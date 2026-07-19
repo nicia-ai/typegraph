@@ -10,6 +10,7 @@ import {
   getNodeKinds,
   type Store,
 } from "../src";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -71,7 +72,7 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
 
     it("returned collection supports create and getById", async () => {
-      const collection = store.getNodeCollection("Person")!;
+      const collection = requireDefined(store.getNodeCollection("Person"));
       const node = await collection.create({ name: "Alice" });
 
       expect(node.kind).toBe("Person");
@@ -83,7 +84,7 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
 
     it("returned collection supports find and count", async () => {
-      const collection = store.getNodeCollection("Company")!;
+      const collection = requireDefined(store.getNodeCollection("Company"));
       await collection.create({ name: "Acme", industry: "Tech" });
       await collection.create({ name: "Globex", industry: "Manufacturing" });
 
@@ -111,7 +112,7 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
 
     it("returned collection supports createFromRecord", async () => {
-      const collection = store.getNodeCollection("Person")!;
+      const collection = requireDefined(store.getNodeCollection("Person"));
       const node = await collection.createFromRecord({ name: "Runtime Data" });
 
       expect(node.kind).toBe("Person");
@@ -144,7 +145,7 @@ describe("getNodeCollection / getEdgeCollection", () => {
         industry: "Tech",
       });
 
-      const collection = store.getEdgeCollection("worksAt")!;
+      const collection = requireDefined(store.getEdgeCollection("worksAt"));
       const edge = await collection.create(alice, acme, { role: "Engineer" });
 
       expect(edge.kind).toBe("worksAt");
@@ -159,7 +160,7 @@ describe("getNodeCollection / getEdgeCollection", () => {
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const bob = await store.nodes.Person.create({ name: "Bob" });
 
-      const collection = store.getEdgeCollection("knows")!;
+      const collection = requireDefined(store.getEdgeCollection("knows"));
       await collection.create(alice, bob);
 
       const total = await collection.count();
@@ -199,7 +200,9 @@ describe("getNodeCollection / getEdgeCollection", () => {
         role: "Engineer",
       });
 
-      const fromCollection = store.getNodeCollection(edge.fromKind)!;
+      const fromCollection = requireDefined(
+        store.getNodeCollection(edge.fromKind),
+      );
       const resolved = await fromCollection.getById(edge.fromId);
       expect(resolved).toBeDefined();
       expect(resolved?.id).toBe(alice.id);
@@ -209,7 +212,7 @@ describe("getNodeCollection / getEdgeCollection", () => {
   describe("dynamic collection round-trip", () => {
     it("getNodeCollection resolves a node by plain string ID", async () => {
       const alice = await store.nodes.Person.create({ name: "Alice" });
-      const collection = store.getNodeCollection("Person")!;
+      const collection = requireDefined(store.getNodeCollection("Person"));
 
       const plainId: string = alice.id;
       const resolved = await collection.getById(plainId);
@@ -225,7 +228,7 @@ describe("getNodeCollection / getEdgeCollection", () => {
       const edge = await store.edges.knows.create(alice, bob, {
         since: "2024",
       });
-      const collection = store.getEdgeCollection("knows")!;
+      const collection = requireDefined(store.getEdgeCollection("knows"));
 
       const plainId: string = edge.id;
       const resolved = await collection.getById(plainId);

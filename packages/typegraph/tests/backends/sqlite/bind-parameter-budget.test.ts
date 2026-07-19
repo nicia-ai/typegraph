@@ -24,6 +24,7 @@ import {
   SQLITE_MAX_BIND_PARAMETERS,
   wrapWithManagedClose,
 } from "../../../src/backend/types";
+import { requireDefined } from "../../../src/utils/presence";
 import { createTestBackend, createTestDatabase } from "../../test-utils";
 
 const MODERN_BETTER_SQLITE3_BUDGET = 32_766;
@@ -108,7 +109,9 @@ describe("SQLite bind-parameter budget detection", () => {
     );
 
     expect(created).toHaveLength(1000);
-    const last = await store.nodes.Person.getById(created[999]!.id);
+    const last = await store.nodes.Person.getById(
+      requireDefined(created[999]).id,
+    );
     expect(last?.index).toBe(999);
   });
 });

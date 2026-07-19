@@ -15,14 +15,16 @@
  * (better-sqlite3 + sqlite-vec) so the table is physically created and its drop
  * is observable in `sqlite_master`.
  */
-import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { asCompiledRowsSql, defineGraph } from "../src";
+import { defineGraph } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
 import { defineGraphExtension } from "../src/graph-extension";
+import { sql } from "../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { createStoreWithSchema, type Store } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 
 const GRAPH_ID = "reclaim_vec";
 
@@ -88,7 +90,11 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
   }
 
   function perFieldTable(kind: string, fieldPath: string): string {
-    return backend.vectorStrategy!.tableName(GRAPH_ID, kind, fieldPath);
+    return requireDefined(backend.vectorStrategy).tableName(
+      GRAPH_ID,
+      kind,
+      fieldPath,
+    );
   }
 
   async function storeWithMaterializedEmbedding(): Promise<BaseStore> {
@@ -188,13 +194,13 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
       indexType: "none" as const,
       limit: 10,
     };
-    const before = await backend.vectorSearch!(rawParams);
+    const before = await requireDefined(backend.vectorSearch)(rawParams);
     expect(before.length).toBe(1);
 
     await withField.clear();
 
     // The leaked row is gone — clear() reset the per-field storage.
-    const after = await backend.vectorSearch!(rawParams);
+    const after = await requireDefined(backend.vectorSearch)(rawParams);
     expect(after).toEqual([]);
 
     // Latch still valid: a fresh write + search works (no "no such table").
@@ -204,7 +210,7 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
       queryEmbedding: [0, 1, 0],
       limit: 10,
     });
-    expect(hits.map((hit) => hit.node.title)).toEqual(["fresh"]);
+    expect(hits.map((hit) => hit.node["title"])).toEqual(["fresh"]);
   });
 
   it("memoizes the reclaim history walk per active version (#12)", async () => {

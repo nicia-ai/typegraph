@@ -13,10 +13,25 @@
       "@nicia-ai/typegraph/indexes": ["./src/indexes/index.ts"],
       "@nicia-ai/typegraph/graph-merge": ["./src/graph-merge/index.ts"],
       "@nicia-ai/typegraph/provenance": ["./src/provenance/index.ts"],
-      "@nicia-ai/typegraph/sqlite": ["./src/backend/sqlite/index.ts"],
-      "@nicia-ai/typegraph/sqlite/local": ["./src/backend/sqlite/local.ts"],
-      "@nicia-ai/typegraph/postgres": ["./src/backend/postgres/index.ts"],
+      "@nicia-ai/typegraph/sqlite/local": [
+        "./src/backend/sqlite/local-store.ts"
+      ],
       "@nicia-ai/typegraph/postgres/pglite": [
+        "./src/backend/postgres/pglite-store.ts"
+      ],
+      "@nicia-ai/typegraph/adapters/drizzle/sqlite": [
+        "./src/backend/sqlite/index.ts"
+      ],
+      "@nicia-ai/typegraph/adapters/drizzle/sqlite/local": [
+        "./src/backend/sqlite/local.ts"
+      ],
+      "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql": [
+        "./src/backend/sqlite/libsql.ts"
+      ],
+      "@nicia-ai/typegraph/adapters/drizzle/postgres": [
+        "./src/backend/postgres/index.ts"
+      ],
+      "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite": [
         "./src/backend/postgres/pglite.ts"
       ]
     }

@@ -21,6 +21,7 @@ import {
 import { defineGraphExtension } from "../src/graph-extension";
 import { createStore, createStoreWithSchema } from "../src/store/store";
 import { type StoreRef } from "../src/store/types";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -161,7 +162,7 @@ describe("Store.deprecateKinds — concurrency + StoreRef", () => {
     const rejected = results.filter((r) => r.status === "rejected");
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
-    const reason = rejected[0]!.reason as Error;
+    const reason = requireDefined(rejected[0]).reason as Error;
     const isExpected =
       reason instanceof StaleVersionError ||
       reason instanceof SchemaContentConflictError;

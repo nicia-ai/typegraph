@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * Node-level delete/modify conflict resolution (design §6.2, T8a).
  *
@@ -26,7 +27,6 @@
  *   are recorded as `deletedBy` / `modifiedBy`), so two merges of the same branch
  *   set in any order resolve every delete/modify conflict identically.
  */
-
 import { canonicalValueKey } from "./canonical-props";
 import type { ProvenanceWeights, ResolutionContext } from "./conflict-policy";
 import {
@@ -96,7 +96,7 @@ function pickHighestPriorityBranch(
   branchIds: readonly BranchId[],
   branchRank: ReadonlyMap<BranchId, number>,
 ): BranchId {
-  let chosen = branchIds[0]!;
+  let chosen = requireDefined(branchIds[0]);
   let chosenRank = branchRank.get(chosen) ?? Number.MAX_SAFE_INTEGER;
   for (const candidate of branchIds.slice(1)) {
     const candidateRank = branchRank.get(candidate) ?? Number.MAX_SAFE_INTEGER;
@@ -210,8 +210,8 @@ function resolveDeleteModifyOver<
       continue;
     }
 
-    const deletionsForKey = deletedByKey.get(key)!;
-    const { id, kind } = modifiedEntity(modifications[0]!);
+    const deletionsForKey = requireDefined(deletedByKey.get(key));
+    const { id, kind } = modifiedEntity(requireDefined(modifications[0]));
     const deletedBy = pickHighestPriorityBranch(
       deletionsForKey.map((deletion) => deletion.branchId),
       branchRank,
@@ -252,7 +252,7 @@ function resolveDeleteModifyOver<
     if (conflictedKeys.has(key)) {
       continue;
     }
-    const { id, kind } = deletedEntity(deletionsForKey[0]!);
+    const { id, kind } = deletedEntity(requireDefined(deletionsForKey[0]));
     deletions.push({ id, kind });
   }
 
@@ -315,10 +315,10 @@ function reconcileOver<Item extends BranchTagged>(
 
   for (const modifications of grouped.values()) {
     if (modifications.length === 1) {
-      out.push(modifications[0]!);
+      out.push(requireDefined(modifications[0]));
       continue;
     }
-    const first = entityOf(modifications[0]!);
+    const first = entityOf(requireDefined(modifications[0]));
     const { props, conflicts: propertyConflicts } = threeWayMergeProps(
       first.id,
       first.kind,
@@ -340,7 +340,7 @@ function reconcileOver<Item extends BranchTagged>(
     const representative =
       modifications.find(
         (modification) => modification.branchId === chosenBranch,
-      ) ?? modifications[0]!;
+      ) ?? requireDefined(modifications[0]);
     out.push(rebuild(representative, chosenBranch, props));
     for (const conflict of propertyConflicts) {
       conflicts.push(conflict);
@@ -475,7 +475,9 @@ function threeWayMergeProps(
   for (const property of [...propertyNames].sort(compareStrings)) {
     const baseHas = property in baseProps;
     const baseKey =
-      baseHas ? canonicalValueKey(baseProps[property]!) : undefined;
+      baseHas ?
+        canonicalValueKey(requireDefined(baseProps[property]))
+      : undefined;
 
     // Contributions from branches that actually CHANGED this property (present and
     // differing from base). Reuse the shared collector so the distinct-(branch,value)
@@ -505,7 +507,7 @@ function threeWayMergeProps(
           (contribution) => !(property in contribution.forkProps),
         );
       if (baseHas && !deletedByFork) {
-        merged[property] = baseProps[property]!;
+        merged[property] = requireDefined(baseProps[property]);
       }
       continue;
     }
@@ -514,7 +516,7 @@ function threeWayMergeProps(
       values.map((candidate) => canonicalValueKey(candidate.value)),
     );
     if (distinctValues.size === 1) {
-      merged[property] = values[0]!.value; // a single, agreed-upon change
+      merged[property] = requireDefined(values[0]).value; // a single, agreed-upon change
       continue;
     }
 
@@ -522,7 +524,10 @@ function threeWayMergeProps(
       (value) => value.branchId === preferredBranchId,
     )?.value;
     const canonicalValue =
-      preferredValue ?? (baseHas ? baseProps[property]! : values[0]!.value);
+      preferredValue ??
+      (baseHas ?
+        requireDefined(baseProps[property])
+      : requireDefined(values[0]).value);
     const reportedValues =
       preferredBranchId === undefined ? values : (
         values.filter((value) => value.branchId !== preferredBranchId)

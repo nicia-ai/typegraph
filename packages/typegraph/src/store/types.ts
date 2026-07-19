@@ -4,10 +4,10 @@
 import { type z } from "zod";
 
 import {
-  type AdoptedTransaction,
   type EdgeRow,
   type NodeRow,
   type TransactionBackend,
+  type TransactionReadBackend,
 } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { type RecordedInstant } from "../core/temporal";
@@ -29,6 +29,7 @@ import {
   type SqlSchema,
 } from "../query/compiler/schema";
 import type { Predicate } from "../query/predicates";
+import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import type {
   CURRENT_ONLY_READ_NAMES,
   EDGE_BATCH_READ_NAMES,
@@ -313,7 +314,7 @@ export type StoreHooks = Readonly<{
  */
 export const AUTO_REFRESH_STATISTICS_ROW_THRESHOLD = 1000;
 
-type BaseStoreOptions = Readonly<{
+export type BaseStoreOptions = Readonly<{
   /** Observability hooks for monitoring */
   hooks?: StoreHooks;
   /**
@@ -417,6 +418,16 @@ export type LiveStoreOptions = BaseStoreOptions &
     recordedRead?: ExternalRecordedReadSource | undefined;
   }>;
 
+/** Live-store options that do not bind a recorded-read relation. */
+export type UnboundLiveStoreOptions = LiveStoreOptions &
+  Readonly<{ recordedRead?: undefined }>;
+
+/** Live-store options with an explicitly bound recorded-read relation. */
+export type RecordedReadStoreOptions = LiveStoreOptions &
+  Readonly<{
+    recordedRead: NonNullable<LiveStoreOptions["recordedRead"]>;
+  }>;
+
 /**
  * Store options with TypeGraph-managed recorded-time capture. `history: true`
  * captures TypeGraph writes and binds TypeGraph's built-in recorded relation
@@ -458,9 +469,11 @@ export type StoreOptions = LiveStoreOptions | HistoryStoreOptions;
  *
  * Generic over the held value (typically `Store<G>`) so the store
  * module can refer to it without importing the `Store` class into
- * `types.ts`.
+ * `types.ts`. The type parameter is deliberately invariant: evolution writes
+ * a replacement into `current`, so a ref for an adapter-only or history-only
+ * Store must never be accepted by a Store that cannot preserve that surface.
  */
-export interface StoreRef<T> {
+export interface StoreRef<in out T> {
   current: T;
 }
 
@@ -1455,92 +1468,51 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
 /**
  * Whether — and why — `tx.sql` can be used on a transaction context. A single
  * required discriminant covering exactly the four states raw-SQL access can be
- * in, so a portable caller branches on capability instead of truthiness-testing
- * `tx.sql` (which is present-but-throwing under history / revision tracking).
- * See {@link TransactionContext.sqlAvailability} for the per-value semantics.
+ * in, so an adapter caller branches on capability instead of truthiness-testing
+ * `tx.sql`. Under history / revision tracking the public type makes `tx.sql`
+ * unusable (`sql?: never`), while the runtime object keeps a fail-loud getter
+ * for JavaScript and type-suppressed callers. See
+ * {@link AdapterTransactionContext} for the per-value semantics.
  */
 export type SqlAvailability =
   "available" | "history" | "revisionTracking" | "unavailable";
 
+type AdapterTransactionSqlAccess<TNativeTransaction> =
+  | Readonly<{
+      sql: TNativeTransaction;
+      sqlAvailability: "available";
+    }>
+  | Readonly<{
+      sql?: never;
+      sqlAvailability: "history" | "revisionTracking";
+    }>
+  | Readonly<{
+      sql?: undefined;
+      sqlAvailability: "unavailable";
+    }>;
+
+export const TRANSACTION_RUNTIME: unique symbol = typeGraphGlobalSymbol(
+  "transaction-runtime-v1",
+);
+
+type TransactionRuntime = Readonly<{
+  backend: TransactionBackend;
+  runNodeOperationHooks: <T>(
+    operation: "create" | "update" | "delete",
+    kind: string,
+    id: string,
+    fn: () => Promise<T>,
+  ) => Promise<T>;
+}>;
+
 /**
- * A typed transaction context with collection API.
- *
- * Provides the same `tx.nodes.*` and `tx.edges.*` API as the Store,
- * but operations are executed within the transaction scope.
- *
- * `tx.sql` is the raw Drizzle handle **bound to this same
- * transaction** — use it to write the caller's own relational tables
- * inside the graph-owned transaction so both layers commit or roll
- * back together (the graph-owned counterpart of
- * {@link Store.withTransaction}, where the caller owns the boundary):
- *
- * ```typescript
- * await store.transaction(async (tx) => {
- *   await tx.nodes.Document.update(documentId, props);
- *   // `tx.sql` is the `AdoptedTransaction` union — cast to your
- *   // concrete Drizzle database type at the call site.
- *   const sqlTx = tx.sql as NodePgDatabase;
- *   await sqlTx.insert(documentVersions).values(versionRow);
- *   await sqlTx.insert(changeEvents).values(eventRow);
- * });
- * ```
- *
- * Per-backend semantics:
- * - **Postgres / libsql** (async drivers): `tx.sql` is the Drizzle
- *   transaction handle. Using the outer `db` instead would write on a
- *   *different* connection and silently escape the transaction — so
- *   `tx.sql` is a correctness requirement there.
- * - **better-sqlite3**: the single connection, framed by TypeGraph's
- *   `BEGIN`/`COMMIT`/`ROLLBACK`.
- * - **Durable Objects (`do-sqlite`)**: the bound Drizzle handle; the
- *   storage transaction is ambient, so writing the outer `db` also
- *   enlists — `tx.sql` is the explicit, portable form.
- *
- * It is `undefined` only on the non-transactional fallback
- * (`backend.capabilities.transactions === false` — e.g. Cloudflare
- * D1, `drizzle-orm/neon-http`), where `store.transaction()` runs the
- * callback with no atomicity and there is no transaction to enlist.
- * Its type is the `AdoptedTransaction` union; cast to your concrete
- * Drizzle database type at the call site.
- *
- * When the store was created with `{ history: true }` or
- * `{ revisionTracking: true }`, `tx.sql` is **present but throwing**: every
- * access raises {@link ConfigurationError} because raw SQL would bypass
- * recorded-time capture or the revision anchor. The static type marks it
- * `sql?: never` so a mistaken `tx.sql.run(...)` fails to typecheck; at runtime
- * it is a fail-loud guard, not `undefined`. Use the typed `tx.nodes` /
- * `tx.edges` collections inside `transaction()`, or
- * `store.withRecordedTransaction(externalTx, fn)` when the relational layer
- * owns the transaction boundary.
- *
- * **Feature detection — branch on {@link sqlAvailability}, not on `tx.sql`'s
- * truthiness.** Because `tx.sql` is present-but-throwing under history or
- * revision tracking, `if (tx.sql)` reads truthy and then throws. The honest
- * discriminant is `tx.sqlAvailability`:
- *
- * ```typescript
- * await store.transaction(async (tx) => {
- *   switch (tx.sqlAvailability) {
- *     case "available": {
- *       const sqlTx = tx.sql as NodePgDatabase; // usable raw handle
- *       await sqlTx.insert(rows).values(row);
- *       break;
- *     }
- *     case "unavailable":
- *       // non-transactional backend: tx.sql === undefined, no atomicity
- *       await fallbackWithoutAtomicity();
- *       break;
- *     case "history":
- *     case "revisionTracking":
- *       // raw SQL disabled here — write your own tables through the external
- *       // handle passed to store.withRecordedTransaction instead
- *       break;
- *   }
- * });
- * ```
- *
- * `tx.sql === undefined` still means exactly "non-transactional fallback"
- * (`sqlAvailability === "unavailable"`).
+ * The portable transaction context mirrors the Store's typed graph operations
+ * while exposing only a read-only backend projection bound to the transaction.
+ * Adapter-native handles are available only through
+ * {@link AdapterTransactionContext}; arbitrary backend writes are absent from
+ * every public transaction context. TypeGraph's non-enumerable symbol port is
+ * an unsupported implementation detail, not a JavaScript security boundary:
+ * reflective code can still discover symbol properties.
  *
  * @example
  * ```typescript
@@ -1551,58 +1523,38 @@ export type SqlAvailability =
  * });
  * ```
  */
-export type TransactionContext<G extends GraphDef> = Readonly<{
+type TransactionCollections<G extends GraphDef> = Readonly<{
+  [TRANSACTION_RUNTIME]: TransactionRuntime;
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
-  sql?: AdoptedTransaction;
-  /**
-   * Honest capability discriminant for `tx.sql` on this transaction. Prefer
-   * this over truthiness-testing `tx.sql`, which is present-but-throwing under
-   * history capture or revision tracking.
-   *
-   * - `"available"` — `tx.sql` is the usable raw handle bound to this
-   *   transaction.
-   * - `"history"` — history capture is on; `tx.sql` is present but every access
-   *   throws {@link ConfigurationError} (`details.code`
-   *   `RECORDED_CAPTURE_RAW_SQL_DISABLED`). Use `tx.nodes` / `tx.edges`, or
-   *   `store.withRecordedTransaction` with your own external handle for
-   *   cross-store atomicity.
-   * - `"revisionTracking"` — same shape as `"history"` (`details.code`
-   *   `REVISION_TRACKING_RAW_SQL_DISABLED`).
-   * - `"unavailable"` — non-transactional fallback
-   *   (`backend.capabilities.transactions === false`, e.g. Cloudflare D1,
-   *   `drizzle-orm/neon-http`); `tx.sql` is `undefined` and there is no
-   *   atomicity.
-   */
-  sqlAvailability: SqlAvailability;
-  /**
-   * The transaction-scoped backend the collections are bound to, for advanced
-   * raw reads that must observe the transaction's snapshot (e.g. graph-merge's
-   * in-transaction base@V re-validation). On the non-transactional fallback it
-   * is the store's plain backend — reads work, but there is no snapshot.
-   */
-  backend: TransactionBackend;
+  /** Read-only backend projection bound to the same graph transaction. */
+  backend: TransactionReadBackend;
   /**
    * Runtime string-keyed node collection access, mirroring
-   * `Store.getNodeCollection` — for callers (e.g. provenance) that resolve a
-   * kind dynamically rather than through the static `nodes.<Kind>` property.
-   * Returns `undefined` when `kind` is not registered in this graph.
+   * `Store.getNodeCollection`. Returns `undefined` when `kind` is not
+   * registered in this graph.
    */
-  getNodeCollection(kind: string): DynamicNodeCollection | undefined;
-  /**
-   * @internal Runs a graph-owned node mutation through this transaction's
-   * operation-hook lifecycle when the mutation cannot use a public collection
-   * verb directly (provenance fact close/reopen). Routed through the
-   * transaction's hook runner, so a successful operation's `onOperationEnd`
-   * is deferred until the transaction commits.
-   */
-  runNodeOperationHooks<T>(
-    operation: "create" | "update" | "delete",
-    kind: string,
-    id: string,
-    fn: () => Promise<T>,
-  ): Promise<T>;
+  getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
 }>;
+
+/**
+ * A portable transaction context containing only TypeGraph-owned graph
+ * operations. Managed Stores use this surface so adapter-native handles never
+ * enter their public contract.
+ */
+export type TransactionContext<G extends GraphDef> = TransactionCollections<G>;
+
+/**
+ * A transaction context exposed by an {@link AdapterStore}. In addition to the
+ * portable graph collections, it carries the adapter-native handle when that
+ * capability is available. The TypeGraph backend remains the same runtime
+ * read projection as the portable context; adapter-native writes intentionally
+ * go through `sql`, making that escape hatch explicit.
+ */
+export type AdapterTransactionContext<
+  G extends GraphDef,
+  TNativeTransaction,
+> = TransactionCollections<G> & AdapterTransactionSqlAccess<TNativeTransaction>;
 
 /**
  * Scoped write measurement, available only on the receipt-enabled transaction
@@ -1640,7 +1592,20 @@ export type ScopedMeasure<Context> = <T>(
  */
 export type MeasurableTransactionContext<G extends GraphDef> =
   TransactionContext<G> &
-    Readonly<{ measure: ScopedMeasure<MeasurableTransactionContext<G>> }>;
+    Readonly<{
+      measure: ScopedMeasure<MeasurableTransactionContext<G>>;
+    }>;
+
+/** Receipt-enabled transaction context for an {@link AdapterStore}. */
+export type MeasurableAdapterTransactionContext<
+  G extends GraphDef,
+  TNativeTransaction,
+> = AdapterTransactionContext<G, TNativeTransaction> &
+  Readonly<{
+    measure: ScopedMeasure<
+      MeasurableAdapterTransactionContext<G, TNativeTransaction>
+    >;
+  }>;
 
 // ============================================================
 // Dynamic Collection Types (widened for runtime dispatch)

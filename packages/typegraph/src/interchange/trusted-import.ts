@@ -7,6 +7,7 @@ import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
 import { getSearchableFields } from "../core/searchable";
 import { TrustedImportError } from "../errors";
+import { storeBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import type {
   GraphData,
@@ -213,12 +214,13 @@ export async function trustedImportGraphStream<G extends GraphDef>(
     AsyncIterable<GraphInterchangeChunk> | Iterable<GraphInterchangeChunk>,
 ): Promise<TrustedImportResult> {
   rejectUnsupportedStoreFeatures(store);
-  const trustedImport = store.backend.trustedImport;
+  const backend = storeBackend(store);
+  const trustedImport = backend.trustedImport;
   if (trustedImport === undefined) {
     throw new TrustedImportError(
-      `The ${store.backend.dialect} backend does not support trusted import.`,
+      `The ${backend.dialect} backend does not support trusted import.`,
       "backend_unsupported",
-      { dialect: store.backend.dialect },
+      { dialect: backend.dialect },
     );
   }
   return trustedImport((session) =>

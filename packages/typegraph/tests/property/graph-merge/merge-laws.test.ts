@@ -25,7 +25,6 @@
  * threshold) so the laws quantify over plain three-way diffs — the regime in
  * which they are claimed to hold.
  */
-
 import type { GraphBackend, Node, NodeId, Store } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -47,6 +46,7 @@ import type {
   SimilarityStrategy,
 } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
+import { requireDefined } from "../../../src/utils/presence";
 import {
   backendMatrix,
   setupSharedPgliteMergeEngine,
@@ -97,7 +97,7 @@ const BRANCH_B = asBranchId("law-branch-b");
  * PGlite engine with isolated tables for this file, matching the determinism
  * gate's rationale.
  */
-const LAW_RUNS = process.env.CI ? 8 : 16;
+const LAW_RUNS = process.env["CI"] ? 8 : 16;
 
 /** In-memory Dice trigram over the `name` field (no embeddings). */
 const nameSimilarity: SimilarityStrategy<LawGraph> = {
@@ -217,7 +217,7 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
       },
     ]);
 
-    return { base, inheritedNodeId: inherited!.id };
+    return { base, inheritedNodeId: requireDefined(inherited).id };
   }
 
   /**

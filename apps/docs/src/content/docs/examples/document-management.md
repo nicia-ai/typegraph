@@ -138,7 +138,7 @@ const graph = defineGraph({
 ## Database Setup
 
 ```typescript
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
 // `createLocalSqliteBackend` loads sqlite-vec (an optional peer dep) and wires

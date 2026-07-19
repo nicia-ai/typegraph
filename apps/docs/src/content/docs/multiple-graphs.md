@@ -132,7 +132,7 @@ Both graphs can share the same database backend. Each graph's data is isolated b
 ```typescript
 // stores.ts
 import { createStore } from "@nicia-ai/typegraph";
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 

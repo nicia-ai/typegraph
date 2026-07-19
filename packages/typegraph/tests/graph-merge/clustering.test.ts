@@ -8,6 +8,7 @@ import {
   enforceDiameter,
 } from "../../src/graph-merge/clustering";
 import type { MergeKey } from "../../src/graph-merge/node-key";
+import { requireDefined } from "../../src/utils/presence";
 
 /**
  * Brands a plain string as a node-identity key for pure clustering tests. These tests
@@ -39,8 +40,8 @@ function shuffled<T>(items: readonly T[], seed: number): T[] {
   for (let index = copy.length - 1; index > 0; index -= 1) {
     state = (state * 1_103_515_245 + 12_345) & 0x7f_ff_ff_ff;
     const swapWith = state % (index + 1);
-    const temporary = copy[index]!;
-    copy[index] = copy[swapWith]!;
+    const temporary = requireDefined(copy[index]);
+    copy[index] = requireDefined(copy[swapWith]);
     copy[swapWith] = temporary;
   }
   return copy;
@@ -177,7 +178,7 @@ describe("connectedComponents", () => {
     const clusters = connectedComponents(edges, idList);
 
     expect(clusters).toHaveLength(1);
-    expect([...clusters[0]!.members].map((id) => id)).toEqual(
+    expect([...requireDefined(clusters[0]).members].map((id) => id)).toEqual(
       [first, second, third].sort((left, right) =>
         left < right ? -1
         : left > right ? 1

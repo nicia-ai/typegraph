@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * Per-kind blocking (design §9 phase 2): bucket a kind's NEW nodes by a cheap
  * exact-equality key so candidate-gen (T6) only compares pairs that could
@@ -38,7 +39,6 @@
  * This module is a PURE function over its inputs (the introspection snapshot is
  * read synchronously by the caller and passed in); it performs no I/O.
  */
-
 import { compareStrings } from "./node-key";
 import type { Node, NodeType, UniqueIntrospection } from "./typegraph-internal";
 import { computeUniqueKey } from "./typegraph-internal";
@@ -193,7 +193,7 @@ export function blockNodes<K extends NodeType>(
   );
   const ordered = new Map<string, Node<K>[]>();
   for (const key of sortedKeys) {
-    const members = [...buckets.get(key)!].sort((left, right) =>
+    const members = [...requireDefined(buckets.get(key))].sort((left, right) =>
       compareStrings(left.id, right.id),
     );
     ordered.set(key, members);

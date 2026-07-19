@@ -11,6 +11,7 @@ import { z } from "zod";
 import { defineEdge, defineGraph, defineNode } from "../../src";
 import type { GraphBackend } from "../../src/backend/types";
 import { createStore, type Store } from "../../src/store";
+import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
 
 // ============================================================
@@ -52,8 +53,8 @@ async function buildChain(
   }
   for (let index = 0; index < length - 1; index++) {
     await store.edges.link.create(
-      { kind: "Item", id: nodeIds[index]! },
-      { kind: "Item", id: nodeIds[index + 1]! },
+      { kind: "Item", id: requireDefined(nodeIds[index]) },
+      { kind: "Item", id: requireDefined(nodeIds[index + 1]) },
     );
   }
   return nodeIds;
@@ -102,10 +103,13 @@ describe("subgraph property tests", () => {
             store = createStore(propertyGraph, backend);
 
             const nodeIds = await buildChain(store, chainLength);
-            const result = await store.subgraph(nodeIds[0]! as never, {
-              edges: ["link"],
-              maxDepth,
-            });
+            const result = await store.subgraph(
+              requireDefined(nodeIds[0]) as never,
+              {
+                edges: ["link"],
+                maxDepth,
+              },
+            );
 
             const expected = Math.min(maxDepth + 1, chainLength);
             expect(result.nodes.size).toBe(expected);
@@ -125,10 +129,13 @@ describe("subgraph property tests", () => {
             store = createStore(propertyGraph, backend);
 
             const nodeIds = await buildChain(store, chainLength);
-            const result = await store.subgraph(nodeIds[0]! as never, {
-              edges: ["link"],
-              maxDepth,
-            });
+            const result = await store.subgraph(
+              requireDefined(nodeIds[0]) as never,
+              {
+                edges: ["link"],
+                maxDepth,
+              },
+            );
 
             for (const kindMap of result.adjacency.values()) {
               for (const edges of kindMap.values()) {
@@ -154,10 +161,13 @@ describe("subgraph property tests", () => {
             store = createStore(propertyGraph, backend);
 
             const nodeIds = await buildChain(store, chainLength);
-            const result = await store.subgraph(nodeIds[0]! as never, {
-              edges: ["link"],
-              maxDepth,
-            });
+            const result = await store.subgraph(
+              requireDefined(nodeIds[0]) as never,
+              {
+                edges: ["link"],
+                maxDepth,
+              },
+            );
 
             // In a chain, edges = nodes - 1 (when all nodes are connected)
             // With maxDepth >= 1, root is always included so size > 0
@@ -186,7 +196,7 @@ describe("subgraph property tests", () => {
             store = createStore(propertyGraph, backend);
 
             const allIds = await buildStar(store, spokeCount);
-            const centerId = allIds[0]!;
+            const centerId = requireDefined(allIds[0]);
             const result = await store.subgraph(centerId as never, {
               edges: ["link"],
               maxDepth: 1,
@@ -209,7 +219,7 @@ describe("subgraph property tests", () => {
             store = createStore(propertyGraph, backend);
 
             const allIds = await buildStar(store, spokeCount);
-            const centerId = allIds[0]!;
+            const centerId = requireDefined(allIds[0]);
             const result = await store.subgraph(centerId as never, {
               edges: ["link"],
               maxDepth,
@@ -236,7 +246,7 @@ describe("subgraph property tests", () => {
             store = createStore(propertyGraph, backend);
 
             const allIds = await buildStar(store, spokeCount);
-            const centerId = allIds[0]!;
+            const centerId = requireDefined(allIds[0]);
 
             const withRoot = await store.subgraph(centerId as never, {
               edges: ["link"],
@@ -271,14 +281,17 @@ describe("subgraph property tests", () => {
             const nodeIds = await buildChain(store, chainLength);
             // Close the chain into a cycle
             await store.edges.link.create(
-              { kind: "Item", id: nodeIds[chainLength - 1]! },
-              { kind: "Item", id: nodeIds[0]! },
+              { kind: "Item", id: requireDefined(nodeIds[chainLength - 1]) },
+              { kind: "Item", id: requireDefined(nodeIds[0]) },
             );
 
-            const result = await store.subgraph(nodeIds[0]! as never, {
-              edges: ["link"],
-              maxDepth: chainLength * 2,
-            });
+            const result = await store.subgraph(
+              requireDefined(nodeIds[0]) as never,
+              {
+                edges: ["link"],
+                maxDepth: chainLength * 2,
+              },
+            );
 
             // All nodes in the cycle should be reachable, each exactly once
             expect(result.nodes.size).toBe(chainLength);

@@ -248,7 +248,7 @@ export async function main(): Promise<void> {
       .to("Media", "m", { includeSubClasses: true })
       .select((ctx) => ({
         person: ctx.p.name,
-        title: ctx.m.title,
+        title: ctx.m["title"],
         kind: ctx.m.kind,
       }))
       .execute();
@@ -272,7 +272,7 @@ export async function main(): Promise<void> {
       .to("Movie", "m", { includeSubClasses: true })
       .select((ctx) => ({
         person: ctx.p.name,
-        title: ctx.m.title,
+        title: ctx.m["title"],
         kind: ctx.m.kind,
       }))
       .execute();

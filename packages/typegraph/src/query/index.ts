@@ -10,9 +10,23 @@
 
 export type { FieldRef, OrderSpec, SortDirection } from "./ast";
 export {
-  asCompiledRowsSql,
-  asCompiledSelectSql,
-  asCompiledStatementSql,
+  isSqlFragment,
+  Placeholder,
+  type RenderedSql,
+  renderPostgres,
+  renderSql,
+  renderSqlInline,
+  renderSqlite,
+  sql,
+  type SqlChunk,
+  type SqlFragment,
+  type SqlIdentifierChunk,
+  type SqlParameterChunk,
+  type SqlPlaceholderChunk,
+  type SqlTag,
+  type SqlTextChunk,
+} from "./sql-fragment";
+export {
   type CompiledRowsSql,
   type CompiledSelectSql,
   type CompiledStatementSql,

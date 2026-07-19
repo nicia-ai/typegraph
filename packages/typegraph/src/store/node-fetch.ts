@@ -12,6 +12,7 @@ import {
   type NodeRow as BackendNodeRow,
   type TransactionBackend,
 } from "../backend/types";
+import { requireDefined } from "../utils/presence";
 import { getRowsByIds } from "./row-fetch";
 
 /**
@@ -29,7 +30,7 @@ export async function getNodeRowsByIds(
     batch:
       backend.getNodes === undefined ?
         undefined
-      : (batchIds) => backend.getNodes!(graphId, kind, batchIds),
+      : (batchIds) => requireDefined(backend.getNodes)(graphId, kind, batchIds),
     one: (id) => backend.getNode(graphId, kind, id),
   });
 }

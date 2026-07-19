@@ -1,7 +1,6 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import type { GraphDef } from "../../core/define-graph";
 import { GraphAlgorithmConvergenceError } from "../../errors";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import {
   type AlgorithmContext,
@@ -148,7 +147,7 @@ function createOscillationDetector() {
   };
 }
 
-function createWorkingTable(context: IterativeGraphRunContext): SQL {
+function createWorkingTable(context: IterativeGraphRunContext): SqlFragment {
   return sql`
     CREATE TEMP TABLE ${context.workingTable} (
       graph_id TEXT NOT NULL,

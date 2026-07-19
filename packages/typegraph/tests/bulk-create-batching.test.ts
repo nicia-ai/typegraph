@@ -106,7 +106,7 @@ function withCallCounts(backend: GraphBackend): {
   const counted: GraphBackend = {
     ...outer,
     transaction: (fn, options) =>
-      backend.transaction((target, tx) => fn(wrapMethods(target), tx), options),
+      backend.transaction((target) => fn(wrapMethods(target)), options),
   };
   return { backend: counted, counts };
 }
@@ -149,8 +149,8 @@ describe("bulkCreate probe batching", () => {
       const created = await store.nodes.Person.bulkCreate(personInputs());
       expect(created).toHaveLength(BATCH_SIZE);
 
-      expect(counts.getNodes).toBe(1);
-      expect(counts.getNode).toBe(0);
+      expect(counts["getNodes"]).toBe(1);
+      expect(counts["getNode"]).toBe(0);
     });
   });
 
@@ -158,8 +158,8 @@ describe("bulkCreate probe batching", () => {
     await withCountedStore(async (store, counts) => {
       await store.nodes.Person.bulkCreate(personInputs());
 
-      expect(counts.checkUniqueBatch).toBe(1);
-      expect(counts.checkUnique).toBe(0);
+      expect(counts["checkUniqueBatch"]).toBe(1);
+      expect(counts["checkUnique"]).toBe(0);
     });
   });
 });
@@ -169,8 +169,8 @@ describe("bulkCreate side-effect batching", () => {
     await withCountedStore(async (store, counts) => {
       await store.nodes.Person.bulkCreate(personInputs());
 
-      expect(counts.insertUniqueBatch).toBe(1);
-      expect(counts.insertUnique).toBe(0);
+      expect(counts["insertUniqueBatch"]).toBe(1);
+      expect(counts["insertUnique"]).toBe(0);
     });
   });
 
@@ -185,8 +185,8 @@ describe("bulkCreate side-effect batching", () => {
       }));
       await store.nodes.Doc.bulkCreate(documents);
 
-      expect(counts.upsertFulltextBatch).toBe(1);
-      expect(counts.upsertFulltext).toBe(0);
+      expect(counts["upsertFulltextBatch"]).toBe(1);
+      expect(counts["upsertFulltext"]).toBe(0);
     });
   });
 
@@ -202,8 +202,8 @@ describe("bulkCreate side-effect batching", () => {
       }));
       await store.nodes.Doc.bulkCreate(documents);
 
-      expect(counts.upsertEmbeddingBatch).toBe(1);
-      expect(counts.upsertEmbedding).toBe(0);
+      expect(counts["upsertEmbeddingBatch"]).toBe(1);
+      expect(counts["upsertEmbedding"]).toBe(0);
     });
   });
 });

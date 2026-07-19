@@ -29,9 +29,13 @@ tradeoffs were made.
 │  └─────────────────────────┬────────────────────────┘  │
 │                            │                           │
 │                            ▼                           │
-│                    ┌──────────────┐                    │
-│                    │   Drizzle    │                    │
-│                    │     ORM      │                    │
+│              ┌────────────────────────┐                │
+│              │ TypeGraph Backend Port │                │
+│              └────────────┬───────────┘                │
+│                           │                            │
+│                    ┌──────▼───────┐                    │
+│                    │ SQL Adapter  │                    │
+│                    │  (Drizzle)   │                    │
 │                    └──────┬───────┘                    │
 │                           │                            │
 └───────────────────────────┼────────────────────────────┘
@@ -44,6 +48,25 @@ tradeoffs were made.
 
 TypeGraph is an **embedded library**, not a database. It runs in your application process, uses your existing
 database connection, and compiles queries to SQL.
+
+### Capability boundaries
+
+TypeGraph's public types match its supported runtime surfaces. The default
+`Store` exposes graph operations; `AdapterStore` adds native transaction
+interoperability; transaction contexts expose a read-only backend projection.
+Every store exposes `store.capabilities`, the read-only runtime feature
+descriptor used by its backend, so portable code can branch on atomicity,
+vector, fulltext, or analytics support without reaching through the adapter
+boundary.
+Whenever a surface loses capabilities, TypeGraph constructs an explicit
+allowlist projection. Proxy overlays are reserved for decorating a surface
+without changing its capabilities.
+
+The internal store and transaction ports are non-enumerable symbol properties
+and are absent from public TypeScript contracts. They are not a JavaScript
+security boundary: sufficiently reflective code can discover symbol properties,
+as it can inspect internals in any in-process library. The guarantee applies to
+all documented and supported access paths.
 
 ## Core Design Principles
 
@@ -205,13 +228,13 @@ The stored schema includes everything needed to understand the graph:
 
 This enables:
 
-| Capability | How It Works |
-|------------|--------------|
+| Capability                   | How It Works                                                                                      |
+| ---------------------------- | ------------------------------------------------------------------------------------------------- |
 | **Self-describing database** | Query the schema without application code—useful for debugging, admin tools, and data exploration |
-| **Schema versioning** | Every schema change creates a new version; previous versions are preserved for auditing |
-| **Change detection** | Compare stored schema to code schema to detect additions, removals, and breaking changes |
-| **Portable exports** | The [interchange format](/interchange) is self-contained—importers know what the data means |
-| **Runtime introspection** | Applications can query the schema at runtime for dynamic UI, validation, or documentation |
+| **Schema versioning**        | Every schema change creates a new version; previous versions are preserved for auditing           |
+| **Change detection**         | Compare stored schema to code schema to detect additions, removals, and breaking changes          |
+| **Portable exports**         | The [interchange format](/interchange) is self-contained—importers know what the data means       |
+| **Runtime introspection**    | Applications can query the schema at runtime for dynamic UI, validation, or documentation         |
 
 ```typescript
 import { getActiveSchema, getSchemaChanges } from "@nicia-ai/typegraph/schema";
@@ -333,24 +356,27 @@ This enables:
 ### The Query Pipeline
 
 ```text
-Query Builder API → Query AST → SQL Generator → Drizzle → Database
+Query Builder → Query AST → TypeGraph SQL Fragment → Adapter → Database
 ```
 
 1. **Query Builder**: Fluent API that constructs a typed AST
 2. **Query AST**: A data structure representing the query (nodes, edges, predicates, projections)
-3. **SQL Generator**: Transforms AST to SQL using CTEs for each step
-4. **Drizzle**: Executes the SQL and returns typed results
+3. **SQL Generator**: Transforms the AST into TypeGraph's immutable,
+   database-independent SQL fragment representation
+4. **Adapter**: Renders the fragment for SQLite or PostgreSQL and executes it
+   through the configured driver
 
 ### Common Table Expressions (CTEs)
 
 TypeGraph compiles traversals to CTEs, which databases optimize well:
 
 ```typescript
-store.query()
+store
+  .query()
   .from("Person", "p")
   .traverse("authored", "e")
   .to("Document", "d")
-  .whereNode("d", (d) => d.status.eq("published"))
+  .whereNode("d", (d) => d.status.eq("published"));
 ```
 
 Becomes:
@@ -425,15 +451,15 @@ better-sqlite3, and libSQL/Turso's built-in vector engine. The behavior is selec
 
 Each backend wires a strategy that knows how to store embeddings and compile similarity queries:
 
-| Backend | Strategy | Storage / Index | Metrics |
-|---------|----------|-----------------|---------|
-| PostgreSQL | `pgvectorStrategy` (default) | typed `vector(N)` tables, HNSW / IVFFlat | cosine, l2, inner_product |
-| better-sqlite3 | `sqliteVecStrategy` (when the sqlite-vec extension loads) | `vec0` virtual tables (KNN) | cosine, l2 |
-| libSQL / Turso | `libsqlVectorStrategy` (wired automatically) | `F32_BLOB(N)`, DiskANN ANN via `libsql_vector_idx` + `vector_top_k` | cosine, l2 |
+| Backend        | Strategy                                                  | Storage / Index                                                     | Metrics                   |
+| -------------- | --------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------- |
+| PostgreSQL     | `pgvectorStrategy` (default)                              | typed `vector(N)` tables, HNSW / IVFFlat                            | cosine, l2, inner_product |
+| better-sqlite3 | `sqliteVecStrategy` (when the sqlite-vec extension loads) | `vec0` virtual tables (KNN)                                         | cosine, l2                |
+| libSQL / Turso | `libsqlVectorStrategy` (wired automatically)              | `F32_BLOB(N)`, DiskANN ANN via `libsql_vector_idx` + `vector_top_k` | cosine, l2                |
 
 `createSqliteBackend` and `createPostgresBackend` accept a `vector?: VectorStrategy` option to override the
-default. The strategies, the `buildVectorCapabilities` helper, and the `VectorStrategy` / `VectorSlot` types are
-exported from the package root.
+default. The strategies, `buildVectorCapabilities`, and the complete `VectorStrategy` / `VectorSlot` authoring
+vocabulary are exported from `@nicia-ai/typegraph/backend`.
 
 A backend advertises its vector support as data on `backend.capabilities.vector`:
 
@@ -531,12 +557,21 @@ TypeGraph is designed for:
 - Applications that already use SQL databases
 - Teams that want one database to manage
 
-### Why Drizzle ORM?
+### Why a TypeGraph-Owned Backend Port?
 
-1. **Type safety**: Full TypeScript inference
-2. **Multiple dialects**: Same API for SQLite and PostgreSQL
-3. **Raw SQL access**: When needed for performance
-4. **Active ecosystem**: Well-maintained, growing community
+The schema DSL, Store, query compiler, and SQL fragments belong to TypeGraph.
+They do not import a database adapter's types. This keeps the public API stable
+and prevents consumers from typechecking declarations for drivers and dialects
+they never use.
+
+Drizzle remains an implementation detail of the built-in SQLite and PostgreSQL
+adapters:
+
+1. **Driver integration**: Reuses mature SQLite and PostgreSQL connections
+2. **Adapter-native access**: Bring-your-own-connection entrypoints retain
+   precise Drizzle database and transaction types
+3. **Replaceable boundary**: The core depends on TypeGraph ports; adapters
+   translate fragments and operations at the edge
 
 ### Why Zod for Schemas?
 

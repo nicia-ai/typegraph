@@ -5,10 +5,9 @@
  * and deleted_at timestamps. Consolidates the previously duplicated temporal
  * filter functions into a single, parameterized implementation.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import { type TemporalMode } from "../../core/types";
 import { nowIso } from "../../utils/date";
+import { sql, type SqlFragment } from "../sql-fragment";
 
 /**
  * The instant every `currentReadInstant()` inside {@link withPinnedReadInstant}
@@ -57,7 +56,7 @@ export function withPinnedReadInstant<T>(emit: () => T): T {
  * Samples the clock per call unless a {@link withPinnedReadInstant} scope is
  * open, in which case every call in that scope binds the same instant.
  */
-export function currentReadInstant(): SQL {
+export function currentReadInstant(): SqlFragment {
   return sql`${pinnedReadInstant ?? nowIso()}`;
 }
 
@@ -93,12 +92,12 @@ export const CURRENT_READ_INSTANT_PLACEHOLDER =
  * so one compiled statement can be reused across executions with a fresh
  * instant filled in per call. See {@link CURRENT_READ_INSTANT_PLACEHOLDER}.
  */
-function currentReadInstantPlaceholder(): SQL {
+function currentReadInstantPlaceholder(): SqlFragment {
   return sql`${sql.placeholder(CURRENT_READ_INSTANT_PLACEHOLDER)}`;
 }
 
 /** Emits the "current" read instant for the requested {@link ReadInstantMode}. */
-export function currentReadInstantFor(mode: ReadInstantMode): SQL {
+export function currentReadInstantFor(mode: ReadInstantMode): SqlFragment {
   return mode === "placeholder" ?
       currentReadInstantPlaceholder()
     : currentReadInstant();
@@ -115,7 +114,7 @@ export type TemporalFilterOptions = Readonly<{
   /** Optional table alias prefix for column references */
   tableAlias?: string | undefined;
   /** Optional execution-time current timestamp SQL expression */
-  currentTimestamp?: SQL | undefined;
+  currentTimestamp?: SqlFragment | undefined;
   /** Recorded/system-time timestamp for recorded-pinned reads. */
   recordedAsOf?: string | undefined;
 }>;
@@ -128,7 +127,7 @@ export type TemporalFilterOptions = Readonly<{
  * functions (compileTemporalFilter, compileEdgeTemporalFilter, compileNodeTemporalFilter).
  *
  * @param options - Temporal filter configuration
- * @returns SQL clause for the temporal filter
+ * @returns `SqlFragment` for the temporal filter
  *
  * @example
  * ```typescript
@@ -145,7 +144,9 @@ export type TemporalFilterOptions = Readonly<{
  * // → deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= '2024-01-01...') AND ...
  * ```
  */
-export function compileTemporalFilter(options: TemporalFilterOptions): SQL {
+export function compileTemporalFilter(
+  options: TemporalFilterOptions,
+): SqlFragment {
   const { mode, asOf, tableAlias, currentTimestamp, recordedAsOf } = options;
 
   // Build column references with optional prefix

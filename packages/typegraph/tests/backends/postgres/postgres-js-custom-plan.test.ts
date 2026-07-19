@@ -28,14 +28,14 @@ import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let bootstrap: Sql | undefined;
 let isPostgresAvailable = false;
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const candidate = postgres(TEST_DATABASE_URL, {
     max: 1,
     connect_timeout: 5,

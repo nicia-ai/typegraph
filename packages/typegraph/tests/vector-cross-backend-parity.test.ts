@@ -46,6 +46,7 @@ import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import { embedding } from "../src/core/embedding";
 import { createStoreWithSchema } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 
 // ============================================================
 // Scenario graph & fixed corpus
@@ -319,12 +320,12 @@ describe("cross-backend vector + hybrid parity", () => {
   // the other Postgres suites. The pool is opened once and the
   // descriptor's create() resets schema + per-field tables per use.
   const TEST_DATABASE_URL =
-    process.env.POSTGRES_URL ??
+    process.env["POSTGRES_URL"] ??
     "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
   let postgresPool: Pool | undefined;
 
   beforeAll(async () => {
-    if (!process.env.POSTGRES_URL) return;
+    if (!process.env["POSTGRES_URL"]) return;
     const pool = new Pool({
       connectionString: TEST_DATABASE_URL,
       connectionTimeoutMillis: 5000,
@@ -348,7 +349,7 @@ describe("cross-backend vector + hybrid parity", () => {
   const postgresDescriptor: BackendDescriptor = {
     label: "postgres-pgvector",
     async create() {
-      const pool = postgresPool!;
+      const pool = requireDefined(postgresPool);
       // Fresh schema each run: drop base + strategy-owned per-field
       // vector tables so the scenario materializes its ANN index from
       // scratch and no embedding rows leak across reuse of the slot.
@@ -468,17 +469,25 @@ describe("cross-backend vector + hybrid parity", () => {
     // are metric-identical (cosine similarity) but pgvector's HNSW recall
     // and float path can differ from sqlite-vec in the last ULP, so the
     // numeric vector is compared close, id-by-id.
-    expect(postgres!.vectorIds).toEqual(reference.vectorIds);
-    expect(postgres!.annVectorIds).toEqual(reference.annVectorIds);
-    expect(new Set(postgres!.hybridIds)).toEqual(new Set(reference.hybridIds));
-    expect(postgres!.hybridIds[0]).toBe(reference.hybridIds[0]);
-    expect(postgres!.partitionTagIds).toEqual(reference.partitionTagIds);
-    expect(postgres!.partitionDocumentIds).toEqual(
+    expect(requireDefined(postgres).vectorIds).toEqual(reference.vectorIds);
+    expect(requireDefined(postgres).annVectorIds).toEqual(
+      reference.annVectorIds,
+    );
+    expect(new Set(requireDefined(postgres).hybridIds)).toEqual(
+      new Set(reference.hybridIds),
+    );
+    expect(requireDefined(postgres).hybridIds[0]).toBe(reference.hybridIds[0]);
+    expect(requireDefined(postgres).partitionTagIds).toEqual(
+      reference.partitionTagIds,
+    );
+    expect(requireDefined(postgres).partitionDocumentIds).toEqual(
       reference.partitionDocumentIds,
     );
-    for (const [index, score] of postgres!.vectorScores.entries()) {
+    for (const [index, score] of requireDefined(
+      postgres,
+    ).vectorScores.entries()) {
       expect(score).toBeCloseTo(
-        reference.vectorScores[index]!,
+        requireDefined(reference.vectorScores[index]),
         SCORE_PRECISION,
       );
     }

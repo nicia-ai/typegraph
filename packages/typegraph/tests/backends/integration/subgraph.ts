@@ -6,6 +6,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { requireDefined } from "../../../src/utils/presence";
 import { collectAllEdges } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -257,7 +258,7 @@ export function registerSubgraphIntegrationTests(
       });
 
       expect(result.root).toBeDefined();
-      expect(result.root!.id).toBe(ids.aliceId);
+      expect(requireDefined(result.root).id).toBe(ids.aliceId);
       expect(result.nodes.size).toBe(1);
       expect(result.adjacency.size).toBe(0);
     });

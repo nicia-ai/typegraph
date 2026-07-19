@@ -18,8 +18,6 @@
  * Nested set operations are wrapped the same way, which preserves the AST's
  * grouping regardless of the dialect's native compound-operator associativity.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import {
   CompilerInvariantError,
   ConfigurationError,
@@ -37,6 +35,7 @@ import {
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
+import { sql, type SqlFragment } from "../sql-fragment";
 import { emitSetOperationQuerySql } from "./emitter";
 import { runCompilerPass } from "./passes";
 import { type LogicalPlan, lowerSetOperationToLogicalPlan } from "./plan";
@@ -44,7 +43,10 @@ import { type LogicalPlan, lowerSetOperationToLogicalPlan } from "./plan";
 /**
  * Type for the query compiler function.
  */
-export type QueryCompilerFunction = (ast: QueryAst, graphId: string) => SQL;
+export type QueryCompilerFunction = (
+  ast: QueryAst,
+  graphId: string,
+) => SqlFragment;
 
 /**
  * Operator mapping for set operations.
@@ -151,7 +153,7 @@ function runSetOperationPassPipeline(
  * @param compileQuery - Function to compile regular (leaf) queries
  * @param vectorStrategy - The backend-configured vector strategy, if any, used
  *   to validate leaf vector predicates against the strategy's metric set
- * @returns SQL for the set operation
+ * @returns `SqlFragment` for the set operation
  */
 export function compileSetOperation(
   op: SetOperation,
@@ -159,7 +161,7 @@ export function compileSetOperation(
   dialect: DialectAdapter,
   compileQuery: QueryCompilerFunction,
   vectorStrategy?: VectorStrategy,
-): SQL {
+): SqlFragment {
   assertUniformSetOperationRecordedCoordinates(op);
   const passState = runSetOperationPassPipeline(
     op,
@@ -193,7 +195,7 @@ function compileSetOperationCore(
   graphId: string,
   compileQuery: QueryCompilerFunction,
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   const left = compileComposableQuery(op.left, graphId, compileQuery, dialect);
   const right = compileComposableQuery(
     op.right,
@@ -217,7 +219,7 @@ function compileComposableQuery(
   graphId: string,
   compileQuery: QueryCompilerFunction,
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   if ("__type" in query) {
     return compileSetOperationCompound(query, graphId, compileQuery, dialect);
   }
@@ -236,7 +238,7 @@ function compileSetOperationCompound(
   graphId: string,
   compileQuery: QueryCompilerFunction,
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   const core = compileSetOperationCore(op, graphId, compileQuery, dialect);
   const suffixClauses = buildSetOperationSuffixClauses(op, dialect);
   if (suffixClauses.length === 0) return core;
@@ -328,8 +330,8 @@ function matchFieldToProjection(
 function buildSetOperationSuffixClauses(
   op: SetOperation,
   dialect: DialectAdapter,
-): SQL[] {
-  const clauses: SQL[] = [];
+): SqlFragment[] {
+  const clauses: SqlFragment[] = [];
 
   // Handle ORDER BY if present
   if (op.orderBy && op.orderBy.length > 0) {
@@ -344,7 +346,7 @@ function buildSetOperationSuffixClauses(
       );
     }
 
-    const orderParts: SQL[] = [];
+    const orderParts: SqlFragment[] = [];
 
     for (const orderSpec of op.orderBy) {
       const projected = matchFieldToProjection(orderSpec.field, projection);

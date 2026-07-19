@@ -25,6 +25,7 @@ import { ConfigurationError, RestrictedDeleteError } from "../src/errors";
 import { buildKindRegistry } from "../src/registry/builders";
 import { deserializeSchema, serializeSchema } from "../src/schema";
 import { createStore, createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -1010,7 +1011,7 @@ describe("Query-Time Implies Expansion", () => {
 
     // The traversal should have expanded edge kinds
     expect(ast.traversals).toHaveLength(1);
-    const traversal = ast.traversals[0]!;
+    const traversal = requireDefined(ast.traversals[0]);
     expect(traversal.edgeKinds).toContain("likes");
     expect(traversal.edgeKinds).toContain("interactsWith");
     expect(traversal.edgeKinds).toContain("manages");
@@ -1041,7 +1042,7 @@ describe("Query-Time Implies Expansion", () => {
       .to("Person", "friend")
       .select((context) => ({ person: context.p, friend: context.friend }));
 
-    const traversal = query.toAst().traversals[0]!;
+    const traversal = requireDefined(query.toAst().traversals[0]);
 
     expect(traversal.edgeKinds).toEqual(["likes"]);
     expect(traversal.inverseEdgeKinds).toEqual(["likedBy"]);
@@ -1072,7 +1073,7 @@ describe("Query-Time Implies Expansion", () => {
     const ast = query.toAst();
 
     // Should only have the exact edge kind
-    expect(ast.traversals[0]!.edgeKinds).toEqual(["likes"]);
+    expect(requireDefined(ast.traversals[0]).edgeKinds).toEqual(["likes"]);
   });
 });
 

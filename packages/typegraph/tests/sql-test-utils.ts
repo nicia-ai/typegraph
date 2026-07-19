@@ -1,17 +1,31 @@
 /**
  * Shared SQL test utilities.
  *
- * Drizzle's SQL objects are composable and store their contents in `queryChunks`.
- * These helpers turn that structure into a readable string for assertions.
+ * Supports both TypeGraph-owned `SqlFragment` values and legacy Drizzle SQL objects
+ * that remain in adapter-focused tests.
  */
+import {
+  isSqlFragment,
+  renderSql,
+  renderSqlInline,
+  type SqlFragment,
+} from "../src/query/sql-fragment";
 
 type SqlTemplateLike = Readonly<{ queryChunks: readonly unknown[] }>;
+type TestSql = SqlFragment | SqlTemplateLike;
 
 /**
  * Extracts a SQL string from a Drizzle SQL template.
  * Inlines parameters/chunks for easier assertion.
  */
-export function toSqlString(sqlTemplate: SqlTemplateLike): string {
+export function toSqlString(
+  sqlTemplate: TestSql,
+  dialect: "sqlite" | "postgres" = "sqlite",
+): string {
+  if (isSqlFragment(sqlTemplate)) {
+    return renderSqlInline(sqlTemplate, dialect);
+  }
+
   const parts: string[] = [];
 
   for (const chunk of sqlTemplate.queryChunks) {
@@ -32,7 +46,7 @@ export function toSqlString(sqlTemplate: SqlTemplateLike): string {
       }
 
       if ("queryChunks" in chunk) {
-        parts.push(toSqlString(chunk as SqlTemplateLike));
+        parts.push(toSqlString(chunk as SqlTemplateLike, dialect));
         continue;
       }
     }
@@ -50,9 +64,14 @@ export function toSqlString(sqlTemplate: SqlTemplateLike): string {
  * Supports both SQLite (?) and PostgreSQL ($1, $2, ...) placeholder styles.
  */
 export function toSqlWithParams(
-  sqlTemplate: SqlTemplateLike,
+  sqlTemplate: TestSql,
   dialect: "sqlite" | "postgres" = "sqlite",
 ): { sql: string; params: unknown[] } {
+  if (isSqlFragment(sqlTemplate)) {
+    const rendered = renderSql(sqlTemplate, dialect);
+    return { sql: rendered.sql, params: [...rendered.params] };
+  }
+
   const params: unknown[] = [];
   let parameterIndex = 1;
 

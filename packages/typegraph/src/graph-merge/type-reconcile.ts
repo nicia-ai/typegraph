@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * Opt-in ontology type reconciliation (design §6 / §7, T10).
  *
@@ -26,7 +27,6 @@
  * repointed edges' `fromKind` / `toKind` annotations while keeping endpoint ids
  * stable (the cascade described in step 2). `mode: "off"` is a guaranteed no-op.
  */
-
 import type { SubClassClosure } from "./closures";
 import { isReachable } from "./closures";
 import { compareStrings, idOf, type MergeKey } from "./node-key";
@@ -143,7 +143,9 @@ export function mostSpecificCommonKind(
   if (qualifiers.length === 0) {
     return undefined;
   }
-  return [...qualifiers].sort((left, right) => compareStrings(left, right))[0]!;
+  return requireDefined(
+    [...qualifiers].sort((left, right) => compareStrings(left, right))[0],
+  );
 }
 
 /**

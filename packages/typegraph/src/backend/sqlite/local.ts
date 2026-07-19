@@ -3,11 +3,11 @@
  *
  * This module depends on the `better-sqlite3` native addon and should only
  * be imported in Node.js environments. For bundler-friendly SQLite DDL
- * generation and Drizzle backend creation, import from `@nicia-ai/typegraph/sqlite`.
+ * generation and Drizzle backend creation, import from `@nicia-ai/typegraph/adapters/drizzle/sqlite`.
  *
  * @example In-memory database (default)
  * ```typescript
- * import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+ * import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
  *
  * const { backend, db } = createLocalSqliteBackend();
  * const store = createStore(graph, backend);
@@ -15,7 +15,7 @@
  *
  * @example File-based database for persistent local development
  * ```typescript
- * import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+ * import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
  *
  * const { backend, db } = createLocalSqliteBackend({ path: "./dev.db" });
  * const store = createStore(graph, backend);
@@ -32,14 +32,29 @@ import {
 import { ConfigurationError } from "../../errors";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 import { generateSqliteDDL } from "../drizzle/ddl";
+import { type AnySqliteDatabase } from "../drizzle/execution";
+export type { AnySqliteDatabase } from "../drizzle/execution";
 import {
   createSqliteBackend,
   type SqliteTables,
   tables as defaultTables,
 } from "../drizzle/sqlite";
 import {
+  DEFAULT_LOCAL_SQLITE_PRAGMAS,
+  type LocalSqliteJournalMode,
+  type LocalSqlitePragmaOptions,
+  type LocalSqliteSynchronousMode,
+} from "./local-options";
+
+export {
+  DEFAULT_LOCAL_SQLITE_PRAGMAS,
+  type LocalSqliteJournalMode,
+  type LocalSqlitePragmaOptions,
+  type LocalSqliteSynchronousMode,
+} from "./local-options";
+import {
+  type AdapterBackend,
   type BackendCapabilities,
-  type GraphBackend,
   wrapWithManagedClose,
 } from "../types";
 
@@ -67,8 +82,8 @@ function parseNodeModuleVersionMismatchMessage(
   const match = regexp.exec(message);
   if (!match?.groups) return undefined;
 
-  const compiled = Number(match.groups.compiled);
-  const required = Number(match.groups.required);
+  const compiled = Number(match.groups["compiled"]);
+  const required = Number(match.groups["required"]);
 
   if (!Number.isFinite(compiled) || !Number.isFinite(required))
     return undefined;
@@ -105,93 +120,6 @@ function createDatabase(path: string): Database.Database {
 // ============================================================
 // Types
 // ============================================================
-
-/**
- * Journal modes accepted by {@link LocalSqlitePragmaOptions.journalMode}.
- */
-export type LocalSqliteJournalMode =
-  "wal" | "delete" | "truncate" | "persist" | "memory" | "off";
-
-/**
- * Synchronous levels accepted by {@link LocalSqlitePragmaOptions.synchronous}.
- */
-export type LocalSqliteSynchronousMode = "off" | "normal" | "full" | "extra";
-
-/**
- * Connection pragmas the local backend applies when it opens the database.
- *
- * Values merge over {@link DEFAULT_LOCAL_SQLITE_PRAGMAS}; pass
- * `pragmas: false` on {@link LocalSqliteBackendOptions} to leave the
- * better-sqlite3 driver defaults untouched.
- */
-export type LocalSqlitePragmaOptions = Readonly<{
-  /** `PRAGMA journal_mode`. Default: `"wal"` (no-op on `":memory:"`). */
-  journalMode?: LocalSqliteJournalMode;
-  /** `PRAGMA synchronous`. Default: `"normal"`. */
-  synchronous?: LocalSqliteSynchronousMode;
-  /** `PRAGMA busy_timeout`, in milliseconds. Default: `5000`. */
-  busyTimeoutMs?: number;
-  /**
-   * `PRAGMA cache_size`, in KiB of page cache — must be negative, per
-   * SQLite's own convention (e.g. `-131072` for 128MiB); a positive value
-   * means a page *count* instead, not KiB, so it's rejected outright
-   * rather than silently sizing the cache to something the caller didn't
-   * intend. Default: `undefined`, meaning SQLite's own built-in default
-   * (2MiB) is left untouched. Worth raising for any database whose
-   * working set won't fit in 2MiB — SQLite's default is tuned for small
-   * embedded use, not for a table that stops fitting in a tiny page
-   * cache and starts paying a heap-row disk read per candidate row a
-   * query touches.
-   */
-  cacheSizeKib?: number | undefined;
-  /**
-   * `PRAGMA mmap_size`, in bytes. Default: `undefined`, meaning SQLite's
-   * own built-in default (0, i.e. disabled) is left untouched. Memory-maps
-   * let reads bypass SQLite's own page cache entirely for pages already
-   * resident in the OS page cache, which helps once the working set
-   * exceeds `cacheSizeKib` but still fits in available RAM.
-   */
-  mmapSizeBytes?: number | undefined;
-  /**
-   * `PRAGMA wal_autocheckpoint`, in WAL pages (a no-op unless `journalMode`
-   * is `"wal"`). Default: `undefined`, meaning SQLite's own built-in
-   * default (1,000 pages, ~4MiB) is left untouched. Every automatic
-   * checkpoint that size has to flush WAL frames back into the main
-   * database file's B-tree — cheap while the file is small, but the cost
-   * climbs as the file (and the fraction of it *not* resident in the page
-   * cache) grows, so a database built by one large bulk load pays
-   * increasingly expensive checkpoints as the load progresses. Raising
-   * this amortizes checkpoint I/O over far more rows; `0` disables
-   * automatic checkpointing entirely (the WAL grows unbounded until a
-   * manual `PRAGMA wal_checkpoint` or the connection closes) for callers
-   * that would rather run one explicit checkpoint after a bulk load
-   * finishes than pay checkpoint cost mid-load at all. Worth raising for
-   * any bulk-insert-heavy workload; leave at the default for a
-   * normal read/write mix, where a large uncheckpointed WAL just makes
-   * every read pay a bigger WAL scan.
-   */
-  walAutocheckpointPages?: number | undefined;
-}>;
-
-/**
- * Pragma defaults for connections the local backend owns: WAL journaling
- * with `synchronous=NORMAL` (the standard durable-and-fast local-SQLite
- * baseline — WAL survives crashes; at NORMAL a power loss can lose the
- * final commits but never corrupts), a 5s busy timeout so concurrent
- * openers wait for the write lock instead of failing with SQLITE_BUSY, and
- * `cacheSizeKib`/`mmapSizeBytes` left `undefined` (SQLite's own tiny
- * defaults) since the right size is workload- and host-dependent — set
- * them explicitly once the database's working set is known.
- */
-export const DEFAULT_LOCAL_SQLITE_PRAGMAS: Required<LocalSqlitePragmaOptions> =
-  {
-    journalMode: "wal",
-    synchronous: "normal",
-    busyTimeoutMs: 5000,
-    cacheSizeKib: undefined,
-    mmapSizeBytes: undefined,
-    walAutocheckpointPages: undefined,
-  };
 
 const LOCAL_SQLITE_JOURNAL_MODES: readonly LocalSqliteJournalMode[] = [
   "wal",
@@ -350,7 +278,7 @@ export type LocalSqliteBackendResult = Readonly<{
   /**
    * The GraphBackend instance for use with createStore.
    */
-  backend: GraphBackend;
+  backend: AdapterBackend<AnySqliteDatabase>;
 
   /**
    * The underlying Drizzle database instance.
@@ -394,45 +322,54 @@ export function createLocalSqliteBackend(
   const tables = options.tables ?? defaultTables;
 
   const sqlite = createDatabase(path);
-  applyConnectionPragmas(sqlite, options.pragmas);
+  try {
+    applyConnectionPragmas(sqlite, options.pragmas);
 
-  // Best-effort: load sqlite-vec so embedding fields are persisted to
-  // per-`(kind, field)` `vec0` storage. Without it, nodes with
-  // `embedding()` fields validate and insert but their vectors are silently
-  // dropped. When the user has installed sqlite-vec as a peer dep we load
-  // it and wire the strategy; otherwise we proceed without vector support.
-  const hasSqliteVec = tryLoadSqliteVec(sqlite);
+    // Best-effort: load sqlite-vec so embedding fields are persisted to
+    // per-`(kind, field)` `vec0` storage. Without it, nodes with
+    // `embedding()` fields validate and insert but their vectors are silently
+    // dropped. When the user has installed sqlite-vec as a peer dep we load
+    // it and wire the strategy; otherwise we proceed without vector support.
+    const hasSqliteVec = tryLoadSqliteVec(sqlite);
 
-  const db = drizzle(sqlite);
+    const db = drizzle(sqlite);
 
-  // Generate and execute DDL from schema
-  const ddlStatements = generateSqliteDDL(tables);
-  for (const statement of ddlStatements) {
-    sqlite.exec(statement);
-  }
+    // Generate and execute DDL from schema
+    const ddlStatements = generateSqliteDDL(tables);
+    for (const statement of ddlStatements) {
+      sqlite.exec(statement);
+    }
 
-  const backend = createSqliteBackend(db, {
-    executionProfile: {
-      isSync: true,
-    },
-    tables,
-    ...(hasSqliteVec ? { vector: sqliteVecStrategy } : {}),
-    capabilities: {
-      ...options.capabilities,
-      graphAnalytics: {
-        supported:
-          options.capabilities?.graphAnalytics?.supported ??
-          options.capabilities?.transactions !== false,
-        mathFunctions:
-          options.capabilities?.graphAnalytics?.mathFunctions ?? true,
+    const backend = createSqliteBackend(db, {
+      executionProfile: {
+        isSync: true,
       },
-    },
-  });
-  const managedBackend = wrapWithManagedClose(backend, () => {
-    sqlite.close();
-  });
+      tables,
+      ...(hasSqliteVec ? { vector: sqliteVecStrategy } : {}),
+      capabilities: {
+        ...options.capabilities,
+        graphAnalytics: {
+          supported:
+            options.capabilities?.graphAnalytics?.supported ??
+            options.capabilities?.transactions !== false,
+          mathFunctions:
+            options.capabilities?.graphAnalytics?.mathFunctions ?? true,
+        },
+      },
+    });
+    const managedBackend = wrapWithManagedClose(backend, () => {
+      sqlite.close();
+    });
 
-  return { backend: managedBackend, db };
+    return { backend: managedBackend, db };
+  } catch (error) {
+    try {
+      sqlite.close();
+    } catch {
+      // Preserve the provisioning error; a cleanup failure is secondary.
+    }
+    throw error;
+  }
 }
 
 function tryLoadSqliteVec(sqlite: Database.Database): boolean {

@@ -5,8 +5,6 @@
  * Uses a recursive CTE for BFS traversal with cycle detection, then hydrates
  * the reachable nodes and connecting edges in two parallel queries.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import type { GraphBackend } from "../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../constants";
 import type {
@@ -46,6 +44,7 @@ import {
   type FieldTypeInfo,
   type SchemaIntrospector,
 } from "../query/schema-introspector";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
@@ -558,27 +557,37 @@ export async function executeSubgraph<
   // pressure), and per-count SQL texts would churn the prepared-statement
   // cache.
   let membership: SubgraphMembership;
-  if (ctx.dialect.name === "postgres") {
-    const includedIds = await fetchIncludedIds(
-      ctx,
-      reachableCte,
-      includedIdsCte,
-    );
-    const idsArray = textArrayParam(includedIds);
-    membership = {
-      prefix: sql``,
-      idFilter: (column) =>
-        sql`EXISTS (SELECT 1 FROM unnest(${idsArray}) AS tg_included(id) WHERE tg_included.id = ${column})`,
-      parameterDependentPlan: true,
-    };
-  } else {
-    membership = {
-      prefix: sql`${reachableCte}${includedIdsCte} `,
-      // SQLite: `column IN (subquery)` evaluates via a transient index —
-      // optimal as-is. (Postgres takes the parameterized text[] form above.)
-      idFilter: (column) => sql`${column} IN (SELECT id FROM included_ids)`,
-      parameterDependentPlan: false,
-    };
+  const dialect = ctx.dialect.name;
+  switch (dialect) {
+    case "postgres": {
+      const includedIds = await fetchIncludedIds(
+        ctx,
+        reachableCte,
+        includedIdsCte,
+      );
+      const idsArray = textArrayParam(includedIds);
+      membership = {
+        prefix: sql``,
+        idFilter: (column) =>
+          sql`EXISTS (SELECT 1 FROM unnest(${idsArray}) AS tg_included(id) WHERE tg_included.id = ${column})`,
+        parameterDependentPlan: true,
+      };
+      break;
+    }
+    case "sqlite": {
+      membership = {
+        prefix: sql`${reachableCte}${includedIdsCte} `,
+        // SQLite: `column IN (subquery)` evaluates via a transient index —
+        // optimal as-is. (Postgres takes the parameterized text[] form above.)
+        idFilter: (column) => sql`${column} IN (SELECT id FROM included_ids)`,
+        parameterDependentPlan: false,
+      };
+      break;
+    }
+    default: {
+      dialect satisfies never;
+      throw new Error(`Unsupported SQL dialect: ${String(dialect)}`);
+    }
   }
 
   const [nodeRows, edgeRows] = await Promise.all([
@@ -722,8 +731,8 @@ function dedupeStrings(values: readonly string[]): readonly string[] {
 // SQL Generation
 // ============================================================
 
-function buildIncludedIdsCte(ctx: SubgraphContext): SQL {
-  const filters: SQL[] = [];
+function buildIncludedIdsCte(ctx: SubgraphContext): SqlFragment {
+  const filters: SqlFragment[] = [];
 
   if (ctx.includeKinds !== undefined && ctx.includeKinds.length > 0) {
     filters.push(compileKindFilter(sql.raw("kind"), ctx.includeKinds));
@@ -746,8 +755,8 @@ function buildIncludedIdsCte(ctx: SubgraphContext): SQL {
  * pre-fetched id-array filter (Postgres).
  */
 type SubgraphMembership = Readonly<{
-  prefix: SQL;
-  idFilter: (column: SQL) => SQL;
+  prefix: SqlFragment;
+  idFilter: (column: SqlFragment) => SqlFragment;
   /**
    * True in id-array mode: the fetch plans depend on the array
    * cardinality, so the statements must never fall onto a prepared
@@ -763,7 +772,7 @@ type SubgraphMembership = Readonly<{
  * `unnest` of the array. (Drizzle would otherwise serialize a JS array
  * param as JSON text.)
  */
-function textArrayParam(values: readonly string[]): SQL {
+function textArrayParam(values: readonly string[]): SqlFragment {
   const elements = values.map(
     (value) =>
       `"${value.replaceAll("\\", "\\\\").replaceAll('"', String.raw`\"`)}"`,
@@ -774,8 +783,8 @@ function textArrayParam(values: readonly string[]): SQL {
 /** Runs the traversal once and returns the closure's node ids. */
 async function fetchIncludedIds(
   ctx: SubgraphContext,
-  reachableCte: SQL,
-  includedIdsCte: SQL,
+  reachableCte: SqlFragment,
+  includedIdsCte: SqlFragment,
 ): Promise<readonly string[]> {
   const rows = await ctx.backend.execute<{ id: string }>(
     asCompiledRowsSql(
@@ -797,7 +806,7 @@ async function fetchSubgraphNodes(
     tableAlias: "n",
     currentTimestamp: currentReadInstant(),
   });
-  const columns: SQL[] = [
+  const columns: SqlFragment[] = [
     sql`n.kind`,
     sql`n.id`,
     buildFullPropsColumn("n", projectionPlan),
@@ -833,7 +842,7 @@ async function fetchSubgraphEdges(
     tableAlias: "e",
     currentTimestamp: currentReadInstant(),
   });
-  const columns: SQL[] = [
+  const columns: SqlFragment[] = [
     sql`e.id`,
     sql`e.kind`,
     sql`e.from_kind`,
@@ -863,7 +872,7 @@ function buildMetadataColumns(
   alias: "n" | "e",
   plan: ProjectionPlan,
   columns: readonly string[],
-): readonly SQL[] {
+): readonly SqlFragment[] {
   if (plan.projectedKinds.size === 0) {
     return columns.map((col) => sql`${sql.raw(`${alias}.${col}`)}`);
   }
@@ -889,7 +898,10 @@ function buildMetadataColumns(
   );
 }
 
-function buildFullPropsColumn(alias: "n" | "e", plan: ProjectionPlan): SQL {
+function buildFullPropsColumn(
+  alias: "n" | "e",
+  plan: ProjectionPlan,
+): SqlFragment {
   if (plan.projectedKinds.size === 0) {
     return sql`${sql.raw(`${alias}.props`)} AS props`;
   }
@@ -906,8 +918,8 @@ function buildProjectedPropertyColumns(
   alias: "n" | "e",
   plan: ProjectionPlan,
   dialect: DialectAdapter,
-): readonly SQL[] {
-  const columns: SQL[] = [];
+): readonly SqlFragment[] {
+  const columns: SqlFragment[] = [];
 
   for (const [kind, kindPlan] of plan.projectedKinds.entries()) {
     for (const fieldPlan of kindPlan.propertyFields) {
@@ -985,7 +997,7 @@ function mapSubgraphNodeRow(
   };
 
   if (kindPlan.includeMeta) {
-    projectedNode.meta = rowToNodeMeta(row);
+    projectedNode["meta"] = rowToNodeMeta(row);
   }
 
   applyProjectedFields(projectedNode, row, kindPlan);
@@ -1014,7 +1026,7 @@ function mapSubgraphEdgeRow(
   };
 
   if (kindPlan.includeMeta) {
-    projectedEdge.meta = rowToEdgeMeta(row);
+    projectedEdge["meta"] = rowToEdgeMeta(row);
   }
 
   applyProjectedFields(projectedEdge, row, kindPlan);

@@ -6,16 +6,16 @@ description: Short, focused patterns for common graph problems
 Recipes are **short, focused patterns** that solve a specific problem in a few code blocks. For complete,
 end-to-end implementations, see [Examples](/examples/document-management).
 
-| Pattern | Use Case |
-|---------|----------|
-| [RBAC](#role-based-access-control-rbac) | Permission checks through role hierarchies |
-| [Social Network](#social-network-followers--feeds) | Feeds, followers, friend recommendations |
+| Pattern                                                | Use Case                                       |
+| ------------------------------------------------------ | ---------------------------------------------- |
+| [RBAC](#role-based-access-control-rbac)                | Permission checks through role hierarchies     |
+| [Social Network](#social-network-followers--feeds)     | Feeds, followers, friend recommendations       |
 | [Content Versioning](#content-versioning-with-history) | Valid-time history and bitemporal audit trails |
-| [Tagging System](#tagging-system) | Flexible categorization with tag clouds |
-| [Tree Navigation](#tree-navigation) | Hierarchical menus, org charts, file systems |
-| [Weighted Relationships](#weighted-relationships) | Scoring, relevance, confidence levels |
-| [Soft Deletes](#soft-deletes-with-cascade) | Safe deletion with relationship cleanup |
-| [Unique Constraints](#enforcing-unique-constraints) | Preventing duplicates |
+| [Tagging System](#tagging-system)                      | Flexible categorization with tag clouds        |
+| [Tree Navigation](#tree-navigation)                    | Hierarchical menus, org charts, file systems   |
+| [Weighted Relationships](#weighted-relationships)      | Scoring, relevance, confidence levels          |
+| [Soft Deletes](#soft-deletes-with-cascade)             | Safe deletion with relationship cleanup        |
+| [Unique Constraints](#enforcing-unique-constraints)    | Preventing duplicates                          |
 
 ## Role-Based Access Control (RBAC)
 
@@ -604,6 +604,11 @@ The caller owns the transaction boundary; TypeGraph adopts that exact
 connection, so a failure rolls back both layers — no stray relational row, no
 graph node with a dangling foreign reference.
 
+This is the explicit adapter surface: create the store with
+`createAdapterStore` or `createAdapterStoreWithSchema`. The portable
+`createStore` factories intentionally do not expose native handles or
+caller-owned transaction adoption.
+
 How you open the transaction depends on whether your driver is async or
 synchronous. `withTransaction` itself is driver-agnostic — it adopts whatever
 connection you hand it.
@@ -692,7 +697,7 @@ await ctx.storage.transaction(async () => {
 
 `store.transaction(async (tx) => …)` works the same way (TypeGraph opens the
 storage transaction for you). Boot the parent store with
-`createStoreWithSchema` at object startup: bootstrap DDL and the durable
+`createAdapterStoreWithSchema` at object startup: bootstrap DDL and the durable
 materialization marker run *outside* any storage transaction (no DDL is ever
 emitted inside the business transaction), while the schema-version commit
 uses the `do-sqlite` runner. Cloudflare D1 is **not** `do-sqlite`:
@@ -702,8 +707,8 @@ D1-backed stores stay `transactionMode: "none"` pending separate work.
 The adopted context exposes the `{ nodes, edges }` surface (same as
 `store.transaction`) and reuses the parent store's resolved schema — it runs
 no migration and emits no DDL inside your transaction. Boot the parent store
-once at startup with `createStoreWithSchema(graph, backend)` so fulltext-backed
-writes find their durable materialization marker; an uninitialized store
+once at startup with `createAdapterStoreWithSchema(graph, backend)` so
+fulltext-backed writes find their durable materialization marker; an uninitialized store
 throws `StoreNotInitializedError` instead of migrating mid-transaction.
 
 `withTransaction` throws `ConfigurationError` on backends that cannot provide
@@ -712,26 +717,31 @@ real rollback (`backend.capabilities.transactions === false`:
 it never silently degrades to a non-atomic fallback, because the relational
 write would still commit.
 
-#### Graph-owned: `store.transaction` + `tx.sql`
+#### Adapter-owned graph transaction: `store.transaction` + `tx.sql`
 
 `withTransaction` is for when the **caller** owns the transaction boundary.
-When **TypeGraph** should own it, use `store.transaction(async (tx) => …)` and
-write your own relational tables through `tx.sql` — the raw Drizzle handle
-bound to that same transaction:
+When **TypeGraph** should own it on an `AdapterStore`, use
+`store.transaction(async (tx) => …)` and write your own relational tables
+through `tx.sql` — the adapter-native handle bound to that same transaction.
+Stores created from the SQLite and PostgreSQL adapter entrypoints infer this
+handle automatically:
 
 ```typescript
 await store.transaction(async (tx) => {
   await tx.nodes.Document.update(documentId, props);
-  // tx.sql is the AdoptedTransaction union — cast to your concrete
-  // Drizzle database type at the call site.
-  const sqlTx = tx.sql as NodePgDatabase;
+  if (tx.sql === undefined) throw new Error("Native transaction unavailable");
+  const sqlTx = tx.sql;
   await sqlTx.insert(documentVersions).values(versionRow);
   await sqlTx.insert(changeEvents).values(eventRow);
 }); // one COMMIT / ROLLBACK across both layers
 ```
 
-`tx.sql`'s static type is the `AdoptedTransaction` union; cast it to your
-concrete Drizzle database type at the call site (as above).
+Custom `AdapterBackend<TNativeTransaction>` implementations determine the
+inferred native handle through their generic parameter. Managed
+`/sqlite/local` and `/postgres/pglite` entrypoints return `Store`, whose
+transaction context exposes only TypeGraph collections and backend ports—no
+adapter-native `tx.sql` handle. Use an adapter entrypoint when application
+tables must share the transaction.
 On **Postgres / libsql** this is mandatory for correctness — using the outer
 `db` would write on a *different* connection and silently escape the
 transaction. On **better-sqlite3** it is the single connection framed by
@@ -744,7 +754,8 @@ not on `tx.sql`'s truthiness:
 await store.transaction(async (tx) => {
   switch (tx.sqlAvailability) {
     case "available": {
-      const sqlTx = tx.sql as NodePgDatabase; // usable raw handle
+      if (tx.sql === undefined) throw new Error("Native transaction unavailable");
+      const sqlTx = tx.sql;
       await sqlTx.insert(documentVersions).values(versionRow);
       break;
     }
@@ -806,7 +817,7 @@ const graph = defineGraph({
 ```typescript
 async function createOrUpdateUserByEmail(
   email: string,
-  username: string
+  username: string,
 ): Promise<{
   user: Node<typeof User>;
   action: "created" | "found" | "updated" | "resurrected";
@@ -814,7 +825,7 @@ async function createOrUpdateUserByEmail(
   return store.nodes.User.getOrCreateByConstraint(
     "user_email",
     { email, username },
-    { ifExists: "update" }
+    { ifExists: "update" },
   );
 }
 ```
@@ -833,7 +844,7 @@ async function followUser(followerId: string, followeeId: string): Promise<void>
     follower,
     followee,
     {},
-    { ifExists: "return" }
+    { ifExists: "return" },
   );
 }
 ```

@@ -15,9 +15,9 @@ import {
   createPostgresBackend,
   createPostgresTables,
   generatePostgresMigrationSQL,
-} from "@nicia-ai/typegraph/postgres";
-import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 import {
   getPostgresUrl,

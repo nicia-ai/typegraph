@@ -11,7 +11,7 @@
  * silently diverging from Postgres. Emitting it on every compiled predicate
  * makes the two backends match by construction.
  */
-import { type SQL, sql } from "drizzle-orm";
+import { sql, type SqlFragment } from "../sql-fragment";
 
 /**
  * The backslash escape character used by the JS pattern builder
@@ -28,4 +28,4 @@ export const LIKE_ESCAPE_CHARACTER = "\\";
  * backslash inside the quotes is a literal in both PostgreSQL (with
  * `standard_conforming_strings`, the default) and SQLite.
  */
-export const likeEscapeClause: SQL = sql`ESCAPE '\\'`;
+export const likeEscapeClause: SqlFragment = sql`ESCAPE '\\'`;

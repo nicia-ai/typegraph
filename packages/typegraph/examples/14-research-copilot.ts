@@ -35,6 +35,7 @@ import {
 } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
+import { requireDefined } from "../src/utils/presence";
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -110,7 +111,10 @@ function mockEmbedding(text: string): number[] {
     let hash = 0;
     for (const char of token) hash = Math.imul(hash, 31) + (char.codePointAt(0) ?? 0);
     for (let index = 0; index < dim; index++) {
-      vector[index]! += Math.sin(hash * (index + 1)) * 0.25 + Math.cos(hash + index) * 0.25;
+      vector[index] =
+        requireDefined(vector[index]) +
+        Math.sin(hash * (index + 1)) * 0.25 +
+        Math.cos(hash + index) * 0.25;
     }
   }
   const magnitude = Math.sqrt(vector.reduce((sum, v) => sum + v * v, 0)) || 1;
@@ -119,7 +123,7 @@ function mockEmbedding(text: string): number[] {
 
 function cosine(a: readonly number[], b: readonly number[]): number {
   let dot = 0;
-  for (let index = 0; index < a.length; index++) dot += a[index]! * b[index]!;
+  for (let index = 0; index < a.length; index++) dot += requireDefined(a[index]) * requireDefined(b[index]);
   return dot; // both vectors are unit-length
 }
 
@@ -465,9 +469,9 @@ export async function main(): Promise<void> {
   }
 
   for (const paper of PAPERS) {
-    const source = paperByKey.get(paper.key)!;
+    const source = requireDefined(paperByKey.get(paper.key));
     for (const citedKey of paper.cites) {
-      const target = paperByKey.get(citedKey)!;
+      const target = requireDefined(paperByKey.get(citedKey));
       await store.edges.cites.create(
         { kind: "Paper", id: source.id },
         { kind: "Paper", id: target.id },
@@ -520,7 +524,7 @@ export async function main(): Promise<void> {
       metric: "cosine",
     });
     ranked = hits.map((hit) => ({
-      paper: paperById.get(hit.node.id)!,
+      paper: requireDefined(paperById.get(hit.node.id)),
       similarity: hit.score,
     }));
   } else {
@@ -583,7 +587,7 @@ export async function main(): Promise<void> {
   );
   console.log(" ancestor concepts matched too (SelfSupervised, DeepLearning).\n");
 
-  const contrastiveTopic = topicByName.get("Contrastive")!;
+  const contrastiveTopic = requireDefined(topicByName.get("Contrastive"));
   const expandedTopicIds = new Set<string>([contrastiveTopic.id]);
   const topicAncestors = await store.algorithms.reachable(contrastiveTopic, {
     edges: ["broader_than"],
@@ -596,7 +600,7 @@ export async function main(): Promise<void> {
     [...topicByName.values()].map((topic) => [topic.id, topic]),
   );
   const expandedTopics = [...expandedTopicIds].map(
-    (id) => topicById.get(id)!.name,
+    (id) => requireDefined(topicById.get(id)).name,
   );
   console.log(`  Expanded set: {${expandedTopics.join(", ")}}\n`);
 
@@ -623,7 +627,7 @@ export async function main(): Promise<void> {
 
   console.log(" Papers matching expanded topic set:");
   for (const [paperId, topics] of matchByPaper) {
-    const paper = paperById.get(paperId)!;
+    const paper = requireDefined(paperById.get(paperId));
     console.log(`   • ${paper.title}`);
     console.log(`       covers: [${[...topics].join(", ")}]`);
   }
@@ -649,7 +653,7 @@ export async function main(): Promise<void> {
   // in a single statement (see example 13).
   const hybridScored = await Promise.all(
     [...candidateIds].map(async (paperId) => {
-      const paper = paperById.get(paperId)!;
+      const paper = requireDefined(paperById.get(paperId));
       const citationCount = await store.algorithms.degree(paperId, {
         edges: ["cites"],
         direction: "in",
@@ -698,8 +702,8 @@ export async function main(): Promise<void> {
   );
   console.log(" explicit influence claim.\n");
 
-  const alex = paperByKey.get("alexnet")!;
-  const simclr = paperByKey.get("simclr")!;
+  const alex = requireDefined(paperByKey.get("alexnet"));
+  const simclr = requireDefined(paperByKey.get("simclr"));
 
   const lineage = await store.algorithms.shortestPath(simclr.id, alex.id, {
     edges: ["cites"],
@@ -727,9 +731,9 @@ export async function main(): Promise<void> {
 
   console.log("\n─── Heritage check (canReach) ───\n");
 
-  const backprop = paperByKey.get("backprop")!;
+  const backprop = requireDefined(paperByKey.get("backprop"));
   for (const key of ["llama", "clip", "cot", "simclr"] as const) {
-    const paper = paperByKey.get(key)!;
+    const paper = requireDefined(paperByKey.get(key));
     const reaches = await store.algorithms.canReach(paper.id, backprop.id, {
       edges: ["cites"],
       maxHops: 10,
@@ -750,7 +754,7 @@ export async function main(): Promise<void> {
     '\n "If I write a paper citing CLIP, who are my natural co-authors?"\n',
   );
 
-  const clip = paperByKey.get("clip")!;
+  const clip = requireDefined(paperByKey.get("clip"));
 
   // 1-hop out: CLIP → authors. `neighbors()` is the natural fit for a
   // single node's adjacency.

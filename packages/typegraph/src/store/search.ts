@@ -7,8 +7,6 @@
  * rank-based, so it papers over score-scale differences between
  * pgvector/sqlite-vec (distance-derived) and tsvector/FTS5 (BM25-style).
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import {
   type FulltextCapabilities,
   type FulltextQueryMode,
@@ -31,8 +29,10 @@ import { validateHybridFusionOptions } from "../query/builder/validation";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { assertVectorMinScore } from "../query/dialect/vector-strategy";
 import { type Predicate } from "../query/predicates";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { type KindRegistry } from "../registry/kind-registry";
 import { compareCodePoints } from "../utils/compare";
+import { requireDefined } from "../utils/presence";
 import { getEmbeddingFields } from "./embedding-sync";
 import { rowToNode } from "./row-mappers";
 import { type Node } from "./types";
@@ -239,7 +239,7 @@ function buildKindCandidates(
   ctx: StoreSearchContext,
   nodeKind: string,
   where: ((accessor: NodeAccessor<NodeType>) => Predicate) | undefined,
-): SQL | undefined {
+): SqlFragment | undefined {
   if (where === undefined) return undefined;
   if (ctx.createQuery === undefined) {
     throw new ConfigurationError(
@@ -438,7 +438,7 @@ export async function executeFulltextSearch<N = Node>(
     kinds.map(async (kind): Promise<readonly RankedSourceRow[]> => {
       const candidates = buildKindCandidates(ctx, kind, options.where);
       const language = effectiveFulltextLanguage(ctx, kind, options.language);
-      const rows = await backend.fulltextSearch!({
+      const rows = await requireDefined(backend.fulltextSearch)({
         graphId,
         nodeKind: kind,
         query: options.query,
@@ -467,7 +467,7 @@ export async function executeFulltextSearch<N = Node>(
 
   const merged =
     singleKind ?
-      perKindRows[0]!
+      requireDefined(perKindRows[0])
     : perKindRows
         .flat()
         .toSorted(
@@ -539,13 +539,13 @@ export async function executeVectorSearch<N = Node>(
   }
   const offset = options.offset ?? 0;
   const singleKind = searchKinds.length === 1;
-  const metric = options.metric ?? searchKinds[0]!.slot.metric;
+  const metric = options.metric ?? requireDefined(searchKinds[0]).slot.metric;
 
   const perKindRows = await Promise.all(
     searchKinds.map(
       async ({ kind, slot }): Promise<readonly RankedSourceRow[]> => {
         const candidates = buildKindCandidates(ctx, kind, options.where);
-        const rows = await backend.vectorSearch!({
+        const rows = await requireDefined(backend.vectorSearch)({
           graphId,
           nodeKind: kind,
           fieldPath: options.fieldPath,
@@ -580,7 +580,7 @@ export async function executeVectorSearch<N = Node>(
 
   const merged =
     singleKind ?
-      perKindRows[0]!
+      requireDefined(perKindRows[0])
     : mergeVectorRows(perKindRows, metric).slice(
         offset,
         offset + options.limit,
@@ -762,10 +762,11 @@ export async function executeHybridSearch<N = Node>(
       "hybridSearch.vector.minScore",
     );
   }
-  const vectorMetric = options.vector.metric ?? vectorKinds[0]!.slot.metric;
+  const vectorMetric =
+    options.vector.metric ?? requireDefined(vectorKinds[0]).slot.metric;
 
   // One candidate subquery per kind, shared by both halves.
-  const candidatesByKind = new Map<string, SQL | undefined>();
+  const candidatesByKind = new Map<string, SqlFragment | undefined>();
   for (const kind of fulltextKinds) {
     candidatesByKind.set(kind, buildKindCandidates(ctx, kind, options.where));
   }
@@ -783,10 +784,10 @@ export async function executeHybridSearch<N = Node>(
     backend.hybridSearch !== undefined &&
     fulltextKinds.length === 1 &&
     vectorKinds.length === 1 &&
-    fulltextKinds[0] === vectorKinds[0]!.kind
+    fulltextKinds[0] === requireDefined(vectorKinds[0]).kind
   ) {
     const kind = fulltextKinds[0];
-    const { slot } = vectorKinds[0]!;
+    const { slot } = requireDefined(vectorKinds[0]);
     const candidates = candidatesByKind.get(kind);
     const hybridFulltextLanguage = effectiveFulltextLanguage(
       ctx,
@@ -862,7 +863,7 @@ export async function executeHybridSearch<N = Node>(
     vectorKinds.map(
       async ({ kind, slot }): Promise<readonly RankedSourceRow[]> => {
         const candidates = candidatesByKind.get(kind);
-        const rows = await backend.vectorSearch!({
+        const rows = await requireDefined(backend.vectorSearch)({
           graphId,
           nodeKind: kind,
           fieldPath: options.vector.fieldPath,
@@ -897,7 +898,7 @@ export async function executeHybridSearch<N = Node>(
         kind,
         options.fulltext.language,
       );
-      const rows = await backend.fulltextSearch!({
+      const rows = await requireDefined(backend.fulltextSearch)({
         graphId,
         nodeKind: kind,
         query: options.fulltext.query,

@@ -15,13 +15,10 @@ import {
   type NodeId,
 } from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
-import type {
-  AdoptedTransaction,
-  GraphBackend,
-  TransactionBackend,
-} from "../src/backend/types";
+import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { ValidationError } from "../src/errors";
 import { createStore } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, createTestDatabase } from "./test-utils";
 
 // ============================================================
@@ -130,7 +127,7 @@ describe("Node Collections (SQLite)", () => {
       const fetched = await store.nodes.Person.getById(person.id);
 
       expect(fetched).toBeDefined();
-      expect(fetched!.name).toBe("Alice");
+      expect(requireDefined(fetched).name).toBe("Alice");
     });
 
     it("returns undefined for non-existent id", async () => {
@@ -164,9 +161,9 @@ describe("Node Collections (SQLite)", () => {
       ]);
 
       expect(results).toHaveLength(3);
-      expect(results[0]!.name).toBe("Bob");
+      expect(requireDefined(results[0]).name).toBe("Bob");
       expect(results[1]).toBeUndefined();
-      expect(results[2]!.name).toBe("Alice");
+      expect(requireDefined(results[2]).name).toBe("Alice");
     });
 
     it("returns empty array for empty input", async () => {
@@ -191,7 +188,7 @@ describe("Node Collections (SQLite)", () => {
       ]);
 
       expect(results).toHaveLength(2);
-      expect(results[0]!.name).toBe("Alice");
+      expect(requireDefined(results[0]).name).toBe("Alice");
       expect(results[1]).toBeUndefined();
     });
   });
@@ -227,7 +224,7 @@ describe("Node Collections (SQLite)", () => {
       const observedBackend: GraphBackend = {
         ...baseBackend,
         async transaction<T>(
-          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          fn: (tx: TransactionBackend) => Promise<T>,
           options?: Parameters<GraphBackend["transaction"]>[1],
         ): Promise<T> {
           transactionCount++;
@@ -285,13 +282,13 @@ describe("Node Collections (SQLite)", () => {
         },
         async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
           rootExecuteCount++;
-          return baseBackend.executeRaw!<T>(sqlText, params);
+          return requireDefined(baseBackend.executeRaw)<T>(sqlText, params);
         },
         async transaction<T>(
-          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          fn: (tx: TransactionBackend) => Promise<T>,
           options?: Parameters<GraphBackend["transaction"]>[1],
         ): Promise<T> {
-          return baseBackend.transaction(async (txBackend, sql) => {
+          return baseBackend.transaction(async (txBackend) => {
             const observedTxBackend: TransactionBackend = {
               ...txBackend,
               async execute<T>(
@@ -302,10 +299,10 @@ describe("Node Collections (SQLite)", () => {
               },
               async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
                 txExecuteCount++;
-                return txBackend.executeRaw!<T>(sqlText, params);
+                return requireDefined(txBackend.executeRaw)<T>(sqlText, params);
               },
             };
-            return fn(observedTxBackend, sql);
+            return fn(observedTxBackend);
           }, options);
         },
       };
@@ -323,7 +320,7 @@ describe("Node Collections (SQLite)", () => {
         });
 
         expect(txResults).toHaveLength(1);
-        expect(txResults[0]!.id).toBe("tx-person");
+        expect(requireDefined(txResults[0]).id).toBe("tx-person");
       });
 
       expect(txExecuteCount).toBeGreaterThan(0);
@@ -430,9 +427,9 @@ describe("Edge Collections (SQLite)", () => {
       ]);
 
       expect(results).toHaveLength(3);
-      expect(results[0]!.role).toBe("Consultant");
+      expect(requireDefined(results[0]).role).toBe("Consultant");
       expect(results[1]).toBeUndefined();
-      expect(results[2]!.role).toBe("Engineer");
+      expect(requireDefined(results[2]).role).toBe("Engineer");
     });
 
     it("returns empty array for empty input", async () => {
@@ -458,7 +455,7 @@ describe("Edge Collections (SQLite)", () => {
       ]);
 
       expect(results).toHaveLength(2);
-      expect(results[0]!.role).toBe("Engineer");
+      expect(requireDefined(results[0]).role).toBe("Engineer");
       expect(results[1]).toBeUndefined();
     });
   });
@@ -509,7 +506,7 @@ describe("Edge Collections (SQLite)", () => {
       });
 
       expect(edges).toHaveLength(1);
-      expect(edges[0]!.role).toBe("Engineer");
+      expect(requireDefined(edges[0]).role).toBe("Engineer");
     });
 
     it("rejects unsupported where filter options", async () => {
@@ -686,7 +683,7 @@ describe("Bulk Operations (SQLite)", () => {
       // Should be findable again
       const fetched = await store.nodes.Person.getById(person.id);
       expect(fetched).toBeDefined();
-      expect(fetched!.name).toBe("Alice Reborn");
+      expect(requireDefined(fetched).name).toBe("Alice Reborn");
     });
   });
 
@@ -784,9 +781,9 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(nodes).toHaveLength(3);
-      expect(nodes[0]!.name).toBe("Alice");
-      expect(nodes[1]!.name).toBe("Bob");
-      expect(nodes[2]!.name).toBe("Charlie");
+      expect(requireDefined(nodes[0]).name).toBe("Alice");
+      expect(requireDefined(nodes[1]).name).toBe("Bob");
+      expect(requireDefined(nodes[2]).name).toBe("Charlie");
 
       const count = await store.nodes.Person.count();
       expect(count).toBe(3);
@@ -798,8 +795,8 @@ describe("Bulk Operations (SQLite)", () => {
         { id: "person-2", props: { name: "Bob" } },
       ]);
 
-      expect(nodes[0]!.id).toBe("person-1");
-      expect(nodes[1]!.id).toBe("person-2");
+      expect(requireDefined(nodes[0]).id).toBe("person-1");
+      expect(requireDefined(nodes[1]).id).toBe("person-2");
     });
 
     it("always returns created nodes", async () => {
@@ -809,8 +806,8 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(nodes).toHaveLength(2);
-      expect(nodes[0]!.name).toBe("Alice");
-      expect(nodes[1]!.name).toBe("Bob");
+      expect(requireDefined(nodes[0]).name).toBe("Alice");
+      expect(requireDefined(nodes[1]).name).toBe("Bob");
     });
 
     it("uses batched backend node inserts for bulkInsert", async () => {
@@ -850,7 +847,7 @@ describe("Bulk Operations (SQLite)", () => {
           await insertNodesBatchWithFallback(baseBackend, params);
         },
         async transaction(fn, options) {
-          return baseBackend.transaction(async (tx, sql) => {
+          return baseBackend.transaction(async (tx) => {
             const wrappedTx: TransactionBackend = {
               ...tx,
               async insertNodeNoReturn(params) {
@@ -862,7 +859,7 @@ describe("Bulk Operations (SQLite)", () => {
                 await insertNodesBatchWithFallback(tx, params);
               },
             };
-            return fn(wrappedTx, sql);
+            return fn(wrappedTx);
           }, options);
         },
       };
@@ -898,8 +895,8 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(nodes).toHaveLength(2);
-      expect(nodes[0]!.meta.version).toBe(1);
-      expect(nodes[1]!.meta.version).toBe(1);
+      expect(requireDefined(nodes[0]).meta.version).toBe(1);
+      expect(requireDefined(nodes[1]).meta.version).toBe(1);
     });
 
     it("updates nodes that exist", async () => {
@@ -911,10 +908,10 @@ describe("Bulk Operations (SQLite)", () => {
         { id: "person-2", props: { name: "Bob Updated" } },
       ]);
 
-      expect(nodes[0]!.name).toBe("Alice Updated");
-      expect(nodes[0]!.meta.version).toBe(2);
-      expect(nodes[1]!.name).toBe("Bob Updated");
-      expect(nodes[1]!.meta.version).toBe(2);
+      expect(requireDefined(nodes[0]).name).toBe("Alice Updated");
+      expect(requireDefined(nodes[0]).meta.version).toBe(2);
+      expect(requireDefined(nodes[1]).name).toBe("Bob Updated");
+      expect(requireDefined(nodes[1]).meta.version).toBe(2);
     });
 
     it("handles mixed create and update", async () => {
@@ -925,8 +922,8 @@ describe("Bulk Operations (SQLite)", () => {
         { id: "person-2", props: { name: "Bob New" } },
       ]);
 
-      expect(nodes[0]!.meta.version).toBe(2); // Updated
-      expect(nodes[1]!.meta.version).toBe(1); // Created
+      expect(requireDefined(nodes[0]).meta.version).toBe(2); // Updated
+      expect(requireDefined(nodes[1]).meta.version).toBe(1); // Created
     });
   });
 
@@ -948,7 +945,7 @@ describe("Bulk Operations (SQLite)", () => {
       expect(count).toBe(1);
 
       const remaining = await store.nodes.Person.find();
-      expect(remaining[0]!.name).toBe("Charlie");
+      expect(requireDefined(remaining[0]).name).toBe("Charlie");
     });
 
     it("silently ignores non-existent ids", async () => {
@@ -979,9 +976,9 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(edges).toHaveLength(3);
-      expect(edges[0]!.role).toBe("Engineer");
-      expect(edges[1]!.role).toBe("Consultant");
-      expect(edges[2]!.role).toBe("Designer");
+      expect(requireDefined(edges[0]).role).toBe("Engineer");
+      expect(requireDefined(edges[1]).role).toBe("Consultant");
+      expect(requireDefined(edges[2]).role).toBe("Designer");
 
       const count = await store.edges.worksAt.count();
       expect(count).toBe(3);
@@ -995,7 +992,7 @@ describe("Bulk Operations (SQLite)", () => {
         { id: "edge-1", from: alice, to: acme, props: { role: "Engineer" } },
       ]);
 
-      expect(edges[0]!.id).toBe("edge-1");
+      expect(requireDefined(edges[0]).id).toBe("edge-1");
     });
 
     it("always returns created edges", async () => {
@@ -1007,7 +1004,7 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(edges).toHaveLength(1);
-      expect(edges[0]!.role).toBe("Engineer");
+      expect(requireDefined(edges[0]).role).toBe("Engineer");
     });
 
     it("uses batched backend edge inserts for bulkInsert", async () => {
@@ -1047,7 +1044,7 @@ describe("Bulk Operations (SQLite)", () => {
           await insertEdgesBatchWithFallback(baseBackend, params);
         },
         async transaction(fn, options) {
-          return baseBackend.transaction(async (tx, sql) => {
+          return baseBackend.transaction(async (tx) => {
             const wrappedTx: TransactionBackend = {
               ...tx,
               async insertEdgeNoReturn(params) {
@@ -1059,7 +1056,7 @@ describe("Bulk Operations (SQLite)", () => {
                 await insertEdgesBatchWithFallback(tx, params);
               },
             };
-            return fn(wrappedTx, sql);
+            return fn(wrappedTx);
           }, options);
         },
       };
@@ -1114,10 +1111,10 @@ describe("Bulk Operations (SQLite)", () => {
         },
         async getNodes(graphId, kind, ids) {
           getNodesCalls += 1;
-          return baseBackend.getNodes!(graphId, kind, ids);
+          return requireDefined(baseBackend.getNodes)(graphId, kind, ids);
         },
         async transaction(fn, options) {
-          return baseBackend.transaction(async (tx, sql) => {
+          return baseBackend.transaction(async (tx) => {
             const wrappedTx = {
               ...tx,
               async getNode(graphId: string, kind: string, id: string) {
@@ -1130,10 +1127,10 @@ describe("Bulk Operations (SQLite)", () => {
                 ids: readonly string[],
               ) {
                 getNodesCalls += 1;
-                return tx.getNodes!(graphId, kind, ids);
+                return requireDefined(tx.getNodes)(graphId, kind, ids);
               },
             };
-            return fn(wrappedTx, sql);
+            return fn(wrappedTx);
           }, options);
         },
       };
@@ -1196,8 +1193,8 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(edges).toHaveLength(2);
-      expect(edges[0]!.role).toBe("Engineer");
-      expect(edges[1]!.role).toBe("Consultant");
+      expect(requireDefined(edges[0]).role).toBe("Engineer");
+      expect(requireDefined(edges[1]).role).toBe("Consultant");
 
       const count = await store.edges.worksAt.count();
       expect(count).toBe(2);
@@ -1224,7 +1221,7 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(edges).toHaveLength(1);
-      expect(edges[0]!.role).toBe("Senior Engineer");
+      expect(requireDefined(edges[0]).role).toBe("Senior Engineer");
     });
 
     it("handles mixed create and update", async () => {
@@ -1255,8 +1252,8 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(edges).toHaveLength(2);
-      expect(edges[0]!.role).toBe("Lead Engineer");
-      expect(edges[1]!.role).toBe("Advisor");
+      expect(requireDefined(edges[0]).role).toBe("Lead Engineer");
+      expect(requireDefined(edges[1]).role).toBe("Advisor");
 
       const count = await store.edges.worksAt.count();
       expect(count).toBe(2);
@@ -1292,12 +1289,12 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(edges).toHaveLength(1);
-      expect(edges[0]!.role).toBe("Engineer Reborn");
-      expect(edges[0]!.meta.deletedAt).toBeUndefined();
+      expect(requireDefined(edges[0]).role).toBe("Engineer Reborn");
+      expect(requireDefined(edges[0]).meta.deletedAt).toBeUndefined();
 
       const fetched = await store.edges.worksAt.getById(edge.id);
       expect(fetched).toBeDefined();
-      expect(fetched!.role).toBe("Engineer Reborn");
+      expect(requireDefined(fetched).role).toBe("Engineer Reborn");
     });
   });
 
@@ -1364,7 +1361,7 @@ describe("Node Collections (Memory)", () => {
 
     const fetched = await store.nodes.Person.getById(person.id);
     expect(fetched).toBeDefined();
-    expect(fetched!.name).toBe("Alice");
+    expect(requireDefined(fetched).name).toBe("Alice");
   });
 
   it("finds and counts nodes", async () => {
@@ -1591,7 +1588,7 @@ describe("Temporal filtering in count() and find()", () => {
       const results = await store.nodes.Person.find();
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.name).toBe("Active");
+      expect(requireDefined(results[0]).name).toBe("Active");
     });
 
     it("excludes expired nodes from find by default", async () => {
@@ -1604,7 +1601,7 @@ describe("Temporal filtering in count() and find()", () => {
       const results = await store.nodes.Person.find();
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.name).toBe("Active");
+      expect(requireDefined(results[0]).name).toBe("Active");
     });
 
     it("includes expired nodes with temporalMode: includeEnded", async () => {
@@ -1646,7 +1643,7 @@ describe("Temporal filtering in count() and find()", () => {
       });
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.name).toBe("Current");
+      expect(requireDefined(results[0]).name).toBe("Current");
     });
 
     it("respects limit and offset with temporal filtering", async () => {
@@ -1681,7 +1678,7 @@ describe("Temporal filtering in count() and find()", () => {
         { temporalMode: "includeTombstones" },
       );
       expect(withWhere).toHaveLength(1);
-      expect(withWhere[0]!.name).toBe("Will Delete");
+      expect(requireDefined(withWhere[0]).name).toBe("Will Delete");
     });
 
     it("excludes future nodes from where-filtered find by default", async () => {
@@ -1696,7 +1693,7 @@ describe("Temporal filtering in count() and find()", () => {
       });
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.name).toBe("Active");
+      expect(requireDefined(results[0]).name).toBe("Active");
     });
 
     it("respects asOf with where-filtered find", async () => {
@@ -1835,7 +1832,7 @@ describe("Temporal filtering in count() and find()", () => {
       const results = await store.edges.worksAt.find();
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.role).toBe("Current");
+      expect(requireDefined(results[0]).role).toBe("Current");
     });
 
     it("includes expired edges with temporalMode: includeEnded", async () => {
@@ -1880,7 +1877,7 @@ describe("Temporal filtering in count() and find()", () => {
       });
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.role).toBe("Current");
+      expect(requireDefined(results[0]).role).toBe("Current");
     });
 
     it("rejects non-canonical asOf timestamps across collection reads", async () => {

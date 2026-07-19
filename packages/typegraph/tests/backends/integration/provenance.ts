@@ -1,14 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  createStoreWithSchema,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  type Node,
-} from "../../../src";
+import { defineEdge, defineGraph, defineNode, type Node } from "../../../src";
 import { createRetractionCapability } from "../../../src/provenance";
+import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
 const Source = defineNode("Source", {
@@ -81,12 +76,7 @@ type JustificationRef = Node<typeof Justification>;
 type PremiseRef = SourceRef | FactRef;
 
 async function createHistoryStore(context: IntegrationTestContext) {
-  const [store] = await createStoreWithSchema(
-    provenanceGraph,
-    context.getStore().backend,
-    { history: true },
-  );
-  return store;
+  return context.createHistoryStore(provenanceGraph);
 }
 
 async function createSource(
@@ -170,10 +160,10 @@ export function registerProvenanceIntegrationTests(
       expect(report.survivedVia).toEqual([]);
       expect(await store.nodes.Fact.getById(fact.id)).toBeUndefined();
       await expect(
-        store.asOfRecorded(before!).nodes.Fact.getById(fact.id),
+        store.asOfRecorded(requireDefined(before)).nodes.Fact.getById(fact.id),
       ).resolves.toMatchObject({ id: "fact-a" });
       await expect(
-        store.asOfRecorded(after!).nodes.Fact.getById(fact.id),
+        store.asOfRecorded(requireDefined(after)).nodes.Fact.getById(fact.id),
       ).resolves.toBeUndefined();
       await expect(
         store.edges.derives.find({ to: fact }),

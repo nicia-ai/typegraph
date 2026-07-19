@@ -32,6 +32,7 @@ import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
 import { type GraphBackend } from "../../src/backend/types";
 import { embedding } from "../../src/core/embedding";
 import { createStoreWithSchema } from "../../src/store";
+import { requireDefined } from "../../src/utils/presence";
 
 const GRAPH_ID = "l2_score_scale_parity";
 const FIELD_PATH = "embedding";
@@ -116,7 +117,7 @@ async function collectSqliteVec(): Promise<BackendResult> {
 describe("cross-backend l2 score-scale parity", () => {
   const temporaryDir = mkdtempSync(path.join(tmpdir(), "tg-l2-parity-"));
 
-  const TEST_DATABASE_URL = process.env.POSTGRES_URL;
+  const TEST_DATABASE_URL = process.env["POSTGRES_URL"];
   let postgresPool: Pool | undefined;
 
   beforeAll(async () => {
@@ -210,8 +211,8 @@ describe("cross-backend l2 score-scale parity", () => {
       ).toEqual(reference.order);
 
       for (const id of reference.order) {
-        const referenceScore = reference.scores.get(id)!;
-        const otherScore = other.scores.get(id)!;
+        const referenceScore = requireDefined(reference.scores.get(id));
+        const otherScore = requireDefined(other.scores.get(id));
         expect(
           Math.abs(otherScore - referenceScore),
           `${other.label} l2 score for ${id} (${otherScore}) vs ${reference.label} (${referenceScore})`,

@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 
 import { avg, count, max, min, sum } from "../../../src";
+import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
 // ============================================================
@@ -59,7 +60,7 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         .aggregate({ total: count("p") })
         .execute();
 
-      expect(results[0]!.total).toBe(0);
+      expect(requireDefined(results[0]).total).toBe(0);
     });
 
     it("sum returns null for empty result set", async () => {
@@ -73,7 +74,7 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         .execute();
 
       // SQL SUM of empty set returns NULL
-      expect(results[0]!.total).toBeNull();
+      expect(requireDefined(results[0]).total).toBeNull();
     });
 
     it("avg returns null for empty result set", async () => {
@@ -86,7 +87,7 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         .aggregate({ average: avg("p", "price") })
         .execute();
 
-      expect(results[0]!.average).toBeNull();
+      expect(requireDefined(results[0]).average).toBeNull();
     });
 
     it("min/max return null for empty result set", async () => {
@@ -102,8 +103,8 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         })
         .execute();
 
-      expect(results[0]!.minPrice).toBeNull();
-      expect(results[0]!.maxPrice).toBeNull();
+      expect(requireDefined(results[0]).minPrice).toBeNull();
+      expect(requireDefined(results[0]).maxPrice).toBeNull();
     });
   });
 }
@@ -138,7 +139,7 @@ function registerNullHandlingTests(context: IntegrationTestContext): void {
         .execute();
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.name).toBe("Without Rating");
+      expect(requireDefined(results[0]).name).toBe("Without Rating");
     });
 
     it("isNotNull filters out null values", async () => {
@@ -164,7 +165,7 @@ function registerNullHandlingTests(context: IntegrationTestContext): void {
         .execute();
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.name).toBe("With Rating");
+      expect(requireDefined(results[0]).name).toBe("With Rating");
     });
   });
 }
@@ -257,8 +258,8 @@ function registerBoundaryTests(context: IntegrationTestContext): void {
 
       // Should get products C and D (skipping first 2)
       expect(results).toHaveLength(2);
-      expect(results[0]!.name).toBe("C");
-      expect(results[1]!.name).toBe("D");
+      expect(requireDefined(results[0]).name).toBe("C");
+      expect(requireDefined(results[1]).name).toBe("D");
     });
   });
 }
@@ -293,7 +294,7 @@ function registerConcurrencyTests(context: IntegrationTestContext): void {
       // All should succeed with same results
       for (const result of results) {
         expect(result).toHaveLength(1);
-        expect(result[0]!.name).toBe("Test");
+        expect(requireDefined(result[0]).name).toBe("Test");
       }
     });
 

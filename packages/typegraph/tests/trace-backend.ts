@@ -13,7 +13,11 @@
  * SQLITE_BUSY-at-commit or a Postgres serialization abort. Contract: hooks
  * must report such an operation through `onError`, never `onOperationEnd`.
  */
-import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import type {
+  GraphBackend,
+  TransactionBackend,
+  TransactionOptions,
+} from "../src/backend/types";
 
 type MethodRecorder = (name: string) => void;
 
@@ -36,34 +40,32 @@ function traceProxy<T extends object>(
   record: MethodRecorder,
 ): T {
   return new Proxy(target, {
-    get(inner, property, receiver) {
-      const value = Reflect.get(inner, property, receiver);
+    get(inner, property, receiver): unknown {
+      const value: unknown = Reflect.get(inner, property, receiver);
       if (typeof property !== "string" || typeof value !== "function") {
         return value;
       }
 
       if (property === "transaction") {
         const transaction = value as GraphBackend["transaction"];
-        return (<R>(
-          fn: (tx: TransactionBackend, sql: unknown) => Promise<R>,
-          options?: unknown,
+        const tracedTransaction: GraphBackend["transaction"] = async <R>(
+          fn: (tx: TransactionBackend) => Promise<R>,
+          options: TransactionOptions | undefined,
         ): Promise<R> => {
           record(`${prefix}transaction:begin`);
-          return Reflect.apply(transaction, inner, [
-            (tx: TransactionBackend, sql: unknown) =>
-              fn(traceProxy(tx, "tx.", record), sql),
-            options,
-          ]).then(
-            (result: R) => {
-              record(`${prefix}transaction:commit`);
-              return result;
-            },
-            (error: unknown) => {
-              record(`${prefix}transaction:rollback`);
-              throw error;
-            },
-          );
-        }) as typeof value;
+          try {
+            const result = await transaction(
+              (tx) => fn(traceProxy(tx, "tx.", record)),
+              options,
+            );
+            record(`${prefix}transaction:commit`);
+            return result;
+          } catch (error: unknown) {
+            record(`${prefix}transaction:rollback`);
+            throw error;
+          }
+        };
+        return tracedTransaction;
       }
 
       return wrapCallable(value, inner, () => {
@@ -109,24 +111,22 @@ export function createCommitFailingBackend(target: GraphBackend): Readonly<{
 }> {
   let armed = false;
   const backend = new Proxy(target, {
-    get(inner, property, receiver) {
-      const value = Reflect.get(inner, property, receiver);
+    get(inner, property, receiver): unknown {
+      const value: unknown = Reflect.get(inner, property, receiver);
       if (property !== "transaction" || typeof value !== "function") {
         return value;
       }
       const transaction = value as GraphBackend["transaction"];
-      return (<R>(
-        fn: (tx: TransactionBackend, sql: unknown) => Promise<R>,
-        options?: unknown,
+      const failingTransaction: GraphBackend["transaction"] = <R>(
+        fn: (tx: TransactionBackend) => Promise<R>,
+        options: TransactionOptions | undefined,
       ): Promise<R> =>
-        Reflect.apply(transaction, inner, [
-          async (tx: TransactionBackend, sql: unknown) => {
-            const result = await fn(tx, sql);
-            if (armed) throw new InjectedCommitFailure();
-            return result;
-          },
-          options,
-        ])) as typeof value;
+        transaction(async (tx) => {
+          const result = await fn(tx);
+          if (armed) throw new InjectedCommitFailure();
+          return result;
+        }, options);
+      return failingTransaction;
     },
   });
   return {

@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * Staging (design §6.4 rule 1, T7): run the state-diff (T3) for EVERY branch,
  * tag each diff item with its origin {@link BranchId}, and assemble the UNION
@@ -26,7 +27,6 @@
  *   The `(…, branchId)` tail breaks ties when the same id is contributed by more
  *   than one branch, so the ordering is total and stable.
  */
-
 import { compareStrings, type MergeKey } from "./node-key";
 import type {
   ChangedEdge,
@@ -163,7 +163,7 @@ function groupByKind<
   )) {
     ordered.set(
       kind,
-      [...buckets.get(kind)!].sort((left, right) =>
+      [...requireDefined(buckets.get(kind))].sort((left, right) =>
         compareByIdThenBranch(left, right),
       ),
     );

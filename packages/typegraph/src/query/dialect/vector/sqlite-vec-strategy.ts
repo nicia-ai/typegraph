@@ -52,9 +52,6 @@
  * The libSQL and pgvector siblings implement the same `VectorStrategy`
  * contract for their engines.
  */
-import { type SQL, sql } from "drizzle-orm";
-
-import { quotedTableName } from "../../../backend/drizzle/operations/shared";
 import { type StrategyTableContribution } from "../../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
@@ -64,6 +61,7 @@ import {
   type VectorMetric,
   type VectorSearchParams,
 } from "../../../backend/types";
+import { sql, type SqlFragment } from "../../sql-fragment";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
@@ -136,16 +134,19 @@ function sqliteVecMetricToken(metric: VectorMetric): string {
  * array into the packed float blob. Finiteness is validated first so a
  * NaN/Infinity names its index before JSON.stringify masks it as `null`.
  */
-function vecF32Literal(embedding: readonly number[], name: string): SQL {
+function vecF32Literal(
+  embedding: readonly number[],
+  name: string,
+): SqlFragment {
   assertFiniteEmbedding(embedding, name);
   return sql`vec_f32(${JSON.stringify(embedding)})`;
 }
 
 function distanceExpression(
-  embeddingColumn: SQL,
+  embeddingColumn: SqlFragment,
   queryEmbedding: readonly number[],
   metric: VectorMetric,
-): SQL {
+): SqlFragment {
   const query = vecF32Literal(queryEmbedding, "queryEmbedding");
   switch (metric) {
     case "cosine": {
@@ -166,16 +167,22 @@ function distanceExpression(
   }
 }
 
+function tableName(
+  graphId: string,
+  nodeKind: string,
+  fieldPath: string,
+): string {
+  return vectorPhysicalName(TABLE_PREFIX, graphId, nodeKind, fieldPath);
+}
+
 export const sqliteVecStrategy: VectorStrategy = {
   name: "sqlite-vec",
   capabilities: SQLITE_VEC_CAPABILITIES,
 
-  tableName(graphId, nodeKind, fieldPath) {
-    return vectorPhysicalName(TABLE_PREFIX, graphId, nodeKind, fieldPath);
-  },
+  tableName,
 
   ownedTables(slot): readonly StrategyTableContribution[] {
-    const table = this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
+    const table = tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
     const name = quoteIdentifier(table);
     const metric = sqliteVecMetricToken(slot.metric);
 
@@ -203,9 +210,13 @@ export const sqliteVecStrategy: VectorStrategy = {
     ];
   },
 
-  buildUpsert(slot, params: UpsertEmbeddingParams, timestamp): readonly SQL[] {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  buildUpsert(
+    slot,
+    params: UpsertEmbeddingParams,
+    timestamp,
+  ): readonly SqlFragment[] {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     const value = vecF32Literal(params.embedding, "embedding");
     // vec0 rejects ON CONFLICT / INSERT OR REPLACE on its primary key —
@@ -227,9 +238,9 @@ export const sqliteVecStrategy: VectorStrategy = {
     slot,
     params: UpsertEmbeddingBatchParams,
     timestamp,
-  ): readonly SQL[] {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  ): readonly SqlFragment[] {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     // Same DELETE + INSERT upsert emulation as buildUpsert, in multi-row
     // form: one IN-list delete, one multi-row insert.
@@ -256,9 +267,9 @@ export const sqliteVecStrategy: VectorStrategy = {
     ];
   },
 
-  buildDelete(slot, params: DeleteEmbeddingParams): readonly SQL[] {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  buildDelete(slot, params: DeleteEmbeddingParams): readonly SqlFragment[] {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     return [
       sql`
@@ -274,9 +285,13 @@ export const sqliteVecStrategy: VectorStrategy = {
   // route the NON-approximate `.similarTo()` branch through this form.
   searchIsExact: true,
 
-  buildSearch(slot, params: VectorSearchParams, candidates?: SQL): SQL {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  buildSearch(
+    slot,
+    params: VectorSearchParams,
+    candidates?: SqlFragment,
+  ): SqlFragment {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     const embeddingColumn = sql`${table}."embedding"`;
     const distance = distanceExpression(
@@ -296,7 +311,7 @@ export const sqliteVecStrategy: VectorStrategy = {
       // `k` covers the requested page: vec0 has no OFFSET inside a MATCH
       // query, so fetch `limit + offset` neighbors and page in a wrapper.
       const knnK = params.limit + (params.offset ?? 0);
-      const conditions: SQL[] = [
+      const conditions: SqlFragment[] = [
         sql`${table}."embedding" MATCH ${query}`,
         sql`k = ${knnK}`,
         sql`${table}."graph_id" = ${params.graphId}`,
@@ -332,7 +347,9 @@ export const sqliteVecStrategy: VectorStrategy = {
     }
 
     // Brute-force scan: no MATCH, so LIMIT is allowed (and required).
-    const conditions: SQL[] = [sql`${table}."graph_id" = ${params.graphId}`];
+    const conditions: SqlFragment[] = [
+      sql`${table}."graph_id" = ${params.graphId}`,
+    ];
     if (candidates !== undefined) {
       conditions.push(sql`${table}."node_id" IN (${candidates})`);
     }
@@ -357,17 +374,17 @@ export const sqliteVecStrategy: VectorStrategy = {
 
   // vec0 indexes inline (the virtual table is the index), so there is no
   // standalone ANN index to create or drop — both return undefined.
-  buildCreateIndex(): SQL | undefined {
+  buildCreateIndex(): SqlFragment | undefined {
     return undefined;
   },
 
-  buildDropIndex(): SQL | undefined {
+  buildDropIndex(): SqlFragment | undefined {
     return undefined;
   },
 
   buildDropStorage(slot): readonly string[] {
     const table = quoteIdentifier(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     // Dropping the vec0 virtual table removes its backing shadow tables too.
     return [`DROP TABLE IF EXISTS ${table}`];

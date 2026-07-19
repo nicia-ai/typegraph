@@ -23,6 +23,7 @@ import { ConfigurationError } from "../src/errors";
 import { defineNodeIndex } from "../src/indexes";
 import { computeIndexSignature } from "../src/store/materialize-indexes";
 import { createStore, createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -149,16 +150,16 @@ describe("Store.materializeIndexes — status table", () => {
       .select()
       .from(defaultSqliteTables.indexMaterializations)
       .where(eq(defaultSqliteTables.indexMaterializations.kind, "Person"));
-    const firstMaterializedAt = firstRow!.materializedAt;
+    const firstMaterializedAt = requireDefined(firstRow).materializedAt;
     expect(firstMaterializedAt).not.toBeNull();
 
-    await backend.recordIndexMaterialization!({
-      indexName: firstRow!.indexName,
+    await requireDefined(backend.recordIndexMaterialization)({
+      indexName: requireDefined(firstRow).indexName,
       graphId: graph.id,
       entity: "node",
       kind: "Person",
-      signature: firstRow!.signature,
-      schemaVersion: firstRow!.schemaVersion,
+      signature: requireDefined(firstRow).signature,
+      schemaVersion: requireDefined(firstRow).schemaVersion,
       attemptedAt: new Date().toISOString(),
       materializedAt: undefined,
       error: "simulated failure",
@@ -170,12 +171,12 @@ describe("Store.materializeIndexes — status table", () => {
       .where(
         eq(
           defaultSqliteTables.indexMaterializations.indexName,
-          firstRow!.indexName,
+          requireDefined(firstRow).indexName,
         ),
       );
 
-    expect(after!.materializedAt).toBe(firstMaterializedAt);
-    expect(after!.lastError).toBe("simulated failure");
+    expect(requireDefined(after).materializedAt).toBe(firstMaterializedAt);
+    expect(requireDefined(after).lastError).toBe("simulated failure");
     await backend.close();
   });
 });
@@ -190,8 +191,8 @@ describe("Store.materializeIndexes — signature drift", () => {
     // signature for one of the declared indexes. The next call should
     // see signature drift and surface a failed result without
     // attempting the DDL.
-    const declared = graph.indexes![0]!;
-    await backend.recordIndexMaterialization!({
+    const declared = requireDefined(requireDefined(graph.indexes)[0]);
+    await requireDefined(backend.recordIndexMaterialization)({
       indexName: declared.name,
       graphId: "some_other_graph",
       entity: declared.entity,
@@ -218,8 +219,8 @@ describe("Store.materializeIndexes — signature drift", () => {
     const [store] = await createStoreWithSchema(graph, backend);
 
     // Drift on the first declared index.
-    const declared = graph.indexes![0]!;
-    await backend.recordIndexMaterialization!({
+    const declared = requireDefined(requireDefined(graph.indexes)[0]);
+    await requireDefined(backend.recordIndexMaterialization)({
       indexName: declared.name,
       graphId: "other",
       entity: declared.entity,
@@ -233,7 +234,7 @@ describe("Store.materializeIndexes — signature drift", () => {
 
     const result = await store.materializeIndexes({ stopOnError: true });
     expect(result.results).toHaveLength(1);
-    expect(result.results[0]!.status).toBe("failed");
+    expect(requireDefined(result.results[0]).status).toBe("failed");
   });
 
   it("computeIndexSignature is unaffected by a present-but-empty keySystemColumns", async () => {

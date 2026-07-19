@@ -1,15 +1,25 @@
 import { type SQL, sql } from "drizzle-orm";
 
-import type { InsertSchemaParams,SqlDialect } from "../../types";
+import type { InsertSchemaParams, SqlDialect } from "../../types";
 import { quotedColumn, type Tables } from "./shared";
 
 type SchemaDialectStrategy = Readonly<{
   booleanLiteral: (value: boolean) => SQL;
 }>;
 
-function createSchemaDialectStrategy(dialect: SqlDialect): SchemaDialectStrategy {
-  const trueLiteral = dialect === "sqlite" ? sql.raw("1") : sql.raw("TRUE");
-  const falseLiteral = dialect === "sqlite" ? sql.raw("0") : sql.raw("FALSE");
+function createSchemaDialectStrategy(
+  dialect: SqlDialect,
+): SchemaDialectStrategy {
+  const literals = {
+    postgres: { false: "FALSE", true: "TRUE" },
+    sqlite: { false: "0", true: "1" },
+  } as const satisfies Record<
+    SqlDialect,
+    Readonly<{ false: string; true: string }>
+  >;
+  const dialectLiterals = literals[dialect];
+  const trueLiteral = sql.raw(dialectLiterals.true);
+  const falseLiteral = sql.raw(dialectLiterals.false);
 
   return {
     booleanLiteral(value: boolean): SQL {
@@ -38,7 +48,9 @@ export function buildInsertSchema(
   const schemaDocumentJson = JSON.stringify(params.schemaDoc);
   const isActiveValue = strategy.booleanLiteral(params.isActive);
 
-  const columns = sql.raw(`"${schemaVersions.graphId.name}", "${schemaVersions.version.name}", "${schemaVersions.schemaHash.name}", "${schemaVersions.schemaDoc.name}", "${schemaVersions.createdAt.name}", "${schemaVersions.isActive.name}"`);
+  const columns = sql.raw(
+    `"${schemaVersions.graphId.name}", "${schemaVersions.version.name}", "${schemaVersions.schemaHash.name}", "${schemaVersions.schemaDoc.name}", "${schemaVersions.createdAt.name}", "${schemaVersions.isActive.name}"`,
+  );
 
   return sql`
     INSERT INTO ${schemaVersions} (${columns})

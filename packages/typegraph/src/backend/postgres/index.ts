@@ -23,7 +23,7 @@
  * ```typescript
  * import { drizzle } from "drizzle-orm/node-postgres";
  * import { Pool } from "pg";
- * import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
+ * import { createPostgresBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
  *
  * const pool = new Pool({ connectionString: process.env.DATABASE_URL });
  * const db = drizzle(pool);
@@ -34,7 +34,7 @@
  * ```typescript
  * import { drizzle } from "drizzle-orm/postgres-js";
  * import postgres from "postgres";
- * import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+ * import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
  *
  * const sql = postgres(process.env.DATABASE_URL);
  * const backend = createPostgresBackend(drizzle(sql));
@@ -44,7 +44,7 @@
  * ```typescript
  * import { Pool } from "@neondatabase/serverless";
  * import { drizzle } from "drizzle-orm/neon-serverless";
- * import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+ * import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
  *
  * const pool = new Pool({ connectionString: env.NEON_DATABASE_URL });
  * const backend = createPostgresBackend(drizzle(pool));
@@ -52,6 +52,7 @@
  */
 
 // Drizzle PostgreSQL backend
+export type { AnyPgDatabase, AnyPgTransaction } from "../drizzle/execution";
 export {
   createPostgresBackend,
   createPostgresTables,

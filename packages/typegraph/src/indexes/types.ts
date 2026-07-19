@@ -273,7 +273,7 @@ export type IndexOrigin = "compile-time" | "runtime";
  * `defineEdgeIndex`) or be reconstructed from a graph extension on
  * restart.
  */
-type IndexDeclarationBase = Readonly<{
+export type IndexDeclarationBase = Readonly<{
   /** Unique index name (used in DDL and as the diffing identity key). */
   name: string;
   /**

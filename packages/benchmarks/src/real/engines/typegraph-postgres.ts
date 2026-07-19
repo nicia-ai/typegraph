@@ -13,7 +13,7 @@ import {
   createPostgresBackend,
   createPostgresTables,
   generatePostgresMigrationSQL,
-} from "@nicia-ai/typegraph/postgres";
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 import { startPostgresContainer } from "../harness/postgres-container";
 import { assertMessageIndexMaterialized, snbGraph } from "../schema/snb-graph";

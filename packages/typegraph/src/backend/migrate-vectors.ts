@@ -39,8 +39,6 @@
  * to the same per-field tables, because every write is an upsert keyed by
  * `(graph_id, node_id)` in the strategy's owned storage.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import {
   DEFAULT_EMBEDDING_INDEX_TYPE,
   DEFAULT_EMBEDDING_METRIC,
@@ -48,9 +46,10 @@ import {
   type EmbeddingMetric,
 } from "../core/embedding";
 import { EmbeddingDimensionChangedError } from "../errors";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
-import { quotedTableName } from "./drizzle/operations/shared";
 import { LEGACY_EMBEDDINGS_TABLE_NAME } from "./drizzle/schema/sqlite";
 import { type GraphBackend } from "./types";
 
@@ -346,7 +345,7 @@ export async function migrateLegacyEmbeddings(
     }
 
     if (batch.length < batchSize) break;
-    const last = batch.at(-1)!;
+    const last = requireDefined(batch.at(-1));
     cursor = {
       graphId: last.graph_id,
       nodeKind: last.node_kind,
@@ -392,10 +391,10 @@ async function readLegacyBatch(
   backend: GraphBackend,
   params: ReadLegacyBatchParams,
 ): Promise<readonly LegacyEmbeddingRow[]> {
-  const table = quotedTableName(params.legacyTableName);
+  const table = sql.identifier(params.legacyTableName);
   const embeddingJson = legacyEmbeddingDecodeExpression(backend);
 
-  const conditions: SQL[] = [];
+  const conditions: SqlFragment[] = [];
   if (params.graphId !== undefined) {
     conditions.push(sql`"graph_id" = ${params.graphId}`);
   }
@@ -429,7 +428,7 @@ async function readLegacyBatch(
  * supports row-value comparison, but Postgres + SQLite both accept this
  * portable form).
  */
-function keysetAfterCondition(after: LegacyRowCursor): SQL {
+function keysetAfterCondition(after: LegacyRowCursor): SqlFragment {
   return sql`
     (
         "graph_id" > ${after.graphId}
@@ -452,7 +451,7 @@ function keysetAfterCondition(after: LegacyRowCursor): SQL {
  * specific, and there is no longer a strategy abstraction over the *legacy*
  * table to delegate to.
  */
-function legacyEmbeddingDecodeExpression(backend: GraphBackend): SQL {
+function legacyEmbeddingDecodeExpression(backend: GraphBackend): SqlFragment {
   switch (backend.dialect) {
     case "sqlite": {
       // Legacy SQLite embeddings were written via `vec_f32('[…]')`

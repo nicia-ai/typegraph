@@ -13,7 +13,6 @@
  * the committed base lives in a separate TARGET — the evolved-base shape the
  * synthetic scope models. Runs on BOTH backends (new-vs-base semantics parity).
  */
-
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -29,6 +28,7 @@ import { mergeAgainstBase } from "../../src/graph-merge/merge";
 import { isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -217,7 +217,9 @@ describe.each(backendMatrix())(
       const result = await mergeAgainstBase<CareGraph>(forkBase, [provider], {
         ...mergeOptions(target),
         canonical: (cluster) =>
-          [...cluster.members].sort((l, r) => (l < r ? 1 : -1))[0]!,
+          requireDefined(
+            [...cluster.members].sort((l, r) => (l < r ? 1 : -1))[0],
+          ),
       });
       expect(isOk(result)).toBe(true);
       if (!isOk(result)) {

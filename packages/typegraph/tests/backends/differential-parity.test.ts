@@ -29,7 +29,13 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { avg, count, createStoreWithSchema, field, sum } from "../../src";
+import {
+  avg,
+  count,
+  createAdapterStoreWithSchema,
+  field,
+  sum,
+} from "../../src";
 import { createSqliteBackend } from "../../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
 import { type IntegrationStore, integrationTestGraph } from "./integration";
@@ -426,13 +432,13 @@ describe("Differential backend parity (SQLite vs PGlite)", () => {
 
   beforeAll(async () => {
     const { db } = createLocalSqliteBackend();
-    [sqliteStore] = await createStoreWithSchema(
+    [sqliteStore] = await createAdapterStoreWithSchema(
       integrationTestGraph,
       createSqliteBackend(db),
     );
 
     engine = await setupSharedPgliteEngine();
-    [pgStore] = await createStoreWithSchema(
+    [pgStore] = await createAdapterStoreWithSchema(
       integrationTestGraph,
       engine.makeBackend(),
     );

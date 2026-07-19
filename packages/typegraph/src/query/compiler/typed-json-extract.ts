@@ -1,20 +1,21 @@
-import { type SQL } from "drizzle-orm";
-
 import { type SelectiveField } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
+import { type SqlFragment } from "../sql-fragment";
 
 type JsonExtractFallback = "json" | "text";
 
 type TypedJsonExtractInput = Readonly<{
-  column: SQL;
+  column: SqlFragment;
   dialect: DialectAdapter;
   fallback?: JsonExtractFallback;
   pointer: JsonPointer;
   valueType: string | undefined;
 }>;
 
-export function compileTypedJsonExtract(input: TypedJsonExtractInput): SQL {
+export function compileTypedJsonExtract(
+  input: TypedJsonExtractInput,
+): SqlFragment {
   const { column, dialect, pointer, valueType } = input;
   const fallback = input.fallback ?? "json";
 
@@ -60,9 +61,9 @@ export function compileTypedJsonExtract(input: TypedJsonExtractInput): SQL {
  */
 export function compileSelectivePropsExtraction(
   field: SelectiveField,
-  column: SQL,
+  column: SqlFragment,
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   return compileTypedJsonExtract({
     column,
     dialect,

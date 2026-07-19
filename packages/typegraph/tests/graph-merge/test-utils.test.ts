@@ -25,6 +25,7 @@ import type {
 import {
   backendMatrix,
   createSqliteMergeBackend,
+  getStoreBackend,
   setupSharedPgliteMergeEngine,
 } from "./test-utils";
 
@@ -181,7 +182,7 @@ describe.each(backendMatrix())(
 
       expect(validation).toBeDefined();
       expect(store.graphId).toBe("merge-test-utils");
-      expect(store.backend).toBe(fixture.backend);
+      expect(getStoreBackend(store)).toBe(fixture.backend);
 
       const name = `Person-${generateId()}`;
       const created = await store.nodes.Person.create({ name });

@@ -3,10 +3,9 @@
  *
  * Functions and constants shared between the standard and recursive compilers.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import { type AggregateExpr, type FieldRef, type SelectiveField } from "../ast";
 import { parseJsonPointer } from "../json-pointer";
+import { sql, type SqlFragment } from "../sql-fragment";
 import { getFieldPointer } from "./predicates";
 
 // ============================================================
@@ -45,8 +44,8 @@ export const EMPTY_REQUIRED_COLUMNS = new Set<string>();
 // SQL Helpers
 // ============================================================
 
-export function quoteIdentifier(identifier: string): SQL {
-  return sql.raw(`"${identifier.replaceAll('"', '""')}"`);
+export function quoteIdentifier(identifier: string): SqlFragment {
+  return sql.identifier(identifier);
 }
 
 // ============================================================

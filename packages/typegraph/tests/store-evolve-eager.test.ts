@@ -21,8 +21,12 @@ import { EagerMaterializationError } from "../src/errors";
 import { defineGraphExtension } from "../src/graph-extension";
 import { defineNodeIndex } from "../src/indexes";
 import type { Store } from "../src/store/store";
-import { createStoreWithSchema } from "../src/store/store";
+import {
+  createAdapterStoreWithSchema,
+  createStoreWithSchema,
+} from "../src/store/store";
 import { type StoreRef } from "../src/store/types";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -56,7 +60,7 @@ async function forceSignatureDrift(
   declared: { name: string; entity: "node" | "edge" | "vector"; kind: string },
   overrides: { signature?: string; graphId?: string } = {},
 ) {
-  await backend.recordIndexMaterialization!({
+  await requireDefined(backend.recordIndexMaterialization)({
     indexName: declared.name,
     graphId: overrides.graphId ?? "some_other_graph",
     entity: declared.entity,
@@ -195,7 +199,7 @@ describe("Store.evolve — eager materialization", () => {
     const backend = createTestBackend();
     const graph = buildGraphWithIndexes();
     const [store] = await createStoreWithSchema(graph, backend);
-    const declared = graph.indexes![0]!;
+    const declared = requireDefined(requireDefined(graph.indexes)[0]);
     await forceSignatureDrift(backend, declared);
 
     const ref: StoreRef<Store<typeof graph>> = { current: store };
@@ -213,7 +217,9 @@ describe("Store.evolve — eager materialization", () => {
     const error = caught as EagerMaterializationError;
     expect(error.failedIndexNames).toEqual([declared.name]);
     expect(error.materialization.results).toHaveLength(1);
-    expect(error.materialization.results[0]!.status).toBe("failed");
+    expect(requireDefined(error.materialization.results[0]).status).toBe(
+      "failed",
+    );
 
     // ref was updated to the new Store BEFORE the throw — the recovery
     // path is to read ref.current and decide what to do with the failures.
@@ -221,11 +227,38 @@ describe("Store.evolve — eager materialization", () => {
     expect(ref.current.registry.hasNodeType("Tag")).toBe(true);
   });
 
+  it("preserves AdapterStore capabilities on eager failure recovery", async () => {
+    const backend = createTestBackend();
+    const graph = buildGraphWithIndexes();
+    const [store] = await createAdapterStoreWithSchema(graph, backend);
+    const declared = requireDefined(requireDefined(graph.indexes)[0]);
+    await forceSignatureDrift(backend, declared);
+    const ref: StoreRef<typeof store> = { current: store };
+
+    const caught = await store
+      .evolve(
+        defineGraphExtension({
+          nodes: { Tag: { properties: { label: { type: "string" } } } },
+        }),
+        { ref, eager: {} },
+      )
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(EagerMaterializationError);
+    expect(ref.current).not.toBe(store);
+    expect(ref.current.registry.hasNodeType("Tag")).toBe(true);
+    expect(ref.current.withTransaction).toBeTypeOf("function");
+    expect(ref.current.backend).toBeDefined();
+  });
+
   it("schema commit is not rolled back when eager materialization fails", async () => {
     const backend = createTestBackend();
     const graph = buildGraphWithIndexes();
     const [store] = await createStoreWithSchema(graph, backend);
-    await forceSignatureDrift(backend, graph.indexes![0]!);
+    await forceSignatureDrift(
+      backend,
+      requireDefined(requireDefined(graph.indexes)[0]),
+    );
 
     await store
       .evolve(
@@ -248,7 +281,10 @@ describe("Store.evolve — eager materialization", () => {
     const backend = createTestBackend();
     const graph = buildGraphWithIndexes();
     const [store] = await createStoreWithSchema(graph, backend);
-    await forceSignatureDrift(backend, graph.indexes![0]!);
+    await forceSignatureDrift(
+      backend,
+      requireDefined(requireDefined(graph.indexes)[0]),
+    );
 
     const caught = await store
       .evolve(

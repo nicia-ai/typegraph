@@ -34,7 +34,7 @@ import { type GraphBackend } from "../../../src/backend/types";
 import { embedding } from "../../../src/core/embedding";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 const EMBEDDING_DIMENSIONS = 3;
@@ -69,7 +69,7 @@ let observedCollation: string | undefined;
 let collationIsC = false;
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   try {
     pool = new Pool({ connectionString: TEST_DATABASE_URL });
     await pool.query("SELECT 1");
@@ -109,7 +109,7 @@ async function seedTiedCorpus(backend: GraphBackend) {
   return store;
 }
 
-describe.runIf(process.env.POSTGRES_URL)(
+describe.runIf(process.env["POSTGRES_URL"])(
   'PostgreSQL hybrid node_id tiebreak (COLLATE "C")',
   () => {
     beforeEach(async () => {

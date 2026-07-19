@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 
 import { compareCodePoints, compareStrings } from "../src/utils/compare";
+import { requireDefined } from "../src/utils/presence";
 
 /** UTF-8 byte order — what SQLite BINARY / Postgres `C` actually compare. */
 function compareUtf8Bytes(left: string, right: string): number {
@@ -18,8 +19,8 @@ function compareUtf8Bytes(left: string, right: string): number {
   const rightBytes = encoder.encode(right);
   const shared = Math.min(leftBytes.length, rightBytes.length);
   for (let index = 0; index < shared; index += 1) {
-    const leftByte = leftBytes[index]!;
-    const rightByte = rightBytes[index]!;
+    const leftByte = requireDefined(leftBytes[index]);
+    const rightByte = requireDefined(rightBytes[index]);
     if (leftByte !== rightByte) return leftByte < rightByte ? -1 : 1;
   }
   if (leftBytes.length === rightBytes.length) return 0;
@@ -103,7 +104,10 @@ describe("compareCodePoints", () => {
     const sorted = [...corpus].toSorted((a, b) => compareCodePoints(a, b));
     for (let index = 1; index < sorted.length; index += 1) {
       expect(
-        compareCodePoints(sorted[index - 1]!, sorted[index]!),
+        compareCodePoints(
+          requireDefined(sorted[index - 1]),
+          requireDefined(sorted[index]),
+        ),
       ).toBeLessThan(1);
     }
   });

@@ -20,7 +20,12 @@ import {
   enumerateAllEdges,
   enumerateAllNodes,
 } from "../../src/graph-merge/state-diff";
-import { backendMatrix } from "./test-utils";
+import { requireDefined } from "../../src/utils/presence";
+import {
+  backendMatrix,
+  getBackendProperty,
+  getStoreBackend,
+} from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -118,24 +123,28 @@ describe.each(backendMatrix())("state-diff [$name]", (entry) => {
 
     // Node A modified.
     expect(diff.nodes.modified).toHaveLength(1);
-    expect(diff.nodes.modified[0]!.id).toBe(nodeA.id);
-    expect(diff.nodes.modified[0]!.forkProps).toMatchObject({
+    expect(requireDefined(diff.nodes.modified[0]).id).toBe(nodeA.id);
+    expect(requireDefined(diff.nodes.modified[0]).forkProps).toMatchObject({
       name: "Alice Updated",
     });
-    expect(diff.nodes.modified[0]!.baseProps).toMatchObject({ name: "Alice" });
+    expect(requireDefined(diff.nodes.modified[0]).baseProps).toMatchObject({
+      name: "Alice",
+    });
 
     // Node B deleted.
     expect(diff.nodes.deleted.map((entry) => entry.id)).toEqual([nodeB.id]);
 
     // Node C new.
     expect(diff.nodes.new).toHaveLength(1);
-    expect(diff.nodes.new[0]!.id).toBe(nodeC.id);
-    expect(diff.nodes.new[0]!.props).toMatchObject({ name: "Carol" });
+    expect(requireDefined(diff.nodes.new[0]).id).toBe(nodeC.id);
+    expect(requireDefined(diff.nodes.new[0]).props).toMatchObject({
+      name: "Carol",
+    });
 
     // Edge A -> C new.
     expect(diff.edges.new.map((entry) => entry.id)).toEqual([edgeAC.id]);
-    expect(diff.edges.new[0]!.fromId).toBe(nodeA.id);
-    expect(diff.edges.new[0]!.toId).toBe(nodeC.id);
+    expect(requireDefined(diff.edges.new[0]).fromId).toBe(nodeA.id);
+    expect(requireDefined(diff.edges.new[0]).toId).toBe(nodeC.id);
 
     // Edge A -> B deleted.
     expect(diff.edges.deleted.map((entry) => entry.id)).toEqual([edgeAB.id]);
@@ -151,7 +160,7 @@ describe.each(backendMatrix())("state-diff [$name]", (entry) => {
     await store.nodes.Person.delete(gone.id);
 
     const rows = await enumerateAllNodes(
-      store.backend,
+      getStoreBackend(store),
       store.graphId,
       "Person",
     );
@@ -197,7 +206,11 @@ describe.each(backendMatrix())("state-diff [$name]", (entry) => {
       },
     ]);
 
-    const rows = await enumerateAllEdges(store.backend, store.graphId, "knows");
+    const rows = await enumerateAllEdges(
+      getStoreBackend(store),
+      store.graphId,
+      "knows",
+    );
     expect(rows.map((row) => row.id)).toEqual(["e-aaa", "e-bbb", "e-ccc"]);
   });
 
@@ -233,9 +246,13 @@ describe.each(backendMatrix())("state-diff [$name]", (entry) => {
 
     const diff = await diffAgainstBase(baseStore, forkStore);
     expect(diff.edges.modified).toHaveLength(1);
-    expect(diff.edges.modified[0]!.id).toBe(edge.id);
-    expect(diff.edges.modified[0]!.forkProps).toMatchObject({ since: "2025" });
-    expect(diff.edges.modified[0]!.baseProps).toMatchObject({ since: "2020" });
+    expect(requireDefined(diff.edges.modified[0]).id).toBe(edge.id);
+    expect(requireDefined(diff.edges.modified[0]).forkProps).toMatchObject({
+      since: "2025",
+    });
+    expect(requireDefined(diff.edges.modified[0]).baseProps).toMatchObject({
+      since: "2020",
+    });
     expect(diff.edges.new).toHaveLength(0);
     expect(diff.edges.deleted).toHaveLength(0);
   });
@@ -293,9 +310,9 @@ describe.each(backendMatrix())("computeBaseVersion [$name]", (entry) => {
     const rawBackend = await makeBackend();
     let entityEnumerationCalls = 0;
     const backend = new Proxy(rawBackend, {
-      get(target, property, receiver) {
+      get(target, property, _receiver) {
         if (property === "findNodesByKind") {
-          const findNodesByKind = target.findNodesByKind.bind(target);
+          const findNodesByKind = target.findNodesByKind;
           return async (
             ...args: Parameters<GraphBackend["findNodesByKind"]>
           ) => {
@@ -304,7 +321,7 @@ describe.each(backendMatrix())("computeBaseVersion [$name]", (entry) => {
           };
         }
         if (property === "findEdgesByKind") {
-          const findEdgesByKind = target.findEdgesByKind.bind(target);
+          const findEdgesByKind = target.findEdgesByKind;
           return async (
             ...args: Parameters<GraphBackend["findEdgesByKind"]>
           ) => {
@@ -312,8 +329,7 @@ describe.each(backendMatrix())("computeBaseVersion [$name]", (entry) => {
             return findEdgesByKind(...args);
           };
         }
-        const value = Reflect.get(target, property, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
+        return getBackendProperty(target, property);
       },
     });
     const [store] = await createStoreWithSchema(graph, backend, {
@@ -376,7 +392,9 @@ describe.each(backendMatrix())("computeBaseVersion [$name]", (entry) => {
       const afterClear = revisionAnchorOf(await computeBaseVersion(store));
 
       expect(afterClear).toBeDefined();
-      expect(Date.parse(afterClear!)).toBeGreaterThan(Date.parse(beforeClear!));
+      expect(Date.parse(requireDefined(afterClear))).toBeGreaterThan(
+        Date.parse(requireDefined(beforeClear)),
+      );
     } finally {
       vi.useRealTimers();
     }

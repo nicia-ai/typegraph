@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * Canonical survivor selection + commutative property union (design §6.4 rule 3
  * & rule 4 / §7.3, T8).
@@ -18,7 +19,6 @@
  * The result is a pure function of the (unordered) member set + the captured
  * branch order, so shuffling members or branches yields an identical resolution.
  */
-
 import type { ClusterResult } from "./clustering";
 import type { ProvenanceWeights, ResolutionContext } from "./conflict-policy";
 import {
@@ -113,9 +113,9 @@ export function pickCanonical(
   if (override !== undefined) {
     return override(cluster);
   }
-  return [...cluster.members].sort((left, right) =>
-    compareStrings(left, right),
-  )[0]!;
+  return requireDefined(
+    [...cluster.members].sort((left, right) => compareStrings(left, right))[0],
+  );
 }
 
 /**
@@ -150,7 +150,7 @@ function pickClusterSurvivor(
     .filter((member) => member.origin === "base")
     .sort(byKey);
   if (baseMembers.length > 0) {
-    return baseMembers[0]!;
+    return requireDefined(baseMembers[0]);
   }
 
   // The survivor's bare id: the override's pick (mapped over the bare-id view of the
@@ -167,7 +167,9 @@ function pickClusterSurvivor(
       compareMergeKeys(left, right),
     )[0];
     canonicalId =
-      minIdentity === undefined ? members[0]!.id : idOf(minIdentity);
+      minIdentity === undefined ?
+        requireDefined(members[0]).id
+      : idOf(minIdentity);
   }
 
   // Among the members AT that id, choose the KIND. An ontology-retype cluster carries
@@ -177,7 +179,7 @@ function pickClusterSurvivor(
   // member is taken.
   const membersAtId = members.filter((member) => member.id === canonicalId);
   if (membersAtId.length === 0) {
-    return [...members].sort(byKey)[0]!;
+    return requireDefined([...members].sort(byKey)[0]);
   }
   const kinds = [...new Set(membersAtId.map((member) => member.kind))];
   const chosenKind =
@@ -187,7 +189,7 @@ function pickClusterSurvivor(
   return (
     (chosenKind === undefined ? undefined : (
       membersAtId.find((member) => member.kind === chosenKind)
-    )) ?? [...membersAtId].sort(byKey)[0]!
+    )) ?? requireDefined([...membersAtId].sort(byKey)[0])
   );
 }
 
@@ -236,7 +238,9 @@ function pickCanonicalPropertyValue(
   }
 
   const canonicalValue = memberPropertyValue(canonicalMember, property);
-  return canonicalValue === undefined ? values[0]!.value : canonicalValue;
+  return canonicalValue === undefined ?
+      requireDefined(values[0]).value
+    : canonicalValue;
 }
 
 /**

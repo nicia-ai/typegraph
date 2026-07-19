@@ -39,6 +39,7 @@ import {
 // these unit tests can exercise it without forcing the barrel to
 // re-export it as part of the public API.
 import { compileGraphExtension } from "../src/graph-extension/compiler";
+import { requireDefined } from "../src/utils/presence";
 
 // ============================================================
 // Helpers
@@ -47,7 +48,7 @@ import { compileGraphExtension } from "../src/graph-extension/compiler";
 function compileSingleNode(document: GraphExtension): NodeType {
   const compiled = compileGraphExtension(document);
   expect(compiled.nodes).toHaveLength(1);
-  return compiled.nodes[0]!.type;
+  return requireDefined(compiled.nodes[0]).type;
 }
 
 // Returns the compiled-edge metadata shape directly (the helper used to
@@ -59,7 +60,7 @@ function compileSingleNode(document: GraphExtension): NodeType {
 function compileSingleEdge(document: GraphExtension) {
   const compiled = compileGraphExtension(document);
   expect(compiled.edges).toHaveLength(1);
-  return compiled.edges[0]!;
+  return requireDefined(compiled.edges[0]);
 }
 
 function endpointKind(endpoint: NodeType | string): string {
@@ -309,7 +310,7 @@ describe("string property parity", () => {
       handwritten.schema.shape.title,
     );
     const compiledMetadata = getSearchableMetadata(
-      compiled.schema.shape.title! as z.ZodType,
+      requireDefined(compiled.schema.shape["title"]) as z.ZodType,
     );
     expect(compiledMetadata).toEqual(handwrittenMetadata);
     expect(compiledMetadata).toEqual({ language: "english" });
@@ -331,7 +332,9 @@ describe("string property parity", () => {
       }),
     );
     expect(
-      getSearchableMetadata(optionalCompiled.schema.shape.title! as z.ZodType),
+      getSearchableMetadata(
+        requireDefined(optionalCompiled.schema.shape["title"]) as z.ZodType,
+      ),
     ).toEqual({
       language: "english",
     });
@@ -348,7 +351,9 @@ describe("string property parity", () => {
       }),
     );
     expect(
-      getSearchableMetadata(compiled.schema.shape.body! as z.ZodType),
+      getSearchableMetadata(
+        requireDefined(compiled.schema.shape["body"]) as z.ZodType,
+      ),
     ).toEqual({
       language: "english",
     });
@@ -524,7 +529,9 @@ describe("array and object property parity", () => {
         },
       }),
     );
-    const compiledVector = compiled.schema.shape.vector! as z.ZodType;
+    const compiledVector = requireDefined(
+      compiled.schema.shape["vector"],
+    ) as z.ZodType;
     expect(getEmbeddingDimensions(compiledVector)).toBe(384);
     expect(getEmbeddingDimensions(compiledVector)).toBe(
       getEmbeddingDimensions(handwritten.schema.shape.vector),
@@ -603,7 +610,7 @@ describe("edge compilation", () => {
       }),
     );
     expect(compiled.edges).toHaveLength(1);
-    const edge = compiled.edges[0]!;
+    const edge = requireDefined(compiled.edges[0]);
     expect(edge.from.map((endpoint) => endpointKind(endpoint))).toEqual([
       "Paper",
     ]);
@@ -625,7 +632,7 @@ describe("edge compilation", () => {
         },
       }),
     );
-    const edge = compiled.edges[0]!;
+    const edge = requireDefined(compiled.edges[0]);
     expect(edge.from.map((endpoint) => endpointKind(endpoint))).toEqual([
       "Paper",
     ]);
@@ -643,7 +650,7 @@ describe("edge compilation", () => {
       }),
     );
     expect(compiled.ontology).toHaveLength(1);
-    const relation = compiled.ontology[0]!;
+    const relation = requireDefined(compiled.ontology[0]);
     expect(relation.metaEdge.name).toBe("subClassOf");
     // Resolved to NodeType references because both names are declared.
     expect(typeof relation.from).toBe("object");
@@ -664,7 +671,7 @@ describe("edge compilation", () => {
       }),
     );
     expect(compiled.ontology).toHaveLength(1);
-    const relation = compiled.ontology[0]!;
+    const relation = requireDefined(compiled.ontology[0]);
     expect(typeof relation.to).toBe("string");
     expect(relation.to).toBe("https://schema.org/PodcastSeries");
   });
@@ -687,7 +694,9 @@ describe("unique constraint compilation", () => {
       }),
     );
     expect(compiled.nodes).toHaveLength(1);
-    const constraint: UniqueConstraint = compiled.nodes[0]!.unique[0]!;
+    const constraint: UniqueConstraint = requireDefined(
+      requireDefined(compiled.nodes[0]).unique[0],
+    );
     expect(constraint.name).toBe("paper_doi");
     expect(constraint.fields).toEqual(["doi"]);
     expect(constraint.scope).toBe("kind");
@@ -715,7 +724,9 @@ describe("unique constraint compilation", () => {
         },
       }),
     );
-    const constraint = compiled.nodes[0]!.unique[0]!;
+    const constraint = requireDefined(
+      requireDefined(compiled.nodes[0]).unique[0],
+    );
     expect(constraint.where).toBeDefined();
     // The callback shape mirrors what `serializeWherePredicate` consumes:
     // a per-field builder dict; calling builder.isNull() returns the
@@ -734,7 +745,7 @@ describe("unique constraint compilation", () => {
         }),
       },
     };
-    const result = constraint.where!(builder);
+    const result = requireDefined(constraint.where)(builder);
     expect(result).toEqual({
       __type: "unique_predicate",
       field: "archivedAt",
@@ -760,7 +771,9 @@ describe("unique constraint compilation", () => {
         },
       }),
     );
-    const constraint = compiled.nodes[0]!.unique[0]!;
+    const constraint = requireDefined(
+      requireDefined(compiled.nodes[0]).unique[0],
+    );
     expect(constraint.scope).toBe("kindWithSubClasses");
     expect(constraint.collation).toBe("caseInsensitive");
   });
@@ -1086,7 +1099,7 @@ describe("validation failures", () => {
         },
       }),
     );
-    const edge = compiled.edges[0]!;
+    const edge = requireDefined(compiled.edges[0]);
     expect(edge.from.map((endpoint) => endpointKind(endpoint))).toEqual(["A"]);
     expect(edge.to).toEqual(["NotDeclaredLocally"]);
   });
@@ -1370,9 +1383,15 @@ describe("document immutability", () => {
       },
     });
     expect(Object.isFrozen(document)).toBe(true);
-    expect(Object.isFrozen(document.nodes!)).toBe(true);
-    expect(Object.isFrozen(document.nodes!.N!)).toBe(true);
-    expect(Object.isFrozen(document.nodes!.N!.properties)).toBe(true);
+    expect(Object.isFrozen(requireDefined(document.nodes))).toBe(true);
+    expect(
+      Object.isFrozen(requireDefined(requireDefined(document.nodes)["N"])),
+    ).toBe(true);
+    expect(
+      Object.isFrozen(
+        requireDefined(requireDefined(document.nodes)["N"]).properties,
+      ),
+    ).toBe(true);
   });
 });
 

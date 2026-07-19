@@ -26,7 +26,6 @@
  *   - ontology type reconciliation (T10 — a shared id staged under Doctor and
  *     SpecialistDoctor collapses to the most-specific kind).
  */
-
 import type { GraphBackend, Node, Store } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -49,6 +48,7 @@ import type {
   SimilarityStrategy,
 } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
+import { requireDefined } from "../../../src/utils/presence";
 import {
   backendMatrix,
   setupSharedPgliteMergeEngine,
@@ -119,7 +119,7 @@ const FIXED_BRANCH_ORDER: readonly BranchId[] = [BRANCH_A, BRANCH_B];
  * deterministic, non-property tests pin the same order-independence paths on both
  * backends; a dev box runs the full set.
  */
-const DETERMINISM_RUNS = process.env.CI ? 12 : 30;
+const DETERMINISM_RUNS = process.env["CI"] ? 12 : 30;
 
 /** In-memory Dice trigram over the `name` field (no embeddings). */
 const nameSimilarity: SimilarityStrategy<CareGraph> = {
@@ -255,7 +255,7 @@ describe.each(backendMatrix())(
           },
         },
       ]);
-      const inheritedNodeId = inherited!.id;
+      const inheritedNodeId = requireDefined(inherited).id;
 
       const branchA = unwrap(
         await branch<CareGraph>(base, () => makeBackend(disposers), {

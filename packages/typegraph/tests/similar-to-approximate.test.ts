@@ -34,6 +34,7 @@ import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import { embedding } from "../src/core/embedding";
 import { createStoreWithSchema } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 
 const GRAPH_ID = "similar_to_ann";
 const EMBEDDING_DIMENSIONS = 3;
@@ -205,7 +206,7 @@ function cosineDistance(vector: readonly number[]): number {
   let normA = 0;
   let normB = 0;
   for (const [index, value] of vector.entries()) {
-    const q = QUERY_EMBEDDING[index]!;
+    const q = requireDefined(QUERY_EMBEDDING[index]);
     dot += value * q;
     normA += value * value;
     normB += q * q;
@@ -356,12 +357,12 @@ describe("similarTo approximate opt-in", () => {
   const libsql = libsqlDescriptor();
 
   const TEST_DATABASE_URL =
-    process.env.POSTGRES_URL ??
+    process.env["POSTGRES_URL"] ??
     "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
   let postgresPool: Pool | undefined;
 
   beforeAll(async () => {
-    if (!process.env.POSTGRES_URL) return;
+    if (!process.env["POSTGRES_URL"]) return;
     const pool = new Pool({
       connectionString: TEST_DATABASE_URL,
       connectionTimeoutMillis: 5000,
@@ -384,7 +385,7 @@ describe("similarTo approximate opt-in", () => {
   const postgresDescriptor: BackendDescriptor = {
     label: "postgres-pgvector",
     async create() {
-      const pool = postgresPool!;
+      const pool = requireDefined(postgresPool);
       await pool.query(`
         DROP TABLE IF EXISTS typegraph_index_materializations CASCADE;
         DROP TABLE IF EXISTS typegraph_node_embeddings CASCADE;

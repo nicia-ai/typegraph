@@ -10,9 +10,9 @@
  * `limit` and `offset` ride as bound parameters (never interpolated), so the
  * clause — string and bound values alike — is identical across engines.
  */
-import { type SQL, sql } from "drizzle-orm";
+import { sql, type SqlFragment } from "../../sql-fragment";
 
-export function vectorPageClause(limit: number, offset?: number): SQL {
+export function vectorPageClause(limit: number, offset?: number): SqlFragment {
   return offset === undefined || offset === 0 ?
       sql`LIMIT ${limit}`
     : sql`LIMIT ${limit} OFFSET ${offset}`;

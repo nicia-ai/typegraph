@@ -24,7 +24,7 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
-import * as rowMappers from "../src/backend/drizzle/row-mappers";
+import * as rowMappers from "../src/backend/row-mappers";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
 import {

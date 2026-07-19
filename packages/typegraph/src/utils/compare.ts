@@ -1,3 +1,4 @@
+import { requireDefined } from "./presence";
 /**
  * Deterministic UTF-16 code-unit string comparison.
  *
@@ -40,8 +41,8 @@ export function compareCodePoints(left: string, right: string): number {
   let leftIndex = 0;
   let rightIndex = 0;
   while (leftIndex < left.length && rightIndex < right.length) {
-    const leftPoint = left.codePointAt(leftIndex)!;
-    const rightPoint = right.codePointAt(rightIndex)!;
+    const leftPoint = requireDefined(left.codePointAt(leftIndex));
+    const rightPoint = requireDefined(right.codePointAt(rightIndex));
     if (leftPoint !== rightPoint) return leftPoint < rightPoint ? -1 : 1;
     leftIndex += leftPoint > 0xff_ff ? 2 : 1;
     rightIndex += rightPoint > 0xff_ff ? 2 : 1;

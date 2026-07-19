@@ -11,10 +11,10 @@
  * suites run on separate vitest workers (parallel files) rather than one serial
  * long-pole. One shared engine per file; data is reset between tests.
  */
-import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach } from "vitest";
 
-import { asCompiledRowsSql } from "../../../src";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 import {
   setupSharedPgliteEngine,

@@ -22,7 +22,7 @@ import {
   fts5Strategy,
   type FulltextStrategy,
   tsvectorStrategy,
-} from "../../query/dialect";
+} from "../../query/dialect/fulltext-strategy";
 import {
   BASE_CONTRIBUTION_OWNER,
   type StrategyTableContribution,

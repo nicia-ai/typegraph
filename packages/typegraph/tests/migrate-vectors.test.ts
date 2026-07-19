@@ -10,14 +10,18 @@
  * `backend.vectorSearch`. Idempotency, graph scoping, the metric resolver,
  * and the absent-table no-op are each covered.
  */
-import { sql } from "drizzle-orm";
-import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { migrateLegacyEmbeddings } from "../src/backend/migrate-vectors";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
+import {
+  renderSqlInline,
+  sql,
+  type SqlFragment,
+} from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
+import { requireDefined } from "../src/utils/presence";
 import { isMissingTableError } from "../src/utils/sql-errors";
 
 const LEGACY_TABLE = "typegraph_node_embeddings";
@@ -31,12 +35,19 @@ type LegacySeed = Readonly<{
   embedding: readonly number[];
 }>;
 
+function runSqlite(
+  db: ReturnType<typeof createLocalSqliteBackend>["db"],
+  fragment: SqlFragment,
+): void {
+  db.run(renderSqlInline(fragment, "sqlite"));
+}
+
 describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
   let backend: GraphBackend;
-  // The raw Drizzle handle seeds the legacy table directly — `db.run` is the
+  // The raw local handle seeds the legacy table directly — `db.run` is the
   // no-row write path for the sync better-sqlite3 driver (`backend.execute`
   // is read-only on this driver and throws on a no-row statement).
-  let db: BaseSQLiteDatabase<"sync", unknown>;
+  let db: ReturnType<typeof createLocalSqliteBackend>["db"];
 
   beforeEach(() => {
     const created = createLocalSqliteBackend();
@@ -59,35 +70,44 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
    * variable-dimension column.
    */
   function seedLegacy(rows: readonly LegacySeed[]): void {
-    db.run(sql`
-      CREATE TABLE IF NOT EXISTS ${sql.raw(`"${LEGACY_TABLE}"`)} (
-        "graph_id" TEXT NOT NULL,
-        "node_kind" TEXT NOT NULL,
-        "node_id" TEXT NOT NULL,
-        "field_path" TEXT NOT NULL,
-        "embedding" BLOB NOT NULL,
-        "dimensions" INTEGER NOT NULL,
-        "created_at" TEXT NOT NULL,
-        "updated_at" TEXT NOT NULL,
-        PRIMARY KEY ("graph_id", "node_kind", "node_id", "field_path")
-      );
-    `);
+    runSqlite(
+      db,
+      sql`
+        CREATE TABLE IF NOT EXISTS ${sql.raw(`"${LEGACY_TABLE}"`)} (
+          "graph_id" TEXT NOT NULL,
+          "node_kind" TEXT NOT NULL,
+          "node_id" TEXT NOT NULL,
+          "field_path" TEXT NOT NULL,
+          "embedding" BLOB NOT NULL,
+          "dimensions" INTEGER NOT NULL,
+          "created_at" TEXT NOT NULL,
+          "updated_at" TEXT NOT NULL,
+          PRIMARY KEY ("graph_id", "node_kind", "node_id", "field_path")
+        );
+      `,
+    );
     for (const row of rows) {
-      db.run(sql`
-        INSERT INTO ${sql.raw(`"${LEGACY_TABLE}"`)}
-          ("graph_id", "node_kind", "node_id", "field_path", "embedding", "dimensions", "created_at", "updated_at")
-        VALUES (
-          ${row.graphId}, ${row.nodeKind}, ${row.nodeId}, ${row.fieldPath},
-          vec_f32(${JSON.stringify(row.embedding)}), ${row.embedding.length}, ${TS}, ${TS}
-        )
-      `);
+      runSqlite(
+        db,
+        sql`
+          INSERT INTO ${sql.raw(`"${LEGACY_TABLE}"`)}
+            ("graph_id", "node_kind", "node_id", "field_path", "embedding", "dimensions", "created_at", "updated_at")
+          VALUES (
+            ${row.graphId}, ${row.nodeKind}, ${row.nodeId}, ${row.fieldPath},
+            vec_f32(${JSON.stringify(row.embedding)}), ${row.embedding.length}, ${TS}, ${TS}
+          )
+        `,
+      );
       // vectorSearch computes top-k over LIVE nodes only, so the migrated
       // embeddings need live node rows to rank through the search path.
-      db.run(sql`
-        INSERT OR IGNORE INTO "typegraph_nodes"
-          ("graph_id", "kind", "id", "props", "version", "created_at", "updated_at")
-        VALUES (${row.graphId}, ${row.nodeKind}, ${row.nodeId}, '{}', 1, ${TS}, ${TS})
-      `);
+      runSqlite(
+        db,
+        sql`
+          INSERT OR IGNORE INTO "typegraph_nodes"
+            ("graph_id", "kind", "id", "props", "version", "created_at", "updated_at")
+          VALUES (${row.graphId}, ${row.nodeKind}, ${row.nodeId}, '{}', 1, ${TS}, ${TS})
+        `,
+      );
     }
   }
 
@@ -97,7 +117,7 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
     fieldPath: string,
     graphId: string,
   ): Promise<number> {
-    const table = backend.vectorStrategy!.tableName(
+    const table = requireDefined(backend.vectorStrategy).tableName(
       graphId,
       nodeKind,
       fieldPath,
@@ -168,7 +188,7 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
     expect(await countPerField("Sentence", "vector", "g1")).toBe(1);
 
     // The migrated vectors rank correctly through the real search path.
-    const hits = await backend.vectorSearch!({
+    const hits = await requireDefined(backend.vectorSearch)({
       graphId: "g1",
       nodeKind: "Document",
       fieldPath: "embedding",
@@ -270,7 +290,7 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
     expect(seen).toEqual([["Image", "embedding"]]);
 
     // The l2-shaped vec0 table scores by raw distance.
-    const hits = await backend.vectorSearch!({
+    const hits = await requireDefined(backend.vectorSearch)({
       graphId: "g1",
       nodeKind: "Image",
       fieldPath: "embedding",

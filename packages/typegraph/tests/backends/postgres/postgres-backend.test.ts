@@ -30,7 +30,6 @@ import {
   createPostgresTables,
 } from "../../../src/backend/postgres";
 import type {
-  AdoptedTransaction,
   GraphBackend,
   TransactionBackend,
   TransactionOptions,
@@ -38,6 +37,7 @@ import type {
 import { rowPropsToObject } from "../../../src/backend/types";
 import type { CompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 
@@ -47,7 +47,7 @@ import { createIntegrationTestSuite } from "../integration-test-suite";
 
 // Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 // ============================================================
@@ -229,7 +229,7 @@ beforeAll(async () => {
   // stray Docker Postgres container running would trigger the
   // DROP+CREATE schema setup below during `pnpm test:unit` and race with
   // other postgres test files sharing the same database.
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   isPostgresAvailable = await initializePostgres();
   if (isPostgresAvailable) {
     await setupTestDatabase();
@@ -312,21 +312,21 @@ function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
     backend: {
       ...backend,
       transaction<T>(
-        fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+        fn: (tx: TransactionBackend) => Promise<T>,
         options?: TransactionOptions,
       ): Promise<T> {
-        return backend.transaction(async (tx, adoptedTransaction) => {
+        return backend.transaction(async (tx) => {
           const observedTransaction: TransactionBackend = {
             ...tx,
             async executeTemporaryStatement(
               query: CompiledTemporaryStatementSql,
             ): Promise<void> {
-              const statement = tx.compileSql!(query).sql;
+              const statement = requireDefined(tx.compileSql)(query).sql;
               if (statement.startsWith("ANALYZE ")) statements.push(statement);
-              await tx.executeTemporaryStatement!(query);
+              await requireDefined(tx.executeTemporaryStatement)(query);
             },
           };
-          return fn(observedTransaction, adoptedTransaction);
+          return fn(observedTransaction);
         }, options);
       },
     },
@@ -350,7 +350,7 @@ describe("PostgreSQL Adapter", () => {
   });
 
   // Run the shared test suite using the shared connection
-  describe.runIf(process.env.POSTGRES_URL)("Adapter Test Suite", () => {
+  describe.runIf(process.env["POSTGRES_URL"])("Adapter Test Suite", () => {
     beforeEach(async () => {
       await clearTestData();
     });
@@ -368,7 +368,7 @@ describe("PostgreSQL Adapter", () => {
   });
 
   // Run the shared integration test suite for PostgreSQL
-  describe.runIf(process.env.POSTGRES_URL)("Integration Test Suite", () => {
+  describe.runIf(process.env["POSTGRES_URL"])("Integration Test Suite", () => {
     beforeEach(async () => {
       await clearTestData();
     });
@@ -422,7 +422,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       const fetched = await store.nodes.Person.getById(person.id);
 
       expect(fetched).toBeDefined();
-      expect(fetched!.name).toBe("Alice");
+      expect(requireDefined(fetched).name).toBe("Alice");
     });
   });
 
@@ -510,7 +510,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       expect(parsed).toEqual(complexProps);
 
       const fetched = await backend.getNode("test_graph", "Person", "person-1");
-      const fetchedProps = rowPropsToObject(fetched!.props);
+      const fetchedProps = rowPropsToObject(requireDefined(fetched).props);
       expect(fetchedProps).toEqual(complexProps);
     });
   });
@@ -541,7 +541,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
     it("adds newly shipped indexes to an already-initialized database", async (ctx) => {
       const { db, pool } = requirePostgres(ctx);
       const backend = createPostgresBackend(db);
-      await backend.bootstrapTables!();
+      await requireDefined(backend.bootstrapTables)();
 
       // Simulate a database initialized before the bare-id indexes shipped.
       // Bootstrap never re-runs automatically on an initialized database
@@ -553,7 +553,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
         'DROP INDEX IF EXISTS "typegraph_recorded_nodes_id_idx"',
       );
 
-      await backend.bootstrapTables!();
+      await requireDefined(backend.bootstrapTables)();
 
       const adopted = await pool.query<{ indexname: string }>(
         `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename IN ('typegraph_nodes', 'typegraph_recorded_nodes')`,
@@ -900,7 +900,7 @@ describe("Store with PostgreSQL Backend", () => {
     await store.edges.knows.bulkCreate([
       ...firstLayer.map((node) => ({ from: root, to: node, props: {} })),
       ...secondLayer.map((node, index) => ({
-        from: firstLayer[index % firstLayer.length]!,
+        from: requireDefined(firstLayer[index % firstLayer.length]),
         to: node,
         props: {},
       })),
@@ -937,7 +937,7 @@ describe("Store with PostgreSQL Backend", () => {
 
     const fetched = await store.nodes.Person.getById(person.id);
     expect(fetched).toBeDefined();
-    expect(fetched!.name).toBe("Alice");
+    expect(requireDefined(fetched).name).toBe("Alice");
   });
 
   it("validates node props against schema", async (ctx) => {
@@ -1066,7 +1066,7 @@ describe("Store with PostgreSQL Backend", () => {
       temporalMode: "includeTombstones",
     });
     expect(fetchedWithTombstones).toBeDefined();
-    expect(fetchedWithTombstones!.meta.deletedAt).toBeDefined();
+    expect(requireDefined(fetchedWithTombstones).meta.deletedAt).toBeDefined();
   });
 });
 
@@ -1270,12 +1270,12 @@ describe("bulkGetOrCreateByConstraint with PostgreSQL", () => {
     );
 
     expect(results).toHaveLength(3);
-    expect(results[0]!.action).toBe("created");
-    expect(results[0]!.node.name).toBe("Alice");
-    expect(results[1]!.action).toBe("created");
-    expect(results[1]!.node.name).toBe("Bob");
-    expect(results[2]!.action).toBe("created");
-    expect(results[2]!.node.name).toBe("Acme");
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[0]).node.name).toBe("Alice");
+    expect(requireDefined(results[1]).action).toBe("created");
+    expect(requireDefined(results[1]).node.name).toBe("Bob");
+    expect(requireDefined(results[2]).action).toBe("created");
+    expect(requireDefined(results[2]).node.name).toBe("Acme");
   });
 
   it("handles mixed creates and finds with correct ordering", async (ctx) => {
@@ -1299,13 +1299,13 @@ describe("bulkGetOrCreateByConstraint with PostgreSQL", () => {
     );
 
     expect(results).toHaveLength(3);
-    expect(results[0]!.action).toBe("created");
-    expect(results[0]!.node.name).toBe("Bob");
-    expect(results[1]!.action).toBe("found");
-    expect(results[1]!.node.id).toBe(alice.id);
-    expect(results[1]!.node.role).toBe("eng");
-    expect(results[2]!.action).toBe("created");
-    expect(results[2]!.node.name).toBe("Acme");
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[0]).node.name).toBe("Bob");
+    expect(requireDefined(results[1]).action).toBe("found");
+    expect(requireDefined(results[1]).node.id).toBe(alice.id);
+    expect(requireDefined(results[1]).node.role).toBe("eng");
+    expect(requireDefined(results[2]).action).toBe("created");
+    expect(requireDefined(results[2]).node.name).toBe("Acme");
   });
 
   it("bulk with ifExists: update updates existing nodes", async (ctx) => {
@@ -1329,10 +1329,10 @@ describe("bulkGetOrCreateByConstraint with PostgreSQL", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("updated");
-    expect(results[0]!.node.role).toBe("manager");
-    expect(results[1]!.action).toBe("created");
-    expect(results[1]!.node.role).toBe("intern");
+    expect(requireDefined(results[0]).action).toBe("updated");
+    expect(requireDefined(results[0]).node.role).toBe("manager");
+    expect(requireDefined(results[1]).action).toBe("created");
+    expect(requireDefined(results[1]).node.role).toBe("intern");
   });
 
   it("bulk resurrects soft-deleted nodes", async (ctx) => {
@@ -1353,10 +1353,10 @@ describe("bulkGetOrCreateByConstraint with PostgreSQL", () => {
     );
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.action).toBe("resurrected");
-    expect(results[0]!.node.id).toBe(alice.id);
-    expect(results[0]!.node.role).toBe("resurrected");
-    expect(results[0]!.node.meta.deletedAt).toBeUndefined();
+    expect(requireDefined(results[0]).action).toBe("resurrected");
+    expect(requireDefined(results[0]).node.id).toBe(alice.id);
+    expect(requireDefined(results[0]).node.role).toBe("resurrected");
+    expect(requireDefined(results[0]).node.meta.deletedAt).toBeUndefined();
   });
 
   it("throws NodeConstraintNotFoundError for invalid constraint name", async (ctx) => {
@@ -1593,8 +1593,8 @@ describe("edge bulkGetOrCreateByEndpoints with PostgreSQL", () => {
     ]);
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("created");
-    expect(results[1]!.action).toBe("created");
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[1]).action).toBe("created");
   });
 
   it("mixed creates and finds with correct ordering", async (ctx) => {
@@ -1617,9 +1617,9 @@ describe("edge bulkGetOrCreateByEndpoints with PostgreSQL", () => {
     ]);
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("created");
-    expect(results[1]!.action).toBe("found");
-    expect(results[1]!.edge.id).toBe(existing.id);
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[1]).action).toBe("found");
+    expect(requireDefined(results[1]).edge.id).toBe(existing.id);
   });
 
   it("within-batch duplicates", async (ctx) => {
@@ -1639,9 +1639,11 @@ describe("edge bulkGetOrCreateByEndpoints with PostgreSQL", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("created");
-    expect(results[1]!.action).toBe("found");
-    expect(results[1]!.edge.id).toBe(results[0]!.edge.id);
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[1]).action).toBe("found");
+    expect(requireDefined(results[1]).edge.id).toBe(
+      requireDefined(results[0]).edge.id,
+    );
   });
 
   it("resurrects soft-deleted edge", async (ctx) => {
@@ -1663,10 +1665,10 @@ describe("edge bulkGetOrCreateByEndpoints with PostgreSQL", () => {
     ]);
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.action).toBe("resurrected");
-    expect(results[0]!.edge.id).toBe(first.id);
-    expect(results[0]!.edge.role).toBe("resurrected");
-    expect(results[0]!.edge.meta.deletedAt).toBeUndefined();
+    expect(requireDefined(results[0]).action).toBe("resurrected");
+    expect(requireDefined(results[0]).edge.id).toBe(first.id);
+    expect(requireDefined(results[0]).edge.role).toBe("resurrected");
+    expect(requireDefined(results[0]).edge.meta.deletedAt).toBeUndefined();
   });
 });
 
@@ -1752,12 +1754,12 @@ describe("Vector Search with PostgreSQL", () => {
     );
 
     // Verify it was stored
-    const result = await pool.query(
+    const result = await pool.query<{ node_id: string }>(
       "SELECT * FROM typegraph_embeddings WHERE id = $1",
       ["emb-1"],
     );
     expect(result.rows.length).toBe(1);
-    expect(result.rows[0].node_id).toBe("doc-1");
+    expect(requireDefined(result.rows[0]).node_id).toBe("doc-1");
   });
 
   it("should compute cosine distance correctly", async (ctx) => {
@@ -1788,7 +1790,7 @@ describe("Vector Search with PostgreSQL", () => {
 
     // Query for similar to [1, 0, 0, 0]
     const queryEmbedding = "[1,0,0,0]";
-    const result = await pool.query(
+    const result = await pool.query<{ distance: string; node_id: string }>(
       `SELECT node_id, embedding <=> $1::vector AS distance
        FROM typegraph_embeddings
        ORDER BY distance ASC`,
@@ -1797,12 +1799,14 @@ describe("Vector Search with PostgreSQL", () => {
 
     expect(result.rows.length).toBe(3);
     // doc-1 should be first (distance 0 - identical)
-    expect(result.rows[0].node_id).toBe("doc-1");
-    expect(Number.parseFloat(result.rows[0].distance)).toBeCloseTo(0, 5);
+    expect(requireDefined(result.rows[0]).node_id).toBe("doc-1");
+    expect(
+      Number.parseFloat(requireDefined(result.rows[0]).distance),
+    ).toBeCloseTo(0, 5);
     // doc-3 should be second (close to query)
-    expect(result.rows[1].node_id).toBe("doc-3");
+    expect(requireDefined(result.rows[1]).node_id).toBe("doc-3");
     // doc-2 should be last (orthogonal = max distance for cosine)
-    expect(result.rows[2].node_id).toBe("doc-2");
+    expect(requireDefined(result.rows[2]).node_id).toBe("doc-2");
   });
 
   it("should filter by minimum score", async (ctx) => {
@@ -1836,7 +1840,7 @@ describe("Vector Search with PostgreSQL", () => {
     const minScore = 0.5; // Only results with similarity >= 0.5
     const threshold = 1 - minScore;
 
-    const result = await pool.query(
+    const result = await pool.query<{ node_id: string; score: string }>(
       `SELECT node_id, 1 - (embedding <=> $1::vector) AS score
        FROM typegraph_embeddings
        WHERE (embedding <=> $1::vector) <= $2
@@ -1877,7 +1881,7 @@ describe("Vector Search with PostgreSQL", () => {
 
     // Query for top 3
     const queryEmbedding = "[1,0,0,0]";
-    const result = await pool.query(
+    const result = await pool.query<{ distance: string; node_id: string }>(
       `SELECT node_id, embedding <=> $1::vector AS distance
        FROM typegraph_embeddings
        ORDER BY distance ASC
@@ -1920,7 +1924,7 @@ describe("Vector Search with PostgreSQL", () => {
     );
 
     // Query using L2 distance operator <->
-    const result = await pool.query(
+    const result = await pool.query<{ distance: string; node_id: string }>(
       `SELECT node_id, embedding <-> '[1,0,0,0]'::vector AS distance
        FROM typegraph_embeddings
        ORDER BY distance ASC`,
@@ -1928,11 +1932,15 @@ describe("Vector Search with PostgreSQL", () => {
 
     expect(result.rows.length).toBe(2);
     // doc-1 should be first (distance 0)
-    expect(result.rows[0].node_id).toBe("doc-1");
-    expect(Number.parseFloat(result.rows[0].distance)).toBeCloseTo(0, 5);
+    expect(requireDefined(result.rows[0]).node_id).toBe("doc-1");
+    expect(
+      Number.parseFloat(requireDefined(result.rows[0]).distance),
+    ).toBeCloseTo(0, 5);
     // doc-2 should have distance 1 (|[1,0,0,0] - [2,0,0,0]| = 1)
-    expect(result.rows[1].node_id).toBe("doc-2");
-    expect(Number.parseFloat(result.rows[1].distance)).toBeCloseTo(1, 5);
+    expect(requireDefined(result.rows[1]).node_id).toBe("doc-2");
+    expect(
+      Number.parseFloat(requireDefined(result.rows[1]).distance),
+    ).toBeCloseTo(1, 5);
   });
 
   it("should support inner product distance", async (ctx) => {
@@ -1968,7 +1976,7 @@ describe("Vector Search with PostgreSQL", () => {
 
     // Query using inner product operator <#>
     // Note: pgvector returns negative inner product, so lower = more similar
-    const result = await pool.query(
+    const result = await pool.query<{ neg_ip: string; node_id: string }>(
       `SELECT node_id, embedding <#> '[1,0,0,0]'::vector AS neg_ip
        FROM typegraph_embeddings
        ORDER BY neg_ip ASC`,
@@ -1976,9 +1984,9 @@ describe("Vector Search with PostgreSQL", () => {
 
     expect(result.rows.length).toBe(2);
     // doc-1 should be first (inner product = 1, neg_ip = -1)
-    expect(result.rows[0].node_id).toBe("doc-1");
+    expect(requireDefined(result.rows[0]).node_id).toBe("doc-1");
     // doc-2 has inner product 0 with query
-    expect(result.rows[1].node_id).toBe("doc-2");
+    expect(requireDefined(result.rows[1]).node_id).toBe("doc-2");
   });
 });
 

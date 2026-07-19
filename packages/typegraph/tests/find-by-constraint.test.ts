@@ -8,6 +8,7 @@ import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import { NodeConstraintNotFoundError } from "../src/errors";
 import { createStore } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -83,10 +84,10 @@ describe("store.nodes.*.findByConstraint()", () => {
     });
 
     expect(found).toBeDefined();
-    expect(found!.id).toBe(created.id);
-    expect(found!.email).toBe("alice@example.com");
-    expect(found!.name).toBe("Alice");
-    expect(found!.role).toBe("eng");
+    expect(requireDefined(found).id).toBe(created.id);
+    expect(requireDefined(found).email).toBe("alice@example.com");
+    expect(requireDefined(found).name).toBe("Alice");
+    expect(requireDefined(found).role).toBe("eng");
   });
 
   it("excludes soft-deleted nodes", async () => {
@@ -152,10 +153,10 @@ describe("store.nodes.*.bulkFindByConstraint()", () => {
 
     expect(results).toHaveLength(3);
     expect(results[0]).toBeDefined();
-    expect(results[0]!.id).toBe(alice.id);
+    expect(requireDefined(results[0]).id).toBe(alice.id);
     expect(results[1]).toBeUndefined();
     expect(results[2]).toBeDefined();
-    expect(results[2]!.email).toBe("bob@example.com");
+    expect(requireDefined(results[2]).email).toBe("bob@example.com");
   });
 
   it("excludes soft-deleted nodes from bulk results", async () => {
@@ -197,7 +198,9 @@ describe("store.nodes.*.bulkFindByConstraint()", () => {
     expect(results).toHaveLength(BATCH_SIZE);
     for (let index = 0; index < 100; index++) {
       expect(results[index]).toBeDefined();
-      expect(results[index]!.email).toBe(`user${index}@example.com`);
+      expect(requireDefined(results[index]).email).toBe(
+        `user${index}@example.com`,
+      );
     }
     for (let index = 100; index < BATCH_SIZE; index++) {
       expect(results[index]).toBeUndefined();
@@ -219,6 +222,6 @@ describe("store.nodes.*.bulkFindByConstraint()", () => {
     expect(results).toHaveLength(2);
     expect(results[0]).toBeDefined();
     expect(results[1]).toBeDefined();
-    expect(results[0]!.id).toBe(results[1]!.id);
+    expect(requireDefined(results[0]).id).toBe(requireDefined(results[1]).id);
   });
 });

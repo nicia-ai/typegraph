@@ -406,9 +406,7 @@ export class PreparedQuery<R> {
         bindings,
         this.#dialect,
       );
-      // Method call (not the detached `executeRaw` local) so a this-using
-      // backend implementation keeps its receiver.
-      const rawRows = await this.#backend.executeRaw!<Record<string, unknown>>(
+      const rawRows = await executeRaw<Record<string, unknown>>(
         template.sql,
         params,
       );

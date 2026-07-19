@@ -15,6 +15,7 @@ import {
   type SerializedOntology,
   type SerializedSchema,
 } from "../src/schema/types";
+import { requireDefined } from "../src/utils/presence";
 
 // ============================================================
 // Test Helpers
@@ -167,8 +168,8 @@ describe("computeSchemaDiff", () => {
         kind: "Person",
         severity: "safe",
       });
-      expect(diff.nodes[0]!.details).toContain("Person");
-      expect(diff.nodes[0]!.details).toContain("added");
+      expect(requireDefined(diff.nodes[0]).details).toContain("Person");
+      expect(requireDefined(diff.nodes[0]).details).toContain("added");
     });
 
     it("detects removed node as breaking change", () => {
@@ -200,8 +201,8 @@ describe("computeSchemaDiff", () => {
         kind: "Person",
         severity: "breaking",
       });
-      expect(diff.nodes[0]!.before).toBeDefined();
-      expect(diff.nodes[0]!.after).toBeUndefined();
+      expect(requireDefined(diff.nodes[0]).before).toBeDefined();
+      expect(requireDefined(diff.nodes[0]).after).toBeUndefined();
     });
 
     it("detects added optional property as safe change", () => {
@@ -251,8 +252,8 @@ describe("computeSchemaDiff", () => {
         kind: "Person",
         severity: "safe",
       });
-      expect(diff.nodes[0]!.details).toContain("email");
-      expect(diff.nodes[0]!.details).toContain("added");
+      expect(requireDefined(diff.nodes[0]).details).toContain("email");
+      expect(requireDefined(diff.nodes[0]).details).toContain("added");
     });
 
     it("detects removed property as breaking change", () => {
@@ -302,8 +303,8 @@ describe("computeSchemaDiff", () => {
         kind: "Person",
         severity: "breaking",
       });
-      expect(diff.nodes[0]!.details).toContain("age");
-      expect(diff.nodes[0]!.details).toContain("removed");
+      expect(requireDefined(diff.nodes[0]).details).toContain("age");
+      expect(requireDefined(diff.nodes[0]).details).toContain("removed");
     });
 
     it("detects new required property as breaking change", () => {
@@ -353,8 +354,8 @@ describe("computeSchemaDiff", () => {
         kind: "Person",
         severity: "breaking",
       });
-      expect(diff.nodes[0]!.details).toContain("email");
-      expect(diff.nodes[0]!.details).toContain("required");
+      expect(requireDefined(diff.nodes[0]).details).toContain("email");
+      expect(requireDefined(diff.nodes[0]).details).toContain("required");
     });
 
     it("detects onDelete change as warning", () => {
@@ -393,9 +394,9 @@ describe("computeSchemaDiff", () => {
         kind: "Person",
         severity: "warning",
       });
-      expect(diff.nodes[0]!.details).toContain("onDelete");
-      expect(diff.nodes[0]!.details).toContain("restrict");
-      expect(diff.nodes[0]!.details).toContain("cascade");
+      expect(requireDefined(diff.nodes[0]).details).toContain("onDelete");
+      expect(requireDefined(diff.nodes[0]).details).toContain("restrict");
+      expect(requireDefined(diff.nodes[0]).details).toContain("cascade");
     });
 
     it("detects unique constraint change as warning", () => {
@@ -448,7 +449,9 @@ describe("computeSchemaDiff", () => {
         kind: "Person",
         severity: "warning",
       });
-      expect(diff.nodes[0]!.details).toContain("Unique constraints");
+      expect(requireDefined(diff.nodes[0]).details).toContain(
+        "Unique constraints",
+      );
     });
 
     it("handles multiple node changes", () => {
@@ -538,7 +541,7 @@ describe("computeSchemaDiff", () => {
 
       expect(diff.hasChanges).toBe(true);
       expect(diff.nodes).toHaveLength(1);
-      expect(diff.nodes[0]!.type).toBe("modified");
+      expect(requireDefined(diff.nodes[0]).type).toBe("modified");
     });
 
     it("detects node annotations changes as safe", () => {
@@ -589,7 +592,7 @@ describe("computeSchemaDiff", () => {
         kind: "Incident",
         severity: "safe",
       });
-      expect(diff.nodes[0]!.details).toContain("Annotations");
+      expect(requireDefined(diff.nodes[0]).details).toContain("Annotations");
     });
 
     it("ignores annotations object key order in node diffs", () => {
@@ -735,7 +738,7 @@ describe("computeSchemaDiff", () => {
         kind: "follows",
         severity: "warning",
       });
-      expect(diff.edges[0]!.details).toContain("fromKinds");
+      expect(requireDefined(diff.edges[0]).details).toContain("fromKinds");
     });
 
     it("detects toKinds change as warning", () => {
@@ -775,7 +778,7 @@ describe("computeSchemaDiff", () => {
         type: "modified",
         severity: "warning",
       });
-      expect(diff.edges[0]!.details).toContain("toKinds");
+      expect(requireDefined(diff.edges[0]).details).toContain("toKinds");
     });
 
     it("detects cardinality change as warning", () => {
@@ -815,9 +818,9 @@ describe("computeSchemaDiff", () => {
         type: "modified",
         severity: "warning",
       });
-      expect(diff.edges[0]!.details).toContain("Cardinality");
-      expect(diff.edges[0]!.details).toContain("many");
-      expect(diff.edges[0]!.details).toContain("one");
+      expect(requireDefined(diff.edges[0]).details).toContain("Cardinality");
+      expect(requireDefined(diff.edges[0]).details).toContain("many");
+      expect(requireDefined(diff.edges[0]).details).toContain("one");
     });
 
     it("detects edge property change as safe", () => {
@@ -860,7 +863,7 @@ describe("computeSchemaDiff", () => {
         type: "modified",
         severity: "safe",
       });
-      expect(diff.edges[0]!.details).toContain("Properties");
+      expect(requireDefined(diff.edges[0]).details).toContain("Properties");
     });
 
     it("detects edge annotations changes as safe", () => {
@@ -909,7 +912,7 @@ describe("computeSchemaDiff", () => {
         kind: "reportedBy",
         severity: "safe",
       });
-      expect(diff.edges[0]!.details).toContain("Annotations");
+      expect(requireDefined(diff.edges[0]).details).toContain("Annotations");
     });
 
     it("handles multiple edge changes in single diff", () => {
@@ -1045,9 +1048,9 @@ describe("computeSchemaDiff", () => {
         entity: "relation",
         severity: "safe",
       });
-      expect(diff.ontology[0]!.details).toContain("subClassOf");
-      expect(diff.ontology[0]!.details).toContain("Employee");
-      expect(diff.ontology[0]!.details).toContain("Person");
+      expect(requireDefined(diff.ontology[0]).details).toContain("subClassOf");
+      expect(requireDefined(diff.ontology[0]).details).toContain("Employee");
+      expect(requireDefined(diff.ontology[0]).details).toContain("Person");
     });
 
     it("detects removed relation as warning", () => {

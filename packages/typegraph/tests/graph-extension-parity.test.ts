@@ -34,6 +34,7 @@ import { defineGraph, defineNode } from "../src";
 import { searchable } from "../src/core/searchable";
 import { defineGraphExtension } from "../src/graph-extension";
 import { createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -71,7 +72,7 @@ describe("Store.evolve — query predicate parity", () => {
       }),
     );
 
-    const articles = evolved.getNodeCollection("Article")!;
+    const articles = requireDefined(evolved.getNodeCollection("Article"));
     await articles.create({ title: "alpha", wordCount: 100 });
     await articles.create({ title: "beta", wordCount: 250 });
     await articles.create({ title: "gamma", wordCount: 50 });
@@ -112,7 +113,7 @@ describe("Store.evolve — query predicate parity", () => {
         },
       }),
     );
-    const articles = evolved.getNodeCollection("Article")!;
+    const articles = requireDefined(evolved.getNodeCollection("Article"));
     await articles.create({ published: true });
     await articles.create({ published: false });
     await articles.create({ published: true });
@@ -150,7 +151,7 @@ describe("Store.evolve — subgraph parity", () => {
 
     // Seed: one Person, two Tags, one edge from each Tag to Person.
     const alice = await evolved.nodes.Person.create({ name: "alice" });
-    const tags = evolved.getNodeCollection("Tag")!;
+    const tags = requireDefined(evolved.getNodeCollection("Tag"));
     type ExtensionTag = Readonly<{ id: string; kind: string; label: string }>;
     const featured = (await tags.create({
       label: "featured",
@@ -158,7 +159,7 @@ describe("Store.evolve — subgraph parity", () => {
     const archived = (await tags.create({
       label: "archived",
     })) as unknown as ExtensionTag;
-    const appliesTo = evolved.getEdgeCollection("appliesTo")!;
+    const appliesTo = requireDefined(evolved.getEdgeCollection("appliesTo"));
     await appliesTo.create({ kind: "Tag", id: featured.id }, alice, {});
     await appliesTo.create({ kind: "Tag", id: archived.id }, alice, {});
 
@@ -207,7 +208,7 @@ describe("Store.evolve — fulltext parity", () => {
       }),
     );
 
-    const notes = evolved.getNodeCollection("Note")!;
+    const notes = requireDefined(evolved.getNodeCollection("Note"));
     await notes.create({
       title: "Climate change drivers",
       body: "Rising global temperatures linked to greenhouse emissions",
@@ -226,7 +227,7 @@ describe("Store.evolve — fulltext parity", () => {
       limit: 10,
     });
     expect(results.length).toBeGreaterThan(0);
-    const top = results[0]!.node as unknown as { title: string };
+    const top = requireDefined(results[0]).node as unknown as { title: string };
     expect(top.title).toBe("Climate change drivers");
   });
 
@@ -280,7 +281,7 @@ describe("Store.evolve — fulltext parity", () => {
         },
       }),
     );
-    const notes = evolved.getNodeCollection("Note")!;
+    const notes = requireDefined(evolved.getNodeCollection("Note"));
     await notes.create({
       title: "Renewable energy outlook",
       body: "Solar and wind capacity",
@@ -292,12 +293,12 @@ describe("Store.evolve — fulltext parity", () => {
 
     expect(runtimeResults.length).toBe(compileResults.length);
     const compileTitle = (
-      compileResults[0]!.node as unknown as {
+      requireDefined(compileResults[0]).node as unknown as {
         title: string;
       }
     ).title;
     const runtimeTitle = (
-      runtimeResults[0]!.node as unknown as {
+      requireDefined(runtimeResults[0]).node as unknown as {
         title: string;
       }
     ).title;
@@ -375,12 +376,12 @@ describe("Store.evolve — algorithm parity", () => {
         },
       }),
     );
-    const modules = evolved.getNodeCollection("Module")!;
+    const modules = requireDefined(evolved.getNodeCollection("Module"));
     type Module = Readonly<{ id: string; kind: string; name: string }>;
     const a = (await modules.create({ name: "a" })) as unknown as Module;
     const b = (await modules.create({ name: "b" })) as unknown as Module;
     const c = (await modules.create({ name: "c" })) as unknown as Module;
-    const dependsOn = evolved.getEdgeCollection("dependsOn")!;
+    const dependsOn = requireDefined(evolved.getEdgeCollection("dependsOn"));
     await dependsOn.create(
       { kind: "Module", id: a.id },
       { kind: "Module", id: b.id },
@@ -420,11 +421,11 @@ describe("Store.evolve — algorithm parity", () => {
 
     const alice = await evolved.nodes.Person.create({ name: "alice" });
     type ExtensionTag = Readonly<{ id: string; kind: string; label: string }>;
-    const tags = evolved.getNodeCollection("Tag")!;
+    const tags = requireDefined(evolved.getNodeCollection("Tag"));
     const featured = (await tags.create({
       label: "featured",
     })) as unknown as ExtensionTag;
-    const appliesTo = evolved.getEdgeCollection("appliesTo")!;
+    const appliesTo = requireDefined(evolved.getEdgeCollection("appliesTo"));
     await appliesTo.create({ kind: "Tag", id: featured.id }, alice, {});
 
     const path = await evolved.algorithms.shortestPath(featured.id, alice.id, {

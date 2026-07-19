@@ -288,9 +288,7 @@ export class UnionableQuery<G extends GraphDef, R> {
       backend,
       recordedAsOfForComposableQuery(ast),
       template !== undefined && executeRaw !== undefined ?
-        // Method call (not the detached `executeRaw` local) so a this-using
-        // backend implementation keeps its receiver.
-        backend.executeRaw!<Record<string, unknown>>(
+        executeRaw<Record<string, unknown>>(
           template.sql,
           fillTemplateParams(
             template.params,

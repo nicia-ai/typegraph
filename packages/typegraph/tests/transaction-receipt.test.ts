@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, type GraphBackend } from "../src";
 import {
+  createBackendOverlay,
   type TransactionBackend,
   type TransactionOptions,
 } from "../src/backend/types";
@@ -91,7 +92,7 @@ function recordBackendCalls(
       async transaction(fn, options) {
         calls.push("transaction");
         return backend.transaction(
-          (target, sql) => fn(recordTransactionTargetCalls(target, calls), sql),
+          (target) => fn(recordTransactionTargetCalls(target, calls)),
           options,
         );
       },
@@ -154,13 +155,12 @@ describe("transaction receipts", () => {
   it("passes isolationLevel through to the backend", async () => {
     const backend = createTestBackend();
     const seenOptions: (TransactionOptions | undefined)[] = [];
-    const spyingBackend: GraphBackend = {
-      ...backend,
-      async transaction(fn, options) {
+    const spyingBackend = createBackendOverlay(backend, {
+      async transactionWithNative(fn, options) {
         seenOptions.push(options);
-        return backend.transaction(fn, options);
+        return backend.transactionWithNative(fn, options);
       },
-    };
+    });
     const store = await createInitializedStore(receiptGraph, spyingBackend);
     seenOptions.length = 0;
 

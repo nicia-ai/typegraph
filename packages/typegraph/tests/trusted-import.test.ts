@@ -60,10 +60,11 @@ function* chunkStream(
   for (const chunk of chunks) yield chunk;
 }
 
-function expectReason(reason: string) {
+function expectReason(reason: string): unknown {
+  const details: unknown = expect.objectContaining({ reason });
   return expect.objectContaining({
     code: "TRUSTED_IMPORT_ERROR",
-    details: expect.objectContaining({ reason }),
+    details,
   });
 }
 

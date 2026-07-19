@@ -1,16 +1,22 @@
 /**
- * Shared row-mapping utilities for Drizzle backend adapters.
+ * Shared database row-mapping utilities.
  */
 
-import { DatabaseOperationError } from "../../errors";
-import { type EdgeRow, type NodeRow, rowPropsToJsonText, type SchemaVersionRow, type UniqueRow } from "../types";
+import { DatabaseOperationError } from "../errors";
+import {
+  type EdgeRow,
+  type NodeRow,
+  rowPropsToJsonText,
+  type SchemaVersionRow,
+  type UniqueRow,
+} from "./types";
 
 function requireTimestamp(value: string | undefined, field: string): string {
   if (value === undefined) {
-    throw new DatabaseOperationError(
-      `Expected non-null ${field} timestamp`,
-      { operation: "select", entity: "row" },
-    );
+    throw new DatabaseOperationError(`Expected non-null ${field} timestamp`, {
+      operation: "select",
+      entity: "row",
+    });
   }
   return value;
 }
@@ -149,16 +155,22 @@ export function createNodeRowMapper(
   config: DialectRowMapperConfig,
 ): (row: Record<string, unknown>) => NodeRow {
   return (row) => ({
-    graph_id: asString(row.graph_id, "graph_id"),
-    kind: asString(row.kind, "kind"),
-    id: asString(row.id, "id"),
-    props: config.normalizeJson(row.props),
-    version: asNumber(row.version, "version"),
-    valid_from: nullToUndefined(config.formatTimestamp(row.valid_from)),
-    valid_to: nullToUndefined(config.formatTimestamp(row.valid_to)),
-    created_at: requireTimestamp(config.formatTimestamp(row.created_at), "created_at"),
-    updated_at: requireTimestamp(config.formatTimestamp(row.updated_at), "updated_at"),
-    deleted_at: nullToUndefined(config.formatTimestamp(row.deleted_at)),
+    graph_id: asString(row["graph_id"], "graph_id"),
+    kind: asString(row["kind"], "kind"),
+    id: asString(row["id"], "id"),
+    props: config.normalizeJson(row["props"]),
+    version: asNumber(row["version"], "version"),
+    valid_from: nullToUndefined(config.formatTimestamp(row["valid_from"])),
+    valid_to: nullToUndefined(config.formatTimestamp(row["valid_to"])),
+    created_at: requireTimestamp(
+      config.formatTimestamp(row["created_at"]),
+      "created_at",
+    ),
+    updated_at: requireTimestamp(
+      config.formatTimestamp(row["updated_at"]),
+      "updated_at",
+    ),
+    deleted_at: nullToUndefined(config.formatTimestamp(row["deleted_at"])),
   });
 }
 
@@ -166,19 +178,25 @@ export function createEdgeRowMapper(
   config: DialectRowMapperConfig,
 ): (row: Record<string, unknown>) => EdgeRow {
   return (row) => ({
-    graph_id: asString(row.graph_id, "graph_id"),
-    id: asString(row.id, "id"),
-    kind: asString(row.kind, "kind"),
-    from_kind: asString(row.from_kind, "from_kind"),
-    from_id: asString(row.from_id, "from_id"),
-    to_kind: asString(row.to_kind, "to_kind"),
-    to_id: asString(row.to_id, "to_id"),
-    props: config.normalizeJson(row.props),
-    valid_from: nullToUndefined(config.formatTimestamp(row.valid_from)),
-    valid_to: nullToUndefined(config.formatTimestamp(row.valid_to)),
-    created_at: requireTimestamp(config.formatTimestamp(row.created_at), "created_at"),
-    updated_at: requireTimestamp(config.formatTimestamp(row.updated_at), "updated_at"),
-    deleted_at: nullToUndefined(config.formatTimestamp(row.deleted_at)),
+    graph_id: asString(row["graph_id"], "graph_id"),
+    id: asString(row["id"], "id"),
+    kind: asString(row["kind"], "kind"),
+    from_kind: asString(row["from_kind"], "from_kind"),
+    from_id: asString(row["from_id"], "from_id"),
+    to_kind: asString(row["to_kind"], "to_kind"),
+    to_id: asString(row["to_id"], "to_id"),
+    props: config.normalizeJson(row["props"]),
+    valid_from: nullToUndefined(config.formatTimestamp(row["valid_from"])),
+    valid_to: nullToUndefined(config.formatTimestamp(row["valid_to"])),
+    created_at: requireTimestamp(
+      config.formatTimestamp(row["created_at"]),
+      "created_at",
+    ),
+    updated_at: requireTimestamp(
+      config.formatTimestamp(row["updated_at"]),
+      "updated_at",
+    ),
+    deleted_at: nullToUndefined(config.formatTimestamp(row["deleted_at"])),
   });
 }
 
@@ -186,13 +204,13 @@ export function createUniqueRowMapper(
   config: DialectRowMapperConfig,
 ): (row: Record<string, unknown>) => UniqueRow {
   return (row) => ({
-    graph_id: asString(row.graph_id, "graph_id"),
-    node_kind: asString(row.node_kind, "node_kind"),
-    constraint_name: asString(row.constraint_name, "constraint_name"),
-    key: asString(row.key, "key"),
-    node_id: asString(row.node_id, "node_id"),
-    concrete_kind: asString(row.concrete_kind, "concrete_kind"),
-    deleted_at: nullToUndefined(config.formatTimestamp(row.deleted_at)),
+    graph_id: asString(row["graph_id"], "graph_id"),
+    node_kind: asString(row["node_kind"], "node_kind"),
+    constraint_name: asString(row["constraint_name"], "constraint_name"),
+    key: asString(row["key"], "key"),
+    node_id: asString(row["node_id"], "node_id"),
+    concrete_kind: asString(row["concrete_kind"], "concrete_kind"),
+    deleted_at: nullToUndefined(config.formatTimestamp(row["deleted_at"])),
   });
 }
 
@@ -200,16 +218,19 @@ export function createSchemaVersionRowMapper(
   config: DialectRowMapperConfig,
 ): (row: Record<string, unknown>) => SchemaVersionRow {
   return (row) => {
-    const isActiveValue = row.is_active;
+    const isActiveValue = row["is_active"];
     const isActive =
       isActiveValue === true || isActiveValue === 1 || isActiveValue === "1";
 
     return {
-      graph_id: asString(row.graph_id, "graph_id"),
-      version: asNumber(row.version, "version"),
-      schema_hash: asString(row.schema_hash, "schema_hash"),
-      schema_doc: rowPropsToJsonText(config.normalizeJson(row.schema_doc)),
-      created_at: requireTimestamp(config.formatTimestamp(row.created_at), "created_at"),
+      graph_id: asString(row["graph_id"], "graph_id"),
+      version: asNumber(row["version"], "version"),
+      schema_hash: asString(row["schema_hash"], "schema_hash"),
+      schema_doc: rowPropsToJsonText(config.normalizeJson(row["schema_doc"])),
+      created_at: requireTimestamp(
+        config.formatTimestamp(row["created_at"]),
+        "created_at",
+      ),
       is_active: isActive,
     };
   };

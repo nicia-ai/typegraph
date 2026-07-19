@@ -12,9 +12,7 @@
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
-import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { PgDialect } from "drizzle-orm/pg-core";
 import { Pool, type PoolClient } from "pg";
 import {
   afterAll,
@@ -28,15 +26,18 @@ import {
 import { z } from "zod";
 
 import {
-  createStoreWithSchema,
+  createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
-  type HistoryStore,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createRetractionCapability } from "../../../src/provenance";
+import {
+  renderPostgres,
+  type SqlFragment,
+} from "../../../src/query/sql-fragment";
 import {
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
@@ -48,7 +49,7 @@ import {
 } from "../../concurrency-utils";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let pool: Pool | undefined;
@@ -63,7 +64,7 @@ function requirePostgres(ctx: { skip: () => void }): Pool {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const candidate = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -193,29 +194,32 @@ const multiSourceConfig = {
   derives: { kind: "derives" },
 } as const;
 
-async function createGraphStore(
-  targetPool: Pool,
-): Promise<HistoryStore<typeof graph>> {
+async function createGraphStore(targetPool: Pool) {
   const backend = createPostgresBackend(drizzle(targetPool));
-  const [store] = await createStoreWithSchema(graph, backend, {
+  const [store] = await createAdapterStoreWithSchema(graph, backend, {
     history: true,
   });
   return store;
 }
 
-async function createMultiSourceGraphStore(
-  targetPool: Pool,
-): Promise<HistoryStore<typeof multiSourceGraph>> {
+async function createMultiSourceGraphStore(targetPool: Pool) {
   const backend = createPostgresBackend(drizzle(targetPool));
-  const [store] = await createStoreWithSchema(multiSourceGraph, backend, {
-    history: true,
-  });
+  const [store] = await createAdapterStoreWithSchema(
+    multiSourceGraph,
+    backend,
+    {
+      history: true,
+    },
+  );
   return store;
 }
 
-async function acquireLock(client: PoolClient, lockSql: SQL): Promise<void> {
-  const compiled = new PgDialect().sqlToQuery(lockSql);
-  await client.query(compiled.sql, compiled.params);
+async function acquireLock(
+  client: PoolClient,
+  lockSql: SqlFragment,
+): Promise<void> {
+  const compiled = renderPostgres(lockSql);
+  await client.query(compiled.sql, [...compiled.params]);
 }
 
 describe("recorded graph-write advisory lock (Postgres)", () => {
@@ -311,7 +315,7 @@ describe("recorded graph-write advisory lock (Postgres)", () => {
     const targetPool = requirePostgres(ctx);
     const db = drizzle(targetPool);
     const backend = createPostgresBackend(db);
-    const [store] = await createStoreWithSchema(graph, backend, {
+    const [store] = await createAdapterStoreWithSchema(graph, backend, {
       history: true,
     });
     const source = await store.nodes.Source.create(

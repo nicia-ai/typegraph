@@ -1,6 +1,7 @@
-import { type SQL, sql } from "drizzle-orm";
+import { type SQL as DrizzleSql, sql } from "drizzle-orm";
 import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
+import { isSqlFragment } from "../../../query/sql-fragment";
 import {
   D1_MAX_BIND_PARAMETERS,
   DURABLE_OBJECT_MAX_BIND_PARAMETERS,
@@ -11,8 +12,10 @@ import { getOrCreateLru } from "./lru";
 import {
   type CompiledSqlQuery,
   compileQueryWithDialect,
+  type ExecutableSql,
   type PreparedSqlStatement,
   type SqlExecutionAdapter,
+  toDrizzleSql,
 } from "./types";
 
 const DEFAULT_PREPARED_STATEMENT_CACHE_MAX = 256;
@@ -171,13 +174,13 @@ function isDurableObjectStorageClient(
 ): value is DurableObjectStorageClient {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
-  const sqlApi = candidate.sql;
+  const sqlApi = candidate["sql"];
   return (
-    typeof candidate.transaction === "function" &&
-    typeof candidate.transactionSync === "function" &&
+    typeof candidate["transaction"] === "function" &&
+    typeof candidate["transactionSync"] === "function" &&
     typeof sqlApi === "object" &&
     sqlApi !== null &&
-    typeof (sqlApi as Record<string, unknown>).exec === "function"
+    typeof (sqlApi as Record<string, unknown>)["exec"] === "function"
   );
 }
 
@@ -278,7 +281,7 @@ function parseCompiledMaxVariableNumber(
 ): number | undefined {
   for (const row of rows) {
     if (typeof row !== "object" || row === null) continue;
-    const option = (row as Record<string, unknown>).compile_options;
+    const option = (row as Record<string, unknown>)["compile_options"];
     if (typeof option !== "string") continue;
     const match = MAX_VARIABLE_NUMBER_COMPILE_OPTION.exec(option);
     if (match !== null) return Number(match[1]);
@@ -289,11 +292,9 @@ function parseCompiledMaxVariableNumber(
 function hasModernBindLimitByVersion(rows: readonly unknown[]): boolean {
   const first = rows[0];
   if (typeof first !== "object" || first === null) return false;
-  const version = (first as Record<string, unknown>).version;
+  const version = (first as Record<string, unknown>)["version"];
   if (typeof version !== "string") return false;
-  const [major = 0, minor = 0] = version
-    .split(".")
-    .map(Number);
+  const [major = 0, minor = 0] = version.split(".").map(Number);
   if (!Number.isFinite(major) || !Number.isFinite(minor)) return false;
   return (
     major > FIRST_MODERN_BIND_LIMIT_MAJOR ||
@@ -312,10 +313,7 @@ function detectHardMaxBindParameters(
   transactionMode: SqliteTransactionMode,
   hostedPlatform: SqliteHostedPlatform | undefined,
 ): number | undefined {
-  if (
-    hostedPlatform === "durable-object" ||
-    transactionMode === "do-sqlite"
-  ) {
+  if (hostedPlatform === "durable-object" || transactionMode === "do-sqlite") {
     return DURABLE_OBJECT_MAX_BIND_PARAMETERS;
   }
   if (hostedPlatform === "d1") return D1_MAX_BIND_PARAMETERS;
@@ -351,7 +349,7 @@ function resolveSqliteClient(
   const sqliteClient = (db as SqliteClientCarrier).$client;
   if (typeof sqliteClient !== "object" || sqliteClient === null) return;
   const candidate = sqliteClient as Record<string, unknown>;
-  if (typeof candidate.prepare !== "function") return;
+  if (typeof candidate["prepare"] !== "function") return;
   return sqliteClient as SqliteClientWithPrepare;
 }
 
@@ -370,9 +368,9 @@ function getOrCreatePreparedStatement(
 // that fail `instanceof Promise` checks (drizzle-team/drizzle-orm#2275).
 async function executeDrizzleQuery<TRow>(
   db: AnySqliteDatabase,
-  query: SQL,
+  query: DrizzleSql,
 ): Promise<readonly TRow[]> {
-  return (await db.all(query));
+  return await db.all(query);
 }
 
 function createPreparedStatementExecutor(
@@ -400,9 +398,9 @@ export function createSqliteExecutionAdapter(
   statementCacheMaxOrOptions: number | SqliteExecutionAdapterOptions = {},
 ): SqliteExecutionAdapter {
   const options: SqliteExecutionAdapterOptions =
-    typeof statementCacheMaxOrOptions === "number"
-      ? { statementCacheMax: statementCacheMaxOrOptions }
-      : statementCacheMaxOrOptions;
+    typeof statementCacheMaxOrOptions === "number" ?
+      { statementCacheMax: statementCacheMaxOrOptions }
+    : statementCacheMaxOrOptions;
   const statementCacheMax =
     options.statementCacheMax ?? DEFAULT_PREPARED_STATEMENT_CACHE_MAX;
   const profileHints = options.profileHints ?? {};
@@ -426,16 +424,14 @@ export function createSqliteExecutionAdapter(
 
   const profile: SqliteExecutionProfile = {
     ...(hostedPlatform === undefined ? {} : { hostedPlatform }),
-    ...(hardMaxBindParameters === undefined ?
-      {}
-    : { hardMaxBindParameters }),
+    ...(hardMaxBindParameters === undefined ? {} : { hardMaxBindParameters }),
     isSync,
     maxBindParameters,
     supportsCompiledExecution: sqliteClient !== undefined,
     transactionMode,
   };
 
-  const compile = (query: SQL): CompiledSqlQuery =>
+  const compile = (query: ExecutableSql): CompiledSqlQuery =>
     compileQueryWithDialect(db, query, "SQLite");
 
   if (sqliteClient !== undefined) {
@@ -455,7 +451,9 @@ export function createSqliteExecutionAdapter(
       return Promise.resolve(rows as readonly TRow[]);
     }
 
-    function executeCompiledRun(compiledQuery: CompiledSqlQuery): Promise<void> {
+    function executeCompiledRun(
+      compiledQuery: CompiledSqlQuery,
+    ): Promise<void> {
       const preparedStatement = getOrCreatePreparedStatement(
         statementCache,
         client,
@@ -466,7 +464,10 @@ export function createSqliteExecutionAdapter(
       // non-reader statements, so pick by the statement's own flag; a
       // client without run() (or without the reader flag but returning
       // rows) drains through all() and discards.
-      if (preparedStatement.run === undefined || preparedStatement.reader === true) {
+      if (
+        preparedStatement.run === undefined ||
+        preparedStatement.reader === true
+      ) {
         preparedStatement.all(...compiledQuery.params);
       } else {
         preparedStatement.run(...compiledQuery.params);
@@ -500,7 +501,7 @@ export function createSqliteExecutionAdapter(
         statementCache.clear();
       },
       compile,
-      execute<TRow>(query: SQL): Promise<readonly TRow[]> {
+      execute<TRow>(query: ExecutableSql): Promise<readonly TRow[]> {
         const compiledQuery = compile(query);
         return executeCompiled<TRow>(compiledQuery);
       },
@@ -524,8 +525,11 @@ export function createSqliteExecutionAdapter(
       // No-op: no statement cache in async/D1 mode
     },
     compile,
-    execute<TRow>(query: SQL): Promise<readonly TRow[]> {
-      return executeDrizzleQuery<TRow>(db, query);
+    execute<TRow>(query: ExecutableSql): Promise<readonly TRow[]> {
+      return executeDrizzleQuery<TRow>(
+        db,
+        isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
+      );
     },
     profile,
   };

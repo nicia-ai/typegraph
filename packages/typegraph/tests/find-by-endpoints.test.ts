@@ -8,6 +8,7 @@ import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import { ValidationError } from "../src/errors";
 import { createStore } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -78,8 +79,8 @@ describe("store.edges.*.findByEndpoints()", () => {
 
     const found = await store.edges.knows.findByEndpoints(alice, bob);
     expect(found).toBeDefined();
-    expect(found!.id).toBe(created.id);
-    expect(found!.relationship).toBe("friend");
+    expect(requireDefined(found).id).toBe(created.id);
+    expect(requireDefined(found).relationship).toBe("friend");
   });
 
   it("finds an existing edge by endpoints with matchOn", async () => {
@@ -101,8 +102,8 @@ describe("store.edges.*.findByEndpoints()", () => {
     });
 
     expect(found).toBeDefined();
-    expect(found!.id).toBe(colleague.id);
-    expect(found!.relationship).toBe("colleague");
+    expect(requireDefined(found).id).toBe(colleague.id);
+    expect(requireDefined(found).relationship).toBe("colleague");
   });
 
   it("returns undefined when matchOn doesn't match any edge", async () => {
@@ -155,6 +156,6 @@ describe("store.edges.*.findByEndpoints()", () => {
 
     const found = await store.edges.emptyEdge.findByEndpoints(alice, bob);
     expect(found).toBeDefined();
-    expect(found!.id).toBe(created.id);
+    expect(requireDefined(found).id).toBe(created.id);
   });
 });

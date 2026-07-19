@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { requireDefined } from "../../../src/utils/presence";
 import {
   seedKnowsChain,
   seedPeopleForRecursiveDepthTracking,
@@ -115,7 +116,11 @@ export function registerRecursiveIntegrationTests(
         .execute();
 
       // Create cycle edge
-      await store.edges.knows.create(eve[0]!, alice[0]!, { since: "2024" });
+      await store.edges.knows.create(
+        requireDefined(eve[0]),
+        requireDefined(alice[0]),
+        { since: "2024" },
+      );
 
       // This should complete without infinite loop due to cycle detection
       const results = await store
@@ -337,7 +342,7 @@ export function registerRecursiveIntegrationTests(
       // Employee1 path should be the longest (CEO -> VP1 -> Manager1 -> Employee1)
       const employee = results.find((r) => r.name === "Employee1");
       expect(employee).toBeDefined();
-      expect(employee!.nodePath.length).toBe(4);
+      expect(requireDefined(employee).nodePath.length).toBe(4);
     });
 
     it("exposes both depth and path together in select context", async () => {
@@ -356,12 +361,14 @@ export function registerRecursiveIntegrationTests(
         }))
         .execute();
 
-      const employee = results.find((r) => r.name === "Employee1")!;
+      const employee = requireDefined(
+        results.find((r) => r.name === "Employee1"),
+      );
       expect(employee).toBeDefined();
       expect(employee.level).toBe(3);
       expect(employee.route.length).toBe(4);
 
-      const vp = results.find((r) => r.name === "VP1")!;
+      const vp = requireDefined(results.find((r) => r.name === "VP1"));
       expect(vp).toBeDefined();
       expect(vp.level).toBe(1);
       expect(vp.route.length).toBe(2);

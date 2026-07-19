@@ -20,6 +20,7 @@ import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend, generateSqliteDDL } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { parseDimensionMismatch } from "../src/utils/sql-errors";
 
 /** A SQLite backend with NO vector strategy (the bring-your-own-Drizzle path). */
@@ -227,7 +228,7 @@ describe("store.reembedVectorField (sqlite-vec)", () => {
       ...backend,
       vectorSearch: (params) => {
         recorded.push(params.metric);
-        return backend.vectorSearch!(params);
+        return requireDefined(backend.vectorSearch)(params);
       },
     };
     const [store] = await createStoreWithSchema(l2Graph, recordingBackend);

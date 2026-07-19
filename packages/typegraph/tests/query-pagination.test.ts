@@ -14,6 +14,7 @@ import {
   defineNode,
   ValidationError,
 } from "../src";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -117,8 +118,8 @@ describe("Cursor Pagination", () => {
     expect(page.prevCursor).toBeUndefined();
 
     // Results should be ordered by name
-    expect(page.data[0]!.name).toBe("Person_01");
-    expect(page.data[4]!.name).toBe("Person_05");
+    expect(requireDefined(page.data[0]).name).toBe("Person_01");
+    expect(requireDefined(page.data[4]).name).toBe("Person_05");
   });
 
   it("fetches next page using cursor", async () => {
@@ -139,15 +140,15 @@ describe("Cursor Pagination", () => {
       .from("Person", "p")
       .orderBy("p", "name")
       .select((ctx) => ctx.p)
-      .paginate({ first: 5, after: page1.nextCursor! });
+      .paginate({ first: 5, after: requireDefined(page1.nextCursor) });
 
     expect(page2.data.length).toBe(5);
     expect(page2.hasNextPage).toBe(true);
     expect(page2.hasPrevPage).toBe(true);
 
     // Should continue from where page1 left off
-    expect(page2.data[0]!.name).toBe("Person_06");
-    expect(page2.data[4]!.name).toBe("Person_10");
+    expect(requireDefined(page2.data[0]).name).toBe("Person_06");
+    expect(requireDefined(page2.data[4]).name).toBe("Person_10");
   });
 
   it("detects last page correctly", async () => {
@@ -176,8 +177,8 @@ describe("Cursor Pagination", () => {
 
     expect(lastPage.data.length).toBe(5);
     expect(lastPage.hasNextPage).toBe(false);
-    expect(lastPage.data[0]!.name).toBe("Person_21");
-    expect(lastPage.data[4]!.name).toBe("Person_25");
+    expect(requireDefined(lastPage.data[0]).name).toBe("Person_21");
+    expect(requireDefined(lastPage.data[4]).name).toBe("Person_25");
   });
 
   it("handles empty result set", async () => {
@@ -226,8 +227,8 @@ describe("Cursor Pagination", () => {
       .select((ctx) => ctx.p)
       .paginate({ first: 5 });
 
-    expect(page.data[0]!.name).toBe("Person_25");
-    expect(page.data[4]!.name).toBe("Person_21");
+    expect(requireDefined(page.data[0]).name).toBe("Person_25");
+    expect(requireDefined(page.data[4]).name).toBe("Person_21");
   });
 
   it("handles multiple order columns", async () => {
@@ -250,8 +251,8 @@ describe("Cursor Pagination", () => {
       .select((ctx) => ctx.p)
       .paginate({ first: 3 });
 
-    expect(page1.data[0]!.age).toBe(30);
-    expect(page1.data[0]!.name).toBe("Person_00");
+    expect(requireDefined(page1.data[0]).age).toBe(30);
+    expect(requireDefined(page1.data[0]).name).toBe("Person_00");
   });
 
   it("throws ValidationError without ORDER BY", async () => {
@@ -415,7 +416,7 @@ describe("Pagination with a non-unique sort key", () => {
         .paginate({ first: 5, ...(cursor ? { after: cursor } : {}) });
       for (const person of result.data) seen.add(person.id);
       if (!result.hasNextPage) break;
-      cursor = result.nextCursor!;
+      cursor = requireDefined(result.nextCursor);
     }
 
     expect([...seen].toSorted()).toEqual(

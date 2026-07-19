@@ -21,10 +21,6 @@
  * Mirrors the `libsqlVectorStrategy` / `sqliteVecStrategy` structure while
  * letting Postgres' planner pick the ANN index when one exists.
  */
-import { type SQL, sql } from "drizzle-orm";
-
-import { formatVector } from "../../../backend/drizzle/columns/vector";
-import { quotedTableName } from "../../../backend/drizzle/operations/shared";
 import { type StrategyTableContribution } from "../../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
@@ -34,6 +30,7 @@ import {
   type VectorMetric,
   type VectorSearchParams,
 } from "../../../backend/types";
+import { sql, type SqlFragment } from "../../sql-fragment";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
@@ -144,16 +141,19 @@ function operatorClass(metric: VectorMetric): string {
  * parameter (not interpolated) — Postgres parses the `[a,b,c]` text and the
  * cast types it. Finiteness is validated first so a NaN names its index.
  */
-function vectorLiteral(embedding: readonly number[], name: string): SQL {
+function vectorLiteral(
+  embedding: readonly number[],
+  name: string,
+): SqlFragment {
   assertFiniteEmbedding(embedding, name);
-  return sql`${formatVector(embedding)}::vector`;
+  return sql`${`[${embedding.join(",")}]`}::vector`;
 }
 
 function distanceExpression(
-  embeddingColumn: SQL,
+  embeddingColumn: SqlFragment,
   queryEmbedding: readonly number[],
   metric: VectorMetric,
-): SQL {
+): SqlFragment {
   const query = vectorLiteral(queryEmbedding, "queryEmbedding");
   switch (metric) {
     case "cosine": {
@@ -172,16 +172,22 @@ function distanceExpression(
   }
 }
 
+function tableName(
+  graphId: string,
+  nodeKind: string,
+  fieldPath: string,
+): string {
+  return vectorPhysicalName(TABLE_PREFIX, graphId, nodeKind, fieldPath);
+}
+
 export const pgvectorStrategy: VectorStrategy = {
   name: "pgvector",
   capabilities: PGVECTOR_CAPABILITIES,
 
-  tableName(graphId, nodeKind, fieldPath) {
-    return vectorPhysicalName(TABLE_PREFIX, graphId, nodeKind, fieldPath);
-  },
+  tableName,
 
   ownedTables(slot): readonly StrategyTableContribution[] {
-    const table = this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
+    const table = tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
     const name = quoteIdentifier(table);
 
     // No standalone graph_id index: the PRIMARY KEY (graph_id, node_id) already
@@ -218,9 +224,13 @@ export const pgvectorStrategy: VectorStrategy = {
     ];
   },
 
-  buildUpsert(slot, params: UpsertEmbeddingParams, timestamp): readonly SQL[] {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  buildUpsert(
+    slot,
+    params: UpsertEmbeddingParams,
+    timestamp,
+  ): readonly SqlFragment[] {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     const value = vectorLiteral(params.embedding, "embedding");
     return [
@@ -237,9 +247,9 @@ export const pgvectorStrategy: VectorStrategy = {
     slot,
     params: UpsertEmbeddingBatchParams,
     timestamp,
-  ): readonly SQL[] {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  ): readonly SqlFragment[] {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     const valueRows = sql.join(
       params.rows.map(
@@ -258,9 +268,9 @@ export const pgvectorStrategy: VectorStrategy = {
     ];
   },
 
-  buildDelete(slot, params: DeleteEmbeddingParams): readonly SQL[] {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  buildDelete(slot, params: DeleteEmbeddingParams): readonly SqlFragment[] {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     return [
       sql`
@@ -270,9 +280,13 @@ export const pgvectorStrategy: VectorStrategy = {
     ];
   },
 
-  buildSearch(slot, params: VectorSearchParams, candidates?: SQL): SQL {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  buildSearch(
+    slot,
+    params: VectorSearchParams,
+    candidates?: SqlFragment,
+  ): SqlFragment {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     const embeddingColumn = sql`${table}."embedding"`;
     const distance = distanceExpression(
@@ -285,7 +299,9 @@ export const pgvectorStrategy: VectorStrategy = {
     // Same SQL for brute-force and ANN: with a matching HNSW/IVFFlat index the
     // Postgres planner rewrites this `ORDER BY distance LIMIT k` into an index
     // scan automatically, so the strategy never branches on `slot.indexType`.
-    const conditions: SQL[] = [sql`${table}."graph_id" = ${params.graphId}`];
+    const conditions: SqlFragment[] = [
+      sql`${table}."graph_id" = ${params.graphId}`,
+    ];
     if (params.minScore !== undefined) {
       conditions.push(
         vectorMinScoreCondition(distance, params.metric, params.minScore),
@@ -349,18 +365,18 @@ export const pgvectorStrategy: VectorStrategy = {
     return distanceExpression(embeddingColumn, queryEmbedding, metric);
   },
 
-  buildCreateIndex(slot, options): SQL | undefined {
+  buildCreateIndex(slot, options): SqlFragment | undefined {
     if (!usesAnnIndex(slot)) return undefined;
     return sql.raw(
       pgvectorIndexDdl(
-        this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+        tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
         slot,
         options?.concurrent === true,
       ),
     );
   },
 
-  buildDropIndex(slot): SQL | undefined {
+  buildDropIndex(slot): SqlFragment | undefined {
     if (!usesAnnIndex(slot)) return undefined;
     const indexName = pgvectorIndexName(slot);
     return sql.raw(`DROP INDEX IF EXISTS ${quoteIdentifier(indexName)}`);
@@ -368,7 +384,7 @@ export const pgvectorStrategy: VectorStrategy = {
 
   buildDropStorage(slot): readonly string[] {
     const table = quoteIdentifier(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     // CASCADE drops the ANN index along with the table.
     return [`DROP TABLE IF EXISTS ${table} CASCADE`];

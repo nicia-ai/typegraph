@@ -12,7 +12,7 @@
  * - `drizzle-orm/pglite` (PGlite, Postgres-in-WASM) — the execution
  *   fast path detects PGlite and routes it correctly (its `.query` has no
  *   named-statement form). For a batteries-included in-process setup, see
- *   `createLocalPgliteBackend` in `@nicia-ai/typegraph/postgres/pglite`.
+ *   `createLocalPgliteBackend` in `@nicia-ai/typegraph/adapters/drizzle/postgres/pglite`.
  *
  * Other pg-protocol Drizzle adapters (Vercel Postgres, Supabase via pg)
  * work unchanged because they all expose a compatible `db.execute()` /
@@ -22,7 +22,7 @@
  * ```typescript
  * import { drizzle } from "drizzle-orm/node-postgres";
  * import { Pool } from "pg";
- * import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
+ * import { createPostgresBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
  *
  * const pool = new Pool({ connectionString: process.env.DATABASE_URL });
  * const db = drizzle(pool);
@@ -38,11 +38,10 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
-import { PgDatabase, PgTransaction } from "drizzle-orm/pg-core";
+import { PgTransaction } from "drizzle-orm/pg-core";
 
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
-import { quoteIdentifier } from "../../query/compiler/utils";
 import {
   buildFulltextCapabilities,
   type FulltextStrategy,
@@ -58,14 +57,33 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import { annIndexScanTypes } from "../../query/sql-intent";
+import {
+  isSqlFragment,
+  sql as portableSql,
+  type SqlFragment,
+} from "../../query/sql-fragment";
+import {
+  annIndexScanTypes,
+  type CompiledRowsSql,
+} from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
+import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
   isMissingTableError,
 } from "../../utils/sql-errors";
+import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
-  type AdoptedTransaction,
+  coerceNumericScore,
+  createEdgeRowMapper,
+  createNodeRowMapper,
+  createSchemaVersionRowMapper,
+  createUniqueRowMapper,
+  nowIso,
+  POSTGRES_ROW_MAPPER_CONFIG,
+} from "../row-mappers";
+import {
+  type AdapterBackend,
   type BackendCapabilities,
   type ClaimIndexMaterializationParams,
   type CommitSchemaVersionParams,
@@ -79,11 +97,11 @@ import {
   type DropVectorIndexParams,
   type FulltextSearchParams,
   type FulltextSearchResult,
-  type GraphBackend,
   type HybridSearchParams,
   type HybridSearchRow,
   type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
+  type InternalTransactionOptions,
   type KindRemovalRow,
   normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
@@ -95,7 +113,6 @@ import {
   type SchemaVersionRow,
   type SetActiveVersionParams,
   type TransactionBackend,
-  type TransactionOptions,
   type TrustedImportSession,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
@@ -117,12 +134,14 @@ import {
 import { generatePgCreateTableSQL, generatePostgresDDL } from "./ddl";
 import {
   type AnyPgDatabase,
+  type AnyPgTransaction,
   createPostgresExecutionAdapter,
   isNeonHttpClient,
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
+import { type ExecutableSql, toDrizzleSql } from "./execution/types";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -141,20 +160,11 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import { hybridCandidatesRef, mapHybridSearchRow } from "./operations/hybrid";
+import { mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
 } from "./operations/strategy";
-import {
-  coerceNumericScore,
-  createEdgeRowMapper,
-  createNodeRowMapper,
-  createSchemaVersionRowMapper,
-  createUniqueRowMapper,
-  nowIso,
-  POSTGRES_ROW_MAPPER_CONFIG,
-} from "./row-mappers";
 import {
   type PostgresTables,
   tables as defaultTables,
@@ -333,7 +343,7 @@ function buildPostgresCapabilities(
 export function createPostgresBackend(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
-): GraphBackend {
+): AdapterBackend<AnyPgTransaction> {
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
   // pgvector is compiled into a standalone Postgres server, so it is wired
@@ -412,7 +422,12 @@ export function createPostgresBackend(
     tableNames.edges,
     getTableName(tables.uniques),
     tableNames.fulltext,
-  ].map((name) => sql`ANALYZE (SKIP_LOCKED) ${quoteIdentifier(name)}`);
+  ].map((name) =>
+    toDrizzleSql(
+      portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(name)}`,
+      "postgres",
+    ),
+  );
   const recordedAnalyzeTables = [
     tableNames.recordedNodes,
     tableNames.recordedEdges,
@@ -615,7 +630,7 @@ export function createPostgresBackend(
   // `adoptTransaction()` (#134 — the caller already opened it): bind a
   // tx-scoped backend to the *literal* `tx` client and gate fulltext on
   // the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(tx: AnyPgDatabase): Readonly<{
+  function bindTransactionBackend(tx: AnyPgTransaction): Readonly<{
     backend: TransactionBackend;
     drainAndClose: () => Promise<void>;
   }> {
@@ -639,18 +654,20 @@ export function createPostgresBackend(
     };
   }
 
-  const backend: GraphBackend = {
+  const backend: AdapterBackend<AnyPgTransaction> = {
     ...operations,
 
-    ...(capabilities.transactions &&
-    executionAdapter.executeCompiled !== undefined ?
+    ...((
+      capabilities.transactions &&
+      executionAdapter.executeCompiled !== undefined
+    ) ?
       {
         async trustedImport<T>(
           fn: (session: TrustedImportSession) => Promise<T>,
         ): Promise<T> {
-          return backend.transaction(async (tx, rawSql) => {
+          return backend.transactionWithNative(async (tx, rawSql) => {
             const trustedExecutionAdapter = createPostgresExecutionAdapter(
-              rawSql as AnyPgDatabase,
+              rawSql,
               { ...adapterOptions, useTransactionClient: true },
             );
             const executeCompiled = trustedExecutionAdapter.executeCompiled;
@@ -992,7 +1009,10 @@ export function createPostgresBackend(
         .map((entry) => entry.tableName);
       for (const tableName of presentRecordedTables) {
         await db.execute(
-          sql`ANALYZE (SKIP_LOCKED) ${quoteIdentifier(tableName)}`,
+          toDrizzleSql(
+            portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(tableName)}`,
+            "postgres",
+          ),
         );
       }
     },
@@ -1012,8 +1032,15 @@ export function createPostgresBackend(
     },
 
     async transaction<T>(
-      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
-      options?: TransactionOptions,
+      fn: (tx: TransactionBackend) => Promise<T>,
+      options?: InternalTransactionOptions,
+    ): Promise<T> {
+      return backend.transactionWithNative((tx) => fn(tx), options);
+    },
+
+    async transactionWithNative<T>(
+      fn: (tx: TransactionBackend, sql: AnyPgTransaction) => Promise<T>,
+      options?: InternalTransactionOptions,
     ): Promise<T> {
       // #134/#135: NO DDL or ensure here. The tx-scoped backend's
       // fulltext-touching methods assert the durable contribution
@@ -1046,16 +1073,13 @@ export function createPostgresBackend(
                   | "repeatable read"
                   | "serializable",
               }),
-            ...((
-              options.accessMode === undefined &&
-              !temporaryWrites
-            ) ?
+            ...(options.accessMode === undefined && !temporaryWrites ?
               {}
             : {
                 accessMode:
                   temporaryWrites ?
                     ("read write" as const)
-                  : (options.accessMode!.replace("_", " ") as
+                  : (requireDefined(options.accessMode).replace("_", " ") as
                       "read only" | "read write"),
               }),
           }
@@ -1079,7 +1103,7 @@ export function createPostgresBackend(
       }, txConfig);
     },
 
-    adoptTransaction(externalTx: AdoptedTransaction): TransactionBackend {
+    adoptTransaction(externalTx: AnyPgTransaction): TransactionBackend {
       // #134: cross-store atomicity is unsafe without real rollback —
       // the caller's relational write on `externalTx` *would* still
       // commit even though the graph write could not be undone. Refuse
@@ -1099,7 +1123,11 @@ export function createPostgresBackend(
           },
         );
       }
-      assertAdoptedDialect<AnyPgDatabase>(externalTx, PgDatabase, "postgres");
+      assertAdoptedDialect<AnyPgTransaction>(
+        externalTx,
+        PgTransaction,
+        "postgres",
+      );
       // The caller owns BEGIN/COMMIT/ROLLBACK via its own
       // `db.transaction(...)`. We adopt the literal `tx` client and run
       // pure DML on it — no transaction is opened or closed here, and no
@@ -1253,16 +1281,16 @@ function createPostgresOperationBackend(
   // Route through the execution adapter so driver-specific result shapes
   // (`{rows}` for node-postgres / neon-serverless; bare array for
   // postgres-js) are normalized in one place.
-  async function execAll<T>(query: SQL): Promise<readonly T[]> {
+  async function execAll<T>(query: ExecutableSql): Promise<readonly T[]> {
     return executionAdapter.execute<T>(query);
   }
 
-  async function execGet<T>(query: SQL): Promise<T | undefined> {
+  async function execGet<T>(query: ExecutableSql): Promise<T | undefined> {
     const rows = await executionAdapter.execute<T>(query);
     return rows[0];
   }
 
-  async function execRun(query: SQL): Promise<void> {
+  async function execRun(query: ExecutableSql): Promise<void> {
     await executionAdapter.execute(query);
   }
 
@@ -1370,7 +1398,7 @@ function createPostgresOperationBackend(
    */
   async function runVectorSearchGucGroup<Row>(
     overrides: readonly SearchGucOverride[],
-    query: SQL,
+    query: ExecutableSql,
   ): Promise<readonly Row[]> {
     const runExclusive = executionAdapter.runExclusive;
     if (runExclusive === undefined) {
@@ -1408,7 +1436,7 @@ function createPostgresOperationBackend(
 
   async function runVectorSearch<Row = VectorSearchRow>(
     overrides: readonly SearchGucOverride[],
-    query: SQL,
+    query: ExecutableSql,
   ): Promise<readonly Row[]> {
     if (overrides.length === 0) {
       return execAll<Row>(query);
@@ -1613,9 +1641,11 @@ function createPostgresOperationBackend(
             // Store-compiled candidates (predicates + subclass + currency)
             // take precedence; the live-node default covers direct backend use.
             params.candidates ??
-              operationStrategy.buildLiveNodeIds(
+              buildLiveNodeCandidates(
+                tableNames.nodes,
                 params.graphId,
                 params.nodeKind,
+                nowIso(),
               ),
           );
           const gucOverrides = await vectorSearchGucOverrides(params);
@@ -1657,9 +1687,11 @@ function createPostgresOperationBackend(
               // Read-only, not marker-gated — see vectorSearch above.
               const candidates =
                 params.candidates ??
-                operationStrategy.buildLiveNodeIds(
+                buildLiveNodeCandidates(
+                  tableNames.nodes,
                   params.graphId,
                   params.nodeKind,
+                  nowIso(),
                 );
               const vectorParams: VectorSearchParams = {
                 graphId: params.graphId,
@@ -1680,11 +1712,11 @@ function createPostgresOperationBackend(
               const vectorSql = vectorStrategy.buildSearch(
                 slot,
                 vectorParams,
-                hybridCandidatesRef(),
+                portableSql.raw("SELECT node_id FROM tg_hybrid_cand"),
               );
               const statement = operationStrategy.buildHybridSearch(
                 { ...params, candidates },
-                vectorSql,
+                toDrizzleSql(vectorSql, "postgres"),
                 params.vector.metric === "cosine",
               );
               const gucOverrides = await vectorSearchGucOverrides({
@@ -1754,18 +1786,22 @@ function createPostgresOperationBackend(
           if (dropStatement !== undefined) {
             await execRun(dropStatement);
           }
-          const table = quoteIdentifier(
+          const table = portableSql.identifier(
             vectorStrategy.tableName(
               slot.graphId,
               slot.nodeKind,
               slot.fieldPath,
             ),
           );
-          await execRun(sql`ALTER TABLE ${table} SET (parallel_workers = 0)`);
+          await execRun(
+            portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`,
+          );
           try {
             await execRun(indexStatement);
           } finally {
-            await execRun(sql`ALTER TABLE ${table} RESET (parallel_workers)`);
+            await execRun(
+              portableSql`ALTER TABLE ${table} RESET (parallel_workers)`,
+            );
           }
         }
       }
@@ -1866,7 +1902,7 @@ function createPostgresOperationBackend(
 
     // === Query Execution ===
 
-    async execute<T>(query: SQL): Promise<readonly T[]> {
+    async execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
       // Statements the compiler branded as containing an ANN index scan
       // (inline `approximate: true`) get the same pgvector GUC wrapping
       // the search facade applies — most importantly
@@ -1874,7 +1910,8 @@ function createPostgresOperationBackend(
       // approximate query starves at the default ef_search frontier.
       // On pgvector < 0.8 the override list is empty and this falls
       // through to the plain fast path.
-      const annTypes = annIndexScanTypes(query);
+      const annTypes =
+        isSqlFragment(query) ? annIndexScanTypes(query) : undefined;
       if (annTypes !== undefined && vectorStrategy !== undefined) {
         const overrides: SearchGucOverride[] = [];
         for (const indexType of annTypes) {
@@ -1887,7 +1924,7 @@ function createPostgresOperationBackend(
     },
 
     compileSql(
-      query: SQL,
+      query: SqlFragment,
     ): Readonly<{ sql: string; params: readonly unknown[] }> {
       return executionAdapter.compile(query);
     },

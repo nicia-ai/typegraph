@@ -29,8 +29,9 @@ export {
   readRecordedClock,
   readRevisionOrigin,
 } from "../store/recorded-capture";
+export { storeBackend, transactionBackend } from "../store/runtime-port";
 export type { Store } from "../store/store";
 export { createStoreWithSchema } from "../store/store";
-export type { Edge, Node } from "../store/types";
+export { type Edge, type Node } from "../store/types";
 export { sha256Hex } from "../utils/hash";
 export { generateId } from "../utils/id";

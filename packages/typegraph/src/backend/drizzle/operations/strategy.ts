@@ -1,7 +1,9 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
+import { isSqlFragment } from "../../../query/sql-fragment";
 import { isPresent } from "../../../utils/presence";
+import { nowIso } from "../../row-mappers";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
@@ -32,7 +34,7 @@ import type {
   UpsertFulltextBatchParams,
   UpsertFulltextParams,
 } from "../../types";
-import { nowIso } from "../row-mappers";
+import { toDrizzleSql } from "../execution/types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 import { buildClearGraph, type ClearGraphStatement } from "./clear";
@@ -108,12 +110,6 @@ export type CommonOperationStrategy = Readonly<{
   ) => readonly SQL[];
   buildFulltextSearch: (params: FulltextSearchParams) => SQL;
   /**
-   * Subquery of live node ids for one `(graphId, nodeKind)` — the candidate
-   * set passed to `VectorStrategy.buildSearch` so vector top-k, like the
-   * fulltext search above, is computed over live rows in SQL.
-   */
-  buildLiveNodeIds: (graphId: string, nodeKind: string) => SQL;
-  /**
    * Composes the single-statement hybrid search: the caller supplies the
    * vector source SQL (strategy-owned); this member builds the fulltext
    * source over the same candidate set and fuses both via
@@ -125,10 +121,7 @@ export type CommonOperationStrategy = Readonly<{
     vectorScoreDescending: boolean,
   ) => SQL;
   buildInsertNode: (params: InsertNodeParams, timestamp: string) => SQL;
-  buildInsertNodeNoReturn: (
-    params: InsertNodeParams,
-    timestamp: string,
-  ) => SQL;
+  buildInsertNodeNoReturn: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodesBatch: (
     params: readonly InsertNodeParams[],
     timestamp: string,
@@ -143,10 +136,7 @@ export type CommonOperationStrategy = Readonly<{
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
   buildHardDeleteNode: (params: HardDeleteNodeParams) => SQL;
   buildInsertEdge: (params: InsertEdgeParams, timestamp: string) => SQL;
-  buildInsertEdgeNoReturn: (
-    params: InsertEdgeParams,
-    timestamp: string,
-  ) => SQL;
+  buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgesBatch: (
     params: readonly InsertEdgeParams[],
     timestamp: string,
@@ -204,21 +194,18 @@ export type SqliteOperationStrategy = CommonOperationStrategy;
 
 export type PostgresOperationStrategy = CommonOperationStrategy;
 
-type TableOperationBuilder = (
-  tables: Tables,
-  ...args: never[]
-) => SQL;
+type TableOperationBuilder = (tables: Tables, ...args: never[]) => SQL;
 
 type TableOperationBuilderMap = Readonly<Record<string, TableOperationBuilder>>;
 
-type BoundTableOperationBuilderMap<TBuilders extends TableOperationBuilderMap> = Readonly<{
-  [K in keyof TBuilders]: TBuilders[K] extends (
-    tables: Tables,
-    ...args: infer TArguments
-  ) => SQL
-    ? (...args: TArguments) => SQL
+type BoundTableOperationBuilderMap<TBuilders extends TableOperationBuilderMap> =
+  Readonly<{
+    [K in keyof TBuilders]: TBuilders[K] extends (
+      (tables: Tables, ...args: infer TArguments) => SQL
+    ) ?
+      (...args: TArguments) => SQL
     : never;
-}>;
+  }>;
 
 function bindTableOperationBuilders<TBuilders extends TableOperationBuilderMap>(
   tables: Tables,
@@ -232,7 +219,9 @@ function bindTableOperationBuilders<TBuilders extends TableOperationBuilderMap>(
     return [name, boundBuilder] as const;
   });
 
-  return Object.fromEntries(boundEntries) as BoundTableOperationBuilderMap<TBuilders>;
+  return Object.fromEntries(
+    boundEntries,
+  ) as BoundTableOperationBuilderMap<TBuilders>;
 }
 
 const COMMON_TABLE_OPERATION_BUILDERS = {
@@ -290,28 +279,38 @@ function createCommonOperationStrategy(
       params: UpsertFulltextParams,
       timestamp: string,
     ): readonly SQL[] =>
-      fulltextStrategy.buildUpsert(fulltextTable, params, timestamp),
+      fulltextStrategy
+        .buildUpsert(fulltextTable, params, timestamp)
+        .map((statement) => toDrizzleSql(statement, dialect)),
     buildDeleteFulltext: (params: DeleteFulltextParams): readonly SQL[] =>
-      fulltextStrategy.buildDelete(fulltextTable, params),
+      fulltextStrategy
+        .buildDelete(fulltextTable, params)
+        .map((statement) => toDrizzleSql(statement, dialect)),
     buildDeleteFulltextByNode: (
       graphId: string,
       nodeKind: string,
       nodeId: string,
     ): readonly SQL[] =>
-      fulltextStrategy.buildDelete(fulltextTable, {
-        graphId,
-        nodeKind,
-        nodeId,
-      }),
+      fulltextStrategy
+        .buildDelete(fulltextTable, {
+          graphId,
+          nodeKind,
+          nodeId,
+        })
+        .map((statement) => toDrizzleSql(statement, dialect)),
     buildUpsertFulltextBatch: (
       params: UpsertFulltextBatchParams,
       timestamp: string,
     ): readonly SQL[] =>
-      fulltextStrategy.buildBatchUpsert(fulltextTable, params, timestamp),
+      fulltextStrategy
+        .buildBatchUpsert(fulltextTable, params, timestamp)
+        .map((statement) => toDrizzleSql(statement, dialect)),
     buildDeleteFulltextBatch: (
       params: DeleteFulltextBatchParams,
     ): readonly SQL[] =>
-      fulltextStrategy.buildBatchDelete(fulltextTable, params),
+      fulltextStrategy
+        .buildBatchDelete(fulltextTable, params)
+        .map((statement) => toDrizzleSql(statement, dialect)),
     buildFulltextSearch: (params: FulltextSearchParams): SQL =>
       buildFulltextSearch(
         fulltextTable,
@@ -321,10 +320,13 @@ function createCommonOperationStrategy(
         // Store-compiled candidates (predicates + subclass + currency)
         // take precedence; the live-node default covers direct backend use.
         params.candidates ??
-          liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind, nowIso()),
+          liveNodeIdsSubquery(
+            tables.nodes,
+            params.graphId,
+            params.nodeKind,
+            nowIso(),
+          ),
       ),
-    buildLiveNodeIds: (graphId: string, nodeKind: string): SQL =>
-      liveNodeIdsSubquery(tables.nodes, graphId, nodeKind, nowIso()),
     buildHybridSearch: (
       params: HybridSearchParams,
       vectorSql: SQL,
@@ -365,7 +367,10 @@ function createCommonOperationStrategy(
         hybridCandidatesRef(),
       );
       return buildHybridSearchStatement({
-        candidatesSql: candidates,
+        candidatesSql:
+          isSqlFragment(candidates) ?
+            toDrizzleSql(candidates, dialect)
+          : candidates,
         vectorSql,
         vectorScoreDescending,
         fulltextSql,
@@ -404,24 +409,31 @@ function createCommonOperationStrategy(
       return buildSetActiveSchema(tables, graphId, version, dialect);
     },
     buildTableExists(tableName: string): SQL {
-      if (dialect === "postgres") {
-        // `pg_table_is_visible` resolves visibility through the session
-        // `search_path` — exactly how the unqualified DELETE / ANALYZE this
-        // probe guards resolves `tableName`. Scoping to `current_schema()`
-        // instead would report the table missing whenever it lives in a
-        // search_path schema that is not the current one (a shared-schema /
-        // multi-tenant deployment), skipping a statement that would in fact
-        // have hit the table — a guard narrower than what it protects.
-        return sql`
-          SELECT c.relname AS table_name
-          FROM pg_catalog.pg_class AS c
-          WHERE c.relname = ${tableName}
-            AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-            AND pg_catalog.pg_table_is_visible(c.oid)
-          LIMIT 1
-        `;
+      switch (dialect) {
+        case "postgres": {
+          // `pg_table_is_visible` resolves visibility through the session
+          // `search_path` — exactly how the unqualified DELETE / ANALYZE this
+          // probe guards resolves `tableName`. Scoping to `current_schema()`
+          // instead would report the table missing whenever it lives in a
+          // search_path schema that is not the current one (a shared-schema /
+          // multi-tenant deployment), skipping a statement that would in fact
+          // have hit the table — a guard narrower than what it protects.
+          return sql`
+            SELECT c.relname AS table_name
+            FROM pg_catalog.pg_class AS c
+            WHERE c.relname = ${tableName}
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND pg_catalog.pg_table_is_visible(c.oid)
+            LIMIT 1
+          `;
+        }
+        case "sqlite": {
+          return sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`;
+        }
+        default: {
+          return dialect satisfies never;
+        }
       }
-      return sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`;
     },
     buildClearGraph(graphId: string): readonly ClearGraphStatement[] {
       return buildClearGraph(tables, graphId);

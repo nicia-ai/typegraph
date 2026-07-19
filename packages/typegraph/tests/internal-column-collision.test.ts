@@ -24,6 +24,7 @@ import {
   buildSelectiveFields,
   FieldAccessTracker,
 } from "../src/query/execution/field-tracker";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -104,14 +105,14 @@ describe("internal column name collision (issue #29)", () => {
 
     const ts = results.find((r) => r.name === "TypeScript");
     expect(ts).toBeDefined();
-    expect(ts!.version).toBe(3);
-    expect(ts!.lifecycle).toBe("active");
-    expect(ts!.createdAt).toBeDefined();
+    expect(requireDefined(ts).version).toBe(3);
+    expect(requireDefined(ts).lifecycle).toBe("active");
+    expect(requireDefined(ts).createdAt).toBeDefined();
 
     const rust = results.find((r) => r.name === "Rust");
     expect(rust).toBeDefined();
-    expect(rust!.version).toBe(1);
-    expect(rust!.lifecycle).toBe("draft");
+    expect(requireDefined(rust).version).toBe(1);
+    expect(requireDefined(rust).lifecycle).toBe("draft");
   });
 
   it("applies predicates to user 'version' property", async () => {
@@ -165,8 +166,8 @@ describe("internal column name collision (issue #29)", () => {
       .execute();
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.userVersion).toBe(42);
-    expect(results[0]!.metaVersion).toBe(1);
+    expect(requireDefined(results[0]).userVersion).toBe(42);
+    expect(requireDefined(results[0]).metaVersion).toBe(1);
   });
 
   it("preserves distinction after update (meta.version increments)", async () => {
@@ -193,9 +194,9 @@ describe("internal column name collision (issue #29)", () => {
       .execute();
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.userVersion).toBe(2);
-    expect(results[0]!.lifecycle).toBe("active");
-    expect(results[0]!.metaVersion).toBe(2);
+    expect(requireDefined(results[0]).userVersion).toBe(2);
+    expect(requireDefined(results[0]).lifecycle).toBe("active");
+    expect(requireDefined(results[0]).metaVersion).toBe(2);
   });
 
   it("generates unique outputNames for user props vs system fields", () => {
@@ -230,7 +231,7 @@ describe("internal column name collision (issue #29)", () => {
     const aliases: string[] = [];
     let match;
     while ((match = aliasPattern.exec(sqlText)) !== null) {
-      aliases.push(match[1]!);
+      aliases.push(requireDefined(match[1]));
     }
 
     const duplicates = aliases.filter(
@@ -270,13 +271,13 @@ describe("internal column name collision (issue #29)", () => {
 
     for (const dialect of ["sqlite", "postgres"] as const) {
       const compiled = compileQuery(ast, "collision_test", { dialect });
-      const sqlText = backend.compileSql!(compiled).sql;
+      const sqlText = requireDefined(backend.compileSql)(compiled).sql;
 
       const aliasPattern = /AS\s+"([^"]+)"/g;
       const aliases: string[] = [];
       let match;
       while ((match = aliasPattern.exec(sqlText)) !== null) {
-        aliases.push(match[1]!);
+        aliases.push(requireDefined(match[1]));
       }
 
       const duplicates = aliases.filter(
@@ -314,8 +315,8 @@ describe("internal column name collision (issue #29)", () => {
       .execute();
 
     expect(results).toHaveLength(3);
-    expect(results[0]!.version).toBe(1);
-    expect(results[1]!.version).toBe(2);
-    expect(results[2]!.version).toBe(3);
+    expect(requireDefined(results[0]).version).toBe(1);
+    expect(requireDefined(results[1]).version).toBe(2);
+    expect(requireDefined(results[2]).version).toBe(3);
   });
 });

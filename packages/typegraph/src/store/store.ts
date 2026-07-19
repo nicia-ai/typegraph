@@ -16,14 +16,17 @@ import {
   type GraphWriteBackend,
   type RawBackend,
 } from "../backend/branded";
+import { createGraphBackendProjection } from "../backend/graph-backend-projection";
 import {
   createEdgeRowMapper,
   createNodeRowMapper,
   POSTGRES_ROW_MAPPER_CONFIG,
   SQLITE_ROW_MAPPER_CONFIG,
-} from "../backend/drizzle/row-mappers";
+} from "../backend/row-mappers";
 import {
-  type AdoptedTransaction,
+  type AdapterBackend,
+  type BackendCapabilities,
+  createTransactionReadBackend,
   type GraphBackend,
   runOptionallyInTransaction,
   type SchemaVersionRow,
@@ -87,6 +90,7 @@ import {
   type SqlSchema,
 } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
+import type { SqlDialect } from "../query/dialect/types";
 import { type VectorSlot } from "../query/dialect/vector-strategy";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import {
@@ -103,6 +107,7 @@ import {
 import { type SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
+import { requireDefined } from "../utils/presence";
 import {
   createGraphAlgorithms,
   type GraphAlgorithms,
@@ -115,6 +120,10 @@ import {
   type NodeOperations,
 } from "./collection-factory";
 import { resolveTemporalReadParams } from "./collections/temporal-read-params";
+import {
+  createHistoryStoreBackendProjection,
+  type HistoryStoreBackend,
+} from "./history-store-backend";
 import { introspectSchema, type SchemaIntrospection } from "./introspect";
 import {
   backendSupportsIndexMaterialization,
@@ -164,15 +173,15 @@ import {
   advanceRevisionClock,
   assertRecordedCaptureTransactionIsolation,
   assertRevisionTrackableBackend,
-  createHistoryUnsafeSqlRef,
   createRecordedBackend,
   createRecordedTransactionScope,
-  createRevisionTrackingUnsafeSqlRef,
   ensureRevisionOrigin,
   lockRecordedGraphWrite,
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
+  throwHistoryUnsafeSqlAccess,
+  throwRevisionTrackingUnsafeSqlAccess,
   withRecordedFlushObserver,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture";
@@ -182,6 +191,7 @@ import {
   type RecordedReadService,
 } from "./recorded-read-service";
 import { rowToEdge, rowToNode } from "./row-mappers";
+import { STORE_RUNTIME, type StoreRuntime } from "./runtime-port";
 import { StoreSearch } from "./search-facade";
 import {
   RecordedStoreView,
@@ -201,6 +211,7 @@ import {
   wrapTransactionCollections,
 } from "./transaction-receipt";
 import {
+  type AdapterTransactionContext,
   AUTO_REFRESH_STATISTICS_ROW_THRESHOLD,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
@@ -210,17 +221,20 @@ import {
   type HistoryStoreOptions,
   type HookContext,
   type LiveStoreOptions,
+  type MeasurableAdapterTransactionContext,
   type MeasurableTransactionContext,
   type Node,
   type OperationHookContext,
   type QueryOptions,
+  type RecordedReadStoreOptions,
   type ScopedMeasure,
-  type SqlAvailability,
   type StoreHooks,
   type StoreOptions,
   type StoreRef,
+  TRANSACTION_RUNTIME,
   type TransactionContext,
   type TransactionOutcome,
+  type UnboundLiveStoreOptions,
 } from "./types";
 
 type StoreSchemaMetadata = Readonly<{
@@ -262,10 +276,13 @@ const CAUGHT_UP_VERB_DETAILS: Readonly<
   },
 };
 
+const ROW_MAPPER_CONFIGS = {
+  postgres: POSTGRES_ROW_MAPPER_CONFIG,
+  sqlite: SQLITE_ROW_MAPPER_CONFIG,
+} satisfies Record<SqlDialect, typeof POSTGRES_ROW_MAPPER_CONFIG>;
+
 function rowMapperConfigFor(backend: GraphBackend | TransactionBackend) {
-  return backend.dialect === "postgres" ?
-      POSTGRES_ROW_MAPPER_CONFIG
-    : SQLITE_ROW_MAPPER_CONFIG;
+  return ROW_MAPPER_CONFIGS[backend.dialect];
 }
 
 // ============================================================
@@ -383,7 +400,184 @@ function transactionOutcome<T>(
   };
 }
 
-export class Store<G extends GraphDef> {
+/** Clones an internal context without evaluating accessor properties. */
+function overlayPropertyDescriptors<
+  TBase extends object,
+  TOverlay extends object,
+>(base: TBase, overlay: TOverlay): TBase & TOverlay {
+  return Object.defineProperties(Object.create(Reflect.getPrototypeOf(base)), {
+    ...Object.getOwnPropertyDescriptors(base),
+    ...Object.getOwnPropertyDescriptors(overlay),
+  }) as TBase & TOverlay;
+}
+
+type StoreCore<G extends GraphDef> = Readonly<{
+  [STORE_RUNTIME]: StoreRuntime<G>;
+  graph: G;
+  graphId: string;
+  capabilities: BackendCapabilities;
+  registry: KindRegistry;
+  historyEnabled: boolean;
+  revisionTrackingEnabled: boolean;
+  revisionSchema: SqlSchema;
+  recordedReadBound: boolean;
+  nodes: GraphNodeCollections<G>;
+  edges: GraphEdgeCollections<G>;
+  algorithms: GraphAlgorithms<G>;
+  search: StoreSearch<G>;
+  getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
+  getNodeCollectionOrThrow: (kind: string) => DynamicNodeCollection;
+  getEdgeCollection: (kind: string) => DynamicEdgeCollection | undefined;
+  getEdgeCollectionOrThrow: (kind: string) => DynamicEdgeCollection;
+  getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
+  getNodePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
+  getEdgePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
+  getEdgePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
+  introspect: () => SchemaIntrospection;
+  query: () => InitialQueryBuilder<G, "open">;
+  asOf: (asOf: string) => StoreView<G>;
+  asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
+  recordedNow: () => Promise<RecordedInstant | undefined>;
+  revisionNow: () => Promise<string | undefined>;
+  revisionOriginNow: () => Promise<string>;
+  view: (coordinate: StoreViewCoordinate) => StoreView<G>;
+  snapshot: () => StoreView<G>;
+  batch: <
+    const Queries extends readonly [
+      BatchableQuery<unknown>,
+      BatchableQuery<unknown>,
+      ...BatchableQuery<unknown>[],
+    ],
+  >(
+    ...queries: Queries
+  ) => Promise<BatchResults<Queries>>;
+  subgraph: <
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: SubgraphOptions<G, EK, NK, P>,
+  ) => Promise<SubgraphResult<G, NK, EK, P>>;
+  clear: () => Promise<void>;
+  refreshStatistics: () => Promise<void>;
+  materializeIndexes: (
+    options?: MaterializeIndexesOptions,
+  ) => Promise<MaterializeIndexesResult>;
+  materializeSystemIndexes: (
+    options?: MaterializeSystemIndexesOptions,
+  ) => Promise<MaterializeIndexesResult>;
+  reembedVectorField: (
+    kind: string,
+    fieldPath: string,
+    options?: ReembedVectorFieldOptions,
+  ) => Promise<ReembedVectorFieldResult>;
+  materializeRemovals: (
+    options?: MaterializeRemovalsOptions,
+  ) => Promise<MaterializeRemovalsResult>;
+  close: () => Promise<void>;
+}>;
+
+type StoreTransactions<G extends GraphDef> = Readonly<{
+  transaction: <T>(
+    fn: (tx: TransactionContext<G>) => Promise<T>,
+    options?: TransactionOptions,
+  ) => Promise<T>;
+  transactionWithReceipt: <T>(
+    fn: (tx: MeasurableTransactionContext<G>) => Promise<T>,
+    options?: TransactionOptions,
+  ) => Promise<TransactionOutcome<T>>;
+}>;
+
+interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
+  readonly evolve: <TRefStore extends StoreCore<G> = TStore>(
+    extension: GraphExtension,
+    options?: Readonly<{
+      ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
+      eager?: MaterializeIndexesOptions;
+    }>,
+  ) => Promise<TStore>;
+  readonly deprecateKinds: <TRefStore extends StoreCore<G> = TStore>(
+    names: readonly string[],
+    options?: Readonly<{
+      ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
+    }>,
+  ) => Promise<TStore>;
+  readonly undeprecateKinds: <TRefStore extends StoreCore<G> = TStore>(
+    names: readonly string[],
+    options?: Readonly<{
+      ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
+    }>,
+  ) => Promise<TStore>;
+  readonly removeKinds: <TRefStore extends StoreCore<G> = TStore>(
+    names: readonly string[],
+    options?: Readonly<{
+      ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
+      eager?: MaterializeRemovalsOptions;
+    }>,
+  ) => Promise<TStore>;
+}
+
+function syncStoreReplacementRef<
+  G extends GraphDef,
+  TRefStore extends StoreCore<G>,
+>(ref: StoreRef<TRefStore> | undefined, replacement: StoreCore<G>): void {
+  if (ref === undefined) return;
+  // StoreEvolution admits only refs whose value is a supertype of the returned
+  // Store flavor. Runtime implementations use one broader class for every
+  // overload, so the compiler cannot recover that public conditional here.
+  ref.current = replacement as unknown as TRefStore;
+}
+
+/**
+ * The default TypeGraph Store contract. It contains the complete graph API and
+ * graph-owned transactions while keeping adapter-native handles, backend
+ * internals, and caller-owned transaction adoption out of the public surface.
+ */
+export type Store<G extends GraphDef> = StoreCore<G> &
+  StoreTransactions<G> &
+  StoreEvolution<G, Store<G>>;
+
+/**
+ * A Store with explicit adapter interoperability. Adapter entrypoints return
+ * this surface so native transaction handles remain precisely typed without
+ * leaking into the default Store contract.
+ */
+export type AdapterStore<
+  G extends GraphDef,
+  TNativeTransaction,
+> = StoreCore<G> &
+  StoreEvolution<G, AdapterStore<G, TNativeTransaction>> &
+  AdapterStoreTransactions<G, TNativeTransaction> &
+  Readonly<{ backend: GraphBackend }>;
+
+type AdapterStoreTransactions<
+  G extends GraphDef,
+  TNativeTransaction,
+> = Readonly<{
+  transaction: <T>(
+    fn: (tx: AdapterTransactionContext<G, TNativeTransaction>) => Promise<T>,
+    options?: TransactionOptions,
+  ) => Promise<T>;
+  transactionWithReceipt: <T>(
+    fn: (
+      tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: TransactionOptions,
+  ) => Promise<TransactionOutcome<T>>;
+  withTransaction: (
+    externalTransaction: TNativeTransaction,
+  ) => AdapterTransactionContext<G, TNativeTransaction>;
+  withRecordedTransaction: <T>(
+    externalTransaction: TNativeTransaction,
+    fn: (
+      tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+  ) => Promise<TransactionOutcome<T>>;
+}>;
+
+class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
+  readonly [STORE_RUNTIME]: StoreRuntime<G>;
   readonly #graph: G;
   /**
    * Bare backend for DDL, vector-storage, and bulk-materialization work that must
@@ -391,6 +585,7 @@ export class Store<G extends GraphDef> {
    */
   readonly #baseBackend: RawBackend;
   readonly #backend: GraphWriteBackend;
+  readonly #adapterBackend: AdapterBackend<TNativeTransaction> | undefined;
   readonly #captureEnabled: boolean;
   readonly #revisionTrackingEnabled: boolean;
   #revisionOrigin: Promise<string> | undefined;
@@ -416,9 +611,11 @@ export class Store<G extends GraphDef> {
     backend: GraphBackend,
     options?: StoreOptions,
     schemaMetadata?: StoreSchemaMetadata,
+    adapterBackend?: AdapterBackend<TNativeTransaction>,
   ) {
     this.#graph = graph;
     this.#baseBackend = asRawBackend(backend);
+    this.#adapterBackend = adapterBackend;
     this.#captureEnabled = options?.history === true;
     this.#revisionTrackingEnabled =
       this.#captureEnabled || options?.revisionTracking === true;
@@ -472,6 +669,27 @@ export class Store<G extends GraphDef> {
       options?.queryDefaults?.traversalExpansion ?? "inverse";
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
+    this[STORE_RUNTIME] = {
+      backend: this.#backend,
+      sealedQuery: (coordinate) => this.sealedQuery(coordinate),
+      recordedNodeGetById: (kind, id, coordinate) =>
+        this.recordedNodeGetById(kind, id, coordinate),
+      recordedNodeGetByIds: (kind, ids, coordinate) =>
+        this.recordedNodeGetByIds(kind, ids, coordinate),
+      recordedEdgeGetById: (kind, id, coordinate) =>
+        this.recordedEdgeGetById(kind, id, coordinate),
+      recordedEdgeGetByIds: (kind, ids, coordinate) =>
+        this.recordedEdgeGetByIds(kind, ids, coordinate),
+      subgraphAtCoordinate: (rootId, subgraphOptions) =>
+        this.subgraphAtCoordinate(rootId, subgraphOptions),
+      algorithmsAtCoordinate: (coordinate) =>
+        this.algorithmsAtCoordinate(coordinate),
+    };
+    Object.defineProperty(this, STORE_RUNTIME, {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+    });
   }
 
   // === Accessors ===
@@ -486,14 +704,14 @@ export class Store<G extends GraphDef> {
     return this.#graph.id;
   }
 
+  /** Runtime features available through this store's configured backend. */
+  get capabilities(): BackendCapabilities {
+    return this.#baseBackend.capabilities;
+  }
+
   /** The kind registry for ontology lookups */
   get registry(): KindRegistry {
     return this.#registry;
-  }
-
-  /** The database backend */
-  get backend(): GraphBackend {
-    return this.#backend;
   }
 
   /**
@@ -725,7 +943,7 @@ export class Store<G extends GraphDef> {
    */
   getNodePropsSchema(kind: string): z.ZodObject<z.ZodRawShape> | undefined {
     if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
-    return this.#graph.nodes[kind]!.type.schema;
+    return requireDefined(this.#graph.nodes[kind]).type.schema;
   }
 
   /**
@@ -748,7 +966,7 @@ export class Store<G extends GraphDef> {
    */
   getEdgePropsSchema(kind: string): z.ZodObject<z.ZodRawShape> | undefined {
     if (!Object.hasOwn(this.#graph.edges, kind)) return undefined;
-    return this.#graph.edges[kind]!.type.schema;
+    return requireDefined(this.#graph.edges[kind]).type.schema;
   }
 
   /**
@@ -1479,20 +1697,16 @@ export class Store<G extends GraphDef> {
    * The transaction context provides the same collection API as the Store:
    * - `tx.nodes.Person.create(...)` - Create a node
    * - `tx.edges.worksAt.create(...)` - Create an edge
-   * - `tx.sql` - the raw Drizzle handle **bound to this same
-   *   transaction**, for writing the caller's own relational tables in
-   *   the same atomic boundary (the graph-owned counterpart of
-   *   {@link Store.withTransaction}). See {@link TransactionContext}
-   *   for per-backend semantics. To decide at runtime whether `tx.sql` is
-   *   usable, branch on `tx.sqlAvailability` rather than truthiness-testing
-   *   `tx.sql` — under history capture or revision tracking `tx.sql` is
-   *   present-but-throwing (`sqlAvailability` is `"history"` /
-   *   `"revisionTracking"`), and it is `undefined` only on the non-transactional
-   *   fallback (`sqlAvailability === "unavailable"`). When it reports
-   *   `"history"` / `"revisionTracking"`, raw SQL is disabled because it would
-   *   bypass recorded-time capture or the revision anchor; use the typed
-   *   collections inside `transaction()` or
-   *   {@link Store.withRecordedTransaction}.
+   * - `tx.backend` - a read-only backend projection bound to this transaction
+   *
+   * {@link AdapterStore} transaction callbacks additionally expose `tx.sql`,
+   * the adapter-native handle bound to the same atomic boundary. Branch on
+   * `tx.sqlAvailability`: `"available"` carries the handle and `"unavailable"`
+   * carries `undefined`. History and revision-tracking contexts make `tx.sql`
+   * unusable in their public types; reflective or type-suppressed runtime
+   * access throws because raw SQL would bypass capture or the revision anchor.
+   * Use typed collections or {@link AdapterStore.withRecordedTransaction} in
+   * those modes.
    *
    * @example
    * ```typescript
@@ -1551,23 +1765,29 @@ export class Store<G extends GraphDef> {
    *   reject stronger snapshot isolation levels.
    */
   transaction<T>(
-    this: HistoryStore<G>,
-    fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
+    this: AdapterHistoryStore<G, TNativeTransaction>,
+    fn: (
+      tx: AdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T>;
 
   transaction<T>(
-    fn: (tx: TransactionContext<G>) => Promise<T>,
+    fn: (tx: AdapterTransactionContext<G, TNativeTransaction>) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T>;
 
   async transaction<T>(
     fn:
-      | ((tx: TransactionContext<G>) => Promise<T>)
-      | ((tx: HistoryTransactionContext<G>) => Promise<T>),
+      | ((tx: AdapterTransactionContext<G, TNativeTransaction>) => Promise<T>)
+      | ((
+          tx: AdapterHistoryTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>),
     options?: TransactionOptions,
   ): Promise<T> {
-    const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
+    const invoke = fn as (
+      tx: AdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>;
     const { result } = await this.#runTransaction(invoke, options, undefined);
     return result;
   }
@@ -1585,7 +1805,7 @@ export class Store<G extends GraphDef> {
    * The receipt does not count writes that bypass the `tx.nodes.*` /
    * `tx.edges.*` collections, such as direct backend writes, raw SQL, or
    * import helpers. The adopted-commit sibling
-   * {@link Store.withRecordedTransaction} also returns a
+   * {@link AdapterStore.withRecordedTransaction} also returns a
    * {@link TransactionOutcome}; only `withTransaction` (whose commit belongs
    * entirely to the caller with no flush point) produces no receipt. On
    * non-transactional backends, the receipt is still returned, but it describes
@@ -1614,23 +1834,33 @@ export class Store<G extends GraphDef> {
    * ```
    */
   transactionWithReceipt<T>(
-    this: HistoryStore<G>,
-    fn: (tx: MeasurableHistoryTransactionContext<G>) => Promise<T>,
+    this: AdapterHistoryStore<G, TNativeTransaction>,
+    fn: (
+      tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<TransactionOutcome<T>>;
 
   transactionWithReceipt<T>(
-    fn: (tx: MeasurableTransactionContext<G>) => Promise<T>,
+    fn: (
+      tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<TransactionOutcome<T>>;
 
   async transactionWithReceipt<T>(
     fn:
-      | ((tx: MeasurableTransactionContext<G>) => Promise<T>)
-      | ((tx: MeasurableHistoryTransactionContext<G>) => Promise<T>),
+      | ((
+          tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>)
+      | ((
+          tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>),
     options?: TransactionOptions,
   ): Promise<TransactionOutcome<T>> {
-    const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
+    const invoke = fn as (
+      tx: AdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>;
     const receiptRecorder = createTransactionReceiptRecorder();
     const { result, recordedByGraph } = await this.#runTransaction(
       invoke,
@@ -1646,7 +1876,9 @@ export class Store<G extends GraphDef> {
   }
 
   async #runTransaction<T>(
-    invoke: (tx: TransactionContext<G>) => Promise<T>,
+    invoke: (
+      tx: AdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
     backendOptions: TransactionOptions | undefined,
     receiptRecorder: TransactionReceiptRecorder | undefined,
   ): Promise<TransactionRunResult<T>> {
@@ -1664,22 +1896,29 @@ export class Store<G extends GraphDef> {
           receiptRecorder,
         ));
       }
-      const fallbackContext: TransactionContext<G> = {
-        nodes,
-        edges,
-        // No real transaction: `tx.sql` is absent and there is no atomicity.
-        sqlAvailability: "unavailable",
-        backend: this.#backend,
-        getNodeCollection: (kind) =>
-          this.#resolveDynamicNodeCollection(nodes, kind),
-        // No transaction, no deferral: operations apply as they happen, so
-        // their hooks fire immediately.
-        runNodeOperationHooks: (operation, kind, id, hookedFunction) =>
-          this.#withOperationHooks(
-            this.#createOperationContext(operation, "node", kind, id),
-            hookedFunction,
-          ),
-      };
+      const fallbackContext: AdapterTransactionContext<G, TNativeTransaction> =
+        {
+          nodes,
+          edges,
+          // No real transaction: `tx.sql` is absent and there is no atomicity.
+          sqlAvailability: "unavailable",
+          backend: createTransactionReadBackend(this.#backend),
+          [TRANSACTION_RUNTIME]: {
+            backend: this.#backend,
+            runNodeOperationHooks: (operation, kind, id, hookedFunction) =>
+              this.#withOperationHooks(
+                this.#createOperationContext(operation, "node", kind, id),
+                hookedFunction,
+              ),
+          },
+          getNodeCollection: (kind: string) =>
+            this.#resolveDynamicNodeCollection(nodes, kind),
+        };
+      Object.defineProperty(fallbackContext, TRANSACTION_RUNTIME, {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+      });
       // `measure` on this non-transactional fallback scopes writes that
       // individually committed rather than one atomic commit, mirroring the
       // receipt caveat.
@@ -1718,18 +1957,28 @@ export class Store<G extends GraphDef> {
         })
       : backendOptions;
     try {
-      const result = await this.#backend.transaction(
-        async (txBackend, sql) =>
-          invoke(
-            this.#buildTransactionContext(
-              txBackend,
-              sql,
-              runHooks,
-              receiptRecorder,
-            ),
+      const run = async (
+        txBackend: TransactionBackend,
+        nativeTransaction: TNativeTransaction | undefined,
+      ): Promise<T> =>
+        invoke(
+          this.#buildTransactionContext(
+            txBackend,
+            nativeTransaction,
+            runHooks,
+            receiptRecorder,
           ),
-        transactionOptions,
-      );
+        );
+      const result =
+        this.#captureEnabled || this.#adapterBackend === undefined ?
+          await this.#backend.transaction(
+            (txBackend) => run(txBackend, undefined),
+            transactionOptions,
+          )
+        : await this.#adapterBackend.transactionWithNative(
+            (txBackend, nativeTransaction) => run(txBackend, nativeTransaction),
+            transactionOptions,
+          );
       for (const outcome of pending) {
         this.#hooks.onOperationEnd?.(outcome.ctx, {
           durationMs: outcome.durationMs,
@@ -1772,7 +2021,7 @@ export class Store<G extends GraphDef> {
    * Fulltext operations assert the durable materialization marker (a
    * cached SELECT) and throw {@link StoreNotInitializedError} on a
    * missing/stale/failed marker rather than migrating mid-transaction —
-   * so boot the parent store via `createStoreWithSchema` once at
+   * so boot the parent store via `createAdapterStoreWithSchema` once at
    * startup.
    *
    * @example
@@ -1797,17 +2046,16 @@ export class Store<G extends GraphDef> {
    *
    * Not available when the store was created with `{ history: true }`: a
    * caller-owned transaction context would let writes happen after capture has
-   * lost its flush point. On a {@link HistoryStore} this is a **compile error**
-   * at the call site (the `externalTx` argument is rejected against a message
-   * type naming {@link Store.withRecordedTransaction}); the runtime guard still
-   * throws `ConfigurationError`
+   * lost its flush point. {@link AdapterHistoryStore} omits this method, while
+   * the runtime guard still throws `ConfigurationError` if the public contract
+   * is bypassed
    * (`RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION`) if the check is
-   * suppressed. Use {@link Store.withRecordedTransaction} on a history-enabled
+   * suppressed. Use {@link AdapterStore.withRecordedTransaction} on a history-enabled
    * store, which adopts the same external transaction but flushes recorded-time
    * capture before the caller commits.
    *
    * @throws {ConfigurationError} when the store has history capture enabled
-   *   (use {@link Store.withRecordedTransaction} instead), or when the backend
+   *   (use {@link AdapterStore.withRecordedTransaction} instead), or when the backend
    *   cannot adopt an external transaction — either it is not a Drizzle
    *   Postgres/SQLite backend, or `backend.capabilities.transactions` is `false`
    *   (`drizzle-orm/neon-http`, Cloudflare D1, SQLite
@@ -1817,21 +2065,17 @@ export class Store<G extends GraphDef> {
    * @throws {StoreNotInitializedError} at point of use, when a fulltext
    *   operation on the returned context observes a missing/stale/failed
    *   durable materialization marker (parent store not booted via
-   *   `createStoreWithSchema`). Rolls back the caller's transaction
+   *   `createAdapterStoreWithSchema`). Rolls back the caller's transaction
    *   without emitting any DDL.
    */
-  withTransaction<This extends Store<G>>(
-    this: This,
-    externalTx: This extends HistoryStore<G> ? HistoryWithTransactionUnavailable
-    : AdoptedTransaction,
-  ): This extends HistoryStore<G> ? never : TransactionContext<G>;
-
-  withTransaction(externalTx: AdoptedTransaction): TransactionContext<G> {
+  withTransaction(
+    externalTx: TNativeTransaction,
+  ): AdapterTransactionContext<G, TNativeTransaction> {
     if (this.#captureEnabled) {
       throw recordedCaptureRequiresCallbackTransactionError();
     }
-    const adopt = this.#backend.adoptTransaction;
-    if (!adopt) {
+    const adopt = this.#adapterBackend?.adoptTransaction;
+    if (adopt === undefined) {
       throw new ConfigurationError(
         "This backend cannot adopt an external transaction for cross-store " +
           "atomicity. adoptTransaction is provided only by the Drizzle " +
@@ -1885,7 +2129,7 @@ export class Store<G extends GraphDef> {
    * Write your own relational tables through the **external transaction handle
    * you passed in** (`externalTx`) — it *is* the pinned connection. `tx.sql` is
    * unavailable here (it is a fail-loud guard under history capture, since raw
-   * SQL bypasses recorded-time capture, and `HistoryTransactionContext` types it
+   * SQL bypasses recorded-time capture, and `AdapterHistoryTransactionContext` types it
    * `sql?: never`). Writing through `externalTx` is the sanctioned way to get
    * cross-store atomicity on a history-enabled store:
    *
@@ -1905,24 +2149,32 @@ export class Store<G extends GraphDef> {
    * graph writes) so two queries never race on that connection.
    */
   withRecordedTransaction<T>(
-    this: HistoryStore<G>,
-    externalTx: AdoptedTransaction,
-    fn: (tx: MeasurableHistoryTransactionContext<G>) => Promise<T>,
+    this: AdapterHistoryStore<G, TNativeTransaction>,
+    externalTx: TNativeTransaction,
+    fn: (
+      tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
   ): Promise<TransactionOutcome<T>>;
 
   withRecordedTransaction<T>(
-    externalTx: AdoptedTransaction,
-    fn: (tx: MeasurableTransactionContext<G>) => Promise<T>,
+    externalTx: TNativeTransaction,
+    fn: (
+      tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
   ): Promise<TransactionOutcome<T>>;
 
   async withRecordedTransaction<T>(
-    externalTx: AdoptedTransaction,
+    externalTx: TNativeTransaction,
     fn:
-      | ((tx: MeasurableTransactionContext<G>) => Promise<T>)
-      | ((tx: MeasurableHistoryTransactionContext<G>) => Promise<T>),
+      | ((
+          tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>)
+      | ((
+          tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>),
   ): Promise<TransactionOutcome<T>> {
-    const adopt = this.#baseBackend.adoptTransaction;
-    if (!adopt) {
+    const adopt = this.#adapterBackend?.adoptTransaction;
+    if (adopt === undefined) {
       throw new ConfigurationError(
         "This backend cannot adopt an external transaction for recorded-time capture.",
         { capability: "adoptTransaction" },
@@ -1951,7 +2203,9 @@ export class Store<G extends GraphDef> {
       await lockRecordedGraphWrite(scope.backend, this.graphId);
     }
     const receiptRecorder = createTransactionReceiptRecorder();
-    const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
+    const invoke = fn as (
+      tx: AdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>;
     const result = await invoke(
       this.#buildTransactionContext(
         scope.backend,
@@ -1993,28 +2247,29 @@ export class Store<G extends GraphDef> {
    * the recorded instant is a whole-transaction flush concern.
    */
   #attachMeasure(
-    context: TransactionContext<G>,
-  ): MeasurableTransactionContext<G> {
-    const measure: ScopedMeasure<MeasurableTransactionContext<G>> = async (
-      fn,
-    ) => {
+    context: AdapterTransactionContext<G, TNativeTransaction>,
+  ): MeasurableAdapterTransactionContext<G, TNativeTransaction> {
+    const measure: ScopedMeasure<
+      MeasurableAdapterTransactionContext<G, TNativeTransaction>
+    > = async (fn) => {
       const scopeRecorder = createTransactionReceiptRecorder();
       const { nodes, edges } = wrapTransactionCollections(
         context.nodes,
         context.edges,
         scopeRecorder,
       );
-      const scoped = this.#attachMeasure({
-        ...context,
-        nodes,
-        edges,
-        getNodeCollection: (kind) =>
-          this.#resolveDynamicNodeCollection(nodes, kind),
-      });
+      const scoped = this.#attachMeasure(
+        overlayPropertyDescriptors(context, {
+          nodes,
+          edges,
+          getNodeCollection: (kind: string) =>
+            this.#resolveDynamicNodeCollection(nodes, kind),
+        }),
+      );
       const result = await fn(scoped);
       return { result, receipt: scopeRecorder.snapshot() };
     };
-    return { ...context, measure };
+    return overlayPropertyDescriptors(context, { measure });
   }
 
   /**
@@ -2029,10 +2284,10 @@ export class Store<G extends GraphDef> {
    */
   #buildTransactionContext(
     txBackend: TransactionBackend,
-    sql?: AdoptedTransaction,
+    sql?: TNativeTransaction,
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
     receiptRecorder?: TransactionReceiptRecorder,
-  ): TransactionContext<G> {
+  ): AdapterTransactionContext<G, TNativeTransaction> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
@@ -2089,32 +2344,41 @@ export class Store<G extends GraphDef> {
     // though the transaction itself is real; only a genuinely absent handle is
     // "unavailable" (this method runs on transactional backends — the
     // non-transactional fallback context is built in #runTransaction).
-    const sqlAvailability: SqlAvailability =
-      this.#captureEnabled ? "history"
-      : this.#revisionTrackingEnabled ? "revisionTracking"
-      : sql === undefined ? "unavailable"
-      : "available";
-
-    const base: TransactionContext<G> = {
+    const base = {
       nodes,
       edges,
-      sqlAvailability,
-      backend: txBackend,
+      backend: createTransactionReadBackend(txBackend),
+      [TRANSACTION_RUNTIME]: { backend: txBackend, runNodeOperationHooks },
       getNodeCollection,
-      runNodeOperationHooks,
     };
 
-    const withSql: TransactionContext<G> =
-      sql === undefined ? base : (
-        {
-          ...base,
-          sql:
-            this.#captureEnabled ? createHistoryUnsafeSqlRef()
-            : this.#revisionTrackingEnabled ?
-              createRevisionTrackingUnsafeSqlRef()
-            : sql,
-        }
-      );
+    let withSql: AdapterTransactionContext<G, TNativeTransaction>;
+    if (this.#captureEnabled) {
+      withSql = {
+        ...base,
+        sqlAvailability: "history",
+        get sql(): never {
+          return throwHistoryUnsafeSqlAccess();
+        },
+      };
+    } else if (this.#revisionTrackingEnabled) {
+      withSql = {
+        ...base,
+        sqlAvailability: "revisionTracking",
+        get sql(): never {
+          return throwRevisionTrackingUnsafeSqlAccess();
+        },
+      };
+    } else if (sql === undefined) {
+      withSql = { ...base, sqlAvailability: "unavailable" };
+    } else {
+      withSql = { ...base, sql, sqlAvailability: "available" };
+    }
+    Object.defineProperty(withSql, TRANSACTION_RUNTIME, {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+    });
 
     // Scoped write measurement (`tx.measure`) is only meaningful with a recorder
     // to scope; the plain `transaction()` path stays free of a `measure` the
@@ -2294,10 +2558,10 @@ export class Store<G extends GraphDef> {
    * @throws {SchemaContentConflictError} when a row already exists at
    *   the target version with a different content hash.
    */
-  async evolve(
+  async evolve<TRefStore extends StoreCore<G>>(
     extension: GraphExtension,
     options?: Readonly<{
-      ref?: StoreRef<Store<G>>;
+      ref?: StoreRef<TRefStore>;
       /**
        * When set, automatically run `materializeIndexes()` on the new
        * Store after the schema commit succeeds. Pass `{}` for default
@@ -2313,7 +2577,7 @@ export class Store<G extends GraphDef> {
        */
       eager?: MaterializeIndexesOptions;
     }>,
-  ): Promise<Store<G>> {
+  ): Promise<StoreImplementation<G, TNativeTransaction>> {
     // Catch up to the persisted state first (extension AND deprecated
     // set). Without this, a stale store applying an extension on top
     // of an out-of-date baseline would make ensureSchema diff against
@@ -2351,7 +2615,7 @@ export class Store<G extends GraphDef> {
     // materialize).
     if (merged === baseline) {
       if (baseline === this.#graph) {
-        if (options?.ref !== undefined) options.ref.current = this;
+        syncStoreReplacementRef(options?.ref, this);
         if (options?.eager !== undefined) {
           await this.#runEagerOrThrow(this, options.eager);
         }
@@ -2425,7 +2689,7 @@ export class Store<G extends GraphDef> {
   }
 
   async #runEagerOrThrow(
-    store: Store<G>,
+    store: StoreImplementation<G, TNativeTransaction>,
     eager: MaterializeIndexesOptions,
   ): Promise<void> {
     const result = await store.materializeIndexes(eager);
@@ -2458,10 +2722,10 @@ export class Store<G extends GraphDef> {
    * @throws {SchemaContentConflictError} when a row already exists at
    *   the target version with a different content hash.
    */
-  async deprecateKinds(
+  async deprecateKinds<TRefStore extends StoreCore<G>>(
     names: readonly string[],
-    options?: Readonly<{ ref?: StoreRef<Store<G>> }>,
-  ): Promise<Store<G>> {
+    options?: Readonly<{ ref?: StoreRef<TRefStore> }>,
+  ): Promise<StoreImplementation<G, TNativeTransaction>> {
     return this.#updateDeprecatedKinds("add", names, options);
   }
 
@@ -2481,10 +2745,10 @@ export class Store<G extends GraphDef> {
    * @throws {SchemaContentConflictError} on a same-version content
    *   conflict.
    */
-  async undeprecateKinds(
+  async undeprecateKinds<TRefStore extends StoreCore<G>>(
     names: readonly string[],
-    options?: Readonly<{ ref?: StoreRef<Store<G>> }>,
-  ): Promise<Store<G>> {
+    options?: Readonly<{ ref?: StoreRef<TRefStore> }>,
+  ): Promise<StoreImplementation<G, TNativeTransaction>> {
     return this.#updateDeprecatedKinds("remove", names, options);
   }
 
@@ -2782,13 +3046,13 @@ export class Store<G extends GraphDef> {
    * @throws {SchemaContentConflictError} on a same-version content
    *   conflict.
    */
-  async removeKinds(
+  async removeKinds<TRefStore extends StoreCore<G>>(
     names: readonly string[],
     options?: Readonly<{
-      ref?: StoreRef<Store<G>>;
+      ref?: StoreRef<TRefStore>;
       eager?: MaterializeRemovalsOptions;
     }>,
-  ): Promise<Store<G>> {
+  ): Promise<StoreImplementation<G, TNativeTransaction>> {
     const { activeRow, baseline } = await this.#loadCaughtUp("remove");
     const plan = planRemovals(baseline, names);
 
@@ -2799,7 +3063,7 @@ export class Store<G extends GraphDef> {
       plan.removedEdgeKinds.length === 0
     ) {
       if (baseline === this.#graph) {
-        if (options?.ref !== undefined) options.ref.current = this;
+        syncStoreReplacementRef(options?.ref, this);
         return this;
       }
       return this.#cloneWithGraph(
@@ -2900,11 +3164,11 @@ export class Store<G extends GraphDef> {
     );
   }
 
-  async #updateDeprecatedKinds(
+  async #updateDeprecatedKinds<TRefStore extends StoreCore<G>>(
     direction: "add" | "remove",
     names: readonly string[],
-    options: Readonly<{ ref?: StoreRef<Store<G>> }> | undefined,
-  ): Promise<Store<G>> {
+    options: Readonly<{ ref?: StoreRef<TRefStore> }> | undefined,
+  ): Promise<StoreImplementation<G, TNativeTransaction>> {
     const verb = direction === "add" ? "deprecate" : "undeprecate";
     const { activeRow, storedSchema, baseline } =
       await this.#loadCaughtUp(verb);
@@ -2940,7 +3204,7 @@ export class Store<G extends GraphDef> {
       // caught-up baseline so they pick up another writer's
       // extension kinds and deprecation flags.
       if (baseline === this.#graph) {
-        if (options?.ref !== undefined) options.ref.current = this;
+        syncStoreReplacementRef(options?.ref, this);
         return this;
       }
       return this.#cloneWithGraph(
@@ -3062,18 +3326,26 @@ export class Store<G extends GraphDef> {
     return nonEmpty;
   }
 
-  #cloneWithGraph(
+  #cloneWithGraph<TRefStore extends StoreCore<G>>(
     graph: G,
-    ref: StoreRef<Store<G>> | undefined,
+    ref: StoreRef<TRefStore> | undefined,
     schemaMetadata: StoreSchemaMetadata = this.#schemaMetadata,
-  ): Store<G> {
-    const next = new Store(
-      graph,
-      this.#baseBackend,
-      this.#options,
-      schemaMetadata,
-    );
-    if (ref !== undefined) ref.current = next;
+  ): StoreImplementation<G, TNativeTransaction> {
+    const next: StoreImplementation<G, TNativeTransaction> =
+      this.#adapterBackend === undefined ?
+        new StoreImplementation<G, TNativeTransaction>(
+          graph,
+          this.#baseBackend,
+          this.#options,
+          schemaMetadata,
+        )
+      : new AdapterStoreImplementation(
+          graph,
+          this.#adapterBackend,
+          this.#options,
+          schemaMetadata,
+        );
+    syncStoreReplacementRef(ref, next);
     return next;
   }
 
@@ -3265,76 +3537,274 @@ export class Store<G extends GraphDef> {
   }
 }
 
+/** Runtime implementation for the explicit adapter-interoperability surface. */
+class AdapterStoreImplementation<
+  G extends GraphDef,
+  TNativeTransaction,
+> extends StoreImplementation<G, TNativeTransaction> {
+  readonly backend: GraphBackend | HistoryStoreBackend;
+
+  constructor(
+    graph: G,
+    backend: AdapterBackend<TNativeTransaction>,
+    options?: StoreOptions,
+    schemaMetadata?: StoreSchemaMetadata,
+  ) {
+    super(graph, backend, options, schemaMetadata, backend);
+    // Projections remain mutable while they serve as internal overlay targets;
+    // freeze only the final object exposed at this public boundary.
+    this.backend =
+      options?.history === true ?
+        createHistoryStoreBackendProjection(this[STORE_RUNTIME].backend)
+      : Object.freeze(
+          createGraphBackendProjection(this[STORE_RUNTIME].backend),
+        );
+  }
+
+  override async evolve<TRefStore extends StoreCore<G>>(
+    extension: GraphExtension,
+    options?: Readonly<{
+      ref?: StoreRef<TRefStore>;
+      eager?: MaterializeIndexesOptions;
+    }>,
+  ): Promise<AdapterStoreImplementation<G, TNativeTransaction>> {
+    return this.#withAdapterReplacement(options?.ref, (replacementRef) =>
+      super.evolve(
+        extension,
+        options?.eager === undefined ?
+          { ref: replacementRef }
+        : { eager: options.eager, ref: replacementRef },
+      ),
+    );
+  }
+
+  override async deprecateKinds<TRefStore extends StoreCore<G>>(
+    names: readonly string[],
+    options?: Readonly<{
+      ref?: StoreRef<TRefStore>;
+    }>,
+  ): Promise<AdapterStoreImplementation<G, TNativeTransaction>> {
+    return this.#withAdapterReplacement(options?.ref, (replacementRef) =>
+      super.deprecateKinds(names, { ref: replacementRef }),
+    );
+  }
+
+  override async undeprecateKinds<TRefStore extends StoreCore<G>>(
+    names: readonly string[],
+    options?: Readonly<{
+      ref?: StoreRef<TRefStore>;
+    }>,
+  ): Promise<AdapterStoreImplementation<G, TNativeTransaction>> {
+    return this.#withAdapterReplacement(options?.ref, (replacementRef) =>
+      super.undeprecateKinds(names, { ref: replacementRef }),
+    );
+  }
+
+  override async removeKinds<TRefStore extends StoreCore<G>>(
+    names: readonly string[],
+    options?: Readonly<{
+      ref?: StoreRef<TRefStore>;
+      eager?: MaterializeRemovalsOptions;
+    }>,
+  ): Promise<AdapterStoreImplementation<G, TNativeTransaction>> {
+    return this.#withAdapterReplacement(options?.ref, (replacementRef) =>
+      super.removeKinds(
+        names,
+        options?.eager === undefined ?
+          { ref: replacementRef }
+        : { eager: options.eager, ref: replacementRef },
+      ),
+    );
+  }
+
+  async #withAdapterReplacement<TRefStore extends StoreCore<G>>(
+    ref: StoreRef<TRefStore> | undefined,
+    operation: (ref: StoreRef<Store<G>>) => Promise<Store<G>>,
+  ): Promise<AdapterStoreImplementation<G, TNativeTransaction>> {
+    const tracked = createTrackedReplacementRef<G>(this);
+    try {
+      await operation(tracked.ref);
+    } catch (error) {
+      if (tracked.wasReplaced()) {
+        const replacement = requireAdapterStoreImplementation<
+          G,
+          TNativeTransaction
+        >(tracked.ref.current);
+        syncAdapterReplacementRef(ref, replacement);
+      }
+      throw error;
+    }
+    const replacement = requireAdapterStoreImplementation<
+      G,
+      TNativeTransaction
+    >(tracked.ref.current);
+    syncAdapterReplacementRef(ref, replacement);
+    return replacement;
+  }
+}
+
+function createTrackedReplacementRef<G extends GraphDef>(
+  initial: Store<G>,
+): Readonly<{
+  ref: StoreRef<Store<G>>;
+  wasReplaced: () => boolean;
+}> {
+  let current = initial;
+  let replaced = false;
+  return {
+    ref: {
+      get current(): Store<G> {
+        return current;
+      },
+      set current(next: Store<G>) {
+        current = next;
+        replaced = true;
+      },
+    },
+    wasReplaced: () => replaced,
+  };
+}
+
+function syncAdapterReplacementRef<
+  G extends GraphDef,
+  TNativeTransaction,
+  TRefStore extends StoreCore<G>,
+>(
+  ref: StoreRef<TRefStore> | undefined,
+  replacement: AdapterStoreImplementation<G, TNativeTransaction>,
+): void {
+  if (ref === undefined) return;
+  // Public StoreEvolution only accepts refs whose value is a supertype of the
+  // returned Store flavor. This implementation class is deliberately broader
+  // because one runtime class backs live, recorded-read, and history overloads.
+  ref.current = replacement as unknown as TRefStore;
+}
+
+function requireAdapterStoreImplementation<
+  G extends GraphDef,
+  TNativeTransaction,
+>(store: Store<G>): AdapterStoreImplementation<G, TNativeTransaction> {
+  if (isAdapterStoreImplementation<G, TNativeTransaction>(store)) return store;
+  throw new ConfigurationError(
+    "Adapter store replacement lost its adapter capabilities.",
+    { code: "ADAPTER_STORE_REPLACEMENT_INVARIANT" },
+  );
+}
+
+function isAdapterStoreImplementation<G extends GraphDef, TNativeTransaction>(
+  store: Store<G>,
+): store is AdapterStoreImplementation<G, TNativeTransaction> {
+  return store instanceof AdapterStoreImplementation;
+}
+
+function asAdapterStoreSurface<G extends GraphDef, TNativeTransaction>(
+  store: AdapterStoreImplementation<G, TNativeTransaction>,
+):
+  | AdapterStore<G, TNativeTransaction>
+  | AdapterHistoryStore<G, TNativeTransaction>
+  | AdapterRecordedReadStore<G, TNativeTransaction> {
+  // One runtime implementation backs the three option-discriminated overloads.
+  // It constructs the matching backend projection and replacement flavor, but
+  // TypeScript cannot derive that structural union from constructor options.
+  return store as unknown as
+    | AdapterStore<G, TNativeTransaction>
+    | AdapterHistoryStore<G, TNativeTransaction>
+    | AdapterRecordedReadStore<G, TNativeTransaction>;
+}
+
 // ============================================================
 // Factory Function
 // ============================================================
 
-export type HistorySafeBackend = Omit<
-  GraphBackend,
-  "executeStatement" | "executeDdl"
+export type AdapterHistoryTransactionContext<
+  G extends GraphDef,
+  TNativeTransaction,
+> = Omit<
+  AdapterTransactionContext<G, TNativeTransaction>,
+  "sql" | "sqlAvailability"
 > &
   Readonly<{
-    executeStatement?: never;
-    executeDdl?: never;
-  }>;
-
-export type HistorySafeTransactionBackend = Omit<
-  TransactionBackend,
-  "executeStatement" | "executeDdl"
-> &
-  Readonly<{
-    executeStatement?: never;
-    executeDdl?: never;
-  }>;
-
-export type HistoryTransactionContext<G extends GraphDef> = Omit<
-  TransactionContext<G>,
-  "backend" | "sql"
-> &
-  Readonly<{
-    backend: HistorySafeTransactionBackend;
     sql?: never;
+    sqlAvailability: "history";
   }>;
 
 /**
- * The {@link HistoryTransactionContext} handed to a `withRecordedTransaction`
+ * The {@link AdapterHistoryTransactionContext} handed to a `withRecordedTransaction`
  * callback, extended with {@link ScopedMeasure}. Its `measure` scopes to a child
- * {@link MeasurableHistoryTransactionContext} (so nested scopes keep the
+ * {@link MeasurableAdapterHistoryTransactionContext} (so nested scopes keep the
  * history-safe `sql?: never` / backend typing). Assignable to
  * {@link MeasurableTransactionContext} (and hence to {@link TransactionContext}),
  * so a projector helper typed against either still accepts it.
  */
-export type MeasurableHistoryTransactionContext<G extends GraphDef> =
-  HistoryTransactionContext<G> &
-    Readonly<{
-      measure: ScopedMeasure<MeasurableHistoryTransactionContext<G>>;
-    }>;
-
-export type RecordedReadStore<G extends GraphDef> = Store<G> &
+export type MeasurableAdapterHistoryTransactionContext<
+  G extends GraphDef,
+  TNativeTransaction,
+> = AdapterHistoryTransactionContext<G, TNativeTransaction> &
   Readonly<{
+    measure: ScopedMeasure<
+      MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>
+    >;
+  }>;
+
+export type AdapterRecordedReadStore<
+  G extends GraphDef,
+  TNativeTransaction,
+> = StoreCore<G> &
+  StoreEvolution<G, AdapterRecordedReadStore<G, TNativeTransaction>> &
+  AdapterStoreTransactions<G, TNativeTransaction> &
+  Readonly<{
+    backend: GraphBackend;
     recordedReadBound: true;
   }>;
 
-export type HistoryStore<G extends GraphDef> = Store<G> &
+export type RecordedReadStore<G extends GraphDef> = StoreCore<G> &
+  StoreTransactions<G> &
+  StoreEvolution<G, RecordedReadStore<G>> &
+  Readonly<{ recordedReadBound: true }>;
+
+export type HistoryStore<G extends GraphDef> = StoreCore<G> &
+  StoreTransactions<G> &
+  StoreEvolution<G, HistoryStore<G>> &
   Readonly<{
-    backend: HistorySafeBackend;
     historyEnabled: true;
     recordedReadBound: true;
   }>;
 
-/**
- * The `externalTx` parameter type {@link Store.withTransaction} resolves to when
- * called on a {@link HistoryStore}. A real {@link AdoptedTransaction} is not
- * assignable to this string literal, so the call is a compile error whose
- * message names the working alternative. `HistoryStore` cannot be excluded from
- * the general signature by a `this` constraint alone — it is a subtype of
- * `Store<G>` — so the block is expressed on the argument instead.
- */
-export type HistoryWithTransactionUnavailable =
-  "withTransaction() is unavailable on a history-enabled store — use store.withRecordedTransaction() so recorded-time capture can flush before the caller commits";
+export type AdapterHistoryStore<
+  G extends GraphDef,
+  TNativeTransaction,
+> = StoreCore<G> &
+  StoreEvolution<G, AdapterHistoryStore<G, TNativeTransaction>> &
+  AdapterHistoryStoreTransactions<G, TNativeTransaction> &
+  Readonly<{
+    backend: HistoryStoreBackend;
+    historyEnabled: true;
+    recordedReadBound: true;
+  }>;
 
-type ExplicitRecordedReadLiveOptions = LiveStoreOptions &
-  Readonly<{ recordedRead: NonNullable<LiveStoreOptions["recordedRead"]> }>;
+type AdapterHistoryStoreTransactions<
+  G extends GraphDef,
+  TNativeTransaction,
+> = Readonly<{
+  transaction: <T>(
+    fn: (
+      tx: AdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: TransactionOptions,
+  ) => Promise<T>;
+  transactionWithReceipt: <T>(
+    fn: (
+      tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: TransactionOptions,
+  ) => Promise<TransactionOutcome<T>>;
+  withRecordedTransaction: <T>(
+    externalTransaction: TNativeTransaction,
+    fn: (
+      tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+  ) => Promise<TransactionOutcome<T>>;
+}>;
 
 /**
  * Creates a new Store instance.
@@ -3373,19 +3843,72 @@ export function createStore<G extends GraphDef>(
 export function createStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
-  options: ExplicitRecordedReadLiveOptions,
+  options: RecordedReadStoreOptions,
 ): RecordedReadStore<G>;
 export function createStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
-  options?: StoreOptions,
+  options?: UnboundLiveStoreOptions,
 ): Store<G>;
+export function createStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: LiveStoreOptions | undefined,
+): Store<G> | RecordedReadStore<G>;
+export function createStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: StoreOptions | undefined,
+): Store<G> | HistoryStore<G> | RecordedReadStore<G>;
 export function createStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
   options?: StoreOptions,
 ): Store<G> | HistoryStore<G> | RecordedReadStore<G> {
-  return new Store(graph, backend, options);
+  return new StoreImplementation<G>(graph, backend, options);
+}
+
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: HistoryStoreOptions,
+): AdapterHistoryStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: RecordedReadStoreOptions,
+): AdapterRecordedReadStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options?: UnboundLiveStoreOptions,
+): AdapterStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: LiveStoreOptions | undefined,
+):
+  | AdapterStore<G, TNativeTransaction>
+  | AdapterRecordedReadStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: StoreOptions | undefined,
+):
+  | AdapterStore<G, TNativeTransaction>
+  | AdapterHistoryStore<G, TNativeTransaction>
+  | AdapterRecordedReadStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options?: StoreOptions,
+):
+  | AdapterStore<G, TNativeTransaction>
+  | AdapterHistoryStore<G, TNativeTransaction>
+  | AdapterRecordedReadStore<G, TNativeTransaction> {
+  return asAdapterStoreSurface(
+    new AdapterStoreImplementation(graph, backend, options),
+  );
 }
 
 function isKnownEdgeKind(graph: GraphDef, name: string): boolean {
@@ -3518,13 +4041,25 @@ export async function createStoreWithSchema<G extends GraphDef>(
 export async function createStoreWithSchema<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
-  options: ExplicitRecordedReadLiveOptions & SchemaManagerOptions,
+  options: RecordedReadStoreOptions & SchemaManagerOptions,
 ): Promise<[RecordedReadStore<G>, SchemaValidationResult]>;
 export async function createStoreWithSchema<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
-  options?: StoreOptions & SchemaManagerOptions,
+  options?: UnboundLiveStoreOptions & SchemaManagerOptions,
 ): Promise<[Store<G>, SchemaValidationResult]>;
+export async function createStoreWithSchema<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: (LiveStoreOptions & SchemaManagerOptions) | undefined,
+): Promise<[Store<G> | RecordedReadStore<G>, SchemaValidationResult]>;
+export async function createStoreWithSchema<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: (StoreOptions & SchemaManagerOptions) | undefined,
+): Promise<
+  [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
+>;
 export async function createStoreWithSchema<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
@@ -3532,6 +4067,29 @@ export async function createStoreWithSchema<G extends GraphDef>(
 ): Promise<
   [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
 > {
+  const prepared = await prepareStoreWithSchema(graph, backend, options);
+  return [
+    new StoreImplementation(
+      prepared.graph,
+      backend,
+      options,
+      prepared.schemaMetadata,
+    ),
+    prepared.result,
+  ];
+}
+
+type PreparedStore<G extends GraphDef> = Readonly<{
+  graph: G;
+  result: SchemaValidationResult;
+  schemaMetadata: StoreSchemaMetadata;
+}>;
+
+async function prepareStoreWithSchema<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: (StoreOptions & SchemaManagerOptions) | undefined,
+): Promise<PreparedStore<G>> {
   // Fold any persisted graph extension into the graph BEFORE
   // constructing the Store. The prefetched row + parsed schema thread
   // through to ensureSchema so each Store boot pays for one DB round
@@ -3568,13 +4126,103 @@ export async function createStoreWithSchema<G extends GraphDef>(
     await materializeSystemIndexesOnBoot(backend, merged.id, result);
   }
 
-  const store = new Store(
-    merged,
-    backend,
-    options,
-    schemaMetadataForResult(activeRow, result),
-  );
-  return [store, result];
+  return {
+    graph: merged,
+    result,
+    schemaMetadata: schemaMetadataForResult(activeRow, result),
+  };
+}
+
+export async function createAdapterStoreWithSchema<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: HistoryStoreOptions & SchemaManagerOptions,
+): Promise<
+  [AdapterHistoryStore<G, TNativeTransaction>, SchemaValidationResult]
+>;
+export async function createAdapterStoreWithSchema<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: RecordedReadStoreOptions & SchemaManagerOptions,
+): Promise<
+  [AdapterRecordedReadStore<G, TNativeTransaction>, SchemaValidationResult]
+>;
+export async function createAdapterStoreWithSchema<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options?: UnboundLiveStoreOptions & SchemaManagerOptions,
+): Promise<[AdapterStore<G, TNativeTransaction>, SchemaValidationResult]>;
+export async function createAdapterStoreWithSchema<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: (LiveStoreOptions & SchemaManagerOptions) | undefined,
+): Promise<
+  [
+    (
+      | AdapterStore<G, TNativeTransaction>
+      | AdapterRecordedReadStore<G, TNativeTransaction>
+    ),
+    SchemaValidationResult,
+  ]
+>;
+export async function createAdapterStoreWithSchema<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: (StoreOptions & SchemaManagerOptions) | undefined,
+): Promise<
+  [
+    (
+      | AdapterStore<G, TNativeTransaction>
+      | AdapterHistoryStore<G, TNativeTransaction>
+      | AdapterRecordedReadStore<G, TNativeTransaction>
+    ),
+    SchemaValidationResult,
+  ]
+>;
+export async function createAdapterStoreWithSchema<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options?: StoreOptions & SchemaManagerOptions,
+): Promise<
+  [
+    (
+      | AdapterStore<G, TNativeTransaction>
+      | AdapterHistoryStore<G, TNativeTransaction>
+      | AdapterRecordedReadStore<G, TNativeTransaction>
+    ),
+    SchemaValidationResult,
+  ]
+> {
+  const prepared = await prepareStoreWithSchema(graph, backend, options);
+  return [
+    asAdapterStoreSurface(
+      new AdapterStoreImplementation(
+        prepared.graph,
+        backend,
+        options,
+        prepared.schemaMetadata,
+      ),
+    ),
+    prepared.result,
+  ];
 }
 
 /**
@@ -3678,13 +4326,25 @@ export async function createVerifiedStore<G extends GraphDef>(
 export async function createVerifiedStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
-  options: ExplicitRecordedReadLiveOptions,
+  options: RecordedReadStoreOptions,
 ): Promise<[RecordedReadStore<G>, SchemaValidationResult]>;
 export async function createVerifiedStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
-  options?: StoreOptions,
+  options?: UnboundLiveStoreOptions,
 ): Promise<[Store<G>, SchemaValidationResult]>;
+export async function createVerifiedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: LiveStoreOptions | undefined,
+): Promise<[Store<G> | RecordedReadStore<G>, SchemaValidationResult]>;
+export async function createVerifiedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: StoreOptions | undefined,
+): Promise<
+  [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
+>;
 export async function createVerifiedStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
@@ -3692,16 +4352,122 @@ export async function createVerifiedStore<G extends GraphDef>(
 ): Promise<
   [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
 > {
+  const prepared = await prepareVerifiedStore(graph, backend);
+  return [
+    new StoreImplementation(
+      prepared.graph,
+      backend,
+      options,
+      prepared.schemaMetadata,
+    ),
+    prepared.result,
+  ];
+}
+
+async function prepareVerifiedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+): Promise<PreparedStore<G>> {
   const {
     graph: merged,
     activeRow,
     result,
   } = await loadAndVerifyGraph(backend, graph);
-  const store = new Store(
-    merged,
-    backend,
-    options,
-    schemaMetadataFromRow(activeRow),
-  );
-  return [store, result];
+  return {
+    graph: merged,
+    result,
+    schemaMetadata: schemaMetadataFromRow(activeRow),
+  };
+}
+
+export async function createVerifiedAdapterStore<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: HistoryStoreOptions,
+): Promise<
+  [AdapterHistoryStore<G, TNativeTransaction>, SchemaValidationResult]
+>;
+export async function createVerifiedAdapterStore<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: RecordedReadStoreOptions,
+): Promise<
+  [AdapterRecordedReadStore<G, TNativeTransaction>, SchemaValidationResult]
+>;
+export async function createVerifiedAdapterStore<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options?: UnboundLiveStoreOptions,
+): Promise<[AdapterStore<G, TNativeTransaction>, SchemaValidationResult]>;
+export async function createVerifiedAdapterStore<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: LiveStoreOptions | undefined,
+): Promise<
+  [
+    (
+      | AdapterStore<G, TNativeTransaction>
+      | AdapterRecordedReadStore<G, TNativeTransaction>
+    ),
+    SchemaValidationResult,
+  ]
+>;
+export async function createVerifiedAdapterStore<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options: StoreOptions | undefined,
+): Promise<
+  [
+    (
+      | AdapterStore<G, TNativeTransaction>
+      | AdapterHistoryStore<G, TNativeTransaction>
+      | AdapterRecordedReadStore<G, TNativeTransaction>
+    ),
+    SchemaValidationResult,
+  ]
+>;
+export async function createVerifiedAdapterStore<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+  options?: StoreOptions,
+): Promise<
+  [
+    (
+      | AdapterStore<G, TNativeTransaction>
+      | AdapterHistoryStore<G, TNativeTransaction>
+      | AdapterRecordedReadStore<G, TNativeTransaction>
+    ),
+    SchemaValidationResult,
+  ]
+> {
+  const prepared = await prepareVerifiedStore(graph, backend);
+  return [
+    asAdapterStoreSurface(
+      new AdapterStoreImplementation(
+        prepared.graph,
+        backend,
+        options,
+        prepared.schemaMetadata,
+      ),
+    ),
+    prepared.result,
+  ];
 }

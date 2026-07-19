@@ -99,7 +99,7 @@ const firstPage = await store
     id: ctx.p.id,
     name: ctx.p.name,
   }))
-  .orderBy("p", "name", "asc")    // ORDER BY required
+  .orderBy("p", "name", "asc") // ORDER BY required
   .paginate({ first: 20 });
 ```
 
@@ -151,12 +151,12 @@ if (lastPage.hasPrevPage && lastPage.prevCursor) {
 
 ### Pagination Parameters
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `first` | `number` | Number of results from the start |
-| `after` | `string` | Cursor to start after (forward pagination) |
-| `last` | `number` | Number of results from the end |
-| `before` | `string` | Cursor to start before (backward pagination) |
+| Parameter | Type     | Description                                  |
+| --------- | -------- | -------------------------------------------- |
+| `first`   | `number` | Number of results from the start             |
+| `after`   | `string` | Cursor to start after (forward pagination)   |
+| `last`    | `number` | Number of results from the end               |
+| `before`  | `string` | Cursor to start before (backward pagination) |
 
 ### Pagination with Traversals
 
@@ -189,7 +189,7 @@ const stream = store
   .query()
   .from("Event", "e")
   .select((ctx) => ctx.e)
-  .orderBy("e", "createdAt", "desc")  // ORDER BY required
+  .orderBy("e", "createdAt", "desc") // ORDER BY required
   .stream({ batchSize: 1000 });
 
 // Process results as they arrive
@@ -339,14 +339,14 @@ provided, and unknown binding keys are rejected.
 
 `param()` works with any scalar predicate:
 
-| Predicate | Example |
-|-----------|---------|
-| `eq` / `neq` | `p.name.eq(param("name"))` |
-| `gt` / `gte` / `lt` / `lte` | `p.age.gt(param("minAge"))` |
-| `between` | `p.age.between(param("lo"), param("hi"))` |
-| `contains` | `p.name.contains(param("substr"))` |
-| `startsWith` / `endsWith` | `p.name.startsWith(param("prefix"))` |
-| `like` / `ilike` | `p.email.like(param("pattern"))` |
+| Predicate                   | Example                                   |
+| --------------------------- | ----------------------------------------- |
+| `eq` / `neq`                | `p.name.eq(param("name"))`                |
+| `gt` / `gte` / `lt` / `lte` | `p.age.gt(param("minAge"))`               |
+| `between`                   | `p.age.between(param("lo"), param("hi"))` |
+| `contains`                  | `p.name.contains(param("substr"))`        |
+| `startsWith` / `endsWith`   | `p.name.startsWith(param("prefix"))`      |
+| `like` / `ilike`            | `p.email.like(param("pattern"))`          |
 
 :::caution
 `param()` is **not** supported in `in()` / `notIn()` — the array length must be known at compile time.
@@ -386,13 +386,19 @@ console.log(JSON.stringify(ast, null, 2));
 
 ### compile()
 
-Compile to SQL without executing:
+Use `toSQL()` to render SQL for the Store's configured dialect without
+executing it:
 
 ```typescript
-const compiled = builder.compile();
+const compiled = builder.toSQL();
 console.log("SQL:", compiled.sql);
 console.log("Parameters:", compiled.params);
 ```
+
+For adapter and tooling authors, `builder.compile()` returns TypeGraph's
+database-independent `CompiledSelectSql` fragment. It can be passed to a
+`GraphBackend` or rendered explicitly with `renderSqlite()` or
+`renderPostgres()`. It is intentionally not a Drizzle `SQL` object.
 
 Useful for:
 

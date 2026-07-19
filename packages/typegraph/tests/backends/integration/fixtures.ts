@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { createStore } from "../../../src";
+import type { GraphBackend, HistoryStore, Store } from "../../../src";
 import {
   defineEdge,
   defineGraph,
@@ -169,6 +169,6 @@ export const integrationTestGraph = defineGraph({
 });
 
 type IntegrationTestGraph = typeof integrationTestGraph;
-export type IntegrationStore = ReturnType<
-  typeof createStore<IntegrationTestGraph>
->;
+export type HistoryIntegrationStore = HistoryStore<IntegrationTestGraph>;
+export type IntegrationStore = Store<IntegrationTestGraph> &
+  Readonly<{ backend: GraphBackend }>;

@@ -12,6 +12,16 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./backend": {
+      "types": "./dist/backend/index.d.ts",
+      "import": "./dist/backend/index.js",
+      "require": "./dist/backend/index.cjs"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js",
+      "require": "./dist/core/index.cjs"
+    },
     "./interchange": {
       "types": "./dist/interchange/index.d.ts",
       "import": "./dist/interchange/index.js",
@@ -47,30 +57,45 @@
       "import": "./dist/provenance/index.js",
       "require": "./dist/provenance/index.cjs"
     },
-    "./sqlite": {
+    "./sqlite/local": {
+      "types": "./dist/backend/sqlite/local-store.d.ts",
+      "import": "./dist/backend/sqlite/local-store.js",
+      "require": "./dist/backend/sqlite/local-store.cjs"
+    },
+    "./postgres/pglite": {
+      "types": "./dist/backend/postgres/pglite-store.d.ts",
+      "import": "./dist/backend/postgres/pglite-store.js",
+      "require": "./dist/backend/postgres/pglite-store.cjs"
+    },
+    "./adapters/drizzle/sqlite": {
       "types": "./dist/backend/sqlite/index.d.ts",
       "import": "./dist/backend/sqlite/index.js",
       "require": "./dist/backend/sqlite/index.cjs"
     },
-    "./postgres": {
+    "./adapters/drizzle/postgres": {
       "types": "./dist/backend/postgres/index.d.ts",
       "import": "./dist/backend/postgres/index.js",
       "require": "./dist/backend/postgres/index.cjs"
     },
-    "./postgres/pglite": {
+    "./adapters/drizzle/postgres/pglite": {
       "types": "./dist/backend/postgres/pglite.d.ts",
       "import": "./dist/backend/postgres/pglite.js",
       "require": "./dist/backend/postgres/pglite.cjs"
     },
-    "./sqlite/local": {
+    "./adapters/drizzle/sqlite/local": {
       "types": "./dist/backend/sqlite/local.d.ts",
       "import": "./dist/backend/sqlite/local.js",
       "require": "./dist/backend/sqlite/local.cjs"
     },
-    "./sqlite/libsql": {
+    "./adapters/drizzle/sqlite/libsql": {
       "types": "./dist/backend/sqlite/libsql.d.ts",
       "import": "./dist/backend/sqlite/libsql.js",
       "require": "./dist/backend/sqlite/libsql.cjs"
+    },
+    "./adapters/drizzle/indexes": {
+      "types": "./dist/backend/drizzle/indexes.d.ts",
+      "import": "./dist/backend/drizzle/indexes.js",
+      "require": "./dist/backend/drizzle/indexes.cjs"
     }
   },
   "files": [
@@ -88,6 +113,9 @@
     "test:types:inline": "node --import tsx scripts/test-types.ts inline",
     "test:types:declarations": "node --import tsx scripts/test-types.ts declarations",
     "test:types:consumer": "node --import tsx scripts/test-types.ts consumer",
+    "test:strict-local-consumers": "node --import tsx scripts/test-strict-local-consumers.ts",
+    "test:api-report": "pnpm build && node --import tsx scripts/api-report.ts",
+    "api-report:update": "pnpm build && node --import tsx scripts/api-report.ts --local",
     "pretest": "node --import tsx scripts/ensure-native-sqlite.ts",
     "test": "vitest run",
     "pretest:unit": "node --import tsx scripts/ensure-native-sqlite.ts",
@@ -175,6 +203,7 @@
     "@electric-sql/pglite": "^0.5.4",
     "@electric-sql/pglite-pgvector": "^0.0.5",
     "@libsql/client": "^0.17.4",
+    "@microsoft/api-extractor": "^7.58.11",
     "@neondatabase/serverless": "^1.1.0",
     "@stryker-mutator/core": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",

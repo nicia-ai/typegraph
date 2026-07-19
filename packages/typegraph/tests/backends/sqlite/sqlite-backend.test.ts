@@ -20,13 +20,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  asCompiledRowsSql,
   BackendDisposedError,
   defineEdge,
   defineGraph,
   defineNode,
   subClassOf,
 } from "../../../src";
+import { sql as portableSql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { requireDefined } from "../../../src/utils/presence";
 
 const nodeRequire = createRequire(import.meta.url);
 import { tables } from "../../../src/backend/drizzle/schema/sqlite";
@@ -37,6 +39,7 @@ import {
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import {
   INTERNAL_TEMPORARY_WRITES,
+  type InternalTransactionOptions,
   type UpsertEmbeddingParams,
   type VectorSearchParams,
   type VectorSearchResult,
@@ -118,7 +121,7 @@ describe("SQLite Backend - Adapter Specific", () => {
           return originalPrepare.call(sqliteClient, sqlText);
         };
 
-        const query = sql`
+        const query = portableSql`
           SELECT id
           FROM typegraph_nodes
           WHERE graph_id = ${"test_graph"}
@@ -141,7 +144,7 @@ describe("SQLite Backend - Adapter Specific", () => {
     it("adds newly shipped indexes to an already-initialized database", async () => {
       const { backend, db } = createLocalSqliteBackend();
       try {
-        await backend.bootstrapTables!();
+        await requireDefined(backend.bootstrapTables)();
 
         // Simulate a database initialized before the bare-id indexes
         // shipped. Bootstrap never re-runs automatically on an initialized
@@ -154,14 +157,14 @@ describe("SQLite Backend - Adapter Specific", () => {
         async function indexNames(): Promise<readonly string[]> {
           const rows = await backend.execute<{ name: string }>(
             asCompiledRowsSql(
-              sql`SELECT name FROM sqlite_master WHERE type = 'index'`,
+              portableSql`SELECT name FROM sqlite_master WHERE type = 'index'`,
             ),
           );
           return rows.map((row) => row.name);
         }
         expect(await indexNames()).not.toContain("typegraph_nodes_id_idx");
 
-        await backend.bootstrapTables!();
+        await requireDefined(backend.bootstrapTables)();
 
         const adopted = await indexNames();
         expect(adopted).toContain("typegraph_nodes_id_idx");
@@ -311,7 +314,7 @@ describe("Store with SQLite Backend", () => {
 
     const fetched = await store.nodes.Person.getById(person.id);
     expect(fetched).toBeDefined();
-    expect(fetched!.name).toBe("Alice");
+    expect(requireDefined(fetched).name).toBe("Alice");
   });
 
   it("validates node props against schema", async () => {
@@ -492,7 +495,7 @@ describe("Store with SQLite Backend", () => {
       temporalMode: "includeTombstones",
     });
     expect(fetchedWithTombstones).toBeDefined();
-    expect(fetchedWithTombstones!.meta.deletedAt).toBeDefined();
+    expect(requireDefined(fetchedWithTombstones).meta.deletedAt).toBeDefined();
   });
 });
 
@@ -708,8 +711,8 @@ describe("SQLite embedding persistence via createSqliteBackend", () => {
       .select((ctx) => ({ title: ctx.d.title }))
       .execute();
     expect(rows).toHaveLength(2);
-    expect(rows[0]!.title).toBe("Similar");
-    expect(rows[1]!.title).toBe("Dissimilar");
+    expect(requireDefined(rows[0]).title).toBe("Similar");
+    expect(requireDefined(rows[1]).title).toBe("Dissimilar");
 
     sqlite.close();
   });
@@ -814,8 +817,8 @@ describe("SQLite backend.vectorSearch", () => {
     const graphId = "vector_search_facade";
     const nodeKind = "Doc";
     const fieldPath = "embedding";
-    const rawUpsertEmbedding = backend.upsertEmbedding!;
-    const rawVectorSearch = backend.vectorSearch!;
+    const rawUpsertEmbedding = requireDefined(backend.upsertEmbedding);
+    const rawVectorSearch = requireDefined(backend.vectorSearch);
 
     // Inject the store-resolved slot fields the backend now requires.
     // sqlite-vec storage is metric-agnostic and brute-force here, so the
@@ -941,11 +944,11 @@ describe("SQLite backend.vectorSearch", () => {
     });
 
     expect(results).toHaveLength(3);
-    expect(results[0]!.nodeId).toBe("doc-x");
-    expect(results[0]!.score).toBeCloseTo(1, 5);
-    expect(results[1]!.nodeId).toBe("doc-close");
-    expect(results[2]!.nodeId).toBe("doc-y");
-    expect(results[2]!.score).toBeCloseTo(0, 5);
+    expect(requireDefined(results[0]).nodeId).toBe("doc-x");
+    expect(requireDefined(results[0]).score).toBeCloseTo(1, 5);
+    expect(requireDefined(results[1]).nodeId).toBe("doc-close");
+    expect(requireDefined(results[2]).nodeId).toBe("doc-y");
+    expect(requireDefined(results[2]).score).toBeCloseTo(0, 5);
   });
 
   it("ranks identical embeddings first under L2 distance (lower score)", async () => {
@@ -967,12 +970,14 @@ describe("SQLite backend.vectorSearch", () => {
     });
 
     expect(results).toHaveLength(3);
-    expect(results[0]!.nodeId).toBe("doc-zero");
-    expect(results[0]!.score).toBeCloseTo(0, 5);
-    expect(results[1]!.nodeId).toBe("doc-near");
-    expect(results[1]!.score).toBeCloseTo(1, 5);
-    expect(results[2]!.nodeId).toBe("doc-far");
-    expect(results[2]!.score).toBeGreaterThan(results[1]!.score);
+    expect(requireDefined(results[0]).nodeId).toBe("doc-zero");
+    expect(requireDefined(results[0]).score).toBeCloseTo(0, 5);
+    expect(requireDefined(results[1]).nodeId).toBe("doc-near");
+    expect(requireDefined(results[1]).score).toBeCloseTo(1, 5);
+    expect(requireDefined(results[2]).nodeId).toBe("doc-far");
+    expect(requireDefined(results[2]).score).toBeGreaterThan(
+      requireDefined(results[1]).score,
+    );
   });
 
   it("rejects inner_product (sqlite-vec has no vec_distance_ip)", async () => {
@@ -1139,7 +1144,7 @@ describe("SQLite backend.vectorSearch", () => {
     });
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.nodeId).toBe("doc-here");
+    expect(requireDefined(results[0]).nodeId).toBe("doc-here");
   });
 
   it("returns an empty array when no rows match", async () => {
@@ -1275,7 +1280,7 @@ describe("SQLite Backend - business transaction write lock", () => {
 
     const txDone = backend.transaction(
       async (tx) => {
-        await tx.execute(asCompiledRowsSql(sql`SELECT 1 AS value`));
+        await tx.execute(asCompiledRowsSql(portableSql`SELECT 1 AS value`));
         signalInside();
         await barrier;
       },
@@ -1313,30 +1318,30 @@ describe("SQLite Backend - business transaction write lock", () => {
       release = resolve;
     });
 
-    const txDone = backend.transaction(
-      async (tx) => {
-        await tx.executeTemporaryStatement!(
-          asCompiledTemporaryStatementSql(
-            sql`CREATE TEMP TABLE iterative_probe (value INTEGER)`,
-          ),
-        );
-        await tx.executeTemporaryStatement!(
-          asCompiledTemporaryStatementSql(
-            sql`INSERT INTO iterative_probe (value) VALUES (1)`,
-          ),
-        );
-        signalInside();
-        await barrier;
-        await tx.executeTemporaryStatement!(
-          asCompiledTemporaryStatementSql(sql`DROP TABLE iterative_probe`),
-        );
-      },
-      {
-        accessMode: "read_only",
-        isolationLevel: "repeatable_read",
-        temporaryWrites: INTERNAL_TEMPORARY_WRITES,
-      },
-    );
+    const transactionOptions = {
+      accessMode: "read_only",
+      isolationLevel: "repeatable_read",
+      temporaryWrites: INTERNAL_TEMPORARY_WRITES,
+    } satisfies InternalTransactionOptions;
+    const txDone = backend.transaction(async (tx) => {
+      await requireDefined(tx.executeTemporaryStatement)(
+        asCompiledTemporaryStatementSql(
+          portableSql`CREATE TEMP TABLE iterative_probe (value INTEGER)`,
+        ),
+      );
+      await requireDefined(tx.executeTemporaryStatement)(
+        asCompiledTemporaryStatementSql(
+          portableSql`INSERT INTO iterative_probe (value) VALUES (1)`,
+        ),
+      );
+      signalInside();
+      await barrier;
+      await requireDefined(tx.executeTemporaryStatement)(
+        asCompiledTemporaryStatementSql(
+          portableSql`DROP TABLE iterative_probe`,
+        ),
+      );
+    }, transactionOptions);
     await inside;
 
     try {

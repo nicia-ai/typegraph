@@ -31,6 +31,7 @@ import {
   type ImportOptions,
   ImportOptionsSchema,
 } from "../src/interchange";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), email: z.string() }),
@@ -150,7 +151,7 @@ function withCallCounts(backend: GraphBackend): {
   const counted: GraphBackend = {
     ...outer,
     transaction: (fn, options) =>
-      backend.transaction((target, tx) => fn(wrapMethods(target), tx), options),
+      backend.transaction((target) => fn(wrapMethods(target)), options),
   };
   return { backend: counted, counts };
 }
@@ -198,7 +199,7 @@ describe("importGraph batching", () => {
       expect(result.success).toBe(true);
       expect(result.nodes.created).toBe(1500);
       // 1500 rows at the 1000-row default = exactly two slices.
-      expect(counts.insertNodesBatch).toBe(2);
+      expect(counts["insertNodesBatch"]).toBe(2);
     });
   });
 
@@ -243,14 +244,14 @@ describe("importGraph batching", () => {
       expect(result.success).toBe(true);
       expect(result.nodes.created).toBe(NODE_COUNT);
 
-      expect(counts.getNode).toBe(0);
-      expect(counts.getNodes).toBeLessThanOrEqual(2);
-      expect(counts.checkUnique).toBe(0);
-      expect(counts.checkUniqueBatch).toBe(1);
-      expect(counts.insertNode).toBe(0);
-      expect(counts.insertNodesBatch).toBe(1);
-      expect(counts.insertUnique).toBe(0);
-      expect(counts.insertUniqueBatch).toBe(1);
+      expect(counts["getNode"]).toBe(0);
+      expect(counts["getNodes"]).toBeLessThanOrEqual(2);
+      expect(counts["checkUnique"]).toBe(0);
+      expect(counts["checkUniqueBatch"]).toBe(1);
+      expect(counts["insertNode"]).toBe(0);
+      expect(counts["insertNodesBatch"]).toBe(1);
+      expect(counts["insertUnique"]).toBe(0);
+      expect(counts["insertUniqueBatch"]).toBe(1);
     });
   });
 
@@ -268,10 +269,10 @@ describe("importGraph batching", () => {
       expect(result.success).toBe(true);
       expect(result.edges.created).toBe(NODE_COUNT);
 
-      expect(counts.getEdge).toBe(0);
-      expect(counts.getEdges).toBe(1);
-      expect(counts.insertEdge).toBe(0);
-      expect(counts.insertEdgesBatch).toBe(1);
+      expect(counts["getEdge"]).toBe(0);
+      expect(counts["getEdges"]).toBe(1);
+      expect(counts["insertEdge"]).toBe(0);
+      expect(counts["insertEdgesBatch"]).toBe(1);
     });
   });
 
@@ -285,8 +286,8 @@ describe("importGraph batching", () => {
       const result = await importGraph(store, payload(notes), importOptions());
 
       expect(result.nodes.created).toBe(20);
-      expect(counts.upsertFulltext).toBe(0);
-      expect(counts.upsertFulltextBatch).toBe(1);
+      expect(counts["upsertFulltext"]).toBe(0);
+      expect(counts["upsertFulltextBatch"]).toBe(1);
     });
   });
 });
@@ -300,7 +301,7 @@ describe("importGraph batching semantics (must not drift)", () => {
       });
       const nodes = [
         personNode(0),
-        { ...personNode(1), id: (await firstPersonId(store))! },
+        { ...personNode(1), id: requireDefined(await firstPersonId(store)) },
       ];
       const result = await importGraph(store, payload(nodes), importOptions());
       expect(result.nodes.created).toBe(1);

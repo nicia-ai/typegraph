@@ -12,7 +12,6 @@ import { z } from "zod";
 import { defineEdge, defineGraph, defineNode } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type {
-  AdoptedTransaction,
   GraphBackend,
   TransactionBackend,
   TransactionOptions,
@@ -28,6 +27,7 @@ import type {
   CompiledTemporaryStatementSql,
 } from "../src/query/sql-intent";
 import { createStore, type Store } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import {
   collectAllEdges,
   createTestBackend,
@@ -181,24 +181,24 @@ function createCountingBackend(
   return {
     ...backend,
     transaction<T>(
-      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+      fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> {
-      return backend.transaction(async (tx, adoptedTransaction) => {
+      return backend.transaction(async (tx) => {
         const observedTransaction: TransactionBackend = {
           ...tx,
           execute<Result>(query: CompiledRowsSql): Promise<readonly Result[]> {
-            collected.push(backend.compileSql!(query).sql);
+            collected.push(requireDefined(backend.compileSql)(query).sql);
             return tx.execute<Result>(query);
           },
           async executeTemporaryStatement(
             query: CompiledTemporaryStatementSql,
           ): Promise<void> {
-            collected.push(backend.compileSql!(query).sql);
-            await tx.executeTemporaryStatement!(query);
+            collected.push(requireDefined(backend.compileSql)(query).sql);
+            await requireDefined(tx.executeTemporaryStatement)(query);
           },
         };
-        return fn(observedTransaction, adoptedTransaction);
+        return fn(observedTransaction);
       }, options);
     },
   };
@@ -348,9 +348,13 @@ describe("store.algorithms", () => {
       const bob = await store.nodes.Person.getById(
         ids.bob as NodeId<typeof Person>,
       );
-      const path = await store.algorithms.shortestPath(alice!, bob!, {
-        edges: ["knows"],
-      });
+      const path = await store.algorithms.shortestPath(
+        requireDefined(alice),
+        requireDefined(bob),
+        {
+          edges: ["knows"],
+        },
+      );
       expect(path?.depth).toBe(1);
     });
   });
@@ -805,8 +809,8 @@ describe("store.algorithms", () => {
         edges: ["knows"],
       });
       for (let index = 1; index < reachable.length; index++) {
-        expect(reachable[index]!.depth).toBeGreaterThanOrEqual(
-          reachable[index - 1]!.depth,
+        expect(requireDefined(reachable[index]).depth).toBeGreaterThanOrEqual(
+          requireDefined(reachable[index - 1]).depth,
         );
       }
     });
@@ -817,7 +821,7 @@ describe("store.algorithms", () => {
         ...backend,
         capabilities: { ...backend.capabilities, transactions: false },
         execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
-          statements.push(backend.compileSql!(query).sql);
+          statements.push(requireDefined(backend.compileSql)(query).sql);
           return backend.execute<T>(query);
         },
       };
@@ -840,20 +844,20 @@ describe("store.algorithms", () => {
       const observedBackend: GraphBackend = {
         ...backend,
         transaction<T>(
-          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
         ): Promise<T> {
-          return backend.transaction(async (tx, adoptedTransaction) => {
+          return backend.transaction(async (tx) => {
             const observedTransaction: TransactionBackend = {
               ...tx,
               execute<Result>(
                 query: CompiledRowsSql,
               ): Promise<readonly Result[]> {
-                statements.push(backend.compileSql!(query).sql);
+                statements.push(requireDefined(backend.compileSql)(query).sql);
                 return tx.execute<Result>(query);
               },
             };
-            return fn(observedTransaction, adoptedTransaction);
+            return fn(observedTransaction);
           }, options);
         },
       };
@@ -913,18 +917,18 @@ describe("store.algorithms", () => {
       const failingBackend: GraphBackend = {
         ...backend,
         transaction<T>(
-          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
         ): Promise<T> {
-          return backend.transaction(async (tx, adoptedTransaction) => {
+          return backend.transaction(async (tx) => {
             const failingTransaction: TransactionBackend = {
               ...tx,
               async executeTemporaryStatement(
                 query: CompiledTemporaryStatementSql,
               ): Promise<void> {
-                const statement = backend.compileSql!(query).sql;
+                const statement = requireDefined(backend.compileSql)(query).sql;
                 temporaryStatements.push(statement);
-                await tx.executeTemporaryStatement!(query);
+                await requireDefined(tx.executeTemporaryStatement)(query);
                 if (temporaryStatements.length === 1) {
                   failNextRead = true;
                 }
@@ -939,7 +943,7 @@ describe("store.algorithms", () => {
                 return tx.execute<Result>(query);
               },
             };
-            return fn(failingTransaction, adoptedTransaction);
+            return fn(failingTransaction);
           }, options);
         },
       };
@@ -1054,10 +1058,10 @@ describe("store.algorithms", () => {
       const bigintBackend: GraphBackend = {
         ...backend,
         transaction<T>(
-          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
         ): Promise<T> {
-          return backend.transaction(async (tx, adoptedTransaction) => {
+          return backend.transaction(async (tx) => {
             const observedTransaction: TransactionBackend = {
               ...tx,
               async execute<Result>(
@@ -1065,13 +1069,13 @@ describe("store.algorithms", () => {
               ): Promise<readonly Result[]> {
                 const rows = await tx.execute<Record<string, unknown>>(query);
                 return rows.map((row) =>
-                  typeof row.meeting_depth === "number" ?
-                    { ...row, meeting_depth: BigInt(row.meeting_depth) }
+                  typeof row["meeting_depth"] === "number" ?
+                    { ...row, meeting_depth: BigInt(row["meeting_depth"]) }
                   : row,
                 ) as readonly Result[];
               },
             };
-            return fn(observedTransaction, adoptedTransaction);
+            return fn(observedTransaction);
           }, options);
         },
       };
@@ -1247,7 +1251,7 @@ describe("store.algorithms", () => {
       const connectedIds = [ids.alice, ids.bob, ids.charlie, ids.dave, ids.eve];
       const connectedLabels = new Set(
         connectedIds.map((id) => {
-          const membership = byId.get(id)!;
+          const membership = requireDefined(byId.get(id));
           expect(membership.size).toBe(5);
           return `${membership.componentKind}\u0000${membership.componentId}`;
         }),
@@ -1573,7 +1577,11 @@ describe("store.algorithms", () => {
       ] as const;
       await Promise.all(
         edgePairs.map(([from, to]) =>
-          labelStore.edges.knows.create(nodes[from]!, nodes[to]!, {}),
+          labelStore.edges.knows.create(
+            requireDefined(nodes[from]),
+            requireDefined(nodes[to]),
+            {},
+          ),
         ),
       );
 
@@ -1649,18 +1657,20 @@ describe("store.algorithms", () => {
       const failingBackend: GraphBackend = {
         ...backend,
         transaction<T>(
-          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
         ): Promise<T> {
-          return backend.transaction(async (tx, adoptedTransaction) => {
+          return backend.transaction(async (tx) => {
             let failNextExecute = false;
             const failingTransaction: TransactionBackend = {
               ...tx,
               async executeTemporaryStatement(
                 query: CompiledTemporaryStatementSql,
               ): Promise<void> {
-                temporaryStatements.push(backend.compileSql!(query).sql);
-                await tx.executeTemporaryStatement!(query);
+                temporaryStatements.push(
+                  requireDefined(backend.compileSql)(query).sql,
+                );
+                await requireDefined(tx.executeTemporaryStatement)(query);
                 if (temporaryStatements.length === 1) failNextExecute = true;
               },
               execute<Result>(
@@ -1673,7 +1683,7 @@ describe("store.algorithms", () => {
                 return tx.execute<Result>(query);
               },
             };
-            return fn(failingTransaction, adoptedTransaction);
+            return fn(failingTransaction);
           }, options);
         },
       };
@@ -1699,16 +1709,16 @@ describe("store.algorithms", () => {
       const failingBackend: GraphBackend = {
         ...backend,
         transaction<T>(
-          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
         ): Promise<T> {
-          return backend.transaction(async (tx, adoptedTransaction) => {
+          return backend.transaction(async (tx) => {
             const failingTransaction: TransactionBackend = {
               ...tx,
               async executeTemporaryStatement(
                 query: CompiledTemporaryStatementSql,
               ): Promise<void> {
-                const statement = backend.compileSql!(query).sql;
+                const statement = requireDefined(backend.compileSql)(query).sql;
                 temporaryStatements.push(statement);
                 if (
                   statement.includes(
@@ -1717,10 +1727,10 @@ describe("store.algorithms", () => {
                 ) {
                   throw new Error("forced cleanup failure");
                 }
-                await tx.executeTemporaryStatement!(query);
+                await requireDefined(tx.executeTemporaryStatement)(query);
               },
             };
-            return fn(failingTransaction, adoptedTransaction);
+            return fn(failingTransaction);
           }, options);
         },
       };

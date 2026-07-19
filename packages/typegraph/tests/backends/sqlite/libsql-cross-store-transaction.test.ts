@@ -19,8 +19,9 @@ import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStore, defineGraph, defineNode } from "../../../src";
+import { createAdapterStore, defineGraph, defineNode } from "../../../src";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
+import { requireDefined } from "../../../src/utils/presence";
 
 const temporaryFiles: string[] = [];
 
@@ -70,7 +71,7 @@ describe("#134 cross-store atomicity (libsql, documented async shape)", () => {
       "CREATE TABLE connectors (" +
         "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
     );
-    const store = createStore(PlainGraph, backend);
+    const store = createAdapterStore(PlainGraph, backend);
 
     const sourceId = await db.transaction(async (sqlTx) => {
       const inserted = await sqlTx
@@ -79,7 +80,7 @@ describe("#134 cross-store atomicity (libsql, documented async shape)", () => {
         .returning({ id: connectors.id });
       const txStore = store.withTransaction(sqlTx);
       const source = await txStore.nodes.ArtifactSource.create({
-        connectorId: inserted[0]!.id,
+        connectorId: requireDefined(inserted[0]).id,
         label: "primary",
       });
       return source.id;
@@ -100,7 +101,7 @@ describe("#134 cross-store atomicity (libsql, documented async shape)", () => {
       "CREATE TABLE connectors (" +
         "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
     );
-    const store = createStore(PlainGraph, backend);
+    const store = createAdapterStore(PlainGraph, backend);
 
     await expect(
       db.transaction(async (sqlTx) => {
@@ -128,7 +129,7 @@ describe("#134 cross-store atomicity (libsql, documented async shape)", () => {
       "CREATE TABLE connectors (" +
         "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
     );
-    const store = createStore(PlainGraph, backend);
+    const store = createAdapterStore(PlainGraph, backend);
 
     const source = await store.transaction(async (tx) => {
       const sqlTx = tx.sql as typeof db;
@@ -137,7 +138,7 @@ describe("#134 cross-store atomicity (libsql, documented async shape)", () => {
         .values({ name: "github" })
         .returning({ id: connectors.id });
       return tx.nodes.ArtifactSource.create({
-        connectorId: inserted[0]!.id,
+        connectorId: requireDefined(inserted[0]).id,
         label: "primary",
       });
     });

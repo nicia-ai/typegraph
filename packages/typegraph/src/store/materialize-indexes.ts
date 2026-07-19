@@ -30,9 +30,6 @@
  *   concurrent same-name expression-index CIC builds deadlock on
  *   Postgres (no safe-snapshot exemption).
  */
-
-import { sql } from "drizzle-orm";
-
 import { type RawBackend } from "../backend/branded";
 import {
   type CreateVectorIndexParams,
@@ -59,11 +56,13 @@ import {
 } from "../indexes/types";
 import { sqlValueList } from "../query/compiler/predicate-utils";
 import { type SqlDialect } from "../query/dialect/types";
+import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { sortedReplacer } from "../schema/canonical";
 import { serializeIndexDeclaration } from "../schema/serializer";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
+import { requireDefined } from "../utils/presence";
 import {
   ensureFocusedStatusTable,
   runBucketedMaterialization,
@@ -83,6 +82,26 @@ import {
 const CLAIM_LEASE_MS = 15 * 60_000;
 const CLAIM_RETRY_DELAY_MS = 200;
 const CLAIM_WAIT_TIMEOUT_MS = CLAIM_LEASE_MS + 60_000;
+
+const INDEX_DIALECT_BEHAVIOR = {
+  postgres: {
+    concurrentBuilds: true,
+    hasInvalidIndexState: true,
+    supportsGinFamily: true,
+  },
+  sqlite: {
+    concurrentBuilds: false,
+    hasInvalidIndexState: false,
+    supportsGinFamily: false,
+  },
+} as const satisfies Record<
+  SqlDialect,
+  Readonly<{
+    concurrentBuilds: boolean;
+    hasInvalidIndexState: boolean;
+    supportsGinFamily: boolean;
+  }>
+>;
 
 /**
  * Whether the backend implements the FULL cross-caller build-claim
@@ -216,7 +235,7 @@ export async function materializeIndexes(
   const tableNames = backend.tableNames;
   const ddlOptions = {
     ifNotExists: true,
-    concurrent: dialect === "postgres",
+    concurrent: INDEX_DIALECT_BEHAVIOR[dialect].concurrentBuilds,
     ...(tableNames?.nodes === undefined ?
       {}
     : { nodesTableName: tableNames.nodes }),
@@ -401,7 +420,10 @@ async function materializeRelationalIndex(
   // equivalent (its substring-search story is FTS5 fulltext), so the
   // declaration is recognized and intentionally not acted on — same
   // contract as vector indexes on engines without vector support.
-  if (declaration.method !== undefined && dialect !== "postgres") {
+  if (
+    declaration.method !== undefined &&
+    !INDEX_DIALECT_BEHAVIOR[dialect].supportsGinFamily
+  ) {
     return {
       indexName: declaration.name,
       entity: declaration.entity,
@@ -433,9 +455,11 @@ async function materializeRelationalIndex(
         // gin_trgm_ops lives in the pg_trgm extension (contrib — present
         // on stock Postgres and the hosted variants). Idempotent, and a
         // permission failure surfaces as this index's `failed` entry.
-        await backend.executeDdl!("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
+        await requireDefined(backend.executeDdl)(
+          "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
+        );
       }
-      await backend.executeDdl!(ddl);
+      await requireDefined(backend.executeDdl)(ddl);
     },
     existingByStatusKey,
     physicalRebuildPreload: invalidLeftovers,
@@ -519,7 +543,7 @@ async function materializeVectorIndex(
         {}
       : { lists: declaration.indexParams.lists }),
     },
-    concurrent: backend.dialect === "postgres",
+    concurrent: INDEX_DIALECT_BEHAVIOR[backend.dialect].concurrentBuilds,
   };
   return materializeOne(declaration, backend, graphId, schemaVersion, {
     // Compound status-table key for vector entries. Pgvector creates
@@ -530,7 +554,7 @@ async function materializeVectorIndex(
     statusKey: vectorStatusKey(graphId, declaration.name),
     signature,
     driftLabel: "Vector index",
-    run: () => backend.createVectorIndex!(params),
+    run: () => requireDefined(backend.createVectorIndex)(params),
     existingByStatusKey,
     physicalRebuildPreload: invalidLeftovers,
   });
@@ -592,7 +616,9 @@ async function materializeOne(
 ): Promise<MaterializeIndexesEntry> {
   // Narrowed by callsite — guaranteed defined when this is reached
   // (validated in `materializeIndexes`).
-  const recordIndexMaterialization = backend.recordIndexMaterialization!;
+  const recordIndexMaterialization = requireDefined(
+    backend.recordIndexMaterialization,
+  );
 
   const { statusKey, signature, driftLabel, run, existingByStatusKey } = action;
   const statusOverride =
@@ -725,7 +751,7 @@ async function settleAgainstExisting(
   const error = new Error(
     `${driftLabel} "${declaration.name}" already materialized with a different signature (recorded by graph "${existing.graphId}" at version ${existing.schemaVersion}). Drop the index manually and retry, or rename the new declaration.`,
   );
-  await backend.recordIndexMaterialization!(
+  await requireDefined(backend.recordIndexMaterialization)(
     buildAttempt({
       declaration,
       graphId,
@@ -770,12 +796,14 @@ async function materializeWithClaim(
   const { statusKey, signature, driftLabel, run } = action;
   const statusOverride =
     statusKey === declaration.name ? undefined : { statusName: statusKey };
-  const recordIndexMaterialization = backend.recordIndexMaterialization!;
+  const recordIndexMaterialization = requireDefined(
+    backend.recordIndexMaterialization,
+  );
   const token = `${statusKey}:${nowIso()}:${Math.floor(performance.now() * 1000)}`;
   const deadline = Date.now() + CLAIM_WAIT_TIMEOUT_MS;
 
   for (;;) {
-    const claimed = await backend.claimIndexMaterialization!({
+    const claimed = await requireDefined(backend.claimIndexMaterialization)({
       indexName: statusKey,
       graphId,
       entity: declaration.entity,
@@ -803,7 +831,9 @@ async function materializeWithClaim(
     try {
       // Fresh re-check: the bulk preload happened before (possibly) waiting
       // on another caller's build.
-      const fresh = await backend.getIndexMaterialization!(statusKey);
+      const fresh = await requireDefined(backend.getIndexMaterialization)(
+        statusKey,
+      );
       const settled = await settleAgainstExisting(
         fresh,
         declaration,
@@ -870,7 +900,7 @@ async function materializeWithClaim(
       // a lease (CLAIM_LEASE_MS) and self-expires, so a missed release is
       // reclaimed by the next materializer; warn and move on.
       try {
-        await backend.releaseIndexMaterializationClaim!({
+        await requireDefined(backend.releaseIndexMaterializationClaim)({
           indexName: statusKey,
           token,
         });
@@ -895,7 +925,9 @@ async function hasInvalidIndexLeftover(
   backend: GraphBackend,
   physicalIndexName: string,
 ): Promise<boolean> {
-  if (backend.dialect !== "postgres") return false;
+  if (!INDEX_DIALECT_BEHAVIOR[backend.dialect].hasInvalidIndexState) {
+    return false;
+  }
   // Scoped to the session search_path like preloadPhysicalIndexStates —
   // an unscoped probe could steer the unqualified DROP INDEX heal at
   // another schema's identically-named (valid) index.
@@ -926,7 +958,10 @@ async function preloadInvalidIndexLeftovers(
   backend: GraphBackend,
   physicalIndexNames: readonly string[],
 ): Promise<ReadonlySet<string>> {
-  if (backend.dialect !== "postgres" || physicalIndexNames.length === 0) {
+  if (
+    !INDEX_DIALECT_BEHAVIOR[backend.dialect].hasInvalidIndexState ||
+    physicalIndexNames.length === 0
+  ) {
     return new Set();
   }
   const { invalid } = await preloadPhysicalIndexStates(
@@ -945,27 +980,34 @@ async function preloadExistingTables(
   tableNames: readonly string[],
 ): Promise<ReadonlySet<string>> {
   if (tableNames.length === 0) return new Set();
-  if (backend.dialect === "postgres") {
-    const rows = await backend.execute<{ name: string }>(
-      asCompiledRowsSql(sql`
-        SELECT c.relname AS name
-        FROM pg_class c
-        WHERE c.relname IN (${sqlValueList(tableNames)})
-          AND c.relkind IN ('r', 'p')
-          AND pg_catalog.pg_table_is_visible(c.oid)
-      `),
-    );
-    return new Set(rows.map((row) => row.name));
+  switch (backend.dialect) {
+    case "postgres": {
+      const rows = await backend.execute<{ name: string }>(
+        asCompiledRowsSql(sql`
+          SELECT c.relname AS name
+          FROM pg_class c
+          WHERE c.relname IN (${sqlValueList(tableNames)})
+            AND c.relkind IN ('r', 'p')
+            AND pg_catalog.pg_table_is_visible(c.oid)
+        `),
+      );
+      return new Set(rows.map((row) => row.name));
+    }
+    case "sqlite": {
+      const rows = await backend.execute<{ name: string }>(
+        asCompiledRowsSql(sql`
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name IN (${sqlValueList(tableNames)})
+        `),
+      );
+      return new Set(rows.map((row) => row.name));
+    }
+    default: {
+      return backend.dialect satisfies never;
+    }
   }
-  const rows = await backend.execute<{ name: string }>(
-    asCompiledRowsSql(sql`
-      SELECT name
-      FROM sqlite_master
-      WHERE type = 'table'
-        AND name IN (${sqlValueList(tableNames)})
-    `),
-  );
-  return new Set(rows.map((row) => row.name));
 }
 
 type PhysicalIndexStates = Readonly<{
@@ -991,34 +1033,37 @@ async function preloadPhysicalIndexStates(
   const valid = new Set<string>();
   const invalid = new Set<string>();
   if (physicalIndexNames.length === 0) return { valid, invalid };
-  if (backend.dialect === "postgres") {
-    // `pg_table_is_visible` scopes the probe to the session search_path —
-    // the same resolution the unqualified CREATE/DROP INDEX DDL uses — so
-    // a schema-per-tenant database never settles one schema's index based
-    // on another schema's identically-named one (matches buildTableExists
-    // in backend/drizzle/operations/strategy.ts).
-    const rows = await backend.execute<{ name: string; valid: boolean }>(
-      asCompiledRowsSql(sql`
-        SELECT c.relname AS name, i.indisvalid AS valid
-        FROM pg_class c
-        JOIN pg_index i ON i.indexrelid = c.oid
-        WHERE c.relname IN (${sqlValueList(physicalIndexNames)})
-          AND pg_catalog.pg_table_is_visible(c.oid)
-      `),
-    );
-    for (const row of rows) (row.valid ? valid : invalid).add(row.name);
-    return { valid, invalid };
+  switch (backend.dialect) {
+    case "postgres": {
+      // Scope to search_path, matching unqualified CREATE/DROP INDEX DDL.
+      const rows = await backend.execute<{ name: string; valid: boolean }>(
+        asCompiledRowsSql(sql`
+          SELECT c.relname AS name, i.indisvalid AS valid
+          FROM pg_class c
+          JOIN pg_index i ON i.indexrelid = c.oid
+          WHERE c.relname IN (${sqlValueList(physicalIndexNames)})
+            AND pg_catalog.pg_table_is_visible(c.oid)
+        `),
+      );
+      for (const row of rows) (row.valid ? valid : invalid).add(row.name);
+      return { valid, invalid };
+    }
+    case "sqlite": {
+      const rows = await backend.execute<{ name: string }>(
+        asCompiledRowsSql(sql`
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'index'
+            AND name IN (${sqlValueList(physicalIndexNames)})
+        `),
+      );
+      for (const row of rows) valid.add(row.name);
+      return { valid, invalid };
+    }
+    default: {
+      return backend.dialect satisfies never;
+    }
   }
-  const rows = await backend.execute<{ name: string }>(
-    asCompiledRowsSql(sql`
-      SELECT name
-      FROM sqlite_master
-      WHERE type = 'index'
-        AND name IN (${sqlValueList(physicalIndexNames)})
-    `),
-  );
-  for (const row of rows) valid.add(row.name);
-  return { valid, invalid };
 }
 
 /**
@@ -1104,10 +1149,10 @@ async function preloadMaterializations(
     for (const row of rows) map.set(row.indexName, row);
     return map;
   }
-  const getOne = backend.getIndexMaterialization!;
+  const getOne = requireDefined(backend.getIndexMaterialization);
   const rows = await Promise.all(statusKeys.map((key) => getOne(key)));
   for (const [index, row] of rows.entries()) {
-    if (row !== undefined) map.set(statusKeys[index]!, row);
+    if (row !== undefined) map.set(requireDefined(statusKeys[index]), row);
   }
   return map;
 }
@@ -1243,7 +1288,7 @@ export async function materializeSystemIndexes(
     backend.ensureIndexMaterializationsTable,
   );
 
-  const concurrent = backend.dialect === "postgres";
+  const concurrent = INDEX_DIALECT_BEHAVIOR[backend.dialect].concurrentBuilds;
   const candidates: readonly SystemIndexCandidate[] =
     SYSTEM_INDEX_DECLARATIONS.map((declaration) => {
       const physicalTable = resolveSystemIndexTableName(
@@ -1350,7 +1395,7 @@ export async function materializeSystemIndexes(
       statusKey: candidate.name,
       signature,
       driftLabel: "System index",
-      run: () => backend.executeDdl!(ddl),
+      run: () => requireDefined(backend.executeDdl)(ddl),
       existingByStatusKey,
       physicalRebuildPreload,
       freshNeedsPhysicalRebuild: async (physicalIndexName) => {

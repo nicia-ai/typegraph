@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * `merge()` orchestrator (design §7.2, T11).
  *
@@ -39,7 +40,6 @@
  * conflict resolution), so shuffling `branches` yields a deep-equal report and an
  * identical committed graph. T12 proves this with a fast-check shuffle property.
  */
-
 import {
   computeBaseVersion,
   computeContentComponent,
@@ -129,6 +129,8 @@ import {
   lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
+  storeBackend,
+  transactionBackend,
 } from "./typegraph-internal";
 import type {
   BaseAmbiguity,
@@ -270,7 +272,7 @@ async function precomputeEmbeddings<G extends GraphDef>(
     );
   }
   for (const [index, text] of orderedTexts.entries()) {
-    lookup.set(text, vectors[index]!);
+    lookup.set(text, requireDefined(vectors[index]));
   }
   return lookup;
 }
@@ -326,7 +328,7 @@ async function embedMissingPairTexts(
   }
   const augmented = new Map(existing);
   for (const [index, text] of orderedTexts.entries()) {
-    augmented.set(text, vectors[index]!);
+    augmented.set(text, requireDefined(vectors[index]));
   }
   return augmented;
 }
@@ -1071,8 +1073,14 @@ function planMerge<G extends GraphDef>(
     dropped,
     baseAmbiguities: baseAmbiguities.sort((left, right) =>
       compareMergeKeys(
-        mergeKey(left.baseIds[0]!.kind, left.baseIds[0]!.id),
-        mergeKey(right.baseIds[0]!.kind, right.baseIds[0]!.id),
+        mergeKey(
+          requireDefined(left.baseIds[0]).kind,
+          requireDefined(left.baseIds[0]).id,
+        ),
+        mergeKey(
+          requireDefined(right.baseIds[0]).kind,
+          requireDefined(right.baseIds[0]).id,
+        ),
       ),
     ),
     provenanceRecords,
@@ -1299,7 +1307,7 @@ export async function commitPlan<G extends GraphDef>(
   plan: MergePlan<G>,
   expectedBaseVersion?: BaseVersion,
 ): Promise<Readonly<{ nodes: number; edges: number }>> {
-  if (!target.backend.capabilities.transactions) {
+  if (!storeBackend(target).capabilities.transactions) {
     throw new MergeError(
       "merge() requires a transaction-capable target backend. The merged plan (canonical upserts, soft-deletes, edge upserts) must commit atomically; a non-transactional fallback would leave a partially-merged graph on a mid-commit failure. (mergeIncremental() enforces the same requirement.)",
       { details: { capability: "transactions" } },
@@ -1314,7 +1322,11 @@ export async function commitPlan<G extends GraphDef>(
       // content fingerprint through this transaction's snapshot. Either proof
       // ensures the plan still describes the live target before committing.
       if (expectedBaseVersion !== undefined) {
-        await assertTargetUnchanged(tx.backend, target, expectedBaseVersion);
+        await assertTargetUnchanged(
+          transactionBackend(tx),
+          target,
+          expectedBaseVersion,
+        );
       }
       return applyMergePlan(
         plan,
@@ -1641,7 +1653,7 @@ async function resolveMerge<G extends GraphDef>(
           options.embedder,
         );
     const ctx: SimilarityContext = {
-      backend: store.backend,
+      backend: storeBackend(store),
       ...(embeddings === undefined ? {} : { embeddings }),
     };
     const candidates = await generateAllCandidates(
@@ -1704,7 +1716,7 @@ async function resolveMerge<G extends GraphDef>(
       // sidecar node ids are deterministic, so this UPSERTS (idempotent re-runs).
       try {
         const provenanceStore = await openProvenanceStore(
-          target.backend,
+          storeBackend(target),
           target.graphId,
         );
         const count = await persistProvenanceRecords(
@@ -2269,12 +2281,12 @@ async function validateIncrementalEdgeWrites<G extends GraphDef>(
         );
       }
       throw new MergeError(
-        `mergeIncremental() would overwrite committed edge "${id}" (kind "${row.kind}") with a different-kind edge "${plannedKindById.get(id)!}" of the same id.`,
+        `mergeIncremental() would overwrite committed edge "${id}" (kind "${row.kind}") with a different-kind edge "${requireDefined(plannedKindById.get(id))}" of the same id.`,
         {
           details: {
             id,
             committedKind: row.kind,
-            plannedKind: plannedKindById.get(id)!,
+            plannedKind: requireDefined(plannedKindById.get(id)),
           },
         },
       );
@@ -2524,7 +2536,7 @@ async function assertInheritedUnchanged<Row, Expected>(
   for (const [kind, ids] of idsByKind) {
     const rows = await args.fetchRows(kind, ids);
     for (const [index, id] of ids.entries()) {
-      const expected = args.expected.get(mergeKey(kind, id))!;
+      const expected = requireDefined(args.expected.get(mergeKey(kind, id)));
       const current = args.deriveValue(rows[index]);
       if (current === expected) {
         continue;
@@ -2656,7 +2668,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
   plan: MergePlan<G>,
   guard: IncrementalCommitGuard<G>,
 ): Promise<Readonly<{ nodes: number; edges: number }>> {
-  if (!target.backend.capabilities.transactions) {
+  if (!storeBackend(target).capabilities.transactions) {
     throw new MergeError(
       "mergeIncremental() requires a transaction-capable target backend. Incremental writes must preflight existing rows and commit atomically; non-transactional fallback would allow partial graph writes.",
       { details: { capability: "transactions" } },
@@ -2674,7 +2686,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
   return withTxConflictRetry(() =>
     target.transaction(async (tx) => {
       if (target.revisionTrackingEnabled) {
-        await lockRecordedGraphWrite(tx.backend, target.graphId);
+        await lockRecordedGraphWrite(transactionBackend(tx), target.graphId);
       }
       const nodesApi = tx.nodes as unknown as TxNodes;
       const edgesApi = tx.edges as unknown as TxEdges;

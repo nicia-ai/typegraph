@@ -4,7 +4,6 @@
  * Captures query patterns from the AST and generates index recommendations.
  * Uses Proxy to wrap Store and QueryBuilder for transparent interception.
  */
-
 import { type z } from "zod";
 
 import { type GraphDef } from "../core/define-graph";
@@ -20,6 +19,7 @@ import {
   type SchemaIntrospector,
 } from "../query/schema-introspector";
 import { type Store } from "../store/store";
+import { requireDefined } from "../utils/presence";
 import { extractPropertyAccesses } from "./ast-extractor";
 import { ProfileCollector } from "./collector";
 import {
@@ -278,7 +278,7 @@ function resolveAccessPaths(
     return [
       {
         entityType: access.entityType,
-        kind: kinds[0]!,
+        kind: requireDefined(kinds[0]),
         target: access.target,
       },
     ];
@@ -288,7 +288,7 @@ function resolveAccessPaths(
     return [
       {
         entityType: access.entityType,
-        kind: kinds[0]!,
+        kind: requireDefined(kinds[0]),
         target: access.target,
       },
     ];
@@ -304,7 +304,8 @@ function resolveAccessPaths(
     ),
   );
 
-  const kindsToUse = matchingKinds.length > 0 ? matchingKinds : [kinds[0]!];
+  const kindsToUse =
+    matchingKinds.length > 0 ? matchingKinds : [requireDefined(kinds[0])];
 
   return kindsToUse.map((kindName) => ({
     entityType: access.entityType,
@@ -332,7 +333,7 @@ function getNodeEnv(): string | undefined {
   if (typeof process === "undefined") {
     return undefined;
   }
-  return process.env.NODE_ENV;
+  return process.env["NODE_ENV"];
 }
 
 /**

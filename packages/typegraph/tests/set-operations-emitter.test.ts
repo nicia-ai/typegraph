@@ -1,4 +1,3 @@
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,6 +6,7 @@ import {
   lowerStandardQueryToLogicalPlan,
 } from "../src/query/compiler";
 import { emitSetOperationQuerySql } from "../src/query/compiler/emitter";
+import { sql } from "../src/query/sql-fragment";
 import { toSqlString } from "./sql-test-utils";
 
 function createSetOperationPlan(): LogicalPlan {

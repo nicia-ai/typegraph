@@ -18,6 +18,7 @@ import { z } from "zod";
 import { createStore, defineEdge, defineGraph, defineNode } from "../../../src";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import type { GraphBackend } from "../../../src/backend/types";
+import { requireDefined } from "../../../src/utils/presence";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const Post = defineNode("Post", {
@@ -61,7 +62,7 @@ async function withCapturingStore<T>(
       // filled to concrete values — directly EXPLAIN-able.
       async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
         captured.push({ sql: sqlText, params });
-        return raw.executeRaw!<T>(sqlText, params);
+        return requireDefined(raw.executeRaw)<T>(sqlText, params);
       },
     };
     const store = createStore(buildGraph(), backend);
@@ -112,7 +113,7 @@ describe("default edge traversal indexes serve compiled joins index-only", () =>
         statement.sql.includes('"typegraph_edges"'),
       );
       expect(edgeStatement).toBeDefined();
-      const plan = explainPlan(client, edgeStatement!);
+      const plan = explainPlan(client, requireDefined(edgeStatement));
       expect(plan).toContain(
         "SEARCH e USING COVERING INDEX typegraph_edges_to_idx",
       );
@@ -143,7 +144,7 @@ describe("default edge traversal indexes serve compiled joins index-only", () =>
         statement.sql.includes('"typegraph_edges"'),
       );
       expect(edgeStatement).toBeDefined();
-      const plan = explainPlan(client, edgeStatement!);
+      const plan = explainPlan(client, requireDefined(edgeStatement));
       expect(plan).toContain(
         "SEARCH e USING COVERING INDEX typegraph_edges_from_idx",
       );

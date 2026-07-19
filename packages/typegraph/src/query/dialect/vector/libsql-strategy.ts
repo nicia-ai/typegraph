@@ -18,9 +18,6 @@
  * The `pgvectorStrategy` and `sqliteVecStrategy` siblings follow the same
  * `VectorStrategy` contract for their engines.
  */
-import { type SQL, sql } from "drizzle-orm";
-
-import { quotedTableName } from "../../../backend/drizzle/operations/shared";
 import { type StrategyTableContribution } from "../../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
@@ -30,6 +27,7 @@ import {
   type VectorMetric,
   type VectorSearchParams,
 } from "../../../backend/types";
+import { sql, type SqlFragment } from "../../sql-fragment";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
@@ -99,16 +97,19 @@ function libsqlMetricToken(metric: VectorMetric): string {
  * bound as a parameter (not interpolated) — `vector32` parses it into the
  * F32 blob. Finiteness is validated first so a NaN names its index.
  */
-function vector32Literal(embedding: readonly number[], name: string): SQL {
+function vector32Literal(
+  embedding: readonly number[],
+  name: string,
+): SqlFragment {
   assertFiniteEmbedding(embedding, name);
   return sql`vector32(${`[${embedding.join(",")}]`})`;
 }
 
 function distanceExpression(
-  embeddingColumn: SQL,
+  embeddingColumn: SqlFragment,
   queryEmbedding: readonly number[],
   metric: VectorMetric,
-): SQL {
+): SqlFragment {
   const query = vector32Literal(queryEmbedding, "queryEmbedding");
   switch (metric) {
     case "cosine": {
@@ -129,16 +130,22 @@ function distanceExpression(
   }
 }
 
+function tableName(
+  graphId: string,
+  nodeKind: string,
+  fieldPath: string,
+): string {
+  return vectorPhysicalName(TABLE_PREFIX, graphId, nodeKind, fieldPath);
+}
+
 export const libsqlVectorStrategy: VectorStrategy = {
   name: "libsql-native",
   capabilities: LIBSQL_CAPABILITIES,
 
-  tableName(graphId, nodeKind, fieldPath) {
-    return vectorPhysicalName(TABLE_PREFIX, graphId, nodeKind, fieldPath);
-  },
+  tableName,
 
   ownedTables(slot): readonly StrategyTableContribution[] {
-    const table = this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
+    const table = tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
     const name = quoteIdentifier(table);
 
     // No standalone graph_id index: the PRIMARY KEY (graph_id, node_id) already
@@ -172,9 +179,13 @@ export const libsqlVectorStrategy: VectorStrategy = {
     ];
   },
 
-  buildUpsert(slot, params: UpsertEmbeddingParams, timestamp): readonly SQL[] {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  buildUpsert(
+    slot,
+    params: UpsertEmbeddingParams,
+    timestamp,
+  ): readonly SqlFragment[] {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     const value = vector32Literal(params.embedding, "embedding");
     return [
@@ -191,9 +202,9 @@ export const libsqlVectorStrategy: VectorStrategy = {
     slot,
     params: UpsertEmbeddingBatchParams,
     timestamp,
-  ): readonly SQL[] {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  ): readonly SqlFragment[] {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     const valueRows = sql.join(
       params.rows.map(
@@ -215,9 +226,9 @@ export const libsqlVectorStrategy: VectorStrategy = {
     ];
   },
 
-  buildDelete(slot, params: DeleteEmbeddingParams): readonly SQL[] {
-    const table = quotedTableName(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+  buildDelete(slot, params: DeleteEmbeddingParams): readonly SqlFragment[] {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     return [
       sql`
@@ -227,9 +238,13 @@ export const libsqlVectorStrategy: VectorStrategy = {
     ];
   },
 
-  buildSearch(slot, params: VectorSearchParams, candidates?: SQL): SQL {
-    const table = this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
-    const quoted = quotedTableName(table);
+  buildSearch(
+    slot,
+    params: VectorSearchParams,
+    candidates?: SqlFragment,
+  ): SqlFragment {
+    const table = tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
+    const quoted = sql.identifier(table);
     const embeddingColumn = sql`${quoted}."embedding"`;
     const distance = distanceExpression(
       embeddingColumn,
@@ -245,7 +260,9 @@ export const libsqlVectorStrategy: VectorStrategy = {
       // multi-graph recall is bounded by the over-fetched k (documented).
       const indexName = libsqlIndexName(slot);
       const query = vector32Literal(params.queryEmbedding, "queryEmbedding");
-      const conditions: SQL[] = [sql`${quoted}."graph_id" = ${params.graphId}`];
+      const conditions: SqlFragment[] = [
+        sql`${quoted}."graph_id" = ${params.graphId}`,
+      ];
       if (params.minScore !== undefined) {
         conditions.push(
           vectorMinScoreCondition(distance, params.metric, params.minScore),
@@ -277,7 +294,9 @@ export const libsqlVectorStrategy: VectorStrategy = {
     }
 
     // Brute-force scan.
-    const conditions: SQL[] = [sql`${quoted}."graph_id" = ${params.graphId}`];
+    const conditions: SqlFragment[] = [
+      sql`${quoted}."graph_id" = ${params.graphId}`,
+    ];
     if (candidates !== undefined) {
       conditions.push(sql`${quoted}."node_id" IN (${candidates})`);
     }
@@ -300,17 +319,17 @@ export const libsqlVectorStrategy: VectorStrategy = {
     return distanceExpression(embeddingColumn, queryEmbedding, metric);
   },
 
-  buildCreateIndex(slot): SQL | undefined {
+  buildCreateIndex(slot): SqlFragment | undefined {
     if (!usesAnnIndex(slot)) return undefined;
     return sql.raw(
       libsqlVectorIndexDdl(
-        this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+        tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
         slot,
       ),
     );
   },
 
-  buildDropIndex(slot): SQL | undefined {
+  buildDropIndex(slot): SqlFragment | undefined {
     if (!usesAnnIndex(slot)) return undefined;
     const indexName = libsqlIndexName(slot);
     return sql.raw(`DROP INDEX IF EXISTS ${quoteIdentifier(indexName)}`);
@@ -318,7 +337,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
 
   buildDropStorage(slot): readonly string[] {
     const table = quoteIdentifier(
-      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
     const statements: string[] = [];
     // Drop the DiskANN index first so libSQL reclaims its shadow tables,

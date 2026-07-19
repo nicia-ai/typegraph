@@ -1,9 +1,8 @@
 /**
  * Unit tests for set operation compilation.
  *
- * Tests UNION, INTERSECT, EXCEPT compilation to SQL.
+ * Tests UNION, INTERSECT, EXCEPT compilation to SqlFragment.
  */
-import { type SQL, sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -18,6 +17,7 @@ import {
 } from "../src/query/compiler/set-operations";
 import { sqliteDialect } from "../src/query/dialect";
 import { jsonPointer } from "../src/query/json-pointer";
+import { sql, type SqlFragment } from "../src/query/sql-fragment";
 import { toSqlString } from "./sql-test-utils";
 
 // ============================================================
@@ -94,12 +94,12 @@ function createOrderSpec(
   };
 }
 
-function mockCompileQuery(ast: QueryAst, _graphId: string): SQL {
-  // Return a simple mock SQL that identifies the query by its start alias
+function mockCompileQuery(ast: QueryAst, _graphId: string): SqlFragment {
+  // Return a simple mock SqlFragment that identifies the query by its start alias
   return sql`SELECT * FROM ${sql.raw(ast.start.alias)}`;
 }
 
-function taggedCompileQuery(ast: QueryAst, _graphId: string): SQL {
+function taggedCompileQuery(ast: QueryAst, _graphId: string): SqlFragment {
   // Tags each leaf so we can assert the set-op compiler delegated to it.
   return sql`SELECT 'leaf:' || ${sql.raw(ast.start.alias)}`;
 }

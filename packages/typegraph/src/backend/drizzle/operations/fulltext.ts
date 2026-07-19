@@ -14,11 +14,13 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
+import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
 import type {
   FulltextQueryMode,
   FulltextSearchParams,
   SqlDialect,
 } from "../../types";
+import { toDrizzleSql } from "../execution/types";
 import { codePointOrderKey, quotedTableName } from "./shared";
 
 function resolveMode(mode: FulltextQueryMode | undefined): FulltextQueryMode {
@@ -30,23 +32,19 @@ export function buildFulltextSearch(
   params: FulltextSearchParams,
   strategy: FulltextStrategy,
   dialect: SqlDialect,
-  candidates?: SQL,
+  candidates?: SQL | SqlFragment,
 ): SQL {
   assertValidSearchParams(params);
 
   const mode = resolveMode(params.mode);
   const table = quotedTableName(tableName);
-  const matchCondition = strategy.matchCondition(
-    tableName,
-    params.query,
-    mode,
-    params.language,
+  const matchCondition = toDrizzleSql(
+    strategy.matchCondition(tableName, params.query, mode, params.language),
+    dialect,
   );
-  const rankExpression = strategy.rankExpression(
-    tableName,
-    params.query,
-    mode,
-    params.language,
+  const rankExpression = toDrizzleSql(
+    strategy.rankExpression(tableName, params.query, mode, params.language),
+    dialect,
   );
 
   const conditions: SQL[] = [
@@ -67,18 +65,23 @@ export function buildFulltextSearch(
   // `store.refreshStatistics()` after bulk loads (the documented setup),
   // not a cleverer SQL form.
   if (candidates !== undefined) {
-    conditions.push(sql`"node_id" IN (${candidates})`);
+    const candidateSql =
+      isSqlFragment(candidates) ? toDrizzleSql(candidates, dialect) : candidates;
+    conditions.push(sql`"node_id" IN (${candidateSql})`);
   }
 
   const snippetExpr =
-    params.includeSnippets === true && strategy.supportsSnippets
-      ? strategy.snippetExpression(
+    params.includeSnippets === true && strategy.supportsSnippets ?
+      toDrizzleSql(
+        strategy.snippetExpression(
           tableName,
           params.query,
           mode,
           params.language,
-        )
-      : sql`NULL`;
+        ),
+        dialect,
+      )
+    : sql`NULL`;
 
   const pageClause =
     params.offset === undefined || params.offset === 0 ?

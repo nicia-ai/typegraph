@@ -23,8 +23,8 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { type SqlDialect } from "../../../query/dialect/types";
+import { coerceNumericScore } from "../../row-mappers";
 import { type HybridSearchRow, type NodeRow } from "../../types";
-import { coerceNumericScore } from "../row-mappers";
 import { codePointOrderKey, quotedColumn, type Tables } from "./shared";
 
 /**
@@ -197,23 +197,23 @@ export function mapHybridSearchRow(
 ): HybridSearchRow {
   return {
     node: toNodeRow(row),
-    fusedScore: coerceNumericScore(row.fused_score as number | string),
-    ...(present(row.vector_rank) ?
-      { vectorRank: Number(row.vector_rank) }
+    fusedScore: coerceNumericScore(row["fused_score"] as number | string),
+    ...(present(row["vector_rank"]) ?
+      { vectorRank: Number(row["vector_rank"]) }
     : {}),
-    ...(present(row.vector_score) ?
-      { vectorScore: coerceNumericScore(row.vector_score as number | string) }
+    ...(present(row["vector_score"]) ?
+      { vectorScore: coerceNumericScore(row["vector_score"] as number | string) }
     : {}),
-    ...(present(row.fulltext_rank) ?
-      { fulltextRank: Number(row.fulltext_rank) }
+    ...(present(row["fulltext_rank"]) ?
+      { fulltextRank: Number(row["fulltext_rank"]) }
     : {}),
-    ...(present(row.fulltext_score) ?
+    ...(present(row["fulltext_score"]) ?
       {
         fulltextScore: coerceNumericScore(
-          row.fulltext_score as number | string,
+          row["fulltext_score"] as number | string,
         ),
       }
     : {}),
-    ...(present(row.snippet) ? { snippet: String(row.snippet) } : {}),
+    ...(present(row["snippet"]) ? { snippet: String(row["snippet"]) } : {}),
   };
 }

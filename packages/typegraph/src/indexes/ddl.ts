@@ -1,8 +1,7 @@
-import { type SQL, sql } from "drizzle-orm";
-import { CasingCache } from "drizzle-orm/casing";
-
 import { getDialect } from "../query/dialect";
 import { type SqlDialect } from "../query/dialect/types";
+import { renderSqlInline, sql, type SqlFragment } from "../query/sql-fragment";
+import { requireDefined } from "../utils/presence";
 import {
   compileEdgeIndexKeys,
   compileIndexWhere,
@@ -29,6 +28,14 @@ export type GenerateIndexDdlOptions = Readonly<{
    */
   concurrent?: boolean | undefined;
 }>;
+
+const INDEX_DDL_BEHAVIOR = {
+  postgres: { concurrentBuilds: true, supportsGinFamily: true },
+  sqlite: { concurrentBuilds: false, supportsGinFamily: false },
+} as const satisfies Record<
+  SqlDialect,
+  Readonly<{ concurrentBuilds: boolean; supportsGinFamily: boolean }>
+>;
 
 /**
  * Generate `CREATE INDEX` DDL for a single relational index declaration.
@@ -79,9 +86,9 @@ function generateTableIndexDDL(
     return generateGinFamilyIndexDDL(index, dialect, tableName, options);
   }
   const ifNotExists = options.ifNotExists ?? true;
-  const propsColumn = sql.raw('"props"');
-  const systemColumn = (column: SystemColumnName): SQL =>
-    sql.raw(quoteIdentifier(column));
+  const propsColumn = sql.identifier("props");
+  const systemColumn = (column: SystemColumnName): SqlFragment =>
+    sql.identifier(column);
 
   const keys =
     index.entity === "node" ?
@@ -90,7 +97,7 @@ function generateTableIndexDDL(
 
   const whereSql =
     index.where ?
-      sqlToInlineString(
+      renderSqlInline(
         compileIndexWhere(
           {
             dialect,
@@ -103,10 +110,13 @@ function generateTableIndexDDL(
       )
     : undefined;
 
-  const keySql = keys.map((k) => sqlToInlineString(k, dialect)).join(", ");
+  const keySql = keys.map((key) => renderSqlInline(key, dialect)).join(", ");
   const unique = index.unique ? "UNIQUE " : "";
   const concurrent =
-    options.concurrent === true && dialect === "postgres" ?
+    (
+      options.concurrent === true &&
+      INDEX_DDL_BEHAVIOR[dialect].concurrentBuilds
+    ) ?
       "CONCURRENTLY "
     : "";
   const ifNotExistsSql = ifNotExists ? "IF NOT EXISTS " : "";
@@ -136,7 +146,7 @@ function generateGinFamilyIndexDDL(
   tableName: string,
   options: GenerateIndexDdlOptions,
 ): string {
-  if (dialect !== "postgres") {
+  if (!INDEX_DDL_BEHAVIOR[dialect].supportsGinFamily) {
     throw new Error(
       `Index "${index.name}" declares method "${index.method}", which ` +
         "requires PostgreSQL. materializeIndexes() reports such " +
@@ -144,8 +154,8 @@ function generateGinFamilyIndexDDL(
     );
   }
   const adapter = getDialect(dialect);
-  const propsColumn = sql.raw('"props"');
-  const pointer = index.fields[0]!;
+  const propsColumn = sql.identifier("props");
+  const pointer = requireDefined(index.fields[0]);
   const expression =
     index.method === "gin" ?
       adapter.jsonExtract(propsColumn, pointer)
@@ -154,58 +164,9 @@ function generateGinFamilyIndexDDL(
     index.method === "gin" ? "jsonb_path_ops" : "gin_trgm_ops";
   const concurrent = options.concurrent === true ? "CONCURRENTLY " : "";
   const ifNotExistsSql = (options.ifNotExists ?? true) ? "IF NOT EXISTS " : "";
-  return `CREATE INDEX ${concurrent}${ifNotExistsSql}${quoteIdentifier(index.name)} ON ${quoteIdentifier(tableName)} USING GIN ((${sqlToInlineString(expression, dialect)}) ${operatorClass});`;
+  return `CREATE INDEX ${concurrent}${ifNotExistsSql}${quoteIdentifier(index.name)} ON ${quoteIdentifier(tableName)} USING GIN ((${renderSqlInline(expression, dialect)}) ${operatorClass});`;
 }
 
 function quoteIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
-}
-
-function sqlToInlineString(object: SQL, dialect: SqlDialect): string {
-  const query = object.toQuery({
-    casing: new CasingCache(),
-    escapeName: (name) => name,
-    escapeParam: (_number, value) => inlineParam(value, dialect),
-    escapeString: (value) => escapeStringLiteral(value),
-    inlineParams: true,
-    invokeSource: "indexes",
-  });
-
-  if (query.params.length > 0) {
-    throw new Error(
-      "Index DDL generation produced parameters; expected fully inlined SQL",
-    );
-  }
-
-  return query.sql;
-}
-
-function inlineParam(value: unknown, dialect: SqlDialect): string {
-  if (value === null || value === undefined) {
-    return "NULL";
-  }
-  if (value instanceof Date) {
-    return escapeStringLiteral(value.toISOString());
-  }
-
-  if (typeof value === "string") {
-    return escapeStringLiteral(value);
-  }
-  if (typeof value === "number") {
-    return value.toString();
-  }
-  if (typeof value === "boolean") {
-    return getDialect(dialect).booleanLiteralString(value);
-  }
-  if (typeof value === "bigint") {
-    return value.toString();
-  }
-
-  throw new TypeError(
-    "Index DDL generation received an unsupported SQL parameter value",
-  );
-}
-
-function escapeStringLiteral(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`;
 }

@@ -535,9 +535,9 @@ describe("Store.evolve — modify restart parity", () => {
     const intro = reloaded.introspect();
     const documentKind = intro.kinds.find((kind) => kind.name === "Doc");
     expect(documentKind).toBeDefined();
-    const documentDocument = intro.extension?.nodes?.Doc;
-    expect(documentDocument?.properties.summary).toBeDefined();
-    expect(documentDocument?.properties.title).toBeDefined();
+    const documentDocument = intro.extension?.nodes?.["Doc"];
+    expect(documentDocument?.properties["summary"]).toBeDefined();
+    expect(documentDocument?.properties["title"]).toBeDefined();
   });
 });
 

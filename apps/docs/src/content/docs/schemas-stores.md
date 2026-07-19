@@ -438,7 +438,10 @@ const graph = defineGraph({
 
 ### `createStore(graph, backend, options?)`
 
-Creates a store instance for a graph definition.
+Creates the portable store contract for a graph definition. It contains the
+complete TypeGraph API and graph-owned transactions, but deliberately omits
+adapter-native handles, caller-owned transaction adoption, and mutable backend
+internals.
 
 ```typescript
 import { createStore } from "@nicia-ai/typegraph";
@@ -467,6 +470,12 @@ function createStore<G extends GraphDef>(
 ```typescript
 const store = createStore(graph, backend);
 ```
+
+When an application owns an adapter connection and must coordinate native SQL
+with TypeGraph, use `createAdapterStore(graph, adapterBackend)` instead. It
+returns `AdapterStore<G, TNativeTransaction>`, which adds precisely typed
+`tx.sql`, `withTransaction`, `withRecordedTransaction`, and the adapter backend
+surface. A plain `GraphBackend` cannot be passed to this factory.
 
 Override the default traversal expansion:
 
@@ -526,6 +535,11 @@ if (result.status === "initialized") {
 
 **Throws:** `MigrationError` if breaking changes are detected and
 `throwOnBreaking` is `true` (the default).
+
+Use `createAdapterStoreWithSchema` for the same provisioning behavior with an
+`AdapterStore` result. This explicit factory is required for native transaction
+adoption or `tx.sql`; schema provisioning alone does not expose adapter
+capabilities on the portable `Store`.
 
 ## Store Projection
 
@@ -1477,7 +1491,7 @@ a thrown error does not roll back earlier writes inside the callback**. If
 you require atomicity, branch on the capability:
 
 ```typescript
-if (backend.capabilities.transactions) {
+if (store.capabilities.transactions) {
   await store.transaction(async (tx) => { /* atomic */ });
 } else {
   // Sequential, non-atomic — handle partial-failure recovery yourself.

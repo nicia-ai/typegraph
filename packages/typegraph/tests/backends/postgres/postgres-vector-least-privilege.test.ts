@@ -39,9 +39,10 @@ import {
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 const LEAST_PRIV_ROLE = "tg_vec_lp_runtime";
@@ -85,7 +86,7 @@ function leastPrivConnection(): Pool {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   try {
     ownerPool = new Pool({ connectionString: TEST_DATABASE_URL });
     await ownerPool.query("SELECT 1");
@@ -138,7 +139,7 @@ afterAll(async () => {
   if (ownerPool) await ownerPool.end();
 });
 
-describe.runIf(process.env.POSTGRES_URL)(
+describe.runIf(process.env["POSTGRES_URL"])(
   "PostgreSQL vector ops under a least-privilege (USAGE-only) role",
   () => {
     const transientPools: Pool[] = [];
@@ -170,14 +171,16 @@ describe.runIf(process.env.POSTGRES_URL)(
 
     afterEach(async () => {
       while (transientPools.length > 0) {
-        const pool = transientPools.pop()!;
+        const pool = requireDefined(transientPools.pop());
         await pool.end();
       }
     });
 
     it("the runtime role genuinely lacks CREATE on schema public (control)", async () => {
       await expect(
-        leastPrivPool!.query(`CREATE TABLE tg_lp_probe (id text)`),
+        requireDefined(leastPrivPool).query(
+          `CREATE TABLE tg_lp_probe (id text)`,
+        ),
       ).rejects.toMatchObject({ code: "42501" });
     });
 
@@ -186,7 +189,9 @@ describe.runIf(process.env.POSTGRES_URL)(
       await createStoreWithSchema(VecGraph, ownerBackend());
 
       // The per-field vector table now exists, owned by the migrator.
-      const tableExists = await ownerPool!.query<{ exists: boolean }>(
+      const tableExists = await requireDefined(ownerPool).query<{
+        exists: boolean;
+      }>(
         `SELECT EXISTS (
            SELECT 1 FROM pg_tables
            WHERE schemaname = 'public' AND tablename = $1

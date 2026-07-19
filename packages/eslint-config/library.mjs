@@ -36,12 +36,6 @@ export function createLibraryConfig(tsconfigRootDir, options = {}) {
       },
       rules: {
         ...vitest.configs.recommended.rules,
-        // Test files often have dynamic type behavior for testing type inference
-        "@typescript-eslint/no-unsafe-member-access": "off",
-        "@typescript-eslint/no-unsafe-assignment": "off",
-        "@typescript-eslint/no-unsafe-call": "off",
-        "@typescript-eslint/no-unsafe-return": "off",
-        "@typescript-eslint/no-unsafe-argument": "off",
         // Tests may not always need explicit assertions
         "vitest/expect-expect": "off",
       },

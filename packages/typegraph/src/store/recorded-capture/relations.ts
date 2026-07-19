@@ -1,6 +1,3 @@
-import { type SQL, sql } from "drizzle-orm";
-
-import { sqlNull } from "../../backend/drizzle/operations/shared";
 import {
   type EdgeRow,
   type NodeRow,
@@ -9,6 +6,7 @@ import {
 } from "../../backend/types";
 import { RECORDED_MAX } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { generateId } from "../../utils/id";
 import { executeStatement } from "./guards";
 
@@ -124,7 +122,7 @@ type RecordedCellBuilder<Row> = (
   row: Row,
   recordedCommit: string,
   operation: RecordedOperation,
-) => SQL;
+) => SqlFragment;
 
 type RecordedCommonColumn =
   | "history_id"
@@ -143,6 +141,10 @@ type RecordedCommonColumn =
   | "schema_version"
   | "tx_id"
   | "meta";
+
+function sqlNull(value: string | undefined): SqlFragment {
+  return value === undefined ? sql.raw("NULL") : sql`${value}`;
+}
 
 function recordedCommonCells<Row extends NodeRow | EdgeRow>(): Record<
   RecordedCommonColumn,
@@ -193,7 +195,7 @@ function recordedValuesTuple<Row, Column extends string>(
   row: Row,
   recordedCommit: string,
   operation: RecordedOperation,
-): SQL {
+): SqlFragment {
   const tuple = columns.map((column) =>
     cells[column](row, recordedCommit, operation),
   );
@@ -202,8 +204,8 @@ function recordedValuesTuple<Row, Column extends string>(
 
 async function insertRecordedRows<Row, Column extends string>(
   target: TransactionBackend,
-  table: SQL,
-  columnList: SQL,
+  table: SqlFragment,
+  columnList: SqlFragment,
   columns: readonly Column[],
   cells: Record<Column, RecordedCellBuilder<Row>>,
   inserts: readonly RecordedInsert<Row>[],
@@ -238,7 +240,7 @@ export function recordedEdgeChunkSize(target: TransactionBackend): number {
 
 export function insertRecordedNodeRows(
   target: TransactionBackend,
-  table: SQL,
+  table: SqlFragment,
   inserts: readonly RecordedInsert<NodeRow>[],
   recordedCommit: string,
 ): Promise<void> {
@@ -255,7 +257,7 @@ export function insertRecordedNodeRows(
 
 export function insertRecordedEdgeRows(
   target: TransactionBackend,
-  table: SQL,
+  table: SqlFragment,
   inserts: readonly RecordedInsert<EdgeRow>[],
   recordedCommit: string,
 ): Promise<void> {

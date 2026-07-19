@@ -1,9 +1,8 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { type ValueType } from "../query/ast";
 import { getDialect } from "../query/dialect";
 import { type SqlDialect } from "../query/dialect/types";
 import { type JsonPointer, jsonPointer } from "../query/json-pointer";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import {
   type EdgeIndexDeclaration,
   type IndexWhereExpression,
@@ -20,13 +19,13 @@ import {
 
 export type IndexCompilationContext = Readonly<{
   dialect: SqlDialect;
-  propsColumn: SQL;
-  systemColumn: (column: SystemColumnName) => SQL;
+  propsColumn: SqlFragment;
+  systemColumn: (column: SystemColumnName) => SqlFragment;
 }>;
 
 type CompiledIndexKeys = Readonly<{
   /** SQL expressions in index key order */
-  keys: readonly SQL[];
+  keys: readonly SqlFragment[];
 }>;
 
 // ============================================================
@@ -36,11 +35,11 @@ type CompiledIndexKeys = Readonly<{
 export function compileNodeIndexKeys(
   index: NodeIndexDeclaration,
   dialect: SqlDialect,
-  propsColumn: SQL,
-  systemColumn: (column: SystemColumnName) => SQL,
+  propsColumn: SqlFragment,
+  systemColumn: (column: SystemColumnName) => SqlFragment,
 ): CompiledIndexKeys {
   const adapter = getDialect(dialect);
-  const keys: SQL[] = [];
+  const keys: SqlFragment[] = [];
 
   const systemColumns = [
     ...getNodeScopeColumns(index.scope),
@@ -73,11 +72,11 @@ export function compileNodeIndexKeys(
 export function compileEdgeIndexKeys(
   index: EdgeIndexDeclaration,
   dialect: SqlDialect,
-  propsColumn: SQL,
-  systemColumn: (column: SystemColumnName) => SQL,
+  propsColumn: SqlFragment,
+  systemColumn: (column: SystemColumnName) => SqlFragment,
 ): CompiledIndexKeys {
   const adapter = getDialect(dialect);
-  const keys: SQL[] = [];
+  const keys: SqlFragment[] = [];
 
   for (const column of getEdgeScopeColumns(index.scope, index.direction)) {
     keys.push(systemColumn(column));
@@ -116,9 +115,9 @@ export function compileEdgeIndexKeys(
 export function compileNodeIndexFieldKeys(
   index: NodeIndexDeclaration,
   ctx: IndexCompilationContext,
-): readonly SQL[] {
+): readonly SqlFragment[] {
   const adapter = getDialect(ctx.dialect);
-  const keys: SQL[] = [];
+  const keys: SqlFragment[] = [];
   for (const [position, pointer] of index.fields.entries()) {
     const extracted = compileIndexKeyValue(
       adapter,
@@ -133,10 +132,10 @@ export function compileNodeIndexFieldKeys(
 
 function compileIndexKeyValue(
   dialect: ReturnType<typeof getDialect>,
-  propsColumn: SQL,
+  propsColumn: SqlFragment,
   pointer: JsonPointer,
   valueType: ValueType | undefined,
-): SQL {
+): SqlFragment {
   switch (valueType) {
     case "number": {
       return dialect.jsonExtractNumber(propsColumn, pointer);
@@ -209,7 +208,7 @@ function isIndexWhereLiteralList(
 export function compileIndexWhere(
   ctx: IndexCompilationContext,
   expression: IndexWhereExpression,
-): SQL {
+): SqlFragment {
   switch (expression.__type) {
     case "index_where_and": {
       return sql`(${sql.join(
@@ -265,7 +264,7 @@ export function compileIndexWhere(
 function compileIndexWhereOperand(
   ctx: IndexCompilationContext,
   operand: IndexWhereOperand,
-): SQL {
+): SqlFragment {
   if (operand.__type === "index_operand_system") {
     return ctx.systemColumn(operand.column);
   }
@@ -299,7 +298,7 @@ function compileIndexWhereOperand(
 function compileIndexWhereLiteral(
   dialect: SqlDialect,
   literal: IndexWhereLiteral,
-): SQL {
+): SqlFragment {
   switch (literal.valueType) {
     case "string":
     case "date": {
@@ -322,7 +321,7 @@ function compileIndexWhereLiteral(
 
 type ComparisonIndexWhereOp = Exclude<IndexWhereOp, "in" | "notIn">;
 
-function compileComparisonOperator(op: ComparisonIndexWhereOp): SQL {
+function compileComparisonOperator(op: ComparisonIndexWhereOp): SqlFragment {
   switch (op) {
     case "eq": {
       return sql`=`;

@@ -19,7 +19,7 @@ import type {
   MergeOptions,
 } from "@nicia-ai/typegraph/graph-merge";
 import { branch, merge } from "@nicia-ai/typegraph/graph-merge";
-import type { SqliteTables } from "@nicia-ai/typegraph/sqlite";
+import type { SqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { z } from "zod";
 
 const Person = defineNode("Person", {

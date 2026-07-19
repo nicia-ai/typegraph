@@ -23,6 +23,7 @@ import {
 } from "../src";
 import { type DefineEdgeOptions } from "../src/core/edge";
 import { type DefineNodeOptions } from "../src/core/node";
+import { requireDefined } from "../src/utils/presence";
 
 describe("defineNode()", () => {
   it("creates a node kind with a name and schema", () => {
@@ -393,7 +394,7 @@ describe("defineGraph() with indexes", () => {
     });
 
     expect(graph.indexes).toHaveLength(1);
-    const declaration = graph.indexes![0]!;
+    const declaration = requireDefined(requireDefined(graph.indexes)[0]);
     expect(declaration.entity).toBe("node");
     expect(declaration.kind).toBe("Person");
     // `origin` is omitted from canonical form for compile-time indexes
@@ -417,7 +418,7 @@ describe("defineGraph() with indexes", () => {
     });
 
     expect(graph.indexes).toHaveLength(1);
-    const declaration = graph.indexes![0]!;
+    const declaration = requireDefined(requireDefined(graph.indexes)[0]);
     expect(declaration.entity).toBe("edge");
     expect(declaration.kind).toBe("knows");
     expect(declaration.origin).toBeUndefined();
@@ -439,8 +440,12 @@ describe("defineGraph() with indexes", () => {
     });
 
     expect(graph.indexes).toHaveLength(2);
-    expect(graph.indexes![0]!.origin).toBeUndefined();
-    expect(graph.indexes![1]!.origin).toBe("runtime");
+    expect(
+      requireDefined(requireDefined(graph.indexes)[0]).origin,
+    ).toBeUndefined();
+    expect(requireDefined(requireDefined(graph.indexes)[1]).origin).toBe(
+      "runtime",
+    );
   });
 
   it("leaves graph.indexes as undefined when the slice is omitted", () => {

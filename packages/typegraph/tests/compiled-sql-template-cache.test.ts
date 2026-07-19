@@ -7,7 +7,6 @@
  * run raw SQL text. Freshness-across-writes is guarded behaviorally in
  * `query-builder-read-freshness.test.ts` and the cross-backend temporal suite.
  */
-import { Placeholder } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -23,6 +22,8 @@ import {
 import type { GraphBackend } from "../src/backend/types";
 import { compileQuery } from "../src/query/compiler/index";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "../src/query/compiler/temporal";
+import { Placeholder } from "../src/query/sql-fragment";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const GRAPH_ID = "compiled-sql-template-cache";
@@ -45,14 +46,14 @@ function countingBackend(real: GraphBackend): {
     ...real,
     compileSql(query) {
       counts.compileSql++;
-      return real.compileSql!(query);
+      return requireDefined(real.compileSql)(query);
     },
     executeRaw<T>(
       sqlText: string,
       params: readonly unknown[],
     ): Promise<readonly T[]> {
       counts.executeRaw++;
-      return real.executeRaw!<T>(sqlText, params);
+      return requireDefined(real.executeRaw)<T>(sqlText, params);
     },
   };
   return { backend, counts };
@@ -188,7 +189,7 @@ describe("compiled SQL template cache", () => {
     const ast = query.toAst();
 
     const compileOnce = () =>
-      real.compileSql!(
+      requireDefined(real.compileSql)(
         compileQuery(ast, GRAPH_ID, {
           dialect: "sqlite",
           readInstant: "placeholder",
@@ -218,7 +219,7 @@ describe("compiled SQL template cache", () => {
       .temporal("asOf", asOf)
       .select((ctx) => ({ id: ctx.p.id }));
 
-    const { params } = real.compileSql!(
+    const { params } = requireDefined(real.compileSql)(
       compileQuery(query.toAst(), GRAPH_ID, {
         dialect: "sqlite",
         readInstant: "placeholder",

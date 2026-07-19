@@ -1,5 +1,7 @@
 // Types
 export {
+  type AdapterTransactionContext,
+  type BaseStoreOptions,
   type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,
@@ -18,6 +20,7 @@ export {
   type HookContext,
   type IfExistsMode,
   type LiveStoreOptions,
+  type MeasurableAdapterTransactionContext,
   type MeasurableTransactionContext,
   type Node,
   type NodeBulkFindByIndexOptions,
@@ -32,6 +35,7 @@ export {
   type OperationHookContext,
   type QueryHookContext,
   type QueryOptions,
+  type RecordedReadStoreOptions,
   type RecordedStoreViewEdgeCollection,
   type RecordedStoreViewEdgeCollections,
   type RecordedStoreViewNodeCollection,
@@ -51,6 +55,7 @@ export {
   type TypedEdgeCollection,
   type TypedRecordedStoreViewEdgeCollection,
   type TypedStoreViewEdgeCollection,
+  type UnboundLiveStoreOptions,
   type UpdateEdgeInput,
   type UpdateNodeInput,
 } from "./types";
@@ -85,6 +90,7 @@ export type {
 export { defineSubgraphProject } from "./subgraph";
 
 // Store
+export type { HistoryStoreBackend } from "./history-store-backend";
 export type {
   MaterializeIndexesEntry,
   MaterializeIndexesOptions,
@@ -98,23 +104,26 @@ export type {
   ReclaimedVectorFieldEntry,
 } from "./materialize-removals";
 export type {
-  HistorySafeBackend,
-  HistorySafeTransactionBackend,
+  AdapterHistoryStore,
+  AdapterHistoryTransactionContext,
+  AdapterRecordedReadStore,
+  AdapterStore,
   HistoryStore,
-  HistoryTransactionContext,
-  HistoryWithTransactionUnavailable,
-  MeasurableHistoryTransactionContext,
+  MeasurableAdapterHistoryTransactionContext,
   RecordedReadStore,
   ReembedFunction,
   ReembedVectorFieldOptions,
   ReembedVectorFieldResult,
   SchemaManagerOptions,
   SchemaValidationResult,
+  Store,
 } from "./store";
-export type { Store } from "./store";
 export {
+  createAdapterStore,
+  createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
+  createVerifiedAdapterStore,
   createVerifiedStore,
 } from "./store";
 

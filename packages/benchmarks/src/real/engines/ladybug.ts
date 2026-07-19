@@ -518,7 +518,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
         `ReplyOf root walk found no root Post for comment ${commentId}`,
       );
     }
-    return root.id as string;
+    return root["id"] as string;
   }
 
   async function recentMessagesOfPerson(personId: string): Promise<
@@ -542,15 +542,15 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     // (see compareIdsAscending's doc).
     return [
       ...posts.map((row) => ({
-        id: row.id as string,
-        content: row.content as string,
-        creationDate: row.creationDate as string,
+        id: row["id"] as string,
+        content: row["content"] as string,
+        creationDate: row["creationDate"] as string,
         kind: "Post" as const,
       })),
       ...comments.map((row) => ({
-        id: row.id as string,
-        content: row.content as string,
-        creationDate: row.creationDate as string,
+        id: row["id"] as string,
+        content: row["content"] as string,
+        creationDate: row["creationDate"] as string,
         kind: "Comment" as const,
       })),
     ]
@@ -596,9 +596,9 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
         content: message.content,
         creationDate: message.creationDate,
         postId: rootId,
-        personId: author?.id,
-        firstName: author?.firstName,
-        lastName: author?.lastName,
+        personId: author?.["id"],
+        firstName: author?.["firstName"],
+        lastName: author?.["lastName"],
       });
     }
 
@@ -620,14 +620,14 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     const canonicalRows = rows
       .toSorted(
         (left, right) =>
-          (right.since as string).localeCompare(left.since as string) ||
-          compareIdsAscending(left.id as string, right.id as string),
+          (right["since"] as string).localeCompare(left["since"] as string) ||
+          compareIdsAscending(left["id"] as string, right["id"] as string),
       )
       .map((row) => ({
-        personId: row.id,
-        firstName: row.firstName,
-        lastName: row.lastName,
-        since: row.since,
+        personId: row["id"],
+        firstName: row["firstName"],
+        lastName: row["lastName"],
+        since: row["since"],
       }));
     return {
       rowCount: canonicalRows.length,
@@ -664,7 +664,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
       await conn.execute(forumOfPostStatement, { id: rootId }),
     );
     const forum = forumRows[0];
-    const moderatorId = forum?.moderatorId as string | undefined;
+    const moderatorId = forum?.["moderatorId"] as string | undefined;
     if (moderatorId === undefined) {
       return { rowCount: 0, digest: canonicalDigest([]) };
     }
@@ -673,11 +673,11 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     );
     const moderator = moderatorRows[0];
     const canonicalRow = {
-      forumId: forum!.forumId,
-      forumTitle: forum!.forumTitle,
+      forumId: forum!["forumId"],
+      forumTitle: forum!["forumTitle"],
       moderatorId,
-      moderatorFirstName: moderator?.firstName,
-      moderatorLastName: moderator?.lastName,
+      moderatorFirstName: moderator?.["firstName"],
+      moderatorLastName: moderator?.["lastName"],
     };
     return {
       rowCount: moderatorRows.length,
@@ -693,7 +693,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     const parentAuthorRows = await rowsOf(
       await conn.execute(parentAuthorStatement, { id: message.id }),
     );
-    const parentAuthorId = parentAuthorRows[0]?.id as string | undefined;
+    const parentAuthorId = parentAuthorRows[0]?.["id"] as string | undefined;
 
     const repliesStatement =
       message.kind === "Post" ?
@@ -703,7 +703,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
       await conn.execute(repliesStatement, { id: message.id }),
     );
     const authorIds = [
-      ...new Set(replies.map((row) => row.authorId as string)),
+      ...new Set(replies.map((row) => row["authorId"] as string)),
     ];
 
     let knowsAuthorIds = new Set<string>();
@@ -714,7 +714,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
           ids: authorIds,
         }),
       );
-      knowsAuthorIds = new Set(knowsRows.map((row) => row.id as string));
+      knowsAuthorIds = new Set(knowsRows.map((row) => row["id"] as string));
     }
 
     // Cypher's own id tie-break above is a plain string compare; re-sorted
@@ -723,23 +723,23 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     const canonicalRows = replies
       .toSorted(
         (left, right) =>
-          (right.creationDate as string).localeCompare(
-            left.creationDate as string,
+          (right["creationDate"] as string).localeCompare(
+            left["creationDate"] as string,
           ) ||
           compareIdsAscending(
-            left.authorId as string,
-            right.authorId as string,
+            left["authorId"] as string,
+            right["authorId"] as string,
           ),
       )
       .map((reply) => ({
-        commentId: reply.id,
-        content: reply.content,
-        creationDate: reply.creationDate,
-        replyAuthorId: reply.authorId,
-        replyAuthorFirstName: reply.authorFirstName,
-        replyAuthorLastName: reply.authorLastName,
+        commentId: reply["id"],
+        content: reply["content"],
+        creationDate: reply["creationDate"],
+        replyAuthorId: reply["authorId"],
+        replyAuthorFirstName: reply["authorFirstName"],
+        replyAuthorLastName: reply["authorLastName"],
         replyAuthorKnowsOriginalMessageAuthor: knowsAuthorIds.has(
-          reply.authorId as string,
+          reply["authorId"] as string,
         ),
       }));
 

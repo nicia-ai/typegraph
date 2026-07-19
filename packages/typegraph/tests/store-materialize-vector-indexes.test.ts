@@ -23,6 +23,7 @@ import { embedding } from "../src/core/embedding";
 import { defineGraphExtension } from "../src/graph-extension";
 import { type VectorIndexDeclaration } from "../src/indexes/types";
 import { createStoreWithSchema } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 /**
@@ -73,7 +74,7 @@ describe("auto-derive vector indexes from embedding() brands", () => {
       (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
     );
     expect(vectorIndexes).toHaveLength(1);
-    const declaration = vectorIndexes[0]!;
+    const declaration = requireDefined(vectorIndexes[0]);
     expect(declaration.kind).toBe("Document");
     expect(declaration.fieldPath).toBe("embedding");
     expect(declaration.dimensions).toBe(384);
@@ -90,9 +91,11 @@ describe("auto-derive vector indexes from embedding() brands", () => {
       edges: {},
     });
 
-    const declaration = (graph.indexes ?? []).find(
-      (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
-    )!;
+    const declaration = requireDefined(
+      (graph.indexes ?? []).find(
+        (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
+      ),
+    );
     expect(declaration.dimensions).toBe(512);
     expect(declaration.metric).toBe("l2");
     expect(declaration.indexParams.m).toBe(32);
@@ -131,9 +134,11 @@ describe("auto-derive vector indexes from embedding() brands", () => {
       nodes: { Document: { type: Document } },
       edges: {},
     });
-    const declaration = (graph.indexes ?? []).find(
-      (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
-    )!;
+    const declaration = requireDefined(
+      (graph.indexes ?? []).find(
+        (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
+      ),
+    );
     expect(declaration.name).toContain("document");
     expect(declaration.name).toContain("embedding");
     expect(declaration.name).toContain("cosine");
@@ -154,12 +159,16 @@ describe("auto-derive vector indexes from embedding() brands", () => {
       nodes: { Document: { type: Document } },
       edges: {},
     });
-    const declarationA = (graphA.indexes ?? []).find(
-      (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
-    )!;
-    const declarationB = (graphB.indexes ?? []).find(
-      (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
-    )!;
+    const declarationA = requireDefined(
+      (graphA.indexes ?? []).find(
+        (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
+      ),
+    );
+    const declarationB = requireDefined(
+      (graphB.indexes ?? []).find(
+        (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
+      ),
+    );
     // Same declaration name across graphs — the disambiguation is
     // applied at materialize time, not at the declaration boundary.
     expect(declarationA.name).toBe(declarationB.name);
@@ -184,8 +193,8 @@ describe("auto-derive vector indexes from embedding() brands", () => {
       (entry): entry is VectorIndexDeclaration => entry.entity === "vector",
     );
     expect(vectorIndexes).toHaveLength(1);
-    expect(vectorIndexes[0]!.dimensions).toBe(384);
-    expect(vectorIndexes[0]!.metric).toBe("cosine");
+    expect(requireDefined(vectorIndexes[0]).dimensions).toBe(384);
+    expect(requireDefined(vectorIndexes[0]).metric).toBe("cosine");
   });
 });
 
@@ -207,8 +216,8 @@ describe("Store.materializeIndexes — vector dispatch on SQLite", () => {
       (entry) => entry.entity === "vector",
     );
     expect(vectorEntry).toBeDefined();
-    expect(vectorEntry!.status).toBe("skipped");
-    expect(vectorEntry!.reason).toMatch(/vector/i);
+    expect(requireDefined(vectorEntry).status).toBe("skipped");
+    expect(requireDefined(vectorEntry).reason).toMatch(/vector/i);
     await backend.close();
   });
 
@@ -318,8 +327,12 @@ describe("cross-graph vector status disambiguation (compound key)", () => {
     const resultA = await storeA.materializeIndexes();
     const resultB = await storeB.materializeIndexes();
 
-    const entryA = resultA.results.find((entry) => entry.entity === "vector")!;
-    const entryB = resultB.results.find((entry) => entry.entity === "vector")!;
+    const entryA = requireDefined(
+      resultA.results.find((entry) => entry.entity === "vector"),
+    );
+    const entryB = requireDefined(
+      resultB.results.find((entry) => entry.entity === "vector"),
+    );
 
     // Both surface the shared declaration name to the consumer
     // (clean for inspection); neither falsely reports

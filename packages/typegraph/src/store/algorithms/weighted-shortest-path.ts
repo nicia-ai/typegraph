@@ -1,5 +1,3 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import type { GraphDef } from "../../core/define-graph";
 import {
   ConfigurationError,
@@ -9,6 +7,7 @@ import {
 } from "../../errors";
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { jsonPointer } from "../../query/json-pointer";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { assertEdgeKinds, resolveMaxIterations } from "./context";
@@ -53,7 +52,7 @@ const MAX_EDGE_WEIGHT = Number.MAX_VALUE / 2 ** 64;
  * (5e-324). PostgreSQL stores smaller nonzero JSON numbers exactly in jsonb
  * and raises a raw underflow when the traversal casts them to float8, so
  * the audit rejects them with the typed error instead. SQLite's JSON parser
- * has already rounded such text to 0 before any SQL can observe it — an
+ * has already rounded such text to 0 before SQL can observe it — an
  * engine-level difference the audit cannot detect there.
  */
 const MIN_EDGE_WEIGHT = Number.MIN_VALUE;
@@ -418,7 +417,7 @@ async function hasVisibleNode(
   return rows.length > 0;
 }
 
-function createWorkingTable(context: IterativeGraphRunContext): SQL {
+function createWorkingTable(context: IterativeGraphRunContext): SqlFragment {
   // DOUBLE PRECISION is accepted by both engines: PostgreSQL's float8, and
   // REAL affinity on SQLite — the same IEEE 754 double either way.
   return sql`

@@ -9,7 +9,12 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStore, defineGraph, defineNode } from "../src";
+import {
+  createAdapterStore,
+  createStore,
+  defineGraph,
+  defineNode,
+} from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import { createTestBackend } from "./test-utils";
 
@@ -125,13 +130,13 @@ describe("recorded-time capture capability gate", () => {
   });
 
   it("names the revision-anchor contract when it guards tx.sql", async () => {
-    const store = createStore(graph, createTestBackend(), {
+    const store = createAdapterStore(graph, createTestBackend(), {
       revisionTracking: true,
     });
 
     await expect(
       store.transaction((tx) => {
-        const sqlHandle = tx.sql as unknown as Readonly<{ insert: unknown }>;
+        const sqlHandle = tx.sql as Readonly<{ insert: unknown }>;
         void sqlHandle.insert;
         return Promise.resolve();
       }),

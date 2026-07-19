@@ -22,6 +22,7 @@ import {
   deserializeWherePredicate,
   serializeSchema,
 } from "../src/schema";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({
@@ -65,8 +66,8 @@ describe("serializeSchema", () => {
 
     expect(serialized.graphId).toBe("test_graph");
     expect(serialized.version).toBe(1);
-    expect(serialized.nodes.Person).toBeDefined();
-    expect(serialized.nodes.Person?.kind).toBe("Person");
+    expect(serialized.nodes["Person"]).toBeDefined();
+    expect(serialized.nodes["Person"]?.kind).toBe("Person");
   });
 
   it("includes node descriptions", () => {
@@ -78,7 +79,7 @@ describe("serializeSchema", () => {
 
     const serialized = serializeSchema(graph, 1);
 
-    expect(serialized.nodes.Person?.description).toBe("A person entity");
+    expect(serialized.nodes["Person"]?.description).toBe("A person entity");
   });
 
   it("includes node annotations only when provided", () => {
@@ -107,14 +108,16 @@ describe("serializeSchema", () => {
 
     const serialized = serializeSchema(graph, 1);
 
-    expect(serialized.nodes.Incident?.annotations).toEqual({
+    expect(serialized.nodes["Incident"]?.annotations).toEqual({
       ui: {
         titleField: "title",
         temporalField: "occurredAt",
       },
       audit: { pii: false },
     });
-    expect("annotations" in serialized.nodes.Person!).toBe(false);
+    expect("annotations" in requireDefined(serialized.nodes["Person"])).toBe(
+      false,
+    );
   });
 
   it("serializes node properties to JSON Schema", () => {
@@ -125,7 +128,7 @@ describe("serializeSchema", () => {
     });
 
     const serialized = serializeSchema(graph, 1);
-    const properties = serialized.nodes.Person?.properties;
+    const properties = serialized.nodes["Person"]?.properties;
 
     expect(properties).toHaveProperty("type", "object");
   });
@@ -148,9 +151,9 @@ describe("serializeSchema", () => {
 
     const serialized = serializeSchema(graph, 1);
 
-    expect(serialized.edges.worksAt?.fromKinds).toEqual(["Person"]);
-    expect(serialized.edges.worksAt?.toKinds).toEqual(["Organization"]);
-    expect(serialized.edges.worksAt?.cardinality).toBe("many");
+    expect(serialized.edges["worksAt"]?.fromKinds).toEqual(["Person"]);
+    expect(serialized.edges["worksAt"]?.toKinds).toEqual(["Organization"]);
+    expect(serialized.edges["worksAt"]?.cardinality).toBe("many");
   });
 
   it("includes edge annotations when provided", () => {
@@ -178,7 +181,7 @@ describe("serializeSchema", () => {
 
     const serialized = serializeSchema(graph, 1);
 
-    expect(serialized.edges.reportedBy?.annotations).toEqual({
+    expect(serialized.edges["reportedBy"]?.annotations).toEqual({
       ui: { showInTimeline: true },
     });
   });
@@ -201,7 +204,7 @@ describe("serializeSchema", () => {
     expect(serialized.ontology.relations[0]?.from).toBe("Company");
     expect(serialized.ontology.relations[0]?.to).toBe("Organization");
 
-    expect(serialized.ontology.closures.subClassAncestors.Company).toContain(
+    expect(serialized.ontology.closures.subClassAncestors["Company"]).toContain(
       "Organization",
     );
   });
@@ -227,11 +230,11 @@ describe("serializeSchema", () => {
 
     const serialized = serializeSchema(graph, 1);
 
-    expect(serialized.nodes.Person?.uniqueConstraints).toHaveLength(1);
-    expect(serialized.nodes.Person?.uniqueConstraints[0]?.name).toBe(
+    expect(serialized.nodes["Person"]?.uniqueConstraints).toHaveLength(1);
+    expect(serialized.nodes["Person"]?.uniqueConstraints[0]?.name).toBe(
       "unique_name",
     );
-    expect(serialized.nodes.Person?.uniqueConstraints[0]?.fields).toEqual([
+    expect(serialized.nodes["Person"]?.uniqueConstraints[0]?.fields).toEqual([
       "name",
     ]);
   });
@@ -255,7 +258,7 @@ describe("serializeSchema", () => {
               fields: ["name"],
               scope: "kind",
               collation: "caseInsensitive",
-              where: (props) => props.deletedAt!.isNull(),
+              where: (props) => requireDefined(props["deletedAt"]).isNull(),
             },
           ],
         },
@@ -264,13 +267,18 @@ describe("serializeSchema", () => {
     });
 
     const serialized = serializeSchema(graph, 1);
-    const constraint = serialized.nodes.User?.uniqueConstraints[0];
+    const constraint = serialized.nodes["User"]?.uniqueConstraints[0];
 
     expect(constraint?.where).toBeDefined();
     expect(constraint?.where).not.toBe("[predicate]");
 
     // Verify it's valid JSON that captures the predicate structure
-    const parsed = JSON.parse(constraint!.where!);
+    const parsedJson: unknown = JSON.parse(
+      requireDefined(requireDefined(constraint).where),
+    );
+    const parsed = z
+      .object({ field: z.string(), op: z.string() })
+      .parse(parsedJson);
     expect(parsed.field).toBe("deletedAt");
     expect(parsed.op).toBe("isNull");
   });
@@ -294,7 +302,7 @@ describe("serializeSchema", () => {
               fields: ["sku"],
               scope: "kind",
               collation: "binary",
-              where: (props) => props.archivedAt!.isNotNull(),
+              where: (props) => requireDefined(props["archivedAt"]).isNotNull(),
             },
           ],
         },
@@ -303,9 +311,14 @@ describe("serializeSchema", () => {
     });
 
     const serialized = serializeSchema(graph, 1);
-    const constraint = serialized.nodes.Item?.uniqueConstraints[0];
+    const constraint = serialized.nodes["Item"]?.uniqueConstraints[0];
 
-    const parsed = JSON.parse(constraint!.where!);
+    const parsedJson: unknown = JSON.parse(
+      requireDefined(requireDefined(constraint).where),
+    );
+    const parsed = z
+      .object({ field: z.string(), op: z.string() })
+      .parse(parsedJson);
     expect(parsed.field).toBe("archivedAt");
     expect(parsed.op).toBe("isNotNull");
   });

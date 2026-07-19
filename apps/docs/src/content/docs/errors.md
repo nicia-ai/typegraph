@@ -328,34 +328,16 @@ and reachable through the `isRecordedCaptureGuardError` type guard:
 
 | `details.code` | Raised when |
 |----------------|-------------|
-| `RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION` | `store.withTransaction(externalTx)` on a history-enabled store — it has no flush point before the caller commits. Use `store.withRecordedTransaction(externalTx, fn)`. (Also a compile error on a `HistoryStore`.) |
+| `RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION` | `store.withTransaction(externalTx)` on a history-enabled store — it has no flush point before the caller commits. Use `store.withRecordedTransaction(externalTx, fn)`. (Also a compile error on an `AdapterHistoryStore`.) |
 | `RECORDED_CAPTURE_RAW_SQL_DISABLED` | A raw SQL escape (`tx.sql`, `backend.executeStatement` / `executeDdl`) on a history-enabled store, where it would bypass recorded-time capture. |
 | `REVISION_TRACKING_RAW_SQL_DISABLED` | The same raw SQL escape on a revision-tracked store, where it would bypass the revision anchor. |
 
-```typescript
-import { isRecordedCaptureGuardError, type Store } from "@nicia-ai/typegraph";
-
-// `withTransaction` is a compile error on a history-enabled store (that is the
-// point — see below). Widen to the base `Store` surface to reach the runtime
-// guard this branch handles.
-const store: Store<typeof graph> = historyStore;
-
-try {
-  store.withTransaction(externalTx);
-} catch (error) {
-  if (
-    isRecordedCaptureGuardError(
-      error,
-      "RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION",
-    )
-  ) {
-    // error.details.code is narrowed to the passed literal here.
-    await historyStore.withRecordedTransaction(externalTx, run);
-  } else {
-    throw error;
-  }
-}
-```
+Typed code cannot call `withTransaction` on an `AdapterHistoryStore`; use
+`withRecordedTransaction` directly. The runtime code remains useful at
+JavaScript and deliberately untyped boundaries. If one of those boundaries
+throws, `isRecordedCaptureGuardError(error,
+"RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION")` narrows both the error and
+its `details.code` without message matching.
 
 Pass a specific code to narrow to one guard, or omit it to match any. The guard
 narrows `error` to a `ConfigurationError` whose `details.code` is the passed

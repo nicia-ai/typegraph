@@ -83,7 +83,7 @@ function projectStaging(staging: StagingSet): StagingShape {
         kind,
         id: member.node.id,
         branchId: member.branchId,
-        name: member.node.props.name,
+        name: member.node.props["name"],
       })),
   );
   const newEdges = [...staging.newEdgesByKind.entries()].flatMap(
@@ -102,7 +102,7 @@ function projectStaging(staging: StagingSet): StagingShape {
       kind: member.node.kind,
       id: member.node.id,
       branchId: member.branchId,
-      name: member.node.forkProps.name,
+      name: member.node.forkProps["name"],
     })),
     deletedNodes: staging.deletedNodes.map((member) => ({
       kind: member.node.kind,

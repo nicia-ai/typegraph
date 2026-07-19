@@ -1,4 +1,4 @@
-import { type SQL, sql, type SQLWrapper } from "drizzle-orm";
+import { type SQLWrapper } from "drizzle-orm";
 import {
   index as pgIndex,
   type IndexBuilder as PgIndexBuilder,
@@ -12,6 +12,8 @@ import {
   uniqueIndex as sqliteUniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
+import { toDrizzleSql } from "../backend/drizzle/execution/types";
+import { sql as portableSql, type SqlFragment } from "../query/sql-fragment";
 import {
   compileEdgeIndexKeys,
   compileIndexWhere,
@@ -48,9 +50,9 @@ export function buildPostgresNodeIndexBuilders(
   );
 
   return nodeIndexes.map((index) => {
-    const propsColumn = sql`${table.props}`;
-    const systemColumn = (column: SystemColumnName): SQL =>
-      sql`${getPostgresNodeSystemColumn(table, column)}`;
+    const propsColumn = portableSql.identifier(table.props.name);
+    const systemColumn = (column: SystemColumnName): SqlFragment =>
+      portableSql.identifier(getPostgresNodeSystemColumn(table, column).name);
 
     const { keys } = compileNodeIndexKeys(
       index,
@@ -62,7 +64,10 @@ export function buildPostgresNodeIndexBuilders(
 
     const base = index.unique ? pgUniqueIndex(index.name) : pgIndex(index.name);
 
-    const builder = base.on(...keys);
+    const drizzleKeys = keys.map((key) => toDrizzleSql(key, "postgres"));
+    assertNonEmpty(drizzleKeys, `node index "${index.name}"`);
+    const [firstKey, ...remainingKeys] = drizzleKeys;
+    const builder = base.on(firstKey, ...remainingKeys);
 
     if (index.where) {
       const ctx: IndexCompilationContext = {
@@ -70,7 +75,9 @@ export function buildPostgresNodeIndexBuilders(
         propsColumn,
         systemColumn,
       };
-      builder.where(compileIndexWhere(ctx, index.where));
+      builder.where(
+        toDrizzleSql(compileIndexWhere(ctx, index.where), "postgres"),
+      );
     }
 
     return builder;
@@ -87,9 +94,9 @@ export function buildPostgresEdgeIndexBuilders(
   );
 
   return edgeIndexes.map((index) => {
-    const propsColumn = sql`${table.props}`;
-    const systemColumn = (column: SystemColumnName): SQL =>
-      sql`${getPostgresEdgeSystemColumn(table, column)}`;
+    const propsColumn = portableSql.identifier(table.props.name);
+    const systemColumn = (column: SystemColumnName): SqlFragment =>
+      portableSql.identifier(getPostgresEdgeSystemColumn(table, column).name);
 
     const { keys } = compileEdgeIndexKeys(
       index,
@@ -101,7 +108,10 @@ export function buildPostgresEdgeIndexBuilders(
 
     const base = index.unique ? pgUniqueIndex(index.name) : pgIndex(index.name);
 
-    const builder = base.on(...keys);
+    const drizzleKeys = keys.map((key) => toDrizzleSql(key, "postgres"));
+    assertNonEmpty(drizzleKeys, `edge index "${index.name}"`);
+    const [firstKey, ...remainingKeys] = drizzleKeys;
+    const builder = base.on(firstKey, ...remainingKeys);
 
     if (index.where) {
       const ctx: IndexCompilationContext = {
@@ -109,7 +119,9 @@ export function buildPostgresEdgeIndexBuilders(
         propsColumn,
         systemColumn,
       };
-      builder.where(compileIndexWhere(ctx, index.where));
+      builder.where(
+        toDrizzleSql(compileIndexWhere(ctx, index.where), "postgres"),
+      );
     }
 
     return builder;
@@ -119,7 +131,7 @@ export function buildPostgresEdgeIndexBuilders(
 function getPostgresNodeSystemColumn(
   table: NodeIndexTable,
   column: SystemColumnName,
-): SQLWrapper {
+): NamedSqlWrapper {
   switch (column) {
     case "graph_id": {
       return table.graphId;
@@ -160,7 +172,7 @@ function getPostgresNodeSystemColumn(
 function getPostgresEdgeSystemColumn(
   table: EdgeIndexTable,
   column: SystemColumnName,
-): SQLWrapper {
+): NamedSqlWrapper {
   switch (column) {
     case "graph_id": {
       return table.graphId;
@@ -221,9 +233,9 @@ export function buildSqliteNodeIndexBuilders(
   );
 
   return nodeIndexes.map((index) => {
-    const propsColumn = sql`${table.props}`;
-    const systemColumn = (column: SystemColumnName): SQL =>
-      sql`${getSqliteNodeSystemColumn(table, column)}`;
+    const propsColumn = portableSql.identifier(table.props.name);
+    const systemColumn = (column: SystemColumnName): SqlFragment =>
+      portableSql.identifier(getSqliteNodeSystemColumn(table, column).name);
 
     const { keys } = compileNodeIndexKeys(
       index,
@@ -236,7 +248,10 @@ export function buildSqliteNodeIndexBuilders(
     const base =
       index.unique ? sqliteUniqueIndex(index.name) : sqliteIndex(index.name);
 
-    const builder = base.on(...keys);
+    const drizzleKeys = keys.map((key) => toDrizzleSql(key, "sqlite"));
+    assertNonEmpty(drizzleKeys, `node index "${index.name}"`);
+    const [firstKey, ...remainingKeys] = drizzleKeys;
+    const builder = base.on(firstKey, ...remainingKeys);
 
     if (index.where) {
       const ctx: IndexCompilationContext = {
@@ -244,7 +259,9 @@ export function buildSqliteNodeIndexBuilders(
         propsColumn,
         systemColumn,
       };
-      builder.where(compileIndexWhere(ctx, index.where));
+      builder.where(
+        toDrizzleSql(compileIndexWhere(ctx, index.where), "sqlite"),
+      );
     }
 
     return builder;
@@ -261,9 +278,9 @@ export function buildSqliteEdgeIndexBuilders(
   );
 
   return edgeIndexes.map((index) => {
-    const propsColumn = sql`${table.props}`;
-    const systemColumn = (column: SystemColumnName): SQL =>
-      sql`${getSqliteEdgeSystemColumn(table, column)}`;
+    const propsColumn = portableSql.identifier(table.props.name);
+    const systemColumn = (column: SystemColumnName): SqlFragment =>
+      portableSql.identifier(getSqliteEdgeSystemColumn(table, column).name);
 
     const { keys } = compileEdgeIndexKeys(
       index,
@@ -276,7 +293,10 @@ export function buildSqliteEdgeIndexBuilders(
     const base =
       index.unique ? sqliteUniqueIndex(index.name) : sqliteIndex(index.name);
 
-    const builder = base.on(...keys);
+    const drizzleKeys = keys.map((key) => toDrizzleSql(key, "sqlite"));
+    assertNonEmpty(drizzleKeys, `edge index "${index.name}"`);
+    const [firstKey, ...remainingKeys] = drizzleKeys;
+    const builder = base.on(firstKey, ...remainingKeys);
 
     if (index.where) {
       const ctx: IndexCompilationContext = {
@@ -284,7 +304,9 @@ export function buildSqliteEdgeIndexBuilders(
         propsColumn,
         systemColumn,
       };
-      builder.where(compileIndexWhere(ctx, index.where));
+      builder.where(
+        toDrizzleSql(compileIndexWhere(ctx, index.where), "sqlite"),
+      );
     }
 
     return builder;
@@ -294,7 +316,7 @@ export function buildSqliteEdgeIndexBuilders(
 function getSqliteNodeSystemColumn(
   table: NodeIndexTable,
   column: SystemColumnName,
-): SQLWrapper {
+): NamedSqlWrapper {
   switch (column) {
     case "graph_id": {
       return table.graphId;
@@ -335,7 +357,7 @@ function getSqliteNodeSystemColumn(
 function getSqliteEdgeSystemColumn(
   table: EdgeIndexTable,
   column: SystemColumnName,
-): SQLWrapper {
+): NamedSqlWrapper {
   switch (column) {
     case "graph_id": {
       return table.graphId;
@@ -472,39 +494,41 @@ export function buildPostgresSystemIndexBuilders(
 // Minimal table shapes (shared between dialect schemas)
 // ============================================================
 
+type NamedSqlWrapper = SQLWrapper & Readonly<{ name: string }>;
+
 type NodeIndexTable = Readonly<{
-  graphId: SQLWrapper;
-  kind: SQLWrapper;
-  id: SQLWrapper;
-  props: SQLWrapper;
-  version: SQLWrapper;
-  validFrom: SQLWrapper;
-  validTo: SQLWrapper;
-  createdAt: SQLWrapper;
-  updatedAt: SQLWrapper;
-  deletedAt: SQLWrapper;
+  graphId: NamedSqlWrapper;
+  kind: NamedSqlWrapper;
+  id: NamedSqlWrapper;
+  props: NamedSqlWrapper;
+  version: NamedSqlWrapper;
+  validFrom: NamedSqlWrapper;
+  validTo: NamedSqlWrapper;
+  createdAt: NamedSqlWrapper;
+  updatedAt: NamedSqlWrapper;
+  deletedAt: NamedSqlWrapper;
 }>;
 
 type EdgeIndexTable = Readonly<{
-  graphId: SQLWrapper;
-  id: SQLWrapper;
-  kind: SQLWrapper;
-  fromKind: SQLWrapper;
-  fromId: SQLWrapper;
-  toKind: SQLWrapper;
-  toId: SQLWrapper;
-  props: SQLWrapper;
-  validFrom: SQLWrapper;
-  validTo: SQLWrapper;
-  createdAt: SQLWrapper;
-  updatedAt: SQLWrapper;
-  deletedAt: SQLWrapper;
+  graphId: NamedSqlWrapper;
+  id: NamedSqlWrapper;
+  kind: NamedSqlWrapper;
+  fromKind: NamedSqlWrapper;
+  fromId: NamedSqlWrapper;
+  toKind: NamedSqlWrapper;
+  toId: NamedSqlWrapper;
+  props: NamedSqlWrapper;
+  validFrom: NamedSqlWrapper;
+  validTo: NamedSqlWrapper;
+  createdAt: NamedSqlWrapper;
+  updatedAt: NamedSqlWrapper;
+  deletedAt: NamedSqlWrapper;
 }>;
 
-function assertNonEmpty(
-  values: readonly SQL[],
+function assertNonEmpty<T>(
+  values: readonly T[],
   label: string,
-): asserts values is readonly [SQL, ...SQL[]] {
+): asserts values is readonly [T, ...T[]] {
   if (values.length === 0) {
     throw new Error(`Index must have at least one key (${label})`);
   }

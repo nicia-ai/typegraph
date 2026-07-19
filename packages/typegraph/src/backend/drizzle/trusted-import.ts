@@ -1,6 +1,5 @@
-import { sql } from "drizzle-orm";
-
 import { TrustedImportError } from "../../errors";
+import { sql } from "../../query/sql-fragment";
 import { asCompiledStatementSql } from "../../query/sql-intent";
 import type {
   InsertEdgeParams,
@@ -60,7 +59,7 @@ function requireStatementExecution(
 
 function rowIndicatesExistingData(row: unknown): boolean {
   if (typeof row !== "object" || row === null) return false;
-  const value = (row as Readonly<Record<string, unknown>>).has_rows;
+  const value = (row as Readonly<Record<string, unknown>>)["has_rows"];
   return value === true || value === 1 || value === "1";
 }
 
@@ -208,9 +207,9 @@ function resolvedValidFrom(
 function postgresArray(values: readonly (string | null)[]): string {
   return `{${values
     .map((value) =>
-      value === DATABASE_NULL ?
-        "NULL"
-      : `"${value.replaceAll("\\", "\\\\").replaceAll('"', String.raw`\"`)}"`,
+      value === DATABASE_NULL ? "NULL" : (
+        `"${value.replaceAll("\\", "\\\\").replaceAll('"', String.raw`\"`)}"`
+      ),
     )
     .join(",")}}`;
 }

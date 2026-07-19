@@ -1,4 +1,3 @@
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -6,6 +5,7 @@ import {
   lowerRecursiveQueryToLogicalPlan,
 } from "../src/query/compiler";
 import { emitRecursiveQuerySql } from "../src/query/compiler/emitter";
+import { sql } from "../src/query/sql-fragment";
 import { toSqlString } from "./sql-test-utils";
 
 function createRecursivePlan(): LogicalPlan {

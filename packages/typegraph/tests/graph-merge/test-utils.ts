@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import type { GraphBackend } from "@nicia-ai/typegraph";
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
-import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import type { GraphBackend, GraphDef, Store } from "@nicia-ai/typegraph";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 import { getTableName, is, Table } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Client, Pool } from "pg";
@@ -15,6 +15,21 @@ import {
   type PostgresTables,
 } from "../../src/backend/drizzle/schema/postgres";
 import type { Embedder } from "../../src/graph-merge/types";
+import { storeBackend } from "../../src/store/runtime-port";
+import { requireDefined } from "../../src/utils/presence";
+
+export function getStoreBackend<G extends GraphDef>(
+  store: Store<G>,
+): GraphBackend {
+  return storeBackend(store);
+}
+
+export function getBackendProperty(
+  backend: GraphBackend,
+  property: PropertyKey,
+): unknown {
+  return Reflect.get(backend, property) as unknown;
+}
 
 /**
  * Backend test fixtures for the graph-merge suite.
@@ -281,7 +296,8 @@ export async function fakeEmbeddings(
   const keys = texts.map((text) => text.toLowerCase());
   const vectors = await fakeEmbedder(keys);
   const lookup = new Map<string, Float32Array>();
-  for (const [index, key] of keys.entries()) lookup.set(key, vectors[index]!);
+  for (const [index, key] of keys.entries())
+    lookup.set(key, requireDefined(vectors[index]));
   return lookup;
 }
 
@@ -311,7 +327,7 @@ export function backendMatrix(): readonly BackendMatrixEntry[] {
       make: () => createPgliteMergeBackend(),
     },
   ];
-  const postgresUrl = process.env.POSTGRES_URL;
+  const postgresUrl = process.env["POSTGRES_URL"];
   if (postgresUrl !== undefined && postgresUrl !== "") {
     entries.push({
       name: "Postgres",

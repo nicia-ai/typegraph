@@ -6,6 +6,7 @@ import {
   type NodeRow,
   type TransactionBackend,
 } from "../backend/types";
+import { requireDefined } from "../utils/presence";
 
 export type InsertDispatch<Params, Row> = Readonly<{
   one: (params: Params) => Promise<Row>;
@@ -25,15 +26,15 @@ export function nodeInsertDispatch(
     oneNoReturn:
       backend.insertNodeNoReturn === undefined ?
         undefined
-      : (params) => backend.insertNodeNoReturn!(params),
+      : (params) => requireDefined(backend.insertNodeNoReturn)(params),
     batch:
       backend.insertNodesBatch === undefined ?
         undefined
-      : (params) => backend.insertNodesBatch!(params),
+      : (params) => requireDefined(backend.insertNodesBatch)(params),
     batchReturning:
       backend.insertNodesBatchReturning === undefined ?
         undefined
-      : (params) => backend.insertNodesBatchReturning!(params),
+      : (params) => requireDefined(backend.insertNodesBatchReturning)(params),
   };
 }
 
@@ -45,15 +46,15 @@ export function edgeInsertDispatch(
     oneNoReturn:
       backend.insertEdgeNoReturn === undefined ?
         undefined
-      : (params) => backend.insertEdgeNoReturn!(params),
+      : (params) => requireDefined(backend.insertEdgeNoReturn)(params),
     batch:
       backend.insertEdgesBatch === undefined ?
         undefined
-      : (params) => backend.insertEdgesBatch!(params),
+      : (params) => requireDefined(backend.insertEdgesBatch)(params),
     batchReturning:
       backend.insertEdgesBatchReturning === undefined ?
         undefined
-      : (params) => backend.insertEdgesBatchReturning!(params),
+      : (params) => requireDefined(backend.insertEdgesBatchReturning)(params),
   };
 }
 

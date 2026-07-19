@@ -19,7 +19,8 @@ import type {
   MergeOptions,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
-import { backendMatrix } from "./test-utils";
+import { requireDefined } from "../../src/utils/presence";
+import { backendMatrix, getStoreBackend } from "./test-utils";
 
 /**
  * Regression coverage for inherited-EDGE delete/modify handling (parity with the
@@ -63,7 +64,11 @@ async function liveLinks(
 ): Promise<
   readonly Readonly<{ id: string; props: Record<string, unknown> }>[]
 > {
-  const rows = await enumerateAllEdges(store.backend, store.graphId, "link");
+  const rows = await enumerateAllEdges(
+    getStoreBackend(store),
+    store.graphId,
+    "link",
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => ({
@@ -150,7 +155,10 @@ describe.each(backendMatrix())("edge delete/modify [$name]", (entry) => {
     // Both independent edits survive; neither is dropped and nothing false-conflicts.
     const links = await liveLinks(baseStore);
     expect(links).toHaveLength(1);
-    expect(links[0]!.props).toMatchObject({ since: "2025", note: "B" });
+    expect(requireDefined(links[0]).props).toMatchObject({
+      since: "2025",
+      note: "B",
+    });
     expect(result.data.conflicts).toHaveLength(0);
   });
 
@@ -176,11 +184,12 @@ describe.each(backendMatrix())("edge delete/modify [$name]", (entry) => {
       (conflict) => conflict.property === "since",
     );
     expect(sinceConflict).toBeDefined();
-    expect(sinceConflict!.entityId).toBe(edgeId);
-    expect(sinceConflict!.values.map((value) => value.value).sort()).toEqual([
-      "2025-A",
-      "2025-B",
-    ]);
+    expect(requireDefined(sinceConflict).entityId).toBe(edgeId);
+    expect(
+      requireDefined(sinceConflict)
+        .values.map((value) => value.value)
+        .sort(),
+    ).toEqual(["2025-A", "2025-B"]);
     // `note` was untouched by both branches → no spurious conflict on it.
     expect(
       result.data.conflicts.some((conflict) => conflict.property === "note"),

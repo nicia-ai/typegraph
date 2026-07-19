@@ -15,6 +15,7 @@ import {
   mapResults,
   transformPathColumns,
 } from "../src/query/execution/result-mapper";
+import { requireDefined } from "../src/utils/presence";
 
 describe("transformPathColumns", () => {
   const baseState: QueryBuilderState = {
@@ -66,7 +67,7 @@ describe("transformPathColumns", () => {
       const result = transformPathColumns(rows, state, "postgres");
 
       expect(result).toBe(rows);
-      expect(result[0]!.p_path).toBe("a|b|c");
+      expect(requireDefined(result[0])["p_path"]).toBe("a|b|c");
     });
 
     it("transforms pipe-delimited paths for SQLite dialect", () => {
@@ -96,7 +97,11 @@ describe("transformPathColumns", () => {
 
       const result = transformPathColumns(rows, state, "sqlite");
 
-      expect(result[0]!.friend_path).toEqual(["id1", "id2", "id3"]);
+      expect(requireDefined(result[0])["friend_path"]).toEqual([
+        "id1",
+        "id2",
+        "id3",
+      ]);
     });
   });
 
@@ -164,7 +169,7 @@ describe("transformPathColumns", () => {
 
       const result = transformPathColumns(rows, state, "sqlite");
 
-      expect(result[0]!.custom_path).toEqual(["id1", "id2"]);
+      expect(requireDefined(result[0])["custom_path"]).toEqual(["id1", "id2"]);
     });
   });
 
@@ -201,8 +206,8 @@ describe("transformPathColumns", () => {
 
       const result = transformPathColumns(rows, state, "sqlite");
 
-      expect(result[0]!.other_column).toBe("unchanged");
-      expect(result[0]!.numeric).toBe(42);
+      expect(requireDefined(result[0])["other_column"]).toBe("unchanged");
+      expect(requireDefined(result[0])["numeric"]).toBe(42);
     });
 
     it("handles non-string path values (already arrays)", () => {
@@ -232,7 +237,10 @@ describe("transformPathColumns", () => {
       const result = transformPathColumns(rows, state, "sqlite");
 
       // Should return original row when path is not a string
-      expect(result[0]!.friend_path).toEqual(["already", "array"]);
+      expect(requireDefined(result[0])["friend_path"]).toEqual([
+        "already",
+        "array",
+      ]);
     });
   });
 });
@@ -261,8 +269,8 @@ describe("buildSelectableNode", () => {
     it("parses JSON props and spreads them at top level", () => {
       const node = buildSelectableNode(baseRow, "p");
 
-      expect(node.name).toBe("Alice");
-      expect(node.age).toBe(30);
+      expect(node["name"]).toBe("Alice");
+      expect(node["age"]).toBe(30);
     });
 
     it("builds meta object from metadata columns", () => {
@@ -316,7 +324,7 @@ describe("buildSelectableNode", () => {
       const node = buildSelectableNode(row, "p");
 
       expect(node.id).toBe("node-123"); // System field, not from props
-      expect(node.name).toBe("Alice");
+      expect(node["name"]).toBe("Alice");
     });
 
     it("filters out 'kind' from props to prevent collision", () => {
@@ -339,7 +347,7 @@ describe("buildSelectableNode", () => {
       const node = buildSelectableNode(row, "p");
 
       expect(node.meta.version).toBe(1); // System meta, not from props
-      expect((node.meta as Record<string, unknown>).fake).toBeUndefined();
+      expect((node.meta as Record<string, unknown>)["fake"]).toBeUndefined();
     });
   });
 
@@ -352,8 +360,8 @@ describe("buildSelectableNode", () => {
 
       const node = buildSelectableNode(row, "p");
 
-      expect(node.name).toBe("Alice");
-      expect(node.age).toBe(30);
+      expect(node["name"]).toBe("Alice");
+      expect(node["age"]).toBe(30);
     });
 
     it("handles undefined props", () => {
@@ -398,9 +406,9 @@ describe("buildSelectContext", () => {
     it("builds context with just the start node", () => {
       const context = buildSelectContext(startRow, "p", []);
 
-      expect(context.p).toBeDefined();
-      expect(context.p!.id).toBe("person-1");
-      expect(context.p!.name).toBe("Alice");
+      expect(context["p"]).toBeDefined();
+      expect(requireDefined(context["p"]).id).toBe("person-1");
+      expect(requireDefined(context["p"])["name"]).toBe("Alice");
     });
   });
 
@@ -446,19 +454,19 @@ describe("buildSelectContext", () => {
     it("includes traversed nodes in context", () => {
       const context = buildSelectContext(traversalRow, "p", traversals);
 
-      expect(context.friend).toBeDefined();
-      expect(context.friend!.id).toBe("person-2");
-      expect(context.friend!.name).toBe("Bob");
+      expect(context["friend"]).toBeDefined();
+      expect(requireDefined(context["friend"]).id).toBe("person-2");
+      expect(requireDefined(context["friend"])["name"]).toBe("Bob");
     });
 
     it("includes edges in context", () => {
       const context = buildSelectContext(traversalRow, "p", traversals);
 
-      expect(context.e).toBeDefined();
-      expect(context.e!.id).toBe("edge-1");
-      expect(context.e!.fromId).toBe("person-1");
-      expect(context.e!.toId).toBe("person-2");
-      expect(context.e!.since).toBe(2020);
+      expect(context["e"]).toBeDefined();
+      expect(requireDefined(context["e"]).id).toBe("edge-1");
+      expect(requireDefined(context["e"]).fromId).toBe("person-1");
+      expect(requireDefined(context["e"]).toId).toBe("person-2");
+      expect(requireDefined(context["e"])["since"]).toBe(2020);
     });
   });
 
@@ -508,7 +516,7 @@ describe("buildSelectContext", () => {
         optionalTraversals,
       );
 
-      expect(context.friend).toBeUndefined();
+      expect(context["friend"]).toBeUndefined();
     });
 
     it("returns undefined for edge when not present", () => {
@@ -518,7 +526,7 @@ describe("buildSelectContext", () => {
         optionalTraversals,
       );
 
-      expect(context.e).toBeUndefined();
+      expect(context["e"]).toBeUndefined();
     });
   });
 });
@@ -551,8 +559,8 @@ describe("mapResults", () => {
 
   it("applies select function to each row", () => {
     const results = mapResults(rows, "p", [], (ctx) => ({
-      id: ctx.p!.id,
-      name: ctx.p!.name,
+      id: requireDefined(ctx["p"]).id,
+      name: requireDefined(ctx["p"])["name"],
     }));
 
     expect(results).toEqual([
@@ -562,13 +570,23 @@ describe("mapResults", () => {
   });
 
   it("handles empty result set", () => {
-    const results = mapResults([], "p", [], (ctx) => ctx.p!.id);
+    const results = mapResults(
+      [],
+      "p",
+      [],
+      (ctx) => requireDefined(ctx["p"]).id,
+    );
 
     expect(results).toEqual([]);
   });
 
   it("preserves result order", () => {
-    const results = mapResults(rows, "p", [], (ctx) => ctx.p!.name);
+    const results = mapResults(
+      rows,
+      "p",
+      [],
+      (ctx) => requireDefined(ctx["p"])["name"],
+    );
 
     expect(results).toEqual(["Alice", "Bob"]);
   });

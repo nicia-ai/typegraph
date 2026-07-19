@@ -19,6 +19,7 @@ import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { ensureSchema } from "../src/schema/manager";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import { createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -75,7 +76,7 @@ describe("graph-extension persistence — loader rewire", () => {
     expect(registry.hasNodeType("Person")).toBe(true);
     expect(registry.hasNodeType("Tag")).toBe(true);
     const tagType = registry.getNodeType("Tag");
-    expect(tagType?.schema.shape.name).toBeDefined();
+    expect(tagType?.schema.shape["name"]).toBeDefined();
   });
 
   it("re-serializing the merged graph reproduces the same canonical hash", async () => {
@@ -95,9 +96,12 @@ describe("graph-extension persistence — loader rewire", () => {
     // hash-equality check return "unchanged" rather than triggering a
     // spurious migration on every boot.
     const merged = mergeGraphExtension(baseGraph, extension);
-    const reSerialized = serializeSchema(merged, persistedRow!.version);
+    const reSerialized = serializeSchema(
+      merged,
+      requireDefined(persistedRow).version,
+    );
     const reHash = await computeSchemaHash(reSerialized);
-    expect(reHash).toBe(persistedRow!.schema_hash);
+    expect(reHash).toBe(requireDefined(persistedRow).schema_hash);
   });
 
   it("graph-extension edges referencing host kinds expose resolved endpoints through the registry", async () => {
@@ -239,8 +243,9 @@ describe("graph-extension persistence — loader rewire", () => {
     // Strip `version` from the extension to simulate a pre-versioning
     // stored document.
     const evolvedSchema = serializeSchema(merged, 2);
-    const { version: _stripVersion, ...legacyExtension } =
-      evolvedSchema.extension!;
+    const { version: _stripVersion, ...legacyExtension } = requireDefined(
+      evolvedSchema.extension,
+    );
     const legacyEvolvedSchema = {
       ...evolvedSchema,
       extension: legacyExtension,

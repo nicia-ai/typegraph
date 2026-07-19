@@ -58,7 +58,7 @@ import {
   defineNode,
   defineGraphExtension,
 } from "@nicia-ai/typegraph";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 // 1. Boot with a compile-time kind.
 const Document = defineNode("Document", {

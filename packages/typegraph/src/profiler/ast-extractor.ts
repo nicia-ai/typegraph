@@ -4,7 +4,6 @@
  * Walks the query AST to identify all property accesses and their
  * usage contexts (filter, sort, select, groupBy).
  */
-
 import {
   type FieldRef,
   type NodePredicate,
@@ -15,6 +14,7 @@ import {
   type SelectiveField,
 } from "../query/ast";
 import { jsonPointer } from "../query/json-pointer";
+import { requireDefined } from "../utils/presence";
 import {
   type ProfileEntityType,
   type PropertyTarget,
@@ -383,7 +383,7 @@ function extractTargetFromFieldRef(ref: FieldRef): PropertyTarget | undefined {
   }
 
   if (ref.path.length === 1) {
-    return { __type: "system", field: ref.path[0]! };
+    return { __type: "system", field: requireDefined(ref.path[0]) };
   }
 
   return undefined;

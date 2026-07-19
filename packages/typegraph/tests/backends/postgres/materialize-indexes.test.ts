@@ -21,9 +21,10 @@ import { tables as defaultPostgresTables } from "../../../src/backend/drizzle/sc
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { defineEdgeIndex, defineNodeIndex } from "../../../src/indexes";
 import { createStoreWithSchema } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let sharedPool: Pool | undefined;
@@ -46,7 +47,7 @@ function requirePostgres(ctx: { skip: () => void }): {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const pool = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -195,7 +196,7 @@ describe("Postgres store.materializeIndexes — CONCURRENTLY", () => {
       ]);
 
       for (const [index, entryA] of a.results.entries()) {
-        const entryB = b.results[index]!;
+        const entryB = requireDefined(b.results[index]);
         const statuses = [entryA.status, entryB.status].toSorted();
         expect(statuses, `iteration ${iteration}: ${entryA.indexName}`).toEqual(
           ["alreadyMaterialized", "created"],
@@ -427,7 +428,7 @@ describe("Postgres materialize build claim", () => {
     // valid status rows, then wipe status to stage the contention.
     const first = await store.materializeIndexes();
     const indexNames = first.results.map((entry) => entry.indexName);
-    const claimedName = indexNames[0]!;
+    const claimedName = requireDefined(indexNames[0]);
 
     // Stage: another materializer "holds" a live claim on index 0 and has
     // NOT yet recorded a result. Rows for both indexes are wiped so this
@@ -488,7 +489,7 @@ describe("Postgres materialize build claim", () => {
     const backend = createPostgresBackend(drizzle(pool));
     const [store] = await createStoreWithSchema(graph, backend);
     const first = await store.materializeIndexes();
-    const staleName = first.results[0]!.indexName;
+    const staleName = requireDefined(first.results[0]).indexName;
 
     await pool.query(`TRUNCATE typegraph_index_materializations CASCADE`);
     for (const entry of first.results) {
@@ -528,7 +529,7 @@ describe("Postgres materialize build claim", () => {
     const backend = createPostgresBackend(drizzle(pool));
     const [store] = await createStoreWithSchema(graph, backend);
     const first = await store.materializeIndexes();
-    const indexName = first.results[0]!.indexName;
+    const indexName = requireDefined(first.results[0]).indexName;
 
     await pool.query(`TRUNCATE typegraph_index_materializations CASCADE`);
     for (const entry of first.results) {
@@ -578,7 +579,7 @@ describe("Postgres materialize build claim", () => {
     const backend = createPostgresBackend(drizzle(pool));
     const [store] = await createStoreWithSchema(graph, backend);
     const first = await store.materializeIndexes();
-    const indexName = first.results[0]!.indexName;
+    const indexName = requireDefined(first.results[0]).indexName;
 
     // Keep the success row; poison only the physical index.
     await pool.query(`DROP INDEX IF EXISTS "${indexName}"`);

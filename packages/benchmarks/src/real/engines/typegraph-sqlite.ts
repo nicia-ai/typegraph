@@ -12,8 +12,8 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
-import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 import { assertMessageIndexMaterialized, snbGraph } from "../schema/snb-graph";
 import { createSnbQueries } from "./typegraph-queries";

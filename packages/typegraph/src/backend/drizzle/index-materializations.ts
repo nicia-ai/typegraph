@@ -16,11 +16,11 @@
 import { sql } from "drizzle-orm";
 
 import type { IndexEntity } from "../../core/types";
+import { formatPostgresTimestamp } from "../row-mappers";
 import type {
   IndexMaterializationRow,
   RecordIndexMaterializationParams,
 } from "../types";
-import { formatPostgresTimestamp } from "./row-mappers";
 
 /**
  * Bridges the dialect-specific timestamp column representation to the

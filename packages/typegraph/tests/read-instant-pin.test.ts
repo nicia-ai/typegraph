@@ -11,20 +11,17 @@
  * calls inside the same millisecond return the same string. These tests drive
  * the clock forward between samples, so they discriminate.
  */
-import { type SQL } from "drizzle-orm";
-import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   currentReadInstant,
   withPinnedReadInstant,
 } from "../src/query/compiler/temporal";
-
-const dialect = new SQLiteSyncDialect();
+import { renderSqlite, type SqlFragment } from "../src/query/sql-fragment";
 
 /** The single bound parameter a `currentReadInstant()` fragment carries. */
-function boundInstant(fragment: SQL): unknown {
-  return dialect.sqlToQuery(fragment).params[0];
+function boundInstant(fragment: SqlFragment): unknown {
+  return renderSqlite(fragment).params[0];
 }
 
 describe("withPinnedReadInstant", () => {

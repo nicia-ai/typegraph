@@ -1,6 +1,5 @@
 import { type SQL, sql } from "drizzle-orm";
 
-import { sqlValueList } from "../../../query/compiler/predicate-utils";
 import type {
   DeleteNodeParams,
   HardDeleteNodeParams,
@@ -140,7 +139,10 @@ export function buildGetNodes(
     SELECT * FROM ${nodes}
     WHERE ${nodes.graphId} = ${graphId}
       AND ${nodes.kind} = ${kind}
-      AND ${nodes.id} IN (${sqlValueList(ids)})
+      AND ${nodes.id} IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
   `;
 }
 

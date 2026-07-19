@@ -7,11 +7,17 @@ import type Database from "better-sqlite3";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { afterEach } from "vitest";
 
-import type { GraphDef } from "../src";
-import { createStoreWithSchema, type Store } from "../src";
+import type { GraphDef, Store } from "../src";
+import {
+  type AdapterStore,
+  createAdapterStoreWithSchema,
+  createStoreWithSchema,
+} from "../src";
+import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
 import type { SqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import type { GraphBackend } from "../src/backend/types";
+import type { AdapterBackend, GraphBackend } from "../src/backend/types";
+import { requireDefined } from "../src/utils/presence";
 
 const backendsToClose: GraphBackend[] = [];
 
@@ -26,7 +32,9 @@ afterEach(closeCreatedTestBackends);
  * Creates a GraphBackend using in-memory SQLite.
  * This is the primary way to create backends for testing.
  */
-export function createTestBackend(customTables?: SqliteTables): GraphBackend {
+export function createTestBackend(
+  customTables?: SqliteTables,
+): AdapterBackend<AnySqliteDatabase> {
   const options = customTables ? { tables: customTables } : {};
   const { backend } = createLocalSqliteBackend(options);
   backendsToClose.push(backend);
@@ -58,12 +66,33 @@ export function createTestDatabase(
  * NOT asserting the init contract use this helper to get an
  * already-initialized store with minimal call-site churn.
  */
+export function createInitializedStore<G extends GraphDef, TNativeTransaction>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+): Promise<AdapterStore<G, TNativeTransaction>>;
+export function createInitializedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+): Promise<Store<G>>;
 export async function createInitializedStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
 ): Promise<Store<G>> {
+  if (isAdapterBackend(backend)) {
+    const [store] = await createAdapterStoreWithSchema(graph, backend);
+    return store;
+  }
   const [store] = await createStoreWithSchema(graph, backend);
   return store;
+}
+
+function isAdapterBackend(
+  backend: GraphBackend,
+): backend is AdapterBackend<unknown> {
+  return (
+    typeof Reflect.get(backend, "transactionWithNative") === "function" &&
+    typeof Reflect.get(backend, "adoptTransaction") === "function"
+  );
 }
 
 export type CapturedStatement = Readonly<{
@@ -114,7 +143,7 @@ export function createPlanCaptureBackend(): PlanCaptureHarness {
     // EXPLAIN-able.
     async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
       captured.push({ sql: sqlText, params });
-      return raw.executeRaw!<T>(sqlText, params);
+      return requireDefined(raw.executeRaw)<T>(sqlText, params);
     },
   };
   backendsToClose.push(raw);
@@ -143,16 +172,29 @@ export function explainQueryPlan(
  * `drizzle-orm/neon-http` and Cloudflare D1. Use it to exercise the
  * non-transactional sequential fall-through.
  */
+export function disableTransactions<TNativeTransaction>(
+  backend: AdapterBackend<TNativeTransaction>,
+): AdapterBackend<TNativeTransaction>;
+export function disableTransactions(backend: GraphBackend): GraphBackend;
 export function disableTransactions(backend: GraphBackend): GraphBackend {
   return {
     ...backend,
     capabilities: { ...backend.capabilities, transactions: false },
     transaction: () =>
       Promise.reject(new Error("synthetic backend has transactions disabled")),
+    ...("transactionWithNative" in backend ?
+      {
+        transactionWithNative: () =>
+          Promise.reject(
+            new Error("synthetic backend has transactions disabled"),
+          ),
+      }
+    : {}),
   };
 }
 
 export { generateSqliteDDL } from "../src/backend/drizzle/ddl";
+export { storeBackend as getStoreBackend } from "../src/store/runtime-port";
 
 /**
  * Flattens all edges from a subgraph adjacency map into a single array.

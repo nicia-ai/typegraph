@@ -11,6 +11,7 @@ import {
   type Node,
 } from "../../src";
 import { createRetractionCapability } from "../../src/provenance";
+import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
 
 const Source = defineNode("Source", {
@@ -136,7 +137,7 @@ async function createSupportedFact(
     { id: `fact-${factIndex}` },
   );
   for (const sourceIndex of fact.sourceIndexes) {
-    const source = sources[sourceIndex]!;
+    const source = requireDefined(sources[sourceIndex]);
     const justification = await store.nodes.Justification.create(
       { label: `justification-${factIndex}-${sourceIndex}` },
       { id: `justification-${factIndex}-${sourceIndex}` },
@@ -177,7 +178,9 @@ describe("provenance retraction property tests", () => {
         const retracted = new Set(scenario.retractedIndexes);
         const provenance = createRetractionCapability(store, config);
         await provenance.retractMany(
-          scenario.retractedIndexes.map((sourceIndex) => sources[sourceIndex]!),
+          scenario.retractedIndexes.map((sourceIndex) =>
+            requireDefined(sources[sourceIndex]),
+          ),
         );
 
         const expectedHeldIds = scenario.facts

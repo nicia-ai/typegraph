@@ -20,6 +20,7 @@ import {
 } from "../../../src";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
 import { wrapWithManagedClose } from "../../../src/backend/types";
+import { requireDefined } from "../../../src/utils/presence";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 
@@ -113,7 +114,7 @@ describe("libsql Backend - Specific", () => {
     await createLibsqlBackend(client);
     // Client is still usable after backend creation — not closed by the factory
     const result = await client.execute("SELECT 1 AS value");
-    expect(result.rows[0]!.value).toBe(1);
+    expect(requireDefined(result.rows[0])["value"]).toBe(1);
     client.close();
   });
 

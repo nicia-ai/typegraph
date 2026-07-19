@@ -40,6 +40,7 @@ import {
 } from "../core/types";
 import { ConfigurationError } from "../errors";
 import { type InitialQueryBuilder } from "../query/builder";
+import { requireDefined } from "../utils/presence";
 import {
   type BaseTraversalOptions,
   type DegreeOptions,
@@ -72,6 +73,7 @@ import {
   withCoordinate,
   withValidCoordinate,
 } from "./collections/temporal-read-params";
+import { storeRuntime } from "./runtime-port";
 import { type StoreSearch } from "./search-facade";
 import { type Store } from "./store";
 import {
@@ -550,7 +552,7 @@ function pinnedCollections<L, W>(
         if (cached !== undefined) return cached;
         const wrapped = wrap(
           kind,
-          (live as Record<string, L>)[kind]!,
+          requireDefined((live as Record<string, L>)[kind]),
           coordinate,
         );
         cache.set(kind, wrapped);
@@ -606,8 +608,10 @@ function recordedNodeCollection<G extends GraphDef>(
         Method in (typeof RECORDED_POINT_READ_NAMES)[number]
       ]: RecordedStoreViewNodeCollection<NodeType>[Method];
     }> = {
-    getById: (id) => store.recordedNodeGetById(kind, id, coordinate),
-    getByIds: (ids) => store.recordedNodeGetByIds(kind, ids, coordinate),
+    getById: (id) =>
+      storeRuntime(store).recordedNodeGetById(kind, id, coordinate),
+    getByIds: (ids) =>
+      storeRuntime(store).recordedNodeGetByIds(kind, ids, coordinate),
   };
   return recordedCollectionProxy(reads, live, coordinate, "node");
 }
@@ -632,8 +636,10 @@ function recordedEdgeCollection<G extends GraphDef>(
         NodeType
       >[Method];
     }> = {
-    getById: (id) => store.recordedEdgeGetById(kind, id, coordinate),
-    getByIds: (ids) => store.recordedEdgeGetByIds(kind, ids, coordinate),
+    getById: (id) =>
+      storeRuntime(store).recordedEdgeGetById(kind, id, coordinate),
+    getByIds: (ids) =>
+      storeRuntime(store).recordedEdgeGetByIds(kind, ids, coordinate),
   };
   return recordedCollectionProxy(reads, live, coordinate, "edge");
 }
@@ -829,13 +835,13 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
    * view's coordinate cannot be overridden on a per-query basis.
    */
   query(): InitialQueryBuilder<G, "sealed"> {
-    return this.store.sealedQuery(this.coordinate);
+    return storeRuntime(this.store).sealedQuery(this.coordinate);
   }
 
   protected internalAlgorithms(): InternalGraphAlgorithms<G> {
-    this.#internalAlgorithms ??= this.store.algorithmsAtCoordinate(
-      this.coordinate,
-    );
+    this.#internalAlgorithms ??= storeRuntime(
+      this.store,
+    ).algorithmsAtCoordinate(this.coordinate);
     return this.#internalAlgorithms;
   }
 
@@ -871,7 +877,10 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
       ...options,
       ...withCoordinate(this.coordinate),
     } as InternalSubgraphOptions<G, EK, NK, P>;
-    return this.store.subgraphAtCoordinate(rootId, internalOptions);
+    return storeRuntime(this.store).subgraphAtCoordinate(
+      rootId,
+      internalOptions,
+    );
   }
 
   /** Shortest path between two nodes at this view's pinned coordinate. */

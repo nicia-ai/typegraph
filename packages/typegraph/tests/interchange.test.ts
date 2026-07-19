@@ -21,6 +21,7 @@ import {
   InterchangeNodeSchema,
 } from "../src/interchange";
 import { createStore } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -486,9 +487,9 @@ describe("Export Options", () => {
     const people = await store.nodes.Person.find();
     const companies = await store.nodes.Company.find();
 
-    const alice = people[0]!;
-    const bob = people[1]!;
-    const acme = companies[0]!;
+    const alice = requireDefined(people[0]);
+    const bob = requireDefined(people[1]);
+    const acme = requireDefined(companies[0]);
 
     await store.edges.worksAt.create(alice, acme, { role: "Engineer" });
     await store.edges.knows.create(alice, bob, {});

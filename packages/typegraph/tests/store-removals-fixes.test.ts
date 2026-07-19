@@ -15,7 +15,6 @@
  *     table — not the canonical default — when the backend is
  *     configured with a non-default name.
  */
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -30,8 +29,10 @@ import {
   INCOMPATIBLE_CHANGE_TYPES,
 } from "../src/graph-extension";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { createStoreWithSchema } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 /**
@@ -80,7 +81,7 @@ describe("materializeRemovals against a DB missing typegraph_reconciliation_mark
     // that was first created before this slice landed and is now being
     // upgraded.
     const backend = createTestBackend();
-    await backend.executeDdl!(
+    await requireDefined(backend.executeDdl)(
       "DROP TABLE IF EXISTS typegraph_reconciliation_markers",
     );
 
@@ -180,9 +181,9 @@ describe("materializeRemovals recorded cleanup transaction recovery (history)", 
     );
     expect(await openTagIntervals()).toBe(2);
     expect(await liveTagRows()).toBe(2);
-    const pendingAfterFailure = await backend.getPendingKindRemovals!(
-      baseGraph.id,
-    );
+    const pendingAfterFailure = await requireDefined(
+      backend.getPendingKindRemovals,
+    )(baseGraph.id);
     expect(pendingAfterFailure.some((row) => row.kindName === "Tag")).toBe(
       true,
     );
@@ -196,9 +197,9 @@ describe("materializeRemovals recorded cleanup transaction recovery (history)", 
     ).toBe(true);
     expect(await openTagIntervals()).toBe(0);
     expect(await liveTagRows()).toBe(0);
-    const pendingAfterRetry = await backend.getPendingKindRemovals!(
-      baseGraph.id,
-    );
+    const pendingAfterRetry = await requireDefined(
+      backend.getPendingKindRemovals,
+    )(baseGraph.id);
     expect(pendingAfterRetry.some((row) => row.kindName === "Tag")).toBe(false);
   });
 });
@@ -223,9 +224,13 @@ describe("clearGraph against a graph with status-table rows", () => {
     await removed.materializeRemovals();
 
     // Sanity: the marker IS set after materializeRemovals.
-    const markerBefore = await backend.getReconciliationMarker!(baseGraph.id);
+    const markerBefore = await requireDefined(backend.getReconciliationMarker)(
+      baseGraph.id,
+    );
     expect(markerBefore).toBeDefined();
-    const removalsBefore = await backend.getAllKindRemovals!(baseGraph.id);
+    const removalsBefore = await requireDefined(backend.getAllKindRemovals)(
+      baseGraph.id,
+    );
     expect(removalsBefore.length).toBeGreaterThan(0);
 
     // Wipe everything for this graphId.
@@ -234,9 +239,13 @@ describe("clearGraph against a graph with status-table rows", () => {
     // All status rows for this graphId are now gone — a stale marker
     // would otherwise let a reused graphId skip recovery on the next
     // materializeRemovals call.
-    const markerAfter = await backend.getReconciliationMarker!(baseGraph.id);
+    const markerAfter = await requireDefined(backend.getReconciliationMarker)(
+      baseGraph.id,
+    );
     expect(markerAfter).toBeUndefined();
-    const removalsAfter = await backend.getAllKindRemovals!(baseGraph.id);
+    const removalsAfter = await requireDefined(backend.getAllKindRemovals)(
+      baseGraph.id,
+    );
     expect(removalsAfter).toHaveLength(0);
   });
 });
@@ -290,10 +299,12 @@ describe("defineGraphExtension strict-authoring index validation", () => {
     }
     expect(captured).toBeInstanceOf(GraphExtensionValidationError);
     expect(
-      captured!.issues.some((issue) => issue.message.includes("coveringField")),
+      requireDefined(captured).issues.some((issue) =>
+        issue.message.includes("coveringField"),
+      ),
     ).toBe(true);
     expect(
-      captured!.issues.some(
+      requireDefined(captured).issues.some(
         (issue) => issue.code === "INVALID_INDEX_DECLARATION",
       ),
     ).toBe(true);
@@ -370,7 +381,7 @@ describe("materializeRemovals against a backend with a custom `uniques` table", 
         sql`SELECT COUNT(*) AS count FROM ${sql.identifier("myapp_uniques")} WHERE node_kind = 'Tag'`,
       ),
     );
-    expect(beforeRows[0]!.count).toBeGreaterThan(0);
+    expect(requireDefined(beforeRows[0]).count).toBeGreaterThan(0);
 
     const removed = await evolved.removeKinds(["Tag"]);
     const result = await removed.materializeRemovals();
@@ -384,7 +395,7 @@ describe("materializeRemovals against a backend with a custom `uniques` table", 
         sql`SELECT COUNT(*) AS count FROM ${sql.identifier("myapp_uniques")} WHERE node_kind = 'Tag'`,
       ),
     );
-    expect(afterRows[0]!.count).toBe(0);
+    expect(requireDefined(afterRows[0]).count).toBe(0);
   });
 });
 

@@ -66,7 +66,7 @@ function withCallCounts(backend: GraphBackend): {
   const counted: GraphBackend = {
     ...outer,
     transaction: (fn, options) =>
-      backend.transaction((target, tx) => fn(wrapMethods(target), tx), options),
+      backend.transaction((target) => fn(wrapMethods(target)), options),
   };
   return { backend: counted, counts };
 }
@@ -129,8 +129,8 @@ describe("cascade edge deletion batches", () => {
 
       await store.nodes.Hub.delete(hub.id);
 
-      expect(counts.deleteEdgesBatch).toBe(1);
-      expect(counts.deleteEdge).toBe(0);
+      expect(counts["deleteEdgesBatch"]).toBe(1);
+      expect(counts["deleteEdge"]).toBe(0);
       const remaining = await store.edges.links.findFrom(hub);
       expect(remaining).toHaveLength(0);
       // Tombstoned, not removed: the spokes themselves survive.
@@ -152,8 +152,8 @@ describe("cascade edge deletion batches", () => {
 
       await store.nodes.Hub.hardDelete(hub.id);
 
-      expect(counts.hardDeleteEdgesBatch).toBe(1);
-      expect(counts.hardDeleteEdge).toBe(0);
+      expect(counts["hardDeleteEdgesBatch"]).toBe(1);
+      expect(counts["hardDeleteEdge"]).toBe(0);
       expect(await store.edges.links.findFrom(hub)).toHaveLength(0);
     } finally {
       await rawBackend.close();
@@ -217,23 +217,23 @@ describe("delete round trips", () => {
       const soft = await store.edges.links.create(hub, spoke, {});
       const hard = await store.edges.links.create(hub, spoke, {});
 
-      counts.getEdge = 0;
+      counts["getEdge"] = 0;
       await store.edges.links.delete(soft.id);
-      expect(counts.getEdge).toBe(1);
-      expect(counts.deleteEdge).toBe(1);
+      expect(counts["getEdge"]).toBe(1);
+      expect(counts["deleteEdge"]).toBe(1);
 
-      counts.getEdge = 0;
+      counts["getEdge"] = 0;
       await store.edges.links.hardDelete(hard.id);
-      expect(counts.getEdge).toBe(1);
-      expect(counts.hardDeleteEdge).toBe(1);
+      expect(counts["getEdge"]).toBe(1);
+      expect(counts["hardDeleteEdge"]).toBe(1);
 
       expect(await store.edges.links.findFrom(hub)).toHaveLength(0);
 
       // Absent/tombstoned: the gate alone decides, still one read.
-      counts.getEdge = 0;
+      counts["getEdge"] = 0;
       await store.edges.links.delete(soft.id);
-      expect(counts.getEdge).toBe(1);
-      expect(counts.deleteEdge).toBe(1);
+      expect(counts["getEdge"]).toBe(1);
+      expect(counts["deleteEdge"]).toBe(1);
     } finally {
       await rawBackend.close();
     }
@@ -250,16 +250,16 @@ describe("delete round trips", () => {
       await store.nodes.Spoke.create({ name: "a" }, { id: "a" });
       await store.nodes.Spoke.create({ name: "b" }, { id: "b" });
 
-      counts.getNode = 0;
+      counts["getNode"] = 0;
       await store.nodes.Spoke.hardDelete("a" as never);
-      expect(counts.getNode).toBe(1);
+      expect(counts["getNode"]).toBe(1);
       expect(await store.nodes.Spoke.getById("a" as never)).toBeUndefined();
 
       // Soft delete's pipeline consumes the pre-image (uniqueness keys),
       // so its in-transaction preflight is deliberate: gate + preflight.
-      counts.getNode = 0;
+      counts["getNode"] = 0;
       await store.nodes.Spoke.delete("b" as never);
-      expect(counts.getNode).toBe(2);
+      expect(counts["getNode"]).toBe(2);
       expect(await store.nodes.Spoke.getById("b" as never)).toBeUndefined();
     } finally {
       await rawBackend.close();

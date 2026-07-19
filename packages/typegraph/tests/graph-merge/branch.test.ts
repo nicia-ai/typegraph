@@ -19,7 +19,11 @@ import {
 import { asBranchId } from "../../src/graph-merge/types";
 import { cloneWorkingCopyStrategy } from "../../src/graph-merge/working-copy";
 import { exportGraph, importGraph } from "../../src/interchange";
-import { backendMatrix } from "./test-utils";
+import {
+  backendMatrix,
+  getBackendProperty,
+  getStoreBackend,
+} from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -77,12 +81,16 @@ type MaterializationGraph = typeof materializationGraph;
 async function snapshotPeople(
   store: Store<G>,
 ): Promise<readonly Readonly<{ id: string; name: unknown }>[]> {
-  const rows = await enumerateAllNodes(store.backend, store.graphId, "Person");
+  const rows = await enumerateAllNodes(
+    getStoreBackend(store),
+    store.graphId,
+    "Person",
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => ({
       id: row.id,
-      name: rowPropsToObject(row.props).name,
+      name: rowPropsToObject(row.props)["name"],
     }))
     .sort((left, right) =>
       left.id < right.id ? -1
@@ -97,14 +105,18 @@ async function snapshotEdges(
 ): Promise<
   readonly Readonly<{ id: string; from: string; to: string; since: unknown }>[]
 > {
-  const rows = await enumerateAllEdges(store.backend, store.graphId, "knows");
+  const rows = await enumerateAllEdges(
+    getStoreBackend(store),
+    store.graphId,
+    "knows",
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => ({
       id: row.id,
       from: row.from_id,
       to: row.to_id,
-      since: rowPropsToObject(row.props).since,
+      since: rowPropsToObject(row.props)["since"],
     }))
     .sort((left, right) =>
       left.id < right.id ? -1
@@ -166,8 +178,10 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     // Distinct branch ids and distinct backing stores.
     expect(branchA.id).not.toBe(branchB.id);
     expect(branchA.store).not.toBe(branchB.store);
-    expect(branchA.store.backend).not.toBe(branchB.store.backend);
-    expect(branchA.store.backend).not.toBe(baseStore.backend);
+    expect(getStoreBackend(branchA.store)).not.toBe(
+      getStoreBackend(branchB.store),
+    );
+    expect(getStoreBackend(branchA.store)).not.toBe(getStoreBackend(baseStore));
 
     // (b) Each branch.store is a deep, id-preserving copy of base data.
     expect(await snapshotPeople(branchA.store)).toEqual(baseBefore);
@@ -278,7 +292,7 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     // valid_from = NULL — "valid since forever". A faithful clone must NOT
     // narrow that to the fork's own creation instant.
     const { baseStore } = await seedBase();
-    const legacy = await baseStore.backend.insertNode({
+    const legacy = await getStoreBackend(baseStore).insertNode({
       graphId: baseStore.graphId,
       kind: "Person",
       id: "legacy-null-validfrom",
@@ -330,15 +344,14 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     cleanups.push(fixture.cleanup);
     let closeCount = 0;
     const tracked: GraphBackend = new Proxy(fixture.backend, {
-      get(target, property, receiver) {
+      get(target, property, _receiver) {
         if (property === "close") {
           return async () => {
             closeCount += 1;
             await target.close();
           };
         }
-        const value = Reflect.get(target, property, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
+        return getBackendProperty(target, property);
       },
     });
 

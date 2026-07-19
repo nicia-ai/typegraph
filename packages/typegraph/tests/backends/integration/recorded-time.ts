@@ -1,13 +1,11 @@
-import { type SQL, sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
   type AnyEdgeType,
-  asCompiledRowsSql,
-  asCompiledStatementSql,
   asRecordedInstant,
   type CompiledRowsSql,
+  type CompiledStatementSql,
   ConfigurationError,
   createStoreWithSchema,
   defineEdge,
@@ -39,12 +37,20 @@ import {
 } from "../../../src/interchange";
 import { compileQuery } from "../../../src/query/compiler/index";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql, type SqlFragment } from "../../../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  asCompiledStatementSql,
+} from "../../../src/query/sql-intent";
 import {
   CURRENT_ONLY_READ_NAMES,
   EDGE_BATCH_READ_NAMES,
 } from "../../../src/store/collection-surface";
 import { toCanonicalIso } from "../../../src/store/recorded-capture";
-import { type IntegrationStore, integrationTestGraph } from "./fixtures";
+import { STORE_RUNTIME } from "../../../src/store/runtime-port";
+import { TRANSACTION_RUNTIME } from "../../../src/store/types";
+import { requireDefined } from "../../../src/utils/presence";
+import { type HistoryIntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
 type ClockRow = Readonly<{ recorded_at: unknown }>;
@@ -52,7 +58,10 @@ type CountRow = Readonly<{ count: unknown }>;
 type RecordedToRow = Readonly<{ recorded_to: unknown }>;
 type RecordedFromRow = Readonly<{ recorded_from: unknown }>;
 type RecordedOpRow = Readonly<{ op: string }>;
-type RecordedSqlStore = Readonly<{ backend: GraphBackend; graphId: string }>;
+type RecordedSqlStore = Readonly<{
+  graphId: string;
+  [STORE_RUNTIME]: Readonly<{ backend: GraphBackend }>;
+}>;
 type RuntimeTarget = Readonly<Record<string, unknown>>;
 
 type RecordedContractCase = Readonly<{
@@ -60,6 +69,10 @@ type RecordedContractCase = Readonly<{
   invoke: () => unknown;
   message: string;
 }>;
+
+function getRuntimeProperty(target: object, property: PropertyKey): unknown {
+  return Reflect.get(target, property) as unknown;
+}
 
 const CascadePerson = defineNode("CascadePerson", {
   schema: z.object({ name: z.string() }),
@@ -214,13 +227,8 @@ function seq(count: number): number[] {
 
 async function createHistoryStore(
   context: IntegrationTestContext,
-): Promise<IntegrationStore> {
-  const [store] = await createStoreWithSchema(
-    integrationTestGraph,
-    context.getStore().backend,
-    { history: true },
-  );
-  return store;
+): Promise<HistoryIntegrationStore> {
+  return context.createHistoryStore(integrationTestGraph);
 }
 
 function quoteIdentifier(name: string): string {
@@ -260,7 +268,7 @@ async function expectMissingRecordedRelations(
 
 function assertWithinBindLimit(
   backend: Pick<GraphBackend, "compileSql">,
-  query: SQL,
+  query: SqlFragment,
   maxParams: number,
 ): void {
   const compiled = backend.compileSql?.(query);
@@ -302,9 +310,9 @@ function withTransactionBindLimit(
     ...(executeStatement === undefined ?
       {}
     : {
-        async executeStatement(query: SQL): Promise<void> {
+        async executeStatement(query: CompiledStatementSql): Promise<void> {
           assertWithinBindLimit(target, query, maxParams);
-          await executeStatement(asCompiledStatementSql(query));
+          await executeStatement(query);
         },
       }),
   };
@@ -342,15 +350,14 @@ function withBindLimit(backend: GraphBackend, maxParams: number): GraphBackend {
     ...(executeStatement === undefined ?
       {}
     : {
-        async executeStatement(query: SQL): Promise<void> {
+        async executeStatement(query: CompiledStatementSql): Promise<void> {
           assertWithinBindLimit(backend, query, maxParams);
-          await executeStatement(asCompiledStatementSql(query));
+          await executeStatement(query);
         },
       }),
     async transaction(fn, options) {
       return backend.transaction(
-        (target, txSql) =>
-          fn(withTransactionBindLimit(target, maxParams), txSql),
+        (target) => fn(withTransactionBindLimit(target, maxParams)),
         options,
       );
     },
@@ -379,7 +386,7 @@ function withoutTransactionInsertBatchHelpers(
     ...backend,
     async transaction(fn, options) {
       return backend.transaction(
-        (target, rawSql) => fn(hideInsertBatchHelpers(target), rawSql),
+        (target) => fn(hideInsertBatchHelpers(target)),
         options,
       );
     },
@@ -393,9 +400,9 @@ function withoutTransactionGetEdges(backend: GraphBackend): GraphBackend {
   return {
     ...backend,
     async transaction(fn, options) {
-      return backend.transaction((target, rawSql) => {
+      return backend.transaction((target) => {
         const { getEdges: _getEdges, ...rest } = target;
-        return fn(rest, rawSql);
+        return fn(rest);
       }, options);
     },
   };
@@ -412,14 +419,14 @@ function withFailingUniqueFinalization(backend: GraphBackend): GraphBackend {
       return rejectUniqueFinalization();
     },
     async transaction(fn, options) {
-      return backend.transaction((target, rawSql) => {
+      return backend.transaction((target) => {
         const failingTarget: TransactionBackend = {
           ...target,
           insertUnique(): Promise<void> {
             return rejectUniqueFinalization();
           },
         };
-        return fn(failingTarget, rawSql);
+        return fn(failingTarget);
       }, options);
     },
   };
@@ -458,8 +465,8 @@ async function rawHelperOutcome<T>(
 async function readRecordedClock(
   store: RecordedSqlStore,
 ): Promise<RecordedInstant> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<ClockRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<ClockRow>(
     asCompiledRowsSql(sql`
       SELECT recorded_at
       FROM ${schema.recordedClockTable}
@@ -480,8 +487,8 @@ async function countRecordedNodeRows(
   nodeId: string,
   kind = "Person",
 ): Promise<number> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<CountRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<CountRow>(
     asCompiledRowsSql(sql`
       SELECT COUNT(*) AS count
       FROM ${schema.recordedNodesTable}
@@ -497,8 +504,8 @@ async function countOpenRecordedNodeRowsByKind(
   store: RecordedSqlStore,
   kind: string,
 ): Promise<number> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<CountRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<CountRow>(
     asCompiledRowsSql(sql`
       SELECT COUNT(*) AS count
       FROM ${schema.recordedNodesTable}
@@ -515,8 +522,8 @@ async function countRecordedEdgeRows(
   edgeId: string,
   kind = "knows",
 ): Promise<number> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<CountRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<CountRow>(
     asCompiledRowsSql(sql`
       SELECT COUNT(*) AS count
       FROM ${schema.recordedEdgesTable}
@@ -531,8 +538,8 @@ async function countRecordedEdgeRows(
 async function countRecordedClockRows(
   store: RecordedSqlStore,
 ): Promise<number> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<CountRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<CountRow>(
     asCompiledRowsSql(sql`
       SELECT COUNT(*) AS count
       FROM ${schema.recordedClockTable}
@@ -547,8 +554,8 @@ async function readRecordedNodeClosedAt(
   kind: string,
   nodeId: string,
 ): Promise<string> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<RecordedToRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<RecordedToRow>(
     asCompiledRowsSql(sql`
       SELECT recorded_to
       FROM ${schema.recordedNodesTable}
@@ -567,8 +574,8 @@ async function readRecordedEdgeClosedAt(
   kind: string,
   edgeId: string,
 ): Promise<string> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<RecordedToRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<RecordedToRow>(
     asCompiledRowsSql(sql`
       SELECT recorded_to
       FROM ${schema.recordedEdgesTable}
@@ -587,8 +594,8 @@ async function readRecordedNodeOpenFrom(
   kind: string,
   nodeId: string,
 ): Promise<string> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<RecordedFromRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<RecordedFromRow>(
     asCompiledRowsSql(sql`
       SELECT recorded_from
       FROM ${schema.recordedNodesTable}
@@ -610,8 +617,8 @@ async function readRecordedEdgeOpenFrom(
   kind: string,
   edgeId: string,
 ): Promise<string> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<RecordedFromRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<RecordedFromRow>(
     asCompiledRowsSql(sql`
       SELECT recorded_from
       FROM ${schema.recordedEdgesTable}
@@ -633,8 +640,8 @@ async function readRecordedNodeOps(
   kind: string,
   nodeId: string,
 ): Promise<readonly string[]> {
-  const schema = createSqlSchema(store.backend.tableNames);
-  const rows = await store.backend.execute<RecordedOpRow>(
+  const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+  const rows = await store[STORE_RUNTIME].backend.execute<RecordedOpRow>(
     asCompiledRowsSql(sql`
       SELECT op
       FROM ${schema.recordedNodesTable}
@@ -648,7 +655,7 @@ async function readRecordedNodeOps(
 }
 
 function unsupportedRead(
-  store: IntegrationStore,
+  store: HistoryIntegrationStore,
   recordedAt: RecordedInstant,
 ): () => Promise<unknown> {
   const recorded = store.asOfRecorded(recordedAt) as unknown as Readonly<{
@@ -673,7 +680,7 @@ function executeBatchable(
   value: unknown,
   backend: GraphBackend,
 ): Promise<unknown> {
-  const executeOn = (value as RuntimeTarget).executeOn;
+  const executeOn = (value as RuntimeTarget)["executeOn"];
   if (typeof executeOn !== "function") {
     throw new TypeError("Expected a BatchableQuery with executeOn");
   }
@@ -1229,10 +1236,13 @@ export function registerRecordedTimeIntegrationTests(
       };
 
       await expect(
-        store.algorithmsAtCoordinate(invalidCoordinate).degree(alice.id, {
-          edges: ["knows"],
-          recordedAsOf: RECORDED_MAX as RecordedInstant,
-        } as never),
+        store[STORE_RUNTIME].algorithmsAtCoordinate(invalidCoordinate).degree(
+          alice.id,
+          {
+            edges: ["knows"],
+            recordedAsOf: RECORDED_MAX as RecordedInstant,
+          } as never,
+        ),
       ).rejects.toThrow("recordedAsOf must be before");
     });
 
@@ -1335,7 +1345,7 @@ export function registerRecordedTimeIntegrationTests(
                 alice,
                 recordedOptions,
               ]),
-              store.backend,
+              store[STORE_RUNTIME].backend,
             ),
           message: "Broad collection reads cannot honor recorded-time",
         },
@@ -1344,7 +1354,7 @@ export function registerRecordedTimeIntegrationTests(
           invoke: async () =>
             executeBatchable(
               invokeRuntimeMethod(knows, "batchFindTo", [bob, recordedOptions]),
-              store.backend,
+              store[STORE_RUNTIME].backend,
             ),
           message: "Broad collection reads cannot honor recorded-time",
         },
@@ -1358,7 +1368,7 @@ export function registerRecordedTimeIntegrationTests(
                 undefined,
                 recordedOptions,
               ]),
-              store.backend,
+              store[STORE_RUNTIME].backend,
             ),
           message: "Broad collection reads cannot honor recorded-time",
         },
@@ -1727,7 +1737,8 @@ export function registerRecordedTimeIntegrationTests(
           .execute(),
       ).rejects.toThrow("Recorded-time queries cannot use vector or fulltext");
 
-      if (store.backend.capabilities.vector?.supported !== true) return;
+      if (store[STORE_RUNTIME].backend.capabilities.vector?.supported !== true)
+        return;
 
       await expect(
         recorded
@@ -1773,7 +1784,8 @@ export function registerRecordedTimeIntegrationTests(
           .execute(),
       ).rejects.toThrow("Recorded-time queries cannot use vector or fulltext");
 
-      if (store.backend.capabilities.vector?.supported !== true) return;
+      if (store[STORE_RUNTIME].backend.capabilities.vector?.supported !== true)
+        return;
 
       await expect(
         recorded
@@ -2204,9 +2216,9 @@ export function registerRecordedTimeIntegrationTests(
 
     it("compiles current-mode reads against the live tables only", async () => {
       const store = await createHistoryStore(context);
-      const schema = createSqlSchema(store.backend.tableNames);
+      const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
       const compileSql = requireBackendHelper(
-        store.backend.compileSql,
+        store[STORE_RUNTIME].backend.compileSql,
         "compileSql",
       );
 
@@ -2221,7 +2233,7 @@ export function registerRecordedTimeIntegrationTests(
         .select((ctx) => ctx.person.id)
         .toAst();
       const compiled = compileQuery(ast, store.graphId, {
-        dialect: store.backend.dialect,
+        dialect: store[STORE_RUNTIME].backend.dialect,
         schema,
       });
       const { sql: text } = compileSql(compiled);
@@ -2250,7 +2262,7 @@ export function registerRecordedTimeIntegrationTests(
       ]);
     });
 
-    it("executes prepared reads over fields named like SQL keywords under history", async () => {
+    it("executes prepared reads over fields named like SqlFragment keywords under history", async () => {
       const [store] = await createStoreWithSchema(
         keywordFieldGraph,
         context.getStore().backend,
@@ -2276,40 +2288,34 @@ export function registerRecordedTimeIntegrationTests(
       ]);
     });
 
-    it("allows read-only executeRaw on the history-wrapped transaction backend", async () => {
+    it("does not expose arbitrary raw SQL on the public transaction backend", async () => {
       const store = await createHistoryStore(context);
 
-      await store.transaction(async (tx) => {
-        await expect(
-          rawHelperOutcome(
-            "tx.backend.executeRaw",
-            tx.backend.executeRaw,
-            (run) => run("SELECT 1 AS one", []),
-          ),
-        ).resolves.toMatch(/tx\.backend\.executeRaw (resolved|unavailable)/);
+      await store.transaction((tx) => {
+        expect("executeRaw" in tx.backend).toBe(false);
+        expect(Object.hasOwn(tx.backend, "executeRaw")).toBe(false);
+        return Promise.resolve();
       });
     });
 
-    it("refuses raw transaction SQL when history capture is enabled", async () => {
+    it("refuses raw transaction SqlFragment when history capture is enabled", async () => {
       const store = await createHistoryStore(context);
 
       await store.transaction(async (tx) => {
-        expect(tx.sql).toBeDefined();
-        expect(() => {
-          const sqlHandle = tx.sql as unknown as Readonly<{ insert: unknown }>;
-          void sqlHandle.insert;
-        }).toThrow("tx.sql is not available when history capture is enabled");
+        expect(() => getRuntimeProperty(tx, "sql")).toThrow(
+          "tx.sql is not available when history capture is enabled",
+        );
         // Enumeration / inspection must fail loud too, not silently resolve to
         // an empty object that reads as "no raw handle".
-        expect(() => ({ ...(tx.sql as unknown as object) })).toThrow(
-          "tx.sql is not available when history capture is enabled",
-        );
-        expect(() => Object.keys(tx.sql as unknown as object)).toThrow(
-          "tx.sql is not available when history capture is enabled",
-        );
-        expect(() => "insert" in (tx.sql as unknown as object)).toThrow(
-          "tx.sql is not available when history capture is enabled",
-        );
+        expect(() => ({
+          ...(getRuntimeProperty(tx, "sql") as object),
+        })).toThrow("tx.sql is not available when history capture is enabled");
+        expect(() =>
+          Object.keys(getRuntimeProperty(tx, "sql") as object),
+        ).toThrow("tx.sql is not available when history capture is enabled");
+        expect(
+          () => "insert" in (getRuntimeProperty(tx, "sql") as object),
+        ).toThrow("tx.sql is not available when history capture is enabled");
         await tx.nodes.Person.create({ name: "Guarded", age: 1 });
       });
     });
@@ -2317,7 +2323,7 @@ export function registerRecordedTimeIntegrationTests(
     it("refuses backend.executeStatement on the history-wrapped backend", async () => {
       const store = await createHistoryStore(context);
       const executeStatement = requireBackendHelper(
-        store.backend.executeStatement,
+        store[STORE_RUNTIME].backend.executeStatement,
         "backend.executeStatement",
       );
 
@@ -2333,21 +2339,18 @@ export function registerRecordedTimeIntegrationTests(
       await expect(
         rawHelperOutcome(
           "backend.executeDdl",
-          store.backend.executeDdl,
+          store[STORE_RUNTIME].backend.executeDdl,
           (run) => run("SELECT 1"),
         ),
       ).resolves.toMatch(/backend\.executeDdl (is not available|unavailable)/);
     });
 
-    it("refuses the raw SQL handle on the history-wrapped backend transaction", async () => {
+    it("does not expose an adapter-native handle on the portable backend transaction", async () => {
       const store = await createHistoryStore(context);
 
-      await store.backend.transaction((_target, rawSql) => {
-        expect(() => {
-          const sqlHandle = rawSql as unknown as Readonly<{ insert: unknown }>;
-          void sqlHandle.insert;
-        }).toThrow("tx.sql is not available when history capture is enabled");
-        return Promise.resolve();
+      await store[STORE_RUNTIME].backend.transaction((target) => {
+        expect(target.dialect).toBe(store[STORE_RUNTIME].backend.dialect);
+        return Promise.resolve(undefined);
       });
     });
 
@@ -2355,13 +2358,14 @@ export function registerRecordedTimeIntegrationTests(
       const store = await createHistoryStore(context);
 
       await store.transaction(async (tx) => {
+        const transactionBackend = tx[TRANSACTION_RUNTIME].backend;
         const executeStatement = requireBackendHelper(
-          tx.backend.executeStatement,
+          transactionBackend.executeStatement,
           "tx.backend.executeStatement",
         );
         const executeDdlOutcome = rawHelperOutcome(
           "tx.backend.executeDdl",
-          tx.backend.executeDdl,
+          transactionBackend.executeDdl,
           (run) => run("SELECT 1"),
         );
 
@@ -2380,9 +2384,13 @@ export function registerRecordedTimeIntegrationTests(
     it("refuses context-returning external transactions when history capture is enabled", async () => {
       const store = await createHistoryStore(context);
 
-      expect(() => store.withTransaction({} as never)).toThrow(
-        "withTransaction() has no recorded-time capture flush point",
-      );
+      expect(() =>
+        invokeRuntimeMethod(
+          store as unknown as RuntimeTarget,
+          "withTransaction",
+          [{}],
+        ),
+      ).toThrow("withTransaction() has no recorded-time capture flush point");
     });
 
     it("chunks recorded point reads and writes beyond SQLite bind limits", async () => {
@@ -2495,12 +2503,12 @@ export function registerRecordedTimeIntegrationTests(
       await expect(
         store.asOfRecorded(recordedAtCreate).nodes.Person.getById(alice.id),
       ).rejects.toMatchObject({
-        details: expect.objectContaining({
+        details: {
           code: "RECORDED_RELATION_INVARIANT_VIOLATION",
           entity: "node",
           kind: "Person",
           id: alice.id,
-        }),
+        },
       });
     });
 
@@ -2551,8 +2559,12 @@ export function registerRecordedTimeIntegrationTests(
         "2020",
         "2021",
       ]);
-      await expect(countRecordedEdgeRows(store, edgeIds[0]!)).resolves.toBe(2);
-      await expect(countRecordedEdgeRows(store, edgeIds[1]!)).resolves.toBe(2);
+      await expect(
+        countRecordedEdgeRows(store, requireDefined(edgeIds[0])),
+      ).resolves.toBe(2);
+      await expect(
+        countRecordedEdgeRows(store, requireDefined(edgeIds[1])),
+      ).resolves.toBe(2);
     });
 
     it("captures direct backend batch writes when transaction targets omit batch helpers", async () => {
@@ -2562,19 +2574,19 @@ export function registerRecordedTimeIntegrationTests(
         { history: true },
       );
       const insertNodesBatch = requireBackendHelper(
-        store.backend.insertNodesBatch,
+        store[STORE_RUNTIME].backend.insertNodesBatch,
         "backend.insertNodesBatch",
       );
       const insertNodesBatchReturning = requireBackendHelper(
-        store.backend.insertNodesBatchReturning,
+        store[STORE_RUNTIME].backend.insertNodesBatchReturning,
         "backend.insertNodesBatchReturning",
       );
       const insertEdgesBatch = requireBackendHelper(
-        store.backend.insertEdgesBatch,
+        store[STORE_RUNTIME].backend.insertEdgesBatch,
         "backend.insertEdgesBatch",
       );
       const insertEdgesBatchReturning = requireBackendHelper(
-        store.backend.insertEdgesBatchReturning,
+        store[STORE_RUNTIME].backend.insertEdgesBatchReturning,
         "backend.insertEdgesBatchReturning",
       );
 
@@ -2653,7 +2665,7 @@ export function registerRecordedTimeIntegrationTests(
         { history: true },
       );
       const insertNodesBatchReturning = requireBackendHelper(
-        store.backend.insertNodesBatchReturning,
+        store[STORE_RUNTIME].backend.insertNodesBatchReturning,
         "backend.insertNodesBatchReturning",
       );
       const sharedId = "outer-returning-shared-cross-kind";
@@ -2703,11 +2715,11 @@ export function registerRecordedTimeIntegrationTests(
         { history: true },
       );
       const insertNodesBatchReturning = requireBackendHelper(
-        storeA.backend.insertNodesBatchReturning,
+        storeA[STORE_RUNTIME].backend.insertNodesBatchReturning,
         "backend.insertNodesBatchReturning",
       );
       const insertEdgesBatchReturning = requireBackendHelper(
-        storeA.backend.insertEdgesBatchReturning,
+        storeA[STORE_RUNTIME].backend.insertEdgesBatchReturning,
         "backend.insertEdgesBatchReturning",
       );
       const sharedEdgeId = "outer-returning-shared-cross-graph-edge";
@@ -2885,14 +2897,18 @@ export function registerRecordedTimeIntegrationTests(
         "expected importGraph recorded instant",
       );
 
-      const schema = createSqlSchema(store.backend.tableNames);
-      const nodeFroms = await store.backend.execute<RecordedFromRow>(
+      const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
+      const nodeFroms = await store[
+        STORE_RUNTIME
+      ].backend.execute<RecordedFromRow>(
         asCompiledRowsSql(sql`
           SELECT recorded_from FROM ${schema.recordedNodesTable}
           WHERE graph_id = ${store.graphId}
         `),
       );
-      const edgeFroms = await store.backend.execute<RecordedFromRow>(
+      const edgeFroms = await store[
+        STORE_RUNTIME
+      ].backend.execute<RecordedFromRow>(
         asCompiledRowsSql(sql`
           SELECT recorded_from FROM ${schema.recordedEdgesTable}
           WHERE graph_id = ${store.graphId}
@@ -2925,7 +2941,7 @@ export function registerRecordedTimeIntegrationTests(
         since: "2020",
       });
 
-      await store.backend.hardDeleteNode({
+      await store[STORE_RUNTIME].backend.hardDeleteNode({
         graphId: store.graphId,
         kind: "Person",
         id: alice.id,
@@ -3141,7 +3157,7 @@ export function registerRecordedTimeIntegrationTests(
           people.push(
             await tx.nodes.Person.create(
               { name: `Name-${index}`, age: index },
-              { id: ids[index]! },
+              { id: requireDefined(ids[index]) },
             ),
           );
         }
@@ -3151,8 +3167,8 @@ export function registerRecordedTimeIntegrationTests(
         const created: string[] = [];
         for (let index = 30; index < people.length - 1; index += 1) {
           const edge = await tx.edges.knows.create(
-            people[index]!,
-            people[index + 1]!,
+            requireDefined(people[index]),
+            requireDefined(people[index + 1]),
             { since: `link-${index}` },
           );
           created.push(edge.id);
@@ -3181,15 +3197,15 @@ export function registerRecordedTimeIntegrationTests(
       // batched flush must classify each operation independently.
       await store.transaction(async (tx) => {
         for (let index = 0; index < 10; index += 1) {
-          await tx.nodes.Person.update(nodeIds[index]!, {
+          await tx.nodes.Person.update(requireDefined(nodeIds[index]), {
             name: `Updated-${index}`,
           });
         }
         for (let index = 10; index < 20; index += 1) {
-          await tx.nodes.Person.delete(nodeIds[index]!);
+          await tx.nodes.Person.delete(requireDefined(nodeIds[index]));
         }
         for (let index = 20; index < 30; index += 1) {
-          await tx.nodes.Person.hardDelete(nodeIds[index]!);
+          await tx.nodes.Person.hardDelete(requireDefined(nodeIds[index]));
         }
       });
       const recordedAtChange = await readRecordedClock(store);
@@ -3217,10 +3233,14 @@ export function registerRecordedTimeIntegrationTests(
       const tombstone = await store
         .view({ mode: "includeTombstones" })
         .asOfRecorded(recordedAtChange)
-        .nodes.Person.getById(nodeIds[10]!);
+        .nodes.Person.getById(requireDefined(nodeIds[10]));
       expect(tombstone?.name).toBe("Name-10");
-      expect(await countRecordedNodeRows(store, ids[10]!)).toBe(2);
-      expect(await countRecordedNodeRows(store, ids[20]!)).toBe(1);
+      expect(await countRecordedNodeRows(store, requireDefined(ids[10]))).toBe(
+        2,
+      );
+      expect(await countRecordedNodeRows(store, requireDefined(ids[20]))).toBe(
+        1,
+      );
     });
 
     it("recordedNow() anchors a recorded read deterministically", async () => {

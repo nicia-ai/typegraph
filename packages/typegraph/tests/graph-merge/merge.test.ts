@@ -25,7 +25,8 @@ import type {
   SimilarityStrategy,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
-import { backendMatrix } from "./test-utils";
+import { requireDefined } from "../../src/utils/presence";
+import { backendMatrix, getStoreBackend } from "./test-utils";
 
 /**
  * A small FHIR-flavored care graph (design §14): patients linked to encounters
@@ -126,12 +127,16 @@ function lexicographicMin(left: string, right: string): string {
 async function livePatients(
   store: Store<CareGraph>,
 ): Promise<readonly Readonly<{ id: string; name: unknown; mrn: unknown }>[]> {
-  const rows = await enumerateAllNodes(store.backend, store.graphId, "Patient");
+  const rows = await enumerateAllNodes(
+    getStoreBackend(store),
+    store.graphId,
+    "Patient",
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => {
       const props = rowPropsToObject(row.props);
-      return { id: row.id, name: props.name, mrn: props.mrn };
+      return { id: row.id, name: props["name"], mrn: props["mrn"] };
     })
     .sort((left, right) =>
       left.id < right.id ? -1
@@ -145,7 +150,11 @@ async function liveEdges(
   store: Store<CareGraph>,
   kind: string,
 ): Promise<readonly Readonly<{ id: string; from: string; to: string }>[]> {
-  const rows = await enumerateAllEdges(store.backend, store.graphId, kind);
+  const rows = await enumerateAllEdges(
+    getStoreBackend(store),
+    store.graphId,
+    kind,
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => ({ id: row.id, from: row.from_id, to: row.to_id }))
@@ -263,8 +272,8 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
 
     const patients = await livePatients(baseStore);
     expect(patients).toHaveLength(1);
-    expect(patients[0]!.name).toBe("Alice");
-    expect(patients[0]!.mrn).toBeUndefined();
+    expect(requireDefined(patients[0]).name).toBe("Alice");
+    expect(requireDefined(patients[0]).mrn).toBeUndefined();
   });
 
   it("honors a deletion while a concurrent branch edits a different property (#2)", async () => {
@@ -291,8 +300,8 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
     expect(patients).toHaveLength(1);
     // Branch B's name edit survives; branch A's mrn deletion is honored, not
     // reverted to the base value.
-    expect(patients[0]!.name).toBe("Alicia");
-    expect(patients[0]!.mrn).toBeUndefined();
+    expect(requireDefined(patients[0]).name).toBe("Alicia");
+    expect(requireDefined(patients[0]).mrn).toBeUndefined();
   });
 
   it("resolves the duplicate Patient, repoints both branches' edges, and flags the name conflict", async () => {
@@ -314,11 +323,11 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
     const patients = await livePatients(baseStore);
     expect(patients).toHaveLength(1);
     const expectedCanonical = lexicographicMin(annaId, anaId);
-    expect(patients[0]!.id).toBe(expectedCanonical);
+    expect(requireDefined(patients[0]).id).toBe(expectedCanonical);
 
     // One entity resolution recording the two-member cluster.
     expect(report.resolutions).toHaveLength(1);
-    const resolution = report.resolutions[0]!;
+    const resolution = requireDefined(report.resolutions[0]);
     expect(resolution.canonicalId).toBe(expectedCanonical);
     expect(resolution.kind).toBe("Patient");
     expect([...resolution.memberIds].sort()).toEqual([annaId, anaId].sort());
@@ -331,8 +340,8 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
     const conditions = await liveEdges(baseStore, "hasCondition");
     expect(encounters).toHaveLength(1);
     expect(conditions).toHaveLength(1);
-    expect(encounters[0]!.from).toBe(expectedCanonical);
-    expect(conditions[0]!.from).toBe(expectedCanonical);
+    expect(requireDefined(encounters[0]).from).toBe(expectedCanonical);
+    expect(requireDefined(conditions[0]).from).toBe(expectedCanonical);
 
     // The name-spelling disagreement surfaces as a property conflict on the
     // canonical patient. The two contributing branch values are recorded.
@@ -340,14 +349,14 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
       (conflict) => conflict.property === "name",
     );
     expect(nameConflict).toBeDefined();
-    expect(nameConflict!.entityId).toBe(expectedCanonical);
-    expect(nameConflict!.kind).toBe("Patient");
-    const conflictNames = nameConflict!.values
-      .map((value) => value.value)
+    expect(requireDefined(nameConflict).entityId).toBe(expectedCanonical);
+    expect(requireDefined(nameConflict).kind).toBe("Patient");
+    const conflictNames = requireDefined(nameConflict)
+      .values.map((value) => value.value)
       .sort();
     expect(conflictNames).toEqual(["Ana Rivera", "Anna Rivera"]);
     // Under "flag" the canonical's own value is retained (no auto-resolution).
-    expect(nameConflict!.resolution).toBe(
+    expect(requireDefined(nameConflict).resolution).toBe(
       expectedCanonical === annaId ? "Anna Rivera" : "Ana Rivera",
     );
 
@@ -366,8 +375,8 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
     const provB = report.provenance.byBranch(BRANCH_B);
     expect(provA.nodeIds).toContain(expectedCanonical);
     expect(provB.nodeIds).toContain(expectedCanonical);
-    expect(provA.edgeIds).toContain(encounters[0]!.id);
-    expect(provB.edgeIds).toContain(conditions[0]!.id);
+    expect(provA.edgeIds).toContain(requireDefined(encounters[0]).id);
+    expect(provB.edgeIds).toContain(requireDefined(conditions[0]).id);
   });
 
   it("produces an identical merged graph regardless of branch order", async () => {
@@ -423,7 +432,7 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
       orderSwap.annaId,
       orderSwap.anaId,
     );
-    expect(swapPatients[0]!.id).toBe(expectedCanonical);
+    expect(requireDefined(swapPatients[0]).id).toBe(expectedCanonical);
   });
 
   it("merges distinct (non-duplicate) patients without collapsing them", async () => {
@@ -607,11 +616,12 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
       (conflict) => conflict.property === "name",
     );
     expect(nameConflict).toBeDefined();
-    expect(nameConflict!.entityId).toBe(sharedId);
-    expect(nameConflict!.values.map((value) => value.value).sort()).toEqual([
-      "Ana Rivera",
-      "Anna Rivera",
-    ]);
+    expect(requireDefined(nameConflict).entityId).toBe(sharedId);
+    expect(
+      requireDefined(nameConflict)
+        .values.map((value) => value.value)
+        .sort(),
+    ).toEqual(["Ana Rivera", "Anna Rivera"]);
     // A single distinct id is not a multi-id MERGE, so no EntityResolution.
     expect(report.resolutions).toEqual([]);
   });
@@ -648,17 +658,17 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
 
     const patients = await livePatients(baseStore);
     expect(patients).toHaveLength(1);
-    expect(patients[0]!.id).toBe(origin.id);
-    expect(patients[0]!.name).toBe("Renamed"); // A's edit survived
+    expect(requireDefined(patients[0]).id).toBe(origin.id);
+    expect(requireDefined(patients[0]).name).toBe("Renamed"); // A's edit survived
     expect(result.data.conflicts).toEqual([]); // disjoint fields → no conflict
 
     const rows = await enumerateAllNodes(
-      baseStore.backend,
+      getStoreBackend(baseStore),
       baseStore.graphId,
       "Patient",
     );
-    const merged = rows.find((row) => row.id === origin.id)!;
-    expect(rowPropsToObject(merged.props).birthDate).toBe(
+    const merged = requireDefined(rows.find((row) => row.id === origin.id));
+    expect(rowPropsToObject(merged.props)["birthDate"]).toBe(
       "2000-12-31", // B's edit survived too
     );
   });
@@ -693,14 +703,15 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
       (conflict) => conflict.property === "name",
     );
     expect(nameConflict).toBeDefined();
-    expect(nameConflict!.entityId).toBe(origin.id);
-    expect(nameConflict!.values.map((value) => value.value).sort()).toEqual([
-      "Alpha",
-      "Beta",
-    ]);
+    expect(requireDefined(nameConflict).entityId).toBe(origin.id);
+    expect(
+      requireDefined(nameConflict)
+        .values.map((value) => value.value)
+        .sort(),
+    ).toEqual(["Alpha", "Beta"]);
     // Under "flag" the base value is retained — not silently overwritten.
     const patients = await livePatients(baseStore);
-    expect(patients[0]!.name).toBe("Origin");
+    expect(requireDefined(patients[0]).name).toBe("Origin");
   });
 });
 
@@ -764,15 +775,15 @@ describe.each(backendMatrix())(
       expect(isOk(result)).toBe(true);
 
       const rows = await enumerateAllEdges(
-        baseStore.backend,
+        getStoreBackend(baseStore),
         baseStore.graphId,
         "linked",
       );
       const live = rows.filter((row) => row.deleted_at === undefined);
       expect(live).toHaveLength(1);
-      const props = rowPropsToObject(live[0]!.props);
-      expect(props.since).toBe("2020");
-      expect(props.note).toBeUndefined();
+      const props = rowPropsToObject(requireDefined(live[0]).props);
+      expect(props["since"]).toBe("2020");
+      expect(props["note"]).toBeUndefined();
     });
   },
 );

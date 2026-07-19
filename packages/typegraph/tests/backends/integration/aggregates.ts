@@ -10,6 +10,7 @@ import {
   min,
   sum,
 } from "../../../src";
+import { requireDefined } from "../../../src/utils/presence";
 import {
   seedAdvancedAggregateProducts,
   seedAggregateProducts,
@@ -349,27 +350,27 @@ export function registerAggregateIntegrationTests(
 
       // Zeta: 0 employees (optionalTraverse must still surface it).
       // Yankee: 1 employee. Bravo: 2 employees. Alpha: 3 employees.
-      await store.edges.worksAt.create(people[0]!, yankee, {
+      await store.edges.worksAt.create(requireDefined(people[0]), yankee, {
         role: "Engineer",
         salary: 90_000,
       });
-      await store.edges.worksAt.create(people[1]!, bravo, {
+      await store.edges.worksAt.create(requireDefined(people[1]), bravo, {
         role: "Engineer",
         salary: 90_000,
       });
-      await store.edges.worksAt.create(people[2]!, bravo, {
+      await store.edges.worksAt.create(requireDefined(people[2]), bravo, {
         role: "Manager",
         salary: 110_000,
       });
-      await store.edges.worksAt.create(people[3]!, alpha, {
+      await store.edges.worksAt.create(requireDefined(people[3]), alpha, {
         role: "Engineer",
         salary: 90_000,
       });
-      await store.edges.worksAt.create(people[4]!, alpha, {
+      await store.edges.worksAt.create(requireDefined(people[4]), alpha, {
         role: "Manager",
         salary: 110_000,
       });
-      await store.edges.worksAt.create(people[5]!, alpha, {
+      await store.edges.worksAt.create(requireDefined(people[5]), alpha, {
         role: "Designer",
         salary: 95_000,
       });

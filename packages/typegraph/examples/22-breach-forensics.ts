@@ -28,6 +28,7 @@ import {
 } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
+import { requireDefined } from "../src/utils/presence";
 import { createExampleBackend, requireRecordedNow } from "./_helpers";
 
 // ============================================================
@@ -230,7 +231,7 @@ async function runForensics(store: Store<typeof graph>): Promise<void> {
     .map((node, index) => {
       const name = nodeName.get(node.id) ?? node.id;
       if (index === 0) return name;
-      const label = hopLabel(pathAtBreach.nodes[index - 1]!.kind, node.kind);
+      const label = hopLabel(requireDefined(pathAtBreach.nodes[index - 1]).kind, node.kind);
       const gone = label === "escalates" ? " (edge later DELETED)" : "";
       return `─${label}${gone}→ ${name}`;
     })

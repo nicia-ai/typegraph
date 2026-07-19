@@ -19,21 +19,23 @@ import { z } from "zod";
 
 import {
   ConfigurationError,
-  createStore,
-  createStoreWithSchema,
+  createAdapterStore,
+  createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
   searchable,
   StoreNotInitializedError,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
+import type { AnyPgTransaction } from "../../../src/backend/drizzle/execution";
 import {
   createPostgresBackend,
   tables as defaultTables,
 } from "../../../src/backend/postgres";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let pool: Pool | undefined;
@@ -79,7 +81,7 @@ const CONTRIB_MAT_TABLE = getTableName(
 );
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   try {
     pool = new Pool({ connectionString: TEST_DATABASE_URL });
     await pool.query("SELECT 1");
@@ -102,7 +104,7 @@ afterAll(async () => {
   if (pool) await pool.end();
 });
 
-describe.runIf(process.env.POSTGRES_URL)(
+describe.runIf(process.env["POSTGRES_URL"])(
   "PostgreSQL cross-store atomicity (#134)",
   () => {
     beforeEach(async () => {
@@ -119,15 +121,15 @@ describe.runIf(process.env.POSTGRES_URL)(
     });
 
     it("commits a relational row and a graph node in one transaction", async () => {
-      const backend = createPostgresBackend(db!);
-      const store = createStore(PlainGraph, backend);
+      const backend = createPostgresBackend(requireDefined(db));
+      const store = createAdapterStore(PlainGraph, backend);
 
-      const sourceId = await db!.transaction(async (sqlTx) => {
+      const sourceId = await requireDefined(db).transaction(async (sqlTx) => {
         const insertedConnectors = await sqlTx
           .insert(connectors)
           .values({ name: "github" })
           .returning({ id: connectors.id });
-        const connectorId = insertedConnectors[0]!.id;
+        const connectorId = requireDefined(insertedConnectors[0]).id;
         const txStore = store.withTransaction(sqlTx);
         const source = await txStore.nodes.ArtifactSource.create({
           connectorId,
@@ -136,18 +138,18 @@ describe.runIf(process.env.POSTGRES_URL)(
         return source.id;
       });
 
-      const rows = await db!.select().from(connectors);
+      const rows = await requireDefined(db).select().from(connectors);
       expect(rows).toEqual([{ id: 1, name: "github" }]);
       const fetched = await store.nodes.ArtifactSource.getById(sourceId);
       expect(fetched?.connectorId).toBe(1);
     });
 
     it("rolls back BOTH layers when the caller's transaction throws", async () => {
-      const backend = createPostgresBackend(db!);
-      const store = createStore(PlainGraph, backend);
+      const backend = createPostgresBackend(requireDefined(db));
+      const store = createAdapterStore(PlainGraph, backend);
 
       await expect(
-        db!.transaction(async (sqlTx) => {
+        requireDefined(db).transaction(async (sqlTx) => {
           await sqlTx.insert(connectors).values({ name: "orphan" });
           const txStore = store.withTransaction(sqlTx);
           await txStore.nodes.ArtifactSource.create({
@@ -158,22 +160,22 @@ describe.runIf(process.env.POSTGRES_URL)(
         }),
       ).rejects.toThrow("business failure after both writes");
 
-      expect(await db!.select().from(connectors)).toEqual([]);
+      expect(await requireDefined(db).select().from(connectors)).toEqual([]);
       expect(await store.nodes.ArtifactSource.find()).toEqual([]);
     });
 
     it("commits a fulltext write with a relational row when the store is booted", async () => {
-      const [store] = await createStoreWithSchema(
+      const [store] = await createAdapterStoreWithSchema(
         FtGraph,
-        createPostgresBackend(db!),
+        createPostgresBackend(requireDefined(db)),
       );
 
-      const documentId = await db!.transaction(async (sqlTx) => {
+      const documentId = await requireDefined(db).transaction(async (sqlTx) => {
         const insertedConnectors = await sqlTx
           .insert(connectors)
           .values({ name: "drive" })
           .returning({ id: connectors.id });
-        const connectorId = insertedConnectors[0]!.id;
+        const connectorId = requireDefined(insertedConnectors[0]).id;
         const txStore = store.withTransaction(sqlTx);
         const document = await txStore.nodes.Doc.create({
           connectorId,
@@ -182,7 +184,9 @@ describe.runIf(process.env.POSTGRES_URL)(
         return document.id;
       });
 
-      expect(await db!.select().from(connectors)).toHaveLength(1);
+      expect(await requireDefined(db).select().from(connectors)).toHaveLength(
+        1,
+      );
       const hits = await store.search.fulltext("Doc", {
         query: "revenue",
         limit: 10,
@@ -193,14 +197,14 @@ describe.runIf(process.env.POSTGRES_URL)(
     it("refuses loudly (and rolls back the relational write) when the store is not booted", async () => {
       // Strategy-owned fulltext table dropped + no durable marker: the
       // exact uninitialized state the gate must refuse on.
-      await pool!.query(
+      await requireDefined(pool).query(
         `DROP TABLE IF EXISTS ${defaultTables.fulltextTableName}`,
       );
-      const backend = createPostgresBackend(db!);
-      const store = createStore(FtGraph, backend);
+      const backend = createPostgresBackend(requireDefined(db));
+      const store = createAdapterStore(FtGraph, backend);
 
       await expect(
-        db!.transaction(async (sqlTx) => {
+        requireDefined(db).transaction(async (sqlTx) => {
           await sqlTx.insert(connectors).values({ name: "premature" });
           const txStore = store.withTransaction(sqlTx);
           await txStore.nodes.Doc.create({
@@ -211,26 +215,46 @@ describe.runIf(process.env.POSTGRES_URL)(
       ).rejects.toBeInstanceOf(StoreNotInitializedError);
 
       // The caller's relational write rolled back with the refusal.
-      expect(await db!.select().from(connectors)).toEqual([]);
+      expect(await requireDefined(db).select().from(connectors)).toEqual([]);
       // Restore the shared fulltext table for downstream suites.
-      await pool!.query(generatePostgresMigrationSQL());
+      await requireDefined(pool).query(generatePostgresMigrationSQL());
     });
 
     it("exposes adoptTransaction with transactions capability", () => {
-      const backend = createPostgresBackend(db!);
+      const backend = createPostgresBackend(requireDefined(db));
       expect(backend.capabilities.transactions).toBe(true);
       expect(backend.adoptTransaction).toBeTypeOf("function");
+    });
+
+    it("rejects a root database passed as an adopted transaction", () => {
+      const backend = createPostgresBackend(requireDefined(db));
+
+      expect(() =>
+        backend.adoptTransaction(
+          requireDefined(db) as unknown as AnyPgTransaction,
+        ),
+      ).toThrow(ConfigurationError);
+      expect(() =>
+        backend.adoptTransaction(
+          requireDefined(db) as unknown as AnyPgTransaction,
+        ),
+      ).toThrow(/not a Postgres Drizzle transaction/);
     });
 
     it("rejects withTransaction when the backend cannot adopt a transaction", () => {
       // A backend whose driver reports no transaction support must not
       // silently degrade — the relational write would still commit.
-      const backend = createPostgresBackend(db!, {
+      const backend = createPostgresBackend(requireDefined(db), {
         capabilities: { transactions: false },
       });
-      const store = createStore(PlainGraph, backend);
-      expect(() => store.withTransaction(db!)).toThrow(ConfigurationError);
-      expect(() => store.withTransaction(db!)).toThrow(
+      const store = createAdapterStore(PlainGraph, backend);
+      const rootDatabaseAsTransaction = requireDefined(
+        db,
+      ) as unknown as AnyPgTransaction;
+      expect(() => store.withTransaction(rootDatabaseAsTransaction)).toThrow(
+        ConfigurationError,
+      );
+      expect(() => store.withTransaction(rootDatabaseAsTransaction)).toThrow(
         /Cross-store atomicity is unavailable/,
       );
     });
@@ -240,22 +264,22 @@ describe.runIf(process.env.POSTGRES_URL)(
     // would write on a different connection and escape the tx, so
     // `tx.sql` is a correctness requirement here.
     it("commits a graph node and a tx.sql relational row in one store.transaction", async () => {
-      const backend = createPostgresBackend(db!);
-      const store = createStore(PlainGraph, backend);
+      const backend = createPostgresBackend(requireDefined(db));
+      const store = createAdapterStore(PlainGraph, backend);
 
       const source = await store.transaction(async (tx) => {
-        const sqlTx = tx.sql as NodePgDatabase;
+        const sqlTx = requireDefined(tx.sql);
         const inserted = await sqlTx
           .insert(connectors)
           .values({ name: "github" })
           .returning({ id: connectors.id });
         return tx.nodes.ArtifactSource.create({
-          connectorId: inserted[0]!.id,
+          connectorId: requireDefined(inserted[0]).id,
           label: "primary",
         });
       });
 
-      expect(await db!.select().from(connectors)).toEqual([
+      expect(await requireDefined(db).select().from(connectors)).toEqual([
         { id: 1, name: "github" },
       ]);
       const fetched = await store.nodes.ArtifactSource.getById(source.id);
@@ -263,12 +287,12 @@ describe.runIf(process.env.POSTGRES_URL)(
     });
 
     it("rolls back BOTH the graph node and the tx.sql relational row when the callback throws", async () => {
-      const backend = createPostgresBackend(db!);
-      const store = createStore(PlainGraph, backend);
+      const backend = createPostgresBackend(requireDefined(db));
+      const store = createAdapterStore(PlainGraph, backend);
 
       await expect(
         store.transaction(async (tx) => {
-          const sqlTx = tx.sql as NodePgDatabase;
+          const sqlTx = requireDefined(tx.sql);
           await sqlTx.insert(connectors).values({ name: "orphan" });
           await tx.nodes.ArtifactSource.create({
             connectorId: 999,
@@ -278,7 +302,7 @@ describe.runIf(process.env.POSTGRES_URL)(
         }),
       ).rejects.toThrow("phase2-pg-rollback");
 
-      expect(await db!.select().from(connectors)).toEqual([]);
+      expect(await requireDefined(db).select().from(connectors)).toEqual([]);
       expect(await store.nodes.ArtifactSource.find()).toEqual([]);
     });
   },

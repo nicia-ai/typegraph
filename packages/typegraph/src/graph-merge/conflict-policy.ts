@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * The centralized property-conflict resolution rule (design §6.4 rule 4 / §7.3,
  * T8). Shared by canonical node-property union (T8 / `canonicalize.ts`) and edge
@@ -12,7 +13,6 @@
  *   ONCE before any resolution runs. Two merges of the same branch set in any
  *   order therefore resolve every conflict identically.
  */
-
 import { canonicalValueKey } from "./canonical-props";
 import { compareStrings } from "./node-key";
 import type {
@@ -115,7 +115,7 @@ function pickByPriority(
   values: readonly ConflictingValue[],
   branchRank: ReadonlyMap<BranchId, number>,
 ): JsonValue {
-  let chosen = values[0]!;
+  let chosen = requireDefined(values[0]);
   let chosenRank = branchRank.get(chosen.branchId) ?? Number.MAX_SAFE_INTEGER;
   for (const candidate of values.slice(1)) {
     const candidateRank =
@@ -144,7 +144,7 @@ function pickByWeight(
   weights: ProvenanceWeights,
   branchRank: ReadonlyMap<BranchId, number>,
 ): JsonValue {
-  let chosen = values[0]!;
+  let chosen = requireDefined(values[0]);
   let chosenWeight = weights.get(chosen.branchId) ?? 0;
   let chosenRank = branchRank.get(chosen.branchId) ?? Number.MAX_SAFE_INTEGER;
   for (const candidate of values.slice(1)) {
@@ -182,7 +182,7 @@ function allValuesEqual(values: readonly ConflictingValue[]): boolean {
   if (values.length <= 1) {
     return true;
   }
-  const first = canonicalValueKey(values[0]!.value);
+  const first = canonicalValueKey(requireDefined(values[0]).value);
   return values.every(
     (candidate) => canonicalValueKey(candidate.value) === first,
   );

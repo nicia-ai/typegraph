@@ -8,6 +8,7 @@ import {
   DEFAULT_PAGINATION_LIMIT,
   DEFAULT_STREAM_BATCH_SIZE,
 } from "../../constants";
+import { requireDefined } from "../../utils/presence";
 import {
   type FieldRef,
   type NodePredicate,
@@ -99,13 +100,13 @@ export function buildCursorPredicate(
 
     // All preceding columns must be equal
     for (let index_ = 0; index_ < index; index_++) {
-      const spec = orderBy[index_]!;
+      const spec = requireDefined(orderBy[index_]);
       const value = values[index_];
       andConditions.push(buildEqualityPredicate(spec.field, value));
     }
 
     // Current column uses comparison
-    const currentSpec = orderBy[index]!;
+    const currentSpec = requireDefined(orderBy[index]);
     const currentValue = values[index];
     const isAsc = currentSpec.direction === "asc";
     const isForward = direction === "forward";
@@ -119,7 +120,7 @@ export function buildCursorPredicate(
 
     // Combine with AND
     if (andConditions.length === 1) {
-      orConditions.push(andConditions[0]!);
+      orConditions.push(requireDefined(andConditions[0]));
     } else {
       orConditions.push({ __type: "and", predicates: andConditions });
     }
@@ -128,7 +129,7 @@ export function buildCursorPredicate(
   // Combine with OR
   const expression: PredicateExpression =
     orConditions.length === 1 ?
-      orConditions[0]!
+      requireDefined(orConditions[0])
     : { __type: "or", predicates: orConditions };
 
   return {
@@ -213,8 +214,8 @@ export function buildPaginatedResult<
   let previousCursor: string | undefined;
 
   if (orderedRows.length > 0) {
-    const firstRow = orderedRows[0]!;
-    const lastRow = orderedRows.at(-1)!;
+    const firstRow = requireDefined(orderedRows[0]);
+    const lastRow = requireDefined(orderedRows.at(-1));
 
     // Build cursors using mapped result context
     const firstContext = buildContext(firstRow);

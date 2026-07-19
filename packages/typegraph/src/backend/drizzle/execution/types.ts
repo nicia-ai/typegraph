@@ -1,4 +1,15 @@
-import { type SQL } from "drizzle-orm";
+import { type SQL as DrizzleSql, sql as drizzleSql } from "drizzle-orm";
+
+import { bindSqlValue } from "../../../query/dialect/profile";
+import { type SqlDialect } from "../../../query/dialect/types";
+import {
+  isSqlFragment,
+  renderSql,
+  type SqlFragment,
+  throwUnsupportedSqlChunk,
+} from "../../../query/sql-fragment";
+
+export type ExecutableSql = DrizzleSql | SqlFragment;
 
 export type CompiledSqlQuery = Readonly<{
   params: readonly unknown[];
@@ -10,8 +21,8 @@ export type PreparedSqlStatement = Readonly<{
 }>;
 
 export type SqlExecutionAdapter = Readonly<{
-  compile: (query: SQL) => CompiledSqlQuery;
-  execute: <TRow>(query: SQL) => Promise<readonly TRow[]>;
+  compile: (query: ExecutableSql) => CompiledSqlQuery;
+  execute: <TRow>(query: ExecutableSql) => Promise<readonly TRow[]>;
   executeCompiled?: <TRow>(
     compiledQuery: CompiledSqlQuery,
   ) => Promise<readonly TRow[]>;
@@ -37,22 +48,69 @@ export type SqlExecutionAdapter = Readonly<{
 }>;
 
 type SqlCompiler = Readonly<{
-  sqlToQuery: (query: SQL) => CompiledSqlQuery;
+  sqlToQuery: (query: DrizzleSql) => CompiledSqlQuery;
 }>;
 
 type DatabaseWithCompiler = Readonly<{
   dialect?: SqlCompiler;
 }>;
 
+type BackendName = "PostgreSQL" | "SQLite";
+
+const DIALECT_BY_BACKEND_NAME = {
+  PostgreSQL: "postgres",
+  SQLite: "sqlite",
+} as const satisfies Record<BackendName, SqlDialect>;
+
 export function compileQueryWithDialect(
   db: unknown,
-  query: SQL,
-  backendName: string,
+  query: ExecutableSql,
+  backendName: BackendName,
 ): CompiledSqlQuery {
+  if (isSqlFragment(query)) {
+    return renderSql(query, DIALECT_BY_BACKEND_NAME[backendName]);
+  }
   const databaseWithCompiler = db as DatabaseWithCompiler;
   const compiler = databaseWithCompiler.dialect;
   if (compiler === undefined) {
     throw new Error(`${backendName} backend is missing a SQL compiler`);
   }
   return compiler.sqlToQuery(query);
+}
+
+/**
+ * Translates TypeGraph's fragment IR into Drizzle's adapter-native SQL object.
+ *
+ * Most execution paths render directly to text and parameters. Async SQLite
+ * drivers expose only Drizzle's execution method, so that adapter needs this
+ * lossless bridge at its final boundary.
+ */
+export function toDrizzleSql(
+  fragment: SqlFragment,
+  dialect: SqlDialect,
+): DrizzleSql {
+  const chunks = fragment.chunks.map((chunk) => {
+    switch (chunk.kind) {
+      case "text": {
+        return drizzleSql.raw(chunk.value);
+      }
+      case "identifier": {
+        // Drizzle's schema builders treat Name chunks as bare index-column
+        // references and omit dialect quoting. Preserve the portable IR's
+        // identifier semantics by handing the adapter an already-quoted,
+        // trusted SQL token instead.
+        return drizzleSql.raw(`"${chunk.value.replaceAll('"', '""')}"`);
+      }
+      case "parameter": {
+        return drizzleSql.param(bindSqlValue(chunk.value, dialect));
+      }
+      case "placeholder": {
+        return drizzleSql.placeholder(chunk.value.name);
+      }
+      default: {
+        return throwUnsupportedSqlChunk(chunk);
+      }
+    }
+  });
+  return drizzleSql.join(chunks);
 }

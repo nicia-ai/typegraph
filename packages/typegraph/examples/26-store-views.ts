@@ -105,7 +105,7 @@ function printRefusal(label: string, error: unknown): void {
   if (!(error instanceof ConfigurationError)) throw error;
   console.log(`  ${label}`);
   console.log(`    name:         ${error.name}`);
-  console.log(`    details.code: ${String(error.details.code)}`);
+  console.log(`    details.code: ${String(error.details["code"])}`);
   console.log(`    message:      ${error.message.split(". ")[0]}.`);
 }
 

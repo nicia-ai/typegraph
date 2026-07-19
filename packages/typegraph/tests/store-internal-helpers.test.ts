@@ -1,8 +1,8 @@
-import { type SQL, sql } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { gateFulltext } from "../src/backend/drizzle/contribution-materializations";
 import {
+  closeAfterFailure,
   createBackendOverlay,
   type EdgeRow,
   type GraphBackend,
@@ -19,9 +19,12 @@ import {
   createRecordedReadBinding,
   createSqlSchema,
 } from "../src/query/compiler/schema";
+import { sql, type SqlFragment } from "../src/query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
+  type CompiledRowsSql,
+  type CompiledStatementSql,
 } from "../src/query/sql-intent";
 import { getEdgeRowsByIds } from "../src/store/edge-fetch";
 import {
@@ -37,6 +40,7 @@ import { createRecordedBackend } from "../src/store/recorded-capture";
 import { recordedBindParamBudget } from "../src/store/recorded-capture/relations";
 import { createRecordedReadService } from "../src/store/recorded-read-service";
 import { getRowsByIds } from "../src/store/row-fetch";
+import { requireDefined } from "../src/utils/presence";
 
 type TestRow = Readonly<{ id: string; value: number }>;
 type TestParams = Readonly<{ id: string; value: number }>;
@@ -76,121 +80,128 @@ function edgeRow(id: string): EdgeRow {
   };
 }
 
-class PrototypeInsertBackend {
+class ClosureInsertBackend {
   readonly calls: string[] = [];
 
-  insertNode(params: InsertNodeParams): Promise<NodeRow> {
+  readonly insertNode = (params: InsertNodeParams): Promise<NodeRow> => {
     this.calls.push(`insertNode:${params.id}`);
     return Promise.resolve(nodeRow(params.id));
-  }
+  };
 
-  insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
+  readonly insertNodeNoReturn = (params: InsertNodeParams): Promise<void> => {
     this.calls.push(`insertNodeNoReturn:${params.id}`);
     return Promise.resolve();
-  }
+  };
 
-  insertNodesBatch(params: readonly InsertNodeParams[]): Promise<void> {
+  readonly insertNodesBatch = (
+    params: readonly InsertNodeParams[],
+  ): Promise<void> => {
     this.calls.push(
       `insertNodesBatch:${params.map((parameter) => parameter.id).join(",")}`,
     );
     return Promise.resolve();
-  }
+  };
 
-  insertNodesBatchReturning(
+  readonly insertNodesBatchReturning = (
     params: readonly InsertNodeParams[],
-  ): Promise<readonly NodeRow[]> {
+  ): Promise<readonly NodeRow[]> => {
     this.calls.push(
       `insertNodesBatchReturning:${params.map((parameter) => parameter.id).join(",")}`,
     );
     return Promise.resolve(params.map((parameter) => nodeRow(parameter.id)));
-  }
+  };
 
-  insertEdge(params: InsertEdgeParams): Promise<EdgeRow> {
+  readonly insertEdge = (params: InsertEdgeParams): Promise<EdgeRow> => {
     this.calls.push(`insertEdge:${params.id}`);
     return Promise.resolve(edgeRow(params.id));
-  }
+  };
 
-  insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
+  readonly insertEdgeNoReturn = (params: InsertEdgeParams): Promise<void> => {
     this.calls.push(`insertEdgeNoReturn:${params.id}`);
     return Promise.resolve();
-  }
+  };
 
-  insertEdgesBatch(params: readonly InsertEdgeParams[]): Promise<void> {
+  readonly insertEdgesBatch = (
+    params: readonly InsertEdgeParams[],
+  ): Promise<void> => {
     this.calls.push(
       `insertEdgesBatch:${params.map((parameter) => parameter.id).join(",")}`,
     );
     return Promise.resolve();
-  }
+  };
 
-  insertEdgesBatchReturning(
+  readonly insertEdgesBatchReturning = (
     params: readonly InsertEdgeParams[],
-  ): Promise<readonly EdgeRow[]> {
+  ): Promise<readonly EdgeRow[]> => {
     this.calls.push(
       `insertEdgesBatchReturning:${params.map((parameter) => parameter.id).join(",")}`,
     );
     return Promise.resolve(params.map((parameter) => edgeRow(parameter.id)));
-  }
+  };
 }
 
-class PrototypeReadBackend {
+class ClosureReadBackend {
   readonly nodes = new Map([["node-a", nodeRow("node-a")]]);
   readonly edges = new Map([["edge-a", edgeRow("edge-a")]]);
 
-  getNode(
+  readonly getNode = (
     _graphId: string,
     _kind: string,
     id: string,
-  ): Promise<NodeRow | undefined> {
+  ): Promise<NodeRow | undefined> => {
     return Promise.resolve(this.nodes.get(id));
-  }
+  };
 
-  getNodes(
+  readonly getNodes = (
     _graphId: string,
     _kind: string,
     ids: readonly string[],
-  ): Promise<readonly NodeRow[]> {
+  ): Promise<readonly NodeRow[]> => {
     return Promise.resolve(
       ids
         .map((id) => this.nodes.get(id))
         .filter((row): row is NodeRow => row !== undefined),
     );
-  }
+  };
 
-  getEdge(_graphId: string, id: string): Promise<EdgeRow | undefined> {
+  readonly getEdge = (
+    _graphId: string,
+    id: string,
+  ): Promise<EdgeRow | undefined> => {
     return Promise.resolve(this.edges.get(id));
-  }
+  };
 
-  getEdges(
+  readonly getEdges = (
     _graphId: string,
     ids: readonly string[],
-  ): Promise<readonly EdgeRow[]> {
+  ): Promise<readonly EdgeRow[]> => {
     return Promise.resolve(
       ids
         .map((id) => this.edges.get(id))
         .filter((row): row is EdgeRow => row !== undefined),
     );
-  }
+  };
 }
 
-class PrototypeRawBackend {
+class ClosureRawBackend {
   readonly dialect = "sqlite";
   readonly calls: string[] = [];
 
-  execute<T>(_query: unknown): Promise<readonly T[]> {
+  readonly execute = <T>(_query: unknown): Promise<readonly T[]> => {
     this.calls.push("execute");
     return Promise.resolve([]);
-  }
+  };
 
-  executeRaw<T>(
+  readonly executeRaw = <T>(
     sqlText: string,
     _params: readonly unknown[],
-  ): Promise<readonly T[]> {
+  ): Promise<readonly T[]> => {
     this.calls.push(`executeRaw:${sqlText}`);
     return Promise.resolve([{ value: this.calls.length } as T]);
-  }
+  };
 }
 
-class PrototypeGraphBackend {
+class ClosureGraphBackend {
   readonly #marker = "prototype";
   readonly calls: string[] = [];
   readonly dialect = "sqlite";
@@ -207,40 +218,40 @@ class PrototypeGraphBackend {
     return createSqlSchema().tables;
   }
 
-  execute<T>(_query: SQL): Promise<readonly T[]> {
+  readonly execute = <T>(_query: CompiledRowsSql): Promise<readonly T[]> => {
     this.calls.push(`execute:${this.#marker}`);
     return Promise.resolve([]);
-  }
+  };
 
-  executeRaw<T>(
+  readonly executeRaw = <T>(
     sqlText: string,
     _params: readonly unknown[],
-  ): Promise<readonly T[]> {
+  ): Promise<readonly T[]> => {
     this.calls.push(`executeRaw:${this.#marker}:${sqlText}`);
     return Promise.resolve([]);
-  }
+  };
 
-  executeStatement(_query: SQL): Promise<void> {
+  readonly executeStatement = (_query: CompiledStatementSql): Promise<void> => {
     this.calls.push(`executeStatement:${this.#marker}`);
     return Promise.resolve();
-  }
+  };
 
-  hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
+  readonly hardDeleteNode = (params: HardDeleteNodeParams): Promise<void> => {
     this.calls.push(`hardDeleteNode:${this.#marker}:${params.id}`);
     return Promise.resolve();
-  }
+  };
 
-  compileSql(
-    _query: SQL,
-  ): Readonly<{ sql: string; params: readonly unknown[] }> {
+  readonly compileSql = (
+    _query: SqlFragment,
+  ): Readonly<{ sql: string; params: readonly unknown[] }> => {
     this.calls.push(`compileSql:${this.#marker}`);
     return { sql: "SELECT 1", params: [] };
-  }
+  };
 
-  close(): Promise<void> {
+  readonly close = (): Promise<void> => {
     this.calls.push(`close:${this.#marker}`);
     return Promise.resolve();
-  }
+  };
 }
 
 function nodeParams(id: string): InsertNodeParams {
@@ -346,8 +357,8 @@ describe("insert dispatch", () => {
     ]);
   });
 
-  it("preserves this-binding for prototype backend insert helpers", async () => {
-    const backend = new PrototypeInsertBackend();
+  it("supports detached receiver-free insert helpers", async () => {
+    const backend = new ClosureInsertBackend();
     const graphBackend = backend as unknown as GraphBackend;
 
     await runInsertNoReturn(nodeInsertDispatch(graphBackend), nodeParams("n1"));
@@ -379,8 +390,8 @@ describe("insert dispatch", () => {
 });
 
 describe("row fetch dispatch", () => {
-  it("preserves this-binding for prototype backend batch readers", async () => {
-    const backend = new PrototypeReadBackend() as unknown as GraphBackend;
+  it("supports detached receiver-free batch readers", async () => {
+    const backend = new ClosureReadBackend() as unknown as GraphBackend;
 
     const nodes = await getNodeRowsByIds(backend, "graph", "Person", [
       "node-a",
@@ -393,8 +404,8 @@ describe("row fetch dispatch", () => {
 });
 
 describe("recorded read dispatch", () => {
-  it("preserves this-binding for prototype backend executeRaw", async () => {
-    const backend = new PrototypeRawBackend();
+  it("supports detached receiver-free executeRaw", async () => {
+    const backend = new ClosureRawBackend();
     const service = createRecordedReadService({
       graphId: "graph",
       backend: backend as unknown as GraphBackend,
@@ -410,10 +421,9 @@ describe("recorded read dispatch", () => {
       "test-recorded-read",
     );
 
-    const rows = await recordedBackend.executeRaw!<{ value: number }>(
-      "SELECT 1",
-      [],
-    );
+    const rows = await requireDefined(recordedBackend.executeRaw)<{
+      value: number;
+    }>("SELECT 1", []);
 
     expect(rows).toEqual([{ value: 1 }]);
     expect(backend.calls).toEqual(["executeRaw:SELECT 1"]);
@@ -421,17 +431,17 @@ describe("recorded read dispatch", () => {
 });
 
 describe("backend overlay wrappers", () => {
-  it("delegates prototype methods with private state through generic overlays", async () => {
-    const backend = new PrototypeGraphBackend();
+  it("delegates receiver-free methods through generic overlays", async () => {
+    const backend = new ClosureGraphBackend();
     const overlay = createBackendOverlay(backend as unknown as GraphBackend, {
-      executeStatement(_query: SQL): Promise<void> {
+      executeStatement(_query: CompiledStatementSql): Promise<void> {
         backend.calls.push("overlay:executeStatement");
         return Promise.resolve();
       },
     });
 
     await overlay.execute(asCompiledRowsSql(sql`SELECT 1`));
-    await overlay.executeStatement!(
+    await requireDefined(overlay.executeStatement)(
       asCompiledStatementSql(sql`UPDATE ignored SET value = 1`),
     );
     await overlay.close();
@@ -443,8 +453,8 @@ describe("backend overlay wrappers", () => {
     ]);
   });
 
-  it("preserves prototype backend methods on managed-close wrappers", async () => {
-    const backend = new PrototypeGraphBackend();
+  it("preserves receiver-free backend methods on managed-close wrappers", async () => {
+    const backend = new ClosureGraphBackend();
     const teardownCalls: string[] = [];
     const managed = wrapWithManagedClose(
       backend as unknown as GraphBackend,
@@ -461,8 +471,95 @@ describe("backend overlay wrappers", () => {
     expect(backend.calls).toEqual(["execute:prototype", "close:prototype"]);
   });
 
+  it("runs teardown after backend close fails and retries only the failed phase", async () => {
+    const backend = new ClosureGraphBackend();
+    let backendCloseAttempts = 0;
+    let teardownAttempts = 0;
+    const closeError = new Error("backend close failed");
+    const failingCloseBackend = createBackendOverlay(
+      backend as unknown as GraphBackend,
+      {
+        close(): Promise<void> {
+          backendCloseAttempts += 1;
+          return Promise.reject(closeError);
+        },
+      },
+    );
+    const managed = wrapWithManagedClose(failingCloseBackend, () => {
+      teardownAttempts += 1;
+    });
+
+    await expect(managed.close()).rejects.toBe(closeError);
+    await expect(managed.close()).rejects.toBe(closeError);
+
+    expect(backendCloseAttempts).toBe(2);
+    expect(teardownAttempts).toBe(1);
+  });
+
+  it("retries teardown without closing an already-closed backend again", async () => {
+    const backend = new ClosureGraphBackend();
+    let teardownAttempts = 0;
+    const teardownError = new Error("teardown failed");
+    const managed = wrapWithManagedClose(
+      backend as unknown as GraphBackend,
+      () => {
+        teardownAttempts += 1;
+        if (teardownAttempts === 1) throw teardownError;
+      },
+    );
+
+    await expect(managed.close()).rejects.toBe(teardownError);
+    await managed.close();
+
+    expect(teardownAttempts).toBe(2);
+    expect(backend.calls).toEqual(["close:prototype"]);
+  });
+
+  it("coalesces concurrent managed close calls", async () => {
+    const backend = new ClosureGraphBackend();
+    let releaseTeardown: (() => void) | undefined;
+    let reportTeardownStarted: (() => void) | undefined;
+    const teardownReleased = new Promise<void>((resolve) => {
+      releaseTeardown = resolve;
+    });
+    const teardownStarted = new Promise<void>((resolve) => {
+      reportTeardownStarted = resolve;
+    });
+    const teardown = vi.fn(async () => {
+      reportTeardownStarted?.();
+      await teardownReleased;
+    });
+    const managed = wrapWithManagedClose(
+      backend as unknown as GraphBackend,
+      teardown,
+    );
+
+    const firstClose = managed.close();
+    const secondClose = managed.close();
+    await teardownStarted;
+
+    expect(backend.calls).toEqual(["close:prototype"]);
+    expect(teardown).toHaveBeenCalledOnce();
+
+    releaseTeardown?.();
+    await Promise.all([firstClose, secondClose]);
+  });
+
+  it("preserves a provisioning error when best-effort cleanup also fails", async () => {
+    const provisioningError = new ConfigurationError("migration failed");
+    const resource = {
+      close(): Promise<void> {
+        return Promise.reject(new Error("cleanup failed"));
+      },
+    };
+
+    await expect(closeAfterFailure(resource, provisioningError)).rejects.toBe(
+      provisioningError,
+    );
+  });
+
   it("preserves prototype backend methods on recorded capture wrappers", async () => {
-    const backend = new PrototypeGraphBackend();
+    const backend = new ClosureGraphBackend();
     const recorded = createRecordedBackend(
       backend as unknown as GraphBackend,
       createSqlSchema(),
@@ -471,16 +568,15 @@ describe("backend overlay wrappers", () => {
     await recorded.execute(asCompiledRowsSql(sql`SELECT 1`));
     await recorded.close();
     await expect(
-      recorded.executeStatement!(
+      requireDefined(recorded.executeStatement)(
         asCompiledStatementSql(sql`UPDATE ignored SET value = 1`),
       ),
     ).rejects.toThrow("backend.executeStatement is not available");
-
     expect(backend.calls).toEqual(["execute:prototype", "close:prototype"]);
   });
 
   it("preserves prototype backend methods on recorded read wrappers", async () => {
-    const backend = new PrototypeGraphBackend();
+    const backend = new ClosureGraphBackend();
     const service = createRecordedReadService({
       graphId: "graph",
       backend: backend as unknown as GraphBackend,
@@ -497,7 +593,7 @@ describe("backend overlay wrappers", () => {
     );
 
     await recordedBackend.execute(asCompiledRowsSql(sql`SELECT 1`));
-    recordedBackend.compileSql!(sql`SELECT 1`);
+    requireDefined(recordedBackend.compileSql)(sql`SELECT 1`);
     await recordedBackend.close();
 
     expect(backend.calls).toEqual([
@@ -508,7 +604,7 @@ describe("backend overlay wrappers", () => {
   });
 
   it("preserves prototype backend methods on fulltext transaction gates", async () => {
-    const backend = new PrototypeGraphBackend();
+    const backend = new ClosureGraphBackend();
     const assertedGraphIds: string[] = [];
     const gated = gateFulltext(
       backend as unknown as TransactionBackend,

@@ -31,6 +31,7 @@ import {
   migrateSchema,
   rollbackSchema,
 } from "../src/schema";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -381,15 +382,17 @@ describe("Schema Changes Detection", () => {
     const diff = await getSchemaChanges(backend, graphV2);
 
     expect(diff).toBeDefined();
-    expect(diff!.hasChanges).toBe(true);
-    expect(diff!.hasBreakingChanges).toBe(false);
-    expect(diff!.nodes).toHaveLength(1);
-    expect(diff!.nodes[0]).toMatchObject({
+    expect(requireDefined(diff).hasChanges).toBe(true);
+    expect(requireDefined(diff).hasBreakingChanges).toBe(false);
+    expect(requireDefined(diff).nodes).toHaveLength(1);
+    expect(requireDefined(diff).nodes[0]).toMatchObject({
       type: "modified",
       kind: "Person",
       severity: "safe",
     });
-    expect(diff!.nodes[0]!.details).toContain("Annotations");
+    expect(requireDefined(requireDefined(diff).nodes[0]).details).toContain(
+      "Annotations",
+    );
   });
 
   it("getSchemaChanges surfaces annotations-only edge changes as safe", async () => {
@@ -427,15 +430,17 @@ describe("Schema Changes Detection", () => {
     const diff = await getSchemaChanges(backend, graphV2);
 
     expect(diff).toBeDefined();
-    expect(diff!.hasChanges).toBe(true);
-    expect(diff!.hasBreakingChanges).toBe(false);
-    expect(diff!.edges).toHaveLength(1);
-    expect(diff!.edges[0]).toMatchObject({
+    expect(requireDefined(diff).hasChanges).toBe(true);
+    expect(requireDefined(diff).hasBreakingChanges).toBe(false);
+    expect(requireDefined(diff).edges).toHaveLength(1);
+    expect(requireDefined(diff).edges[0]).toMatchObject({
       type: "modified",
       kind: "reportedBy",
       severity: "safe",
     });
-    expect(diff!.edges[0]!.details).toContain("Annotations");
+    expect(requireDefined(requireDefined(diff).edges[0]).details).toContain(
+      "Annotations",
+    );
   });
 });
 
@@ -571,11 +576,13 @@ describe("Migration Hooks", () => {
     });
 
     expect(capturedContext).toBeDefined();
-    expect(capturedContext!.graphId).toBe("migration_test");
-    expect(capturedContext!.fromVersion).toBe(1);
-    expect(capturedContext!.toVersion).toBe(2);
-    expect(capturedContext!.diff.hasChanges).toBe(true);
-    expect(capturedContext!.diff.isBackwardsCompatible).toBe(true);
+    expect(requireDefined(capturedContext).graphId).toBe("migration_test");
+    expect(requireDefined(capturedContext).fromVersion).toBe(1);
+    expect(requireDefined(capturedContext).toVersion).toBe(2);
+    expect(requireDefined(capturedContext).diff.hasChanges).toBe(true);
+    expect(requireDefined(capturedContext).diff.isBackwardsCompatible).toBe(
+      true,
+    );
   });
 
   it("does not call hooks for initialized status", async () => {
@@ -735,12 +742,14 @@ describe("Property change classification", () => {
     });
 
     const diff = await getSchemaChanges(backend, graphV2);
-    expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.nodes[0]).toMatchObject({
+    expect(requireDefined(diff).hasBreakingChanges).toBe(true);
+    expect(requireDefined(diff).nodes[0]).toMatchObject({
       kind: "Person",
       severity: "breaking",
     });
-    expect(diff!.nodes[0]!.details).toContain("age");
+    expect(requireDefined(requireDefined(diff).nodes[0]).details).toContain(
+      "age",
+    );
 
     await expect(createStoreWithSchema(graphV2, backend)).rejects.toThrow(
       MigrationError,
@@ -777,8 +786,8 @@ describe("Property change classification", () => {
     });
 
     const diff = await getSchemaChanges(backend, graphV2);
-    expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.nodes[0]).toMatchObject({
+    expect(requireDefined(diff).hasBreakingChanges).toBe(true);
+    expect(requireDefined(diff).nodes[0]).toMatchObject({
       kind: "Person",
       severity: "breaking",
     });
@@ -817,8 +826,8 @@ describe("Property change classification", () => {
     });
 
     const diff = await getSchemaChanges(backend, graphV2);
-    expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.nodes[0]).toMatchObject({
+    expect(requireDefined(diff).hasBreakingChanges).toBe(true);
+    expect(requireDefined(diff).nodes[0]).toMatchObject({
       kind: "Person",
       severity: "breaking",
     });
@@ -855,8 +864,8 @@ describe("Property change classification", () => {
     });
 
     const diff = await getSchemaChanges(backend, graphV2);
-    expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.nodes[0]).toMatchObject({
+    expect(requireDefined(diff).hasBreakingChanges).toBe(true);
+    expect(requireDefined(diff).nodes[0]).toMatchObject({
       kind: "Person",
       severity: "breaking",
     });
@@ -894,8 +903,8 @@ describe("Property change classification", () => {
     });
 
     const diff = await getSchemaChanges(backend, graphV2);
-    expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.nodes[0]).toMatchObject({
+    expect(requireDefined(diff).hasBreakingChanges).toBe(true);
+    expect(requireDefined(diff).nodes[0]).toMatchObject({
       kind: "Person",
       severity: "breaking",
     });
@@ -939,7 +948,7 @@ describe("Property change classification", () => {
     });
 
     const diff = await getSchemaChanges(backend, graphV2);
-    expect(diff!.hasBreakingChanges).toBe(false);
+    expect(requireDefined(diff).hasBreakingChanges).toBe(false);
     const [, result] = await createStoreWithSchema(graphV2, backend);
     expect(result.status).toBe("migrated");
   });
@@ -979,8 +988,8 @@ describe("Property change classification", () => {
     });
 
     const diff = await getSchemaChanges(backend, graphV2);
-    expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.edges[0]).toMatchObject({
+    expect(requireDefined(diff).hasBreakingChanges).toBe(true);
+    expect(requireDefined(diff).edges[0]).toMatchObject({
       kind: "worksAt",
       severity: "breaking",
     });
@@ -1020,8 +1029,8 @@ describe("Property change classification", () => {
     });
 
     const diff = await getSchemaChanges(backend, graphV2);
-    expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.edges[0]).toMatchObject({
+    expect(requireDefined(diff).hasBreakingChanges).toBe(true);
+    expect(requireDefined(diff).edges[0]).toMatchObject({
       kind: "worksAt",
       severity: "breaking",
     });

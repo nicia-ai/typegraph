@@ -68,9 +68,9 @@ export function vectorSlotFromCreateIndexParams(
 ): VectorSlot {
   return {
     ...vectorSlotFromParams(params),
-    ...(params.indexParams === undefined
-      ? {}
-      : { indexParams: params.indexParams }),
+    ...(params.indexParams === undefined ?
+      {}
+    : { indexParams: params.indexParams }),
   };
 }
 

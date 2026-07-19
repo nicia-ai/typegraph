@@ -9,6 +9,7 @@ import { DEFAULT_PAGINATION_LIMIT } from "../../constants";
 import { type GraphDef } from "../../core/define-graph";
 import { UnsupportedPredicateError, ValidationError } from "../../errors";
 import { compareStrings } from "../../utils/compare";
+import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
   mergeEdgeKinds,
@@ -358,14 +359,14 @@ export class ExecutableQuery<
   }
 
   /**
-   * Compiles the query to a Drizzle SQL object.
+   * Compiles the query to TypeGraph's database-independent SQL fragment.
    *
-   * Returns a Drizzle SQL object that can be executed directly
-   * with db.all(), db.get(), etc.
+   * Pass the result to a GraphBackend, or use toSQL() to render SQL text and
+   * parameters for the configured dialect.
    */
   compile(): CompiledSelectSql {
     // Emits a directly-runnable statement with the read instant as a literal
-    // (a caller may hand the result straight to db.all()), so this is not the
+    // (a backend may execute the result directly), so this is not the
     // reusable placeholder template execute() caches — see #templateFor.
     const ast = this.toAst();
     return compileQuery(ast, this.#config.graphId, this.#compileOptions());
@@ -521,9 +522,7 @@ export class ExecutableQuery<
     const rawRows = await this.#executeOnBackend(
       backend,
       template !== undefined && executeRaw !== undefined ?
-        // Method call (not the detached `executeRaw` local) so a this-using
-        // backend implementation keeps its receiver.
-        backend.executeRaw!<Record<string, unknown>>(
+        executeRaw<Record<string, unknown>>(
           template.sql,
           fillTemplateParams(template.params, {}, this.#dialect()),
         )
@@ -925,12 +924,12 @@ export class ExecutableQuery<
     if (orderedRows.length > 0) {
       try {
         previousCursor = this.#buildCursorFromSelectiveRow(
-          orderedRows[0]!,
+          requireDefined(orderedRows[0]),
           selectiveFields,
           "b",
         );
         nextCursor = this.#buildCursorFromSelectiveRow(
-          orderedRows.at(-1)!,
+          requireDefined(orderedRows.at(-1)),
           selectiveFields,
           "f",
         );
@@ -969,7 +968,7 @@ export class ExecutableQuery<
         field.path[0] !== "props" &&
         field.jsonPointer === undefined
       ) {
-        tracker.record(field.alias, field.path[0]!, true);
+        tracker.record(field.alias, requireDefined(field.path[0]), true);
         continue;
       }
 
@@ -987,7 +986,7 @@ export class ExecutableQuery<
         return false;
       }
 
-      tracker.record(field.alias, segments[0]!, false);
+      tracker.record(field.alias, requireDefined(segments[0]), false);
     }
 
     return true;
@@ -1035,7 +1034,7 @@ export class ExecutableQuery<
         if (spec.field.path.length !== 1) {
           throw new MissingSelectiveFieldError(alias, "orderBy");
         }
-        const fieldName = spec.field.path[0]!;
+        const fieldName = requireDefined(spec.field.path[0]);
         const outputName = outputNameByAliasField.get(
           `${alias}\u0000${fieldName}`,
         );
@@ -1053,7 +1052,7 @@ export class ExecutableQuery<
         throw new MissingSelectiveFieldError(alias, "orderBy");
       }
 
-      const topField = segments[0]!;
+      const topField = requireDefined(segments[0]);
       const outputName = outputNameByAliasField.get(
         `${alias}\u0000${topField}`,
       );
@@ -1092,7 +1091,7 @@ export class ExecutableQuery<
 
       let current = aliasObject;
       for (let index = 0; index < segments.length - 1; index++) {
-        const segment = segments[index]!;
+        const segment = requireDefined(segments[index]);
         const existing_ = current[segment];
         if (typeof existing_ === "object" && existing_ !== null) {
           current = existing_ as Record<string, unknown>;
@@ -1102,7 +1101,7 @@ export class ExecutableQuery<
           current = created;
         }
       }
-      current[segments.at(-1)!] = decoded;
+      current[requireDefined(segments.at(-1))] = decoded;
     }
 
     return cursorContext;

@@ -8,7 +8,13 @@ import {
   StaleVersionError,
   UniquenessError,
 } from "../../errors";
+import type { SqlDialect } from "../../query/dialect/types";
+import type {
+  CompiledStatementSql,
+  CompiledTemporaryStatementSql,
+} from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
+import { nowIso as defaultNowIso } from "../row-mappers";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
@@ -38,12 +44,12 @@ import type {
   UpdateEdgeParams,
   UpdateNodeParams,
 } from "../types";
+import { type ExecutableSql } from "./execution/types";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
-import { nowIso as defaultNowIso } from "./row-mappers";
 
 /**
  * The internal operation backend — what `createCommonOperationBackend`
@@ -112,6 +118,11 @@ export type CommonOperationBackend = Pick<
 export type InternalOperationBackend = TransactionBackend &
   CommonOperationBackend;
 
+const DRIZZLE_DIALECT_LABELS = {
+  postgres: "Postgres",
+  sqlite: "SQLite",
+} as const satisfies Record<SqlDialect, string>;
+
 /**
  * Assert an externally-supplied transaction handle is the expected
  * Drizzle dialect, narrowing it for `adoptTransaction`. A wrong-dialect
@@ -121,10 +132,10 @@ export type InternalOperationBackend = TransactionBackend &
 export function assertAdoptedDialect<T>(
   externalTx: unknown,
   brand: Parameters<typeof is>[1],
-  backend: "postgres" | "sqlite",
+  backend: SqlDialect,
 ): asserts externalTx is T {
   if (is(externalTx, brand)) return;
-  const label = backend === "postgres" ? "Postgres" : "SQLite";
+  const label = DRIZZLE_DIALECT_LABELS[backend];
   throw new ConfigurationError(
     `adoptTransaction received a handle that is not a ${label} Drizzle ` +
       `transaction. Pass the \`tx\` from a ${label} ` +
@@ -134,9 +145,9 @@ export function assertAdoptedDialect<T>(
 }
 
 type OperationBackendExecution = Readonly<{
-  execAll: <TRow>(query: SQL) => Promise<readonly TRow[]>;
-  execGet: <TRow>(query: SQL) => Promise<TRow | undefined>;
-  execRun: (query: SQL) => Promise<void>;
+  execAll: <TRow>(query: ExecutableSql) => Promise<readonly TRow[]>;
+  execGet: <TRow>(query: ExecutableSql) => Promise<TRow | undefined>;
+  execRun: (query: ExecutableSql) => Promise<void>;
 }>;
 
 type OperationBackendBatchConfig = Readonly<{
@@ -229,11 +240,13 @@ export function createCommonOperationBackend(
   }
 
   return {
-    async executeStatement(query: SQL): Promise<void> {
+    async executeStatement(query: CompiledStatementSql): Promise<void> {
       await execution.execRun(query);
     },
 
-    async executeTemporaryStatement(query: SQL): Promise<void> {
+    async executeTemporaryStatement(
+      query: CompiledTemporaryStatementSql,
+    ): Promise<void> {
       await execution.execRun(query);
     },
 

@@ -26,6 +26,8 @@ const PACKAGE_NAME = "@nicia-ai/typegraph";
 // entry here.
 const PUBLIC_SUBPATHS = [
   { subpath: "", expectedExport: "createStore" },
+  { subpath: "/backend", expectedExport: "sql" },
+  { subpath: "/core", expectedExport: "defineGraph" },
   { subpath: "/interchange", expectedExport: "importGraph" },
   { subpath: "/profiler", expectedExport: "QueryProfiler" },
   { subpath: "/schema", expectedExport: "deserializeSchema" },
@@ -33,11 +35,32 @@ const PUBLIC_SUBPATHS = [
   { subpath: "/graph-extension", expectedExport: "defineGraphExtension" },
   { subpath: "/graph-merge", expectedExport: "branch" },
   { subpath: "/provenance", expectedExport: "createRetractionCapability" },
-  { subpath: "/sqlite", expectedExport: "createSqliteBackend" },
-  { subpath: "/postgres", expectedExport: "createPostgresBackend" },
-  { subpath: "/sqlite/local", expectedExport: "createLocalSqliteBackend" },
-  { subpath: "/sqlite/libsql", expectedExport: "createLibsqlBackend" },
-  { subpath: "/postgres/pglite", expectedExport: "createLocalPgliteBackend" },
+  { subpath: "/sqlite/local", expectedExport: "createLocalSqliteStore" },
+  { subpath: "/postgres/pglite", expectedExport: "createLocalPgliteStore" },
+  {
+    subpath: "/adapters/drizzle/sqlite",
+    expectedExport: "createSqliteBackend",
+  },
+  {
+    subpath: "/adapters/drizzle/sqlite/local",
+    expectedExport: "createLocalSqliteBackend",
+  },
+  {
+    subpath: "/adapters/drizzle/sqlite/libsql",
+    expectedExport: "createLibsqlBackend",
+  },
+  {
+    subpath: "/adapters/drizzle/postgres",
+    expectedExport: "createPostgresBackend",
+  },
+  {
+    subpath: "/adapters/drizzle/postgres/pglite",
+    expectedExport: "createLocalPgliteBackend",
+  },
+  {
+    subpath: "/adapters/drizzle/indexes",
+    expectedExport: "buildSqliteNodeIndexBuilders",
+  },
 ];
 
 function findPackageManifest(startPath, packageName) {
@@ -62,6 +85,8 @@ function toSubpath(exportsKey) {
 }
 
 const failures = [];
+let esmRoot;
+let cjsRoot;
 
 // Guard against the export surface growing past this test: every subpath the
 // installed package declares must be covered by PUBLIC_SUBPATHS.
@@ -87,6 +112,7 @@ for (const { subpath, expectedExport } of PUBLIC_SUBPATHS) {
 
   try {
     const esmModule = await import(specifier);
+    if (subpath === "") esmRoot = esmModule;
     if (typeof esmModule[expectedExport] === "undefined")
       failures.push(`ESM ${specifier}: missing export "${expectedExport}"`);
   } catch (error) {
@@ -95,10 +121,47 @@ for (const { subpath, expectedExport } of PUBLIC_SUBPATHS) {
 
   try {
     const cjsModule = require(specifier);
+    if (subpath === "") cjsRoot = cjsModule;
     if (typeof cjsModule[expectedExport] === "undefined")
       failures.push(`CJS ${specifier}: missing export "${expectedExport}"`);
   } catch (error) {
     failures.push(`CJS ${specifier}: ${error.message}`);
+  }
+}
+
+if (esmRoot !== undefined && cjsRoot !== undefined) {
+  try {
+    const cjsFragment = cjsRoot.sql`SELECT ${1}`;
+    const cjsPlaceholder = new cjsRoot.Placeholder("value");
+    const renderedByEsm = esmRoot.renderPostgres(
+      esmRoot.sql`${cjsFragment}, ${cjsPlaceholder}`,
+    );
+    if (
+      renderedByEsm.sql !== "SELECT $1, $2" ||
+      renderedByEsm.params[0] !== 1 ||
+      renderedByEsm.params[1] !== cjsPlaceholder
+    ) {
+      failures.push(
+        "CJS fragments/placeholders are not interoperable with ESM",
+      );
+    }
+
+    const esmFragment = esmRoot.sql`SELECT ${2}`;
+    const esmPlaceholder = new esmRoot.Placeholder("value");
+    const renderedByCjs = cjsRoot.renderPostgres(
+      cjsRoot.sql`${esmFragment}, ${esmPlaceholder}`,
+    );
+    if (
+      renderedByCjs.sql !== "SELECT $1, $2" ||
+      renderedByCjs.params[0] !== 2 ||
+      renderedByCjs.params[1] !== esmPlaceholder
+    ) {
+      failures.push(
+        "ESM fragments/placeholders are not interoperable with CJS",
+      );
+    }
+  } catch (error) {
+    failures.push(`ESM/CJS SQL fragment interoperability: ${error.message}`);
   }
 }
 

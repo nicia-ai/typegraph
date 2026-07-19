@@ -3,8 +3,6 @@
  *
  * Handles node CRUD operations: create, update, delete.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import {
   createBackendOverlay,
   type GraphBackend,
@@ -52,11 +50,13 @@ import {
 import { getDialect } from "../../query/dialect";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { type JsonPointer, resolveJsonPointer } from "../../query/json-pointer";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { requireDefined } from "../../utils/presence";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
   checkDisjointnessConstraint,
@@ -1879,7 +1879,7 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
   );
   const probeIndexExpr = sql`CASE ${sql.join(caseBranches, sql` `)} ELSE NULL END`;
 
-  const conditions: SQL[] = [
+  const conditions: SqlFragment[] = [
     sql`"graph_id" = ${ctx.graphId}`,
     sql`"kind" = ${kind}`,
     sql`"deleted_at" IS NULL`,
@@ -2082,7 +2082,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     );
     for (const [batchIndex, entry] of toCreate.entries()) {
       results[entry.index] = {
-        node: createdNodes[batchIndex]!,
+        node: requireDefined(createdNodes[batchIndex]),
         action: "created",
       };
     }
@@ -2132,7 +2132,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
   // Step 6: Resolve within-batch duplicates by copying the first occurrence's result
   for (const { index, sourceIndex } of duplicateOf) {
-    const sourceResult = results[sourceIndex]!;
+    const sourceResult = requireDefined(results[sourceIndex]);
     results[index] = { node: sourceResult.node, action: "found" };
   }
 

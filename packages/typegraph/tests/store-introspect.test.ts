@@ -15,6 +15,7 @@ import { z } from "zod";
 import { defineGraph, defineNode, KindNotFoundError } from "../src";
 import { defineGraphExtension } from "../src/graph-extension";
 import { createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -38,7 +39,7 @@ describe("Store.introspect", () => {
     expect(result.schemaVersion).toBe(active?.version);
     expect(result.schemaHash).toBe(active?.schema_hash);
     expect(result.kinds).toHaveLength(1);
-    const person = result.kinds[0]!;
+    const person = requireDefined(result.kinds[0]);
     expect(person.name).toBe("Person");
     expect(person.origin).toBe("compile-time");
     expect(person.deprecated).toBe(false);
@@ -62,7 +63,7 @@ describe("Store.introspect", () => {
     const tag = result.kinds.find((kind) => kind.name === "Tag");
     expect(tag).toBeDefined();
     expect(tag?.origin).toBe("runtime");
-    expect(result.extension?.nodes?.Tag).toBeDefined();
+    expect(result.extension?.nodes?.["Tag"]).toBeDefined();
   });
 
   it("reflects deprecation state", async () => {
@@ -128,7 +129,7 @@ describe("Store.introspect", () => {
         },
       }),
     );
-    const persistedDocument = original.introspect().extension!;
+    const persistedDocument = requireDefined(original.introspect().extension);
 
     // Build a fresh graph + backend, then evolve with the introspected
     // document. The result should expose `Tag` again.

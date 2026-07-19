@@ -5,9 +5,8 @@
  * Handles comparisons, string operations, null checks, array/object predicates,
  * and subqueries.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import { UnsupportedPredicateError } from "../../errors";
+import { requireDefined } from "../../utils/presence";
 import {
   type ArrayPredicate,
   type ExistsSubquery,
@@ -34,6 +33,7 @@ import {
   jsonPointer,
 } from "../json-pointer";
 import { isParameterRef } from "../predicates";
+import { sql, type SqlFragment } from "../sql-fragment";
 import {
   getSingleSubqueryColumnValueType,
   getSubqueryColumnCount,
@@ -70,7 +70,7 @@ export function compileFieldColumn(
   field: FieldRef,
   cteAlias?: string,
   cteColumnPrefix?: string,
-): SQL {
+): SqlFragment {
   // When cteColumnPrefix is defined (including empty string), use raw column names
   // This is for CTE WHERE clauses which operate on raw table columns
   if (cteColumnPrefix !== undefined) {
@@ -150,7 +150,7 @@ export function compileFieldValue(
   cteAlias?: string,
   pointerOverride?: JsonPointer,
   cteColumnPrefix?: string,
-): SQL {
+): SqlFragment {
   const resolved = normalizeValueType(valueType);
   const column = compileFieldColumn(field, cteAlias, cteColumnPrefix);
 
@@ -197,7 +197,7 @@ function compileFieldTextValue(
   cteAlias?: string,
   pointerOverride?: JsonPointer,
   cteColumnPrefix?: string,
-): SQL {
+): SqlFragment {
   const column = compileFieldColumn(field, cteAlias, cteColumnPrefix);
   if (!isJsonField(field)) {
     return column;
@@ -220,7 +220,7 @@ function compileFieldJsonValue(
   cteAlias?: string,
   pointerOverride?: JsonPointer,
   cteColumnPrefix?: string,
-): SQL {
+): SqlFragment {
   const column = compileFieldColumn(field, cteAlias, cteColumnPrefix);
   if (!isJsonField(field)) {
     return column;
@@ -363,7 +363,7 @@ function compileStringPattern(op: string, pattern: string): string {
  * `compileStringPattern`'s escaping for the literal-pattern path, both driven
  * by the same {@link LIKE_ESCAPE_CHARACTER} so they can't drift apart.
  */
-function escapeLikePatternParameter(parameter: SQL): SQL {
+function escapeLikePatternParameter(parameter: SqlFragment): SqlFragment {
   const doubledEscape = `${LIKE_ESCAPE_CHARACTER}${LIKE_ESCAPE_CHARACTER}`;
   return sql`REPLACE(REPLACE(REPLACE(${parameter}, ${LIKE_ESCAPE_CHARACTER}, ${doubledEscape}), '%', ${`${LIKE_ESCAPE_CHARACTER}%`}), '_', ${`${LIKE_ESCAPE_CHARACTER}_`})`;
 }
@@ -371,7 +371,10 @@ function escapeLikePatternParameter(parameter: SQL): SQL {
 /**
  * Builds a SQL pattern expression for parameterized string operations.
  */
-function compileParameterizedStringPattern(op: string, parameter: SQL): SQL {
+function compileParameterizedStringPattern(
+  op: string,
+  parameter: SqlFragment,
+): SqlFragment {
   switch (op) {
     case "contains": {
       const escaped = escapeLikePatternParameter(parameter);
@@ -411,7 +414,7 @@ function compileParameterizedStringPattern(op: string, parameter: SQL): SQL {
 export type PredicateCompilerContext = Readonly<{
   dialect: DialectAdapter;
   schema: SqlSchema;
-  compileQuery: (ast: QueryAst, graphId: string) => SQL;
+  compileQuery: (ast: QueryAst, graphId: string) => SqlFragment;
   cteColumnPrefix?: string;
   /**
    * Active vector strategy for `field.similarTo(...)` compilation. When
@@ -456,7 +459,7 @@ export type PredicateCompilerContext = Readonly<{
 export function compilePredicateExpression(
   expr: PredicateExpression,
   ctx: PredicateCompilerContext,
-): SQL {
+): SqlFragment {
   const { dialect } = ctx;
 
   const cteColumnPrefix = ctx.cteColumnPrefix;
@@ -622,7 +625,7 @@ function compileComparisonPredicate(
   },
   dialect: DialectAdapter,
   cteColumnPrefix?: string,
-): SQL {
+): SqlFragment {
   // Handle ParameterRef on the right side
   if (isParameterRef(expr.right)) {
     const parameterValueType =
@@ -677,7 +680,8 @@ function compileComparisonPredicate(
   // For single-value comparisons, extract the literal value
   const right = expr.right;
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Type narrowing with Array.isArray
-  const rightValue: LiteralValue = Array.isArray(right) ? right[0]! : right;
+  const rightValue: LiteralValue =
+    Array.isArray(right) ? requireDefined(right[0]) : right;
 
   const convertedRight = convertValueForSql(rightValue.value, dialect);
   const opSql = COMPARISON_OP_SQL[expr.op];
@@ -696,7 +700,7 @@ function compileArrayPredicate(
   expr: ArrayPredicate,
   dialect: DialectAdapter,
   cteColumnPrefix?: string,
-): SQL {
+): SqlFragment {
   const field = compileFieldJsonValue(
     expr.field,
     dialect,
@@ -752,7 +756,7 @@ function compileObjectPredicate(
   expr: ObjectPredicate,
   dialect: DialectAdapter,
   cteColumnPrefix?: string,
-): SQL {
+): SqlFragment {
   const basePointer = getFieldPointer(expr.field);
   const pointer = joinJsonPointers(basePointer, expr.pointer);
   const column = compileFieldColumn(expr.field, undefined, cteColumnPrefix);
@@ -835,7 +839,7 @@ function compileAggregatePredicate(
     value: LiteralValue;
   },
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   const aggregate = compileAggregateExpr(expr.aggregate, dialect);
 
   const op = COMPARISON_OP_SQL[expr.op];
@@ -855,7 +859,7 @@ function compileAggregatePredicate(
 function compileAggregateExpr(
   expr: AggregateExprInput,
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   const cteAlias = `cte_${expr.field.alias}`;
   const field = compileFieldValue(
     expr.field,
@@ -897,7 +901,7 @@ function compileAggregateExpr(
 function compileExistsSubquery(
   expr: ExistsSubquery,
   ctx: PredicateCompilerContext,
-): SQL {
+): SqlFragment {
   if (expr.subquery.graphId === undefined) {
     throw new UnsupportedPredicateError("EXISTS subquery must have a graphId");
   }
@@ -911,7 +915,7 @@ function compileExistsSubquery(
 function compileInSubquery(
   expr: InSubquery,
   ctx: PredicateCompilerContext,
-): SQL {
+): SqlFragment {
   const subqueryColumnCount = getSubqueryColumnCount(expr.subquery);
   if (subqueryColumnCount !== 1) {
     throw new UnsupportedPredicateError(

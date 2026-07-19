@@ -4,7 +4,6 @@
  * Tests for the query fragment composition API that enables reusable
  * query transformations via the pipe() method.
  */
-import { type SQL } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -15,49 +14,16 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type EmptyEdgeAliasMap,
   limitFragment,
+  type NodeAlias,
   offsetFragment,
   orderByFragment,
+  type QueryFragment,
 } from "../src";
 import { compileQuery } from "../src/query/compiler";
 import { buildKindRegistry } from "../src/registry";
-
-/**
- * Helper to extract SQL string and params from a Drizzle SQL object.
- */
-function sqlToStrings(
-  sqlObject: SQL,
-  dialect: "sqlite" | "postgres" = "sqlite",
-): { sql: string; params: unknown[] } {
-  const params: unknown[] = [];
-  let parameterIndex = 1;
-
-  function flatten(object: unknown): string {
-    if (
-      typeof object === "object" &&
-      object !== null &&
-      "value" in object &&
-      Array.isArray(object.value)
-    ) {
-      return (object as { value: string[] }).value.join("");
-    }
-    if (
-      typeof object === "object" &&
-      object !== null &&
-      "queryChunks" in object &&
-      Array.isArray((object as { queryChunks: unknown[] }).queryChunks)
-    ) {
-      return (object as { queryChunks: unknown[] }).queryChunks
-        .map((c) => flatten(c))
-        .join("");
-    }
-    params.push(object);
-    return dialect === "postgres" ? `$${parameterIndex++}` : "?";
-  }
-
-  const sqlString = flatten(sqlObject);
-  return { sql: sqlString, params };
-}
+import { toSqlWithParams } from "./sql-test-utils";
 
 const User = defineNode("User", {
   schema: z.object({
@@ -97,18 +63,29 @@ const graph = defineGraph({
 
 const registry = buildKindRegistry(graph);
 
-// Test helper fragments defined at module scope (unicorn/consistent-function-scoping)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const activeOnlyFragment = (q: any) =>
-  q.whereNode("u", ({ status }: { status: { eq: (v: string) => unknown } }) =>
-    status.eq("active"),
-  );
+type UserAliases = Readonly<{ u: NodeAlias<typeof User> }>;
+type UserFragment = QueryFragment<
+  typeof graph,
+  UserAliases,
+  UserAliases,
+  EmptyEdgeAliasMap,
+  EmptyEdgeAliasMap
+>;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const recentFirstFragment = (q: any) => q.orderBy("u", "createdAt", "desc");
+const activeOnlyFragment: UserFragment = (query) =>
+  query.whereNode("u", ({ status }) => status.eq("active"));
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const limitResultsFragment = (q: any) => q.limit(10);
+const recentFirstFragment: UserFragment = (query) =>
+  query.orderBy("u", "createdAt", "desc");
+
+const limitResultsFragment: UserFragment = (query) => query.limit(10);
+
+const paginationOrderFragment: UserFragment = (query) =>
+  query.orderBy("u", "createdAt", "desc");
+
+const paginationLimitFragment: UserFragment = (query) => query.limit(20);
+
+const paginationOffsetFragment: UserFragment = (query) => query.offset(40);
 
 describe("Fragment Composition", () => {
   describe("pipe() method on QueryBuilder", () => {
@@ -160,21 +137,17 @@ describe("Fragment Composition", () => {
     it("fragment factory produces working fragments at runtime", () => {
       const fragment = createFragment<typeof graph>();
 
-      // Define a filter fragment - use any to bypass complex type inference
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const activeOnly = fragment((q: any) =>
-        q.whereNode(
-          "u",
-          ({ status }: { status: { eq: (v: string) => unknown } }) =>
-            status.eq("active"),
-        ),
-      );
+      const activeOnly = fragment<
+        UserAliases,
+        UserAliases,
+        EmptyEdgeAliasMap,
+        EmptyEdgeAliasMap
+      >((query) => query.whereNode("u", ({ status }) => status.eq("active")));
 
       // Apply it via pipe
       const query = createQueryBuilder<typeof graph>(graph.id, registry)
         .from("User", "u")
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .pipe(activeOnly as any)
+        .pipe(activeOnly)
         .select((ctx) => ctx.u);
 
       const ast = query.toAst();
@@ -187,8 +160,7 @@ describe("Fragment Composition", () => {
       const combined = composeFragments(
         activeOnlyFragment,
         recentFirstFragment,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ) as any;
+      );
 
       const query = createQueryBuilder<typeof graph>(graph.id, registry)
         .from("User", "u")
@@ -205,8 +177,7 @@ describe("Fragment Composition", () => {
         activeOnlyFragment,
         recentFirstFragment,
         limitResultsFragment,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ) as any;
+      );
 
       const query = createQueryBuilder<typeof graph>(graph.id, registry)
         .from("User", "u")
@@ -224,8 +195,7 @@ describe("Fragment Composition", () => {
     it("limitFragment() adds a limit", () => {
       const query = createQueryBuilder<typeof graph>(graph.id, registry)
         .from("User", "u")
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .pipe(limitFragment(25) as any)
+        .pipe(limitFragment<typeof graph>(25))
         .select((ctx) => ctx.u);
 
       const ast = query.toAst();
@@ -235,8 +205,7 @@ describe("Fragment Composition", () => {
     it("offsetFragment() adds an offset", () => {
       const query = createQueryBuilder<typeof graph>(graph.id, registry)
         .from("User", "u")
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .pipe(offsetFragment(50) as any)
+        .pipe(offsetFragment<typeof graph>(50))
         .select((ctx) => ctx.u);
 
       const ast = query.toAst();
@@ -246,8 +215,7 @@ describe("Fragment Composition", () => {
     it("orderByFragment() adds ordering", () => {
       const query = createQueryBuilder<typeof graph>(graph.id, registry)
         .from("User", "u")
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .pipe(orderByFragment("u", "name", "asc") as any)
+        .pipe(orderByFragment<typeof graph, "u">("u", "name", "asc"))
         .select((ctx) => ctx.u);
 
       const ast = query.toAst();
@@ -255,13 +223,12 @@ describe("Fragment Composition", () => {
       expect(ast.orderBy?.[0]?.direction).toBe("asc");
     });
 
-    it("combines helper fragments via composeFragments", () => {
+    it("combines pagination fragments via composeFragments", () => {
       const paginated = composeFragments(
-        orderByFragment("u", "createdAt", "desc"),
-        limitFragment(20),
-        offsetFragment(40),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ) as any;
+        paginationOrderFragment,
+        paginationLimitFragment,
+        paginationOffsetFragment,
+      );
 
       const query = createQueryBuilder<typeof graph>(graph.id, registry)
         .from("User", "u")
@@ -299,7 +266,7 @@ describe("Fragment Composition", () => {
 
       const ast = query.toAst();
       const compiled = compileQuery(ast, graph.id, "sqlite");
-      const { sql, params } = sqlToStrings(compiled);
+      const { sql, params } = toSqlWithParams(compiled);
 
       // Verify the SQL contains expected clauses
       expect(sql).toContain("WHERE");

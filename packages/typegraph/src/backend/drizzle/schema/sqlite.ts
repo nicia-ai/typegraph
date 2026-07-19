@@ -8,10 +8,10 @@
  * @example
  * ```typescript
  * // Default table names
- * import { tables } from "@nicia-ai/typegraph/sqlite";
+ * import { tables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
  *
  * // Custom table names
- * import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
+ * import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
  * const tables = createSqliteTables({
  *   nodes: "myapp_nodes",
  *   edges: "myapp_edges",

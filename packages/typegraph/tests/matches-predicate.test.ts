@@ -25,7 +25,7 @@ import {
 import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
 import { type FulltextAccessor } from "../src/query/predicates";
 import { buildKindRegistry } from "../src/registry";
-import type { createStore } from "../src/store";
+import type { Store } from "../src/store";
 import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 import { createInitializedStore, createTestBackend } from "./test-utils";
 
@@ -106,7 +106,7 @@ function runtimeFulltext(u: unknown): FulltextAccessor {
 
 describe(".matches() predicate", () => {
   let backend: GraphBackend;
-  let store: ReturnType<typeof createStore<typeof DocumentGraph>>;
+  let store: Store<typeof DocumentGraph>;
 
   beforeEach(async () => {
     backend = createTestBackend();
@@ -550,7 +550,7 @@ const PolymorphicGraph = defineGraph({
 
 describe(".matches() with polymorphic alias", () => {
   let backend: GraphBackend;
-  let store: ReturnType<typeof createStore<typeof PolymorphicGraph>>;
+  let store: Store<typeof PolymorphicGraph>;
 
   beforeEach(async () => {
     backend = createTestBackend();

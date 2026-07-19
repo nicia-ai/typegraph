@@ -106,7 +106,7 @@ const DEFAULT_POSTGRES_URL =
 
 /** Postgres URL for benchmarks: the `POSTGRES_URL` env override, else the default. */
 export function getPostgresUrl(): string {
-  return process.env.POSTGRES_URL ?? DEFAULT_POSTGRES_URL;
+  return process.env["POSTGRES_URL"] ?? DEFAULT_POSTGRES_URL;
 }
 
 export type PerfBackend = "sqlite" | "postgres";

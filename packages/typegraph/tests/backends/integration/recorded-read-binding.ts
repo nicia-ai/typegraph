@@ -4,7 +4,6 @@ import {
   asRecordedInstant,
   createSqlSchema,
   createStore,
-  createStoreWithSchema,
   type NodeId,
   type RecordedInstant,
   recordedRelation,
@@ -13,18 +12,14 @@ import {
   resolveReadCoordinate,
   withRecordedCoordinate,
 } from "../../../src/core/temporal";
-import { type IntegrationStore, integrationTestGraph } from "./fixtures";
+import { STORE_RUNTIME } from "../../../src/store/runtime-port";
+import { type HistoryIntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
 async function createHistoryStore(
   context: IntegrationTestContext,
-): Promise<IntegrationStore> {
-  const [store] = await createStoreWithSchema(
-    integrationTestGraph,
-    context.getStore().backend,
-    { history: true },
-  );
-  return store;
+): Promise<HistoryIntegrationStore> {
+  return context.createHistoryStore(integrationTestGraph);
 }
 
 function requireRecordedInstant(
@@ -197,7 +192,7 @@ export function registerRecordedReadBindingIntegrationTests(
       await expect(
         context
           .getStore()
-          .recordedNodeGetById(
+          [STORE_RUNTIME].recordedNodeGetById(
             "Person",
             "missing" as NodeId<PersonType>,
             coordinate,

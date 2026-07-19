@@ -46,6 +46,7 @@ import {
   MAX_EXPLICIT_RECURSIVE_DEPTH,
 } from "../src/query/compiler";
 import { buildKindRegistry } from "../src/registry";
+import { requireDefined } from "../src/utils/presence";
 import { toSqlWithParams } from "./sql-test-utils";
 
 const Person = defineNode("Person", {
@@ -151,7 +152,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("comparison");
     expect((predicate as { op: string }).op).toBe("gt");
   });
@@ -164,7 +165,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("between");
   });
 
@@ -189,7 +190,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("comparison");
     expect((predicate as { op: string }).op).toBe("eq");
   });
@@ -203,7 +204,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("array_op");
     expect((predicate as { op: string }).op).toBe("isEmpty");
   });
@@ -217,7 +218,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("array_op");
     expect((predicate as { op: string }).op).toBe("contains");
   });
@@ -231,7 +232,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("array_op");
     expect((predicate as { op: string }).op).toBe("lengthGte");
   });
@@ -245,7 +246,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("object_op");
     expect((predicate as { op: string }).op).toBe("hasKey");
   });
@@ -259,7 +260,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("object_op");
     expect((predicate as { op: string }).op).toBe("pathEquals");
   });
@@ -272,7 +273,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("comparison");
     expect((predicate as { op: string }).op).toBe("eq");
   });
@@ -285,7 +286,7 @@ describe("Query Builder Basics", () => {
 
     const ast = query.toAst();
     expect(ast.predicates).toHaveLength(1);
-    const predicate = ast.predicates[0]!.expression;
+    const predicate = requireDefined(ast.predicates[0]).expression;
     expect(predicate.__type).toBe("comparison");
     expect((predicate as { op: string }).op).toBe("gt");
   });
@@ -369,7 +370,7 @@ describe("Query Builder - Traversals", () => {
     const ast = query.toAst();
 
     expect(ast.traversals).toHaveLength(1);
-    const traversal = ast.traversals[0]!;
+    const traversal = requireDefined(ast.traversals[0]);
     expect(traversal.edgeKinds).toEqual(["worksAt"]);
     expect(traversal.direction).toBe("out");
     expect(traversal.nodeAlias).toBe("o");
@@ -384,7 +385,7 @@ describe("Query Builder - Traversals", () => {
 
     const ast = query.toAst();
 
-    expect(ast.traversals[0]!.direction).toBe("in");
+    expect(requireDefined(ast.traversals[0]).direction).toBe("in");
   });
 });
 
@@ -568,7 +569,9 @@ describe("Query Compilation to SQL", () => {
       .select((context) => ({ p: context.p, peer: context.peer }));
 
     const ast = query.toAst();
-    expect(ast.traversals[0]!.inverseEdgeKinds).toEqual(["sameAs"]);
+    expect(requireDefined(ast.traversals[0]).inverseEdgeKinds).toEqual([
+      "sameAs",
+    ]);
 
     const sqlObject = compileQuery(ast, bidirectionalGraph.id);
     const { sql } = toSqlWithParams(sqlObject);
@@ -742,7 +745,9 @@ describe("Query Compilation to SQL", () => {
 
     const boundedNames = [
       ...new Set(
-        [...sql.matchAll(/"(__tg_[^"]+)"/g)].map((match) => match[1]!),
+        [...sql.matchAll(/"(__tg_[^"]+)"/g)].map((match) =>
+          requireDefined(match[1]),
+        ),
       ),
     ];
 
@@ -2089,13 +2094,13 @@ describe("QueryBuilder Variable-Length Paths", () => {
 
     const ast = q.toAst();
     expect(ast.traversals).toHaveLength(1);
-    const vl = ast.traversals[0]!.variableLength;
+    const vl = requireDefined(ast.traversals[0]).variableLength;
     expect(vl).toBeDefined();
-    expect(vl!.minDepth).toBe(1);
-    expect(vl!.maxDepth).toBe(-1); // unlimited
-    expect(vl!.cyclePolicy).toBe("prevent");
-    expect(vl!.pathAlias).toBeUndefined();
-    expect(vl!.depthAlias).toBeUndefined();
+    expect(requireDefined(vl).minDepth).toBe(1);
+    expect(requireDefined(vl).maxDepth).toBe(-1); // unlimited
+    expect(requireDefined(vl).cyclePolicy).toBe("prevent");
+    expect(requireDefined(vl).pathAlias).toBeUndefined();
+    expect(requireDefined(vl).depthAlias).toBeUndefined();
   });
 
   it("builds AST with recursive({...}) options", () => {
@@ -2115,7 +2120,9 @@ describe("QueryBuilder Variable-Length Paths", () => {
         org: context.o.name,
       }));
 
-    const vl = q.toAst().traversals[0]!.variableLength!;
+    const vl = requireDefined(
+      requireDefined(q.toAst().traversals[0]).variableLength,
+    );
     expect(vl.minDepth).toBe(2);
     expect(vl.maxDepth).toBe(6);
     expect(vl.cyclePolicy).toBe("allow");
@@ -2134,7 +2141,9 @@ describe("QueryBuilder Variable-Length Paths", () => {
         org: context.o.name,
       }));
 
-    const vl = q.toAst().traversals[0]!.variableLength!;
+    const vl = requireDefined(
+      requireDefined(q.toAst().traversals[0]).variableLength,
+    );
     expect(vl.minDepth).toBe(1);
     expect(vl.maxDepth).toBe(-1);
     expect(vl.cyclePolicy).toBe("prevent");
@@ -2154,7 +2163,10 @@ describe("QueryBuilder Variable-Length Paths", () => {
       }));
 
     const ast = q.toAst();
-    expect(ast.traversals[0]!.variableLength!.pathAlias).toBe("my_path");
+    expect(
+      requireDefined(requireDefined(ast.traversals[0]).variableLength)
+        .pathAlias,
+    ).toBe("my_path");
   });
 
   it("builds AST with recursive({ depth }) option", () => {
@@ -2169,7 +2181,10 @@ describe("QueryBuilder Variable-Length Paths", () => {
       }));
 
     const ast = q.toAst();
-    expect(ast.traversals[0]!.variableLength!.depthAlias).toBe("level");
+    expect(
+      requireDefined(requireDefined(ast.traversals[0]).variableLength)
+        .depthAlias,
+    ).toBe("level");
   });
 
   it("can combine all options in one call", () => {
@@ -2184,7 +2199,7 @@ describe("QueryBuilder Variable-Length Paths", () => {
       }));
 
     const ast = q.toAst();
-    const vl = ast.traversals[0]!.variableLength!;
+    const vl = requireDefined(requireDefined(ast.traversals[0]).variableLength);
     expect(vl).toBeDefined();
     expect(vl.minDepth).toBe(1);
     expect(vl.maxDepth).toBe(10);

@@ -149,7 +149,7 @@ export class ExecutableAggregateQuery<
   }
 
   /**
-   * Compiles the query to a Drizzle SQL object.
+   * Compiles the query to TypeGraph's database-independent SQL fragment.
    */
   compile(): CompiledSelectSql {
     // Emits a directly-runnable statement with the read instant as a literal;
@@ -208,9 +208,7 @@ export class ExecutableAggregateQuery<
       executeRaw === undefined ? undefined : this.#resolveTemplate(ast);
     const rows =
       template !== undefined && executeRaw !== undefined ?
-        // Method call (not the detached `executeRaw` local) so a this-using
-        // backend implementation keeps its receiver.
-        await backend.executeRaw!<Record<string, unknown>>(
+        await executeRaw<Record<string, unknown>>(
           template.sql,
           fillTemplateParams(
             template.params,

@@ -110,7 +110,8 @@ export type {
   TableContribution,
 } from "./backend/table-contribution";
 export type {
-  AdoptedTransaction,
+  AdapterBackend,
+  AdapterBackendTransactions,
   BackendCapabilities,
   BackendIdentity,
   BackendLifecycle,
@@ -147,6 +148,8 @@ export type {
   SchemaVersionRow,
   SetActiveVersionParams,
   TransactionBackend,
+  TransactionOptions,
+  TransactionReadBackend,
   TrustedImportSession,
   UniqueConstraintBackend,
   UpsertFulltextBatchParams,
@@ -341,14 +344,15 @@ export {
   type RecordedRelationOptions,
 } from "./query/compiler/schema";
 export type {
+  AdapterHistoryStore,
+  AdapterHistoryTransactionContext,
+  AdapterRecordedReadStore,
+  AdapterStore,
   EdgeIntrospection,
   FulltextSearchHit,
   FulltextSearchOptions,
-  HistorySafeBackend,
-  HistorySafeTransactionBackend,
   HistoryStore,
-  HistoryTransactionContext,
-  HistoryWithTransactionUnavailable,
+  HistoryStoreBackend,
   HybridFulltextOptions,
   HybridFusionOptions,
   HybridSearchHit,
@@ -362,7 +366,7 @@ export type {
   MaterializeRemovalsOptions,
   MaterializeRemovalsResult,
   MaterializeSystemIndexesOptions,
-  MeasurableHistoryTransactionContext,
+  MeasurableAdapterHistoryTransactionContext,
   OntologyIntrospection,
   RebuildFulltextOptions,
   RebuildFulltextResult,
@@ -412,8 +416,11 @@ export type {
   TypedStoreViewEdgeCollection,
 } from "./store";
 export {
+  createAdapterStore,
+  createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
+  createVerifiedAdapterStore,
   createVerifiedStore,
   RecordedStoreView,
   StoreSearch,
@@ -456,6 +463,8 @@ export type {
 } from "./store/subgraph";
 export { defineSubgraphProject } from "./store/subgraph";
 export type {
+  AdapterTransactionContext,
+  BaseStoreOptions,
   ConstraintNames,
   CreateEdgeInput,
   CreateNodeInput,
@@ -473,6 +482,7 @@ export type {
   HookContext,
   IfExistsMode,
   LiveStoreOptions,
+  MeasurableAdapterTransactionContext,
   MeasurableTransactionContext,
   Node,
   NodeBulkFindByIndexOptions,
@@ -484,6 +494,7 @@ export type {
   OperationHookContext,
   QueryHookContext,
   QueryOptions,
+  RecordedReadStoreOptions,
   ScopedMeasure,
   SqlAvailability,
   StoreHooks,
@@ -494,6 +505,7 @@ export type {
   TransactionOutcome,
   TransactionReceipt,
   TypedEdgeCollection,
+  UnboundLiveStoreOptions,
   UpdateEdgeInput,
   UpdateNodeInput,
 } from "./store/types";
@@ -559,9 +571,6 @@ export type { ParameterRef } from "./query/ast";
 
 // Functions and classes
 export {
-  asCompiledRowsSql,
-  asCompiledSelectSql,
-  asCompiledStatementSql,
   // Aggregate functions
   avg,
   // Fragment composition
@@ -617,6 +626,23 @@ export type {
   FlexibleQueryFragment,
   QueryFragment,
   TraversalFragment,
+} from "./query";
+export {
+  isSqlFragment,
+  Placeholder,
+  type RenderedSql,
+  renderPostgres,
+  renderSql,
+  renderSqlInline,
+  renderSqlite,
+  sql,
+  type SqlChunk,
+  type SqlFragment,
+  type SqlIdentifierChunk,
+  type SqlParameterChunk,
+  type SqlPlaceholderChunk,
+  type SqlTag,
+  type SqlTextChunk,
 } from "./query";
 
 // ============================================================

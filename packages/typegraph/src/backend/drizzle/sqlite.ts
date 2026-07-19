@@ -12,7 +12,7 @@
  * ```typescript
  * import { drizzle } from "drizzle-orm/better-sqlite3";
  * import Database from "better-sqlite3";
- * import { createSqliteBackend, tables } from "@nicia-ai/typegraph/sqlite";
+ * import { createSqliteBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
  *
  * const sqlite = new Database("app.db");
  * const db = drizzle(sqlite);
@@ -32,7 +32,6 @@ import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { BackendDisposedError, ConfigurationError } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
-import { quoteIdentifier } from "../../query/compiler/utils";
 import {
   buildFulltextCapabilities,
   fts5Strategy,
@@ -44,10 +43,17 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
+import {
+  isSqlFragment,
+  sql as portableSql,
+  type SqlFragment,
+} from "../../query/sql-fragment";
+import { type CompiledRowsSql } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
 import { isMissingTableError } from "../../utils/sql-errors";
+import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
-  type AdoptedTransaction,
+  type AdapterBackend,
   type BackendCapabilities,
   type CommitSchemaVersionParams,
   type ContributionMaterializationIdentity,
@@ -65,6 +71,7 @@ import {
   type HybridSearchRow,
   type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
+  type InternalTransactionOptions,
   type KindRemovalRow,
   normalizeGraphAnalyticsCapabilities,
   type RecordContributionMaterializationParams,
@@ -75,7 +82,6 @@ import {
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
   type TransactionBackend,
-  type TransactionOptions,
   type TrustedImportSession,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
@@ -92,6 +98,7 @@ import {
   type SqliteExecutionProfile,
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
+import { type ExecutableSql, toDrizzleSql } from "./execution/types";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
@@ -100,6 +107,15 @@ import {
   vectorSlotFromParams,
 } from "./vector-runtime";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
+import {
+  coerceNumericScore,
+  createEdgeRowMapper,
+  createNodeRowMapper,
+  createSchemaVersionRowMapper,
+  createUniqueRowMapper,
+  nowIso,
+  SQLITE_ROW_MAPPER_CONFIG,
+} from "../row-mappers";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -129,17 +145,8 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import { hybridCandidatesRef, mapHybridSearchRow } from "./operations/hybrid";
+import { mapHybridSearchRow } from "./operations/hybrid";
 import { createSqliteOperationStrategy } from "./operations/strategy";
-import {
-  coerceNumericScore,
-  createEdgeRowMapper,
-  createNodeRowMapper,
-  createSchemaVersionRowMapper,
-  createUniqueRowMapper,
-  nowIso,
-  SQLITE_ROW_MAPPER_CONFIG,
-} from "./row-mappers";
 import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
 import {
   analyzeImportedTables,
@@ -481,8 +488,7 @@ function resolveSqliteGraphAnalyticsCapabilities(
   profile: SqliteExecutionProfile,
   override: GraphAnalyticsCapabilities | undefined,
 ): GraphAnalyticsCapabilities {
-  const requested =
-    override ??
+  const requested = override ??
     SQLITE_CAPABILITIES.graphAnalytics ?? {
       supported: false,
       mathFunctions: false,
@@ -571,7 +577,7 @@ function createSqliteOperationBackend(
   const compiledExecute = executionAdapter.executeCompiled;
   const compiledRun = executionAdapter.executeCompiledRun;
 
-  function execGet<T>(query: SQL): Promise<T | undefined> {
+  function execGet<T>(query: ExecutableSql): Promise<T | undefined> {
     // Fallback uses db.all()[0], not db.get(): drizzle-team/drizzle-orm#1049
     // — db.get() crashes with the libsql driver when no rows match
     // (normalizeRow receives undefined).
@@ -581,27 +587,29 @@ function createSqliteOperationBackend(
     // that are NOT Promise instances (drizzle-team/drizzle-orm#2275).
     return runWithSerializedQueue(serializedQueue, async () => {
       if (compiledExecute === undefined) {
-        const rows = await db.all(query);
-        return (rows as T[])[0];
+        const rows = await executionAdapter.execute<T>(query);
+        return rows[0];
       }
       const rows = await compiledExecute<T>(executionAdapter.compile(query));
       return rows[0];
     });
   }
 
-  function execAll<T>(query: SQL): Promise<T[]> {
+  function execAll<T>(query: ExecutableSql): Promise<T[]> {
     return runWithSerializedQueue(serializedQueue, async () => {
       if (compiledExecute === undefined) {
-        return await db.all(query);
+        return [...(await executionAdapter.execute<T>(query))];
       }
       return [...(await compiledExecute<T>(executionAdapter.compile(query)))];
     });
   }
 
-  function execRun(query: SQL): Promise<void> {
+  function execRun(query: ExecutableSql): Promise<void> {
     return runWithSerializedQueue(serializedQueue, async () => {
       if (compiledRun === undefined) {
-        await db.run(query);
+        await db.run(
+          isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
+        );
         return;
       }
       await compiledRun(executionAdapter.compile(query));
@@ -746,9 +754,11 @@ function createSqliteOperationBackend(
             // Store-compiled candidates (predicates + subclass + currency)
             // take precedence; the live-node default covers direct backend use.
             params.candidates ??
-              operationStrategy.buildLiveNodeIds(
+              buildLiveNodeCandidates(
+                tableNames.nodes,
                 params.graphId,
                 params.nodeKind,
+                nowIso(),
               ),
           );
           let rows: readonly { node_id: string; score: number }[];
@@ -789,9 +799,11 @@ function createSqliteOperationBackend(
               // Read-only, not marker-gated — see vectorSearch above.
               const candidates =
                 params.candidates ??
-                operationStrategy.buildLiveNodeIds(
+                buildLiveNodeCandidates(
+                  tableNames.nodes,
                   params.graphId,
                   params.nodeKind,
+                  nowIso(),
                 );
               const vectorParams: VectorSearchParams = {
                 graphId: params.graphId,
@@ -812,11 +824,11 @@ function createSqliteOperationBackend(
               const vectorSql = vectorStrategy.buildSearch(
                 slot,
                 vectorParams,
-                hybridCandidatesRef(),
+                portableSql.raw("SELECT node_id FROM tg_hybrid_cand"),
               );
               const statement = operationStrategy.buildHybridSearch(
                 { ...params, candidates },
-                vectorSql,
+                toDrizzleSql(vectorSql, "sqlite"),
                 params.vector.metric === "cosine",
               );
               let raw: readonly Record<string, unknown>[];
@@ -950,14 +962,14 @@ function createSqliteOperationBackend(
 
     // === Query Execution ===
 
-    async execute<T>(query: SQL): Promise<readonly T[]> {
+    async execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
       return runWithSerializedQueue(serializedQueue, async () =>
         executionAdapter.execute<T>(query),
       );
     },
 
     compileSql(
-      query: SQL,
+      query: SqlFragment,
     ): Readonly<{ sql: string; params: readonly unknown[] }> {
       return executionAdapter.compile(query);
     },
@@ -969,7 +981,7 @@ function createSqliteOperationBackend(
 export function createSqliteBackend(
   db: AnySqliteDatabase,
   options: SqliteBackendOptions = {},
-): GraphBackend {
+): AdapterBackend<AnySqliteDatabase> {
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? fts5Strategy;
   const profileHints = options.executionProfile ?? {};
@@ -1184,9 +1196,8 @@ export function createSqliteBackend(
           "transactionSync, and async transaction runners.",
       );
     }
-    return runWithSerializedQueue(
-      serializedQueue,
-      () => storage.transaction(run),
+    return runWithSerializedQueue(serializedQueue, () =>
+      storage.transaction(run),
     );
   }
 
@@ -1322,12 +1333,14 @@ export function createSqliteBackend(
     return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
   }
 
-  const backend: GraphBackend = {
+  const backend: AdapterBackend<AnySqliteDatabase> = {
     ...operations,
 
-    ...(isSync &&
-    transactionMode === "sql" &&
-    executionAdapter.executePreparedRunBatch !== undefined ?
+    ...((
+      isSync &&
+      transactionMode === "sql" &&
+      executionAdapter.executePreparedRunBatch !== undefined
+    ) ?
       {
         async trustedImport<T>(
           fn: (session: TrustedImportSession) => Promise<T>,
@@ -1582,17 +1595,30 @@ export function createSqliteBackend(
       // `sql.raw` is safe; SQLite's `PRAGMA` does not accept bound
       // parameters for its value.
       await db.run(
-        sql`PRAGMA analysis_limit = ${sql.raw(String(SQLITE_ANALYZE_ROW_LIMIT))}`,
+        toDrizzleSql(
+          portableSql`PRAGMA analysis_limit = ${portableSql.raw(String(SQLITE_ANALYZE_ROW_LIMIT))}`,
+          "sqlite",
+        ),
       );
       for (const tableName of coreAnalyzeTables) {
-        await db.run(sql`ANALYZE ${quoteIdentifier(tableName)}`);
+        await db.run(
+          toDrizzleSql(
+            portableSql`ANALYZE ${portableSql.identifier(tableName)}`,
+            "sqlite",
+          ),
+        );
       }
       // The recorded relations may be absent on a schema created before
       // recorded-time history landed (bring-your-own-connection, no DDL
       // re-run); ANALYZE on a missing table errors, so skip those.
       for (const tableName of recordedAnalyzeTables) {
         try {
-          await db.run(sql`ANALYZE ${quoteIdentifier(tableName)}`);
+          await db.run(
+            toDrizzleSql(
+              portableSql`ANALYZE ${portableSql.identifier(tableName)}`,
+              "sqlite",
+            ),
+          );
         } catch (error) {
           if (!isMissingTableError(error)) throw error;
         }
@@ -1614,8 +1640,15 @@ export function createSqliteBackend(
     },
 
     async transaction<T>(
-      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
-      options?: TransactionOptions,
+      fn: (tx: TransactionBackend) => Promise<T>,
+      options?: InternalTransactionOptions,
+    ): Promise<T> {
+      return backend.transactionWithNative((tx) => fn(tx), options);
+    },
+
+    async transactionWithNative<T>(
+      fn: (tx: TransactionBackend, sql: AnySqliteDatabase) => Promise<T>,
+      options?: InternalTransactionOptions,
     ): Promise<T> {
       const temporaryWrites =
         options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
@@ -1664,10 +1697,7 @@ export function createSqliteBackend(
           // reserve SQLite's single writer slot. Business transactions retain
           // BEGIN IMMEDIATE so read-then-write cannot lose a lock-upgrade race.
           await runFrameStatement(
-            (
-              options?.accessMode === "read_only" ||
-                temporaryWrites
-            ) ?
+            options?.accessMode === "read_only" || temporaryWrites ?
               sql`BEGIN`
             : sql`BEGIN IMMEDIATE`,
           );
@@ -1702,17 +1732,14 @@ export function createSqliteBackend(
         async () =>
           db.transaction(async (tx) => fn(bindTransactionBackend(tx), tx), {
             behavior:
-              (
-                options?.accessMode === "read_only" ||
-                temporaryWrites
-              ) ?
+              options?.accessMode === "read_only" || temporaryWrites ?
                 "deferred"
               : "immediate",
           }) as Promise<T>,
       );
     },
 
-    adoptTransaction(externalTx: AdoptedTransaction): TransactionBackend {
+    adoptTransaction(externalTx: AnySqliteDatabase): TransactionBackend {
       // #134: parity with Postgres. Cross-store atomicity needs real
       // rollback; on a "none" driver the caller's relational write
       // would commit with no way to undo the graph write. Refuse

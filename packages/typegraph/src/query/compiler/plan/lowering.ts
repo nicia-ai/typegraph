@@ -1,4 +1,5 @@
 import { CompilerInvariantError } from "../../../errors";
+import { requireDefined } from "../../../utils/presence";
 import type {
   AggregateExpr,
   ComposableQuery,
@@ -458,7 +459,7 @@ function lowerSetOperationToLogicalPlanNode(
     if (op.limit !== undefined && op.offset !== undefined) {
       currentNode = { ...limitOffsetBase, limit: op.limit, offset: op.offset };
     } else if (op.limit === undefined) {
-      currentNode = { ...limitOffsetBase, offset: op.offset! };
+      currentNode = { ...limitOffsetBase, offset: requireDefined(op.offset) };
     } else {
       currentNode = { ...limitOffsetBase, limit: op.limit };
     }

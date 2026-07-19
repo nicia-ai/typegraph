@@ -21,6 +21,7 @@ import type {
   ResolvedCluster,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 
 type AnyNodeId = NodeId<NodeType>;
 
@@ -75,8 +76,8 @@ function shuffled<T>(items: readonly T[], seed: number): T[] {
   for (let index = copy.length - 1; index > 0; index -= 1) {
     state = (state * 1_103_515_245 + 12_345) & 0x7f_ff_ff_ff;
     const swapWith = state % (index + 1);
-    const temporary = copy[index]!;
-    copy[index] = copy[swapWith]!;
+    const temporary = requireDefined(copy[index]);
+    copy[index] = requireDefined(copy[swapWith]);
     copy[swapWith] = temporary;
   }
   return copy;
@@ -93,9 +94,11 @@ describe("pickCanonical", () => {
 
   it("honors an explicit canonical override", () => {
     const last = (cluster: ResolvedCluster): AnyNodeId =>
-      [...cluster.members].sort((left, right) =>
-        lexicographic(right, left),
-      )[0]!;
+      requireDefined(
+        [...cluster.members].sort((left, right) =>
+          lexicographic(right, left),
+        )[0],
+      );
     expect(pickCanonical(bareCluster("a", "b", "c"), last)).toBe("c");
   });
 });
@@ -119,12 +122,12 @@ describe("canonicalizeCluster", () => {
 
     // Canonical is node-a (min id), whose name is "Anna Rivera".
     expect(entity.canonicalId).toBe("node-a");
-    expect(entity.props.name).toBe("Anna Rivera");
+    expect(entity.props["name"]).toBe("Anna Rivera");
     // birthDate agreed → unioned, no conflict.
-    expect(entity.props.birthDate).toBe("1990-01-01");
+    expect(entity.props["birthDate"]).toBe("1990-01-01");
 
     expect(entity.conflicts).toHaveLength(1);
-    const conflict = entity.conflicts[0]!;
+    const conflict = requireDefined(entity.conflicts[0]);
     expect(conflict.property).toBe("name");
     expect(`${conflict.entityId}`).toBe("node-a");
     expect(conflict.resolution).toBe("Anna Rivera");
@@ -144,7 +147,7 @@ describe("canonicalizeCluster", () => {
       "lastWriteWins",
       rank(order),
     );
-    expect(natural.props.name).toBe("A. Rivera");
+    expect(natural.props["name"]).toBe("A. Rivera");
 
     // Shuffling the member array must not change the resolution.
     for (let seed = 1; seed <= 5; seed += 1) {
@@ -154,7 +157,7 @@ describe("canonicalizeCluster", () => {
         "lastWriteWins",
         rank(order),
       );
-      expect(reordered.props.name).toBe("A. Rivera");
+      expect(reordered.props["name"]).toBe("A. Rivera");
       // The canonical id is still the min member id, independent of order.
       expect(reordered.canonicalId).toBe("node-a");
     }
@@ -168,7 +171,7 @@ describe("canonicalizeCluster", () => {
       rank([b2, b1, b3]),
     );
     // b2 is now highest priority → "Ana Rivera".
-    expect(entity.props.name).toBe("Ana Rivera");
+    expect(entity.props["name"]).toBe("Ana Rivera");
   });
 
   it('"provenanceWeighted" picks the highest-weight branch', () => {
@@ -184,7 +187,7 @@ describe("canonicalizeCluster", () => {
       rank([]),
       weights,
     );
-    expect(entity.props.name).toBe("Ana Rivera");
+    expect(entity.props["name"]).toBe("Ana Rivera");
   });
 
   it("delegates to a function policy with a deterministic conflict record", () => {
@@ -195,7 +198,7 @@ describe("canonicalizeCluster", () => {
       );
     };
     const entity = canonicalizeCluster(cluster, members, longest, rank([]));
-    expect(entity.props.name).toBe("Anna Rivera");
+    expect(entity.props["name"]).toBe("Anna Rivera");
   });
 
   it("records no conflict when every member agrees on a property", () => {
@@ -211,7 +214,7 @@ describe("canonicalizeCluster", () => {
       rank([]),
     );
     expect(entity.conflicts).toHaveLength(0);
-    expect(entity.props.name).toBe("Same Name");
+    expect(entity.props["name"]).toBe("Same Name");
   });
 
   it("reports the full EntityResolution (canonical, sorted members, branch origins)", () => {
@@ -231,13 +234,13 @@ describe("canonicalizeCluster", () => {
     // the first-created id. Create three, build a cluster, assert the canonical
     // is the lexicographic minimum — proving creation order does not leak in.
     const created = [generateId(), generateId(), generateId()];
-    const sortedMin = [...created].sort((left, right) =>
-      lexicographic(left, right),
-    )[0]!;
+    const sortedMin = requireDefined(
+      [...created].sort((left, right) => lexicographic(left, right))[0],
+    );
 
     const nanoidCluster = clusterOf(...created);
     const nanoidMembers = created.map((id, index) =>
-      member(id, [b1, b2, b3][index]!, { name: "Shared" }),
+      member(id, requireDefined([b1, b2, b3][index]), { name: "Shared" }),
     );
 
     const entity = canonicalizeCluster(
@@ -292,8 +295,8 @@ describe("ClusterMember origin discriminator (step 1)", () => {
     );
     expect(entity.canonicalId).toBe("z-base");
     expect(entity.resolution.canonicalId).toBe(nodeId("z-base"));
-    expect(entity.props.name).toBe("Anna Rivera");
-    expect(entity.props.mrn).toBe("MRN-1");
+    expect(entity.props["name"]).toBe("Anna Rivera");
+    expect(entity.props["mrn"]).toBe("MRN-1");
   });
 
   it("keeps the committed base VALUE under the default 'flag' base policy (#4)", () => {
@@ -315,11 +318,13 @@ describe("ClusterMember origin discriminator (step 1)", () => {
     const entity = canonicalizeCluster(cluster, members, "flag", rank([b1]));
 
     expect(entity.canonicalId).toBe("z-base");
-    expect(entity.props.name).toBe("Committed");
+    expect(entity.props["name"]).toBe("Committed");
     expect(entity.conflicts).toHaveLength(1);
     // The sentinel base branch is excluded from the public values; the staged
     // branch's competing value is shown.
-    const reported = entity.conflicts[0]!.values.map((value) => value.value);
+    const reported = requireDefined(entity.conflicts[0]).values.map(
+      (value) => value.value,
+    );
     expect(reported).toEqual(["Branch"]);
   });
 
@@ -350,6 +355,6 @@ describe("ClusterMember origin discriminator (step 1)", () => {
     );
 
     expect(entity.canonicalId).toBe("z-base"); // identity invariant intact
-    expect(entity.props.name).toBe("Branch"); // value overwritten by opt-in
+    expect(entity.props["name"]).toBe("Branch"); // value overwritten by opt-in
   });
 });

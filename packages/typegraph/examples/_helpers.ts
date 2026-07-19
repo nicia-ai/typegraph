@@ -9,13 +9,16 @@
  * - `requireRecordedNow()` — asserts a store has recorded history and returns
  *   its current recorded timestamp, for the time-travel examples.
  */
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import {
+  createLocalSqliteBackend,
+  type LocalSqliteBackendResult,
+} from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 /**
  * Creates an in-memory SQLite backend for examples.
  * This supports the full query API, unlike the memory adapter.
  */
-export function createExampleBackend() {
+export function createExampleBackend(): LocalSqliteBackendResult["backend"] {
   const { backend } = createLocalSqliteBackend();
   return backend;
 }

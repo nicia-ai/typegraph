@@ -1,5 +1,4 @@
-import { type SQL, sql } from "drizzle-orm";
-
+import { createGraphBackendProjection } from "../backend/graph-backend-projection";
 import {
   createBackendOverlay,
   type EdgeRow,
@@ -24,8 +23,10 @@ import {
   compileTemporalFilter,
   currentReadInstant,
 } from "../query/compiler/temporal";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, type CompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
+import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
 import { recordedBindParamBudget } from "./recorded-capture/relations";
 import { rowToEdge, rowToNode } from "./row-mappers";
@@ -43,7 +44,7 @@ type RecordedReadServiceParams = Readonly<{
 
 type RecordedGetByIdsParams<T extends Readonly<{ id: string }>> = Readonly<{
   entity: "node" | "edge";
-  table: SQL;
+  table: SqlFragment;
   alias: string;
   kind: string;
   ids: readonly string[];
@@ -110,7 +111,11 @@ function createRecordedReadBackend(
   backend: GraphBackend,
   surface: string,
 ): GraphBackend {
-  return createBackendOverlay(backend, {
+  // A public AdapterStore backend is frozen. Decorate a fresh allowlist
+  // projection so Proxy invariants do not prevent the execute guards from
+  // replacing non-configurable function properties.
+  const projectedBackend = createGraphBackendProjection(backend);
+  return createBackendOverlay(projectedBackend, {
     execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> =>
       withRelationsPrecondition(backend, backend.execute<T>(query), surface),
     ...(backend.executeRaw === undefined ?
@@ -122,7 +127,7 @@ function createRecordedReadBackend(
         ): Promise<readonly T[]> =>
           withRelationsPrecondition(
             backend,
-            backend.executeRaw!<T>(sqlText, params),
+            requireDefined(backend.executeRaw)<T>(sqlText, params),
             surface,
           ),
       }),
@@ -133,7 +138,7 @@ function recordedTemporalFilter(
   backend: GraphBackend,
   coordinate: ReadCoordinate,
   tableAlias: string,
-): SQL {
+): SqlFragment {
   const recordedAsOf = coordinate.recorded?.asOf;
   if (recordedAsOf === undefined) {
     throw new ConfigurationError(

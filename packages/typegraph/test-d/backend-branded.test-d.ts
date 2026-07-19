@@ -7,8 +7,12 @@
  * must be an error, every correct use must compile, and both brands must stay
  * usable wherever a plain `GraphBackend` is read.
  */
-import { expectAssignable, expectError, expectNotAssignable } from "tsd";
-import { type SQL } from "drizzle-orm";
+import {
+  expectAssignable,
+  expectError,
+  expectNotAssignable,
+  expectType,
+} from "tsd";
 
 import {
   asGraphWriteBackend,
@@ -17,6 +21,9 @@ import {
   type RawBackend,
 } from "../src/backend/branded";
 import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
+import { sqliteDialect } from "../src/query/dialect/sqlite";
+import { type DialectAdapter } from "../src/query/dialect/types";
+import { type SqlFragment } from "../src/query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
@@ -27,9 +34,26 @@ import {
 declare const plain: GraphBackend;
 declare const writeBackend: GraphWriteBackend;
 declare const rawBackend: RawBackend;
-declare const unbrandedSql: SQL;
+declare const unbrandedSql: SqlFragment;
 declare const compiledRows: CompiledRowsSql;
 declare const compiledStatement: CompiledStatementSql;
+declare const receiverDependentExecuteRaw: <T>(
+  this: Readonly<{ connection: unknown }>,
+  sqlText: string,
+  params: readonly unknown[],
+) => Promise<readonly T[]>;
+declare const narrowedInList: (
+  this: void,
+  left: SqlFragment,
+  values: readonly string[],
+  negated: boolean,
+) => SqlFragment;
+
+expectAssignable<DialectAdapter>(sqliteDialect);
+expectNotAssignable<DialectAdapter>({
+  ...sqliteDialect,
+  inList: narrowedInList,
+});
 
 /** A bulk / DDL seam that bypasses capture — mirrors materializeRemovals. */
 declare function runsRawBulkWork(backend: RawBackend): void;
@@ -73,13 +97,34 @@ expectError(rowExecutor<unknown>(unbrandedSql));
 void rowExecutor<unknown>(compiledRows);
 void rowExecutor<unknown>(asCompiledRowsSql(unbrandedSql));
 
-// Statement execution is intentionally branded. A random Drizzle SQL object is
+// Statement execution is intentionally branded. A random TypeGraph fragment is
 // not enough to cross the non-row-returning raw-statement seam; callers must
 // make the statement intent explicit.
 declare const statementExecutor: NonNullable<GraphBackend["executeStatement"]>;
 expectError(statementExecutor(unbrandedSql));
 void statementExecutor(compiledStatement);
 void statementExecutor(asCompiledStatementSql(unbrandedSql));
+
+// Backend ports are receiver-free. Implementations that depend on `this`
+// cannot satisfy the contract, so saving and invoking a member is always safe.
+expectNotAssignable<NonNullable<GraphBackend["executeRaw"]>>(
+  receiverDependentExecuteRaw,
+);
+declare const receiverFreeExecuteRaw: NonNullable<GraphBackend["executeRaw"]>;
+const detachedExecuteRaw = receiverFreeExecuteRaw;
+void detachedExecuteRaw<unknown>("SELECT 1", []);
+
+type BackendMemberWithInvalidReceiver = {
+  [K in keyof GraphBackend]-?: NonNullable<GraphBackend[K]> extends (
+    (...args: never[]) => unknown
+  ) ?
+    unknown extends ThisParameterType<NonNullable<GraphBackend[K]>> ? K
+    : ThisParameterType<NonNullable<GraphBackend[K]>> extends void ? never
+    : K
+  : never;
+}[keyof GraphBackend];
+declare const backendMemberWithInvalidReceiver: BackendMemberWithInvalidReceiver;
+expectType<never>(backendMemberWithInvalidReceiver);
 
 // Backend overlays must only replace real backend members. This catches typoed
 // wrapper keys at compile time instead of silently dropping them at runtime.

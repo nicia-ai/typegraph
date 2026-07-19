@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * Candidate SOURCES (design §4 / §6.1) — the RECALL layer of candidate generation.
  *
@@ -35,7 +36,6 @@
  * the scoring stage additionally dedups + sorts, so neither source's emission order
  * leaks into the merge result.
  */
-
 import { isUniqueBucketKey, UNBLOCKED_BUCKET_KEY } from "./blocking";
 import { MergeError } from "./errors";
 import {
@@ -266,7 +266,12 @@ function windowedPairs(
   for (let index = 0; index < keyed.length; index += 1) {
     const last = Math.min(index + config.window, keyed.length - 1);
     for (let index_ = index + 1; index_ <= last; index_ += 1) {
-      pairs.push(orderEndpoints(keyed[index]!.node, keyed[index_]!.node));
+      pairs.push(
+        orderEndpoints(
+          requireDefined(keyed[index]).node,
+          requireDefined(keyed[index_]).node,
+        ),
+      );
     }
   }
   return pairs;
@@ -298,7 +303,12 @@ export function pairsFromBlocks(
     }
     for (let index = 0; index < members.length; index += 1) {
       for (let index_ = index + 1; index_ < members.length; index_ += 1) {
-        pairs.push(orderEndpoints(members[index]!, members[index_]!));
+        pairs.push(
+          orderEndpoints(
+            requireDefined(members[index]),
+            requireDefined(members[index_]),
+          ),
+        );
       }
     }
   }
@@ -321,7 +331,10 @@ export function forcedEdgesFromBlocks(
     const members = sortMembersById(blocks.get(bucketKey) ?? []);
     for (let index = 0; index < members.length; index += 1) {
       for (let index_ = index + 1; index_ < members.length; index_ += 1) {
-        const { a, b } = orderEndpoints(members[index]!, members[index_]!);
+        const { a, b } = orderEndpoints(
+          requireDefined(members[index]),
+          requireDefined(members[index_]),
+        );
         edges.push({ a, b, score: FORCED_MATCH_SCORE });
       }
     }
@@ -393,8 +406,8 @@ export function ontologyRetypeEdges(
       }
       for (let index = 1; index < members.length; index += 1) {
         edges.push({
-          a: members[0]!,
-          b: members[index]!,
+          a: requireDefined(members[0]),
+          b: requireDefined(members[index]),
           score: FORCED_MATCH_SCORE,
         });
       }
@@ -423,11 +436,14 @@ function unionByCompatibility(
     for (let index_ = index + 1; index_ < identities.length; index_ += 1) {
       if (
         isRetypeCompatible([
-          kindOf(identities[index]!),
-          kindOf(identities[index_]!),
+          kindOf(requireDefined(identities[index])),
+          kindOf(requireDefined(identities[index_])),
         ])
       ) {
-        forest.union(identities[index]!, identities[index_]!);
+        forest.union(
+          requireDefined(identities[index]),
+          requireDefined(identities[index_]),
+        );
       }
     }
   }
@@ -443,7 +459,7 @@ function groupsOf(
 ): readonly (readonly MergeKey[])[] {
   const byRoot = new Map<MergeKey, MergeKey[]>();
   for (const identity of identities) {
-    const root = representativeOf.get(identity)!;
+    const root = requireDefined(representativeOf.get(identity));
     const bucket = byRoot.get(root);
     if (bucket === undefined) {
       byRoot.set(root, [identity]);

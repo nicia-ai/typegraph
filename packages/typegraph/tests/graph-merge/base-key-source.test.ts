@@ -15,7 +15,6 @@
  * is the only base source doing work. The branch forks from an EMPTY fork-point; the
  * committed base lives in a separate TARGET (the evolved-base shape). Both backends.
  */
-
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -31,6 +30,7 @@ import { mergeAgainstBase } from "../../src/graph-merge/merge";
 import { isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -134,7 +134,7 @@ describe.each(backendMatrix())("baseKey source [$name]", (entry) => {
     // Absorbed onto the committed base id (no duplicate), base value kept (keep-base).
     const patients = await target.nodes.Patient.find();
     expect(patients.map((patient) => patient.id)).toEqual(["base-1"]);
-    expect(patients[0]!.name).toBe("Ana Rivera");
+    expect(requireDefined(patients[0]).name).toBe("Ana Rivera");
     expect(result.data.resolutions.length).toBeGreaterThanOrEqual(1);
   });
 

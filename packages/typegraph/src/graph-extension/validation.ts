@@ -274,10 +274,10 @@ export function validateGraphExtension(
     }
   }
 
-  const version = validateVersion(documentRecord.version, issues);
+  const version = validateVersion(documentRecord["version"], issues);
 
-  const nodes = validateNodesSection(documentRecord.nodes, issues, strict);
-  const edges = validateEdgesSection(documentRecord.edges, issues, strict);
+  const nodes = validateNodesSection(documentRecord["nodes"], issues, strict);
+  const edges = validateEdgesSection(documentRecord["edges"], issues, strict);
 
   // Edge endpoints can reference (a) kinds declared in this same document,
   // (b) compile-time host kinds resolved at merge time, or (c) external
@@ -285,7 +285,7 @@ export function validateGraphExtension(
   // here.
 
   const ontology = validateOntologySection(
-    documentRecord.ontology,
+    documentRecord["ontology"],
     issues,
     strict,
   );
@@ -294,7 +294,7 @@ export function validateGraphExtension(
   }
 
   const indexes = validateIndexesSection(
-    documentRecord.indexes,
+    documentRecord["indexes"],
     issues,
     strict,
   );
@@ -430,7 +430,7 @@ function validateNodeDocument(
   }
 
   const description = validateOptionalString(
-    raw.description,
+    raw["description"],
     `${path}/description`,
     "`description`",
     "INVALID_DOCUMENT_SHAPE",
@@ -438,13 +438,13 @@ function validateNodeDocument(
   );
 
   const annotations = validateAnnotations(
-    raw.annotations,
+    raw["annotations"],
     `${path}/annotations`,
     `Node "${kindName}"`,
     issues,
   );
 
-  const propertiesRaw = raw.properties;
+  const propertiesRaw = raw["properties"];
   const properties = validatePropertiesMap(
     propertiesRaw,
     `${path}/properties`,
@@ -455,7 +455,7 @@ function validateNodeDocument(
   );
   if (properties === undefined) return undefined;
 
-  const uniqueRaw = raw.unique;
+  const uniqueRaw = raw["unique"];
   const unique = validateUniqueConstraints(
     uniqueRaw,
     `${path}/unique`,
@@ -553,7 +553,7 @@ function validateEdgeDocument(
   }
 
   const description = validateOptionalString(
-    raw.description,
+    raw["description"],
     `${path}/description`,
     "`description`",
     "INVALID_DOCUMENT_SHAPE",
@@ -561,17 +561,17 @@ function validateEdgeDocument(
   );
 
   const annotations = validateAnnotations(
-    raw.annotations,
+    raw["annotations"],
     `${path}/annotations`,
     `Edge "${kindName}"`,
     issues,
   );
 
-  const from = validateEndpointList(raw.from, `${path}/from`, issues);
-  const to = validateEndpointList(raw.to, `${path}/to`, issues);
+  const from = validateEndpointList(raw["from"], `${path}/from`, issues);
+  const to = validateEndpointList(raw["to"], `${path}/to`, issues);
   if (from === undefined || to === undefined) return undefined;
 
-  const propertiesRaw = raw.properties;
+  const propertiesRaw = raw["properties"];
   const properties =
     propertiesRaw === undefined ?
       {}
@@ -671,9 +671,9 @@ function validateOntologySection(
       );
     }
 
-    const metaEdge = entry.metaEdge;
-    const from = entry.from;
-    const to = entry.to;
+    const metaEdge = entry["metaEdge"];
+    const from = entry["from"];
+    const to = entry["to"];
 
     if (typeof metaEdge !== "string" || !META_EDGE_NAME_SET.has(metaEdge)) {
       issues.push({
@@ -974,7 +974,7 @@ function validateIndexEntry(
     return undefined;
   }
 
-  const entity = raw.entity;
+  const entity = raw["entity"];
   if (entity !== "node" && entity !== "edge") {
     issues.push({
       path: `${path}/entity`,
@@ -999,7 +999,7 @@ function validateIndexEntry(
     );
   }
 
-  if (typeof raw.kind !== "string" || !isValidKindName(raw.kind)) {
+  if (typeof raw["kind"] !== "string" || !isValidKindName(raw["kind"])) {
     issues.push({
       path: `${path}/kind`,
       message:
@@ -1009,7 +1009,7 @@ function validateIndexEntry(
     return undefined;
   }
 
-  const fields = validateStringList(raw.fields, `${path}/fields`, issues, {
+  const fields = validateStringList(raw["fields"], `${path}/fields`, issues, {
     allowEmpty: false,
     label: "fields",
     emptyCode: "EMPTY_INDEX_FIELDS",
@@ -1017,13 +1017,13 @@ function validateIndexEntry(
   if (fields === undefined) return undefined;
 
   const coveringFields = validateStringList(
-    raw.coveringFields,
+    raw["coveringFields"],
     `${path}/coveringFields`,
     issues,
     { allowEmpty: true, label: "coveringFields" },
   );
 
-  if (raw.unique !== undefined && typeof raw.unique !== "boolean") {
+  if (raw["unique"] !== undefined && typeof raw["unique"] !== "boolean") {
     issues.push({
       path: `${path}/unique`,
       message: "Index `unique` must be a boolean.",
@@ -1033,8 +1033,8 @@ function validateIndexEntry(
   }
 
   let name: string | undefined;
-  if (raw.name !== undefined) {
-    if (typeof raw.name !== "string" || raw.name.length === 0) {
+  if (raw["name"] !== undefined) {
+    if (typeof raw["name"] !== "string" || raw["name"].length === 0) {
       issues.push({
         path: `${path}/name`,
         message: "Index `name` must be a non-empty string.",
@@ -1042,11 +1042,11 @@ function validateIndexEntry(
       });
       return undefined;
     }
-    name = raw.name;
+    name = raw["name"];
   }
 
   const scopeResult = validateOptionalLiteral(
-    raw.scope,
+    raw["scope"],
     INDEX_SCOPE_VALUES,
     `${path}/scope`,
     "Index `scope`",
@@ -1057,7 +1057,7 @@ function validateIndexEntry(
   const scope = scopeResult.value;
 
   const where = validateGraphExtensionIndexWhere(
-    raw.where,
+    raw["where"],
     `${path}/where`,
     issues,
     strict,
@@ -1066,18 +1066,18 @@ function validateIndexEntry(
   if (entity === "node") {
     return compactUndefined<ExtensionIndex>({
       entity: "node",
-      kind: raw.kind,
+      kind: raw["kind"],
       name,
       fields,
       coveringFields,
-      unique: raw.unique,
+      unique: raw["unique"],
       scope,
       where,
     });
   }
 
   const directionResult = validateOptionalLiteral(
-    raw.direction,
+    raw["direction"],
     EDGE_INDEX_DIRECTION_VALUES,
     `${path}/direction`,
     "Edge index `direction`",
@@ -1089,12 +1089,12 @@ function validateIndexEntry(
 
   return compactUndefined<ExtensionIndex>({
     entity: "edge",
-    kind: raw.kind,
+    kind: raw["kind"],
     name,
     direction,
     fields,
     coveringFields,
-    unique: raw.unique,
+    unique: raw["unique"],
     scope,
     where,
   });
@@ -1185,7 +1185,7 @@ function validateGraphExtensionIndexWhere(
       issues,
     );
   }
-  if (typeof raw.field !== "string" || raw.field.length === 0) {
+  if (typeof raw["field"] !== "string" || raw["field"].length === 0) {
     issues.push({
       path: `${path}/field`,
       message: "`where.field` must be a non-empty string.",
@@ -1193,7 +1193,10 @@ function validateGraphExtensionIndexWhere(
     });
     return undefined;
   }
-  if (typeof raw.op !== "string" || !RUNTIME_INDEX_WHERE_OPS.has(raw.op)) {
+  if (
+    typeof raw["op"] !== "string" ||
+    !RUNTIME_INDEX_WHERE_OPS.has(raw["op"])
+  ) {
     issues.push({
       path: `${path}/op`,
       message: '`where.op` must be "isNull" or "isNotNull" in v1.',
@@ -1202,8 +1205,8 @@ function validateGraphExtensionIndexWhere(
     return undefined;
   }
   return Object.freeze({
-    field: raw.field,
-    op: raw.op as NullCheckOp,
+    field: raw["field"],
+    op: raw["op"] as NullCheckOp,
   });
 }
 
@@ -1280,7 +1283,7 @@ function validateProperty(
     return undefined;
   }
   const property = raw;
-  const type = property.type;
+  const type = property["type"];
   if (typeof type !== "string" || !SUPPORTED_PROPERTY_TYPES.has(type)) {
     issues.push({
       path: `${path}/type`,
@@ -1328,14 +1331,14 @@ function validateStringProperty(
   strict: boolean,
 ): ExtensionStringProperty | undefined {
   const minLength = validateNonNegativeInteger(
-    raw.minLength,
+    raw["minLength"],
     `${path}/minLength`,
     "string.minLength",
     "INVALID_LENGTH_BOUNDS",
     issues,
   );
   const maxLength = validateNonNegativeInteger(
-    raw.maxLength,
+    raw["maxLength"],
     `${path}/maxLength`,
     "string.maxLength",
     "INVALID_LENGTH_BOUNDS",
@@ -1354,11 +1357,11 @@ function validateStringProperty(
   }
 
   let pattern: string | undefined;
-  if (raw.pattern !== undefined) {
-    if (typeof raw.pattern === "string") {
+  if (raw["pattern"] !== undefined) {
+    if (typeof raw["pattern"] === "string") {
       try {
-        new RegExp(raw.pattern);
-        pattern = raw.pattern;
+        new RegExp(raw["pattern"]);
+        pattern = raw["pattern"];
       } catch (error) {
         issues.push({
           path: `${path}/pattern`,
@@ -1378,15 +1381,15 @@ function validateStringProperty(
   }
 
   let format: ExtensionStringProperty["format"];
-  if (raw.format !== undefined) {
-    if (typeof raw.format !== "string") {
+  if (raw["format"] !== undefined) {
+    if (typeof raw["format"] !== "string") {
       issues.push({
         path: `${path}/format`,
-        message: `String format must be a string; received ${describeUnknownValue(raw.format)}.`,
+        message: `String format must be a string; received ${describeUnknownValue(raw["format"])}.`,
         code: "INVALID_PROPERTY_REFINEMENT",
       });
-    } else if (SUPPORTED_STRING_FORMATS.has(raw.format)) {
-      format = raw.format as ExtensionStringProperty["format"];
+    } else if (SUPPORTED_STRING_FORMATS.has(raw["format"])) {
+      format = raw["format"] as ExtensionStringProperty["format"];
     } else if (strict) {
       // Authoring-mode reject. A typo like `"date-time"` (no
       // hyphen) silently compiled to a plain `z.string()` in earlier
@@ -1394,7 +1397,7 @@ function validateStringProperty(
       // the typo here is the contract.
       issues.push({
         path: `${path}/format`,
-        message: `Unsupported string format "${raw.format}". Supported: ${[...SUPPORTED_STRING_FORMATS].join(", ")}.`,
+        message: `Unsupported string format "${raw["format"]}". Supported: ${[...SUPPORTED_STRING_FORMATS].join(", ")}.`,
         code: "UNSUPPORTED_STRING_FORMAT",
       });
     }
@@ -1446,14 +1449,14 @@ function validateNumberProperty(
 ): ExtensionNumberProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
   const min = validateOptionalFiniteNumber(
-    raw.min,
+    raw["min"],
     `${path}/min`,
     "`min`",
     "INVALID_NUMBER_BOUNDS",
     issues,
   );
   const max = validateOptionalFiniteNumber(
-    raw.max,
+    raw["max"],
     `${path}/max`,
     "`max`",
     "INVALID_NUMBER_BOUNDS",
@@ -1468,7 +1471,7 @@ function validateNumberProperty(
   }
 
   const int = validateOptionalBoolean(
-    raw.int,
+    raw["int"],
     `${path}/int`,
     "`int`",
     "INVALID_PROPERTY_REFINEMENT",
@@ -1520,7 +1523,7 @@ function validateEnumProperty(
   issues: GraphExtensionIssue[],
 ): ExtensionEnumProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
-  const valuesRaw = raw.values;
+  const valuesRaw = raw["values"];
   if (!Array.isArray(valuesRaw) || valuesRaw.length === 0) {
     issues.push({
       path: `${path}/values`,
@@ -1567,7 +1570,7 @@ function validateArrayProperty(
   strict: boolean,
 ): ExtensionArrayProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
-  const itemsRaw = raw.items;
+  const itemsRaw = raw["items"];
   if (itemsRaw === undefined) {
     issues.push({
       path: `${path}/items`,
@@ -1584,7 +1587,7 @@ function validateArrayProperty(
     });
     return undefined;
   }
-  const itemType = itemsRaw.type;
+  const itemType = itemsRaw["type"];
   if (itemType === "array") {
     issues.push({
       path: `${path}/items`,
@@ -1637,7 +1640,7 @@ function validateObjectProperty(
     return undefined;
   }
 
-  const propertiesRaw = raw.properties;
+  const propertiesRaw = raw["properties"];
   if (!isPlainObject(propertiesRaw)) {
     issues.push({
       path: `${path}/properties`,
@@ -1668,7 +1671,7 @@ function validateObjectProperty(
       });
       continue;
     }
-    const fieldType = value.type;
+    const fieldType = value["type"];
     if (fieldType === "object") {
       issues.push({
         path: fieldPath,
@@ -1739,7 +1742,7 @@ function validatePropertyModifiers(
   const issuesAtEntry = issues.length;
 
   const optional = validateOptionalBoolean(
-    raw.optional,
+    raw["optional"],
     `${path}/optional`,
     "`optional`",
     "INVALID_PROPERTY_REFINEMENT",
@@ -1747,16 +1750,16 @@ function validatePropertyModifiers(
   );
 
   let searchable: { language?: string } | undefined;
-  if (raw.searchable !== undefined) {
+  if (raw["searchable"] !== undefined) {
     if (propertyType !== "string") {
       issues.push({
         path: `${path}/searchable`,
         message: `\`searchable\` is only valid on string properties (got "${propertyType}").`,
         code: "INVALID_MODIFIER_TARGET",
       });
-    } else if (isPlainObject(raw.searchable)) {
-      const searchableRaw = raw.searchable;
-      const language = searchableRaw.language;
+    } else if (isPlainObject(raw["searchable"])) {
+      const searchableRaw = raw["searchable"];
+      const language = searchableRaw["language"];
       if (language === undefined) {
         searchable = {};
       } else {
@@ -1780,18 +1783,18 @@ function validatePropertyModifiers(
   }
 
   let embedding: { dimensions: number } | undefined;
-  if (raw.embedding !== undefined) {
+  if (raw["embedding"] !== undefined) {
     if (propertyType === "array") {
-      const itemsRaw = raw.items;
-      const itemType = isPlainObject(itemsRaw) ? itemsRaw.type : undefined;
+      const itemsRaw = raw["items"];
+      const itemType = isPlainObject(itemsRaw) ? itemsRaw["type"] : undefined;
       if (itemType !== "number") {
         issues.push({
           path: `${path}/embedding`,
           message: '`embedding` requires `array.items.type === "number"`.',
           code: "INVALID_MODIFIER_TARGET",
         });
-      } else if (isPlainObject(raw.embedding)) {
-        const dim = raw.embedding.dimensions;
+      } else if (isPlainObject(raw["embedding"])) {
+        const dim = raw["embedding"]["dimensions"];
         if (typeof dim !== "number" || !Number.isInteger(dim) || dim <= 0) {
           issues.push({
             path: `${path}/embedding/dimensions`,
@@ -1834,9 +1837,9 @@ function validatePropertyModifiers(
   }
 
   let description: string | undefined;
-  if (raw.description !== undefined) {
-    if (typeof raw.description === "string") {
-      description = raw.description;
+  if (raw["description"] !== undefined) {
+    if (typeof raw["description"] === "string") {
+      description = raw["description"];
     } else {
       issues.push({
         path: `${path}/description`,
@@ -1901,7 +1904,7 @@ function validateUniqueConstraints(
     }
 
     const constraint = entry;
-    const name = constraint.name;
+    const name = constraint["name"];
     if (typeof name !== "string" || name.length === 0) {
       issues.push({
         path: `${constraintPath}/name`,
@@ -1920,7 +1923,7 @@ function validateUniqueConstraints(
     }
     names.add(name);
 
-    const fieldsRaw = constraint.fields;
+    const fieldsRaw = constraint["fields"];
     if (!Array.isArray(fieldsRaw) || fieldsRaw.length === 0) {
       issues.push({
         path: `${constraintPath}/fields`,
@@ -1968,7 +1971,7 @@ function validateUniqueConstraints(
     if (!fieldsValid) continue;
 
     const scopeResult = validateOptionalLiteral(
-      constraint.scope,
+      constraint["scope"],
       ["kind", "kindWithSubClasses"] as const,
       `${constraintPath}/scope`,
       "Unique constraint `scope`",
@@ -1979,7 +1982,7 @@ function validateUniqueConstraints(
     const scope = scopeResult.value;
 
     const collationResult = validateOptionalLiteral(
-      constraint.collation,
+      constraint["collation"],
       ["binary", "caseInsensitive"] as const,
       `${constraintPath}/collation`,
       "Unique constraint `collation`",
@@ -1990,16 +1993,16 @@ function validateUniqueConstraints(
     const collation = collationResult.value;
 
     const where: { field: string; op: NullCheckOp } | undefined =
-      constraint.where === undefined ?
+      constraint["where"] === undefined ?
         undefined
       : validateUniqueWhere(
-          constraint.where,
+          constraint["where"],
           `${constraintPath}/where`,
           properties,
           issues,
           strict,
         );
-    if (constraint.where !== undefined && where === undefined) continue;
+    if (constraint["where"] !== undefined && where === undefined) continue;
 
     result.push(
       compactUndefined<ExtensionUniqueConstraint>({
@@ -2040,8 +2043,8 @@ function validateUniqueWhere(
       issues,
     );
   }
-  const field = raw.field;
-  const op = raw.op;
+  const field = raw["field"];
+  const op = raw["op"];
   if (typeof field !== "string" || field.length === 0) {
     issues.push({
       path: `${path}/field`,
@@ -2093,7 +2096,7 @@ function validateAnnotations(
     assertJsonValue(raw, "annotations", ownerLabel);
   } catch (error) {
     if (error instanceof ConfigurationError) {
-      const detailPath = (error.details as Record<string, unknown>).path;
+      const detailPath = (error.details as Record<string, unknown>)["path"];
       const annotationPath =
         typeof detailPath === "string" ?
           `${path}/${detailPath

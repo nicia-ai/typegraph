@@ -7,26 +7,31 @@
  * and delete all execute and rank correctly on libSQL's native engine.
  */
 import { type Client, createClient } from "@libsql/client";
-import { type SQL, sql } from "drizzle-orm";
-import { SQLiteAsyncDialect } from "drizzle-orm/sqlite-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
 import { type VectorSearchParams } from "../../../src/backend/types";
 import { libsqlVectorStrategy } from "../../../src/query/dialect/vector/libsql-strategy";
 import { type VectorSlot } from "../../../src/query/dialect/vector-strategy";
+import {
+  renderSqlite,
+  sql,
+  type SqlFragment,
+} from "../../../src/query/sql-fragment";
+import { requireDefined } from "../../../src/utils/presence";
 
-const dialect = new SQLiteAsyncDialect();
-
-function run(client: Client, query: SQL) {
-  const compiled = dialect.sqlToQuery(query);
+function run(client: Client, query: SqlFragment) {
+  const compiled = renderSqlite(query);
   return client.execute({
     sql: compiled.sql,
     args: compiled.params as never[],
   });
 }
 
-async function runAll(client: Client, queries: readonly SQL[]): Promise<void> {
+async function runAll(
+  client: Client,
+  queries: readonly SqlFragment[],
+): Promise<void> {
   for (const query of queries) await run(client, query);
 }
 
@@ -34,7 +39,7 @@ const GRAPH = "g1";
 const TS = "2026-06-01T00:00:00.000Z";
 
 /** `nodeIds` as a one-column SELECT, the shape `buildSearch` expects. */
-function candidateIds(nodeIds: readonly string[]): SQL {
+function candidateIds(nodeIds: readonly string[]): SqlFragment {
   return sql.join(
     nodeIds.map((nodeId) => sql`SELECT ${nodeId}`),
     sql` UNION ALL `,
@@ -79,7 +84,7 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
     client.close();
   });
 
-  // Helper that runs raw DDL strings (ownedTables emits strings, not SQL).
+  // Helper that runs raw DDL strings (`ownedTables` emits strings, not fragments).
   async function createStorage(s: VectorSlot): Promise<void> {
     for (const contribution of libsqlVectorStrategy.ownedTables(s)) {
       for (const ddl of contribution.createDdl) {
@@ -141,12 +146,12 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
       client,
       libsqlVectorStrategy.buildSearch(s, searchParams([1, 0, 0])),
     );
-    const ids = result.rows.map((r) => r.node_id as string);
+    const ids = result.rows.map((r) => r["node_id"] as string);
     expect(ids[0]).toBe("d1");
     expect(ids[1]).toBe("d3");
     expect(ids[2]).toBe("d2");
     // cosine score = 1 - distance; exact match → ~1.0
-    expect(Number(result.rows[0]?.score)).toBeCloseTo(1, 5);
+    expect(Number(result.rows[0]?.["score"])).toBeCloseTo(1, 5);
   });
 
   it("upsert replaces an existing embedding for the same node", async () => {
@@ -159,7 +164,7 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
       libsqlVectorStrategy.buildSearch(s, searchParams([1, 0, 0])),
     );
     expect(result.rows.length).toBe(1);
-    expect(Number(result.rows[0]?.score)).toBeCloseTo(1, 5);
+    expect(Number(result.rows[0]?.["score"])).toBeCloseTo(1, 5);
   });
 
   it("minScore filters out dissimilar rows", async () => {
@@ -174,7 +179,7 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
         searchParams([1, 0, 0], { minScore: 0.5 }),
       ),
     );
-    const ids = result.rows.map((r) => r.node_id as string);
+    const ids = result.rows.map((r) => r["node_id"] as string);
     expect(ids).toEqual(["d1"]);
   });
 
@@ -215,7 +220,7 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
         searchParams([1, 0, 0], { limit: 2 }),
       ),
     );
-    const ids = result.rows.map((r) => r.node_id as string);
+    const ids = result.rows.map((r) => r["node_id"] as string);
     expect(ids).toContain("d1");
     expect(ids).not.toContain("d2"); // orthogonal vector excluded from top-2
   });
@@ -245,14 +250,14 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
     // (never DDL) and `vector_top_k` has its index. A later none→hnsw change
     // at the same dimension is a deliberate shape change handled by
     // `store.reembedVectorField`, not a lazy re-ensure on the hot path.
-    await backend.ensureVectorSlotContribution!(slot);
-    await backend.upsertEmbedding!({
+    await requireDefined(backend.ensureVectorSlotContribution)(slot);
+    await requireDefined(backend.upsertEmbedding)({
       ...slot,
       nodeId: "d1",
       embedding: [1, 0, 0],
     });
 
-    const result = await backend.vectorSearch!({
+    const result = await requireDefined(backend.vectorSearch)({
       ...slot,
       queryEmbedding: [1, 0, 0],
       limit: 1,
@@ -274,7 +279,7 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
         searchParams([1, 0, 0], { metric: "l2" }),
       ),
     );
-    const ids = result.rows.map((r) => r.node_id as string);
+    const ids = result.rows.map((r) => r["node_id"] as string);
     expect(ids).toEqual(["d1", "d3", "d2"]);
   });
 
@@ -291,7 +296,7 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
         searchParams([1, 0, 0], { minScore: 0.5 }),
       ),
     );
-    const ids = result.rows.map((r) => r.node_id as string);
+    const ids = result.rows.map((r) => r["node_id"] as string);
     expect(ids).toContain("d1");
     expect(ids).not.toContain("d2");
   });
@@ -331,7 +336,7 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
         searchParams([1, 0, 0], { limit: 10 }),
       ),
     );
-    const ids = result.rows.map((r) => r.node_id as string);
+    const ids = result.rows.map((r) => r["node_id"] as string);
     expect(ids).toEqual(["d1"]);
     expect(ids).not.toContain("other");
   });
@@ -407,7 +412,7 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
           candidateIds(["d2", "d3"]),
         ),
       );
-      expect(result.rows.map((row) => row.node_id)).toEqual(["d2", "d3"]);
+      expect(result.rows.map((row) => row["node_id"])).toEqual(["d2", "d3"]);
     });
 
     it("under-fills when tombstone drift pushes the survivors past the headroom", async () => {
@@ -438,7 +443,7 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
           candidateIds(survivors),
         ),
       );
-      expect(exact.rows.map((row) => row.node_id)).toEqual(survivors);
+      expect(exact.rows.map((row) => row["node_id"])).toEqual(survivors);
     });
   });
 });

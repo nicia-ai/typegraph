@@ -12,7 +12,7 @@ import {
   createSchemaVersionRowMapper,
   POSTGRES_ROW_MAPPER_CONFIG,
   SQLITE_ROW_MAPPER_CONFIG,
-} from "../../src/backend/drizzle/row-mappers";
+} from "../../src/backend/row-mappers";
 import { rowPropsToJsonText, rowPropsToObject } from "../../src/backend/types";
 import { DatabaseOperationError } from "../../src/errors";
 import { rowToNode } from "../../src/store/row-mappers";
@@ -124,7 +124,7 @@ describe("RowProps mapping", () => {
         deleted_at: undefined,
       });
       expect(fromObject).toEqual(fromString);
-      expect(fromObject.name).toBe("Alice");
+      expect(fromObject["name"]).toBe("Alice");
     });
   });
 });

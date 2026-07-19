@@ -211,8 +211,8 @@ describe("getFieldTypeInfo - object types", () => {
 
     expect(info?.valueType).toBe("object");
     expect(info?.shape).toBeDefined();
-    expect(info?.shape?.name?.valueType).toBe("string");
-    expect(info?.shape?.count?.valueType).toBe("number");
+    expect(info?.shape?.["name"]?.valueType).toBe("string");
+    expect(info?.shape?.["count"]?.valueType).toBe("number");
   });
 
   it("resolves record type with value type info", () => {
@@ -626,11 +626,11 @@ describe("getSharedFieldTypeInfo - object shape intersection", () => {
     expect(info?.valueType).toBe("object");
     expect(info?.shape).toBeDefined();
     // Common fields should be present
-    expect(info?.shape?.created?.valueType).toBe("date");
-    expect(info?.shape?.tags?.valueType).toBe("array");
+    expect(info?.shape?.["created"]?.valueType).toBe("date");
+    expect(info?.shape?.["tags"]?.valueType).toBe("array");
     // Unique fields should not be present
-    expect(info?.shape?.extra).toBeUndefined();
-    expect(info?.shape?.other).toBeUndefined();
+    expect(info?.shape?.["extra"]).toBeUndefined();
+    expect(info?.shape?.["other"]).toBeUndefined();
   });
 });
 

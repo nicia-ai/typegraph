@@ -16,7 +16,6 @@
  * the BYTE-IDENTICAL edge set the back-compat `generateCandidates(blocks, …)`
  * composition produces over the same blocked input.
  */
-
 import type { Node, UniqueIntrospection } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -53,6 +52,7 @@ import type {
   ResolveConfig,
   SimilarityStrategy,
 } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -249,7 +249,11 @@ describe("candidate sources + scoring stage (step 0)", () => {
     const pairs = pairsFromBlocks(blocks);
     expect(pairs).toHaveLength(1);
     const forced: readonly CandidateEdge[] = [
-      { a: pairs[0]!.a, b: pairs[0]!.b, score: FORCED_MATCH_SCORE },
+      {
+        a: requireDefined(pairs[0]).a,
+        b: requireDefined(pairs[0]).b,
+        score: FORCED_MATCH_SCORE,
+      },
     ];
 
     const scored = scoreCandidates(
@@ -368,7 +372,7 @@ describe("ontologyRetypeEdges (cross-kind ontology retype source)", () => {
     const edges = ontologyRetypeEdges(identities, isRetypeCompatible);
 
     expect(edges).toHaveLength(1);
-    const edge = edges[0]!;
+    const edge = requireDefined(edges[0]);
     expect(idOf(edge.a)).toBe("x");
     expect(idOf(edge.b)).toBe("x");
     expect(new Set([kindOf(edge.a), kindOf(edge.b)])).toEqual(
@@ -390,9 +394,12 @@ describe("ontologyRetypeEdges (cross-kind ontology retype source)", () => {
     const edges = ontologyRetypeEdges(identities, isRetypeCompatible);
 
     expect(edges).toHaveLength(1);
-    expect(new Set([kindOf(edges[0]!.a), kindOf(edges[0]!.b)])).toEqual(
-      new Set(["Doctor", "SpecialistDoctor"]),
-    );
+    expect(
+      new Set([
+        kindOf(requireDefined(edges[0]).a),
+        kindOf(requireDefined(edges[0]).b),
+      ]),
+    ).toEqual(new Set(["Doctor", "SpecialistDoctor"]));
     // No edge touches the unrelated Encounter identity.
     const touched = edges.flatMap((edge) => [kindOf(edge.a), kindOf(edge.b)]);
     expect(touched).not.toContain("Encounter");
@@ -408,7 +415,7 @@ describe("ontologyRetypeEdges (cross-kind ontology retype source)", () => {
     const edges = ontologyRetypeEdges(identities, () => true);
 
     expect(edges).toHaveLength(2); // 3 identities → star of 2 edges → one cluster
-    const min = [...identities].sort(compareMergeKeys)[0]!;
+    const min = requireDefined([...identities].sort(compareMergeKeys)[0]);
     expect(edges.every((edge) => edge.a === min)).toBe(true);
   });
 
@@ -482,7 +489,7 @@ describe("ontologyRetypeEdges (cross-kind ontology retype source)", () => {
     ];
     const edges = ontologyRetypeEdges(identities, collapsesToOneKind);
     expect(edges).toHaveLength(2); // 3 identities → star of 2 edges → one cluster
-    const min = [...identities].sort(compareMergeKeys)[0]!;
+    const min = requireDefined([...identities].sort(compareMergeKeys)[0]);
     expect(edges.every((edge) => edge.a === min)).toBe(true);
   });
 });

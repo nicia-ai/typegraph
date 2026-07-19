@@ -9,21 +9,21 @@
  * collision the guard exists for; with real timers the commits separate
  * naturally and would pass even if the guard were removed.
  */
-import { sql } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  asCompiledRowsSql,
   ConfigurationError,
   createStoreWithSchema,
   defineGraph,
   defineNode,
   type RecordedInstant,
+  renderPostgres,
+  sql,
 } from "../src";
 import { type GraphBackend } from "../src/backend/types";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { asCompiledRowsSql } from "../src/query/sql-intent";
 import {
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
@@ -75,9 +75,7 @@ describe("recorded commit clock", () => {
   });
 
   it("uses a namespaced Postgres advisory lock separate from schema writes", () => {
-    const compiled = new PgDialect().sqlToQuery(
-      recordedClockAdvisoryLockSql("graph-1"),
-    );
+    const compiled = renderPostgres(recordedClockAdvisoryLockSql("graph-1"));
     const compactSql = compiled.sql.replaceAll(/\s+/gu, " ");
 
     expect(compactSql).toMatch(
@@ -90,10 +88,10 @@ describe("recorded commit clock", () => {
     // Graph writes take their advisory lock before graph row reads/writes;
     // recorded-clock allocation takes its lock at flush after live writes. A
     // shared namespace would recreate the original acquire-order inversion.
-    const recordedClockParams = new PgDialect().sqlToQuery(
+    const recordedClockParams = renderPostgres(
       recordedClockAdvisoryLockSql("graph-1"),
     ).params;
-    const graphWriteParams = new PgDialect().sqlToQuery(
+    const graphWriteParams = renderPostgres(
       recordedGraphWriteAdvisoryLockSql("graph-1"),
     ).params;
 

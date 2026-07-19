@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { createStore, createStoreWithSchema } from "../../../src";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -28,7 +27,7 @@ export function registerLateMaterializationIntegrationTests(
     let store: IntegrationStore;
 
     beforeEach(async () => {
-      store = createStore(integrationTestGraph, context.getStore().backend, {
+      store = await context.createStore(integrationTestGraph, {
         queryDefaults: { traversalExpansion: "none" },
       });
 
@@ -187,11 +186,7 @@ export function registerLateMaterializationIntegrationTests(
       // late-mat outer re-join keys on exactly that identity with no temporal
       // predicate, so recorded reads must fall back to the flat plan — this
       // guards against duplicated survivors and stale-version props.
-      const [history] = await createStoreWithSchema(
-        integrationTestGraph,
-        context.getStore().backend,
-        { history: true },
-      );
+      const history = await context.createHistoryStore(integrationTestGraph);
 
       const nodes = [];
       for (const person of [

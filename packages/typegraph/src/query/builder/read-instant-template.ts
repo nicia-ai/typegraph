@@ -11,25 +11,24 @@
  * a fresh instant into the placeholder on every execution via
  * {@link fillTemplateParams}.
  *
- * The fast path requires a backend that can both compile a Drizzle SQL object
+ * The fast path requires a backend that can both compile a TypeGraph `SqlFragment`
  * to text (`compileSql`) and execute pre-compiled text (`executeRaw`). Custom
  * or async backends without those members fall back to per-call recompilation,
  * exactly as before.
  */
-import { Placeholder, type SQL } from "drizzle-orm";
-
 import { ConfigurationError } from "../../errors";
 import { nowIso } from "../../utils/date";
 import { type ComposableQuery, type QueryAst } from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "../compiler/temporal";
-import { getDialect } from "../dialect";
+import { bindSqlValue } from "../dialect/profile";
 import { type SqlDialect } from "../dialect/types";
+import { isSqlPlaceholder, type SqlFragment } from "../sql-fragment";
 import { type CompiledSelectSql, isRawExecutable } from "../sql-intent";
 
 /**
  * A compiled statement ready for `executeRaw`: SQL text plus a positional
- * parameter list that may still contain unfilled {@link Placeholder} objects
+ * parameter list that may still contain unfilled named placeholder objects
  * (the read instant, and any user `param()` refs on a prepared query).
  */
 export type CompiledTemplate = Readonly<{
@@ -37,13 +36,11 @@ export type CompiledTemplate = Readonly<{
   params: readonly unknown[];
 }>;
 
-/** Compiles a Drizzle SQL object to `{ sql, params }` without executing. */
-type CompileSqlFunction = (query: SQL) => CompiledTemplate;
+/** Compiles a TypeGraph `SqlFragment` to `{ sql, params }` without executing. */
+type CompileSqlFunction = (query: SqlFragment) => CompiledTemplate;
 
 /**
- * The slice of a backend used to build a template. Passed whole (not as a bare
- * `compileSql` reference) so `compileSql` is invoked as a method — a custom
- * backend may implement it with `this`, which a detached call would lose.
+ * The receiver-free slice of a backend used to build a template.
  */
 export type SqlCompilerBackend = Readonly<{ compileSql?: CompileSqlFunction }>;
 
@@ -51,7 +48,7 @@ export type SqlCompilerBackend = Readonly<{ compileSql?: CompileSqlFunction }>;
 function templateHasReadInstant(template: CompiledTemplate): boolean {
   return template.params.some(
     (parameter) =>
-      parameter instanceof Placeholder &&
+      isSqlPlaceholder(parameter) &&
       parameter.name === CURRENT_READ_INSTANT_PLACEHOLDER,
   );
 }
@@ -127,7 +124,6 @@ export function buildReadInstantTemplate(
   // backend.execute, which honors the brand. See isRawExecutable.
   if (!isRawExecutable(compiled)) return undefined;
 
-  // Method call (not a detached reference) so a this-using compileSql works.
   const template = backend.compileSql(compiled);
   if (args.needsReadInstant && !templateHasReadInstant(template)) {
     return undefined;
@@ -175,13 +171,11 @@ export function fillTemplateParams(
   bindings: Readonly<Record<string, unknown>>,
   dialect: SqlDialect,
 ): unknown[] {
-  const adapter = getDialect(dialect);
   let readInstant: string | undefined;
   return params.map((parameter) => {
-    if (!(parameter instanceof Placeholder)) return parameter;
+    if (!isSqlPlaceholder(parameter)) return parameter;
 
-    // drizzle types Placeholder#name as `any`; it is always a string.
-    const name = parameter.name as string;
+    const name = parameter.name;
     if (name === CURRENT_READ_INSTANT_PLACEHOLDER) {
       readInstant ??= nowIso();
       return readInstant;
@@ -193,7 +187,6 @@ export function fillTemplateParams(
         parameterName: name,
       });
     }
-    if (value instanceof Date) return value.toISOString();
-    return adapter.bindValue(value);
+    return bindSqlValue(value, dialect);
   });
 }

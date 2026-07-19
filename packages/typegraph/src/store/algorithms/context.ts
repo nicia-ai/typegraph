@@ -1,5 +1,3 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { type GraphBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import {
@@ -25,6 +23,7 @@ import {
   type TemporalFilterOptions,
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareCodePoints } from "../../utils/compare";
 import type { AlgorithmCyclePolicy, TraversalDirection } from "./types";
@@ -219,7 +218,7 @@ export function assertEdgeKinds(edges: readonly string[]): void {
  */
 export function compileNodeKindSeedFilter(
   nodeKinds: readonly string[] | undefined,
-): SQL {
+): SqlFragment {
   if (nodeKinds === undefined) return sql`TRUE`;
   return compileKindFilter(sql.raw("n.kind"), nodeKinds);
 }

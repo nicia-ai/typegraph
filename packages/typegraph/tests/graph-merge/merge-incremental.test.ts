@@ -14,7 +14,6 @@
  *   - the existing-target-id write guard fires for a colliding NODE and a colliding EDGE;
  *   - a branch that did not fork from `forkPoint` is REJECTED.
  */
-
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -32,8 +31,9 @@ import { mergeIncremental } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { normalizeGraph } from "../property/graph-merge/normalize";
-import { backendMatrix } from "./test-utils";
+import { backendMatrix, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
   schema: z.object({
@@ -176,7 +176,7 @@ describe.each(backendMatrix())(
           props: { on: "2026-06-01" },
         },
       ]);
-      return edge!;
+      return requireDefined(edge);
     }
 
     it("commits an incremental merge into a history-backed target", async () => {
@@ -246,7 +246,7 @@ describe.each(backendMatrix())(
       // encounter + edge repointed onto it. Base name preserved (keep-base).
       const patients = await target.nodes.Patient.find();
       expect(patients.map((patient) => patient.id)).toEqual(["base-ana"]);
-      expect(patients[0]!.name).toBe("Anna Rivera");
+      expect(requireDefined(patients[0]).name).toBe("Anna Rivera");
       const encounters = await target.nodes.Encounter.find();
       expect(encounters.map((enc) => enc.id)).toEqual(["enc-1"]);
       expect(result.data.resolutions.length).toBeGreaterThanOrEqual(1);
@@ -295,7 +295,9 @@ describe.each(backendMatrix())(
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
       const provider = await forkOf(forkPoint);
-      await provider.store.nodes.Patient.update(base!.id, { name: "Anna R." });
+      await provider.store.nodes.Patient.update(requireDefined(base).id, {
+        name: "Anna R.",
+      });
       const target = await emptyStore();
       await target.nodes.Patient.bulkCreate([
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
@@ -322,7 +324,9 @@ describe.each(backendMatrix())(
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
       const provider = await forkOf(forkPoint);
-      await provider.store.nodes.Patient.update(base!.id, { name: "Anna R." });
+      await provider.store.nodes.Patient.update(requireDefined(base).id, {
+        name: "Anna R.",
+      });
       const target = await emptyStore();
       await target.nodes.Patient.bulkCreate([
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
@@ -340,7 +344,7 @@ describe.each(backendMatrix())(
       ) => {
         if (!injected) {
           injected = true;
-          await target.nodes.Patient.update(base!.id, {
+          await target.nodes.Patient.update(requireDefined(base).id, {
             name: "Concurrent Edit",
           });
         }
@@ -373,7 +377,9 @@ describe.each(backendMatrix())(
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
       const provider = await forkOf(forkPoint);
-      await provider.store.nodes.Patient.update(base!.id, { name: "Anna R." });
+      await provider.store.nodes.Patient.update(requireDefined(base).id, {
+        name: "Anna R.",
+      });
       const target = await emptyStore();
       await target.nodes.Patient.bulkCreate([
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
@@ -410,7 +416,7 @@ describe.each(backendMatrix())(
       expect(isOk(result)).toBe(true);
       (target as { transaction: unknown }).transaction = original;
       const ana = (await target.nodes.Patient.find()).find(
-        (patient) => patient.id === base!.id,
+        (patient) => patient.id === requireDefined(base).id,
       );
       expect(ana?.name).toBe("Anna R.");
     });
@@ -422,7 +428,7 @@ describe.each(backendMatrix())(
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
       const provider = await forkOf(forkPoint);
-      await provider.store.nodes.Patient.delete(base!.id);
+      await provider.store.nodes.Patient.delete(requireDefined(base).id);
       const target = await emptyStore();
       await target.nodes.Patient.bulkCreate([
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
@@ -486,7 +492,7 @@ describe.each(backendMatrix())(
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
       const provider = await forkOf(forkPoint);
-      await provider.store.nodes.Patient.delete(base!.id);
+      await provider.store.nodes.Patient.delete(requireDefined(base).id);
       const target = await emptyStore();
       await target.nodes.Patient.bulkCreate([
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
@@ -504,7 +510,7 @@ describe.each(backendMatrix())(
       ) => {
         if (!injected) {
           injected = true;
-          await target.nodes.Patient.update(base!.id, {
+          await target.nodes.Patient.update(requireDefined(base).id, {
             name: "Concurrent Edit",
           });
         }
@@ -625,12 +631,14 @@ describe.each(backendMatrix())(
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
       const provider = await forkOf(forkPoint);
-      await provider.store.nodes.Patient.delete(base!.id);
+      await provider.store.nodes.Patient.delete(requireDefined(base).id);
       const target = await emptyStore();
       await target.nodes.Patient.bulkCreate([
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
-      await target.nodes.Patient.update(base!.id, { tag: "target-live" });
+      await target.nodes.Patient.update(requireDefined(base).id, {
+        tag: "target-live",
+      });
 
       const result = await mergeIncremental<CareGraph>({
         forkPoint,
@@ -656,12 +664,14 @@ describe.each(backendMatrix())(
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
       const provider = await forkOf(forkPoint);
-      await provider.store.nodes.Patient.update(base!.id, { name: "Anna R." });
+      await provider.store.nodes.Patient.update(requireDefined(base).id, {
+        name: "Anna R.",
+      });
       const target = await emptyStore();
       await target.nodes.Patient.bulkCreate([
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
-      await target.nodes.Patient.delete(base!.id);
+      await target.nodes.Patient.delete(requireDefined(base).id);
 
       const result = await mergeIncremental<CareGraph>({
         forkPoint,
@@ -762,7 +772,7 @@ describe.each(backendMatrix())(
       // Single committed row, base name kept (keep-base), no duplicate insert.
       const patients = await target.nodes.Patient.find();
       expect(patients.map((patient) => patient.id)).toEqual(["base-ana"]);
-      expect(patients[0]!.name).toBe("Anna Rivera");
+      expect(requireDefined(patients[0]).name).toBe("Anna Rivera");
       // The base↔branch name divergence is FLAGGED, and the reserved base-provenance
       // sentinel never leaks into the public conflict's contributing-branch values.
       const nameConflict = result.data.conflicts.find(
@@ -906,7 +916,7 @@ describe.each(backendMatrix())(
       // aborts before any write, so nothing was committed).
       const committed = await target.edges.hadEncounter.find();
       expect(committed.map((edge) => edge.id)).toEqual(["shared-edge"]);
-      expect(committed[0]!.on).toBe("2000-01-01");
+      expect(requireDefined(committed[0]).on).toBe("2000-01-01");
     });
 
     it("GUARD (soft-delete): refuses to resurrect a soft-deleted committed EDGE", async () => {
@@ -944,7 +954,7 @@ describe.each(backendMatrix())(
       ]);
       // Soft-delete the committed edge. The commit's upsert resolves by id and would
       // RESURRECT this tombstone (dropping the branch's new edge) — a silent data loss.
-      await target.edges.hadEncounter.delete(sdEdge!.id);
+      await target.edges.hadEncounter.delete(requireDefined(sdEdge).id);
 
       const result = await mergeIncremental<CareGraph>({
         forkPoint,
@@ -974,7 +984,7 @@ describe.each(backendMatrix())(
       ]);
       // Soft-delete it; the commit's upsert would resurrect the tombstone and merge its
       // stale props forward into what the branch staged as a fresh insert.
-      await target.nodes.Patient.delete(sdPat!.id);
+      await target.nodes.Patient.delete(requireDefined(sdPat).id);
 
       const result = await mergeIncremental<CareGraph>({
         forkPoint,
@@ -1103,7 +1113,7 @@ describe.each(backendMatrix())(
       ]);
       // Public create keeps the unique index coherent; this raw backend update then
       // simulates an older/heterogeneous committed row the active schema would strip.
-      await target.backend.updateNode({
+      await getStoreBackend(target).updateNode({
         graphId: target.graphId,
         kind: "Patient",
         id: "base-ana",
@@ -1127,15 +1137,15 @@ describe.each(backendMatrix())(
         expect(result.error.message).toMatch(/lossy base update/i);
       }
 
-      const row = await target.backend.getNode(
+      const row = await getStoreBackend(target).getNode(
         target.graphId,
         "Patient",
         "base-ana",
       );
       expect(row).toBeDefined();
-      const props = rowPropsToObject(row!.props);
-      expect(props.legacyCode).toBe("KEEP-ME");
-      expect(props.tag).toBeUndefined();
+      const props = rowPropsToObject(requireDefined(row).props);
+      expect(props["legacyCode"]).toBe("KEEP-ME");
+      expect(props["tag"]).toBeUndefined();
     });
 
     it("REJECTS a branch that did not fork from forkPoint (base@V mismatch)", async () => {
