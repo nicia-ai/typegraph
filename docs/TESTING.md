@@ -68,7 +68,7 @@ Property tests are especially valuable for:
 
 ### Integration Tests
 
-Location: `packages/typegraph/tests/backends/*.test.ts`
+Location: `packages/typegraph/tests/backends/`
 
 Tests that exercise complete workflows with real database backends.
 
@@ -92,12 +92,25 @@ pnpm test:unit
 # Property-based tests only
 pnpm test:property
 
-# PostgreSQL integration tests (requires running PostgreSQL)
+# PostgreSQL integration tests (requires Docker; manages its test service)
 pnpm test:postgres
+
+# Every runnable SQLite example
+pnpm test:examples
+
+# PostgreSQL example (requires POSTGRES_URL)
+pnpm test:examples:postgres
+
+# Render docs, check internal routes/anchors, and typecheck documented imports
+pnpm test:docs:release
 
 # With coverage report
 pnpm test:coverage
 ```
+
+`pnpm test:postgres` manages its Docker test service automatically. The
+PostgreSQL example runner intentionally uses `POSTGRES_URL` so it can exercise
+the same caller-supplied connection configuration shown to users.
 
 ## Coverage
 

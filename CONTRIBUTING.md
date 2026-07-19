@@ -40,7 +40,7 @@ This is a monorepo managed by [Turbo](https://turbo.build/).
 
 We use [Vitest](https://vitest.dev/) for testing.
 
-- **Run all unit tests:**
+- **Run the SQLite/PGlite test suite:**
 
   ```bash
   pnpm test
@@ -53,10 +53,24 @@ We use [Vitest](https://vitest.dev/) for testing.
   ```
 
 - **Run PostgreSQL integration tests:**
-  (Requires Docker)
+  (Requires Docker; the command manages the test container)
 
   ```bash
   pnpm test:postgres
+  ```
+
+- **Run every SQLite and PostgreSQL example:**
+
+  ```bash
+  pnpm test:examples
+  POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
+    pnpm test:examples:postgres
+  ```
+
+- **Build the documentation and verify rendered links and public imports:**
+
+  ```bash
+  pnpm test:docs:release
   ```
 
 - **Run layered TypeScript type tests (inline + declaration + consumer smoke):**
@@ -83,9 +97,16 @@ pnpm build
 
 1. **Branch:** Create a new branch for your feature or fix.
 2. **Code:** Implement your changes. Please adhere to the existing coding style (Prettier/ESLint will help).
-3. **Test:** Add unit tests for new features or bug fixes. Ensure all tests pass.
-4. **Lint:** Run `pnpm lint` to check for style issues.
-5. **Commit:** We use [Changesets](https://github.com/changesets/changesets) for versioning.
+3. **Test:** Add tests for new features or bug fixes. Before committing, run the
+   canonical local sequence:
+
+   ```bash
+   pnpm fix && pnpm typecheck && pnpm test
+   ```
+
+   Run `pnpm test:postgres` for backend, Store, or collection changes. Run the
+   example and documentation release checks when their surfaces change.
+4. **Commit:** We use [Changesets](https://github.com/changesets/changesets) for versioning.
    - If your change affects the published package, run `pnpm changeset` and follow the prompts
      to add a changeset file describing your modification.
 

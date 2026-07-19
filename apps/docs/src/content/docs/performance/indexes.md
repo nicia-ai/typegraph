@@ -376,7 +376,7 @@ const personName = defineNodeIndex(Person, {
 ```
 
 On SQLite these declarations are `skipped` — SQLite's substring-search
-story is [FTS5 fulltext](/search/fulltext) via `searchable()` fields.
+story is [FTS5 fulltext](/fulltext-search) via `searchable()` fields.
 
 GIN-family methods take exactly one field and don't support `unique`,
 `coveringFields`, or `where`; the query's `graph_id` / `kind` filters apply

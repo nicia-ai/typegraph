@@ -94,6 +94,9 @@ jobs:
       - name: Docs
         run: pnpm test:docs
 
+      - name: Verify rendered docs and documented imports
+        run: pnpm test:docs:release
+
       - name: Unused code check
         run: pnpm test:unused
 
@@ -167,8 +170,8 @@ jobs:
       - name: Run SQLite perf sanity
         run: pnpm --filter @nicia-ai/typegraph-benchmarks perf:check
 
-      - name: Run example smoke test
-        run: pnpm --filter @nicia-ai/typegraph exec tsx examples/01-basic-usage.ts
+      - name: Run all SQLite examples
+        run: pnpm test:examples
 
   test-strict-local-consumers:
     name: Test Strict Packed Consumers (TypeScript 5 and 6)
@@ -362,6 +365,12 @@ jobs:
         run: pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres
         env:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
+          POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
+
+      - name: Run PostgreSQL example
+        if: ${{ matrix.shard == '1/2' }}
+        run: pnpm test:examples:postgres
+        env:
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
 
   test-durable-objects:

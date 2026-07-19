@@ -134,7 +134,14 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 
 ## Connection Management
 
-TypeGraph does not manage database connections. You are responsible for:
+Managed Store factories own their local SQLite or PGlite connection, and their
+`store.close()` method releases it. The local backend factories
+`createLocalSqliteBackend` and `createLocalPgliteBackend` likewise expose an
+owned backend whose `close()` releases its resources.
+
+Bring-your-own adapter factories leave connection ownership with you. For
+`createSqliteBackend`, `createPostgresBackend`, and `createLibsqlBackend`, you
+are responsible for:
 
 1. **Creating and configuring** the database connection
 2. **Implementing connection pooling** for production use
@@ -173,7 +180,8 @@ const db = drizzle(pool);
 const backend = createPostgresBackend(db);
 ```
 
-The `store.close()` method is a no-op. Connection cleanup is your responsibility.
+In the bring-your-own example above, `store.close()` leaves the supplied driver
+open. Close that driver or pool through its own API.
 
 ## Predicate Serialization
 
