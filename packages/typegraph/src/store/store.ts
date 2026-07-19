@@ -93,6 +93,7 @@ import {
 import type {
   IdentityFacade,
   IdentityFacadeFor,
+  IdentityNode,
   IdentityReadFacadeFor,
 } from "../identity/types";
 import { type VectorIndexDeclaration } from "../indexes/types";
@@ -969,6 +970,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       {
         graphId: this.graphId,
         registry: this.#registry,
+        sameIdAcrossKinds: this.#graph.identity.sameIdAcrossKinds,
         schema: this.#sqlSchema(),
       },
       target,
@@ -2619,9 +2621,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#graph.identity === undefined ?
           undefined
         : wrapTransactionIdentity(
-            (context as TransactionContext<G> & {
-              identity: IdentityFacade<G>;
-            }).identity,
+            (
+              context as unknown as TransactionContext<G> & {
+                identity: IdentityFacade<G>;
+              }
+            ).identity,
             scopeRecorder,
           );
       const scoped = this.#attachMeasure(
@@ -2774,6 +2778,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       schema: this.#sqlSchema(),
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      sameIdAcrossKinds: this.#graph.identity?.sameIdAcrossKinds ?? "ignore",
+      loadNode: async (ref, coordinate) => {
+        if (coordinate !== undefined) {
+          return (await this.recordedNodeGetById(
+            ref.kind,
+            ref.id as NodeId<NodeType>,
+            coordinate,
+          )) as IdentityNode<G> | undefined;
+        }
+        const row = await backend.getNode(this.graphId, ref.kind, ref.id);
+        if (row === undefined || row.deleted_at !== undefined) return undefined;
+        return rowToNode(row) as IdentityNode<G>;
+      },
     };
   }
 
@@ -3796,6 +3813,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #createNodeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
   ): NodeOperationContext<G> {
+    const identityConfig = this.#graph.identity;
     return {
       graph: this.#graph,
       graphId: this.graphId,
@@ -3803,7 +3821,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
-      ...(this.#graph.identity === undefined ?
+      ...(identityConfig === undefined ?
         {}
       : {
           identity: {
@@ -3817,6 +3835,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 {
                   graphId: this.graphId,
                   registry: this.#registry,
+                  sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
                   schema: this.#sqlSchema(),
                 },
                 target,
@@ -3828,7 +3847,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               mode: "soft" | "hard",
             ) =>
               detachIdentityForNode(
-                { graphId: this.graphId, schema: this.#sqlSchema() },
+                {
+                  graphId: this.graphId,
+                  sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
+                  schema: this.#sqlSchema(),
+                },
                 target,
                 ref,
                 mode,
@@ -3985,6 +4008,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
         identityEnabled: this.#graph.identity !== undefined,
+        identitySameIdAcrossKinds:
+          this.#graph.identity?.sameIdAcrossKinds ?? "ignore",
         ...(this.#schema !== undefined && { schema: this.#schema }),
         ...(this.#recordedReadBinding !== undefined && {
           recordedReadBinding: this.#recordedReadBinding,
@@ -4884,10 +4909,7 @@ export async function createVerifiedStore<G extends GraphDef>(
     prepared.schemaMetadata,
   );
   await store.validateIdentity();
-  return [
-    store,
-    prepared.result,
-  ];
+  return [store, prepared.result];
 }
 
 async function prepareVerifiedStore<G extends GraphDef>(
@@ -4994,8 +5016,5 @@ export async function createVerifiedAdapterStore<
     prepared.schemaMetadata,
   );
   await store.validateIdentity();
-  return [
-    asAdapterStoreSurface(store),
-    prepared.result,
-  ];
+  return [asAdapterStoreSurface(store), prepared.result];
 }

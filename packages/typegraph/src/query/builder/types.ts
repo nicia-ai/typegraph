@@ -614,6 +614,8 @@ export type QueryBuilderConfig = Readonly<{
   defaultTraversalExpansion: TraversalExpansion;
   /** Whether this builder's graph enables Operational Identity. */
   identityEnabled: boolean;
+  /** Equal-id behavior used by historical identity traversal compilation. */
+  identitySameIdAcrossKinds: "fold" | "ignore";
   backend?: GraphBackend;
   dialect?: SqlDialect;
   /** SQL schema configuration from createSqlSchema(...) for custom table names. */
@@ -677,4 +679,6 @@ export type CreateQueryBuilderOptions = Readonly<{
    * config produces SQL that references identity tables that do not exist.
    */
   identityEnabled?: boolean;
+  /** Same-id behavior for compile-only identity-aware traversals. */
+  identitySameIdAcrossKinds?: "fold" | "ignore";
 }>;

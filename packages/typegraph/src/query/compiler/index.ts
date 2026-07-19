@@ -190,6 +190,8 @@ export type CompileQueryOptions = Readonly<{
    * across executions with a fresh "now" each call. See {@link ReadInstantMode}.
    */
   readInstant?: ReadInstantMode | undefined;
+  /** Equal-id behavior for historical identity traversal reconstruction. */
+  identitySameIdAcrossKinds?: "fold" | "ignore" | undefined;
 }>;
 
 /**
@@ -252,6 +254,7 @@ export function compileQuery(
     schema,
     annIndexTypes,
     readInstant: options_.readInstant ?? "literal",
+    identitySameIdAcrossKinds: options_.identitySameIdAcrossKinds ?? "fold",
     compileQuery: (subAst, subGraphId) =>
       compileQuery(
         inheritRecordedAsOf(subAst, ast.recordedAsOf),
@@ -463,6 +466,11 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
     ...(options_.readInstant === undefined ?
       {}
     : { readInstant: options_.readInstant }),
+    ...(options_.identitySameIdAcrossKinds === undefined ?
+      {}
+    : {
+        identitySameIdAcrossKinds: options_.identitySameIdAcrossKinds,
+      }),
   };
 }
 

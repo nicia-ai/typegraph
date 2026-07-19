@@ -163,10 +163,8 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
   });
 
   it("remaps a folded assertion endpoint onto the cluster survivor (#2)", async () => {
-    const [baseStore] = await createStoreWithSchema(
-      patientGraph,
-      await makeBackend(),
-    );
+    const backend = await makeBackend();
+    const [baseStore] = await createStoreWithSchema(patientGraph, backend);
     const anchor = await baseStore.nodes.Patient.create(
       { name: "Anchor Person", birthDate: "1990-01-01" },
       { id: "anchor" },
@@ -207,11 +205,7 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(isOk(result)).toBe(true);
 
     // The two duplicate patients collapsed to one survivor ("p-ana").
-    const rows = await enumerateAllNodes(
-      baseStore.backend,
-      baseStore.graphId,
-      "Patient",
-    );
+    const rows = await enumerateAllNodes(backend, baseStore.graphId, "Patient");
     const liveIds = rows
       .filter((row) => row.deleted_at === undefined)
       .map((row) => row.id)

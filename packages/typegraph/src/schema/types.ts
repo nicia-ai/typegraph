@@ -622,7 +622,7 @@ export const serializedSchemaZod = z.object({
     })
     .loose(),
   identity: z
-    .object({ sameIdAcrossKinds: z.literal("fold") })
+    .object({ sameIdAcrossKinds: z.enum(["fold", "ignore"]) })
     .readonly()
     .optional(),
   /**

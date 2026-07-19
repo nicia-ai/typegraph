@@ -3,7 +3,9 @@
 ---
 
 Add the opt-in TypeGraph Identity Profile with typed store, transaction, and
-temporal-view APIs; same-ID folding; assertion history; interchange and graph
+temporal-view APIs; configurable same-ID folding or assertion-only identity;
+kind-branded and hydrated member reads; idempotent assertion receipts; ended
+assertion retraction results; assertion history; interchange and graph
 merge propagation; identity-expanded traversal; cross-backend closure storage;
 and fail-fast capability errors for non-transactional D1 and neon-http drivers.
 
@@ -24,9 +26,9 @@ endpoint incompatibility, and unresolved extension-ontology endpoint names. To
 recover, fix the graph definition; for a persisted extension document, correct
 the stored document before upgrading (or rewrite it through the previous minor,
 which still accepts it). Interchange documents remain readable across versions —
-`1.0` documents are still accepted on import, and exports write `2.0`. On an
-identity-enabled graph, `create()`/`upsert` of a soft-deleted same-`(kind, id)`
-row now resurrects that row (properties replaced, validity window reset so
-`validFrom` becomes the resurrection instant) rather than erroring. These are
-additive-strictness and semantics-pinning changes on top of the new opt-in
-profile, hence the minor bump.
+`1.0` documents are still accepted on import, and exports write `2.0`.
+`create()`/`upsert` of a soft-deleted same-`(kind, id)` row now resurrects that
+row on every graph (properties replaced, validity window reset so `validFrom`
+becomes the resurrection instant) rather than leaking a storage constraint
+error. These are additive-strictness and semantics-pinning changes on top of
+the new opt-in profile, hence the minor bump.

@@ -1,12 +1,10 @@
-import { sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  asCompiledRowsSql,
-  asCompiledStatementSql,
+  type AdapterStore,
   asNodeId,
-  createStoreWithSchema,
+  createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -20,6 +18,12 @@ import {
 } from "../src/identity/service";
 import { disjointWith } from "../src/ontology";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { sql } from "../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  asCompiledStatementSql,
+} from "../src/query/sql-intent";
+import { storeRuntime } from "../src/store/runtime-port";
 import { createInitializedStore, createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -80,8 +84,8 @@ function transfer(
   };
 }
 
-async function countAssertionsTouching(
-  store: Store<typeof graph>,
+async function countAssertionsTouching<TNativeTransaction>(
+  store: AdapterStore<typeof graph, TNativeTransaction>,
   ref: Ref,
 ): Promise<number> {
   const schema = createSqlSchema(store.backend.tableNames);
@@ -101,14 +105,18 @@ async function countAssertionsTouching(
 
 describe("identity review fixes", () => {
   it("#1 captures merge-created assertions in recorded history", async () => {
-    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-      history: true,
-    });
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      {
+        history: true,
+      },
+    );
     const person = await store.nodes.Person.create({ name: "Alice" });
     const author = await store.nodes.Author.create({ penName: "A." });
 
     await store.applyIdentityMergeAtTarget(
-      store.backend,
+      storeRuntime(store).backend,
       [],
       [
         transfer(
@@ -352,9 +360,13 @@ describe("identity review fixes", () => {
   });
 
   it("#12 batches recorded rows for a bulk assertion flush", async () => {
-    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-      history: true,
-    });
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      {
+        history: true,
+      },
+    );
     const p1 = await store.nodes.Person.create({ name: "One" }, { id: "p1" });
     const p2 = await store.nodes.Person.create({ name: "Two" }, { id: "p2" });
     const p3 = await store.nodes.Person.create({ name: "Three" }, { id: "p3" });
@@ -423,9 +435,13 @@ describe("identity review fixes", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     try {
-      const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-        revisionTracking: true,
-      });
+      const [store] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        {
+          revisionTracking: true,
+        },
+      );
       const a = await store.nodes.Person.create({ name: "A" }, { id: "aaa" });
       const b = await store.nodes.Person.create({ name: "B" }, { id: "bbb" });
       const assertion = await store.identity.assertSame(a, b);

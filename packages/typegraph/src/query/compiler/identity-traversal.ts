@@ -1,4 +1,4 @@
-import { type SQL, sql } from "drizzle-orm";
+import { sql, type SqlFragment } from "../sql-fragment";
 
 import { type QueryAst } from "../ast";
 import { type TemporalFilterPass } from "./passes";
@@ -8,14 +8,14 @@ export function compileIdentitySourcePredicate(
   input: Readonly<{
     ast: QueryAst;
     ctx: PredicateCompilerContext;
-    edgeId: SQL;
-    edgeKind: SQL;
+    edgeId: SqlFragment;
+    edgeKind: SqlFragment;
     graphId: string;
-    previousId: SQL;
-    previousKind: SQL;
+    previousId: SqlFragment;
+    previousKind: SqlFragment;
     temporalFilterPass: TemporalFilterPass;
   }>,
-): SQL {
+): SqlFragment {
   const {
     ast,
     ctx,
@@ -80,6 +80,17 @@ export function compileIdentitySourcePredicate(
       AND structural_node.recorded_from <= ${ast.recordedAsOf}
       AND structural_node.recorded_to > ${ast.recordedAsOf}
     `;
+  const sameIdEdges =
+    (ctx.identitySameIdAcrossKinds ?? "fold") === "fold" ?
+      sql`
+        UNION ALL
+        SELECT left_node.kind, left_node.id, right_node.kind, right_node.id
+        FROM structural_nodes left_node
+        JOIN structural_nodes right_node
+          ON right_node.id = left_node.id
+         AND right_node.kind <> left_node.kind
+      `
+    : sql``;
 
   return sql`
     EXISTS (
@@ -102,12 +113,7 @@ export function compileIdentitySourcePredicate(
         SELECT a_kind, a_id, b_kind, b_id FROM same_assertions
         UNION ALL
         SELECT b_kind, b_id, a_kind, a_id FROM same_assertions
-        UNION ALL
-        SELECT left_node.kind, left_node.id, right_node.kind, right_node.id
-        FROM structural_nodes left_node
-        JOIN structural_nodes right_node
-          ON right_node.id = left_node.id
-         AND right_node.kind <> left_node.kind
+        ${sameIdEdges}
       ),
       identity_members(kind, id) AS (
         SELECT ${previousKind}, ${previousId}
@@ -145,7 +151,7 @@ export function compileIdentitySourcePredicate(
 function resolveAssertionValidityInstant(
   ast: QueryAst,
   temporalFilterPass: TemporalFilterPass,
-): SQL {
+): SqlFragment {
   if (ast.temporalMode.mode === "asOf" && ast.temporalMode.asOf !== undefined) {
     return sql`${ast.temporalMode.asOf}`;
   }
@@ -164,7 +170,7 @@ function resolveAssertionValidityInstant(
 function compileAssertionValidityFilter(
   ast: QueryAst,
   temporalFilterPass: TemporalFilterPass,
-): SQL {
+): SqlFragment {
   const instant = resolveAssertionValidityInstant(ast, temporalFilterPass);
   const validity = sql`ia.deleted_at IS NULL AND ia.valid_from <= ${instant} AND (ia.valid_to IS NULL OR ia.valid_to > ${instant})`;
   if (ast.recordedAsOf === undefined) {

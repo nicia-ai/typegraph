@@ -328,7 +328,8 @@ export class GraphExtensionUnresolvedEndpointError extends GraphExtensionError {
  * name. Absolute HTTP(S) IRIs remain deliberate inert external references.
  */
 export class GraphExtensionUnresolvedOntologyEndpointError extends GraphExtensionError {
-  readonly code = "GRAPH_EXTENSION_UNRESOLVED_ONTOLOGY_ENDPOINT" as const;
+  override readonly code =
+    "GRAPH_EXTENSION_UNRESOLVED_ONTOLOGY_ENDPOINT" as const;
   readonly metaEdge: "inverseOf" | "implies";
   readonly endpoint: string;
 

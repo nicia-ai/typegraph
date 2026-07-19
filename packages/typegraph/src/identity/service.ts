@@ -1,5 +1,3 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { type ReadCoordinate } from "../core/temporal";
@@ -11,6 +9,7 @@ import {
   ValidationError,
 } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
@@ -24,7 +23,10 @@ import {
   type GraphNodeRef,
   type IdentityAssertion,
   type IdentityAssertionId,
+  type IdentityAssertionResult,
   type IdentityFacade,
+  type IdentityNode,
+  type IdentityNodeRef,
   type IdentityReadFacade,
   type IdentityRelation,
 } from "./types";
@@ -49,7 +51,12 @@ export type IdentityServiceContext<G extends GraphDef> = Readonly<{
   schema: SqlSchema;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
+  sameIdAcrossKinds: "fold" | "ignore";
   coordinate?: ReadCoordinate;
+  loadNode: (
+    ref: PlainNodeRef,
+    coordinate?: ReadCoordinate,
+  ) => Promise<IdentityNode<G> | undefined>;
 }>;
 
 export type IdentityTransferAssertion = Readonly<{
@@ -183,11 +190,27 @@ function publicAssertion<G extends GraphDef>(
   return {
     id: row.id as IdentityAssertionId,
     relation: row.rel,
-    a: { kind: row.a_kind, id: row.a_id },
-    b: { kind: row.b_kind, id: row.b_id },
+    a: publicNodeRef<G>({ kind: row.a_kind, id: row.a_id }),
+    b: publicNodeRef<G>({ kind: row.b_kind, id: row.b_id }),
     validFrom: row.valid_from,
     ...(row.valid_to === undefined ? {} : { validTo: row.valid_to }),
   };
+}
+
+function assertionResult<G extends GraphDef>(
+  assertion: IdentityAssertion<G>,
+  action: IdentityAssertionResult<G>["action"],
+): IdentityAssertionResult<G> {
+  return { ...assertion, assertion, action };
+}
+
+function publicNodeRef<G extends GraphDef>(
+  ref: PlainNodeRef,
+): IdentityNodeRef<G> {
+  // Every service entry point validates kinds against the graph registry, and
+  // persisted assertion/closure rows are constrained to those same endpoints.
+  // Reapply the public per-kind NodeId brand at this storage boundary.
+  return ref as IdentityNodeRef<G>;
 }
 
 function requireStatementTarget(target: Backend): asserts target is Backend & {
@@ -207,7 +230,7 @@ function requireStatementTarget(target: Backend): asserts target is Backend & {
 
 async function executeStatement(
   target: Backend,
-  statement: SQL,
+  statement: SqlFragment,
 ): Promise<void> {
   requireStatementTarget(target);
   await target.executeStatement(asCompiledStatementSql(statement));
@@ -277,7 +300,7 @@ function nodeSnapshotSource(
   schema: SqlSchema,
   graphId: string,
   coordinate: ReadCoordinate | undefined,
-): SQL {
+): SqlFragment {
   const recordedAsOf = coordinate?.recorded?.asOf;
   return recordedAsOf === undefined ?
       sql`
@@ -300,7 +323,7 @@ function assertionSnapshotSource(
   coordinate: ReadCoordinate | undefined,
   currentInstant: string,
   relation: IdentityRelation | undefined,
-): SQL {
+): SqlFragment {
   const recordedAsOf = coordinate?.recorded?.asOf;
   const instant = assertionValidityInstant(coordinate, currentInstant);
   const validity = sql`AND valid_from <= ${instant} AND (valid_to IS NULL OR valid_to > ${instant})`;
@@ -332,7 +355,7 @@ function assertionSnapshotSource(
 function nodeVisibilitySql(
   coordinate: ReadCoordinate | undefined,
   currentInstant: string,
-): SQL {
+): SqlFragment {
   const mode = coordinate?.valid.mode ?? "current";
   if (mode === "includeTombstones") return sql`1 = 1`;
   if (mode === "includeEnded") return sql`n.deleted_at IS NULL`;
@@ -489,6 +512,7 @@ async function loadHistoricalVisibleMembers(
   graphId: string,
   ref: PlainNodeRef,
   coordinate: ReadCoordinate,
+  sameIdAcrossKinds: "fold" | "ignore",
 ): Promise<readonly PlainNodeRef[]> {
   const classes = await loadHistoricalClasses(
     target,
@@ -496,6 +520,7 @@ async function loadHistoricalVisibleMembers(
     graphId,
     [ref],
     coordinate,
+    sameIdAcrossKinds,
   );
   return classes.get(refKey(ref))!.visible;
 }
@@ -511,6 +536,7 @@ async function loadHistoricalClasses(
   graphId: string,
   references: readonly PlainNodeRef[],
   coordinate: ReadCoordinate,
+  sameIdAcrossKinds: "fold" | "ignore",
 ): Promise<ReadonlyMap<string, HistoricalClass>> {
   const uniqueByKey = new Map<string, PlainNodeRef>();
   for (const ref of references) uniqueByKey.set(refKey(ref), ref);
@@ -535,6 +561,19 @@ async function loadHistoricalClasses(
     uniqueReferences.map((ref) => sql`(${ref.kind}, ${ref.id})`),
     sql`, `,
   );
+  const sameIdEdges =
+    sameIdAcrossKinds === "fold" ?
+      sql`
+        UNION ALL
+        SELECT left_node.kind, left_node.id, right_node.kind, right_node.id
+        FROM node_snapshot left_node
+        JOIN node_snapshot right_node
+          ON right_node.id = left_node.id
+         AND (right_node.kind <> left_node.kind OR right_node.id <> left_node.id)
+        WHERE left_node.deleted_at IS NULL
+          AND right_node.deleted_at IS NULL
+      `
+    : sql``;
   const rows = await target.execute<RawHistoricalClassMemberRow>(
     asCompiledRowsSql(sql`
       WITH RECURSIVE
@@ -551,14 +590,7 @@ async function loadHistoricalClasses(
         SELECT a_kind, a_id, b_kind, b_id FROM same_assertions
         UNION ALL
         SELECT b_kind, b_id, a_kind, a_id FROM same_assertions
-        UNION ALL
-        SELECT left_node.kind, left_node.id, right_node.kind, right_node.id
-        FROM node_snapshot left_node
-        JOIN node_snapshot right_node
-          ON right_node.id = left_node.id
-         AND (right_node.kind <> left_node.kind OR right_node.id <> left_node.id)
-        WHERE left_node.deleted_at IS NULL
-          AND right_node.deleted_at IS NULL
+        ${sameIdEdges}
       ),
       identity_members(seed_kind, seed_id, kind, id) AS (
         SELECT seeds.seed_kind, seeds.seed_id, seeds.seed_kind, seeds.seed_id
@@ -625,6 +657,7 @@ function visibleMembersAtCoordinate<G extends GraphDef>(
     ctx.graphId,
     ref,
     ctx.coordinate!,
+    ctx.sameIdAcrossKinds,
   );
 }
 
@@ -649,10 +682,10 @@ async function loadAssertions(
 }
 
 function referenceCondition(
-  kindColumn: SQL,
-  idColumn: SQL,
+  kindColumn: SqlFragment,
+  idColumn: SqlFragment,
   references: readonly PlainNodeRef[],
-): SQL {
+): SqlFragment {
   if (references.length === 0) return sql`1 = 0`;
   return sql`(${sql.join(
     references.map(
@@ -820,6 +853,7 @@ export class UnionFind {
 function buildComponents(
   structuralNodes: readonly PlainNodeRef[],
   assertions: readonly IdentityAssertionStorageRow[],
+  sameIdAcrossKinds: "fold" | "ignore",
 ): ReadonlyMap<string, readonly PlainNodeRef[]> {
   const unionFind = new UnionFind();
   const byId = new Map<string, PlainNodeRef[]>();
@@ -829,10 +863,12 @@ function buildComponents(
     group.push(ref);
     byId.set(ref.id, group);
   }
-  for (const group of byId.values()) {
-    const first = group[0];
-    if (first === undefined) continue;
-    for (const member of group.slice(1)) unionFind.union(first, member);
+  if (sameIdAcrossKinds === "fold") {
+    for (const group of byId.values()) {
+      const first = group[0];
+      if (first === undefined) continue;
+      for (const member of group.slice(1)) unionFind.union(first, member);
+    }
   }
   for (const assertion of assertions) {
     if (assertion.rel !== "same") continue;
@@ -850,6 +886,7 @@ async function loadSnapshot(
   graphId: string,
   coordinate?: ReadCoordinate,
   allowedKinds?: ReadonlySet<string>,
+  sameIdAcrossKinds: "fold" | "ignore" = "fold",
 ): Promise<IdentitySnapshot> {
   const currentInstant = nowIso();
   const [nodes, assertions] = await Promise.all([
@@ -875,7 +912,11 @@ async function loadSnapshot(
     nodes: scopedNodes,
     structuralNodes,
     assertions: scopedAssertions,
-    components: buildComponents(structuralNodes, scopedAssertions),
+    components: buildComponents(
+      structuralNodes,
+      scopedAssertions,
+      sameIdAcrossKinds,
+    ),
   };
 }
 
@@ -1351,6 +1392,7 @@ async function replaceClosure(
   schema: SqlSchema,
   graphId: string,
   allowedKinds?: ReadonlySet<string>,
+  sameIdAcrossKinds: "fold" | "ignore" = "fold",
 ): Promise<void> {
   const snapshot = await loadSnapshot(
     target,
@@ -1358,6 +1400,7 @@ async function replaceClosure(
     graphId,
     undefined,
     allowedKinds,
+    sameIdAcrossKinds,
   );
   await executeStatement(
     target,
@@ -1373,7 +1416,7 @@ async function insertClosureComponents(
   components: ReadonlyMap<string, readonly PlainNodeRef[]>,
 ): Promise<void> {
   const emitted = new Set<string>();
-  const values: SQL[] = [];
+  const values: SqlFragment[] = [];
   for (const [memberKey, component] of components) {
     if (emitted.has(memberKey) || component.length < 2) continue;
     const canonical = component[0]!;
@@ -1409,6 +1452,7 @@ async function replaceAffectedClosure(
   schema: SqlSchema,
   graphId: string,
   references: readonly PlainNodeRef[],
+  sameIdAcrossKinds: "fold" | "ignore" = "fold",
 ): Promise<void> {
   if (references.length === 0) return;
   const affectedByKey = new Map<string, PlainNodeRef>();
@@ -1460,7 +1504,7 @@ async function replaceAffectedClosure(
     target,
     schema,
     graphId,
-    buildComponents(structuralNodes, assertions),
+    buildComponents(structuralNodes, assertions, sameIdAcrossKinds),
   );
 }
 
@@ -1530,7 +1574,7 @@ async function assertPair<G extends GraphDef>(
   firstInput: GraphNodeRef<G>,
   secondInput: GraphNodeRef<G>,
   touch: IdentityTouch,
-): Promise<IdentityAssertion<G>> {
+): Promise<IdentityAssertionResult<G>> {
   const first = plainRef(firstInput);
   const second = plainRef(secondInput);
   if (refKey(first) === refKey(second)) throw selfAssertionError(relation);
@@ -1547,7 +1591,9 @@ async function assertPair<G extends GraphDef>(
     a,
     b,
   );
-  if (existing !== undefined) return publicAssertion(existing);
+  if (existing !== undefined) {
+    return assertionResult(publicAssertion(existing), "existing");
+  }
 
   await validateCurrentRelation(
     ctx,
@@ -1570,7 +1616,7 @@ async function assertPair<G extends GraphDef>(
   if (relation === "same") {
     await mergeCurrentClasses(target, ctx.schema, ctx.graphId, a, b);
   }
-  return publicAssertion(row);
+  return assertionResult(publicAssertion(row), "created");
 }
 
 function assertionSemanticKey(
@@ -1590,7 +1636,7 @@ async function bulkAssertPairs<G extends GraphDef>(
     b: GraphNodeRef<G>;
   }>[],
   touch: IdentityTouch,
-): Promise<readonly IdentityAssertion<G>[]> {
+): Promise<readonly IdentityAssertionResult<G>[]> {
   if (pairs.length === 0) return [];
   const normalizedPairs = pairs.map((pair) => {
     const first = plainRef(pair.a);
@@ -1646,10 +1692,12 @@ async function bulkAssertPairs<G extends GraphDef>(
     group.push(ref);
     byId.set(ref.id, group);
   }
-  for (const group of byId.values()) {
-    const first = group[0];
-    if (first === undefined) continue;
-    for (const member of group.slice(1)) unionFind.union(first, member);
+  if (ctx.sameIdAcrossKinds === "fold") {
+    for (const group of byId.values()) {
+      const first = group[0];
+      if (first === undefined) continue;
+      for (const member of group.slice(1)) unionFind.union(first, member);
+    }
   }
   for (const assertion of persistedAssertions) {
     const endpointA = { kind: assertion.a_kind, id: assertion.a_id };
@@ -1673,7 +1721,7 @@ async function bulkAssertPairs<G extends GraphDef>(
   }
 
   const createdRows: IdentityAssertionStorageRow[] = [];
-  const results: IdentityAssertion<G>[] = [];
+  const results: IdentityAssertionResult<G>[] = [];
   const closureReferences: PlainNodeRef[] = [];
   const timestamp = nowIso();
   const operation: IdentityContradictionErrorDetails["operation"] =
@@ -1683,7 +1731,7 @@ async function bulkAssertPairs<G extends GraphDef>(
     const semanticKey = assertionSemanticKey(relation, a, b);
     const existing = bySemanticKey.get(semanticKey);
     if (existing !== undefined) {
-      results.push(publicAssertion(existing));
+      results.push(assertionResult(publicAssertion(existing), "existing"));
       continue;
     }
     const rootA = unionFind.root(a);
@@ -1739,7 +1787,7 @@ async function bulkAssertPairs<G extends GraphDef>(
     const row = buildAssertionRow(ctx.graphId, relation, a, b, timestamp);
     createdRows.push(row);
     bySemanticKey.set(semanticKey, row);
-    results.push(publicAssertion(row));
+    results.push(assertionResult(publicAssertion(row), "created"));
     if (relation === "same") {
       closureReferences.push(a, b);
       if (rootA !== rootB) {
@@ -1764,6 +1812,7 @@ async function bulkAssertPairs<G extends GraphDef>(
       ctx.schema,
       ctx.graphId,
       closureReferences,
+      ctx.sameIdAcrossKinds,
     );
   }
   return results;
@@ -1895,13 +1944,18 @@ async function retractByIds(
     }
   }
   for (const row of current) {
-    touch(ctx.graphId, row.id, {
+    const ended = {
       ...row,
       valid_to: endedById.get(row.id)!,
       updated_at: now,
-    });
+    };
+    touch(ctx.graphId, row.id, ended);
   }
-  return current;
+  return current.map((row) => ({
+    ...row,
+    valid_to: endedById.get(row.id)!,
+    updated_at: now,
+  }));
 }
 
 async function runIdentityMutation<G extends GraphDef, T>(
@@ -1946,11 +2000,20 @@ export function createIdentityReadFacade<G extends GraphDef>(
   return {
     async representativeOf(input) {
       const members = await visibleMembersAtCoordinate(ctx, plainRef(input));
-      return members[0];
+      return members[0] === undefined ? undefined : publicNodeRef(members[0]);
     },
 
     async membersOf(input) {
-      return visibleMembersAtCoordinate(ctx, plainRef(input));
+      const members = await visibleMembersAtCoordinate(ctx, plainRef(input));
+      return members.map((member) => publicNodeRef<G>(member));
+    },
+
+    async nodesOf(input) {
+      const members = await visibleMembersAtCoordinate(ctx, plainRef(input));
+      const nodes = await Promise.all(
+        members.map((member) => ctx.loadNode(member, ctx.coordinate)),
+      );
+      return nodes.filter((node) => node !== undefined);
     },
 
     async areSame(firstInput, secondInput) {
@@ -2007,6 +2070,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         ctx.graphId,
         [first, second],
         ctx.coordinate!,
+        ctx.sameIdAcrossKinds,
       );
       const firstClass = classes.get(refKey(first))!;
       const secondClass = classes.get(refKey(second))!;
@@ -2087,11 +2151,18 @@ export function createIdentityFacade<G extends GraphDef>(
       return runIdentityMutation(ctx, async (target, touch) => {
         const ended = await retractById(ctx, target, id, touch);
         if (ended?.rel === "same") {
-          await replaceAffectedClosure(target, ctx.schema, ctx.graphId, [
-            { kind: ended.a_kind, id: ended.a_id },
-            { kind: ended.b_kind, id: ended.b_id },
-          ]);
+          await replaceAffectedClosure(
+            target,
+            ctx.schema,
+            ctx.graphId,
+            [
+              { kind: ended.a_kind, id: ended.a_id },
+              { kind: ended.b_kind, id: ended.b_id },
+            ],
+            ctx.sameIdAcrossKinds,
+          );
         }
+        return ended === undefined ? undefined : publicAssertion<G>(ended);
       });
     },
 
@@ -2110,8 +2181,15 @@ export function createIdentityFacade<G extends GraphDef>(
           b,
         );
         if (existing === undefined) return;
-        await retractById(ctx, target, existing.id, touch);
-        await replaceAffectedClosure(target, ctx.schema, ctx.graphId, [a, b]);
+        const ended = await retractById(ctx, target, existing.id, touch);
+        await replaceAffectedClosure(
+          target,
+          ctx.schema,
+          ctx.graphId,
+          [a, b],
+          ctx.sameIdAcrossKinds,
+        );
+        return ended === undefined ? undefined : publicAssertion<G>(ended);
       });
     },
 
@@ -2130,7 +2208,8 @@ export function createIdentityFacade<G extends GraphDef>(
           b,
         );
         if (existing === undefined) return;
-        await retractById(ctx, target, existing.id, touch);
+        const ended = await retractById(ctx, target, existing.id, touch);
+        return ended === undefined ? undefined : publicAssertion<G>(ended);
       });
     },
 
@@ -2152,8 +2231,10 @@ export function createIdentityFacade<G extends GraphDef>(
             ctx.schema,
             ctx.graphId,
             closureReferences,
+            ctx.sameIdAcrossKinds,
           );
         }
+        return retracted.map((assertion) => publicAssertion<G>(assertion));
       });
     },
   };
@@ -2172,9 +2253,22 @@ export async function rebuildIdentityClosureForContext<G extends GraphDef>(
   async function rebuildAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
     await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-      const snapshot = await loadSnapshot(rawTarget, ctx.schema, ctx.graphId);
+      const snapshot = await loadSnapshot(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        undefined,
+        undefined,
+        ctx.sameIdAcrossKinds,
+      );
       validateSnapshotIntegrity(snapshot, ctx.registry, ctx.graphId);
-      await replaceClosure(rawTarget, ctx.schema, ctx.graphId);
+      await replaceClosure(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        undefined,
+        ctx.sameIdAcrossKinds,
+      );
     });
   }
 
@@ -2197,7 +2291,14 @@ export async function validateIdentityForContext<G extends GraphDef>(
 
   async function validateAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
-    const snapshot = await loadSnapshot(target, ctx.schema, ctx.graphId);
+    const snapshot = await loadSnapshot(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      undefined,
+      undefined,
+      ctx.sameIdAcrossKinds,
+    );
     validateSnapshotIntegrity(snapshot, ctx.registry, ctx.graphId);
     await assertClosureMatchesComponents(
       target,
@@ -2269,6 +2370,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
       ctx.schema,
       ctx.graphId,
       new Set(ctx.registry.nodeKinds.keys()),
+      ctx.sameIdAcrossKinds,
     );
   });
 }
@@ -2276,12 +2378,12 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
 export async function foldIdentityForCreatedNodes(
   ctx: Pick<
     IdentityServiceContext<GraphDef>,
-    "graphId" | "registry" | "schema"
+    "graphId" | "registry" | "sameIdAcrossKinds" | "schema"
   >,
   target: Backend,
   references: readonly PlainNodeRef[],
 ): Promise<void> {
-  if (references.length === 0) return;
+  if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") return;
   await lockIdentityGraph(target, ctx.graphId);
   await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
     const ids = [...new Set(references.map((ref) => ref.id))];
@@ -2341,12 +2443,16 @@ export async function foldIdentityForCreatedNodes(
       ctx.schema,
       ctx.graphId,
       closureReferences,
+      ctx.sameIdAcrossKinds,
     );
   });
 }
 
 export async function detachIdentityForNode(
-  ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "sameIdAcrossKinds" | "schema"
+  >,
   target: Backend,
   ref: PlainNodeRef,
   mode: "soft" | "hard",
@@ -2404,7 +2510,13 @@ export async function detachIdentityForNode(
         touch(ctx.graphId, row.id, ended);
       }
     }
-    await replaceAffectedClosure(rawTarget, ctx.schema, ctx.graphId, [ref]);
+    await replaceAffectedClosure(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+      [ref],
+      ctx.sameIdAcrossKinds,
+    );
   });
 }
 
@@ -2708,6 +2820,7 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
         ctx.schema,
         ctx.graphId,
         closureReferences,
+        ctx.sameIdAcrossKinds,
       );
     }
     await importIdentityAssertionsIntoTarget(ctx, target, assertions, "state");

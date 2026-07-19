@@ -17,7 +17,7 @@ import { createPostgresBackend } from "../../../src/backend/postgres";
 import { raceTimeout, TIMEOUT_SENTINEL } from "../../concurrency-utils";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 const Person = defineNode("Person", {
@@ -44,7 +44,7 @@ const enabledGraph = defineGraph({
 let pool: Pool | undefined;
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const candidate = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -58,7 +58,7 @@ afterAll(async () => {
   if (pool !== undefined) await pool.end();
 });
 
-describe.runIf(process.env.POSTGRES_URL)(
+describe.runIf(process.env["POSTGRES_URL"])(
   "PostgreSQL identity enablement lock",
   () => {
     let writer: PoolClient | undefined;

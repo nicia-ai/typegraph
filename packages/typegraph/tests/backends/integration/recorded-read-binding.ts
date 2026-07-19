@@ -1,8 +1,6 @@
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import {
-  asCompiledStatementSql,
   asRecordedInstant,
   createSqlSchema,
   createStore,
@@ -14,6 +12,8 @@ import {
   resolveReadCoordinate,
   withRecordedCoordinate,
 } from "../../../src/core/temporal";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../../../src/query/sql-intent";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { type HistoryIntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";

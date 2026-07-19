@@ -1540,7 +1540,7 @@ export async function commitPlan<G extends GraphDef>(
         tx.nodes as unknown as TxNodes,
         tx.edges as unknown as TxEdges,
         target,
-        tx.backend,
+        transactionBackend(tx),
       );
     }, mergeCommitTransactionOptions(target)),
   );
@@ -2907,7 +2907,13 @@ async function commitIncrementalPlan<G extends GraphDef>(
       await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);
       await validateIncrementalNodeWrites(target, nodesApi, plan);
       await validateIncrementalEdgeWrites(target, edgesApi, plan);
-      return applyMergePlan(plan, nodesApi, edgesApi, target, tx.backend);
+      return applyMergePlan(
+        plan,
+        nodesApi,
+        edgesApi,
+        target,
+        transactionBackend(tx),
+      );
     }, mergeCommitTransactionOptions(target)),
   );
 }

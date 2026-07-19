@@ -49,10 +49,11 @@ describe.each(backendMatrix())("base@V content component [$name]", (entry) => {
   }
 
   it("omits the identity key for an empty assertion list, preserving the pre-identity token (#3)", async () => {
-    const [store] = await createStoreWithSchema(graph, await makeBackend());
+    const backend = await makeBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
 
     const token = await computeContentComponent(
-      store.backend,
+      backend,
       store.graphId,
       store.graph,
       [],
@@ -69,10 +70,11 @@ describe.each(backendMatrix())("base@V content component [$name]", (entry) => {
   });
 
   it("changes the token when the identity assertion list is non-empty (#3)", async () => {
-    const [store] = await createStoreWithSchema(graph, await makeBackend());
+    const backend = await makeBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
 
     const empty = await computeContentComponent(
-      store.backend,
+      backend,
       store.graphId,
       store.graph,
       [],
@@ -85,7 +87,7 @@ describe.each(backendMatrix())("base@V content component [$name]", (entry) => {
       validFrom: "2024-01-01T00:00:00.000Z",
     };
     const withAssertion = await computeContentComponent(
-      store.backend,
+      backend,
       store.graphId,
       store.graph,
       [assertion],

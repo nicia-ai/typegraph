@@ -86,7 +86,7 @@ const IDENTITY_PATH_TOKEN_SEPARATOR = "\u001F";
  * different kind) are distinct tokens; otherwise it is the bare id, preserving
  * the exact pre-identity token and public path output.
  */
-function compilePathToken(tableAlias: string, composite: boolean): SQL {
+function compilePathToken(tableAlias: string, composite: boolean): SqlFragment {
   if (!composite) {
     return sql.raw(`${tableAlias}.id`);
   }

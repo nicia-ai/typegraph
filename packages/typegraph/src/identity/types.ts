@@ -2,11 +2,26 @@ import {
   type AllNodeTypes,
   type GraphDef,
   type GraphIdentityConfig,
+  type NodeKinds,
 } from "../core/define-graph";
+import { type NodeId } from "../core/types";
 import { ValidationError } from "../errors";
-import { type NodeRef } from "../store/types";
+import { type Node, type NodeRef } from "../store/types";
 
 export type GraphNodeRef<G extends GraphDef> = NodeRef<AllNodeTypes<G>>;
+
+/** A graph-bounded identity result reference with a kind-specific branded id. */
+export type IdentityNodeRef<G extends GraphDef> = {
+  [K in NodeKinds<G>]: Readonly<{
+    kind: K;
+    id: NodeId<G["nodes"][K]["type"]>;
+  }>;
+}[NodeKinds<G>];
+
+/** A hydrated identity member, discriminated by its registered node kind. */
+export type IdentityNode<G extends GraphDef> = {
+  [K in NodeKinds<G>]: Node<G["nodes"][K]["type"]>;
+}[NodeKinds<G>];
 
 declare const __identityAssertionId: unique symbol;
 
@@ -48,11 +63,18 @@ export type IdentityRelation = "same" | "different";
 export type IdentityAssertion<G extends GraphDef> = Readonly<{
   id: IdentityAssertionId;
   relation: IdentityRelation;
-  a: GraphNodeRef<G>;
-  b: GraphNodeRef<G>;
+  a: IdentityNodeRef<G>;
+  b: IdentityNodeRef<G>;
   validFrom: string;
   validTo?: string;
 }>;
+
+/** Result of an idempotent assertion write. */
+export type IdentityAssertionResult<G extends GraphDef> = IdentityAssertion<G> &
+  Readonly<{
+    assertion: IdentityAssertion<G>;
+    action: "created" | "existing";
+  }>;
 
 export type IdentityPair<G extends GraphDef> = Readonly<{
   a: GraphNodeRef<G>;
@@ -62,8 +84,9 @@ export type IdentityPair<G extends GraphDef> = Readonly<{
 export type IdentityReadFacade<G extends GraphDef> = Readonly<{
   representativeOf: (
     ref: GraphNodeRef<G>,
-  ) => Promise<GraphNodeRef<G> | undefined>;
-  membersOf: (ref: GraphNodeRef<G>) => Promise<readonly GraphNodeRef<G>[]>;
+  ) => Promise<IdentityNodeRef<G> | undefined>;
+  membersOf: (ref: GraphNodeRef<G>) => Promise<readonly IdentityNodeRef<G>[]>;
+  nodesOf: (ref: GraphNodeRef<G>) => Promise<readonly IdentityNode<G>[]>;
   areSame: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<boolean>;
   areDifferent: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<boolean>;
   assertionsOf: (
@@ -76,29 +99,31 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
     assertSame: (
       a: GraphNodeRef<G>,
       b: GraphNodeRef<G>,
-    ) => Promise<IdentityAssertion<G>>;
+    ) => Promise<IdentityAssertionResult<G>>;
     assertDifferent: (
       a: GraphNodeRef<G>,
       b: GraphNodeRef<G>,
-    ) => Promise<IdentityAssertion<G>>;
+    ) => Promise<IdentityAssertionResult<G>>;
     bulkAssertSame: (
       pairs: readonly IdentityPair<G>[],
-    ) => Promise<readonly IdentityAssertion<G>[]>;
+    ) => Promise<readonly IdentityAssertionResult<G>[]>;
     bulkAssertDifferent: (
       pairs: readonly IdentityPair<G>[],
-    ) => Promise<readonly IdentityAssertion<G>[]>;
-    retractAssertion: (id: IdentityAssertionId) => Promise<void>;
+    ) => Promise<readonly IdentityAssertionResult<G>[]>;
+    retractAssertion: (
+      id: IdentityAssertionId,
+    ) => Promise<IdentityAssertion<G> | undefined>;
     retractSameAssertion: (
       a: GraphNodeRef<G>,
       b: GraphNodeRef<G>,
-    ) => Promise<void>;
+    ) => Promise<IdentityAssertion<G> | undefined>;
     retractDifferentAssertion: (
       a: GraphNodeRef<G>,
       b: GraphNodeRef<G>,
-    ) => Promise<void>;
+    ) => Promise<IdentityAssertion<G> | undefined>;
     bulkRetractAssertions: (
       ids: readonly IdentityAssertionId[],
-    ) => Promise<void>;
+    ) => Promise<readonly IdentityAssertion<G>[]>;
   }>;
 
 export type IdentityFacadeFor<G extends GraphDef> =

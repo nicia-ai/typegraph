@@ -32,7 +32,9 @@ throw `ConfigurationError` with details code `IDENTITY_NOT_ENABLED` if reached
 
 `sameIdAcrossKinds: "fold"` preserves TypeGraph's structural ID rule: live
 nodes of different kinds with the same ID belong to one identity class. No
-assertion row is manufactured for that implicit membership.
+assertion row is manufactured for that implicit membership. Use
+`sameIdAcrossKinds: "ignore"` to enable the assertion ledger without joining
+equal IDs across kinds; only explicit `same` assertions then join classes.
 
 ## Write and read identity
 
@@ -46,17 +48,20 @@ const author = await store.nodes.Author.create(
   { id: "author-alice" },
 );
 
-const assertion = await store.identity.assertSame(alice, author);
+const result = await store.identity.assertSame(alice, author);
+// result.action is "created" or "existing"; result.assertion is durable truth
 
 await store.identity.membersOf(alice);
 // [{ kind: "Author", id: "author-alice" },
 //  { kind: "Person", id: "person-alice" }]
 
 await store.identity.representativeOf(alice);
+await store.identity.nodesOf(alice); // hydrated, kind-discriminated nodes
 await store.identity.areSame(alice, author);
 await store.identity.assertionsOf(alice);
 
-await store.identity.retractAssertion(assertion.id);
+const ended = await store.identity.retractAssertion(result.assertion.id);
+// ended?.validTo is the exact assertion end instant
 ```
 
 The complete write surface is:
@@ -68,19 +73,25 @@ The complete write surface is:
 - `bulkRetractAssertions(ids)`
 
 Bulk methods are eager, preserve input order, and run under one graph identity
-lock. Reasserting a current semantic pair is idempotent. Self-assertions are
-rejected. Assertion IDs use the exported private-symbol-branded
+lock. Reasserting a current semantic pair is idempotent; assertion results
+distinguish `action: "created"` from `action: "existing"`. Retraction methods
+return the ended assertion (or `undefined` for a missing current assertion),
+and bulk retraction returns all ended assertions. Self-assertions are rejected.
+Assertion IDs use the exported private-symbol-branded
 `IdentityAssertionId` type so unrelated strings cannot be passed accidentally.
 When you hold a plain assertion-ID string that came from persistence or an
 interchange document, re-enter the branded type with the `asIdentityAssertionId(value)`
 caster rather than a `as` assertion.
 
-Reads return typed `{ kind, id }` node references. A missing, deleted, or
+Reference reads return graph-bounded `{ kind, id }` values whose IDs retain the
+node kind's `NodeId` brand. `nodesOf` hydrates the class into a kind-discriminated
+node union. A missing, deleted, or
 coordinate-invisible input returns `undefined`, `[]`, or `false` according to
 the method. A visible singleton returns itself from `membersOf` and
 `representativeOf`, and `areSame(ref, ref)` is true. `areDifferent` lifts an
 explicit different assertion across both identity classes and also reflects
-ontology `disjointWith` constraints.
+ontology `disjointWith` constraints. Representatives are deterministic: the
+code-point-smallest `(kind, id)` visible member wins.
 
 ## Integrity and lifecycle
 
@@ -91,11 +102,12 @@ one class. These checks, folding, node deletion, import, and schema validation
 share one per-graph lock and one mutation coordinator.
 
 Soft-deleting a node ends its current assertions. Hard-deleting it removes its
-assertions permanently. On an identity-enabled graph a `create()` or `upsert`
-for a soft-deleted same-`(kind, id)` row **resurrects** that row rather than
-erroring: its properties are replaced and its validity window is reset, so
-`validFrom` becomes the resurrection instant. Resurrection does not revive ended
-assertions, but folding runs again over the resurrected node. Kind removal
+assertions permanently. On every graph, a `create()` or `upsert` for a
+soft-deleted same-`(kind, id)` row **resurrects** that row rather than erroring:
+its properties are replaced and its validity window is reset, so `validFrom`
+becomes the resurrection instant. This graph-wide rule does not depend on the
+identity profile. Resurrection does not revive ended assertions, but folding
+runs again over the resurrected node when configured. Kind removal
 cascades assertion and closure rows for the removed kinds. Tightening ontology
 disjointness is rejected when it would make a persisted class contradictory.
 

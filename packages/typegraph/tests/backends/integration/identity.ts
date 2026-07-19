@@ -1,9 +1,7 @@
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  asCompiledStatementSql,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -13,6 +11,8 @@ import {
 } from "../../../src";
 import { inverseOf } from "../../../src/ontology";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../../../src/query/sql-intent";
 import { type IntegrationTestContext } from "./test-context";
 
 /**

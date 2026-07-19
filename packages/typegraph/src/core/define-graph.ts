@@ -155,7 +155,8 @@ function normalizeEdges(
 
 /** Durable graph-level configuration for the TypeGraph Identity Profile. */
 export type GraphIdentityConfig = Readonly<{
-  sameIdAcrossKinds: "fold";
+  /** Whether equal ids in different kinds implicitly join one identity class. */
+  sameIdAcrossKinds: "fold" | "ignore";
 }>;
 
 /**

@@ -900,7 +900,6 @@ async function prepareBatchCreates<G extends GraphDef>(
   options?: NodeCreateInternalOptions,
 ): Promise<{
   preparedCreates: NodeCreatePrepared[];
-  batchInsertParams: InsertNodeParams[];
 }> {
   const {
     backend: validationBackend,
@@ -942,14 +941,10 @@ async function prepareBatchCreates<G extends GraphDef>(
     );
   }
 
-  const batchInsertParams = preparedCreates.map(
-    (prepared) => prepared.insertParams,
-  );
-
-  return { preparedCreates, batchInsertParams };
+  return { preparedCreates };
 }
 
-type IdentityCreatePartition = Readonly<{
+type CreatePartition = Readonly<{
   inserts: readonly NodeCreatePrepared[];
   resurrections: readonly Readonly<{
     prepared: NodeCreatePrepared;
@@ -957,11 +952,11 @@ type IdentityCreatePartition = Readonly<{
   }>[];
 }>;
 
-async function partitionIdentityCreates(
+async function partitionCreates(
   graphId: string,
   preparedCreates: readonly NodeCreatePrepared[],
   target: GraphBackend | TransactionBackend,
-): Promise<IdentityCreatePartition> {
+): Promise<CreatePartition> {
   const inserts: NodeCreatePrepared[] = [];
   const resurrections: {
     prepared: NodeCreatePrepared;
@@ -1151,31 +1146,21 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         options,
       );
 
-      if (identity !== undefined) {
-        const existing = await target.getNode(ctx.graphId, kind, id);
-        if (existing?.deleted_at !== undefined) {
-          const resurrected = await applyNodeUpdate(
-            createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-            {
-              existing,
-              clearDeleted: true,
-              schema: prepared.nodeKind.schema,
-              validatedProps: prepared.validatedProps,
-              uniqueConstraints: prepared.uniqueConstraints,
-              ...(prepared.insertParams.validFrom === undefined ?
-                {}
-              : { validFrom: prepared.insertParams.validFrom }),
-              ...(prepared.insertParams.validTo === undefined ?
-                {}
-              : { validTo: prepared.insertParams.validTo }),
-            },
-            target,
-          );
+      const existing = await target.getNode(ctx.graphId, kind, id);
+      if (existing?.deleted_at !== undefined) {
+        const resurrected = await resurrectPreparedNode(
+          ctx,
+          target,
+          lock,
+          prepared,
+          existing,
+        );
+        if (identity !== undefined) {
           await identity.foldCreated(target, [
             { kind: prepared.kind, id: prepared.id },
           ]);
-          return shouldReturnRow ? rowToNode(resurrected) : undefined;
         }
+        return shouldReturnRow ? rowToNode(resurrected) : undefined;
       }
 
       let row: BackendNodeRow | undefined;
@@ -1244,30 +1229,21 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   await runInWriteTransaction(ctx, backend, async (target, lock) => {
     const identity = ctx.identity;
     if (identity !== undefined) await identity.lock(target);
-    const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
-      ctx,
-      inputs,
+    const { preparedCreates } = await prepareBatchCreates(ctx, inputs, target);
+
+    const partition = await partitionCreates(
+      ctx.graphId,
+      preparedCreates,
       target,
     );
-
-    if (identity === undefined) {
-      await runInsertBatch(nodeInsertDispatch(target), batchInsertParams);
-      await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
-    } else {
-      const partition = await partitionIdentityCreates(
-        ctx.graphId,
-        preparedCreates,
-        target,
-      );
-      await runInsertBatch(
-        nodeInsertDispatch(target),
-        partition.inserts.map((prepared) => prepared.insertParams),
-      );
-      for (const { prepared, existing } of partition.resurrections) {
-        await resurrectPreparedNode(ctx, target, lock, prepared, existing);
-      }
-      await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
+    await runInsertBatch(
+      nodeInsertDispatch(target),
+      partition.inserts.map((prepared) => prepared.insertParams),
+    );
+    for (const { prepared, existing } of partition.resurrections) {
+      await resurrectPreparedNode(ctx, target, lock, prepared, existing);
     }
+    await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
     if (identity !== undefined) {
       await identity.foldCreated(
         target,
@@ -1300,47 +1276,38 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   return runInWriteTransaction(ctx, backend, async (target, lock) => {
     const identity = ctx.identity;
     if (identity !== undefined) await identity.lock(target);
-    const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
+    const { preparedCreates } = await prepareBatchCreates(
       ctx,
       inputs,
       target,
       options,
     );
 
-    let rows: readonly BackendNodeRow[];
-    if (identity === undefined) {
-      rows = await runInsertBatchReturning(
-        nodeInsertDispatch(target),
-        batchInsertParams,
-      );
-      await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
-    } else {
-      const partition = await partitionIdentityCreates(
-        ctx.graphId,
-        preparedCreates,
-        target,
-      );
-      const inserted = await runInsertBatchReturning(
-        nodeInsertDispatch(target),
-        partition.inserts.map((prepared) => prepared.insertParams),
-      );
-      const resurrected: BackendNodeRow[] = [];
-      for (const { prepared, existing } of partition.resurrections) {
-        resurrected.push(
-          await resurrectPreparedNode(ctx, target, lock, prepared, existing),
-        );
-      }
-      await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
-      const byReference = new Map(
-        [...inserted, ...resurrected].map((row) => [
-          JSON.stringify([row.kind, row.id]),
-          row,
-        ]),
-      );
-      rows = preparedCreates.map((prepared) =>
-        byReference.get(JSON.stringify([prepared.kind, prepared.id]))!,
+    const partition = await partitionCreates(
+      ctx.graphId,
+      preparedCreates,
+      target,
+    );
+    const inserted = await runInsertBatchReturning(
+      nodeInsertDispatch(target),
+      partition.inserts.map((prepared) => prepared.insertParams),
+    );
+    const resurrected: BackendNodeRow[] = [];
+    for (const { prepared, existing } of partition.resurrections) {
+      resurrected.push(
+        await resurrectPreparedNode(ctx, target, lock, prepared, existing),
       );
     }
+    await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
+    const byReference = new Map(
+      [...inserted, ...resurrected].map((row) => [
+        JSON.stringify([row.kind, row.id]),
+        row,
+      ]),
+    );
+    const rows = preparedCreates.map((prepared) =>
+      byReference.get(JSON.stringify([prepared.kind, prepared.id]))!,
+    );
     if (identity !== undefined) {
       await identity.foldCreated(
         target,

@@ -1,9 +1,8 @@
-import { sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  asCompiledRowsSql,
+  createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
   createVerifiedStore,
@@ -17,6 +16,8 @@ import { ConfigurationError, IdentityContradictionError } from "../src/errors";
 import { exportGraph, importGraph } from "../src/interchange";
 import { disjointWith } from "../src/ontology";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { sql } from "../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../src/query/sql-intent";
 import {
   createInitializedStore,
   createTestBackend,
@@ -56,6 +57,13 @@ const disabledGraph = defineGraph({
   edges: {},
 });
 
+const assertionOnlyGraph = defineGraph({
+  id: "identity_assertion_only_unit",
+  nodes: graph.nodes,
+  edges: graph.edges,
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+
 const disabledMigrationGraph = defineGraph({
   id: graph.id,
   nodes: graph.nodes,
@@ -63,6 +71,90 @@ const disabledMigrationGraph = defineGraph({
 });
 
 describe("Operational Identity", () => {
+  it("supports the identity ledger without implicitly folding equal ids", async () => {
+    const store = await createInitializedStore(
+      assertionOnlyGraph,
+      createTestBackend(),
+    );
+    const person = await store.nodes.Person.create(
+      { name: "Alice" },
+      { id: "shared" },
+    );
+    const author = await store.nodes.Author.create(
+      { penName: "A." },
+      { id: "shared" },
+    );
+
+    expect(await store.identity.areSame(person, author)).toBe(false);
+    expect(await store.identity.membersOf(person)).toEqual([
+      { kind: "Person", id: person.id },
+    ]);
+
+    await store.identity.assertSame(person, author);
+    expect(await store.identity.areSame(person, author)).toBe(true);
+  });
+
+  it("returns hydrated, kind-discriminated identity members", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const person = await store.nodes.Person.create(
+      { name: "Alice" },
+      { id: "person" },
+    );
+    const author = await store.nodes.Author.create(
+      { penName: "A." },
+      { id: "author" },
+    );
+    await store.identity.assertSame(person, author);
+
+    const nodes = await store.identity.nodesOf(person);
+    expect(nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "Person", name: "Alice" }),
+        expect.objectContaining({ kind: "Author", penName: "A." }),
+      ]),
+    );
+  });
+
+  it("reports idempotent assertion actions and the ended retraction", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const first = await store.nodes.Person.create(
+      { name: "First" },
+      { id: "first" },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Second" },
+      { id: "second" },
+    );
+
+    const created = await store.identity.assertSame(first, second);
+    const existing = await store.identity.assertSame(first, second);
+    expect(created.action).toBe("created");
+    expect(existing.action).toBe("existing");
+    expect(existing.assertion.id).toBe(created.assertion.id);
+
+    const ended = await store.identity.retractAssertion(created.assertion.id);
+    expect(ended?.validTo).toBeDefined();
+  });
+
+  it("resurrects tombstoned ids consistently without identity enabled", async () => {
+    const store = await createInitializedStore(
+      disabledGraph,
+      createTestBackend(),
+    );
+    const original = await store.nodes.Person.create(
+      { name: "Before" },
+      { id: "person" },
+    );
+    await store.nodes.Person.delete(original.id);
+
+    const revived = await store.nodes.Person.create(
+      { name: "After" },
+      { id: "person" },
+    );
+    expect(revived.id).toBe(original.id);
+    expect(revived.name).toBe("After");
+  });
+
   it("fails with the stable capability code on non-transactional drivers", () => {
     const backend = disableTransactions(createTestBackend());
 
@@ -137,9 +229,11 @@ describe("Operational Identity", () => {
   });
 
   it("captures identity after-images at the assertion commit instant", async () => {
-    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-      history: true,
-    });
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
     const person = await store.nodes.Person.create({ name: "Alice" });
     const author = await store.nodes.Author.create({ penName: "A." });
     const assertion = await store.identity.assertSame(person, author);

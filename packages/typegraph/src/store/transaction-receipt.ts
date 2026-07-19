@@ -209,6 +209,7 @@ export function wrapTransactionIdentity<G extends GraphDef>(
   return {
     representativeOf: (ref) => identity.representativeOf(ref),
     membersOf: (ref) => identity.membersOf(ref),
+    nodesOf: (ref) => identity.nodesOf(ref),
     areSame: (a, b) => identity.areSame(a, b),
     areDifferent: (a, b) => identity.areDifferent(a, b),
     assertionsOf: (ref) => identity.assertionsOf(ref),
@@ -242,24 +243,28 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     },
     async retractAssertion(id) {
       recorder.assertWritable();
-      await identity.retractAssertion(id);
+      const result = await identity.retractAssertion(id);
       recorder.recordIdentity("retractions", 1);
+      return result;
     },
     async retractSameAssertion(a, b) {
       recorder.assertWritable();
-      await identity.retractSameAssertion(a, b);
+      const result = await identity.retractSameAssertion(a, b);
       recorder.recordIdentity("retractions", 1);
+      return result;
     },
     async retractDifferentAssertion(a, b) {
       recorder.assertWritable();
-      await identity.retractDifferentAssertion(a, b);
+      const result = await identity.retractDifferentAssertion(a, b);
       recorder.recordIdentity("retractions", 1);
+      return result;
     },
     async bulkRetractAssertions(ids) {
       recorder.assertWritable();
       const count = ids.length;
-      await identity.bulkRetractAssertions(ids);
+      const result = await identity.bulkRetractAssertions(ids);
       recorder.recordIdentity("retractions", count);
+      return result;
     },
   };
 }
