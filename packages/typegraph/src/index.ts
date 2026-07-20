@@ -372,6 +372,8 @@ export type {
   RebuildFulltextResult,
   ReclaimedVectorFieldEntry,
   RecordedReadStore,
+  RecordedScanOptions,
+  RecordedScanPage,
   ReembedFunction,
   ReembedVectorFieldOptions,
   ReembedVectorFieldResult,

@@ -12,7 +12,7 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
-import { ConfigurationError } from "../errors";
+import { ConfigurationError, ValidationError } from "../errors";
 import { sqlValueList } from "../query/compiler/predicate-utils";
 import {
   type RecordedReadBinding,
@@ -23,6 +23,7 @@ import {
   compileTemporalFilter,
   currentReadInstant,
 } from "../query/compiler/temporal";
+import { decodeCursor, encodeCursor } from "../query/cursor";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, type CompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
@@ -30,9 +31,15 @@ import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
 import { recordedBindParamBudget } from "./recorded-capture/relations";
 import { rowToEdge, rowToNode } from "./row-mappers";
-import { type Edge, type Node } from "./types";
+import {
+  type Edge,
+  type Node,
+  type RecordedScanOptions,
+  type RecordedScanPage,
+} from "./types";
 
 const RECORDED_POINT_READ_FIXED_BIND_PARAMS = 8;
+const RECORDED_SCAN_LIMIT = 1000;
 
 type RecordedReadServiceParams = Readonly<{
   graphId: string;
@@ -52,6 +59,16 @@ type RecordedGetByIdsParams<T extends Readonly<{ id: string }>> = Readonly<{
   toEntity: (row: Record<string, unknown>) => T;
 }>;
 
+type RecordedScanParams<T extends Readonly<{ id: string }>> = Readonly<{
+  entity: "node" | "edge";
+  table: SqlFragment;
+  alias: string;
+  kind: string;
+  coordinate: ReadCoordinate;
+  options: RecordedScanOptions | undefined;
+  toEntity: (row: Record<string, unknown>) => T;
+}>;
+
 export type RecordedReadService = Readonly<{
   backendForCoordinate: (
     coordinate: ReadCoordinate,
@@ -67,6 +84,11 @@ export type RecordedReadService = Readonly<{
     ids: readonly NodeId<N>[],
     coordinate: ReadCoordinate,
   ) => Promise<readonly (Node<N> | undefined)[]>;
+  nodeScan: <N extends NodeType>(
+    kind: string,
+    coordinate: ReadCoordinate,
+    options?: RecordedScanOptions,
+  ) => Promise<RecordedScanPage<Node<N>>>;
   edgeGetById: <E extends AnyEdgeType>(
     kind: string,
     id: EdgeId<E>,
@@ -77,6 +99,11 @@ export type RecordedReadService = Readonly<{
     ids: readonly EdgeId<E>[],
     coordinate: ReadCoordinate,
   ) => Promise<readonly (Edge<E> | undefined)[]>;
+  edgeScan: <E extends AnyEdgeType>(
+    kind: string,
+    coordinate: ReadCoordinate,
+    options?: RecordedScanOptions,
+  ) => Promise<RecordedScanPage<Edge<E>>>;
 }>;
 
 /**
@@ -165,7 +192,7 @@ function recordedRelationInvariantError(
   }>,
 ): ConfigurationError {
   return new ConfigurationError(
-    "Recorded relation invariant violation: more than one recorded row matched the requested point read.",
+    "Recorded relation invariant violation: more than one recorded row matched the requested read.",
     {
       code: "RECORDED_RELATION_INVARIANT_VIOLATION",
       graphId: params.graphId,
@@ -183,6 +210,77 @@ function recordedRelationInvariantError(
   );
 }
 
+function validateRecordedScanLimit(limit: number | undefined): number {
+  if (limit === undefined) return RECORDED_SCAN_LIMIT;
+  if (!Number.isInteger(limit) || limit <= 0 || limit > RECORDED_SCAN_LIMIT) {
+    throw new ValidationError(
+      `Recorded scan limit must be an integer between 1 and ${RECORDED_SCAN_LIMIT}, got: ${String(limit)}`,
+      {
+        issues: [
+          {
+            path: "limit",
+            message: `Must be an integer between 1 and ${RECORDED_SCAN_LIMIT}.`,
+          },
+        ],
+      },
+    );
+  }
+  return limit;
+}
+
+function recordedScanCursorScope(
+  graphId: string,
+  entity: "node" | "edge",
+  kind: string,
+  coordinate: ReadCoordinate,
+): string {
+  return JSON.stringify([
+    "recorded-scan",
+    graphId,
+    entity,
+    kind,
+    coordinate.valid.mode,
+    coordinate.valid.asOf,
+    coordinate.recorded?.asOf,
+  ]);
+}
+
+function invalidRecordedScanCursor(): ValidationError {
+  return new ValidationError(
+    "Recorded scan cursor does not match this graph, collection, or temporal coordinate.",
+    {
+      issues: [
+        {
+          path: "after",
+          message:
+            "Use a cursor returned by the same recorded collection scan.",
+        },
+      ],
+    },
+  );
+}
+
+function decodeRecordedScanCursor(
+  cursor: string,
+  expectedScope: string,
+): string {
+  const decoded = decodeCursor(cursor);
+  if (
+    decoded.d !== "f" ||
+    decoded.cols.length !== 1 ||
+    decoded.cols[0] !== expectedScope ||
+    decoded.vals.length !== 1 ||
+    typeof decoded.vals[0] !== "string"
+  ) {
+    throw invalidRecordedScanCursor();
+  }
+  return decoded.vals[0];
+}
+
+function encodeRecordedScanCursor(id: string, scope: string): string {
+  return encodeCursor({ v: 1, d: "f", vals: [id], cols: [scope] });
+}
+
 export function createRecordedReadService(
   params: RecordedReadServiceParams,
 ): RecordedReadService {
@@ -197,6 +295,15 @@ export function createRecordedReadService(
     recordedReadBinding === undefined ? undefined : (
       recordedReadSqlSchema(recordedReadBinding)
     );
+
+  function schemaForRecordedRead(surface: string) {
+    return (
+      recordedSchema ??
+      recordedReadSqlSchema(
+        requireRecordedReadBinding(recordedReadBinding, surface),
+      )
+    );
+  }
 
   async function recordedGetByIds<T extends Readonly<{ id: string }>>(
     read: RecordedGetByIdsParams<T>,
@@ -245,16 +352,65 @@ export function createRecordedReadService(
     return ids.map((id) => byId.get(id));
   }
 
+  async function recordedScan<T extends Readonly<{ id: string }>>(
+    scan: RecordedScanParams<T>,
+  ): Promise<RecordedScanPage<T>> {
+    const { table, alias, kind, coordinate, options, toEntity, entity } = scan;
+    const limit = validateRecordedScanLimit(options?.limit);
+    const scope = recordedScanCursorScope(graphId, entity, kind, coordinate);
+    const after =
+      options?.after === undefined ?
+        undefined
+      : decodeRecordedScanCursor(options.after, scope);
+    const aliasSql = sql.raw(alias);
+    const temporalFilter = recordedTemporalFilter(backend, coordinate, alias);
+    const rows = await withRelationsPrecondition(
+      backend,
+      backend.execute<Record<string, unknown>>(
+        asCompiledRowsSql(sql`
+          SELECT * FROM ${table} ${aliasSql}
+          WHERE ${aliasSql}.graph_id = ${graphId}
+            AND ${aliasSql}.kind = ${kind}
+            ${after === undefined ? sql.raw("") : sql`AND ${aliasSql}.id > ${after}`}
+            AND ${temporalFilter}
+          ORDER BY ${aliasSql}.id ASC, ${aliasSql}.recorded_from ASC
+          LIMIT ${limit + 1}
+        `),
+      ),
+      "recorded-scan",
+    );
+    const entities = rows.map((row) => toEntity(row));
+    for (let index = 1; index < entities.length; index += 1) {
+      const previous = requireDefined(entities[index - 1]);
+      const current = requireDefined(entities[index]);
+      if (previous.id !== current.id) continue;
+      throw recordedRelationInvariantError({
+        graphId,
+        entity,
+        kind,
+        id: current.id,
+        coordinate,
+      });
+    }
+
+    const hasNextPage = entities.length > limit;
+    const data = hasNextPage ? entities.slice(0, limit) : entities;
+    return {
+      data,
+      nextCursor:
+        hasNextPage ?
+          encodeRecordedScanCursor(requireDefined(data.at(-1)).id, scope)
+        : undefined,
+      hasNextPage,
+    };
+  }
+
   function nodeGetByIds<N extends NodeType>(
     kind: string,
     ids: readonly NodeId<N>[],
     coordinate: ReadCoordinate,
   ): Promise<readonly (Node<N> | undefined)[]> {
-    const schema =
-      recordedSchema ??
-      recordedReadSqlSchema(
-        requireRecordedReadBinding(recordedReadBinding, "recorded-point-read"),
-      );
+    const schema = schemaForRecordedRead("recorded-point-read");
     return recordedGetByIds({
       entity: "node",
       table: schema.nodesTable,
@@ -271,11 +427,7 @@ export function createRecordedReadService(
     ids: readonly EdgeId<E>[],
     coordinate: ReadCoordinate,
   ): Promise<readonly (Edge<E> | undefined)[]> {
-    const schema =
-      recordedSchema ??
-      recordedReadSqlSchema(
-        requireRecordedReadBinding(recordedReadBinding, "recorded-point-read"),
-      );
+    const schema = schemaForRecordedRead("recorded-point-read");
     return recordedGetByIds({
       entity: "edge",
       table: schema.edgesTable,
@@ -283,6 +435,40 @@ export function createRecordedReadService(
       kind,
       ids,
       coordinate,
+      toEntity: (row) => rowToEdge(mapRecordedEdgeRow(row)) as Edge<E>,
+    });
+  }
+
+  function nodeScan<N extends NodeType>(
+    kind: string,
+    coordinate: ReadCoordinate,
+    options?: RecordedScanOptions,
+  ): Promise<RecordedScanPage<Node<N>>> {
+    const schema = schemaForRecordedRead("recorded-scan");
+    return recordedScan({
+      entity: "node",
+      table: schema.nodesTable,
+      alias: "n",
+      kind,
+      coordinate,
+      options,
+      toEntity: (row) => rowToNode(mapRecordedNodeRow(row)) as Node<N>,
+    });
+  }
+
+  function edgeScan<E extends AnyEdgeType>(
+    kind: string,
+    coordinate: ReadCoordinate,
+    options?: RecordedScanOptions,
+  ): Promise<RecordedScanPage<Edge<E>>> {
+    const schema = schemaForRecordedRead("recorded-scan");
+    return recordedScan({
+      entity: "edge",
+      table: schema.edgesTable,
+      alias: "e",
+      kind,
+      coordinate,
+      options,
       toEntity: (row) => rowToEdge(mapRecordedEdgeRow(row)) as Edge<E>,
     });
   }
@@ -307,6 +493,7 @@ export function createRecordedReadService(
     },
 
     nodeGetByIds,
+    nodeScan,
 
     async edgeGetById<E extends AnyEdgeType>(
       kind: string,
@@ -318,5 +505,6 @@ export function createRecordedReadService(
     },
 
     edgeGetByIds,
+    edgeScan,
   };
 }

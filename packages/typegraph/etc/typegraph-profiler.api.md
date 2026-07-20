@@ -2656,6 +2656,19 @@ type RecordedReadBinding = RecordedReadSource;
 type RecordedReadSource = ExternalRecordedReadSource | TypeGraphRecordedReadSource;
 
 // @public
+type RecordedScanOptions = Readonly<{
+    limit?: number;
+    after?: string;
+}>;
+
+// @public
+type RecordedScanPage<T> = Readonly<{
+    data: readonly T[];
+    nextCursor: string | undefined;
+    hasNextPage: boolean;
+}>;
+
+// @public
 class RecordedStoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
     get asOfRecorded(): string;
@@ -2664,7 +2677,9 @@ class RecordedStoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
 }
 
 // @public
-type RecordedStoreViewEdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType> = Pick<StoreViewEdgeCollection<E, From, To>, (typeof RECORDED_POINT_READ_NAMES)[number]>;
+type RecordedStoreViewEdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType> = Pick<StoreViewEdgeCollection<E, From, To>, (typeof RECORDED_POINT_READ_NAMES)[number]> & Readonly<{
+    scan: (options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E, From, To>>>;
+}>;
 
 // @public
 type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
@@ -2672,7 +2687,9 @@ type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
 };
 
 // @public
-type RecordedStoreViewNodeCollection<N extends NodeType> = Pick<StoreViewNodeCollection<N>, (typeof RECORDED_POINT_READ_NAMES)[number]>;
+type RecordedStoreViewNodeCollection<N extends NodeType> = Pick<StoreViewNodeCollection<N>, (typeof RECORDED_POINT_READ_NAMES)[number]> & Readonly<{
+    scan: (options?: RecordedScanOptions) => Promise<RecordedScanPage<Node<N>>>;
+}>;
 
 // @public
 type RecordedStoreViewNodeCollections<G extends GraphDef> = {
@@ -3203,8 +3220,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
     recordedNodeGetById: <N extends NodeType>(kind: string, id: NodeId<N>, coordinate: ReadCoordinate) => Promise<Node<N> | undefined>;
     recordedNodeGetByIds: <N extends NodeType>(kind: string, ids: readonly NodeId<N>[], coordinate: ReadCoordinate) => Promise<readonly (Node<N> | undefined)[]>;
+    recordedNodeScan: <N extends NodeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Node<N>>>;
     recordedEdgeGetById: <E extends AnyEdgeType>(kind: string, id: EdgeId<E>, coordinate: ReadCoordinate) => Promise<Edge<E> | undefined>;
     recordedEdgeGetByIds: <E extends AnyEdgeType>(kind: string, ids: readonly EdgeId<E>[], coordinate: ReadCoordinate) => Promise<readonly (Edge<E> | undefined)[]>;
+    recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
     subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
 }>;

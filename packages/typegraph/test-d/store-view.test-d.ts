@@ -480,32 +480,33 @@ expectAssignable<Pick<RecordedStoreView<typeof graph>, RecordedSharedKeys>>(
 
 // ============================================================
 // Conformance: the recorded view's collections expose EXACTLY the two
-// reconstructing point reads, and those reads ARE StoreView's point reads.
+// reconstructing point reads plus the bounded scan, and the point reads ARE
+// StoreView's point reads.
 // Narrowness (the `keyof` checks) turns silently widening the recorded surface
 // back to include find / findFrom / etc. into a build break; the mutual
 // assignability locks each point read's signature to StoreView's, so a getById
 // change can't drift the two apart.
 // ============================================================
 
-expectType<"getById" | "getByIds">(
+expectType<"getById" | "getByIds" | "scan">(
   {} as keyof RecordedStoreViewNodeCollection<typeof Person>,
 );
-expectType<"getById" | "getByIds">(
+expectType<"getById" | "getByIds" | "scan">(
   {} as keyof RecordedStoreViewEdgeCollection<typeof worksAt>,
 );
 
 expectAssignable<
   Pick<StoreViewNodeCollection<typeof Person>, "getById" | "getByIds">
 >({} as RecordedStoreViewNodeCollection<typeof Person>);
-expectAssignable<RecordedStoreViewNodeCollection<typeof Person>>(
-  {} as Pick<StoreViewNodeCollection<typeof Person>, "getById" | "getByIds">,
-);
+expectAssignable<
+  Pick<RecordedStoreViewNodeCollection<typeof Person>, "getById" | "getByIds">
+>({} as Pick<StoreViewNodeCollection<typeof Person>, "getById" | "getByIds">);
 expectAssignable<
   Pick<StoreViewEdgeCollection<typeof worksAt>, "getById" | "getByIds">
 >({} as RecordedStoreViewEdgeCollection<typeof worksAt>);
-expectAssignable<RecordedStoreViewEdgeCollection<typeof worksAt>>(
-  {} as Pick<StoreViewEdgeCollection<typeof worksAt>, "getById" | "getByIds">,
-);
+expectAssignable<
+  Pick<RecordedStoreViewEdgeCollection<typeof worksAt>, "getById" | "getByIds">
+>({} as Pick<StoreViewEdgeCollection<typeof worksAt>, "getById" | "getByIds">);
 
 // The recorded view's per-kind accessors yield exactly those narrow
 // collections, so the class wiring cannot drift from the collection types.

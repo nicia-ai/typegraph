@@ -1423,13 +1423,35 @@ export type StoreViewEdgeCollections<G extends GraphDef> = {
   >;
 };
 
-/** Recorded-time node point reads for one node kind. */
+/** Options for one bounded, forward-only recorded-time collection scan. */
+export type RecordedScanOptions = Readonly<{
+  /** Maximum entities to return. Defaults to 1,000 and cannot exceed 1,000. */
+  limit?: number;
+  /** Opaque cursor returned by the preceding page. */
+  after?: string;
+}>;
+
+/** One page from a deterministic recorded-time collection scan. */
+export type RecordedScanPage<T> = Readonly<{
+  /** Entities ordered by canonical id ascending. */
+  data: readonly T[];
+  /** Cursor for the next page, or `undefined` when the scan is complete. */
+  nextCursor: string | undefined;
+  /** Whether another page exists after this one. */
+  hasNextPage: boolean;
+}>;
+
+/** Recorded-time reconstructing reads for one node kind. */
 export type RecordedStoreViewNodeCollection<N extends NodeType> = Pick<
   StoreViewNodeCollection<N>,
   (typeof RECORDED_POINT_READ_NAMES)[number]
->;
+> &
+  Readonly<{
+    /** Scan one bounded page at the view's pinned coordinate. */
+    scan: (options?: RecordedScanOptions) => Promise<RecordedScanPage<Node<N>>>;
+  }>;
 
-/** Recorded-time edge point reads for one edge kind. */
+/** Recorded-time reconstructing reads for one edge kind. */
 export type RecordedStoreViewEdgeCollection<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
@@ -1437,7 +1459,13 @@ export type RecordedStoreViewEdgeCollection<
 > = Pick<
   StoreViewEdgeCollection<E, From, To>,
   (typeof RECORDED_POINT_READ_NAMES)[number]
->;
+> &
+  Readonly<{
+    /** Scan one bounded page at the view's pinned coordinate. */
+    scan: (
+      options?: RecordedScanOptions,
+    ) => Promise<RecordedScanPage<Edge<E, From, To>>>;
+  }>;
 
 /** Recorded-time edge collection derived from an `EdgeRegistration`. */
 export type TypedRecordedStoreViewEdgeCollection<R extends EdgeRegistration> =
@@ -1447,14 +1475,14 @@ export type TypedRecordedStoreViewEdgeCollection<R extends EdgeRegistration> =
     EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType
   >;
 
-/** Mapped type of all recorded-time node point-read collections. */
+/** Mapped type of all recorded-time node reconstructing-read collections. */
 export type RecordedStoreViewNodeCollections<G extends GraphDef> = {
   [K in keyof G["nodes"] & string]-?: RecordedStoreViewNodeCollection<
     G["nodes"][K]["type"]
   >;
 };
 
-/** Mapped type of all recorded-time edge point-read collections. */
+/** Mapped type of all recorded-time edge reconstructing-read collections. */
 export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
   [K in keyof G["edges"] & string]-?: TypedRecordedStoreViewEdgeCollection<
     G["edges"][K]

@@ -227,6 +227,8 @@ import {
   type OperationHookContext,
   type QueryOptions,
   type RecordedReadStoreOptions,
+  type RecordedScanOptions,
+  type RecordedScanPage,
   type ScopedMeasure,
   type StoreHooks,
   type StoreOptions,
@@ -676,10 +678,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.recordedNodeGetById(kind, id, coordinate),
       recordedNodeGetByIds: (kind, ids, coordinate) =>
         this.recordedNodeGetByIds(kind, ids, coordinate),
+      recordedNodeScan: (kind, coordinate, options) =>
+        this.recordedNodeScan(kind, coordinate, options),
       recordedEdgeGetById: (kind, id, coordinate) =>
         this.recordedEdgeGetById(kind, id, coordinate),
       recordedEdgeGetByIds: (kind, ids, coordinate) =>
         this.recordedEdgeGetByIds(kind, ids, coordinate),
+      recordedEdgeScan: (kind, coordinate, options) =>
+        this.recordedEdgeScan(kind, coordinate, options),
       subgraphAtCoordinate: (rootId, subgraphOptions) =>
         this.subgraphAtCoordinate(rootId, subgraphOptions),
       algorithmsAtCoordinate: (coordinate) =>
@@ -1264,6 +1270,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return this.#recordedReads.nodeGetByIds(kind, ids, coordinate);
   }
 
+  /** @internal Bounded recorded-time node enumeration for RecordedStoreView. */
+  async recordedNodeScan<N extends NodeType>(
+    kind: string,
+    coordinate: ReadCoordinate,
+    options?: RecordedScanOptions,
+  ): Promise<RecordedScanPage<Node<N>>> {
+    return this.#recordedReads.nodeScan(kind, coordinate, options);
+  }
+
   /**
    * Internal seam for {@link RecordedStoreView}: reconstruct an edge point read
    * from the recorded-time relation while preserving live getById behavior.
@@ -1290,6 +1305,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     coordinate: ReadCoordinate,
   ): Promise<readonly (Edge<E> | undefined)[]> {
     return this.#recordedReads.edgeGetByIds(kind, ids, coordinate);
+  }
+
+  /** @internal Bounded recorded-time edge enumeration for RecordedStoreView. */
+  async recordedEdgeScan<E extends AnyEdgeType>(
+    kind: string,
+    coordinate: ReadCoordinate,
+    options?: RecordedScanOptions,
+  ): Promise<RecordedScanPage<Edge<E>>> {
+    return this.#recordedReads.edgeScan(kind, coordinate, options);
   }
 
   // === Temporal Views ===

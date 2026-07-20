@@ -187,6 +187,28 @@ const cited = await recorded.edges.cites.getByIds(citationIds);
 const reachable = await recorded.reachable(docId, { edges: ["cites"] });
 ```
 
+Recorded collections also expose `scan()` for complete snapshot reconstruction.
+Each call returns at most 1,000 entities in canonical `id` order; use the opaque
+`nextCursor` to continue without retaining a separate identity inventory:
+
+```typescript
+const first = await recorded.nodes.Document.scan({ limit: 500 });
+const second =
+  first.nextCursor === undefined ?
+    undefined
+  : await recorded.nodes.Document.scan({
+      limit: 500,
+      after: first.nextCursor,
+    });
+
+const citations = await recorded.edges.cites.scan({ limit: 500 });
+```
+
+Scan cursors are forward-only and bound to the graph, entity kind, and both
+temporal coordinates. Passing a cursor to another collection or recorded-time
+view throws a `ValidationError` instead of silently skipping data. Iterate each
+declared node and edge kind to reconstruct a complete historical graph snapshot.
+
 A raw wall-clock string — `store.asOfRecorded(new Date().toISOString())` — does
 **not** type-check, by design. Recorded instants are monotonic and can briefly
 run ahead of wall-clock time under bursty writes, so a wall-clock value may sort

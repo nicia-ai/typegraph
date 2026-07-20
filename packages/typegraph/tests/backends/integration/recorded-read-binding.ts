@@ -84,6 +84,12 @@ export function registerRecordedReadBindingIntegrationTests(
         .execute();
       expect(rows).toEqual(["Alice"]);
 
+      const scan = await readStore
+        .asOfRecorded(recordedAtCreate)
+        .nodes.Person.scan({ limit: 1 });
+      expect(scan.data.map((person) => person.name)).toEqual(["Alice"]);
+      expect(scan.hasNextPage).toBe(false);
+
       await readStore.nodes.Person.update(alice.id, {
         name: "Live-only update",
       });
@@ -146,6 +152,12 @@ export function registerRecordedReadBindingIntegrationTests(
         undefined,
         "2021",
       ]);
+
+      const scan = await readStore
+        .asOfRecorded(recordedAtCreate)
+        .edges.knows.scan({ limit: 1 });
+      expect(scan.data.map((found) => found.since)).toEqual(["2020"]);
+      expect(scan.hasNextPage).toBe(false);
 
       await readStore.edges.knows.update(edge.id, { since: "live-only" });
       expect(await historyStore.recordedNow()).toBe(recordedAtUpdate);
