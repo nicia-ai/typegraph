@@ -13,6 +13,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type Edge,
+  type Node,
+  type RecordedScanPage,
   RecordedStoreView,
 } from "../src";
 import { createTestBackend } from "./test-utils";
@@ -60,10 +63,14 @@ describe("RecordedStoreView typed surface", () => {
     // ...but the live-state search facade is intentionally absent.
     expectTypeOf(recorded).not.toHaveProperty("search");
 
-    // Node collections are narrowed to point reconstruction only — broad reads
-    // (find / count) and every write are absent.
+    // Node collections expose point reads plus bounded deterministic scans;
+    // broad reads (find / count) and every write remain absent.
     expectTypeOf(recorded.nodes.Person).toHaveProperty("getById");
     expectTypeOf(recorded.nodes.Person).toHaveProperty("getByIds");
+    expectTypeOf(recorded.nodes.Person).toHaveProperty("scan");
+    expectTypeOf(recorded.nodes.Person.scan()).toEqualTypeOf<
+      Promise<RecordedScanPage<Node<typeof Person>>>
+    >();
     expectTypeOf(recorded.nodes.Person).not.toHaveProperty("find");
     expectTypeOf(recorded.nodes.Person).not.toHaveProperty("count");
     expectTypeOf(recorded.nodes.Person).not.toHaveProperty("create");
@@ -71,11 +78,16 @@ describe("RecordedStoreView typed surface", () => {
     expectTypeOf(recorded.nodes.Person).not.toHaveProperty("delete");
     expectTypeOf(recorded.nodes.Person).not.toHaveProperty("findFrom");
 
-    // Edge collections likewise — point reads only; the endpoint reads that the
-    // valid-time StoreView *does* support stay absent here (recorded-time
-    // endpoint reads are not yet reconstructed), as do all writes.
+    // Edge collections likewise add bounded scans; the endpoint reads that the
+    // valid-time StoreView supports stay absent here, as do all writes.
     expectTypeOf(recorded.edges.knows).toHaveProperty("getById");
     expectTypeOf(recorded.edges.knows).toHaveProperty("getByIds");
+    expectTypeOf(recorded.edges.knows).toHaveProperty("scan");
+    expectTypeOf(recorded.edges.knows.scan()).toEqualTypeOf<
+      Promise<
+        RecordedScanPage<Edge<typeof knows, typeof Person, typeof Person>>
+      >
+    >();
     expectTypeOf(recorded.edges.knows).not.toHaveProperty("find");
     expectTypeOf(recorded.edges.knows).not.toHaveProperty("findFrom");
     expectTypeOf(recorded.edges.knows).not.toHaveProperty("findTo");

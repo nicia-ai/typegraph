@@ -328,10 +328,11 @@ adopt a caller-owned transaction:
   writes only. Out-of-band database writes and row-returning raw SQL paths are
   not captured into the recorded relations.
 - **Reconstructing reads only.** A recorded view exposes point reads
-  (`getById` / `getByIds`), `query()`, `subgraph()`, and the graph algorithms.
-  Broad collection reads (`find` / `count` / `findFrom`), `search`, and fulltext
-  / vector predicates are refused — those indexes reflect current state and
-  cannot answer a recorded-time query.
+  (`getById` / `getByIds`), bounded deterministic `scan()` pages, `query()`,
+  `subgraph()`, and the graph algorithms. Broad filtered collection reads
+  (`find` / `count` / `findFrom`), `search`, and fulltext / vector predicates are
+  refused — those indexes reflect current state and cannot answer a
+  recorded-time query.
 - **Transactional backend required.** Capture needs a backend with atomic
   transactions and statement execution — the built-in SQLite / PostgreSQL
   backends qualify. A custom backend must implement `executeStatement` (optional

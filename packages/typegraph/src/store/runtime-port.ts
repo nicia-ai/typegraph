@@ -20,7 +20,13 @@ import {
   type SubgraphProject,
   type SubgraphResult,
 } from "./subgraph";
-import { type Edge, type Node, TRANSACTION_RUNTIME } from "./types";
+import {
+  type Edge,
+  type Node,
+  type RecordedScanOptions,
+  type RecordedScanPage,
+  TRANSACTION_RUNTIME,
+} from "./types";
 
 export const STORE_RUNTIME: unique symbol =
   typeGraphGlobalSymbol("store-runtime-v1");
@@ -44,6 +50,11 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     ids: readonly NodeId<N>[],
     coordinate: ReadCoordinate,
   ) => Promise<readonly (Node<N> | undefined)[]>;
+  recordedNodeScan: <N extends NodeType>(
+    kind: string,
+    coordinate: ReadCoordinate,
+    options?: RecordedScanOptions,
+  ) => Promise<RecordedScanPage<Node<N>>>;
   recordedEdgeGetById: <E extends AnyEdgeType>(
     kind: string,
     id: EdgeId<E>,
@@ -54,6 +65,11 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     ids: readonly EdgeId<E>[],
     coordinate: ReadCoordinate,
   ) => Promise<readonly (Edge<E> | undefined)[]>;
+  recordedEdgeScan: <E extends AnyEdgeType>(
+    kind: string,
+    coordinate: ReadCoordinate,
+    options?: RecordedScanOptions,
+  ) => Promise<RecordedScanPage<Edge<E>>>;
   subgraphAtCoordinate: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,

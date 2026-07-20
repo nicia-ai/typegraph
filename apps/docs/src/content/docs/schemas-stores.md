@@ -2234,10 +2234,11 @@ asRecordedInstant(value: string): RecordedInstant; // brand an external timestam
   `recordedRelation({ schema })` using a `createSqlSchema(...)` schema and
   cannot be combined with `history: true`.
 - The view exposes only **reconstructing** reads: `nodes` / `edges` point reads
-  (`getById` / `getByIds`), a sealed `query()`, `subgraph()`, and the graph
-  algorithms (`reachable` / `canReach` / `shortestPath` / `degree`). Broad
-  collection reads, `search`, and fulltext / vector predicates reject — those
-  indexes reflect current state only.
+  (`getById` / `getByIds`) and bounded deterministic `scan()` pages, a sealed
+  `query()`, `subgraph()`, and the graph algorithms (`reachable` / `canReach` /
+  `shortestPath` / `degree`). Broad filtered collection reads, `search`, and
+  fulltext / vector predicates reject — those indexes reflect current state
+  only.
 - Built-in capture covers TypeGraph collection writes. Out-of-band database
   writes and row-returning raw SQL paths are not captured into the recorded
   relations.

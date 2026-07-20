@@ -861,6 +861,87 @@ export function registerRecordedTimeIntegrationTests(
       expect(await countRecordedEdgeRows(store, edge.id)).toBe(2);
     });
 
+    it("scans complete recorded node and edge snapshots in bounded id order", async () => {
+      const store = await createHistoryStore(context);
+      const charlie = await store.nodes.Person.create(
+        { name: "Charlie", age: 32 },
+        { id: "scan-person-c" },
+      );
+      const alice = await store.nodes.Person.create(
+        { name: "Alice", age: 30 },
+        { id: "scan-person-a" },
+      );
+      const bob = await store.nodes.Person.create(
+        { name: "Bob", age: 31 },
+        { id: "scan-person-b" },
+      );
+      const laterEdge = await store.edges.knows.create(
+        charlie,
+        alice,
+        { since: "2021" },
+        { id: "scan-edge-b" },
+      );
+      const firstEdge = await store.edges.knows.create(
+        alice,
+        bob,
+        { since: "2020" },
+        { id: "scan-edge-a" },
+      );
+      const recordedAtSnapshot = await readRecordedClock(store);
+
+      await store.nodes.Person.update(bob.id, { name: "Bobby" });
+      await store.nodes.Person.create(
+        { name: "Dana", age: 33 },
+        { id: "scan-person-d" },
+      );
+      await store.edges.knows.create(
+        bob,
+        charlie,
+        { since: "2022" },
+        { id: "scan-edge-c" },
+      );
+
+      const recorded = store.asOfRecorded(recordedAtSnapshot);
+      const firstNodePage = await recorded.nodes.Person.scan({ limit: 2 });
+      expect(firstNodePage.data.map((node) => [node.id, node.name])).toEqual([
+        [alice.id, "Alice"],
+        [bob.id, "Bob"],
+      ]);
+      expect(firstNodePage.hasNextPage).toBe(true);
+      expect(firstNodePage.nextCursor).toBeDefined();
+
+      const secondNodePage = await recorded.nodes.Person.scan({
+        limit: 2,
+        after: requireDefined(firstNodePage.nextCursor),
+      });
+      expect(secondNodePage.data.map((node) => node.id)).toEqual([charlie.id]);
+      expect(secondNodePage.hasNextPage).toBe(false);
+      expect(secondNodePage.nextCursor).toBeUndefined();
+
+      const firstEdgePage = await recorded.edges.knows.scan({ limit: 1 });
+      expect(firstEdgePage.data.map((edge) => edge.id)).toEqual([firstEdge.id]);
+      expect(firstEdgePage.hasNextPage).toBe(true);
+
+      const secondEdgePage = await recorded.edges.knows.scan({
+        limit: 1,
+        after: requireDefined(firstEdgePage.nextCursor),
+      });
+      expect(secondEdgePage.data.map((edge) => edge.id)).toEqual([
+        laterEdge.id,
+      ]);
+      expect(secondEdgePage.hasNextPage).toBe(false);
+
+      await expect(
+        recorded.edges.knows.scan({
+          limit: 1,
+          after: requireDefined(firstNodePage.nextCursor),
+        }),
+      ).rejects.toThrow("cursor does not match");
+      await expect(recorded.nodes.Person.scan({ limit: 1001 })).rejects.toThrow(
+        "between 1 and 1000",
+      );
+    });
+
     it("supports chained valid-time and recorded-time coordinates", async () => {
       const store = await createHistoryStore(context);
 
@@ -2442,7 +2523,7 @@ export function registerRecordedTimeIntegrationTests(
       ).toBe(true);
     });
 
-    it("fails loud when a recorded point read matches overlapping intervals", async () => {
+    it("fails loud when a recorded read matches overlapping intervals", async () => {
       const baseBackend = context.getStore().backend;
       const store = await createHistoryStore(context);
       if (baseBackend.executeStatement === undefined) {
@@ -2502,6 +2583,16 @@ export function registerRecordedTimeIntegrationTests(
 
       await expect(
         store.asOfRecorded(recordedAtCreate).nodes.Person.getById(alice.id),
+      ).rejects.toMatchObject({
+        details: {
+          code: "RECORDED_RELATION_INVARIANT_VIOLATION",
+          entity: "node",
+          kind: "Person",
+          id: alice.id,
+        },
+      });
+      await expect(
+        store.asOfRecorded(recordedAtCreate).nodes.Person.scan(),
       ).rejects.toMatchObject({
         details: {
           code: "RECORDED_RELATION_INVARIANT_VIOLATION",

@@ -36,6 +36,8 @@ export {
   type QueryHookContext,
   type QueryOptions,
   type RecordedReadStoreOptions,
+  type RecordedScanOptions,
+  type RecordedScanPage,
   type RecordedStoreViewEdgeCollection,
   type RecordedStoreViewEdgeCollections,
   type RecordedStoreViewNodeCollection,

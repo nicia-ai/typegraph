@@ -346,7 +346,7 @@ function createRecordedUnsupportedRefusal(
       new ConfigurationError(
         `'${method}' is not available on a RecordedStoreView (${describeCoordinate(coordinate)}). ` +
           `Recorded-time reads are reconstructing reads; this view exposes only query, ` +
-          `subgraph, graph algorithms, and point getById/getByIds collection reads.`,
+          `subgraph, graph algorithms, and collection getById/getByIds/scan reads.`,
         {
           code: "RECORDED_STORE_VIEW_UNSUPPORTED",
           entity,
@@ -612,6 +612,8 @@ function recordedNodeCollection<G extends GraphDef>(
       storeRuntime(store).recordedNodeGetById(kind, id, coordinate),
     getByIds: (ids) =>
       storeRuntime(store).recordedNodeGetByIds(kind, ids, coordinate),
+    scan: (options) =>
+      storeRuntime(store).recordedNodeScan(kind, coordinate, options),
   };
   return recordedCollectionProxy(reads, live, coordinate, "node");
 }
@@ -640,6 +642,8 @@ function recordedEdgeCollection<G extends GraphDef>(
       storeRuntime(store).recordedEdgeGetById(kind, id, coordinate),
     getByIds: (ids) =>
       storeRuntime(store).recordedEdgeGetByIds(kind, ids, coordinate),
+    scan: (options) =>
+      storeRuntime(store).recordedEdgeScan(kind, coordinate, options),
   };
   return recordedCollectionProxy(reads, live, coordinate, "edge");
 }
@@ -1081,7 +1085,7 @@ export class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
 /**
  * A narrow recorded-time read lens. It preserves the valid-time coordinate
  * carried by the source view and adds a recorded/system-time pin. Collection
- * reads are intentionally limited to point reconstruction; broad collection
+ * reads expose point reconstruction and bounded scans; broad collection
  * predicates, endpoint reads, search, and further coordinate changes are absent
  * from the typed surface and refused by the runtime proxies for JS callers.
  */
@@ -1139,7 +1143,7 @@ export class RecordedStoreView<
     return recorded.asOf;
   }
 
-  /** Recorded-time node point-read collections. */
+  /** Recorded-time node reconstructing-read collections. */
   get nodes(): RecordedStoreViewNodeCollections<G> {
     this.#nodes ??= pinnedNodeCollectionsFor(
       this.store,
@@ -1150,7 +1154,7 @@ export class RecordedStoreView<
     return this.#nodes;
   }
 
-  /** Recorded-time edge point-read collections. */
+  /** Recorded-time edge reconstructing-read collections. */
   get edges(): RecordedStoreViewEdgeCollections<G> {
     this.#edges ??= pinnedEdgeCollectionsFor(
       this.store,

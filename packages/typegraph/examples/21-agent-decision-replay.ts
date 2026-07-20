@@ -62,10 +62,13 @@ const graph = defineGraph({
 // The reconstructing reads the agent uses. A live `store.view(...)` and a
 // recorded `store.asOfRecorded(...)` both satisfy this surface, so the agent
 // runs the *identical* code against either coordinate.
-type EvidenceView = Pick<
-  RecordedStoreView<typeof graph>,
-  "query" | "degree" | "nodes"
->;
+type RecordedEvidenceView = RecordedStoreView<typeof graph>;
+type EvidenceView = Pick<RecordedEvidenceView, "query" | "degree"> &
+  Readonly<{
+    nodes: Readonly<{
+      Paper: Pick<RecordedEvidenceView["nodes"]["Paper"], "getById">;
+    }>;
+  }>;
 
 // ============================================================
 // The agent: "recommend the most-cited paper that supports a claim"
