@@ -20,9 +20,12 @@ declare const RECORDED_INSTANT_BRAND: unique symbol;
  * {@link Store.recordedNow} or an explicit {@link asRecordedInstant} — never an
  * ad-hoc wall-clock string.
  *
- * The recorded commit clock is a logical, monotonic per-graph instant that can
- * run briefly ahead of wall time under bursty same-millisecond writes, so a raw
- * `new Date().toISOString()` may sort *before* the most recent commits and
+ * The recorded commit clock is a millisecond-resolution logical, monotonic
+ * clock scoped to one graph. Every captured commit advances it by at least one
+ * millisecond. Sustaining more than 1,000 captured commits per second therefore
+ * pushes it progressively ahead of wall time; that lead shrinks only while the
+ * per-graph commit rate is below 1,000 per second or during an idle gap. A raw
+ * `new Date().toISOString()` may consequently sort *before* recent commits and
  * silently omit them. The brand turns that footgun into a compile error:
  * `store.asOfRecorded` accepts only a `RecordedInstant`, so a bare wall-clock
  * string no longer type-checks — callers reach for `await store.recordedNow()`

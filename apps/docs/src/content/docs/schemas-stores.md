@@ -2219,9 +2219,12 @@ asRecordedInstant(value: string): RecordedInstant; // brand an external timestam
 - **`T` is a `RecordedInstant`**, a branded canonical timestamp. It comes from
   `store.recordedNow()` or `asRecordedInstant(...)`; a raw wall-clock string
   (`new Date().toISOString()`) is a compile error. Recorded instants are
-  monotonic and can run briefly ahead of wall-clock time under bursty writes, so
-  a wall-clock value may sort before the most recent commits and silently omit
-  them — the brand prevents that at the type level.
+  monotonic per graph and advance by at least one millisecond per captured
+  commit. Above 1,000 captured commits per second they accumulate lead over
+  wall-clock time until the rate falls below that threshold or the graph becomes
+  idle, so a wall-clock value may sort before recent commits and silently omit
+  them — the brand prevents that at the type level. See the
+  [recorded-clock rate boundary](/queries/temporal#recorded-clock-rate-and-wall-time-lead).
 - **`store.recordedNow()`** returns the recorded high-water mark — the latest
   captured recorded instant. After guarding the `undefined` case,
   `store.asOfRecorded(checkpoint)` reconstructs everything committed so far. Use

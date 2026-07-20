@@ -1365,9 +1365,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * subgraph, graph algorithms, and collection point reads.
    *
    * Prefer `await store.recordedNow()` as the anchor over a wall-clock
-   * timestamp: recorded instants are monotonic and can run briefly ahead of the
-   * wall clock under bursty writes, so a `new Date().toISOString()` passed here
-   * may sort before the most recent commits and silently omit them.
+   * timestamp. The recorded clock advances by at least one millisecond per
+   * captured commit, so a graph sustaining more than 1,000 commits per second
+   * runs progressively ahead of wall time until its commit rate falls below
+   * that threshold or it becomes idle. A `new Date().toISOString()` passed here
+   * may therefore sort before recent commits and silently omit them.
    */
   asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G> {
     const validCoordinate = resolveReadCoordinate(
@@ -1385,9 +1387,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Returns the latest recorded-time instant captured for this graph — the
    * recorded high-water mark. After guarding the `undefined` case,
    * `store.asOfRecorded(checkpoint)` reconstructs everything committed so far, a
-   * deterministic anchor that avoids guessing with the wall clock (recorded
-   * instants are monotonic and can run briefly ahead of wall-clock time under
-   * bursty writes). Capture each anchor right after the writes it should cover.
+   * deterministic anchor that avoids guessing with the wall clock. Recorded
+   * instants are monotonic per graph and advance by at least one millisecond per
+   * captured commit; above 1,000 commits per second they accumulate lead over
+   * wall time until the graph's commit rate drops below that threshold or it
+   * becomes idle. Capture each anchor right after the writes it should cover.
    *
    * Returns `undefined` until the first write has been captured, so on a
    * brand-new graph guard the composition — `asOfRecorded(undefined)` rejects

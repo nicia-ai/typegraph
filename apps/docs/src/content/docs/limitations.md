@@ -350,6 +350,22 @@ adopt a caller-owned transaction:
   because snapshot isolation cannot safely allocate that per-graph recorded
   clock inside the captured transaction. Omit the transaction isolation option,
   or set it to `read_committed`.
+- **The recorded clock has millisecond resolution.** Each captured transaction
+  advances a graph's clock by at least one millisecond. A graph sustaining more
+  than 1,000 captured commits per second therefore accumulates lead over wall
+  time; the lead shrinks only while its commit rate is below that threshold or
+  during an idle gap. The clock and the year-9999 open-sentinel ceiling are per
+  graph. Batch writes at replay/checkpoint boundaries, or partition independent
+  workloads across graphs when queries do not require one graph-wide snapshot.
+  Sharding gives each graph a separate budget but provides no cross-graph
+  recorded anchor. See
+  [Recorded-clock rate and wall-time lead](/queries/temporal#recorded-clock-rate-and-wall-time-lead).
+- **Diagonal reads inherit recorded-clock lead.** Direct
+  `store.asOfRecorded(T)` uses `T` for both recorded and valid time. If a
+  high-rate graph has accumulated substantial lead, short-lived or future-dated
+  validity windows may appear ended relative to wall time. Pin the axes
+  independently with `store.asOf(validT).asOfRecorded(recordedT)` when that
+  distinction matters.
 
 ## Schema Migration Constraints
 

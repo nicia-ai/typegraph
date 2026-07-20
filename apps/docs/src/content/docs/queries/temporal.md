@@ -210,10 +210,10 @@ view throws a `ValidationError` instead of silently skipping data. Iterate each
 declared node and edge kind to reconstruct a complete historical graph snapshot.
 
 A raw wall-clock string — `store.asOfRecorded(new Date().toISOString())` — does
-**not** type-check, by design. Recorded instants are monotonic and can briefly
-run ahead of wall-clock time under bursty writes, so a wall-clock value may sort
-*before* the most recent commits and silently omit them. The brand turns that
-footgun into a compile error: to pin "as things stand right now"
+**not** type-check, by design. Recorded instants are monotonic and can run ahead
+of wall-clock time, so a wall-clock value may sort *before* the most recent
+commits and silently omit them. The brand turns that footgun into a compile
+error: to pin "as things stand right now"
 deterministically, use `store.recordedNow()` (the recorded high-water mark),
 then guard the `undefined` case before passing it to `store.asOfRecorded()`.
 
@@ -235,6 +235,40 @@ dropped writes (another writer moved the clock) and misfires on no-op writes. To
 confirm a specific write committed, observe the write itself (e.g. its return
 value, or run it inside `store.transaction(...)` and act on success), not the
 global clock.
+
+#### Recorded-clock rate and wall-time lead
+
+The recorded clock is a strict, millisecond-resolution logical clock scoped to
+one graph. A captured transaction receives one instant, regardless of how many
+entities it writes. The allocator chooses the later of the current wall-clock
+millisecond and one millisecond after the graph's previous recorded commit.
+
+That gives every captured transaction a distinct, addressable state, but it
+also establishes a per-graph rate boundary:
+
+- At a sustained rate above **1,000 captured commits per second**, recorded time
+  advances faster than wall time. At `R` commits per second, the lead grows by
+  approximately `(R - 1000)` milliseconds each second.
+- The lead does not self-heal while that rate continues. It shrinks only while
+  the graph commits below 1,000 times per second, or after an idle gap long
+  enough for wall time to pass the recorded high-water mark.
+- The clock and its `9999-12-31T23:59:59.999Z` ceiling are **per graph**.
+  Independent graphs have independent clocks. Partitioning a workload across
+  graphs multiplies the clock budget, but also partitions queries and recorded
+  snapshots; TypeGraph does not provide a cross-graph recorded anchor.
+
+Batch related writes in `store.transaction(...)`: one transaction allocates one
+recorded instant. For event logs, align transactions with durable replay or
+checkpoint boundaries, and cap transaction size separately so an initial sync
+does not hold a write lock or capture buffer without bound.
+
+Until physical wall time and logical commit order are represented separately,
+large accumulated lead also affects the diagonal valid-time coordinate of
+`store.asOfRecorded(T)`, which uses `T` for both temporal axes. A short-lived or
+future-dated validity interval can therefore appear ended earlier than intended
+relative to wall time. High-rate applications that use bounded validity windows
+should pin the axes independently with
+`store.asOf(validT).asOfRecorded(recordedT)`.
 
 Direct `store.asOfRecorded(T)` is **diagonal** bitemporal sugar: it reads the
 recorded relation as of `T` *and* uses the same `T` for the valid-time axis. To
@@ -365,7 +399,10 @@ The takeaway: capture is opt-in and cheap when you batch. Under `history: true`,
 prefer `store.transaction(...)` for bulk writes; a loop of individual
 collection writes is the one pattern that pays the per-write multiple. (Stores
 created without `history: true` are unaffected — graph writes never touch the
-capture path.)
+capture path.) Batching also reduces recorded-clock consumption: one captured
+transaction advances the per-graph clock once, even when it contains many
+writes. See [Recorded-clock rate and wall-time lead](#recorded-clock-rate-and-wall-time-lead)
+for the 1,000-commit-per-second boundary.
 
 > **Performance.** Recorded reads reconstruct from the history relations rather
 > than the live tables, so they are slower than current-state reads — most
