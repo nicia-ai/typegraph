@@ -855,7 +855,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
         targetId: pair.targetId,
       }),
     );
-    const distance = rows[0]?.distance;
+    const distance = rows[0]?.["distance"];
     return shortestPathDistanceResult(
       distance === undefined ? undefined : Number(distance),
     );
@@ -868,7 +868,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
         seedId: personId,
       }),
     );
-    return reachableSetResult(rows.map((row) => String(row.id)));
+    return reachableSetResult(rows.map((row) => String(row["id"])));
   }
 
   async function IC2(personId: string) {
@@ -878,12 +878,12 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     ]);
     const canonicalRows = [...posts, ...comments]
       .map((row) => ({
-        friendId: String(row.friendId),
-        friendFirstName: String(row.friendFirstName),
-        friendLastName: String(row.friendLastName),
-        id: String(row.id),
-        content: String(row.content),
-        creationDate: String(row.creationDate),
+        friendId: String(row["friendId"]),
+        friendFirstName: String(row["friendFirstName"]),
+        friendLastName: String(row["friendLastName"]),
+        id: String(row["id"]),
+        content: String(row["content"]),
+        creationDate: String(row["creationDate"]),
       }))
       .toSorted((left, right) => compareMessageRecencyDesc(left, right))
       .slice(0, IC_MESSAGE_LIMIT)
@@ -910,12 +910,12 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     ]);
     const canonicalRows = [...toPosts, ...toComments]
       .map((row) => ({
-        authorId: String(row.authorId),
-        authorFirstName: String(row.authorFirstName),
-        authorLastName: String(row.authorLastName),
-        id: String(row.id),
-        content: String(row.content),
-        creationDate: String(row.creationDate),
+        authorId: String(row["authorId"]),
+        authorFirstName: String(row["authorFirstName"]),
+        authorLastName: String(row["authorLastName"]),
+        id: String(row["id"]),
+        content: String(row["content"]),
+        creationDate: String(row["creationDate"]),
       }))
       .toSorted((left, right) => compareMessageRecencyDesc(left, right))
       .slice(0, IC_MESSAGE_LIMIT)
@@ -945,12 +945,12 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     ]);
     const canonicalRows = [...posts, ...comments]
       .map((row) => ({
-        creatorId: String(row.creatorId),
-        creatorFirstName: String(row.creatorFirstName),
-        creatorLastName: String(row.creatorLastName),
-        id: String(row.id),
-        content: String(row.content),
-        creationDate: String(row.creationDate),
+        creatorId: String(row["creatorId"]),
+        creatorFirstName: String(row["creatorFirstName"]),
+        creatorLastName: String(row["creatorLastName"]),
+        id: String(row["id"]),
+        content: String(row["content"]),
+        creationDate: String(row["creationDate"]),
       }))
       .toSorted((left, right) => compareMessageRecencyDesc(left, right))
       .slice(0, IC_MESSAGE_LIMIT)
@@ -972,7 +972,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     const rows = await rowsOf(
       await conn.execute(degreeStatement, { id: personId }),
     );
-    return degreeResult(Number(rows[0]?.degree ?? 0));
+    return degreeResult(Number(rows[0]?.["degree"] ?? 0));
   }
 
   return {
