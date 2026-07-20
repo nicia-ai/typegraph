@@ -273,6 +273,9 @@ describe("#140 graph-owned cross-store via tx.sql (SQLite)", () => {
     const store = createAdapterStore(PlainGraph, backend);
 
     const source = await store.transaction(async (tx) => {
+      if (tx.sqlAvailability !== "available") {
+        throw new Error("SQLite adapter transaction did not expose SQL");
+      }
       const sqlTx = tx.sql as typeof db;
       const connectorId = requireDefined(
         sqlTx
@@ -301,6 +304,9 @@ describe("#140 graph-owned cross-store via tx.sql (SQLite)", () => {
 
     await expect(
       store.transaction(async (tx) => {
+        if (tx.sqlAvailability !== "available") {
+          throw new Error("SQLite adapter transaction did not expose SQL");
+        }
         const sqlTx = tx.sql as typeof db;
         sqlTx.insert(connectors).values({ name: "orphan" }).run();
         await tx.nodes.ArtifactSource.create({

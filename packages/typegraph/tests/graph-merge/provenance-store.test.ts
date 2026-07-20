@@ -33,7 +33,7 @@ import { isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
 import { requireDefined } from "../../src/utils/presence";
-import { backendMatrix, getStoreBackend } from "./test-utils";
+import { backendMatrix } from "./test-utils";
 
 const Patient = defineNode("Patient", {
   schema: z.object({ name: z.string(), birthDate: z.string() }),
@@ -165,10 +165,7 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     expect(report.provenancePersisted?.count).toBeGreaterThan(0);
     expect(report.warnings).toEqual([]);
 
-    const provStore = await openProvenanceStore(
-      getStoreBackend(base),
-      base.graphId,
-    );
+    const provStore = await openProvenanceStore(base);
 
     // Every node id the in-memory index credits to a branch is persisted for it.
     for (const branchId of [BRANCH_A, BRANCH_B]) {
@@ -194,10 +191,7 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     expect(patients).toHaveLength(1);
     const canonicalId = requireDefined(patients[0]).id;
 
-    const provStore = await openProvenanceStore(
-      getStoreBackend(base),
-      base.graphId,
-    );
+    const provStore = await openProvenanceStore(base);
     const forCanonical = (await provStore.nodes.Provenance.find()).filter(
       (p) => p.canonicalId === canonicalId,
     );
@@ -222,10 +216,7 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     const { base, branches } = await materialize();
     unwrap(await merge<CareGraph>(base, branches, provMergeOptions(true)));
 
-    const provStore = await openProvenanceStore(
-      getStoreBackend(base),
-      base.graphId,
-    );
+    const provStore = await openProvenanceStore(base);
     const firstCount = (await provStore.nodes.Provenance.find()).length;
 
     // Re-persist the SAME records (as a re-run would): deterministic ids → upsert.
@@ -251,10 +242,7 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     );
     expect(report.provenancePersisted).toBeUndefined();
 
-    const provStore = await openProvenanceStore(
-      getStoreBackend(base),
-      base.graphId,
-    );
+    const provStore = await openProvenanceStore(base);
     expect(await provStore.nodes.Provenance.find()).toHaveLength(0);
   });
 });

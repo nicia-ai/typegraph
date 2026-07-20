@@ -1580,6 +1580,12 @@ export function createSqliteBackend(
     },
 
     async refreshStatistics(): Promise<void> {
+      // Cloudflare Durable Object SQLite forbids maintenance PRAGMAs such as
+      // `analysis_limit` with SQLITE_AUTH. Index DDL itself is supported, so
+      // boot/materialization may still create the index; statistics refresh is
+      // the only unsupported follow-up and is intentionally a no-op.
+      if (transactionMode === "do-sqlite") return;
+
       // `ANALYZE` populates `sqlite_stat1`. With no stat table, the
       // planner falls back to heuristics that, at least for FTS5
       // virtual-table queries and multi-column index selection, can be

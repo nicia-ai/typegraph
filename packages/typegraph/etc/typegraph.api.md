@@ -37,7 +37,6 @@ type AdapterHistoryStoreTransactions<G extends GraphDef, TNativeTransaction> = R
 
 // @public (undocumented)
 export type AdapterHistoryTransactionContext<G extends GraphDef, TNativeTransaction> = Omit<AdapterTransactionContext<G, TNativeTransaction>, "sql" | "sqlAvailability"> & Readonly<{
-    sql?: never;
     sqlAvailability: "history";
 }>;
 
@@ -68,10 +67,8 @@ type AdapterTransactionSqlAccess<TNativeTransaction> = Readonly<{
     sql: TNativeTransaction;
     sqlAvailability: "available";
 }> | Readonly<{
-    sql?: never;
     sqlAvailability: "history" | "revisionTracking";
 }> | Readonly<{
-    sql?: undefined;
     sqlAvailability: "unavailable";
 }>;
 

@@ -163,6 +163,10 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
       expect(backend.capabilities.maxBindParameters).toBe(
         DURABLE_OBJECT_MAX_BIND_PARAMETERS,
       );
+      // Workerd rejects SQLite maintenance PRAGMAs with SQLITE_AUTH. The
+      // do-sqlite profile makes planner-statistics refresh a safe no-op so a
+      // boot that adopts a newly shipped system index stays warning-free.
+      await expect(backend.refreshStatistics()).resolves.toBeUndefined();
 
       const staleHintBackend = createSqliteBackend(db, {
         capabilities: {
@@ -448,6 +452,9 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
     await inObject("tx-sql", async ({ db, store }) => {
       // Adapter tx.sql is the precisely typed bound do-sqlite Drizzle handle.
       await store.transaction(async (tx) => {
+        if (tx.sqlAvailability !== "available") {
+          throw new Error("Durable Object transaction did not expose SQL");
+        }
         await tx.nodes.Doc.create({ title: "via-tx-sql" });
         await tx.sql
           .insert(docVersions)
@@ -458,6 +465,9 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
 
       await expect(
         store.transaction(async (tx) => {
+          if (tx.sqlAvailability !== "available") {
+            throw new Error("Durable Object transaction did not expose SQL");
+          }
           await tx.nodes.Doc.create({ title: "doomed" });
           await tx.sql
             .insert(docVersions)

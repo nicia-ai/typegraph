@@ -136,7 +136,9 @@ describe("recorded-time capture capability gate", () => {
 
     await expect(
       store.transaction((tx) => {
-        const sqlHandle = tx.sql as Readonly<{ insert: unknown }>;
+        const sqlHandle = Reflect.get(tx, "sql") as Readonly<{
+          insert: unknown;
+        }>;
         void sqlHandle.insert;
         return Promise.resolve();
       }),

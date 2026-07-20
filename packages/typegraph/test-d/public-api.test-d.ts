@@ -505,7 +505,7 @@ const recordedOutcome = adapterHistoryStore.withRecordedTransaction(
         >
       >
     >(tx.measure);
-    expectError(tx.sql?.select());
+    expectError(tx.sql);
     expectError(tx.backend.executeRaw);
     expectError(tx.backend.executeStatement);
     expectError(tx.backend.executeDdl?.("DROP TABLE typegraph_nodes"));

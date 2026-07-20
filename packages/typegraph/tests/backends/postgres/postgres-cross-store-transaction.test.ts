@@ -268,7 +268,10 @@ describe.runIf(process.env["POSTGRES_URL"])(
       const store = createAdapterStore(PlainGraph, backend);
 
       const source = await store.transaction(async (tx) => {
-        const sqlTx = requireDefined(tx.sql);
+        if (tx.sqlAvailability !== "available") {
+          throw new Error("PostgreSQL adapter transaction did not expose SQL");
+        }
+        const sqlTx = tx.sql;
         const inserted = await sqlTx
           .insert(connectors)
           .values({ name: "github" })
@@ -292,7 +295,12 @@ describe.runIf(process.env["POSTGRES_URL"])(
 
       await expect(
         store.transaction(async (tx) => {
-          const sqlTx = requireDefined(tx.sql);
+          if (tx.sqlAvailability !== "available") {
+            throw new Error(
+              "PostgreSQL adapter transaction did not expose SQL",
+            );
+          }
+          const sqlTx = tx.sql;
           await sqlTx.insert(connectors).values({ name: "orphan" });
           await tx.nodes.ArtifactSource.create({
             connectorId: 999,

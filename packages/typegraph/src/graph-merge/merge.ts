@@ -1715,10 +1715,7 @@ async function resolveMerge<G extends GraphDef>(
       // write failure must NOT fail the merge — it surfaces as a warning. The
       // sidecar node ids are deterministic, so this UPSERTS (idempotent re-runs).
       try {
-        const provenanceStore = await openProvenanceStore(
-          storeBackend(target),
-          target.graphId,
-        );
+        const provenanceStore = await openProvenanceStore(target);
         const count = await persistProvenanceRecords(
           provenanceStore,
           target.graphId,

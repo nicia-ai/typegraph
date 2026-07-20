@@ -4,10 +4,10 @@
  * `store.transaction(async (tx) => { ... })` runs a callback in which every
  * write either commits together or rolls back together. The callback receives
  * a transaction context with the same collection API as the store —
- * `tx.nodes.<Kind>` and `tx.edges.<name>` — plus `tx.sql`, the raw Drizzle
- * handle bound to the same transaction for the caller's own relational
- * tables. The callback's return value becomes the return value of
- * `store.transaction()`.
+ * `tx.nodes.<Kind>` and `tx.edges.<name>`. Adapter stores additionally expose a
+ * raw Drizzle handle for the caller's own relational tables after
+ * `tx.sqlAvailability` is narrowed to `"available"`. The callback's return
+ * value becomes the return value of `store.transaction()`.
  *
  * The motivating scenario: placing an order must write an Order node,
  * decrement the inventory it draws from, AND link the two with a `fulfills`

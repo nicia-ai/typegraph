@@ -96,9 +96,9 @@ created with `createAdapterStore` or `createAdapterStoreWithSchema` and
 below both require:
 
 - **Write your own tables through the external handle you passed in**, never
-  through `tx.sql`. Under history capture `tx.sql` is a present-but-throwing
-  guard (raw SQL would bypass recorded-time capture); its static type is
-  `sql?: never` and every access raises a
+  through `tx.sql`. Under history capture the typed transaction context omits
+  `sql` (raw SQL would bypass recorded-time capture); suppressed access reaches
+  a runtime guard and raises a
   [`ConfigurationError`](/errors/#recorded-capture-guard-codes). The external
   handle *is* the pinned connection, so writing your cursor row through it keeps
   both layers in the one transaction.

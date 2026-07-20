@@ -20,12 +20,13 @@
 import { z } from "zod";
 
 import { compareStrings } from "./node-key";
-import type { GraphBackend, Node, Store } from "./typegraph-internal";
+import type { GraphDef, Node, Store } from "./typegraph-internal";
 import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
   sha256Hex,
+  storeBackend,
 } from "./typegraph-internal";
 import type { BranchId, ProvenanceRecord } from "./types";
 
@@ -67,17 +68,16 @@ export type ProvenanceNode = Node<typeof Provenance>;
 
 /**
  * Opens — materializing the schema if needed — the provenance store for a target
- * graph on the given backend. Idempotent: safe to call before every persist/query,
- * and shares the backend with the target (so the caller must NOT close it
+ * store. Idempotent: safe to call before every persist/query, and shares the
+ * backend with the target (so the caller must NOT close it
  * separately — closing the shared backend is the target owner's job).
  */
-export async function openProvenanceStore(
-  backend: GraphBackend,
-  targetGraphId: string,
+export async function openProvenanceStore<G extends GraphDef>(
+  target: Store<G>,
 ): Promise<Store<ProvenanceGraph>> {
   const [store] = await createStoreWithSchema(
-    buildProvenanceGraph(targetGraphId),
-    backend,
+    buildProvenanceGraph(target.graphId),
+    storeBackend(target),
   );
   return store;
 }

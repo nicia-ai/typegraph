@@ -132,7 +132,10 @@ describe("#134 cross-store atomicity (libsql, documented async shape)", () => {
     const store = createAdapterStore(PlainGraph, backend);
 
     const source = await store.transaction(async (tx) => {
-      const sqlTx = tx.sql as typeof db;
+      if (tx.sqlAvailability !== "available") {
+        throw new Error("libSQL adapter transaction did not expose SQL");
+      }
+      const sqlTx = tx.sql;
       const inserted = await sqlTx
         .insert(connectors)
         .values({ name: "github" })
@@ -151,7 +154,10 @@ describe("#134 cross-store atomicity (libsql, documented async shape)", () => {
 
     await expect(
       store.transaction(async (tx) => {
-        const sqlTx = tx.sql as typeof db;
+        if (tx.sqlAvailability !== "available") {
+          throw new Error("libSQL adapter transaction did not expose SQL");
+        }
+        const sqlTx = tx.sql;
         await sqlTx.insert(connectors).values({ name: "orphan" });
         await tx.nodes.ArtifactSource.create({
           connectorId: 999,

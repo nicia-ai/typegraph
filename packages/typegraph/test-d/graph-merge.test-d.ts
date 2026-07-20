@@ -1,7 +1,13 @@
 import { expectAssignable, expectError, expectType } from "tsd";
 import { z } from "zod";
 
-import { type GraphBackend, defineGraph, defineNode, type Store } from "..";
+import {
+  type AdapterHistoryStore,
+  type GraphBackend,
+  defineGraph,
+  defineNode,
+  type Store,
+} from "..";
 import {
   BranchError,
   type GraphBranch,
@@ -18,6 +24,8 @@ import {
   isOk,
   merge,
   normalizeMergeOptions,
+  openProvenanceStore,
+  type ProvenanceGraph,
   unwrap,
 } from "../dist/graph-merge";
 
@@ -36,6 +44,7 @@ const graph = defineGraph({
 
 declare const backend: GraphBackend;
 declare const store: Store<typeof graph>;
+declare const adapterHistoryStore: AdapterHistoryStore<typeof graph, unknown>;
 declare const branches: readonly GraphBranch<typeof graph>[];
 
 const makeBackend: MakeBackend = () => Promise.resolve(backend);
@@ -74,6 +83,10 @@ expectType<Promise<Result<GraphBranch<typeof graph>, BranchError>>>(
 );
 expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
   merge(store, branches, options),
+);
+expectType<Promise<Store<ProvenanceGraph>>>(openProvenanceStore(store));
+expectType<Promise<Store<ProvenanceGraph>>>(
+  openProvenanceStore(adapterHistoryStore),
 );
 
 declare const mergeResult: Result<MergeReport<typeof graph>, MergeError>;

@@ -283,11 +283,11 @@ internal to TypeGraph's query and transaction implementation.
 `store.withTransaction` on a history-enabled store is a **compile error** (the
 `externalTx` argument is rejected with a message naming
 `withRecordedTransaction`); the runtime guard still throws `ConfigurationError`
-if suppressed. Inside an `AdapterHistoryStore.transaction(...)`, `tx.sql` is
-present but throwing:
-its static type is `sql?: never`, and `tx.sqlAvailability` reports `"history"`
-(or `"revisionTracking"`) so portable code can branch without touching the
-throwing handle — see the `tx.sqlAvailability` guidance in
+if suppressed. Inside an `AdapterHistoryStore.transaction(...)`, the typed
+context omits `tx.sql`, and `tx.sqlAvailability` reports `"history"` (or
+`"revisionTracking"`) so portable code can branch without touching the runtime
+guard. Suppressed JavaScript or TypeScript access still throws — see the
+`tx.sqlAvailability` guidance in
 [Cross-Store Transactions](/recipes/).
 Both guards carry a branchable `details.code`; see
 [Recorded-capture guard codes](/errors/#recorded-capture-guard-codes).

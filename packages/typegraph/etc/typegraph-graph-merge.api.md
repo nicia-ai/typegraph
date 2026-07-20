@@ -2524,7 +2524,7 @@ type OntologyRelation = Readonly<{
 }>;
 
 // @public
-export function openProvenanceStore(backend: GraphBackend, targetGraphId: string): Promise<Store<ProvenanceGraph>>;
+export function openProvenanceStore<G extends GraphDef>(target: Store<G>): Promise<Store<ProvenanceGraph>>;
 
 // @public
 type OrderSpec = Readonly<{

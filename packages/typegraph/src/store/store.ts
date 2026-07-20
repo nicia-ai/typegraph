@@ -411,6 +411,15 @@ function overlayPropertyDescriptors<
   }) as TBase & TOverlay;
 }
 
+/** Keeps suppressed/JavaScript raw-SQL access fail-loud without advertising it. */
+function defineUnavailableSqlGuard(context: object, guard: () => never): void {
+  Object.defineProperty(context, "sql", {
+    configurable: false,
+    enumerable: true,
+    get: guard,
+  });
+}
+
 type StoreCore<G extends GraphDef> = Readonly<{
   [STORE_RUNTIME]: StoreRuntime<G>;
   graph: G;
@@ -1725,7 +1734,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * ```typescript
    * await store.transaction(async (tx) => {
    *   await tx.nodes.Document.update(documentId, props);
-   *   // cast `tx.sql` to your concrete Drizzle database type
+   *   if (tx.sqlAvailability !== "available") {
+   *     throw new Error("This operation requires a SQL-backed transaction");
+   *   }
+   *   // Narrowing makes the precisely typed native handle available.
    *   const sqlTx = tx.sql as NodePgDatabase;
    *   await sqlTx.insert(documentVersions).values(versionRow);
    * });
@@ -2357,18 +2369,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       withSql = {
         ...base,
         sqlAvailability: "history",
-        get sql(): never {
-          return throwHistoryUnsafeSqlAccess();
-        },
       };
+      defineUnavailableSqlGuard(withSql, () => throwHistoryUnsafeSqlAccess());
     } else if (this.#revisionTrackingEnabled) {
       withSql = {
         ...base,
         sqlAvailability: "revisionTracking",
-        get sql(): never {
-          return throwRevisionTrackingUnsafeSqlAccess();
-        },
       };
+      defineUnavailableSqlGuard(withSql, () =>
+        throwRevisionTrackingUnsafeSqlAccess(),
+      );
     } else if (sql === undefined) {
       withSql = { ...base, sqlAvailability: "unavailable" };
     } else {
@@ -3724,7 +3734,6 @@ export type AdapterHistoryTransactionContext<
   "sql" | "sqlAvailability"
 > &
   Readonly<{
-    sql?: never;
     sqlAvailability: "history";
   }>;
 
@@ -3732,7 +3741,7 @@ export type AdapterHistoryTransactionContext<
  * The {@link AdapterHistoryTransactionContext} handed to a `withRecordedTransaction`
  * callback, extended with {@link ScopedMeasure}. Its `measure` scopes to a child
  * {@link MeasurableAdapterHistoryTransactionContext} (so nested scopes keep the
- * history-safe `sql?: never` / backend typing). Assignable to
+ * history-safe absent-`sql` / backend typing). Assignable to
  * {@link MeasurableTransactionContext} (and hence to {@link TransactionContext}),
  * so a projector helper typed against either still accepts it.
  */
