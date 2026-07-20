@@ -433,6 +433,13 @@ const fromAgentA = await readProvenance(store, { branchId: "agent-a" }); // what
 const whoMadeX = await readProvenance(store, { canonicalId: "patient-123" }); // who contributed node X?
 ```
 
+Inspection tools that have a backend and graph id but not the target's
+`GraphDef` can use the standalone overload:
+
+```typescript
+const store = await openProvenanceStore(backend, targetGraphId);
+```
+
 ## Snapshot vs incremental
 
 A branch is forked from a `base@V` — a token combining the base's schema hash

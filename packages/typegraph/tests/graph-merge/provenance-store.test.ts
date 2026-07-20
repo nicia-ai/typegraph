@@ -76,6 +76,7 @@ function provMergeOptions(persistProvenance: boolean): MergeOptions<CareGraph> {
 }
 
 type Fixture = Readonly<{
+  backend: GraphBackend;
   base: Store<CareGraph>;
   branches: readonly GraphBranch<CareGraph>[];
 }>;
@@ -102,7 +103,8 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
    * Patients into one canonical and repoints both edges onto it.
    */
   async function materialize(): Promise<Fixture> {
-    const [base] = await createStoreWithSchema(careGraph, await makeBackend());
+    const backend = await makeBackend();
+    const [base] = await createStoreWithSchema(careGraph, backend);
     const branchA = unwrap(
       await branch<CareGraph>(base, () => makeBackend(), { id: BRANCH_A }),
     );
@@ -143,8 +145,17 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
       },
     ]);
 
-    return { base, branches: [branchA, branchB] };
+    return { backend, base, branches: [branchA, branchB] };
   }
+
+  it("opens from a backend and graph id without the target GraphDef", async () => {
+    cleanups = [];
+    const { backend, base, branches } = await materialize();
+    unwrap(await merge<CareGraph>(base, branches, provMergeOptions(true)));
+
+    const provStore = await openProvenanceStore(backend, base.graphId);
+    expect(await provStore.nodes.Provenance.find()).not.toHaveLength(0);
+  });
 
   it("persists {branch, sourceId} rows that match the report index", async () => {
     cleanups = [];

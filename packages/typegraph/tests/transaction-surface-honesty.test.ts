@@ -87,6 +87,7 @@ describe("#254 tx.sqlAvailability discriminant", () => {
     await store.transaction(async (tx) => {
       await tx.nodes.Person.create({ name: "probe" });
       expect(tx.sqlAvailability).toBe("available");
+      // The runtime assertion above does not narrow the TypeScript union.
       if (tx.sqlAvailability !== "available") {
         throw new Error("Expected an available adapter transaction");
       }

@@ -50,7 +50,10 @@ import {
 } from "../../query/sql-fragment";
 import { type CompiledRowsSql } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
-import { isMissingTableError } from "../../utils/sql-errors";
+import {
+  isMissingTableError,
+  isSqliteNotAuthorizedError,
+} from "../../utils/sql-errors";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   type AdapterBackend,
@@ -1580,12 +1583,6 @@ export function createSqliteBackend(
     },
 
     async refreshStatistics(): Promise<void> {
-      // Cloudflare Durable Object SQLite forbids maintenance PRAGMAs such as
-      // `analysis_limit` with SQLITE_AUTH. Index DDL itself is supported, so
-      // boot/materialization may still create the index; statistics refresh is
-      // the only unsupported follow-up and is intentionally a no-op.
-      if (transactionMode === "do-sqlite") return;
-
       // `ANALYZE` populates `sqlite_stat1`. With no stat table, the
       // planner falls back to heuristics that, at least for FTS5
       // virtual-table queries and multi-column index selection, can be
@@ -1600,12 +1597,19 @@ export function createSqliteBackend(
       // fixed internal constant, not user input, so inlining it via
       // `sql.raw` is safe; SQLite's `PRAGMA` does not accept bound
       // parameters for its value.
-      await db.run(
-        toDrizzleSql(
-          portableSql`PRAGMA analysis_limit = ${portableSql.raw(String(SQLITE_ANALYZE_ROW_LIMIT))}`,
-          "sqlite",
-        ),
-      );
+      try {
+        await db.run(
+          toDrizzleSql(
+            portableSql`PRAGMA analysis_limit = ${portableSql.raw(String(SQLITE_ANALYZE_ROW_LIMIT))}`,
+            "sqlite",
+          ),
+        );
+      } catch (error) {
+        // Cloudflare D1 and Durable Object SQLite reject this performance-only
+        // tuning PRAGMA through their authorizer. Continue with scoped ANALYZE,
+        // which workerd permits, but keep every unexpected failure loud.
+        if (!isSqliteNotAuthorizedError(error)) throw error;
+      }
       for (const tableName of coreAnalyzeTables) {
         await db.run(
           toDrizzleSql(

@@ -88,6 +88,9 @@ expectType<Promise<Store<ProvenanceGraph>>>(openProvenanceStore(store));
 expectType<Promise<Store<ProvenanceGraph>>>(
   openProvenanceStore(adapterHistoryStore),
 );
+expectType<Promise<Store<ProvenanceGraph>>>(
+  openProvenanceStore(backend, graph.id),
+);
 
 declare const mergeResult: Result<MergeReport<typeof graph>, MergeError>;
 if (isOk(mergeResult)) {

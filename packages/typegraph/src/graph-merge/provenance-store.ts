@@ -20,7 +20,7 @@
 import { z } from "zod";
 
 import { compareStrings } from "./node-key";
-import type { GraphDef, Node, Store } from "./typegraph-internal";
+import type { GraphBackend, GraphDef, Node, Store } from "./typegraph-internal";
 import {
   createStoreWithSchema,
   defineGraph,
@@ -67,17 +67,32 @@ export type ProvenanceGraph = ReturnType<typeof buildProvenanceGraph>;
 export type ProvenanceNode = Node<typeof Provenance>;
 
 /**
- * Opens — materializing the schema if needed — the provenance store for a target
- * store. Idempotent: safe to call before every persist/query, and shares the
- * backend with the target (so the caller must NOT close it
- * separately — closing the shared backend is the target owner's job).
+ * Opens — materializing the schema if needed — the provenance store for a target.
+ * Pass the target Store in ordinary application code; inspection tools that do
+ * not have its GraphDef may instead pass the backend and target graph id.
+ *
+ * Idempotent: safe to call before every persist/query, and shares the backend
+ * with the target (so the caller must NOT close it separately — closing the
+ * shared backend is the target owner's job).
  */
-export async function openProvenanceStore<G extends GraphDef>(
+export function openProvenanceStore<G extends GraphDef>(
   target: Store<G>,
+): Promise<Store<ProvenanceGraph>>;
+/** Opens a provenance store for standalone inspection without a target GraphDef. */
+export function openProvenanceStore(
+  backend: GraphBackend,
+  targetGraphId: string,
+): Promise<Store<ProvenanceGraph>>;
+export async function openProvenanceStore<G extends GraphDef>(
+  ...args:
+    | readonly [target: Store<G>]
+    | readonly [backend: GraphBackend, targetGraphId: string]
 ): Promise<Store<ProvenanceGraph>> {
+  const [backend, targetGraphId] =
+    args.length === 1 ? [storeBackend(args[0]), args[0].graphId] : args;
   const [store] = await createStoreWithSchema(
-    buildProvenanceGraph(target.graphId),
-    storeBackend(target),
+    buildProvenanceGraph(targetGraphId),
+    backend,
   );
   return store;
 }

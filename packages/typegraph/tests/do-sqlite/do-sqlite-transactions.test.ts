@@ -49,6 +49,7 @@ import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../../src/backend/sqlite";
 import { DURABLE_OBJECT_MAX_BIND_PARAMETERS } from "../../src/backend/types";
 import { RECORDED_EDGE_COLUMNS } from "../../src/store/recorded-capture";
+import { isSqliteNotAuthorizedError } from "../../src/utils/sql-errors";
 
 import { SpikeDO } from "./worker";
 
@@ -154,6 +155,38 @@ function inObject<T>(
 }
 
 describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
+  it("continues with ANALYZE when workerd forbids analysis_limit", async () => {
+    await inObject(
+      "statistics-authorization",
+      async ({ db, backend, store }) => {
+        await store.nodes.Doc.create({ title: "statistics seed" });
+
+        // Bypass TypeGraph to pin the real engine gap: workerd rejects the tuning
+        // PRAGMA through SQLite's authorizer. This must fail if workerd ever starts
+        // allowing it, forcing us to reconsider the compatibility path.
+        let pragmaError: unknown;
+        try {
+          await db.run(sql.raw("PRAGMA analysis_limit = 1000"));
+        } catch (error) {
+          pragmaError = error;
+        }
+        expect(isSqliteNotAuthorizedError(pragmaError)).toBe(true);
+
+        // TypeGraph suppresses only that recognized performance-tuning failure.
+        // ANALYZE itself is permitted and must still populate planner statistics.
+        await expect(backend.refreshStatistics()).resolves.toBeUndefined();
+        const analyzedTables = await db.all(
+          sql.raw("SELECT DISTINCT tbl FROM sqlite_stat1"),
+        );
+        expect(analyzedTables).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ tbl: "typegraph_nodes" }),
+          ]),
+        );
+      },
+    );
+  });
+
   it("auto-detects do-sqlite and advertises capabilities.transactions:true", async () => {
     await inObject("detect", async ({ db, backend }, storage) => {
       expect(db.$client).toBe(storage);
@@ -163,11 +196,6 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
       expect(backend.capabilities.maxBindParameters).toBe(
         DURABLE_OBJECT_MAX_BIND_PARAMETERS,
       );
-      // Workerd rejects SQLite maintenance PRAGMAs with SQLITE_AUTH. The
-      // do-sqlite profile makes planner-statistics refresh a safe no-op so a
-      // boot that adopts a newly shipped system index stays warning-free.
-      await expect(backend.refreshStatistics()).resolves.toBeUndefined();
-
       const staleHintBackend = createSqliteBackend(db, {
         capabilities: {
           graphAnalytics: { supported: true, mathFunctions: false },

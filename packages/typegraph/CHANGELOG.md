@@ -60,6 +60,10 @@
   `StoreRef` values are preserved without downstream casts. Remove casts that
   existed only to restore the old widened evolution result.
 
+  Requiring the `sqlAvailability` check is source-breaking for adapter code that
+  previously read `tx.sql` from the unnarrowed union. Narrow on the discriminant
+  before passing the handle to even an `unknown`-typed sink.
+
   `GraphBackend` is now the portable TypeGraph backend port. Native transaction
   adoption lives on `AdapterBackend<TNativeTransaction>`, so a capability-less
   backend cannot be passed to an adapter-store factory. Portable transaction
