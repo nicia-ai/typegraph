@@ -66,11 +66,24 @@ queries, **in-process SQLite pulls ahead of networked Postgres at SF10**:
 | GA_BFS / GA_SSSP | 2.8s | 22.3s | ~8× |
 | BFS3 | 1.7s | 7.2s | ~4.3× |
 
-tg-postgres pays a per-round network round-trip + MVCC/temp-table cost on every
-iteration; tg-sqlite runs the same D2 substrate in-process, row-wise, with no
-round-trip. At SF1 these were close; at 10× the per-round overhead compounds, so
-**SQLite is the better TypeGraph backend for the graph-algorithm lanes at scale**
-(Postgres still wins where it can parallelize / on the weighted-Dijkstra IC14).
+Both backends run the identical logical D2 algorithm, so the gap is a
+PostgreSQL-specific execution constant factor — **but its cause is not yet
+established, and it is not "round-trip overhead."** Three facts rule that out:
+GA_BFS/GA_SSSP already issue exactly one `INSERT … RETURNING` per round
+(regression-tested in `algorithms.test.ts`), so there is nothing to collapse;
+PostgreSQL is reached over loopback (~1ms point queries), so ~tens of exchanges
+can't explain hundreds of seconds; and **the PG/SQLite ratio is stable — ~8.1×
+at SF1, ~8.0× at SF10 for BFS/SSSP** — which is the signature of a per-row/
+per-edge executor + temporary-relation cost, not a fixed tax that compounds with
+scale. (An earlier WCC investigation already corrected a network attribution:
+round trips were ~15ms; the real cliff then was missing temp-table statistics.)
+The one concrete *reducible* lead is that WCC still does **two temporary-table
+update passes per round** (`weakly-connected-components.ts:121`) — a plausible
+write-amplification win, but its upside is unmeasured (a server-side loop keeps
+the same MVCC work). **SQLite is the faster TypeGraph backend for the graph
+lanes at this scale; quantifying and reducing PG's D2 constant factor is an open
+investigation, not an established removable overhead.** (Postgres still wins the
+weighted-Dijkstra IC14.)
 
 ## IC14 (weighted shortest path, #288)
 
