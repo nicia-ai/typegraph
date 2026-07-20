@@ -106,3 +106,33 @@ Two disk issues surfaced (both fixed on ref `57c64a76`):
    overflowed 150 GiB. The fill-in used a **500 GiB** volume. The runner's
    `DEFAULT_VOLUME_SIZE_GIB` (150) is fine for SF1 but too small for SF10 — the
    SF10 profile should default to ~400–500 GiB.
+
+## What these numbers do and don't imply (optimization guidance)
+
+The graph-query slownesses above are mostly **architectural, niche, or artifacts
+of the LDBC schema — not broad TypeGraph engine gaps to fix.** Notes on the three
+most eye-catching cells, so nobody reads them as a to-do list:
+
+- **IC9 (the feed / recent-N pattern)** is slow in the benchmark mainly because
+  LDBC models `creator` as an edge (`hasCreator`), so the sort key has to be
+  fetched for every candidate. A real app with a feed workload would denormalize
+  the owner onto the item and index `(owner, created_at)` — which TypeGraph
+  already supports via `defineNodeIndex` — and it'd be fast. So this is a
+  schema-modeling artifact of the benchmark, not a TypeGraph limitation to fix.
+  (A "per-author top-K pushdown" would not help either — without that composite
+  index it still has to fetch every candidate's sort key.)
+- **GA_WCC / GA_BFS / GA_SSSP** are architectural — users who need whole-graph
+  analytics are genuinely better served by a specialized engine (pgGraph's CSR,
+  neo4j GDS), and no amount of SQL-iteration tuning changes that.
+- **IC14 (weighted shortest path)** — a bidirectional Dijkstra would speed it up,
+  but it's niche and benchmark-amplified: IC14 picks *random* person pairs (near
+  the graph diameter, worst case for single-source), whereas real weighted-SP
+  queries are typically between related/nearby entities where the current
+  single-source already terminates fast. Not worth the correctness-critical
+  core-algorithm change for a rarely-hit path.
+
+The one genuinely broad, tractable engine win the benchmark surfaced is
+**bulk-load throughput** (tg-postgres loads ~3× slower than pgGraph — prepared
+`INSERT` vs batched; Postgres `COPY` would help everyone who bulk-loads). Beyond
+that, real-user optimization is best driven by profiling TypeGraph's actual
+workloads, not LDBC shapes. Perf work is on hold pending that.
