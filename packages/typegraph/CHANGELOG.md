@@ -1,5 +1,26 @@
 # @nicia-ai/typegraph
 
+## 0.39.0
+
+### Minor Changes
+
+- [#306](https://github.com/nicia-ai/typegraph/pull/306) [`cd4e0eb`](https://github.com/nicia-ai/typegraph/commit/cd4e0ebf1fa8a51e8a965e667801941a5360e097) Thanks [@pdlug](https://github.com/pdlug)! - Add bounded, deterministic `scan()` pagination to recorded-time node and edge collections so adapters can reconstruct complete historical snapshots without retaining a separate identity inventory.
+
+- [#305](https://github.com/nicia-ai/typegraph/pull/305) [`4349766`](https://github.com/nicia-ai/typegraph/commit/4349766fc9d5db7046f05cefab6e56f4dd4d655a) Thanks [@pdlug](https://github.com/pdlug)! - Harden adapter capability surfaces and document their migrations.
+
+  This is source-breaking for adapter code that reads `tx.sql` without first
+  narrowing `tx.sqlAvailability === "available"`: non-available union arms now
+  omit `sql` instead of exposing it as an optional `never`/`undefined` property.
+  The runtime history and revision-tracking guards remain fail-loud for JavaScript
+  and type-suppressed callers.
+
+  Add `openProvenanceStore(targetStore)` as the preferred graph-merge provenance
+  API while retaining `openProvenanceStore(backend, targetGraphId)` for standalone
+  inspection tools. On Cloudflare D1 and Durable Object SQLite, ignore only a
+  recognized `SQLITE_AUTH` rejection of the performance-only `analysis_limit`
+  PRAGMA and continue with scoped `ANALYZE`; unexpected maintenance failures stay
+  visible.
+
 ## 0.38.0
 
 ### Minor Changes
@@ -43,13 +64,13 @@
 
   Migration map:
 
-  | 0.37 use | 0.38 replacement |
-  | --- | --- |
-  | `createStoreWithSchema(...)` followed by `tx.sql` | `createAdapterStoreWithSchema(...)` |
-  | `Store<G, TNativeTransaction>` | `AdapterStore<G, TNativeTransaction>` |
-  | `TransactionContext<G, TNativeTransaction>` | `AdapterTransactionContext<G, TNativeTransaction>` |
-  | `HistoryTransactionContext<G>` | `TransactionContext<G>` for portable history stores, or `AdapterHistoryTransactionContext<G>` for adapter history stores |
-  | `AdoptedTransaction` | The adapter's concrete native-handle type, such as `AnySqliteDatabase` or `AnyPgTransaction`, passed as the adapter generic |
+  | 0.37 use                                          | 0.38 replacement                                                                                                            |
+  | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+  | `createStoreWithSchema(...)` followed by `tx.sql` | `createAdapterStoreWithSchema(...)`                                                                                         |
+  | `Store<G, TNativeTransaction>`                    | `AdapterStore<G, TNativeTransaction>`                                                                                       |
+  | `TransactionContext<G, TNativeTransaction>`       | `AdapterTransactionContext<G, TNativeTransaction>`                                                                          |
+  | `HistoryTransactionContext<G>`                    | `TransactionContext<G>` for portable history stores, or `AdapterHistoryTransactionContext<G>` for adapter history stores    |
+  | `AdoptedTransaction`                              | The adapter's concrete native-handle type, such as `AnySqliteDatabase` or `AnyPgTransaction`, passed as the adapter generic |
 
   `HistoryTransactionContext` and `MeasurableHistoryTransactionContext` were
   removed rather than retained as aliases. Portable stores have one SQL-free
@@ -129,12 +150,12 @@
   compatibility aliases because those names now distinguish the managed Store
   API from bring-your-own-connection adapters. Move imports as follows:
 
-  | 0.37 entrypoint | 0.38 entrypoint |
-  | --- | --- |
-  | `/sqlite` | `/adapters/drizzle/sqlite` |
-  | `/sqlite/local` for `createLocalSqliteBackend` | `/adapters/drizzle/sqlite/local` |
-  | `/sqlite/libsql` | `/adapters/drizzle/sqlite/libsql` |
-  | `/postgres` | `/adapters/drizzle/postgres` |
+  | 0.37 entrypoint                                   | 0.38 entrypoint                     |
+  | ------------------------------------------------- | ----------------------------------- |
+  | `/sqlite`                                         | `/adapters/drizzle/sqlite`          |
+  | `/sqlite/local` for `createLocalSqliteBackend`    | `/adapters/drizzle/sqlite/local`    |
+  | `/sqlite/libsql`                                  | `/adapters/drizzle/sqlite/libsql`   |
+  | `/postgres`                                       | `/adapters/drizzle/postgres`        |
   | `/postgres/pglite` for `createLocalPgliteBackend` | `/adapters/drizzle/postgres/pglite` |
 
   The managed `/sqlite/local` and `/postgres/pglite` entrypoints keep Drizzle
