@@ -41,6 +41,29 @@
   `createAdapterStoreWithSchema`, and `createVerifiedAdapterStore` counterparts
   when the application deliberately needs adapter-native interoperability.
 
+  Migration map:
+
+  | 0.37 use | 0.38 replacement |
+  | --- | --- |
+  | `createStoreWithSchema(...)` followed by `tx.sql` | `createAdapterStoreWithSchema(...)` |
+  | `Store<G, TNativeTransaction>` | `AdapterStore<G, TNativeTransaction>` |
+  | `TransactionContext<G, TNativeTransaction>` | `AdapterTransactionContext<G, TNativeTransaction>` |
+  | `HistoryTransactionContext<G>` | `TransactionContext<G>` for portable history stores, or `AdapterHistoryTransactionContext<G>` for adapter history stores |
+  | `AdoptedTransaction` | The adapter's concrete native-handle type, such as `AnySqliteDatabase` or `AnyPgTransaction`, passed as the adapter generic |
+
+  `HistoryTransactionContext` and `MeasurableHistoryTransactionContext` were
+  removed rather than retained as aliases. Portable stores have one SQL-free
+  transaction context across live and history modes. Adapter contexts expose
+  `sql` only after `sqlAvailability === "available"`; the other discriminated
+  union arms omit the property. Store evolution is now generic over the exact
+  Store flavor, so adapter/history/recorded-read surfaces and compatible
+  `StoreRef` values are preserved without downstream casts. Remove casts that
+  existed only to restore the old widened evolution result.
+
+  Requiring the `sqlAvailability` check is source-breaking for adapter code that
+  previously read `tx.sql` from the unnarrowed union. Narrow on the discriminant
+  before passing the handle to even an `unknown`-typed sink.
+
   `GraphBackend` is now the portable TypeGraph backend port. Native transaction
   adoption lives on `AdapterBackend<TNativeTransaction>`, so a capability-less
   backend cannot be passed to an adapter-store factory. Portable transaction
@@ -100,6 +123,25 @@
   SQL values come from TypeGraph's query compiler. Managed local stores now live
   at `/sqlite/local` and `/postgres/pglite`; bring-your-own-connection APIs live
   under `/adapters/drizzle/sqlite...` and `/adapters/drizzle/postgres...`.
+
+  The old `@nicia-ai/typegraph/sqlite` and
+  `@nicia-ai/typegraph/postgres` entrypoints were removed. They are not
+  compatibility aliases because those names now distinguish the managed Store
+  API from bring-your-own-connection adapters. Move imports as follows:
+
+  | 0.37 entrypoint | 0.38 entrypoint |
+  | --- | --- |
+  | `/sqlite` | `/adapters/drizzle/sqlite` |
+  | `/sqlite/local` for `createLocalSqliteBackend` | `/adapters/drizzle/sqlite/local` |
+  | `/sqlite/libsql` | `/adapters/drizzle/sqlite/libsql` |
+  | `/postgres` | `/adapters/drizzle/postgres` |
+  | `/postgres/pglite` for `createLocalPgliteBackend` | `/adapters/drizzle/postgres/pglite` |
+
+  The managed `/sqlite/local` and `/postgres/pglite` entrypoints keep Drizzle
+  out of their public declarations, but their built-in database implementation
+  still uses Drizzle internally. `drizzle-orm` therefore remains a required peer
+  of the 0.38 package; declaration isolation does not imply installation
+  isolation.
 
 - [#298](https://github.com/nicia-ai/typegraph/pull/298) [`f178663`](https://github.com/nicia-ai/typegraph/commit/f1786634e7867b892805349dc922269e155d1d65) Thanks [@pdlug](https://github.com/pdlug)! - Add deterministic synchronous label propagation with exact binary tie-breaking,
   induced node-kind scope, temporal and recorded-time views, bind-independent

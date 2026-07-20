@@ -2246,8 +2246,9 @@ asRecordedInstant(value: string): RecordedInstant; // brand an external timestam
 Adopt an external transaction under `history: true` with the callback form
 `store.withRecordedTransaction(externalTx, async (tx) => ...)`, which flushes
 capture before the caller commits. `store.withTransaction(...)` is a compile
-error on a history store, and raw `tx.sql` is present-but-throwing — branch on
-`tx.sqlAvailability` (`"history"`) rather than truthiness-testing `tx.sql`. See
+error on a history store, and the typed history transaction context omits raw
+`tx.sql`. Branch on `tx.sqlAvailability` (`"history"`) before accessing the SQL
+handle. See
 [Recorded time](/queries/temporal#recorded-time-bitemporal) for the full guide.
 
 ## Observability Hooks

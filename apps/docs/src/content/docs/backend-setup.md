@@ -508,9 +508,15 @@ await store.refreshStatistics();
 
 The implementation runs `ANALYZE` against the TypeGraph-managed tables in
 the configured backend — the call is safe regardless of custom table names
-or fulltext / embedding configuration. If you need to bypass the API for an
-unusual deployment (for example issuing `ANALYZE` over a separate admin
-connection), call `backend.execute()` with raw SQL as the escape hatch.
+or fulltext / embedding configuration. Cloudflare D1 and Durable Object SQLite
+reject the performance-only `PRAGMA analysis_limit` tuning statement through
+their authorizer. TypeGraph recognizes only that `SQLITE_AUTH` failure and
+continues with scoped `ANALYZE`; workerd permits `ANALYZE`, so planner statistics
+are still refreshed but without bounded sampling. Unexpected PRAGMA or ANALYZE
+failures stay visible through the existing caller warning or rejection. If you
+need to bypass the API for an unusual deployment (for example issuing `ANALYZE`
+over a separate admin connection), call `backend.execute()` with raw SQL as the
+escape hatch.
 
 ### pgbouncer / transaction-pool mode
 
@@ -790,6 +796,9 @@ The runtime authorizer forbids temporary tables, so the same profile reports
 `shortestPath`, `reachable`, and `weightedShortestPath` automatically use their
 inline fallback; temporary-table-only analytics such as
 `weaklyConnectedComponents` throw `UnsupportedBackendCapabilityError`.
+The authorizer also rejects SQLite's `analysis_limit` tuning PRAGMA. Statistics
+refresh catches that specific authorization error and still runs scoped
+`ANALYZE`; this affects refresh cost only, not query results.
 The same profile advertises Cloudflare's 100-bound-parameter query limit.
 TypeGraph uses that hard ceiling for its managed write batches and
 recorded-history flushes; capability overrides may lower it but cannot raise
@@ -815,7 +824,9 @@ export class MyObject {
     // Atomic across TypeGraph + the product's own relational tables:
     await store.transaction(async (tx) => {
       await tx.nodes.Document.update(documentId, props);
-      if (tx.sql === undefined) throw new Error("Native transaction unavailable");
+      if (tx.sqlAvailability !== "available") {
+        throw new Error(`Native transaction unavailable: ${tx.sqlAvailability}`);
+      }
       const sqlTx = tx.sql;
       await sqlTx.insert(documentVersions).values(versionRow);
     });
@@ -884,6 +895,7 @@ TypeGraph choosing separate query semantics per backend:
 | Filtered approximate search **guarantees** a full page | ✓ `sqlite-vec` / ✗ `libsql-native`                | ✗ (`pgvector` recovers, but is bounded)    | Only `sqlite-vec` guarantees it; the others can return **fewer than `limit`** rows under heavy filtering — see below      |
 | Per-query fulltext `language` override                 | ✗                                                 | ✓                                          | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query               |
 | HNSW `efSearch` query tuning                           | ✗                                                 | ✓                                          | Silent no-op on SQLite; Postgres applies `hnsw.ef_search`. Performance only — same results                                |
+| Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
 
 ### Filtered approximate search
 

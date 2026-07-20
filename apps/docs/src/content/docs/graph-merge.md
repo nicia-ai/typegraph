@@ -428,9 +428,16 @@ Query persisted provenance back later:
 ```typescript
 import { openProvenanceStore, readProvenance } from "@nicia-ai/typegraph/graph-merge";
 
-const store = await openProvenanceStore(target.backend, target.graphId);
+const store = await openProvenanceStore(target);
 const fromAgentA = await readProvenance(store, { branchId: "agent-a" }); // what did agent A contribute?
 const whoMadeX = await readProvenance(store, { canonicalId: "patient-123" }); // who contributed node X?
+```
+
+Inspection tools that have a backend and graph id but not the target's
+`GraphDef` can use the standalone overload:
+
+```typescript
+const store = await openProvenanceStore(backend, targetGraphId);
 ```
 
 ## Snapshot vs incremental

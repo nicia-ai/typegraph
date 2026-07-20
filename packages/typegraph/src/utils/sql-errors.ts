@@ -23,6 +23,7 @@ import { ConfigurationError } from "../errors";
 
 const SQLITE_MISSING_TABLE_PATTERN = "no such table";
 const SQLITE_GENERIC_ERROR_CODE = "SQLITE_ERROR";
+const SQLITE_NOT_AUTHORIZED_CODE = "SQLITE_AUTH";
 const DRIZZLE_QUERY_ERROR_PREFIX = "Failed query:";
 const POSTGRES_UNDEFINED_RELATION_PATTERN =
   /\b(?:relation|table)\s+"[^"]+"\s+does not exist\b/i;
@@ -178,6 +179,27 @@ export function isMissingTableError(error: unknown): boolean {
       }
     }
     if (!(link instanceof Error)) everyPriorLinkWasError = false;
+  }
+  return false;
+}
+
+/**
+ * Whether SQLite rejected a statement through its authorizer. Cloudflare D1
+ * and Durable Objects surface this as `not authorized: SQLITE_AUTH`, usually on
+ * a Drizzle wrapper's `.cause`; native drivers may instead expose
+ * `code: "SQLITE_AUTH"`. Both shapes are structural enough to distinguish from
+ * an unrelated permission or connection failure.
+ */
+export function isSqliteNotAuthorizedError(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (sqliteErrorCode(link) === SQLITE_NOT_AUTHORIZED_CODE) return true;
+    const message = messageProperty(link);
+    if (
+      message?.includes(SQLITE_NOT_AUTHORIZED_CODE) === true &&
+      message.toLowerCase().includes("not authorized")
+    ) {
+      return true;
+    }
   }
   return false;
 }

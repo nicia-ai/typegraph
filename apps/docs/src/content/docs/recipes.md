@@ -729,7 +729,9 @@ handle automatically:
 ```typescript
 await store.transaction(async (tx) => {
   await tx.nodes.Document.update(documentId, props);
-  if (tx.sql === undefined) throw new Error("Native transaction unavailable");
+  if (tx.sqlAvailability !== "available") {
+    throw new Error(`Native transaction unavailable: ${tx.sqlAvailability}`);
+  }
   const sqlTx = tx.sql;
   await sqlTx.insert(documentVersions).values(versionRow);
   await sqlTx.insert(changeEvents).values(eventRow);
@@ -754,13 +756,12 @@ not on `tx.sql`'s truthiness:
 await store.transaction(async (tx) => {
   switch (tx.sqlAvailability) {
     case "available": {
-      if (tx.sql === undefined) throw new Error("Native transaction unavailable");
       const sqlTx = tx.sql;
       await sqlTx.insert(documentVersions).values(versionRow);
       break;
     }
     case "unavailable":
-      // Non-transactional fallback: tx.sql === undefined, no atomicity.
+      // Non-transactional fallback: no tx.sql property and no atomicity.
       await writeWithoutAtomicity();
       break;
     case "history":
@@ -773,14 +774,12 @@ await store.transaction(async (tx) => {
 });
 ```
 
-`tx.sql` is `undefined` — and `tx.sqlAvailability` is `"unavailable"` — only on
-the non-transactional fallback (`capabilities.transactions === false`), where
-`store.transaction` runs the callback with no atomicity and there is no
-transaction to join. Under `history: true` or `revisionTracking: true`, `tx.sql`
-is **present but throwing** (`sqlAvailability` is `"history"` /
-`"revisionTracking"`); its static type is `sql?: never` so a mistaken
-`tx.sql.run(...)` fails to typecheck, and at runtime every access throws
-`ConfigurationError`. The thrown error carries a branchable `details.code` — see
+When `tx.sqlAvailability` is `"unavailable"`, the callback is running without
+atomicity and there is no native transaction to join. The non-available union
+arms omit the `sql` property, so even reading `tx.sql` requires first narrowing
+the discriminant to `"available"`. Suppressed JavaScript or TypeScript access
+under `history: true` or `revisionTracking: true` still throws
+`ConfigurationError`; the error carries a branchable `details.code` — see
 [Recorded-capture guard codes](/errors/#recorded-capture-guard-codes).
 
 ## Enforcing Unique Constraints

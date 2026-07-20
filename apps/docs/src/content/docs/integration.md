@@ -638,7 +638,9 @@ export class GraphObject {
     // Atomic across TypeGraph + the caller's own relational tables:
     await store.transaction(async (tx) => {
       await tx.nodes.Document.update(documentId, props);
-      if (tx.sql === undefined) throw new Error("Native transaction unavailable");
+      if (tx.sqlAvailability !== "available") {
+        throw new Error(`Native transaction unavailable: ${tx.sqlAvailability}`);
+      }
       const sqlTx = tx.sql;
       await sqlTx.insert(documentVersions).values(versionRow);
     });

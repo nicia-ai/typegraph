@@ -33,7 +33,7 @@ import {
 import { isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
-import { backendMatrix, getStoreBackend } from "./test-utils";
+import { backendMatrix } from "./test-utils";
 
 const Patient = defineNode("Patient", {
   schema: z.object({ name: z.string(), mrn: z.string() }),
@@ -188,10 +188,7 @@ describe.each(backendMatrix())(
       }
       expect(result.data.provenancePersisted).toBeDefined();
 
-      const provenanceStore = await openProvenanceStore(
-        getStoreBackend(target),
-        target.graphId,
-      );
+      const provenanceStore = await openProvenanceStore(target);
       const baseRecords = await readProvenance(provenanceStore, {
         branchId: BASE_PROVENANCE_BRANCH,
       });

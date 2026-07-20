@@ -171,6 +171,11 @@ function assertFactoryContracts(
   const portableAdapterProjection: Store<typeof graph> = adapterStore;
   void portableAdapterProjection;
   void adapterStore.transaction((tx) => {
+    if (false) {
+      // @ts-expect-error Native handles require an explicit availability check.
+      const leakedToUnknown: unknown = tx.sql;
+      void leakedToUnknown;
+    }
     if (tx.sqlAvailability === "available") {
       tx.sql.executeNative("select 1");
     }

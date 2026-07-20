@@ -15,7 +15,10 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { isMissingTableError } from "../src/utils/sql-errors";
+import {
+  isMissingTableError,
+  isSqliteNotAuthorizedError,
+} from "../src/utils/sql-errors";
 
 /**
  * Mirrors drizzle-orm's `DrizzleQueryError`: `.message` is the query
@@ -251,5 +254,44 @@ describe("isMissingTableError", () => {
     (a as { cause?: unknown }).cause = b;
     (b as { cause?: unknown }).cause = a;
     expect(isMissingTableError(a)).toBe(false);
+  });
+});
+
+describe("isSqliteNotAuthorizedError", () => {
+  it("detects native, workerd, and D1 authorization failures", () => {
+    expect(
+      isSqliteNotAuthorizedError({ code: "SQLITE_AUTH", message: "denied" }),
+    ).toBe(true);
+    expect(
+      isSqliteNotAuthorizedError(
+        drizzleQueryError(
+          "PRAGMA analysis_limit = 1000",
+          new Error("not authorized: SQLITE_AUTH"),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isSqliteNotAuthorizedError(
+        new Error("D1_ERROR: not authorized: SQLITE_AUTH"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not swallow unrelated authorization or SQLite failures", () => {
+    expect(
+      isSqliteNotAuthorizedError(
+        pgError("permission denied for relation foo", "42501"),
+      ),
+    ).toBe(false);
+    expect(
+      isSqliteNotAuthorizedError(
+        new Error("SQLITE_ERROR: too many SQL variables"),
+      ),
+    ).toBe(false);
+    expect(
+      isSqliteNotAuthorizedError(
+        new Error("request not authorized by application policy"),
+      ),
+    ).toBe(false);
   });
 });

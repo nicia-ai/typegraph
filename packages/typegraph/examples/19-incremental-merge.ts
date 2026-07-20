@@ -221,10 +221,7 @@ async function main(): Promise<void> {
     // Query the DURABLE provenance back later: "what did this provider
     // contribute?" The sidecar store SHARES the target's backend, so it must not
     // be closed separately — it goes away when the target's backend closes below.
-    const provenanceStore = await openProvenanceStore(
-      target.backend,
-      target.graphId,
-    );
+    const provenanceStore = await openProvenanceStore(target);
     const contributed = await readProvenance(provenanceStore, {
       branchId: PROVIDER,
     });

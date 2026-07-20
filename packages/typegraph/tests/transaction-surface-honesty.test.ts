@@ -66,9 +66,9 @@ describe("backend capability descriptors", () => {
   });
 });
 
-/** Reads `tx.sql.run` — the access the guard fail-louds on under capture. */
-function readSqlRunAccessor(tx: Readonly<{ sql?: unknown }>): unknown {
-  return (tx.sql as { run?: unknown }).run;
+/** Reflectively reads `tx.sql.run` to exercise the runtime-only guard. */
+function readSqlRunAccessor(tx: object): unknown {
+  return (Reflect.get(tx, "sql") as { run?: unknown }).run;
 }
 
 /** Returns whatever `fn` throws, or `undefined` if it does not throw. */
@@ -87,6 +87,10 @@ describe("#254 tx.sqlAvailability discriminant", () => {
     await store.transaction(async (tx) => {
       await tx.nodes.Person.create({ name: "probe" });
       expect(tx.sqlAvailability).toBe("available");
+      // The runtime assertion above does not narrow the TypeScript union.
+      if (tx.sqlAvailability !== "available") {
+        throw new Error("Expected an available adapter transaction");
+      }
       expect(tx.sql).toBeDefined();
     });
   });
@@ -99,7 +103,7 @@ describe("#254 tx.sqlAvailability discriminant", () => {
     await store.transaction(async (tx) => {
       await tx.nodes.Person.create({ name: "probe" });
       expect(tx.sqlAvailability).toBe("unavailable");
-      expect(tx.sql).toBeUndefined();
+      expect(Reflect.get(tx, "sql")).toBeUndefined();
     });
   });
 
@@ -454,11 +458,11 @@ function nativeTransactionTypeAssertions(
   const store = createAdapterStore(graph, backend);
 
   void store.transaction((tx) => {
-    expectTypeOf(tx.sql).toEqualTypeOf<NativeTransactionProbe | undefined>();
+    // @ts-expect-error Native handles require an explicit availability check.
+    const leakedToUnknown: unknown = tx.sql;
+    void leakedToUnknown;
     if (tx.sqlAvailability === "available") {
       expectTypeOf(tx.sql).toEqualTypeOf<NativeTransactionProbe>();
-    } else {
-      expectTypeOf(tx.sql).toEqualTypeOf<undefined>();
     }
     return Promise.resolve();
   });

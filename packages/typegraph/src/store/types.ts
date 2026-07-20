@@ -1497,9 +1497,10 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
  * Whether — and why — `tx.sql` can be used on a transaction context. A single
  * required discriminant covering exactly the four states raw-SQL access can be
  * in, so an adapter caller branches on capability instead of truthiness-testing
- * `tx.sql`. Under history / revision tracking the public type makes `tx.sql`
- * unusable (`sql?: never`), while the runtime object keeps a fail-loud getter
- * for JavaScript and type-suppressed callers. See
+ * `tx.sql`. The non-available variants omit `sql` entirely, so even reading the
+ * handle requires first narrowing `sqlAvailability` to `"available"`. The
+ * runtime object keeps a fail-loud getter under history / revision tracking for
+ * JavaScript and type-suppressed callers. See
  * {@link AdapterTransactionContext} for the per-value semantics.
  */
 export type SqlAvailability =
@@ -1511,11 +1512,9 @@ type AdapterTransactionSqlAccess<TNativeTransaction> =
       sqlAvailability: "available";
     }>
   | Readonly<{
-      sql?: never;
       sqlAvailability: "history" | "revisionTracking";
     }>
   | Readonly<{
-      sql?: undefined;
       sqlAvailability: "unavailable";
     }>;
 
