@@ -4,7 +4,7 @@ import {
   rowPropsToJsonText,
   type TransactionBackend,
 } from "../../backend/types";
-import { RECORDED_MAX } from "../../core/temporal";
+import { RECORDED_MAX_REVISION } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { generateId } from "../../utils/id";
@@ -120,7 +120,7 @@ function recordedChunkSize(
  */
 type RecordedCellBuilder<Row> = (
   row: Row,
-  recordedCommit: string,
+  recordedRevision: number,
   operation: RecordedOperation,
 ) => SqlFragment;
 
@@ -161,8 +161,8 @@ function recordedCommonCells<Row extends NodeRow | EdgeRow>(): Record<
     created_at: (row) => sql`${row.created_at}`,
     updated_at: (row) => sql`${row.updated_at}`,
     deleted_at: (row) => sql`${sqlNull(row.deleted_at)}`,
-    recorded_from: (_row, recordedCommit) => sql`${recordedCommit}`,
-    recorded_to: () => sql`${RECORDED_MAX}`,
+    recorded_from: (_row, recordedRevision) => sql`${recordedRevision}`,
+    recorded_to: () => sql`${RECORDED_MAX_REVISION}`,
     op: (_row, _recordedCommit, operation) => sql`${operation}`,
     schema_version: () => sql`NULL`,
     tx_id: () => sql`NULL`,
@@ -193,11 +193,11 @@ function recordedValuesTuple<Row, Column extends string>(
   columns: readonly Column[],
   cells: Record<Column, RecordedCellBuilder<Row>>,
   row: Row,
-  recordedCommit: string,
+  recordedRevision: number,
   operation: RecordedOperation,
 ): SqlFragment {
   const tuple = columns.map((column) =>
-    cells[column](row, recordedCommit, operation),
+    cells[column](row, recordedRevision, operation),
   );
   return sql`(${sql.join(tuple, sql`, `)})`;
 }
@@ -209,7 +209,7 @@ async function insertRecordedRows<Row, Column extends string>(
   columns: readonly Column[],
   cells: Record<Column, RecordedCellBuilder<Row>>,
   inserts: readonly RecordedInsert<Row>[],
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   if (inserts.length === 0) return;
   const values = inserts.map((insert) =>
@@ -217,7 +217,7 @@ async function insertRecordedRows<Row, Column extends string>(
       columns,
       cells,
       insert.row,
-      recordedCommit,
+      recordedRevision,
       insert.operation,
     ),
   );
@@ -242,7 +242,7 @@ export function insertRecordedNodeRows(
   target: TransactionBackend,
   table: SqlFragment,
   inserts: readonly RecordedInsert<NodeRow>[],
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   return insertRecordedRows(
     target,
@@ -251,7 +251,7 @@ export function insertRecordedNodeRows(
     RECORDED_NODE_COLUMNS,
     recordedNodeCells,
     inserts,
-    recordedCommit,
+    recordedRevision,
   );
 }
 
@@ -259,7 +259,7 @@ export function insertRecordedEdgeRows(
   target: TransactionBackend,
   table: SqlFragment,
   inserts: readonly RecordedInsert<EdgeRow>[],
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   return insertRecordedRows(
     target,
@@ -268,6 +268,6 @@ export function insertRecordedEdgeRows(
     RECORDED_EDGE_COLUMNS,
     recordedEdgeCells,
     inserts,
-    recordedCommit,
+    recordedRevision,
   );
 }

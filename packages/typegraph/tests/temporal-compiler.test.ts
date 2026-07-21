@@ -135,7 +135,7 @@ describe("compileTemporalFilter", () => {
   });
 
   describe("recorded predicate", () => {
-    const recordedAsOf = "2024-03-04T05:06:07.000Z";
+    const recordedAsOf = "r1:0000000000000007:2024-03-04T05:06:07.000Z";
 
     it("omits the recorded predicate when recordedAsOf is absent", () => {
       const sql = getSqlString({ mode: "asOf", asOf: "2024-01-01T00:00:00Z" });
@@ -155,9 +155,9 @@ describe("compileTemporalFilter", () => {
       expect(sql.trim().startsWith("(")).toBe(true);
       expect(sql).toContain("recorded_from <=");
       expect(sql).toContain("< recorded_to");
-      // Half-open: `recorded_from <= R AND R < recorded_to`, so R appears twice.
-      const occurrences = (sql.match(new RegExp(recordedAsOf, "g")) ?? [])
-        .length;
+      // Half-open: `recorded_from <= R AND R < recorded_to`, so the decoded
+      // numeric revision appears twice in the stored-range predicate.
+      const occurrences = (sql.match(/\b7\b/g) ?? []).length;
       expect(occurrences).toBe(2);
     });
 
@@ -266,12 +266,14 @@ describe("extractTemporalOptions", () => {
   it("passes through recordedAsOf from the ast", () => {
     const ast = {
       temporalMode: { mode: "asOf" as const, asOf: "2024-06-15T12:00:00.000Z" },
-      recordedAsOf: "2024-07-01T00:00:00.000Z",
+      recordedAsOf: "r1:0000000000000009:2024-07-01T00:00:00.000Z",
     };
 
     const options = extractTemporalOptions(ast, "n");
 
-    expect(options.recordedAsOf).toBe("2024-07-01T00:00:00.000Z");
+    expect(options.recordedAsOf).toBe(
+      "r1:0000000000000009:2024-07-01T00:00:00.000Z",
+    );
     expect(options.mode).toBe("asOf");
     expect(options.tableAlias).toBe("n");
   });

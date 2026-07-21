@@ -48,6 +48,7 @@ import {
   asRecordedInstant,
   type ReadCoordinate,
   type RecordedInstant,
+  recordedInstantWallTime,
   resolveReadCoordinate,
   withRecordedCoordinate,
 } from "../core/temporal";
@@ -171,6 +172,7 @@ import {
 } from "./operations";
 import {
   advanceRevisionClock,
+  assertCurrentRecordedSchema,
   assertRecordedCaptureTransactionIsolation,
   assertRevisionTrackableBackend,
   createRecordedBackend,
@@ -1357,22 +1359,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Returns a narrow read-only view pinned to a recorded/system-time instant.
    *
    * Direct `store.asOfRecorded(T)` is diagonal bitemporal sugar: it reads the
-   * recorded-time relation as of `T` and uses the same `T` for the valid-time
-   * axis. Use `store.asOf(validT).asOfRecorded(recordedT)` when the valid and
-   * recorded axes should differ.
+   * recorded-time relation at the anchor's logical revision and uses the
+   * anchor's wall-time component for the valid-time axis. Use
+   * `store.asOf(validT).asOfRecorded(recordedT)` when the valid and recorded
+   * axes should differ.
    *
    * The returned view exposes only reconstructing-safe reads: query,
    * subgraph, graph algorithms, and collection point reads.
    *
-   * Prefer `await store.recordedNow()` as the anchor over a wall-clock
-   * timestamp: recorded instants are monotonic and can run briefly ahead of the
-   * wall clock under bursty writes, so a `new Date().toISOString()` passed here
-   * may sort before the most recent commits and silently omit them.
+   * Prefer `await store.recordedNow()` over a wall-clock timestamp. The anchor
+   * carries both the graph's strict logical revision and a non-decreasing
+   * physical wall-time high-water mark, so several commits in one millisecond
+   * remain independently addressable without manufacturing timestamp
+   * increments.
    */
   asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G> {
     const validCoordinate = resolveReadCoordinate(
       "asOf",
-      recordedAsOf,
+      recordedInstantWallTime(recordedAsOf),
       "Use await store.recordedNow() as the anchor, or asRecordedInstant(value) only for an instant previously read from recordedNow().",
     );
     return new RecordedStoreView(
@@ -1385,9 +1389,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Returns the latest recorded-time instant captured for this graph — the
    * recorded high-water mark. After guarding the `undefined` case,
    * `store.asOfRecorded(checkpoint)` reconstructs everything committed so far, a
-   * deterministic anchor that avoids guessing with the wall clock (recorded
-   * instants are monotonic and can run briefly ahead of wall-clock time under
-   * bursty writes). Capture each anchor right after the writes it should cover.
+   * deterministic anchor that avoids guessing with the wall clock. Its logical
+   * revision is strictly monotonic per graph while its timestamp is a
+   * non-decreasing physical wall-time high-water mark. Capture each anchor right
+   * after the writes it should cover.
    *
    * Returns `undefined` until the first write has been captured, so on a
    * brand-new graph guard the composition — `asOfRecorded(undefined)` rejects
@@ -4118,6 +4123,18 @@ type PreparedStore<G extends GraphDef> = Readonly<{
   schemaMetadata: StoreSchemaMetadata;
 }>;
 
+async function assertHistorySchemaOnOpen(
+  backend: GraphBackend,
+  options: StoreOptions | undefined,
+): Promise<void> {
+  if (options?.history !== true) return;
+  const schema =
+    options.schema === undefined ?
+      createSqlSchema(backend.tableNames)
+    : requireSqlSchema(options.schema, "store schema");
+  await assertCurrentRecordedSchema(backend, schema);
+}
+
 async function prepareStoreWithSchema<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
@@ -4139,6 +4156,8 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     ...options,
     preloaded: { activeRow, storedSchema },
   });
+
+  await assertHistorySchemaOnOpen(backend, options);
 
   // #135/#143: this is the single durable-marker writer, and it MUST
   // run after ensureSchemaImpl so the breaking-change gate is reached
@@ -4385,7 +4404,7 @@ export async function createVerifiedStore<G extends GraphDef>(
 ): Promise<
   [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
 > {
-  const prepared = await prepareVerifiedStore(graph, backend);
+  const prepared = await prepareVerifiedStore(graph, backend, options);
   return [
     new StoreImplementation(
       prepared.graph,
@@ -4400,12 +4419,14 @@ export async function createVerifiedStore<G extends GraphDef>(
 async function prepareVerifiedStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
+  options: StoreOptions | undefined,
 ): Promise<PreparedStore<G>> {
   const {
     graph: merged,
     activeRow,
     result,
   } = await loadAndVerifyGraph(backend, graph);
+  await assertHistorySchemaOnOpen(backend, options);
   return {
     graph: merged,
     result,
@@ -4491,7 +4512,7 @@ export async function createVerifiedAdapterStore<
     SchemaValidationResult,
   ]
 > {
-  const prepared = await prepareVerifiedStore(graph, backend);
+  const prepared = await prepareVerifiedStore(graph, backend, options);
   return [
     asAdapterStoreSurface(
       new AdapterStoreImplementation(

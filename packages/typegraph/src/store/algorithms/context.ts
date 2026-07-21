@@ -103,7 +103,7 @@ export function resolveTemporalOptions(
   // `recordedAsOf` normally arrives pre-validated through StoreView's
   // withRecordedCoordinate, but it is absent from the public algorithm option
   // types, so validate here too: a type-unsafe caller that smuggles a
-  // non-canonical timestamp would otherwise be string-compared raw against
+  // non-canonical anchor would otherwise be string-compared raw against
   // recorded_from/recorded_to and return wrong rows on SQLite.
   if (options.recordedAsOf !== undefined) {
     assertValidRecordedInstant(options.recordedAsOf, "recordedAsOf");

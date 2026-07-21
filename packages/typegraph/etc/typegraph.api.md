@@ -352,6 +352,9 @@ export type CommitSchemaVersionParams = Readonly<{
 }>;
 
 // @public
+export function compareRecordedInstants(left: RecordedInstant, right: RecordedInstant): -1 | 0 | 1;
+
+// @public
 type ComparisonOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn";
 
 // @public
@@ -987,6 +990,18 @@ type DeleteFulltextParams = Readonly<{
     graphId: string;
     nodeKind: string;
     nodeId: string;
+}>;
+
+// @public
+export function deleteLegacyRecordedAnchorMap(options: DeleteLegacyRecordedAnchorMapOptions): Promise<void>;
+
+// @public (undocumented)
+export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
+    backend: Pick<GraphBackend, "dialect" | "execute" | "executeStatement" | "tableNames" | "transaction">;
+    graphId: string;
+    tableNames?: Partial<SqlTableNames> | undefined;
+    mappingTableName?: string | undefined;
+    dropWhenEmpty?: boolean | undefined;
 }>;
 
 // @public
@@ -3224,6 +3239,36 @@ export type MigrateLegacyEmbeddingsResult = Readonly<{
 }>;
 
 // @public
+export function migrateLegacyRecordedTime(options: MigrateLegacyRecordedTimeOptions): Promise<MigrateLegacyRecordedTimeResult>;
+
+// @public
+export type MigrateLegacyRecordedTimeOptions = Readonly<{
+    backend: GraphBackend;
+    tableNames?: Partial<SqlTableNames> | undefined;
+    mappingTableName?: string | undefined;
+}>;
+
+// @public (undocumented)
+export type MigrateLegacyRecordedTimeResult = Readonly<{
+    migrated: boolean;
+    graphs: number;
+    anchors: number;
+    mappingTableName: string;
+}>;
+
+// @public
+export function migrateRecordedAnchor(options: MigrateRecordedAnchorOptions): Promise<RecordedInstant>;
+
+// @public (undocumented)
+export type MigrateRecordedAnchorOptions = Readonly<{
+    backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames">;
+    graphId: string;
+    anchor: string;
+    tableNames?: Partial<SqlTableNames> | undefined;
+    mappingTableName?: string | undefined;
+}>;
+
+// @public
 export class MigrationError extends TypeGraphError {
     constructor(message: string, details: MigrationErrorDetails, options?: {
         cause?: unknown;
@@ -4085,6 +4130,12 @@ export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
 
+// @public
+export function recordedInstantRevision(instant: RecordedInstant): number;
+
+// @public
+export function recordedInstantWallTime(instant: RecordedInstant): string;
+
 // @public (undocumented)
 type RecordedReadBinding = RecordedReadSource;
 
@@ -4125,7 +4176,7 @@ export type RecordedScanPage<T> = Readonly<{
 // @public
 export class RecordedStoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
-    get asOfRecorded(): string;
+    get asOfRecorded(): RecordedInstant;
     get edges(): RecordedStoreViewEdgeCollections<G>;
     get nodes(): RecordedStoreViewNodeCollections<G>;
 }

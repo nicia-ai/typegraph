@@ -344,6 +344,10 @@ function getPgColumnType(column: PgColumn): string {
     case "PgInteger": {
       return "INTEGER";
     }
+    case "PgBigInt53":
+    case "PgBigInt64": {
+      return "BIGINT";
+    }
     case "PgBoolean": {
       return "BOOLEAN";
     }

@@ -39,7 +39,13 @@ export {
 } from "./external-ref";
 
 // Recorded-time instant brand (the typed anchor for store.asOfRecorded)
-export { asRecordedInstant, type RecordedInstant } from "./temporal";
+export {
+  asRecordedInstant,
+  compareRecordedInstants,
+  type RecordedInstant,
+  recordedInstantRevision,
+  recordedInstantWallTime,
+} from "./temporal";
 
 // Graph definition
 export {

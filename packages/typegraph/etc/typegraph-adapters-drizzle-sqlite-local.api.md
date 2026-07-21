@@ -818,41 +818,37 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
             recordedFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "recorded_from";
                 tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
+                enumValues: undefined;
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
+            }, {}, {}>;
             recordedTo: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "recorded_to";
                 tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
+                enumValues: undefined;
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
+            }, {}, {}>;
             op: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "op";
                 tableName: string;
@@ -1203,41 +1199,37 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
             recordedFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "recorded_from";
                 tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
+                enumValues: undefined;
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
+            }, {}, {}>;
             recordedTo: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "recorded_to";
                 tableName: string;
-                dataType: "string";
-                columnType: "SQLiteText";
-                data: string;
-                driverParam: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: [string, ...string[]];
+                enumValues: undefined;
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
-            }, {}, {
-                length: number | undefined;
-            }>;
+            }, {}, {}>;
             op: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "op";
                 tableName: string;
@@ -1338,6 +1330,23 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
             }, {}, {
                 length: number | undefined;
             }>;
+            revision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
             recordedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "recorded_at";
                 tableName: string;

@@ -203,6 +203,22 @@ and resolves with the existing node. See
 [Transaction Receipts](#transaction-receipts) for how a coalesced upsert reads on
 a receipt.
 
+Every captured transaction receives one versioned recorded instant: a strict
+per-graph logical revision paired with a non-decreasing physical wall-time
+high-water mark. High commit rates consume revisions without pushing the
+timestamp beyond observed wall time. A backward clock correction holds the
+physical component at its prior value until the clock catches up, preserving
+cumulative diagonal checkpoint replay. Group changes by their durable
+replay/checkpoint boundary so one addressable source position consumes one
+recorded instant where practical. Cap transaction size independently: a source
+may expose one coarse checkpoint for a very large initial sync, but that does
+not make an unbounded transaction safe.
+
+Recorded clocks are independent per graph, and there is no cross-graph
+`recordedNow()` snapshot. See
+[Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time)
+for the anchor encoding and replay semantics.
+
 **Coalescing eliminates *re-delivery* churn, not replay cost.** The win is
 scoped to re-delivery of the current value — the realistic at-least-once case,
 where a change that was already applied arrives again (a crash-window replay, a
@@ -386,6 +402,11 @@ const anchor = asRecordedInstant(stored); // validates + re-brands
 const graphAtOffset = store.asOfRecorded(anchor);
 const issue = await graphAtOffset.nodes.Issue.getById(issueId);
 ```
+
+If the cursor table contains timestamp-only anchors from the recorded-time
+preview, migrate the TypeGraph relations first and remap those cursor values
+with `migrateRecordedAnchor({ backend, graphId, anchor: stored })`. See
+[Migrating preview recorded time](/schema-management#migrating-preview-recorded-time).
 
 That answers "what did the materialized graph know after offset X?" even if
 later corrections changed or deleted rows. See

@@ -1,16 +1,22 @@
 import { type GraphBackend } from "../../backend/types";
-import { RECORDED_MAX } from "../../core/temporal";
+import {
+  createRecordedInstant,
+  parseRecordedInstant,
+  RECORDED_MAX_REVISION,
+} from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import type { SqlDialect } from "../../query/dialect/types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
-import { nowIso } from "../../utils/date";
+import { canonicalizeDatabaseTimestamp, nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
-import { requireDefined } from "../../utils/presence";
 import { executeStatement } from "./guards";
 
-type ClockRow = Readonly<{ recorded_at: unknown }>;
+type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
+type RecordedClockParts = Readonly<{ recordedAt: string; revision: number }>;
+export type AllocatedRecordedCommit = RecordedClockParts &
+  Readonly<{ instant: string }>;
 type RevisionOriginRow = Readonly<{ origin: unknown }>;
 
 type RecordedClockBackend = Pick<
@@ -26,11 +32,11 @@ type RevisionOriginBackend = Pick<
 /**
  * Floor sentinel used only to seed-and-lock a graph's clock row before the
  * read/advance/write sequence on SQLite-family backends. Always overwritten by
- * the real commit within the same transaction; chosen so every real wall-clock
- * instant sorts after it on both text and timestamp ordering.
+ * the real commit within the same transaction. Revision zero is reserved for
+ * this internal row and is never exposed as a valid recorded instant.
  */
-const RECORDED_MIN = "1970-01-01T00:00:00.000Z";
-const RECORDED_MAX_TIME = new Date(RECORDED_MAX).getTime();
+const RECORDED_MIN_REVISION = 0;
+const RECORDED_MIN_TIME = "1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
 const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
   "typegraph:recorded-graph-write";
@@ -186,88 +192,64 @@ export async function lockRecordedGraphWrite(
   return graphWriteLockEvidence();
 }
 
-function failInvalidClockTimestamp(value: unknown): never {
+function failInvalidClock(value: unknown, cause?: unknown): never {
   throw new ConfigurationError(
-    "Recorded clock row contained an invalid timestamp",
+    "Recorded clock row contained an invalid revision or wall time",
     { value },
+    {
+      cause,
+      suggestion:
+        "Run migrateLegacyRecordedTime() before using recorded-time tables created by the timestamp-only preview schema.",
+    },
   );
 }
 
-/**
- * A `YYYY-MM-DD[ T]HH:MM:SS[.fff]` timestamp carrying no timezone designator
- * (no trailing `Z` and no `±HH:MM` offset). `new Date()` would parse such a
- * value in the host's *local* zone, so it must be pinned to UTC explicitly.
- */
-const ZONELESS_DATETIME_PATTERN =
-  /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
-const OFFSET_DATETIME_PATTERN =
-  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?)$/i;
-
-function normalizeOffsetDesignator(offset: string): string {
-  if (offset.toUpperCase() === "Z") return "Z";
-  if (/^[+-]\d{2}$/.test(offset)) return `${offset}:00`;
-  if (/^[+-]\d{4}$/.test(offset)) {
-    return `${offset.slice(0, 3)}:${offset.slice(3)}`;
+function recordedClockRevision(value: unknown): number {
+  const revision =
+    typeof value === "bigint" ? Number(value)
+    : typeof value === "string" && /^\d+$/.test(value) ? Number(value)
+    : value;
+  if (
+    typeof revision !== "number" ||
+    !Number.isSafeInteger(revision) ||
+    revision < RECORDED_MIN_REVISION ||
+    revision >= RECORDED_MAX_REVISION
+  ) {
+    return failInvalidClock(value);
   }
-  return offset;
+  return revision;
 }
 
-/**
- * Milliseconds since the epoch for a recorded-clock timestamp string. A
- * zoneless timestamp is interpreted as UTC — not the host's local zone — so
- * `recordedNow()` never drifts by the server's offset (or by a DST transition)
- * on a backend whose driver yields a naive timestamp for the recorded columns.
- * Timezone-aware and date-only strings are parsed as-is (already unambiguous).
- */
-function clockTimestampMs(value: string): number {
-  if (ZONELESS_DATETIME_PATTERN.test(value)) {
-    return Date.parse(`${value.replace(" ", "T")}Z`);
-  }
-  const offsetMatch = OFFSET_DATETIME_PATTERN.exec(value);
-  if (offsetMatch) {
-    const [, date, time, offset] = offsetMatch;
-    return Date.parse(
-      `${date}T${time}${normalizeOffsetDesignator(requireDefined(offset))}`,
-    );
-  }
-  return Date.parse(value);
+function recordedClockWallTime(value: unknown): string {
+  return canonicalizeDatabaseTimestamp(value) ?? failInvalidClock(value);
 }
 
-/**
- * Canonicalizes a recorded-clock value (a driver `Date` or an ISO string) to a
- * canonical UTC ISO string. Both branches guard against an unrepresentable
- * instant: a `Date` whose `getTime()` is `NaN` would otherwise make
- * `toISOString()` throw a bare `RangeError`, masking the typed
- * {@link ConfigurationError} the string branch already raises for an
- * unparseable value. Exported for focused unit coverage of that guard.
- */
-export function toCanonicalIso(value: unknown): string {
-  if (value instanceof Date) {
-    if (Number.isNaN(value.getTime())) return failInvalidClockTimestamp(value);
-    return value.toISOString();
-  }
-  if (typeof value === "string") {
-    const timestamp = clockTimestampMs(value);
-    if (Number.isNaN(timestamp)) return failInvalidClockTimestamp(value);
-    return new Date(timestamp).toISOString();
-  }
-  return failInvalidClockTimestamp(value);
+function recordedClockParts(row: ClockRow): RecordedClockParts | undefined {
+  const revision = recordedClockRevision(row.revision);
+  if (revision === RECORDED_MIN_REVISION) return undefined;
+  return { revision, recordedAt: recordedClockWallTime(row.recorded_at) };
 }
 
-/**
- * The next monotonic recorded-commit instant (ms since epoch) for a graph: the
- * wall clock, or one millisecond past the previous commit when the wall clock
- * has not advanced. Returned as a number so the caller range-checks it against
- * the open sentinel before formatting — one parse in, one format out.
- */
-function nextRecordedCommitTime(previous: string | undefined): number {
-  // `nowIso()` (not `Date.now()`) so a mocked wall clock still drives capture;
-  // `Date.parse` of its canonical-Z string avoids the extra Date allocation +
-  // re-parse of `new Date(nowIso()).getTime()` on this per-commit hot path.
-  const wallTime = Date.parse(nowIso());
-  return previous === undefined ? wallTime : (
-      Math.max(wallTime, Date.parse(previous) + 1)
-    );
+function nextRecordedCommitParts(
+  previous: RecordedClockParts | undefined,
+): RecordedClockParts {
+  const wallTime = nowIso();
+  if (previous === undefined) {
+    return { revision: 1, recordedAt: wallTime };
+  }
+
+  return {
+    revision: previous.revision + 1,
+    // Keep diagonal replay cumulative across backward clock corrections without
+    // manufacturing a new millisecond for same-ms commits. Throughput can make
+    // this component repeat, never run ahead of the greatest observed wall time.
+    recordedAt: nonDecreasingWallTime(wallTime, previous.recordedAt),
+  };
+}
+
+function nonDecreasingWallTime(current: string, previous: string): string {
+  if (current < previous) return previous;
+  return current;
 }
 
 /**
@@ -281,20 +263,31 @@ export async function readRecordedClock(
   schema: SqlSchema,
   graphId: string,
 ): Promise<string | undefined> {
+  const parts = await readRecordedClockParts(target, schema, graphId);
+  return parts === undefined ? undefined : (
+      createRecordedInstant(parts.revision, parts.recordedAt)
+    );
+}
+
+async function readRecordedClockParts(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<RecordedClockParts | undefined> {
   const rows = await target.execute<ClockRow>(
     asCompiledRowsSql(sql`
-      SELECT recorded_at
+      SELECT revision, recorded_at
       FROM ${schema.recordedClockTable}
       WHERE graph_id = ${graphId}
     `),
   );
-  const first = rows[0];
-  return first === undefined ? undefined : toCanonicalIso(first.recorded_at);
+  const row = rows[0];
+  return row === undefined ? undefined : recordedClockParts(row);
 }
 
 /**
  * Reads the durable, random origin assigned to one graph's revision clock.
- * The origin namespaces an otherwise timestamp-only revision anchor, so a
+ * The origin namespaces an otherwise graph-local revision anchor, so a
  * branch cannot mistake another store's coincident clock value for its base.
  */
 export async function readRevisionOrigin(
@@ -365,14 +358,15 @@ async function writeRecordedClock(
   target: RecordedClockBackend,
   schema: SqlSchema,
   graphId: string,
-  recordedAt: string,
+  parts: RecordedClockParts,
 ): Promise<void> {
   await executeStatement(
     target,
     sql`
-      INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at)
-      VALUES (${graphId}, ${recordedAt})
-      ON CONFLICT (graph_id) DO UPDATE SET recorded_at = ${recordedAt}
+      INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+      VALUES (${graphId}, ${parts.revision}, ${parts.recordedAt})
+      ON CONFLICT (graph_id) DO UPDATE
+      SET revision = ${parts.revision}, recorded_at = ${parts.recordedAt}
     `,
   );
 }
@@ -401,9 +395,9 @@ async function lockRecordedClock(
       await executeStatement(
         target,
         sql`
-          INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at)
-          VALUES (${graphId}, ${RECORDED_MIN})
-          ON CONFLICT (graph_id) DO UPDATE SET recorded_at = recorded_at
+          INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+          VALUES (${graphId}, ${RECORDED_MIN_REVISION}, ${RECORDED_MIN_TIME})
+          ON CONFLICT (graph_id) DO UPDATE SET revision = revision
         `,
       );
       return;
@@ -420,38 +414,37 @@ export async function allocateRecordedCommit(
   graphId: string,
   ownsWriteLock: boolean,
   previousRevision?: string,
-): Promise<string> {
+): Promise<AllocatedRecordedCommit> {
   await lockRecordedClock(target, schema, graphId, ownsWriteLock);
   const previous =
-    previousRevision ?? (await readRecordedClock(target, schema, graphId));
-  const recordedCommitTime = nextRecordedCommitTime(previous);
-  if (
-    !Number.isFinite(recordedCommitTime) ||
-    recordedCommitTime >= RECORDED_MAX_TIME
-  ) {
+    previousRevision === undefined ?
+      await readRecordedClockParts(target, schema, graphId)
+    : parseRecordedInstant(previousRevision, "previous recorded revision");
+  const { revision, recordedAt } = nextRecordedCommitParts(previous);
+  if (revision >= RECORDED_MAX_REVISION) {
     throw new ConfigurationError(
-      `Recorded commit clock reached the open sentinel ${RECORDED_MAX}`,
-      { graphId, recordedCommitTime },
+      `Recorded commit clock reached the open revision sentinel ${RECORDED_MAX_REVISION}`,
+      { graphId, revision },
       {
         suggestion:
-          "Use a graph with a normal recorded-time clock; the open sentinel is reserved for relation intervals.",
+          "Start a new graph before exhausting the per-graph recorded revision space.",
       },
     );
   }
-  const recordedCommit = new Date(recordedCommitTime).toISOString();
-  await writeRecordedClock(target, schema, graphId, recordedCommit);
-  return recordedCommit;
+  const instant = createRecordedInstant(revision, recordedAt);
+  await writeRecordedClock(target, schema, graphId, { revision, recordedAt });
+  return { instant, revision, recordedAt };
 }
 
 /**
  * Advances the durable graph revision after a successful live-store write.
  *
- * Revision tracking deliberately reuses the monotonic per-graph clock already
+ * Revision tracking deliberately reuses the monotonic per-graph revision already
  * owned by recorded-time capture. The write path holds the graph write lock
  * before this runs. Callers additionally state whether their SQLite
  * transaction owns the write lock so `allocateRecordedCommit` can skip its
  * redundant seed-UPSERT only on bundled `BEGIN IMMEDIATE` paths. It preserves
- * monotonicity even when wall-clock milliseconds repeat. History capture calls
+ * monotonicity independently of wall-clock behavior. History capture calls
  * `allocateRecordedCommit` during its own flush instead, so a captured write
  * remains one revision rather than being advanced twice.
  */
@@ -462,11 +455,12 @@ export async function advanceRevisionClock(
   ownsWriteLock: boolean,
   previousRevision?: string,
 ): Promise<string> {
-  return allocateRecordedCommit(
+  const commit = await allocateRecordedCommit(
     target,
     schema,
     graphId,
     ownsWriteLock,
     previousRevision,
   );
+  return commit.instant;
 }

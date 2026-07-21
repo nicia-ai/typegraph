@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../src/errors";
 import {
+  canonicalizeDatabaseTimestamp,
   decodeDate,
   encodeDate,
   isCanonicalIsoDate,
@@ -15,6 +16,43 @@ import {
 } from "../src/utils/date";
 
 describe("date utilities", () => {
+  describe("canonicalizeDatabaseTimestamp", () => {
+    it("interprets zoneless driver timestamps as UTC", () => {
+      expect(canonicalizeDatabaseTimestamp("2026-06-25 12:00:00")).toBe(
+        "2026-06-25T12:00:00.000Z",
+      );
+      expect(canonicalizeDatabaseTimestamp("2026-06-25T12:30")).toBe(
+        "2026-06-25T12:30:00.000Z",
+      );
+      expect(canonicalizeDatabaseTimestamp("2026-06-25T12:00:00.123")).toBe(
+        "2026-06-25T12:00:00.123Z",
+      );
+    });
+
+    it("normalizes explicit database-driver offsets", () => {
+      expect(canonicalizeDatabaseTimestamp("2026-06-25 12:00:00+00")).toBe(
+        "2026-06-25T12:00:00.000Z",
+      );
+      expect(canonicalizeDatabaseTimestamp("2026-06-25 12:00:00+0000")).toBe(
+        "2026-06-25T12:00:00.000Z",
+      );
+      expect(canonicalizeDatabaseTimestamp("2026-06-25 12:00:00-0230")).toBe(
+        "2026-06-25T14:30:00.000Z",
+      );
+    });
+
+    it("rejects unsupported and unrepresentable values", () => {
+      expect(
+        canonicalizeDatabaseTimestamp(new Date("not a date")),
+      ).toBeUndefined();
+      expect(canonicalizeDatabaseTimestamp("not a date")).toBeUndefined();
+      expect(
+        canonicalizeDatabaseTimestamp("June 25 2026 12:00:00"),
+      ).toBeUndefined();
+      expect(canonicalizeDatabaseTimestamp(42)).toBeUndefined();
+    });
+  });
+
   describe("isValidIsoDate", () => {
     it("accepts valid ISO 8601 dates with milliseconds", () => {
       expect(isValidIsoDate("2024-01-15T10:30:00.000Z")).toBe(true);

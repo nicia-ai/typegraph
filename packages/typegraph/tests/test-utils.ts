@@ -17,9 +17,47 @@ import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
 import type { SqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { AdapterBackend, GraphBackend } from "../src/backend/types";
+import {
+  createRecordedInstant,
+  type RecordedInstant,
+} from "../src/core/temporal";
 import { requireDefined } from "../src/utils/presence";
 
 const backendsToClose: GraphBackend[] = [];
+
+export function recordedRevisionFromDriver(value: unknown): number {
+  const revision =
+    typeof value === "bigint" ? Number(value)
+    : typeof value === "string" ? Number(value)
+    : value;
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision)) {
+    throw new TypeError(
+      `Expected a safe recorded revision, got ${String(value)}`,
+    );
+  }
+  return revision;
+}
+
+export function recordedWallTimeFromDriver(value: unknown): string {
+  const date =
+    value instanceof Date ? value
+    : typeof value === "string" ? new Date(value)
+    : undefined;
+  if (date === undefined || Number.isNaN(date.getTime())) {
+    throw new Error(`Expected a recorded wall time, got ${String(value)}`);
+  }
+  return date.toISOString();
+}
+
+export function recordedInstantFromDriver(
+  revision: unknown,
+  recordedAt: unknown,
+): RecordedInstant {
+  return createRecordedInstant(
+    recordedRevisionFromDriver(revision),
+    recordedWallTimeFromDriver(recordedAt),
+  );
+}
 
 async function closeCreatedTestBackends(): Promise<void> {
   const current = backendsToClose.splice(0);

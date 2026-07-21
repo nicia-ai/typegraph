@@ -74,6 +74,63 @@ export function validateIsoDate(value: string, fieldName: string): string {
 const CANONICAL_ISO_DATE_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
+const ZONELESS_DATETIME_PATTERN =
+  /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+const OFFSET_DATETIME_PATTERN =
+  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?)$/i;
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function normalizedOffset(offset: string): string {
+  if (offset.toUpperCase() === "Z") return "Z";
+  if (/^[+-]\d{2}$/.test(offset)) return `${offset}:00`;
+  if (/^[+-]\d{4}$/.test(offset)) {
+    return `${offset.slice(0, 3)}:${offset.slice(3)}`;
+  }
+  return offset;
+}
+
+function databaseTimestampMilliseconds(value: string): number {
+  if (ZONELESS_DATETIME_PATTERN.test(value)) {
+    return Date.parse(`${value.replace(" ", "T")}Z`);
+  }
+  const offsetMatch = OFFSET_DATETIME_PATTERN.exec(value);
+  if (offsetMatch !== null) {
+    const date = offsetMatch[1];
+    const time = offsetMatch[2];
+    const offset = offsetMatch[3];
+    if (date === undefined || time === undefined || offset === undefined) {
+      return Number.NaN;
+    }
+    return Date.parse(`${date}T${time}${normalizedOffset(offset)}`);
+  }
+  if (DATE_ONLY_PATTERN.test(value)) {
+    return Date.parse(`${value}T00:00:00.000Z`);
+  }
+  return Number.NaN;
+}
+
+/**
+ * Canonicalizes a database-driver timestamp without interpreting a zoneless
+ * string in the host timezone. PostgreSQL drivers can return values such as
+ * `2026-06-25 12:00:00`; TypeGraph treats that shape as UTC so the same stored
+ * clock value cannot move across hosts or daylight-saving boundaries.
+ *
+ * Returns `undefined` for an unsupported or unrepresentable value so callers
+ * can raise an error specific to their storage boundary.
+ */
+export function canonicalizeDatabaseTimestamp(
+  value: unknown,
+): string | undefined {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return undefined;
+    return value.toISOString();
+  }
+  if (typeof value !== "string") return undefined;
+  const milliseconds = databaseTimestampMilliseconds(value);
+  if (Number.isNaN(milliseconds)) return undefined;
+  return new Date(milliseconds).toISOString();
+}
+
 /**
  * Checks if a string is a canonical UTC ISO 8601 datetime with fixed
  * millisecond width (`YYYY-MM-DDTHH:mm:ss.sssZ`).

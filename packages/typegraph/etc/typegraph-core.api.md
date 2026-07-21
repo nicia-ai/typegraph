@@ -44,6 +44,9 @@ export type Cardinality = "many" | "one" | "unique" | "oneActive";
 export type Collation = "binary" | "caseInsensitive";
 
 // @public
+export function compareRecordedInstants(left: RecordedInstant, right: RecordedInstant): -1 | 0 | 1;
+
+// @public
 export function createExternalRef<T extends string>(table: T): (id: string) => ExternalRefValue<T>;
 
 // @public (undocumented)
@@ -626,6 +629,12 @@ const RECORDED_INSTANT_BRAND: unique symbol;
 export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
+
+// @public
+export function recordedInstantRevision(instant: RecordedInstant): number;
+
+// @public
+export function recordedInstantWallTime(instant: RecordedInstant): string;
 
 // @public
 type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;

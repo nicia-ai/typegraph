@@ -302,6 +302,70 @@ and need a deliberate re-embed at a single dimension — see
 The vector and hybrid query API (`.similarTo()`, `store.search.vector`,
 `store.search.hybrid`) is storage-transparent and unchanged by this cutover.
 
+## Migrating Preview Recorded Time
+
+The initial recorded-time preview stored timestamps directly in
+`recorded_from`, `recorded_to`, and the graph clock. Versioned anchors now keep
+the durable string API while recorded relations compare numeric revisions.
+
+**Stop writers and run the one-time migration before enabling `history: true`
+with the new library version.** `createStoreWithSchema` and
+`createVerifiedStore` validate the recorded table shapes during an async open
+and reject an unmigrated preview schema before returning a store:
+
+```typescript
+import {
+  deleteLegacyRecordedAnchorMap,
+  migrateLegacyRecordedTime,
+  migrateRecordedAnchor,
+} from "@nicia-ai/typegraph";
+
+const result = await migrateLegacyRecordedTime({ backend });
+console.log(result.graphs, result.anchors);
+
+// Translate anchors stored in an application-owned checkpoint table.
+const upgraded = await migrateRecordedAnchor({
+  backend,
+  graphId: "event-materializer",
+  anchor: oldTimestampOnlyAnchor,
+});
+await checkpoints.replaceAnchor(oldTimestampOnlyAnchor, upgraded);
+
+// Do this only after every external checkpoint for the graph is upgraded.
+await deleteLegacyRecordedAnchorMap({
+  backend,
+  graphId: "event-materializer",
+  dropWhenEmpty: true,
+});
+```
+
+The migration dense-ranks distinct legacy commit timestamps independently per
+graph, preserving their exact total order. It rewrites the recorded relations
+and clock atomically and retains a durable old-anchor mapping so downstream
+stores can migrate separately. Re-running it after the cutover is a no-op.
+`migrateRecordedAnchor` also accepts an already-versioned `r1` anchor, making a
+mixed old/new checkpoint pass idempotent.
+
+The synchronous `createStore` factory is an attach-only, zero-I/O path, so it
+cannot inspect table shapes during construction. If used with `history: true`,
+an unmigrated schema still fails loudly on the first recorded operation. Prefer
+one of the async factories above at application startup when early schema
+verification matters.
+
+The old allocator may have pushed a hot graph's physical timestamp ahead of
+real wall time. Migration preserves that value because lowering it would put
+the clock behind recorded relation boundaries. New commits advance the logical
+revision normally, while the physical component remains pinned until wall time
+catches up. During that window, diagonal reads use the inherited future valid
+time; recorded-only ordering and replay remain exact.
+
+The mapping is graph-scoped: the same timestamp can correspond to different
+revisions in different graphs. Keep writers stopped for the schema rewrite, and
+delete mapping rows only after every external checkpoint for that graph has
+been translated. `dropWhenEmpty: true` atomically drops the mapping table when
+the deleted graph was the final one. Without that option, the empty table is
+retained intentionally and can be dropped by your normal migration tooling.
+
 ## Schema Serialization
 
 Schemas are stored as JSON documents with computed hashes for fast comparison:

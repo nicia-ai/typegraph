@@ -4,7 +4,7 @@ import {
   type NodeRow,
   type TransactionBackend,
 } from "../../backend/types";
-import { RECORDED_MAX } from "../../core/temporal";
+import { RECORDED_MAX_REVISION } from "../../core/temporal";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
@@ -67,17 +67,17 @@ async function closeOpenReturning(
   table: SqlFragment,
   graphId: string,
   ids: readonly string[],
-  recordedCommit: string,
+  recordedRevision: number,
   kind?: string,
 ): Promise<ReadonlyMap<string, boolean>> {
   const kindFilter = kind === undefined ? sql`` : sql`AND kind = ${kind}`;
   const rows = await target.execute<ClosedRow>(
     asCompiledRowsSql(sql`
       UPDATE ${table}
-      SET recorded_to = ${recordedCommit}
+      SET recorded_to = ${recordedRevision}
       WHERE graph_id = ${graphId}
         ${kindFilter}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
         AND id IN (${sqlValueList(ids)})
       RETURNING id, deleted_at
     `),
@@ -143,7 +143,7 @@ export async function flushNodes(
   schema: SqlSchema,
   graphId: string,
   entities: readonly TouchedNode[],
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   const chunkSize = recordedNodeChunkSize(target);
   for (const [kind, group] of groupNodesByKind(entities)) {
@@ -154,7 +154,7 @@ export async function flushNodes(
         schema.recordedNodesTable,
         graphId,
         ids,
-        recordedCommit,
+        recordedRevision,
         kind,
       );
       const afterById = await resolveAfterImages(entityChunk, (missing) =>
@@ -164,7 +164,7 @@ export async function flushNodes(
         target,
         schema.recordedNodesTable,
         recordedInsertsFor(afterById, closed),
-        recordedCommit,
+        recordedRevision,
       );
     }
   }
@@ -175,7 +175,7 @@ export async function flushEdges(
   schema: SqlSchema,
   graphId: string,
   entities: readonly TouchedEdge[],
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   const chunkSize = recordedEdgeChunkSize(target);
   for (const entityChunk of chunk(entities, chunkSize)) {
@@ -185,7 +185,7 @@ export async function flushEdges(
       schema.recordedEdgesTable,
       graphId,
       ids,
-      recordedCommit,
+      recordedRevision,
     );
     const afterById = await resolveAfterImages(entityChunk, (missing) =>
       getEdgeRowsByIds(target, graphId, missing),
@@ -194,7 +194,7 @@ export async function flushEdges(
       target,
       schema.recordedEdgesTable,
       recordedInsertsFor(afterById, closed),
-      recordedCommit,
+      recordedRevision,
     );
   }
 }
@@ -204,16 +204,16 @@ async function closeOpenByKind(
   table: SqlFragment,
   graphId: string,
   kind: string,
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   await executeStatement(
     target,
     sql`
       UPDATE ${table}
-      SET recorded_to = ${recordedCommit}
+      SET recorded_to = ${recordedRevision}
       WHERE graph_id = ${graphId}
         AND kind = ${kind}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `,
   );
 }
@@ -223,16 +223,16 @@ async function closeOpenEdgesByNodeKind(
   schema: SqlSchema,
   graphId: string,
   nodeKind: string,
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   await executeStatement(
     target,
     sql`
       UPDATE ${schema.recordedEdgesTable}
-      SET recorded_to = ${recordedCommit}
+      SET recorded_to = ${recordedRevision}
       WHERE graph_id = ${graphId}
         AND (from_kind = ${nodeKind} OR to_kind = ${nodeKind})
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `,
   );
 }
@@ -256,14 +256,14 @@ export async function closeRecordedHardDeletedKind(
       schema.recordedNodesTable,
       graphId,
       removal.kind,
-      recordedCommit,
+      recordedCommit.revision,
     );
     await closeOpenEdgesByNodeKind(
       target,
       schema,
       graphId,
       removal.kind,
-      recordedCommit,
+      recordedCommit.revision,
     );
     return;
   }
@@ -272,7 +272,7 @@ export async function closeRecordedHardDeletedKind(
     schema.recordedEdgesTable,
     graphId,
     removal.kind,
-    recordedCommit,
+    recordedCommit.revision,
   );
 }
 

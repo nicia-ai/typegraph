@@ -441,7 +441,8 @@ const graph = defineGraph({
 Creates the portable store contract for a graph definition. It contains the
 complete TypeGraph API and graph-owned transactions, but deliberately omits
 adapter-native handles, caller-owned transaction adoption, and mutable backend
-internals.
+internals. This synchronous factory performs no database I/O, including schema
+shape checks. Use an async factory below when startup must verify storage.
 
 ```typescript
 import { createStore } from "@nicia-ai/typegraph";
@@ -493,6 +494,13 @@ for any graph with `searchable()` fields: it durably materializes the
 fulltext storage. Bare `createStore()` does not, and the first fulltext
 operation against an uninitialized database throws
 `StoreNotInitializedError`.
+
+With `history: true`, the async open also verifies the recorded node, edge, and
+clock column shapes before returning. Databases created by the timestamp-only
+recorded-time preview must run `migrateLegacyRecordedTime({ backend })` first;
+an unmigrated schema throws a typed `ConfigurationError` with
+`details.code === "RECORDED_SCHEMA_INCOMPATIBLE"` at open rather than on the
+first write.
 
 ```typescript
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
@@ -2210,18 +2218,26 @@ store.asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
 // also: store.asOf(validT).asOfRecorded(recordedT)
 //       store.view({ mode }).asOfRecorded(recordedT)
 store.recordedNow(): Promise<RecordedInstant | undefined>;
-asRecordedInstant(value: string): RecordedInstant; // brand an external timestamp
+asRecordedInstant(value: string): RecordedInstant; // re-brand a persisted anchor
+recordedInstantRevision(value: RecordedInstant): number;
+recordedInstantWallTime(value: RecordedInstant): string;
+compareRecordedInstants(a: RecordedInstant, b: RecordedInstant): -1 | 0 | 1;
 ```
 
 - **`store.asOfRecorded(T)`** is diagonal sugar — the recorded *and* valid axes
   both at `T`. Chain from `store.asOf(validT)` / `store.view({ mode })` to pin
   the two axes independently.
-- **`T` is a `RecordedInstant`**, a branded canonical timestamp. It comes from
-  `store.recordedNow()` or `asRecordedInstant(...)`; a raw wall-clock string
-  (`new Date().toISOString()`) is a compile error. Recorded instants are
-  monotonic and can run briefly ahead of wall-clock time under bursty writes, so
-  a wall-clock value may sort before the most recent commits and silently omit
-  them — the brand prevents that at the type level.
+- **`T` is a `RecordedInstant`**, a branded canonical string encoded as
+  `r1:<16-digit revision>:<canonical UTC timestamp>`. It comes from
+  `store.recordedNow()` or from `asRecordedInstant(...)` after the exact anchor
+  has round-tripped through untyped storage. A raw wall-clock string
+  (`new Date().toISOString()`) is a compile error because it cannot distinguish
+  multiple commits in one millisecond. The logical revision orders commits; the
+  timestamp is a non-decreasing physical wall-time high-water mark. Use
+  `recordedInstantRevision(T)`, `recordedInstantWallTime(T)`, and
+  `compareRecordedInstants(a, b)` instead of splitting or comparing anchor
+  strings manually. Comparisons are meaningful only within one graph. See
+  [Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time).
 - **`store.recordedNow()`** returns the recorded high-water mark — the latest
   captured recorded instant. After guarding the `undefined` case,
   `store.asOfRecorded(checkpoint)` reconstructs everything committed so far. Use

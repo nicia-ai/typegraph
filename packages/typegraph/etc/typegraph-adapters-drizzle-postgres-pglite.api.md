@@ -762,10 +762,10 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
             recordedFrom: drizzle_orm_pg_core.PgColumn<{
                 name: "recorded_from";
                 tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
-                driverParam: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
@@ -779,10 +779,10 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
             recordedTo: drizzle_orm_pg_core.PgColumn<{
                 name: "recorded_to";
                 tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
-                driverParam: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
@@ -1109,10 +1109,10 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
             recordedFrom: drizzle_orm_pg_core.PgColumn<{
                 name: "recorded_from";
                 tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
-                driverParam: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
@@ -1126,10 +1126,10 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
             recordedTo: drizzle_orm_pg_core.PgColumn<{
                 name: "recorded_to";
                 tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
-                driverParam: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
@@ -1228,6 +1228,23 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
                 enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            revision: drizzle_orm_pg_core.PgColumn<{
+                name: "revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;

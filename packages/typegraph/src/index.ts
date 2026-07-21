@@ -58,6 +58,7 @@ export {
   asNodeId,
   // Recorded-time instant brand (the typed anchor for store.asOfRecorded)
   asRecordedInstant,
+  compareRecordedInstants,
   // External reference type for hybrid overlay patterns
   createExternalRef,
   DEFAULT_SEARCHABLE_LANGUAGE,
@@ -91,6 +92,8 @@ export {
   metaEdge,
   type NodeKinds,
   type RecordedInstant,
+  recordedInstantRevision,
+  recordedInstantWallTime,
   // Vector-slot enumeration for manual provisioning (the boot step
   // createStoreWithSchema performs via backend.ensureVectorSlotContribution)
   resolveGraphVectorSlots,
@@ -184,6 +187,15 @@ export {
 // Vector Storage Migration (one-time shared-table → per-field cutover)
 // ============================================================
 
+export {
+  deleteLegacyRecordedAnchorMap,
+  type DeleteLegacyRecordedAnchorMapOptions,
+  migrateLegacyRecordedTime,
+  type MigrateLegacyRecordedTimeOptions,
+  type MigrateLegacyRecordedTimeResult,
+  migrateRecordedAnchor,
+  type MigrateRecordedAnchorOptions,
+} from "./backend/migrate-recorded-time";
 export {
   type LegacyEmbeddingSlotConfig,
   migrateLegacyEmbeddings,
