@@ -124,31 +124,24 @@ describe("Query Builder Type Safety", () => {
       expect(identityGraph.identity).toEqual({ sameIdAcrossKinds: "fold" });
     });
 
-    it("guides a compile-only builder toward identityEnabled: true", () => {
+    it("infers identity capability for a compile-only builder", () => {
       const identityRegistry = buildKindRegistry(identityGraph);
 
-      // Compile-only builder (no backend, identityEnabled defaulting false):
-      // the message must point at the missing option, not blame the graph.
-      expect(() =>
-        createQueryBuilder<typeof identityGraph>(
-          identityGraph.id,
-          identityRegistry,
-        )
-          .from("Person", "person")
-          .traverse("knows", "edge", { includeIdentityMembers: true }),
-      ).toThrow(/identityEnabled: true/u);
-
-      // Opting in makes the identical traversal compile.
       const builder = createQueryBuilder<typeof identityGraph>(
         identityGraph.id,
         identityRegistry,
-        { identityEnabled: true },
       )
         .from("Person", "person")
         .traverse("knows", "edge", { includeIdentityMembers: true })
         .to("Person", "friend")
         .select((context) => context.friend);
       expect(builder.toAst().traversals[0]?.includeIdentityMembers).toBe(true);
+
+      expect(() =>
+        createQueryBuilder<typeof graph>(graph.id, registry, {
+          identityEnabled: true,
+        }),
+      ).toThrow(/identity-enabled graph registry/u);
     });
   });
 

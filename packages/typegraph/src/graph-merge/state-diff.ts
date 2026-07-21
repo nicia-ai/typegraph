@@ -42,7 +42,7 @@ import type {
   TransactionBackend,
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds } from "./typegraph-internal";
-import { storeBackend } from "./typegraph-internal";
+import { storeBackend, storeRuntime } from "./typegraph-internal";
 
 /**
  * Local structural mirror of TypeGraph's internal `NodeRow`. 0.29.0 does NOT
@@ -429,8 +429,8 @@ export async function diffAgainstBase<G extends GraphDef>(
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
   const [baseIdentity, forkIdentity] = await Promise.all([
-    baseStore.identityAssertionsForInterchange("state"),
-    forkStore.identityAssertionsForInterchange("state"),
+    storeRuntime(baseStore).identityAssertionsForInterchange("state"),
+    storeRuntime(forkStore).identityAssertionsForInterchange("state"),
   ]);
   const baseIdentityById = new Map(
     baseIdentity.map((assertion) => [assertion.id, assertion]),

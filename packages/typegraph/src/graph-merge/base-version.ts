@@ -50,7 +50,7 @@ import type {
   TransactionBackend,
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
-import { storeBackend } from "./typegraph-internal";
+import { storeBackend, storeRuntime } from "./typegraph-internal";
 import { computeSchemaHash, serializeSchema } from "./typegraph-internal";
 import type { BaseVersion } from "./types";
 import { asBaseVersion } from "./types";
@@ -246,7 +246,7 @@ export async function computeBaseVersion<G extends GraphDef>(
   }
   const [schemaComponent, identityAssertions] = await Promise.all([
     computeSchemaComponent(store),
-    store.identityAssertionsForInterchange("state"),
+    storeRuntime(store).identityAssertionsForInterchange("state"),
   ]);
   const contentComponent = await computeContentComponent(
     storeBackend(store),

@@ -30,7 +30,11 @@ export {
   readRecordedClock,
   readRevisionOrigin,
 } from "../store/recorded-capture";
-export { storeBackend, transactionBackend } from "../store/runtime-port";
+export {
+  storeBackend,
+  storeRuntime,
+  transactionBackend,
+} from "../store/runtime-port";
 export type { Store } from "../store/store";
 export { createStoreWithSchema } from "../store/store";
 export { type Edge, type Node } from "../store/types";

@@ -12,6 +12,11 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
+import {
+  type IdentityImportSummary,
+  type IdentityTransferAssertion,
+} from "../identity/service";
+import { type IdentityReadFacadeFor } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { type InternalGraphAlgorithms } from "./algorithms";
@@ -81,6 +86,39 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   algorithmsAtCoordinate: (
     coordinate: ReadCoordinate,
   ) => InternalGraphAlgorithms<G>;
+  identityAtCoordinate: (
+    coordinate: ReadCoordinate,
+  ) => IdentityReadFacadeFor<G>;
+  rebuildIdentityClosure: () => Promise<void>;
+  validateIdentity: () => Promise<void>;
+  identityAssertionsForInterchange: (
+    mode: "state" | "archival",
+    options?: Readonly<{
+      nodeKinds?: readonly string[];
+      includeDeleted?: boolean;
+    }>,
+  ) => Promise<readonly IdentityTransferAssertion[]>;
+  identityAssertionsAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    mode?: "state" | "archival",
+  ) => Promise<readonly IdentityTransferAssertion[]>;
+  lockIdentityImportTarget: (
+    target: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
+  foldImportedIdentityNodes: (
+    target: GraphBackend | TransactionBackend,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+  ) => Promise<void>;
+  importIdentityAssertionsAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    assertions: readonly IdentityTransferAssertion[],
+    mode: "state" | "archival",
+  ) => Promise<IdentityImportSummary>;
+  applyIdentityMergeAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    retractionIds: readonly string[],
+    assertions: readonly IdentityTransferAssertion[],
+  ) => Promise<void>;
 }>;
 
 export function storeRuntime<G extends GraphDef>(

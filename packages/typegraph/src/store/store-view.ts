@@ -836,7 +836,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
 
   /** Identity reads pinned to this view's valid and recorded coordinates. */
   get identity(): IdentityReadFacadeFor<G> {
-    return this.store.identityAtCoordinate(this.coordinate);
+    return storeRuntime(this.store).identityAtCoordinate(this.coordinate);
   }
 
   /**

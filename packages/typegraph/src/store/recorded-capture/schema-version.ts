@@ -146,6 +146,24 @@ export async function assertCurrentRecordedSchema(
       ),
     ),
   );
+  const recordedIdentityTable = schema.tables.recordedIdentityAssertions;
+  if (
+    includeIdentity &&
+    (columnTypes.get(recordedIdentityTable)?.size ?? 0) === 0
+  ) {
+    throw new ConfigurationError(
+      "Recorded identity history is not provisioned for this database.",
+      {
+        code: "RECORDED_IDENTITY_SCHEMA_MISSING",
+        dialect: backend.dialect,
+        table: recordedIdentityTable,
+      },
+      {
+        suggestion:
+          "Run createStoreWithSchema(...) after enabling graph identity so the recorded identity relation is created before opening with history: true.",
+      },
+    );
+  }
   const incompatible = requirements.flatMap((requirement) => {
     const actual = columnTypes.get(requirement.table)?.get(requirement.column);
     if (

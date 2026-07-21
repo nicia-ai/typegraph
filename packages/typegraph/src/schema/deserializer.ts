@@ -139,6 +139,7 @@ function buildRegistryFromRelations(schema: SerializedSchema): KindRegistry {
       }),
     ),
     edgeEndpoints: buildEdgeEndpointKinds(schema.edges),
+    ...(schema.identity === undefined ? {} : { identity: schema.identity }),
   });
 }
 

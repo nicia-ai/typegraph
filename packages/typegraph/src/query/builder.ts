@@ -8,6 +8,7 @@
  * createQueryBuilder factory function.
  */
 import { type GraphDef } from "../core/define-graph";
+import { ConfigurationError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   type CreateQueryBuilderOptions,
@@ -161,6 +162,29 @@ function createQueryBuilderWithContext<
     registry.nodeKinds,
     registry.edgeKinds,
   );
+  if (options?.identityEnabled === true && registry.identity === undefined) {
+    throw new ConfigurationError(
+      "Identity-aware query compilation requires an identity-enabled graph registry.",
+      { code: "IDENTITY_NOT_ENABLED", graphId },
+      {
+        suggestion:
+          "Build the registry from a graph whose defineGraph(...) config includes identity.",
+      },
+    );
+  }
+  if (
+    options?.identitySameIdAcrossKinds !== undefined &&
+    registry.identity === undefined
+  ) {
+    throw new ConfigurationError(
+      "identitySameIdAcrossKinds requires an identity-enabled graph registry.",
+      { code: "IDENTITY_NOT_ENABLED", graphId },
+      {
+        suggestion:
+          "Configure sameIdAcrossKinds on defineGraph(...).identity instead.",
+      },
+    );
+  }
 
   // Build config, only including optional properties if defined
   const config: QueryBuilderConfig = {
@@ -168,8 +192,12 @@ function createQueryBuilderWithContext<
     registry,
     schemaIntrospector,
     defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
-    identityEnabled: options?.identityEnabled ?? false,
-    identitySameIdAcrossKinds: options?.identitySameIdAcrossKinds ?? "fold",
+    identityEnabled:
+      options?.identityEnabled ?? registry.identity !== undefined,
+    identitySameIdAcrossKinds:
+      options?.identitySameIdAcrossKinds ??
+      registry.identity?.sameIdAcrossKinds ??
+      "fold",
     ...(options?.backend !== undefined && { backend: options.backend }),
     ...(options?.dialect !== undefined && { dialect: options.dialect }),
     ...(options?.schema !== undefined && { schema: options.schema }),

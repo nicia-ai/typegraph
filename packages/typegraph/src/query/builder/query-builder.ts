@@ -1282,9 +1282,6 @@ export class QueryBuilder<
 
   /**
    * Guards `includeIdentityMembers` against a non-identity-enabled builder.
-   * A compile-only builder (no backend) cannot infer identity from a store, so
-   * its message points at the missing `identityEnabled: true` option rather
-   * than at the graph — the graph may well be identity-enabled.
    */
   #assertIdentityTraversalAllowed(
     options: Readonly<{ includeIdentityMembers?: boolean }> | undefined,
@@ -1292,13 +1289,13 @@ export class QueryBuilder<
     if (!options?.includeIdentityMembers || this.#config.identityEnabled) {
       return;
     }
-    const detail =
-      this.#config.backend === undefined ?
-        " A compile-only query builder does not infer identity from a store: pass `identityEnabled: true` in CreateQueryBuilderOptions."
-      : "";
     throw new ConfigurationError(
-      `includeIdentityMembers requires an identity-enabled graph.${detail}`,
+      "includeIdentityMembers requires an identity-enabled graph registry.",
       { code: "IDENTITY_TRAVERSAL_REQUIRES_PROFILE" },
+      {
+        suggestion:
+          "Enable defineGraph(...).identity and build the registry from that graph.",
+      },
     );
   }
 

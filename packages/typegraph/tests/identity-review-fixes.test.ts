@@ -121,7 +121,7 @@ describe("identity review fixes", () => {
     const person = await store.nodes.Person.create({ name: "Alice" });
     const author = await store.nodes.Author.create({ penName: "A." });
 
-    await store.applyIdentityMergeAtTarget(
+    await storeRuntime(store).applyIdentityMergeAtTarget(
       storeRuntime(store).backend,
       [],
       [
@@ -155,7 +155,7 @@ describe("identity review fixes", () => {
     const bRef = { kind: "Person", id: b.id };
 
     await expect(
-      store.applyIdentityMergeAtTarget(
+      storeRuntime(store).applyIdentityMergeAtTarget(
         store.backend,
         [],
         [
@@ -178,9 +178,9 @@ describe("identity review fixes", () => {
     const existing = await store.identity.assertSame(a, b);
 
     await expect(
-      store.applyIdentityMergeAtTarget(
+      storeRuntime(store).applyIdentityMergeAtTarget(
         store.backend,
-        [existing.id],
+        [existing.assertion.id],
         [transfer("d1", "different", aRef, bRef, new Date().toISOString())],
       ),
     ).resolves.toBeUndefined();
@@ -211,7 +211,7 @@ describe("identity review fixes", () => {
     const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
     await expect(
-      store.applyIdentityMergeAtTarget(
+      storeRuntime(store).applyIdentityMergeAtTarget(
         store.backend,
         [],
         [
@@ -244,7 +244,7 @@ describe("identity review fixes", () => {
     const bRef = { kind: "Person", id: b.id };
 
     await expect(
-      store.importIdentityAssertionsAtTarget(
+      storeRuntime(store).importIdentityAssertionsAtTarget(
         store.backend,
         [
           transfer(
@@ -269,7 +269,7 @@ describe("identity review fixes", () => {
 
     // A zero-width window is what a same-instant retraction / skew clamp emits;
     // archival re-import must accept it so the store's own output round-trips.
-    const summary = await store.importIdentityAssertionsAtTarget(
+    const summary = await storeRuntime(store).importIdentityAssertionsAtTarget(
       store.backend,
       [
         transfer(
@@ -399,7 +399,7 @@ describe("identity review fixes", () => {
       const assertion = await store.identity.assertSame(a, b);
       // Clock jumps backward before the retraction.
       vi.setSystemTime(new Date("2026-05-01T00:00:00.000Z"));
-      await store.identity.retractAssertion(assertion.id);
+      await store.identity.retractAssertion(assertion.assertion.id);
 
       const schema = createSqlSchema(store.backend.tableNames);
       const rows = await store.backend.execute<{
@@ -409,7 +409,7 @@ describe("identity review fixes", () => {
         asCompiledRowsSql(sql`
           SELECT valid_from, valid_to
           FROM ${schema.identityAssertionsTable}
-          WHERE graph_id = ${store.graphId} AND id = ${assertion.id}
+          WHERE graph_id = ${store.graphId} AND id = ${assertion.assertion.id}
         `),
       );
       const row = requireDefined(rows[0]);
@@ -429,8 +429,10 @@ describe("identity review fixes", () => {
     expect(() => asIdentityAssertionId("")).toThrow(ValidationError);
 
     await expect(
-      store.identity.retractAssertion(asIdentityAssertionId(assertion.id)),
-    ).resolves.toMatchObject({ id: assertion.id });
+      store.identity.retractAssertion(
+        asIdentityAssertionId(assertion.assertion.id),
+      ),
+    ).resolves.toMatchObject({ id: assertion.assertion.id });
     expect(await store.identity.areSame(a, b)).toBe(false);
   });
 
@@ -459,7 +461,7 @@ describe("identity review fixes", () => {
     expect(await store.revisionNow()).toBe(before);
 
     // Real change advances exactly once.
-    await store.identity.retractAssertion(assertion.id);
+    await store.identity.retractAssertion(assertion.assertion.id);
     expect(revisionsAdvanced(before, await store.revisionNow())).toBe(1);
   });
 
@@ -470,7 +472,9 @@ describe("identity review fixes", () => {
     await store.identity.assertSame(a, b);
 
     // A consistent materialized closure verifies cleanly.
-    await expect(store.validateIdentity()).resolves.toBeUndefined();
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
 
     // Corrupt the materialized closure out from under the engine.
     const schema = createSqlSchema(store.backend.tableNames);
@@ -485,7 +489,7 @@ describe("identity review fixes", () => {
       `),
     );
 
-    await expect(store.validateIdentity()).rejects.toMatchObject({
+    await expect(storeRuntime(store).validateIdentity()).rejects.toMatchObject({
       name: "ConfigurationError",
       details: matchingObject({
         code: "IDENTITY_SCHEMA_CONTRADICTION",

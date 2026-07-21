@@ -681,6 +681,7 @@ export type GraphBackend = Readonly<{
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
+    commitSchemaVersionWithPreflight?: (params: CommitSchemaVersionParams, preflight: (target: TransactionBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
@@ -696,6 +697,7 @@ export type GraphBackend = Readonly<{
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+    ensureIdentityTables?: () => Promise<void>;
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -759,6 +761,11 @@ export type GraphExtension = Readonly<{
 
 // @public
 export type GraphExtensionVersion = number;
+
+// @public
+export type GraphIdentityConfig = Readonly<{
+    sameIdAcrossKinds: "fold" | "ignore";
+}>;
 
 // @public (undocumented)
 export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
@@ -1222,6 +1229,9 @@ export type ResolvedSqlTableNames = Readonly<{
     recordedEdges: string;
     recordedClock: string;
     revisionOrigins: string;
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
     fulltext: string;
     uniques: string;
 }>;
@@ -1326,6 +1336,7 @@ export type SerializedSchema = Readonly<{
         onNodeDelete: DeleteBehavior;
         temporalMode: TemporalMode;
     }>;
+    identity?: GraphIdentityConfig;
     indexes?: readonly IndexDeclaration[];
     extension?: GraphExtension;
     deprecatedKinds?: readonly string[];
@@ -1413,6 +1424,9 @@ export type SqlTableNames = Readonly<{
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
     revisionOrigins?: string | undefined;
+    identityAssertions?: string | undefined;
+    recordedIdentityAssertions?: string | undefined;
+    identityClosure?: string | undefined;
     fulltext: string;
     uniques: string;
 }>;
@@ -1508,6 +1522,7 @@ export type UpdateNodeParams = Readonly<{
     kind: string;
     id: string;
     props: Readonly<Record<string, unknown>>;
+    validFrom?: string | null;
     validTo?: string;
     incrementVersion?: boolean;
     clearDeleted?: boolean;

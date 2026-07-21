@@ -11,6 +11,7 @@ import {
   defineGraphExtension,
   defineNode,
   type GraphBackend,
+  rebuildIdentityClosure,
 } from "../src";
 import {
   type RecordedInstant,
@@ -133,6 +134,40 @@ describe("Operational Identity", () => {
     );
   });
 
+  it("hydrates identity members with one batched read per kind", async () => {
+    const baseBackend = createTestBackend();
+    const getNodes = requireDefined(baseBackend.getNodes);
+    let singleReads = 0;
+    let batchReads = 0;
+    const backend: GraphBackend = {
+      ...baseBackend,
+      getNode: async (graphId, kind, id) => {
+        singleReads += 1;
+        return baseBackend.getNode(graphId, kind, id);
+      },
+      getNodes: async (graphId, kind, ids) => {
+        batchReads += 1;
+        return getNodes(graphId, kind, ids);
+      },
+    };
+    const store = await createInitializedStore(graph, backend);
+    const person = await store.nodes.Person.create({ name: "Alice" });
+    const alias = await store.nodes.Person.create({ name: "Alias" });
+    const author = await store.nodes.Author.create({ penName: "A." });
+    await store.identity.bulkAssertSame([
+      { a: person, b: alias },
+      { a: alias, b: author },
+    ]);
+    singleReads = 0;
+    batchReads = 0;
+
+    const nodes = await store.identity.nodesOf(person);
+
+    expect(nodes).toHaveLength(3);
+    expect(batchReads).toBe(2);
+    expect(singleReads).toBe(0);
+  });
+
   it("reports idempotent assertion actions and the ended retraction", async () => {
     const store = await createInitializedStore(graph, createTestBackend());
     const first = await store.nodes.Person.create(
@@ -238,7 +273,7 @@ describe("Operational Identity", () => {
     const afterRetraction = await store.revisionNow();
     expect(revisionsAdvanced(after, afterRetraction)).toBe(1);
 
-    await store.rebuildIdentityClosure();
+    await rebuildIdentityClosure(store);
     expect(await store.revisionNow()).toBe(afterRetraction);
   });
 
@@ -260,14 +295,14 @@ describe("Operational Identity", () => {
       asCompiledRowsSql(sql`
         SELECT recorded_from
         FROM ${schema.recordedIdentityAssertionsTable}
-        WHERE graph_id = ${store.graphId} AND id = ${assertion.id}
+        WHERE graph_id = ${store.graphId} AND id = ${assertion.assertion.id}
       `),
     );
     expect(
       recordedRevisionFromDriver(requireDefined(rows[0]).recorded_from),
     ).toBe(recordedInstantRevision(assertionCommit));
 
-    await store.identity.retractAssertion(assertion.id);
+    await store.identity.retractAssertion(assertion.assertion.id);
     expect(await store.identity.assertionsOf(person)).toEqual([]);
     expect(
       await store.asOfRecorded(assertionCommit).identity.assertionsOf(person),
@@ -421,7 +456,7 @@ describe("Operational Identity", () => {
     const assertion = await store.identity.assertSame(author, other);
     expect(await store.identity.areSame(person, other)).toBe(true);
 
-    await store.identity.retractAssertion(assertion.id);
+    await store.identity.retractAssertion(assertion.assertion.id);
     expect(await store.identity.areSame(person, other)).toBe(false);
     expect(await store.identity.membersOf(other)).toEqual([
       { kind: "Person", id: "other" },
@@ -479,7 +514,7 @@ describe("Operational Identity", () => {
     expect(await store.identity.representativeOf(person)).toBeUndefined();
     expect(await store.identity.assertionsOf(company)).toEqual([]);
     await expect(
-      store.identity.retractAssertion(different.id),
+      store.identity.retractAssertion(different.assertion.id),
     ).resolves.toBeUndefined();
   });
 
@@ -501,7 +536,7 @@ describe("Operational Identity", () => {
     await new Promise((resolve) => setTimeout(resolve, 2));
     const beforeRetraction = new Date().toISOString();
     await new Promise((resolve) => setTimeout(resolve, 2));
-    await store.identity.retractAssertion(assertion.id);
+    await store.identity.retractAssertion(assertion.assertion.id);
 
     expect(
       await store.asOf(beforeRetraction).identity.membersOf(person),
@@ -606,7 +641,7 @@ describe("Operational Identity", () => {
       { id: "author" },
     );
     const assertion = await source.identity.assertSame(person, author);
-    await source.identity.retractAssertion(assertion.id);
+    await source.identity.retractAssertion(assertion.assertion.id);
 
     const state = await exportGraph(source);
     const archive = await exportGraph(source, { identityMode: "archival" });
@@ -675,7 +710,7 @@ describe("Operational Identity", () => {
     await new Promise((resolve) => setTimeout(resolve, 2));
     const beforeRetraction = new Date().toISOString();
     await new Promise((resolve) => setTimeout(resolve, 2));
-    await store.identity.retractAssertion(assertion.id);
+    await store.identity.retractAssertion(assertion.assertion.id);
     expect(
       await store
         .query()

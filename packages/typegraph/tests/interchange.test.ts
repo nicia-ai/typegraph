@@ -1594,6 +1594,56 @@ describe("Identity interchange import guards", () => {
 });
 
 describe("Identity interchange streaming", () => {
+  it("omits identity assertions whose endpoint kinds are filtered out", async () => {
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const person = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "filtered-person" },
+    );
+    const company = await source.nodes.Company.create(
+      { name: "Acme" },
+      { id: "filtered-company" },
+    );
+    await source.identity.assertSame(person, company);
+
+    const document = await exportGraph(source, { nodeKinds: ["Person"] });
+
+    expect(document.nodes.map((node) => node.kind)).toEqual(["Person"]);
+    expect(document.identity?.assertions).toEqual([]);
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    await expect(
+      importGraph(target, document, importOptions({ onConflict: "error" })),
+    ).resolves.toMatchObject({ success: true });
+  });
+
+  it("omits archival identity assertions whose deleted endpoint is excluded", async () => {
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const first = await source.nodes.Person.create(
+      { name: "First" },
+      { id: "archival-live" },
+    );
+    const deleted = await source.nodes.Person.create(
+      { name: "Deleted" },
+      { id: "archival-deleted" },
+    );
+    await source.identity.assertSame(first, deleted);
+    await source.nodes.Person.delete(deleted.id);
+
+    const document = await exportGraph(source, { identityMode: "archival" });
+
+    expect(document.nodes.map((node) => node.id)).toEqual([first.id]);
+    expect(document.identity?.assertions).toEqual([]);
+  });
+
   it("round-trips header, nodes, edges, and identity through the stream", async () => {
     const source = await createInitializedStore(
       identityGraph,

@@ -63,6 +63,7 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
           to: typeof relation.to === "string" ? relation.to : relation.to.kind,
         })),
     edgeEndpoints: buildEdgeEndpointKinds(graph.edges),
+    ...(graph.identity === undefined ? {} : { identity: graph.identity }),
   });
 }
 

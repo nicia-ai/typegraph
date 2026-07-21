@@ -37,7 +37,7 @@ import {
 } from "../store/operations/node-write-pipeline";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
-import { storeBackend } from "../store/runtime-port";
+import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { checkUniquenessConstraints } from "../store/uniqueness";
 import { validateOptionalCanonicalIsoDate } from "../utils/date";
@@ -105,6 +105,7 @@ export async function importGraph<G extends GraphDef>(
   const graph = store.graph;
   const graphId = store.graphId;
   const backend = storeBackend(store);
+  const runtime = storeRuntime(store);
   const registry = store.registry;
 
   // Build lookup maps for schema validation
@@ -119,7 +120,7 @@ export async function importGraph<G extends GraphDef>(
   // runInWriteTransaction for the shared lock-before-rows contract every
   // writer follows.
   await runInWriteTransaction(store, backend, async (target, lock) => {
-    await store.lockIdentityImportTarget(target);
+    await runtime.lockIdentityImportTarget(target);
     await processNodes(
       target,
       graphId,
@@ -132,7 +133,7 @@ export async function importGraph<G extends GraphDef>(
       importedNodeIds,
       lock,
     );
-    await store.foldImportedIdentityNodes(
+    await runtime.foldImportedIdentityNodes(
       target,
       data.nodes
         .filter((node) => importedNodeIds.has(makeNodeKey(node.kind, node.id)))
@@ -151,7 +152,7 @@ export async function importGraph<G extends GraphDef>(
       importedNodeIds,
     );
     if (data.identity !== undefined) {
-      const identity = await store.importIdentityAssertionsAtTarget(
+      const identity = await runtime.importIdentityAssertionsAtTarget(
         target,
         data.identity.assertions,
         data.identity.mode,
@@ -324,7 +325,7 @@ function throwIfStreamChunkFailed(
 
 /**
  * Rejects an identity payload aimed at an identity-disabled graph BEFORE any
- * entity write. {@link Store.importIdentityAssertionsAtTarget} raises the same
+ * entity write. The internal identity import coordinator raises the same
  * typed `ConfigurationError` (code `IDENTITY_IMPORT_REQUIRES_PROFILE`), but only
  * after `processNodes`/`processEdges` have run — a partial write on a
  * non-transactional backend — and only for a NON-empty assertions array (an

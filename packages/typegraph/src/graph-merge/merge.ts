@@ -137,6 +137,7 @@ import {
   readRecordedClock,
   readRevisionOrigin,
   storeBackend,
+  storeRuntime,
   transactionBackend,
 } from "./typegraph-internal";
 import type {
@@ -1476,7 +1477,7 @@ async function applyMergePlan<G extends GraphDef>(
     committedEdges += items.length;
   }
 
-  await target.applyIdentityMergeAtTarget(
+  await storeRuntime(target).applyIdentityMergeAtTarget(
     txBackend,
     plan.identityRetractions,
     plan.identityAssertions,
@@ -1623,7 +1624,7 @@ async function assertTargetUnchanged<G extends GraphDef>(
     txBackend,
     target.graphId,
     target.graph,
-    await target.identityAssertionsAtTarget(txBackend, "state"),
+    await storeRuntime(target).identityAssertionsAtTarget(txBackend, "state"),
   );
   const expectedContent = contentComponentOf(expectedBaseVersion);
   if (liveContent !== expectedContent) {

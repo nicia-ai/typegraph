@@ -1,4 +1,5 @@
 import { type GraphDef, type GraphIdentityConfig } from "../core/define-graph";
+import { storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 
 /**
@@ -8,5 +9,5 @@ import { type Store } from "../store/store";
 export async function rebuildIdentityClosure<
   G extends GraphDef & Readonly<{ identity: GraphIdentityConfig }>,
 >(store: Store<G>): Promise<void> {
-  await store.rebuildIdentityClosure();
+  await storeRuntime(store).rebuildIdentityClosure();
 }

@@ -502,6 +502,13 @@ an unmigrated schema throws a typed `ConfigurationError` with
 `details.code === "RECORDED_SCHEMA_INCOMPATIBLE"` at open rather than on the
 first write.
 
+For an existing history-enabled database that predates identity enablement,
+open it once through `createStoreWithSchema(...)` after adding
+`defineGraph(...).identity`. If the recorded identity relation is absent, the
+history preflight reports
+`details.code === "RECORDED_IDENTITY_SCHEMA_MISSING"`; malformed columns in
+an existing relation continue to report `RECORDED_SCHEMA_INCOMPATIBLE`.
+
 ```typescript
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 

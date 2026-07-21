@@ -582,10 +582,10 @@ function draftNodeCreate<G extends GraphDef>(
 /**
  * The async half: existence, disjointness, and uniqueness checks.
  *
- * The existence probe's row is returned on the prepared record: the create
- * path needs the same row to choose between a fresh insert and a tombstone
- * resurrection, and re-reading it would double the round trips of every
- * create.
+ * The existence probe's row is returned on the prepared record so fresh
+ * inserts avoid a second read. Resurrection is the rare exception: it
+ * re-checks the row immediately before writing because another transaction
+ * may have resurrected it after preparation.
  */
 async function finishNodeCreatePreparation<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -594,14 +594,8 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
 
-  // LOAD-BEARING for `tombstone` below: this throw is what makes a surviving
-  // row provably a tombstone, which is the entire basis on which the create
-  // path resurrects without re-reading. Keep the throw unconditional and keep
-  // it ahead of the return. Making it conditional, moving it after the other
-  // checks, or adding a create entrypoint that skips preparation would leave
-  // `tombstone` able to hold a LIVE row, and resurrection would then overwrite
-  // a live node's props instead of erroring. Anything that relaxes this must
-  // narrow `tombstone` at its source rather than at the consumer.
+  // This is the fast-path existence gate. Resurrection repeats it immediately
+  // before the update because the row can change while constraints are checked.
   const existingNode = await backend.getNode(ctx.graphId, kind, id);
   if (existingNode && !existingNode.deleted_at) {
     throw createNodeAlreadyExistsError(kind, id);
@@ -994,10 +988,7 @@ async function prepareBatchCreates<G extends GraphDef>(
 
 type CreatePartition = Readonly<{
   inserts: readonly NodeCreatePrepared[];
-  resurrections: readonly Readonly<{
-    prepared: NodeCreatePrepared;
-    existing: BackendNodeRow;
-  }>[];
+  resurrections: readonly NodeCreatePrepared[];
 }>;
 
 /**
@@ -1012,53 +1003,72 @@ function partitionCreates(
   preparedCreates: readonly NodeCreatePrepared[],
 ): CreatePartition {
   const inserts: NodeCreatePrepared[] = [];
-  const resurrections: {
-    prepared: NodeCreatePrepared;
-    existing: BackendNodeRow;
-  }[] = [];
+  const resurrections: NodeCreatePrepared[] = [];
 
   for (const prepared of preparedCreates) {
-    const existing = prepared.tombstone;
-    if (existing === undefined) {
+    if (prepared.tombstone === undefined) {
       inserts.push(prepared);
     } else {
-      resurrections.push({ prepared, existing });
+      resurrections.push(prepared);
     }
   }
   return { inserts, resurrections };
 }
 
-function resurrectPreparedNode<G extends GraphDef>(
+async function resurrectPreparedNode<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   target: GraphBackend | TransactionBackend,
   lock: GraphWriteLock,
   prepared: NodeCreatePrepared,
-  existing: BackendNodeRow,
 ): Promise<BackendNodeRow> {
-  // Resurrection replaces the row's props outright, so being handed a live row
-  // would silently overwrite a node the caller never addressed. Unreachable
-  // while preparation throws on live rows, and cheap enough to keep as the
-  // backstop for a refactor that relaxes that.
-  if (existing.deleted_at === undefined) {
+  const current = await target.getNode(ctx.graphId, prepared.kind, prepared.id);
+  if (current === undefined) {
+    throw new DatabaseOperationError(
+      `Node tombstone disappeared before resurrection: ${prepared.kind} ${prepared.id}`,
+      { operation: "update", entity: "node" },
+    );
+  }
+  if (current.deleted_at === undefined) {
     throw createNodeAlreadyExistsError(prepared.kind, prepared.id);
   }
-  return applyNodeUpdate(
-    createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-    {
-      existing,
-      clearDeleted: true,
-      schema: prepared.nodeKind.schema,
-      validatedProps: prepared.validatedProps,
-      uniqueConstraints: prepared.uniqueConstraints,
-      ...(prepared.insertParams.validFrom === undefined ?
-        {}
-      : { validFrom: prepared.insertParams.validFrom }),
-      ...(prepared.insertParams.validTo === undefined ?
-        {}
-      : { validTo: prepared.insertParams.validTo }),
-    },
-    target,
-  );
+  try {
+    return await applyNodeUpdate(
+      createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+      {
+        existing: current,
+        clearDeleted: true,
+        schema: prepared.nodeKind.schema,
+        validatedProps: prepared.validatedProps,
+        uniqueConstraints: prepared.uniqueConstraints,
+        ...(prepared.insertParams.validFrom === undefined ?
+          {}
+        : { validFrom: prepared.insertParams.validFrom }),
+        ...(prepared.insertParams.validTo === undefined ?
+          {}
+        : { validTo: prepared.insertParams.validTo }),
+      },
+      target,
+    );
+  } catch (error) {
+    if (
+      !(error instanceof DatabaseOperationError) ||
+      error.message !== "Update node failed: no row returned"
+    ) {
+      throw error;
+    }
+    // The UPDATE itself has a tombstone predicate, closing the remaining gap
+    // between the re-read and write. Translate a peer resurrection into the
+    // create API's stable duplicate error instead of leaking a 0-row update.
+    const afterFailure = await target.getNode(
+      ctx.graphId,
+      prepared.kind,
+      prepared.id,
+    );
+    if (afterFailure !== undefined && afterFailure.deleted_at === undefined) {
+      throw createNodeAlreadyExistsError(prepared.kind, prepared.id);
+    }
+    throw error;
+  }
 }
 
 // ============================================================
@@ -1179,7 +1189,6 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           target,
           lock,
           prepared,
-          existing,
         );
         if (identity !== undefined) {
           await identity.foldCreated(target, foldReferences([prepared]));
@@ -1258,8 +1267,8 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       nodeInsertDispatch(target),
       partition.inserts.map((prepared) => prepared.insertParams),
     );
-    for (const { prepared, existing } of partition.resurrections) {
-      await resurrectPreparedNode(ctx, target, lock, prepared, existing);
+    for (const prepared of partition.resurrections) {
+      await resurrectPreparedNode(ctx, target, lock, prepared);
     }
     await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
     if (identity !== undefined) {
@@ -1301,9 +1310,9 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       partition.inserts.map((prepared) => prepared.insertParams),
     );
     const resurrected: BackendNodeRow[] = [];
-    for (const { prepared, existing } of partition.resurrections) {
+    for (const prepared of partition.resurrections) {
       resurrected.push(
-        await resurrectPreparedNode(ctx, target, lock, prepared, existing),
+        await resurrectPreparedNode(ctx, target, lock, prepared),
       );
     }
     await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);

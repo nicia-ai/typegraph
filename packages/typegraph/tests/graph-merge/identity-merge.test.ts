@@ -157,7 +157,7 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     // The target ends with exactly the reasserted assertion current — the old id
     // is retracted, the new id wins.
     const current = await store.identity.assertionsOf(first);
-    expect(current.map((entry) => entry.id)).toEqual([reasserted.id]);
+    expect(current.map((entry) => entry.id)).toEqual([reasserted.assertion.id]);
     expect(current.map((entry) => entry.id)).not.toContain(assertion.id);
   });
 
@@ -267,7 +267,7 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     const recalled = await store
       .asOfRecorded(checkpoint)
       .identity.assertionsOf(first);
-    expect(recalled.map((entry) => entry.id)).toContain(created.id);
+    expect(recalled.map((entry) => entry.id)).toContain(created.assertion.id);
   });
 });
 

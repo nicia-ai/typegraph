@@ -46,6 +46,7 @@ const WARMUP_ITERATIONS = 2;
 const SAMPLE_ITERATIONS = 7;
 const SEED_ROWS_PER_KIND = 100;
 const WRITE_OPS = 20;
+const BULK_ASSERT_OPS = 500;
 type ExecuteRaw = <T>(
   sqlText: string,
   params: readonly unknown[],
@@ -322,8 +323,30 @@ async function main(argv: readonly string[]): Promise<void> {
             { kind: "Person", id: pair.person },
             { kind: "Author", id: pair.author },
           );
-          await store.identity.retractAssertion(assertion.id);
+          await store.identity.retractAssertion(assertion.assertion.id);
         }
+      };
+    });
+
+    await record("identity:bulk-chain-assert", BULK_ASSERT_OPS, async () => {
+      const start = counter;
+      counter += BULK_ASSERT_OPS + 1;
+      const ids = Array.from(
+        { length: BULK_ASSERT_OPS + 1 },
+        (_, index) => `bulk-chain-${start + index}`,
+      );
+      await store.nodes.Person.bulkCreate(
+        ids.map((id) => ({ props: { name: id }, id })),
+      );
+      const pairs = Array.from({ length: BULK_ASSERT_OPS }, (_, index) => ({
+        a: { kind: "Person" as const, id: `bulk-chain-${start + index}` },
+        b: {
+          kind: "Person" as const,
+          id: `bulk-chain-${start + index + 1}`,
+        },
+      }));
+      return async () => {
+        await store.identity.bulkAssertSame(pairs);
       };
     });
 

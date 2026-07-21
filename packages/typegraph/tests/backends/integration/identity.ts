@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -9,6 +9,7 @@ import {
   defineNode,
   rebuildIdentityClosure,
 } from "../../../src";
+import { exportGraph } from "../../../src/interchange";
 import { inverseOf } from "../../../src/ontology";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
@@ -104,7 +105,7 @@ export function registerIdentityIntegrationTests(
         id: "shared-id",
       });
 
-      await store.identity.retractAssertion(assertion.id);
+      await store.identity.retractAssertion(assertion.assertion.id);
       expect(await store.identity.areSame(person, product)).toBe(false);
     });
 
@@ -246,7 +247,7 @@ export function registerIdentityIntegrationTests(
           { a: second, b: third },
         ]);
         await tx.identity.bulkRetractAssertions([
-          requireDefined(assertions[0]).id,
+          requireDefined(assertions[0]).assertion.id,
         ]);
       });
 
@@ -270,7 +271,7 @@ export function registerIdentityIntegrationTests(
         { a: first, b: second },
         { a: second, b: third },
       ]);
-      expect(same.map((assertion) => assertion.relation)).toEqual([
+      expect(same.map((result) => result.assertion.relation)).toEqual([
         "same",
         "same",
       ]);
@@ -280,7 +281,7 @@ export function registerIdentityIntegrationTests(
         { a: first, b: separate },
         { a: second, b: separate },
       ]);
-      expect(different.map((assertion) => assertion.relation)).toEqual([
+      expect(different.map((result) => result.assertion.relation)).toEqual([
         "different",
         "different",
       ]);
@@ -295,10 +296,75 @@ export function registerIdentityIntegrationTests(
       expect(await store.identity.areSame(first, third)).toBe(false);
       const [firstSame] = same;
       await store.identity.bulkRetractAssertions([
-        requireDefined(firstSame).id,
-        requireDefined(firstSame).id,
+        requireDefined(firstSame).assertion.id,
+        requireDefined(firstSame).assertion.id,
       ]);
       expect(await store.identity.areSame(first, second)).toBe(false);
+    });
+
+    it("preserves first-occurrence input order in bulk retraction results", async () => {
+      const store = context.getStore();
+      const nodes = await store.nodes.Person.bulkCreate(
+        Array.from({ length: 6 }, (_, index) => ({
+          id: `ordered-retraction-${index}`,
+          props: { name: `Ordered ${index}` },
+        })),
+      );
+      const assertions = await store.identity.bulkAssertDifferent([
+        { a: requireDefined(nodes[0]), b: requireDefined(nodes[1]) },
+        { a: requireDefined(nodes[2]), b: requireDefined(nodes[3]) },
+        { a: requireDefined(nodes[4]), b: requireDefined(nodes[5]) },
+      ]);
+      const ids = assertions.map((result) => result.assertion.id);
+      const requested = [
+        requireDefined(ids[2]),
+        requireDefined(ids[0]),
+        requireDefined(ids[1]),
+        requireDefined(ids[2]),
+      ];
+
+      const ended = await store.identity.bulkRetractAssertions(requested);
+
+      expect(ended.map((assertion) => assertion.id)).toEqual(
+        requested.slice(0, 3),
+      );
+    });
+
+    it("filters identity assertions with omitted endpoint kinds", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Filtered person" },
+        { id: "filtered-person" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Filtered company" },
+        { id: "filtered-company" },
+      );
+      await store.identity.assertSame(person, company);
+
+      const document = await exportGraph(store, { nodeKinds: ["Person"] });
+
+      expect(document.nodes.map((node) => node.kind)).toEqual(["Person"]);
+      expect(document.identity?.assertions).toEqual([]);
+    });
+
+    it("filters archival identity assertions with omitted deleted endpoints", async () => {
+      const store = context.getStore();
+      const first = await store.nodes.Person.create(
+        { name: "Archival live" },
+        { id: "archival-live" },
+      );
+      const deleted = await store.nodes.Person.create(
+        { name: "Archival deleted" },
+        { id: "archival-deleted" },
+      );
+      await store.identity.assertSame(first, deleted);
+      await store.nodes.Person.delete(deleted.id);
+
+      const document = await exportGraph(store, { identityMode: "archival" });
+
+      expect(document.nodes.map((node) => node.id)).toEqual([first.id]);
+      expect(document.identity?.assertions).toEqual([]);
     });
 
     it("makes current reads equal a valid-time view at now", async () => {
@@ -355,6 +421,43 @@ export function registerIdentityIntegrationTests(
         { kind: "Person", id: "seed" },
         { kind: "Product", id: "far" },
       ]);
+    });
+
+    it("reconstructs a same-id fold before a later bridge deletion", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+        const store = context.getStore();
+        const seed = await store.nodes.Person.create(
+          { name: "Seed" },
+          { id: "historical-seed" },
+        );
+        const bridgePerson = await store.nodes.Person.create(
+          { name: "Bridge person" },
+          { id: "historical-bridge" },
+        );
+        const bridgeCompany = await store.nodes.Company.create(
+          { name: "Bridge company" },
+          { id: "historical-bridge" },
+        );
+        const far = await store.nodes.Product.create(
+          { name: "Far", price: 1, category: "test" },
+          { id: "historical-far" },
+        );
+        await store.identity.assertSame(seed, bridgePerson);
+        await store.identity.assertSame(bridgeCompany, far);
+        const beforeDeletion = "2026-01-01T00:00:01.000Z";
+
+        vi.setSystemTime(new Date("2026-01-01T00:01:00.000Z"));
+        await store.nodes.Company.delete(bridgeCompany.id);
+
+        expect(await store.identity.areSame(seed, far)).toBe(false);
+        expect(
+          await store.asOf(beforeDeletion).identity.areSame(seed, far),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("uses code-point ordering for mixed-case and astral ids", async () => {
@@ -749,7 +852,7 @@ export function registerIdentityIntegrationTests(
         );
         const assertion = await store.identity.assertSame(alice, alias);
         await store.edges.link.create(alias, bob, {}, { id: "alias-bob" });
-        await store.identity.retractAssertion(assertion.id);
+        await store.identity.retractAssertion(assertion.assertion.id);
 
         const current = await store
           .query()
@@ -799,7 +902,7 @@ export function registerIdentityIntegrationTests(
         await store.edges.link.create(alias, bob, {}, { id: "alias-bob" });
         const beforeRetraction = await store.recordedNow();
         expect(beforeRetraction).toBeDefined();
-        await store.identity.retractAssertion(assertion.id);
+        await store.identity.retractAssertion(assertion.assertion.id);
 
         const current = await store
           .query()

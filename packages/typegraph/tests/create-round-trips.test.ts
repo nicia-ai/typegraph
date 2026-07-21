@@ -113,6 +113,45 @@ function countingBackend(targetId: string): Readonly<{
   };
 }
 
+function peerResurrectionBackend(targetId: string): GraphBackend {
+  const base = createTestBackend();
+  return {
+    ...base,
+    transaction: (fn, options) =>
+      base.transaction((transactionTarget) => {
+        let peerInjected = false;
+        const racingTarget = new Proxy(transactionTarget, {
+          get(source, property, receiver) {
+            const value: unknown = Reflect.get(source, property, receiver);
+            if (property !== "updateNode" || typeof value !== "function") {
+              return value;
+            }
+            const updateNode = value as (
+              params: Parameters<GraphBackend["updateNode"]>[0],
+            ) => ReturnType<GraphBackend["updateNode"]>;
+            return async (
+              params: Parameters<GraphBackend["updateNode"]>[0],
+            ) => {
+              if (
+                !peerInjected &&
+                params.id === targetId &&
+                params.clearDeleted === true
+              ) {
+                peerInjected = true;
+                await updateNode.call(source, {
+                  ...params,
+                  props: { name: "Peer" },
+                });
+              }
+              return updateNode.call(source, params);
+            };
+          },
+        });
+        return fn(racingTarget);
+      }, options),
+  } satisfies GraphBackend;
+}
+
 describe("create-path round trips", () => {
   it("reads the created id exactly once on a plain graph", async () => {
     const { backend, counts, reset } = countingBackend("solo");
@@ -126,7 +165,7 @@ describe("create-path round trips", () => {
     expect(counts.targetNodeReads).toBe(1);
   });
 
-  it("reads the created id exactly once when resurrecting a tombstone", async () => {
+  it("re-checks a tombstone immediately before resurrection", async () => {
     const { backend, counts, reset } = countingBackend("gone");
     const store = await createInitializedStore(plainGraph, backend);
     const gone = await store.nodes.Person.create(
@@ -142,7 +181,25 @@ describe("create-path round trips", () => {
     );
 
     expect(revived.name).toBe("Back");
-    expect(counts.targetNodeReads).toBe(1);
+    // The second read is isolated to the rare resurrection branch. It prevents
+    // a stale preparation result from overwriting a peer resurrection.
+    expect(counts.targetNodeReads).toBe(2);
+  });
+
+  it("does not overwrite a peer resurrection between re-read and update", async () => {
+    const store = await createInitializedStore(
+      plainGraph,
+      peerResurrectionBackend("contended"),
+    );
+    const original = await store.nodes.Person.create(
+      { name: "Original" },
+      { id: "contended" },
+    );
+    await store.nodes.Person.delete(original.id);
+
+    await expect(
+      store.nodes.Person.create({ name: "Late writer" }, { id: "contended" }),
+    ).rejects.toThrow(/already exists/u);
   });
 
   it("skips the identity fold probe for generated ids", async () => {
@@ -166,7 +223,7 @@ describe("create-path round trips", () => {
 
     expect(counts.targetNodeReads).toBe(1);
     // Three node kinds are registered; the fold is still a single bare-id
-    // lookup, which `nodes_id_idx` serves as an indexed seek.
+    // lookup, which `typegraph_nodes_id_idx` serves as an indexed seek.
     expect(counts.foldProbes).toBe(1);
   });
 

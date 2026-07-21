@@ -182,7 +182,7 @@ export function registerRecordedReadBindingIntegrationTests(
         await historyStore.recordedNow(),
         "expected recorded instant after identity assertion",
       );
-      await historyStore.identity.retractAssertion(assertion.id);
+      await historyStore.identity.retractAssertion(assertion.assertion.id);
 
       const readStore = createStore(integrationTestGraph, backend, {
         recordedRead: recordedRelation({
@@ -224,7 +224,7 @@ export function registerRecordedReadBindingIntegrationTests(
         await historyStore.recordedNow(),
         "expected recorded instant after identity assertion",
       );
-      await historyStore.identity.retractAssertion(assertion.id);
+      await historyStore.identity.retractAssertion(assertion.assertion.id);
 
       // Move the captured recorded identity assertions to a divergent table
       // name and empty the default-named one, so only the divergent table

@@ -19,6 +19,7 @@ import {
   createVerifiedStore,
   defineGraph,
   defineNode,
+  rebuildIdentityClosure,
 } from "../src";
 import {
   createLocalSqliteBackend,
@@ -81,7 +82,7 @@ describe("identity closure validation on createVerifiedStore", () => {
 
       // Repairing the closure restores a clean verified open.
       const repairStore = createStore(graph, result.backend);
-      await repairStore.rebuildIdentityClosure();
+      await rebuildIdentityClosure(repairStore);
 
       await expect(
         createVerifiedStore(graph, result.backend),

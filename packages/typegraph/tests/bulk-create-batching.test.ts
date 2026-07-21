@@ -300,10 +300,14 @@ describe("bulkCreate batching semantics (must not drift)", () => {
     // them into resurrections — properties replaced, validity window reset.
     // Probe batching must not change this.
     await withCountedStore(async (store) => {
-      const node = await store.nodes.Person.create({
-        name: "first",
-        email: "gone@example.com",
-      });
+      const originalValidFrom = "2020-01-01T00:00:00.000Z";
+      const node = await store.nodes.Person.create(
+        {
+          name: "first",
+          email: "gone@example.com",
+        },
+        { validFrom: originalValidFrom },
+      );
       await store.nodes.Person.delete(node.id);
 
       const [resurrected] = await store.nodes.Person.bulkCreate([
@@ -315,6 +319,10 @@ describe("bulkCreate batching semantics (must not drift)", () => {
 
       expect(resurrected).toMatchObject({ id: node.id, name: "second" });
       expect(requireDefined(resurrected).meta.deletedAt).toBeUndefined();
+      expect(requireDefined(resurrected).meta.validFrom).not.toBe(
+        originalValidFrom,
+      );
+      expect(requireDefined(resurrected).meta.validTo).toBeUndefined();
     });
   });
 });

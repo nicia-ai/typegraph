@@ -70,11 +70,10 @@ export type IdentityAssertion<G extends GraphDef> = Readonly<{
 }>;
 
 /** Result of an idempotent assertion write. */
-export type IdentityAssertionResult<G extends GraphDef> = IdentityAssertion<G> &
-  Readonly<{
-    assertion: IdentityAssertion<G>;
-    action: "created" | "existing";
-  }>;
+export type IdentityAssertionResult<G extends GraphDef> = Readonly<{
+  assertion: IdentityAssertion<G>;
+  action: "created" | "existing";
+}>;
 
 export type IdentityPair<G extends GraphDef> = Readonly<{
   a: GraphNodeRef<G>;

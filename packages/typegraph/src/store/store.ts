@@ -458,41 +458,6 @@ type StoreCore<G extends GraphDef> = Readonly<{
   capabilities: BackendCapabilities;
   registry: KindRegistry;
   identity: IdentityFacadeFor<G>;
-  identityAtCoordinate: (
-    coordinate: ReadCoordinate,
-  ) => IdentityReadFacadeFor<G>;
-  rebuildIdentityClosure: () => Promise<void>;
-  identitySchemaPreflight: (target: TransactionBackend) => Promise<void>;
-  identityEnablementPreflight: (target: TransactionBackend) => Promise<void>;
-  validateIdentity: () => Promise<void>;
-  removeIdentityKindsInSchemaPreflight: (
-    target: TransactionBackend,
-    kinds: readonly string[],
-  ) => Promise<void>;
-  identityAssertionsForInterchange: (
-    mode: "state" | "archival",
-  ) => Promise<readonly IdentityTransferAssertion[]>;
-  identityAssertionsAtTarget: (
-    target: GraphBackend | TransactionBackend,
-    mode?: "state" | "archival",
-  ) => Promise<readonly IdentityTransferAssertion[]>;
-  lockIdentityImportTarget: (
-    target: GraphBackend | TransactionBackend,
-  ) => Promise<void>;
-  foldImportedIdentityNodes: (
-    target: GraphBackend | TransactionBackend,
-    references: readonly Readonly<{ kind: string; id: string }>[],
-  ) => Promise<void>;
-  importIdentityAssertionsAtTarget: (
-    target: GraphBackend | TransactionBackend,
-    assertions: readonly IdentityTransferAssertion[],
-    mode: "state" | "archival",
-  ) => Promise<IdentityImportSummary>;
-  applyIdentityMergeAtTarget: (
-    target: GraphBackend | TransactionBackend,
-    retractionIds: readonly string[],
-    assertions: readonly IdentityTransferAssertion[],
-  ) => Promise<void>;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;
@@ -783,6 +748,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.subgraphAtCoordinate(rootId, subgraphOptions),
       algorithmsAtCoordinate: (coordinate) =>
         this.algorithmsAtCoordinate(coordinate),
+      identityAtCoordinate: (coordinate) =>
+        this.identityAtCoordinate(coordinate),
+      rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
+      validateIdentity: () => this.validateIdentity(),
+      identityAssertionsForInterchange: (mode, options) =>
+        this.identityAssertionsForInterchange(mode, options),
+      identityAssertionsAtTarget: (target, mode) =>
+        this.identityAssertionsAtTarget(target, mode),
+      lockIdentityImportTarget: (target) =>
+        this.lockIdentityImportTarget(target),
+      foldImportedIdentityNodes: (target, references) =>
+        this.foldImportedIdentityNodes(target, references),
+      importIdentityAssertionsAtTarget: (target, assertions, mode) =>
+        this.importIdentityAssertionsAtTarget(target, assertions, mode),
+      applyIdentityMergeAtTarget: (target, retractionIds, assertions) =>
+        this.applyIdentityMergeAtTarget(target, retractionIds, assertions),
     };
     Object.defineProperty(this, STORE_RUNTIME, {
       configurable: false,
@@ -929,11 +910,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** @internal Interchange export seam that honors this store's SQL binding. */
   identityAssertionsForInterchange(
     mode: "state" | "archival",
+    options?: Readonly<{
+      nodeKinds?: readonly string[];
+      includeDeleted?: boolean;
+    }>,
   ): Promise<readonly IdentityTransferAssertion[]> {
     if (this.#graph.identity === undefined) return Promise.resolve([]);
     return readIdentityAssertionsForInterchange(
       this.#identityContext(this.#baseBackend),
       mode,
+      options,
     );
   }
 
@@ -2779,17 +2765,51 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
       sameIdAcrossKinds: this.#graph.identity?.sameIdAcrossKinds ?? "ignore",
-      loadNode: async (ref, coordinate) => {
-        if (coordinate !== undefined) {
-          return (await this.recordedNodeGetById(
-            ref.kind,
-            ref.id as NodeId<NodeType>,
-            coordinate,
-          )) as IdentityNode<G> | undefined;
+      loadNodes: async (references, coordinate) => {
+        const idsByKind = new Map<string, Set<string>>();
+        for (const reference of references) {
+          const ids = idsByKind.get(reference.kind) ?? new Set<string>();
+          ids.add(reference.id);
+          idsByKind.set(reference.kind, ids);
         }
-        const row = await backend.getNode(this.graphId, ref.kind, ref.id);
-        if (row === undefined || row.deleted_at !== undefined) return;
-        return rowToNode(row) as IdentityNode<G>;
+        const loadedByReference = new Map<string, IdentityNode<G>>();
+        await Promise.all(
+          [...idsByKind].map(async ([kind, idSet]) => {
+            const ids = [...idSet];
+            if (coordinate !== undefined) {
+              const nodes = await this.recordedNodeGetByIds(
+                kind,
+                ids.map((id) => id as NodeId<NodeType>),
+                coordinate,
+              );
+              for (const [index, node] of nodes.entries()) {
+                if (node !== undefined) {
+                  loadedByReference.set(
+                    JSON.stringify([kind, ids[index]]),
+                    node as IdentityNode<G>,
+                  );
+                }
+              }
+              return;
+            }
+            const rows =
+              backend.getNodes === undefined ?
+                await Promise.all(
+                  ids.map((id) => backend.getNode(this.graphId, kind, id)),
+                )
+              : await backend.getNodes(this.graphId, kind, ids);
+            for (const row of rows) {
+              if (row === undefined || row.deleted_at !== undefined) continue;
+              loadedByReference.set(
+                JSON.stringify([kind, row.id]),
+                rowToNode(row) as IdentityNode<G>,
+              );
+            }
+          }),
+        );
+        return references.map((reference) =>
+          loadedByReference.get(JSON.stringify([reference.kind, reference.id])),
+        );
       },
     };
   }
@@ -4007,9 +4027,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         backend: backend as GraphBackend,
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
-        identityEnabled: this.#graph.identity !== undefined,
-        identitySameIdAcrossKinds:
-          this.#graph.identity?.sameIdAcrossKinds ?? "ignore",
         ...(this.#schema !== undefined && { schema: this.#schema }),
         ...(this.#recordedReadBinding !== undefined && {
           recordedReadBinding: this.#recordedReadBinding,

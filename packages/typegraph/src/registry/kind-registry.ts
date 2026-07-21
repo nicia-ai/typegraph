@@ -1,3 +1,4 @@
+import { type GraphIdentityConfig } from "../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import {
   computeTransitiveClosure,
@@ -31,6 +32,8 @@ export class KindRegistry {
   // === Node & Edge Kinds ===
   readonly nodeKinds: ReadonlyMap<string, NodeType>;
   readonly edgeKinds: ReadonlyMap<string, AnyEdgeType>;
+  /** Durable graph capability used by compile-only query builders. */
+  readonly identity: GraphIdentityConfig | undefined;
 
   // === Subsumption (subClassOf) ===
   // Transitive closure for inheritance
@@ -77,9 +80,11 @@ export class KindRegistry {
       edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
       edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
     },
+    identity?: GraphIdentityConfig,
   ) {
     this.nodeKinds = nodeKinds;
     this.edgeKinds = edgeKinds;
+    this.identity = identity;
     this.subClassAncestors = closures.subClassAncestors;
     this.subClassDescendants = closures.subClassDescendants;
     this.broaderClosure = closures.broaderClosure;

@@ -1,10 +1,6 @@
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
-import {
-  optionalRecordedInstantParts,
-  type ReadCoordinate,
-  type RecordedInstantParts,
-} from "../core/temporal";
+import { type ReadCoordinate } from "../core/temporal";
 import {
   ConfigurationError,
   IdentityContradictionError,
@@ -23,6 +19,13 @@ import { compareCodePoints } from "../utils/compare";
 import { canonicalizeDatabaseTimestamp, nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
 import { requireDefined } from "../utils/presence";
+import {
+  historicalIdentityReconstructionCtes,
+  identityAssertionSnapshotSource,
+  identityNodeSnapshotSource,
+  identityNodeVisibilitySql,
+  identitySqlCoordinate,
+} from "./historical-sql";
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
   type GraphNodeRef,
@@ -58,10 +61,10 @@ export type IdentityServiceContext<G extends GraphDef> = Readonly<{
   revisionTrackingEnabled: boolean;
   sameIdAcrossKinds: "fold" | "ignore";
   coordinate?: ReadCoordinate;
-  loadNode: (
-    ref: PlainNodeRef,
+  loadNodes: (
+    references: readonly PlainNodeRef[],
     coordinate?: ReadCoordinate,
-  ) => Promise<IdentityNode<G> | undefined>;
+  ) => Promise<readonly (IdentityNode<G> | undefined)[]>;
 }>;
 
 export type IdentityTransferAssertion = Readonly<{
@@ -76,6 +79,11 @@ export type IdentityTransferAssertion = Readonly<{
 export type IdentityImportSummary = Readonly<{
   created: number;
   skipped: number;
+}>;
+
+type IdentityInterchangeReadOptions = Readonly<{
+  nodeKinds?: readonly string[];
+  includeDeleted?: boolean;
 }>;
 
 type RawIdentityAssertionRow = Readonly<{
@@ -241,7 +249,7 @@ function assertionResult<G extends GraphDef>(
   assertion: IdentityAssertion<G>,
   action: IdentityAssertionResult<G>["action"],
 ): IdentityAssertionResult<G> {
-  return { ...assertion, assertion, action };
+  return { assertion, action };
 }
 
 function publicNodeRef<G extends GraphDef>(
@@ -324,8 +332,11 @@ async function loadNodeSnapshot(
   graphId: string,
   coordinate: ReadCoordinate | undefined,
 ): Promise<readonly NodeSnapshot[]> {
+  const sqlCoordinate = identitySqlCoordinate(coordinate, nowIso());
   const rows = await target.execute<RawNodeSnapshotRow>(
-    asCompiledRowsSql(nodeSnapshotSource(schema, graphId, coordinate)),
+    asCompiledRowsSql(
+      identityNodeSnapshotSource(schema, graphId, sqlCoordinate),
+    ),
   );
   return rows.map((row) => ({
     ref: { kind: row.kind, id: row.id },
@@ -334,104 +345,6 @@ async function loadNodeSnapshot(
     createdAt: toCanonicalIso(row.created_at),
     deletedAt: optionalTimestamp(row.deleted_at),
   }));
-}
-
-// Assertions are class structure, not tombstonable nodes: an ended assertion
-// no longer defines class membership at the read instant even when the read
-// mode widens *node* visibility (includeEnded / includeTombstones). So the
-// validity window is applied unconditionally — only the instant it is measured
-// against tracks the read coordinate.
-function assertionValidityInstant(
-  coordinate: ReadCoordinate | undefined,
-  currentInstant: string,
-): string {
-  const mode = coordinate?.valid.mode ?? "current";
-  return mode === "asOf" ?
-      (coordinate?.valid.asOf ?? currentInstant)
-    : (recordedPin(coordinate)?.recordedAt ?? currentInstant);
-}
-
-function recordedPin(
-  coordinate: ReadCoordinate | undefined,
-): RecordedInstantParts | undefined {
-  return optionalRecordedInstantParts(
-    coordinate?.recorded?.asOf,
-    "recorded.asOf",
-  );
-}
-
-function nodeSnapshotSource(
-  schema: SqlSchema,
-  graphId: string,
-  coordinate: ReadCoordinate | undefined,
-): SqlFragment {
-  const recorded = recordedPin(coordinate);
-  return recorded === undefined ?
-      sql`
-        SELECT kind, id, valid_from, valid_to, created_at, deleted_at
-        FROM ${schema.nodesTable}
-        WHERE graph_id = ${graphId}
-      `
-    : sql`
-      SELECT kind, id, valid_from, valid_to, created_at, deleted_at
-      FROM ${schema.recordedNodesTable}
-      WHERE graph_id = ${graphId}
-        AND recorded_from <= ${recorded.revision}
-        AND recorded_to > ${recorded.revision}
-    `;
-}
-
-function assertionSnapshotSource(
-  schema: SqlSchema,
-  graphId: string,
-  coordinate: ReadCoordinate | undefined,
-  currentInstant: string,
-  relation: IdentityRelation | undefined,
-): SqlFragment {
-  const recorded = recordedPin(coordinate);
-  const instant = assertionValidityInstant(coordinate, currentInstant);
-  const validity = sql`AND valid_from <= ${instant} AND (valid_to IS NULL OR valid_to > ${instant})`;
-  const relationFilter =
-    relation === undefined ? sql`` : sql`AND rel = ${relation}`;
-  return recorded === undefined ?
-      sql`
-        SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-               valid_from, valid_to, created_at, updated_at, deleted_at
-        FROM ${schema.identityAssertionsTable}
-        WHERE graph_id = ${graphId}
-          AND deleted_at IS NULL
-          ${relationFilter}
-          ${validity}
-      `
-    : sql`
-      SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-             valid_from, valid_to, created_at, updated_at, deleted_at
-      FROM ${schema.recordedIdentityAssertionsTable}
-      WHERE graph_id = ${graphId}
-        AND recorded_from <= ${recorded.revision}
-        AND recorded_to > ${recorded.revision}
-        AND deleted_at IS NULL
-        ${relationFilter}
-        ${validity}
-    `;
-}
-
-function nodeVisibilitySql(
-  coordinate: ReadCoordinate | undefined,
-  currentInstant: string,
-): SqlFragment {
-  const mode = coordinate?.valid.mode ?? "current";
-  if (mode === "includeTombstones") return sql`1 = 1`;
-  if (mode === "includeEnded") return sql`n.deleted_at IS NULL`;
-  const instant =
-    mode === "asOf" ?
-      (coordinate?.valid.asOf ?? currentInstant)
-    : (recordedPin(coordinate)?.recordedAt ?? currentInstant);
-  return sql`
-    n.deleted_at IS NULL
-    AND (n.valid_from IS NULL OR n.valid_from <= ${instant})
-    AND (n.valid_to IS NULL OR n.valid_to > ${instant})
-  `;
 }
 
 function normalizeMemberRow(row: RawIdentityMemberRow): NodeSnapshot {
@@ -526,6 +439,7 @@ async function loadCurrentVisibleMembers(
   ref: PlainNodeRef,
 ): Promise<readonly PlainNodeRef[]> {
   const now = nowIso();
+  const coordinate = identitySqlCoordinate(undefined, now);
   const rows = await target.execute<RawIdentityMemberRow>(
     asCompiledRowsSql(sql`
       WITH anchor AS (
@@ -551,7 +465,7 @@ async function loadCurrentVisibleMembers(
         ON n.graph_id = ${graphId}
        AND n.kind = m.kind
        AND n.id = m.id
-      WHERE ${nodeVisibilitySql(undefined, now)}
+      WHERE ${identityNodeVisibilitySql(coordinate, "n")}
     `),
   );
   const members = rows
@@ -603,65 +517,25 @@ async function loadHistoricalClasses(
   );
   if (uniqueReferences.length === 0) return emptyClasses;
   const currentInstant = nowIso();
-  const nodes = nodeSnapshotSource(schema, graphId, coordinate);
-  const assertions = assertionSnapshotSource(
-    schema,
-    graphId,
-    coordinate,
-    currentInstant,
-    "same",
-  );
+  const sqlCoordinate = identitySqlCoordinate(coordinate, currentInstant);
   const seeds = sql.join(
     uniqueReferences.map((ref) => sql`(${ref.kind}, ${ref.id})`),
     sql`, `,
   );
-  const sameIdEdges =
-    sameIdAcrossKinds === "fold" ?
-      sql`
-        UNION ALL
-        SELECT left_node.kind, left_node.id, right_node.kind, right_node.id
-        FROM node_snapshot left_node
-        JOIN node_snapshot right_node
-          ON right_node.id = left_node.id
-         AND (right_node.kind <> left_node.kind OR right_node.id <> left_node.id)
-        WHERE left_node.deleted_at IS NULL
-          AND right_node.deleted_at IS NULL
-      `
-    : sql``;
+  const reconstruction = historicalIdentityReconstructionCtes({
+    schema,
+    graphId,
+    coordinate: sqlCoordinate,
+    seedSource: sql`VALUES ${seeds}`,
+    sameIdAcrossKinds,
+  });
   const rows = await target.execute<RawHistoricalClassMemberRow>(
     asCompiledRowsSql(sql`
       WITH RECURSIVE
-      seeds(seed_kind, seed_id) AS (
-        VALUES ${seeds}
-      ),
-      node_snapshot(kind, id, valid_from, valid_to, created_at, deleted_at) AS (
-        ${nodes}
-      ),
-      same_assertions(a_kind, a_id, b_kind, b_id) AS (
-        SELECT a_kind, a_id, b_kind, b_id FROM (${assertions}) identity_assertions
-      ),
-      identity_edges(a_kind, a_id, b_kind, b_id) AS (
-        SELECT a_kind, a_id, b_kind, b_id FROM same_assertions
-        UNION ALL
-        SELECT b_kind, b_id, a_kind, a_id FROM same_assertions
-        ${sameIdEdges}
-      ),
-      identity_members(seed_kind, seed_id, kind, id) AS (
-        SELECT seeds.seed_kind, seeds.seed_id, seeds.seed_kind, seeds.seed_id
-        FROM seeds
-        JOIN node_snapshot n
-          ON n.kind = seeds.seed_kind AND n.id = seeds.seed_id
-        WHERE ${nodeVisibilitySql(coordinate, currentInstant)}
-        UNION
-        SELECT member.seed_kind, member.seed_id, edge.b_kind, edge.b_id
-        FROM identity_members member
-        JOIN identity_edges edge
-          ON edge.a_kind = member.kind
-         AND edge.a_id = member.id
-      )
+      ${reconstruction}
       SELECT member.seed_kind, member.seed_id,
              member.kind AS member_kind, member.id AS member_id,
-             CASE WHEN ${nodeVisibilitySql(coordinate, currentInstant)}
+             CASE WHEN ${identityNodeVisibilitySql(sqlCoordinate, "n")}
                THEN 1 ELSE 0 END AS is_visible
       FROM identity_members member
       JOIN node_snapshot n ON n.kind = member.kind AND n.id = member.id
@@ -723,11 +597,10 @@ async function loadAssertions(
   coordinate: ReadCoordinate | undefined,
   currentInstant: string,
 ): Promise<readonly IdentityAssertionStorageRow[]> {
-  const source = assertionSnapshotSource(
+  const source = identityAssertionSnapshotSource(
     schema,
     graphId,
-    coordinate,
-    currentInstant,
+    identitySqlCoordinate(coordinate, currentInstant),
     undefined,
   );
   const rows = await target.execute<RawIdentityAssertionRow>(
@@ -774,11 +647,10 @@ async function loadAssertionsTouching(
     }
     return [...byId.values()];
   }
-  const source = assertionSnapshotSource(
+  const source = identityAssertionSnapshotSource(
     schema,
     graphId,
-    coordinate,
-    nowIso(),
+    identitySqlCoordinate(coordinate, nowIso()),
     relation,
   );
   const aMatches = referenceCondition(
@@ -1001,6 +873,74 @@ function classHasDisjointKinds(
     }
   }
   return undefined;
+}
+
+function kindSetsHaveDisjointKinds(
+  registry: KindRegistry,
+  first: ReadonlySet<string>,
+  second: ReadonlySet<string>,
+): readonly [string, string] | undefined {
+  for (const left of first) {
+    for (const right of second) {
+      if (registry.areDisjoint(left, right)) return [left, right];
+    }
+  }
+  return undefined;
+}
+
+type DifferentAssertionIndex = Map<
+  string,
+  Map<string, IdentityAssertionStorageRow>
+>;
+
+function indexDifferentAssertion(
+  index: DifferentAssertionIndex,
+  firstRoot: string,
+  secondRoot: string,
+  assertion: IdentityAssertionStorageRow,
+): void {
+  const firstNeighbors =
+    index.get(firstRoot) ?? new Map<string, IdentityAssertionStorageRow>();
+  const secondNeighbors =
+    index.get(secondRoot) ?? new Map<string, IdentityAssertionStorageRow>();
+  if (!firstNeighbors.has(secondRoot)) {
+    firstNeighbors.set(secondRoot, assertion);
+  }
+  if (!secondNeighbors.has(firstRoot)) {
+    secondNeighbors.set(firstRoot, assertion);
+  }
+  index.set(firstRoot, firstNeighbors);
+  index.set(secondRoot, secondNeighbors);
+}
+
+function mergeDifferentAssertionRoots(
+  index: DifferentAssertionIndex,
+  survivingRoot: string,
+  retiredRoot: string,
+): void {
+  const survivingNeighbors =
+    index.get(survivingRoot) ?? new Map<string, IdentityAssertionStorageRow>();
+  const retiredNeighbors = index.get(retiredRoot);
+  survivingNeighbors.delete(retiredRoot);
+  if (retiredNeighbors !== undefined) {
+    for (const [neighborRoot, assertion] of retiredNeighbors) {
+      if (neighborRoot === survivingRoot) continue;
+      const canonicalAssertion =
+        survivingNeighbors.get(neighborRoot) ?? assertion;
+      survivingNeighbors.set(neighborRoot, canonicalAssertion);
+      const neighborMap = index.get(neighborRoot);
+      if (neighborMap !== undefined) {
+        neighborMap.delete(retiredRoot);
+        neighborMap.set(survivingRoot, canonicalAssertion);
+      }
+    }
+  }
+  index.delete(retiredRoot);
+  if (survivingNeighbors.size === 0) {
+    index.delete(survivingRoot);
+  } else {
+    index.set(survivingRoot, survivingNeighbors);
+  }
 }
 
 function spanningDifferentAssertion(
@@ -1697,12 +1637,10 @@ async function bulkAssertPairs<G extends GraphDef>(
   );
 
   // Build the union-find ONCE (structural nodes + same-id groups + persisted
-  // same-assertions), then union each accepted same pair into it — instead of
-  // rebuilding the whole partition per pair (the old O(P²)). Different
-  // assertions live in their own list so the spanning-conflict check scans
-  // only them, and a per-root member index keeps class lookups O(1).
+  // same-assertions), then union each accepted same pair into it. Per-root kind
+  // sets make disjointness independent of class cardinality, and the symmetric
+  // different-root index avoids rescanning every persisted assertion per pair.
   const unionFind = new UnionFind();
-  const differentAssertions: IdentityAssertionStorageRow[] = [];
   const allReferences = new Map<string, PlainNodeRef>();
   const byId = new Map<string, PlainNodeRef[]>();
   for (const ref of structuralNodes) {
@@ -1727,17 +1665,29 @@ async function bulkAssertPairs<G extends GraphDef>(
     } else {
       unionFind.add(endpointA);
       unionFind.add(endpointB);
-      differentAssertions.push(assertion);
     }
     allReferences.set(refKey(endpointA), endpointA);
     allReferences.set(refKey(endpointB), endpointB);
   }
-  const membersByRoot = new Map<string, PlainNodeRef[]>();
+  const kindsByRoot = new Map<string, Set<string>>();
   for (const ref of allReferences.values()) {
     const root = unionFind.root(ref);
-    const group = membersByRoot.get(root) ?? [];
-    group.push(ref);
-    membersByRoot.set(root, group);
+    const kinds = kindsByRoot.get(root) ?? new Set<string>();
+    kinds.add(ref.kind);
+    kindsByRoot.set(root, kinds);
+  }
+  const differentByRoot: DifferentAssertionIndex = new Map();
+  for (const assertion of persistedAssertions) {
+    if (assertion.rel !== "different") continue;
+    const rootA = unionFind.root({
+      kind: assertion.a_kind,
+      id: assertion.a_id,
+    });
+    const rootB = unionFind.root({
+      kind: assertion.b_kind,
+      id: assertion.b_id,
+    });
+    indexDifferentAssertion(differentByRoot, rootA, rootB, assertion);
   }
 
   const createdRows: IdentityAssertionStorageRow[] = [];
@@ -1766,20 +1716,7 @@ async function bulkAssertPairs<G extends GraphDef>(
         });
       }
     } else {
-      const spanning = differentAssertions.find((assertion) => {
-        const spanA = unionFind.root({
-          kind: assertion.a_kind,
-          id: assertion.a_id,
-        });
-        const spanB = unionFind.root({
-          kind: assertion.b_kind,
-          id: assertion.b_id,
-        });
-        return (
-          (spanA === rootA && spanB === rootB) ||
-          (spanA === rootB && spanB === rootA)
-        );
-      });
+      const spanning = differentByRoot.get(rootA)?.get(rootB);
       if (spanning !== undefined) {
         throw new IdentityContradictionError({
           operation,
@@ -1789,10 +1726,10 @@ async function bulkAssertPairs<G extends GraphDef>(
           conflictingAssertionId: spanning.id,
         });
       }
-      const disjointKinds = classHasDisjointKinds(
+      const disjointKinds = kindSetsHaveDisjointKinds(
         ctx.registry,
-        membersByRoot.get(rootA) ?? [a],
-        membersByRoot.get(rootB) ?? [b],
+        kindsByRoot.get(rootA) ?? new Set([a.kind]),
+        kindsByRoot.get(rootB) ?? new Set([b.kind]),
       );
       if (disjointKinds !== undefined) {
         throw new IdentityContradictionError({
@@ -1812,14 +1749,21 @@ async function bulkAssertPairs<G extends GraphDef>(
       closureReferences.push(a, b);
       if (rootA !== rootB) {
         unionFind.union(a, b);
-        const mergedRoot = unionFind.root(a);
-        const merged = [
-          ...(membersByRoot.get(rootA) ?? [a]),
-          ...(membersByRoot.get(rootB) ?? [b]),
-        ];
-        membersByRoot.delete(rootA);
-        membersByRoot.delete(rootB);
-        membersByRoot.set(mergedRoot, merged);
+        const survivingRoot = unionFind.root(a);
+        const retiredRoot = survivingRoot === rootA ? rootB : rootA;
+        const survivingKinds =
+          kindsByRoot.get(survivingRoot) ?? new Set<string>();
+        const retiredKinds = kindsByRoot.get(retiredRoot);
+        if (retiredKinds !== undefined) {
+          for (const kind of retiredKinds) survivingKinds.add(kind);
+        }
+        kindsByRoot.delete(retiredRoot);
+        kindsByRoot.set(survivingRoot, survivingKinds);
+        mergeDifferentAssertionRoots(
+          differentByRoot,
+          survivingRoot,
+          retiredRoot,
+        );
       }
     }
   }
@@ -1957,11 +1901,18 @@ async function retractByIds(
       );
     }
   }
-  const ended = current.map((row) => ({
-    ...row,
-    valid_to: requireDefined(endedById.get(row.id)),
-    updated_at: now,
-  }));
+  const currentById = new Map(current.map((row) => [row.id, row]));
+  const ended = uniqueIds.flatMap((id) => {
+    const row = currentById.get(id);
+    if (row === undefined) return [];
+    return [
+      {
+        ...row,
+        valid_to: requireDefined(endedById.get(row.id)),
+        updated_at: now,
+      },
+    ];
+  });
   for (const row of ended) {
     touch(ctx.graphId, row.id, { ...row });
   }
@@ -2020,9 +1971,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
 
     async nodesOf(input) {
       const members = await visibleMembersAtCoordinate(ctx, plainRef(input));
-      const nodes = await Promise.all(
-        members.map((member) => ctx.loadNode(member, ctx.coordinate)),
-      );
+      const nodes = await ctx.loadNodes(members, ctx.coordinate);
       return nodes.filter((node) => node !== undefined);
     },
 
@@ -2390,7 +2339,7 @@ export async function foldIdentityForCreatedNodes(
   await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
     const ids = [...new Set(references.map((ref) => ref.id))];
     // One chunked bare-id SELECT over ALL created ids, not one per node kind:
-    // `nodes_id_idx (graph_id, id)` makes the kind-free probe an indexed seek,
+    // `typegraph_nodes_id_idx (graph_id, id)` makes the kind-free probe an indexed seek,
     // so the whole cross-kind peer set comes back in a single round trip.
     const liveKindsById = new Map<string, Set<string>>();
     for (const idChunk of chunk(ids, REFERENCE_CHUNK_SIZE)) {
@@ -2527,15 +2476,61 @@ export async function detachIdentityForNode(
 export async function readIdentityAssertionsForInterchange<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   mode: "state" | "archival",
+  options?: IdentityInterchangeReadOptions,
 ): Promise<readonly IdentityTransferAssertion[]> {
+  const nodeKinds = options?.nodeKinds;
+  const kindFilter =
+    nodeKinds === undefined ? sql``
+    : nodeKinds.length === 0 ? sql`AND 1 = 0`
+    : sql`
+      AND identity_assertions.a_kind IN (${sql.join(
+        nodeKinds.map((kind) => sql`${kind}`),
+        sql`, `,
+      )})
+            AND identity_assertions.b_kind IN (${sql.join(
+              nodeKinds.map((kind) => sql`${kind}`),
+              sql`, `,
+            )})
+    `;
+  const liveEndpointJoins =
+    options?.includeDeleted === false ?
+      sql`
+        JOIN ${ctx.schema.nodesTable} identity_a_node
+          ON identity_a_node.graph_id = identity_assertions.graph_id
+         AND identity_a_node.kind = identity_assertions.a_kind
+         AND identity_a_node.id = identity_assertions.a_id
+         AND identity_a_node.deleted_at IS NULL
+        JOIN ${ctx.schema.nodesTable} identity_b_node
+          ON identity_b_node.graph_id = identity_assertions.graph_id
+         AND identity_b_node.kind = identity_assertions.b_kind
+         AND identity_b_node.id = identity_assertions.b_id
+         AND identity_b_node.deleted_at IS NULL
+      `
+    : sql``;
   const rows = await ctx.backend.execute<RawIdentityAssertionRow>(
     asCompiledRowsSql(sql`
-      SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-             valid_from, valid_to, created_at, updated_at, deleted_at
-      FROM ${ctx.schema.identityAssertionsTable}
-      WHERE graph_id = ${ctx.graphId}
-        AND deleted_at IS NULL
-        ${mode === "state" ? sql`AND valid_to IS NULL` : sql``}
+      SELECT identity_assertions.graph_id AS graph_id,
+             identity_assertions.id AS id,
+             identity_assertions.rel AS rel,
+             identity_assertions.a_kind AS a_kind,
+             identity_assertions.a_id AS a_id,
+             identity_assertions.b_kind AS b_kind,
+             identity_assertions.b_id AS b_id,
+             identity_assertions.valid_from AS valid_from,
+             identity_assertions.valid_to AS valid_to,
+             identity_assertions.created_at AS created_at,
+             identity_assertions.updated_at AS updated_at,
+             identity_assertions.deleted_at AS deleted_at
+      FROM ${ctx.schema.identityAssertionsTable} identity_assertions
+      ${liveEndpointJoins}
+      WHERE identity_assertions.graph_id = ${ctx.graphId}
+        AND identity_assertions.deleted_at IS NULL
+        ${
+          mode === "state" ?
+            sql`AND identity_assertions.valid_to IS NULL`
+          : sql``
+        }
+        ${kindFilter}
     `),
   );
   return rows

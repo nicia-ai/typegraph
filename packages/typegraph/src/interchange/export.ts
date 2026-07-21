@@ -9,7 +9,7 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
-import { storeBackend } from "../store/runtime-port";
+import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
@@ -137,9 +137,12 @@ export async function* exportGraphStream<G extends GraphDef>(
     yield* exportEdgeChunks(backend, graphId, kind, resolved);
   }
   if (store.graph.identity !== undefined) {
-    const assertions = await store.identityAssertionsForInterchange(
-      resolved.identityMode,
-    );
+    const assertions = await storeRuntime(
+      store,
+    ).identityAssertionsForInterchange(resolved.identityMode, {
+      nodeKinds,
+      includeDeleted: resolved.includeDeleted,
+    });
     for (
       let index = 0;
       index < assertions.length;

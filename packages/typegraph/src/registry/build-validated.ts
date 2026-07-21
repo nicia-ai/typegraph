@@ -1,3 +1,4 @@
+import { type GraphIdentityConfig } from "../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import { ConfigurationError } from "../errors";
 import {
@@ -22,6 +23,7 @@ export function buildValidatedKindRegistry(
     edgeKinds: ReadonlyMap<string, AnyEdgeType>;
     ontology: readonly NamedOntologyRelation[];
     edgeEndpoints: ReadonlyMap<string, EdgeEndpointKinds>;
+    identity?: GraphIdentityConfig;
   }>,
 ): KindRegistry {
   if (input.ontology.length === 0) {
@@ -29,6 +31,7 @@ export function buildValidatedKindRegistry(
       input.nodeKinds,
       input.edgeKinds,
       createEmptyClosures(),
+      input.identity,
     );
     validateImpliesEndpointCompatibility(input.edgeEndpoints, registry);
     return registry;
@@ -51,7 +54,12 @@ export function buildValidatedKindRegistry(
   }
 
   const closures = computeClosuresFromNamedOntology(input.ontology);
-  const registry = new KindRegistry(input.nodeKinds, input.edgeKinds, closures);
+  const registry = new KindRegistry(
+    input.nodeKinds,
+    input.edgeKinds,
+    closures,
+    input.identity,
+  );
   validateImpliesEndpointCompatibility(input.edgeEndpoints, registry);
   validateInverseEndpointCompatibility(
     input.ontology,

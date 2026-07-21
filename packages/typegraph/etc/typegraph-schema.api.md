@@ -258,6 +258,7 @@ export type DeserializedSchema = Readonly<{
     getRelations: () => readonly SerializedOntologyRelation[];
     getClosures: () => SerializedClosures;
     getDefaults: () => SerializedSchema["defaults"];
+    getIdentity: () => SerializedSchema["identity"];
     getRaw: () => SerializedSchema;
     buildRegistry: () => KindRegistry;
 }>;
@@ -686,6 +687,7 @@ type GraphBackend = Readonly<{
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
+    commitSchemaVersionWithPreflight?: (params: CommitSchemaVersionParams, preflight: (target: TransactionBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
@@ -701,6 +703,7 @@ type GraphBackend = Readonly<{
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+    ensureIdentityTables?: () => Promise<void>;
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -748,12 +751,13 @@ type GraphBackend = Readonly<{
 }>;
 
 // @public
-type GraphDef<TNodes extends Record<string, NodeRegistration> = Record<string, NodeRegistration>, TEdges extends Record<string, EdgeRegistration> = Record<string, EdgeRegistration>, TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[]> = Readonly<{
+type GraphDef<TNodes extends Record<string, NodeRegistration> = Record<string, NodeRegistration>, TEdges extends Record<string, EdgeRegistration> = Record<string, EdgeRegistration>, TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[], TIdentity extends GraphIdentityConfig | undefined = GraphIdentityConfig | undefined> = Readonly<{
     [GRAPH_DEF_BRAND]: true;
     id: string;
     nodes: TNodes;
     edges: TEdges;
     ontology: TOntology;
+    identity: TIdentity;
     defaults: Readonly<{
         onNodeDelete: DeleteBehavior;
         temporalMode: TemporalMode;
@@ -780,6 +784,11 @@ type GraphExtension = Readonly<{
 
 // @public
 type GraphExtensionVersion = number;
+
+// @public
+type GraphIdentityConfig = Readonly<{
+    sameIdAcrossKinds: "fold" | "ignore";
+}>;
 
 // @public (undocumented)
 type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
@@ -838,6 +847,13 @@ type HybridSearchRow = Readonly<{
     fulltextRank?: number;
     fulltextScore?: number;
     snippet?: string;
+}>;
+
+// @public
+export type IdentityChange = Readonly<{
+    type: ChangeType;
+    severity: ChangeSeverity;
+    details: string;
 }>;
 
 // @public
@@ -1051,13 +1067,14 @@ class KindRegistry {
         narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
         equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
         iriToKind: ReadonlyMap<string, string>;
+        relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
         disjointPairs: ReadonlySet<string>;
         partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
         hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
         edgeInverses: ReadonlyMap<string, string>;
         edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
         edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
-    });
+    }, identity?: GraphIdentityConfig);
     areDisjoint(a: string, b: string): boolean;
     areEquivalent(a: string, b: string): boolean;
     // (undocumented)
@@ -1088,11 +1105,13 @@ class KindRegistry {
     getInverseEdge(edgeKind: string): string | undefined;
     getNodeType(name: string): NodeType | undefined;
     getParts(whole: string): readonly string[];
+    getRelatedKinds(kind: string): readonly string[];
     getWholes(part: string): readonly string[];
     hasEdgeType(name: string): boolean;
     hasNodeType(name: string): boolean;
     // (undocumented)
     readonly hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    readonly identity: GraphIdentityConfig | undefined;
     // (undocumented)
     readonly iriToKind: ReadonlyMap<string, string>;
     isAssignableTo(concreteKind: string, targetKind: string): boolean;
@@ -1107,6 +1126,8 @@ class KindRegistry {
     readonly nodeKinds: ReadonlyMap<string, NodeType>;
     // (undocumented)
     readonly partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    // (undocumented)
+    readonly relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
     resolveIri(iri: string): string | undefined;
     // (undocumented)
     readonly subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
@@ -1332,6 +1353,7 @@ export type SchemaDiff = Readonly<{
     nodes: readonly NodeChange[];
     edges: readonly EdgeChange[];
     ontology: readonly OntologyChange[];
+    identity?: IdentityChange;
     indexes: readonly IndexChange[];
     extension?: ExtensionChange;
     deprecatedKinds?: DeprecatedKindsChange;
@@ -1351,6 +1373,7 @@ export type SchemaManagerOptions = Readonly<{
     systemIndexes?: "materialize" | "skip";
     onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
     onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
+    schemaCommitPreflight?: (target: TransactionBackend) => Promise<void>;
 }>;
 
 // @public (undocumented)
@@ -1472,6 +1495,7 @@ export type SerializedSchema = Readonly<{
         onNodeDelete: DeleteBehavior;
         temporalMode: TemporalMode;
     }>;
+    identity?: GraphIdentityConfig;
     indexes?: readonly IndexDeclaration[];
     extension?: GraphExtension;
     deprecatedKinds?: readonly string[];
@@ -1547,6 +1571,9 @@ type SqlTableNames = Readonly<{
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
     revisionOrigins?: string | undefined;
+    identityAssertions?: string | undefined;
+    recordedIdentityAssertions?: string | undefined;
+    identityClosure?: string | undefined;
     fulltext: string;
     uniques: string;
 }>;
@@ -1675,6 +1702,7 @@ type UpdateNodeParams = Readonly<{
     kind: string;
     id: string;
     props: Readonly<Record<string, unknown>>;
+    validFrom?: string | null;
     validTo?: string;
     incrementVersion?: boolean;
     clearDeleted?: boolean;

@@ -191,6 +191,7 @@ export function buildUpdateNode(
       WHERE ${nodes.graphId} = ${params.graphId}
         AND ${nodes.kind} = ${params.kind}
         AND ${nodes.id} = ${params.id}
+        AND ${nodes.deletedAt} IS NOT NULL
       RETURNING *
     `;
   }
