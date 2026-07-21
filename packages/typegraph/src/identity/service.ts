@@ -2487,10 +2487,10 @@ export async function readIdentityAssertionsForInterchange<G extends GraphDef>(
         nodeKinds.map((kind) => sql`${kind}`),
         sql`, `,
       )})
-            AND identity_assertions.b_kind IN (${sql.join(
-              nodeKinds.map((kind) => sql`${kind}`),
-              sql`, `,
-            )})
+      AND identity_assertions.b_kind IN (${sql.join(
+        nodeKinds.map((kind) => sql`${kind}`),
+        sql`, `,
+      )})
     `;
   const liveEndpointJoins =
     options?.includeDeleted === false ?

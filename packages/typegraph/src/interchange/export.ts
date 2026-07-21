@@ -140,7 +140,7 @@ export async function* exportGraphStream<G extends GraphDef>(
     const assertions = await storeRuntime(
       store,
     ).identityAssertionsForInterchange(resolved.identityMode, {
-      nodeKinds,
+      ...(resolved.nodeKinds === undefined ? {} : { nodeKinds }),
       includeDeleted: resolved.includeDeleted,
     });
     for (

@@ -887,6 +887,7 @@ export class DatabaseOperationError extends TypeGraphError {
 export type DatabaseOperationErrorDetails = Readonly<{
     operation: string;
     entity: string;
+    reason?: "no_row_returned";
 }>;
 
 // @public (undocumented)

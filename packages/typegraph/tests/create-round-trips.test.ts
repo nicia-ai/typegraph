@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  DatabaseOperationError,
   defineGraph,
   defineNode,
   type GraphBackend,
@@ -143,7 +144,21 @@ function peerResurrectionBackend(targetId: string): GraphBackend {
                   props: { name: "Peer" },
                 });
               }
-              return updateNode.call(source, params);
+              try {
+                return await updateNode.call(source, params);
+              } catch (error) {
+                if (
+                  error instanceof DatabaseOperationError &&
+                  error.details.reason === "no_row_returned"
+                ) {
+                  throw new DatabaseOperationError(
+                    "Backend-specific zero-row update",
+                    error.details,
+                    { cause: error },
+                  );
+                }
+                throw error;
+              }
             };
           },
         });
@@ -200,6 +215,24 @@ describe("create-path round trips", () => {
     await expect(
       store.nodes.Person.create({ name: "Late writer" }, { id: "contended" }),
     ).rejects.toThrow(/already exists/u);
+  });
+
+  it("lets an upsert overwrite a peer resurrection", async () => {
+    const store = await createInitializedStore(
+      plainGraph,
+      peerResurrectionBackend("contended-upsert"),
+    );
+    const original = await store.nodes.Person.create(
+      { name: "Original" },
+      { id: "contended-upsert" },
+    );
+    await store.nodes.Person.delete(original.id);
+
+    const revived = await store.nodes.Person.upsertById("contended-upsert", {
+      name: "Late writer",
+    });
+
+    expect(revived.name).toBe("Late writer");
   });
 
   it("skips the identity fold probe for generated ids", async () => {

@@ -838,6 +838,28 @@ async function performNodeUpdate<G extends GraphDef>(
   return rowToNode(row);
 }
 
+async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: UpdateNodeInput,
+  target: GraphBackend | TransactionBackend,
+  lock: GraphWriteLock,
+  options?: Readonly<{ clearDeleted?: boolean }>,
+): Promise<Node> {
+  try {
+    return await performNodeUpdate(ctx, input, target, lock, options);
+  } catch (error) {
+    if (!options?.clearDeleted || !isNodeUpdateNoRowError(error)) throw error;
+
+    // Another writer may resurrect the tombstone after this upsert's probe.
+    // Upsert still owns the requested properties, so converge by re-reading
+    // the now-live row and applying an ordinary update instead of exposing
+    // the resurrection UPDATE's internal zero-row sentinel.
+    const current = await target.getNode(ctx.graphId, input.kind, input.id);
+    if (current === undefined || current.deleted_at !== undefined) throw error;
+    return performNodeUpdate(ctx, input, target, lock);
+  }
+}
+
 // ============================================================
 // Shared Batch Preparation
 //
@@ -1015,6 +1037,17 @@ function partitionCreates(
   return { inserts, resurrections };
 }
 
+function isNodeUpdateNoRowError(
+  error: unknown,
+): error is DatabaseOperationError {
+  return (
+    error instanceof DatabaseOperationError &&
+    error.details.operation === "update" &&
+    error.details.entity === "node" &&
+    error.details.reason === "no_row_returned"
+  );
+}
+
 async function resurrectPreparedNode<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   target: GraphBackend | TransactionBackend,
@@ -1050,12 +1083,7 @@ async function resurrectPreparedNode<G extends GraphDef>(
       target,
     );
   } catch (error) {
-    if (
-      !(error instanceof DatabaseOperationError) ||
-      error.message !== "Update node failed: no row returned"
-    ) {
-      throw error;
-    }
+    if (!isNodeUpdateNoRowError(error)) throw error;
     // The UPDATE itself has a tombstone predicate, closing the remaining gap
     // between the re-read and write. Translate a peer resurrection into the
     // create API's stable duplicate error instead of leaking a 0-row update.
@@ -1361,7 +1389,13 @@ export async function executeNodeUpdate<G extends GraphDef>(
       if (options?.clearDeleted && identity !== undefined) {
         await identity.lock(target);
       }
-      const node = await performNodeUpdate(ctx, input, target, lock, options);
+      const node = await performNodeUpdateWithResurrectionRecovery(
+        ctx,
+        input,
+        target,
+        lock,
+        options,
+      );
       if (options?.clearDeleted && identity !== undefined) {
         await identity.foldCreated(target, [
           { kind: input.kind, id: input.id },
@@ -1387,7 +1421,13 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
     if (options?.clearDeleted && identity !== undefined) {
       await identity.lock(target);
     }
-    const node = await performNodeUpdate(ctx, input, target, lock, options);
+    const node = await performNodeUpdateWithResurrectionRecovery(
+      ctx,
+      input,
+      target,
+      lock,
+      options,
+    );
     if (options?.clearDeleted && identity !== undefined) {
       await identity.foldCreated(target, [{ kind: input.kind, id: input.id }]);
     }

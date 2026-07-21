@@ -28,7 +28,11 @@ import {
 } from "../src/interchange";
 import { createStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
-import { createInitializedStore, createTestBackend } from "./test-utils";
+import {
+  createInitializedStore,
+  createPlanCaptureBackend,
+  createTestBackend,
+} from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -1594,6 +1598,22 @@ describe("Identity interchange import guards", () => {
 });
 
 describe("Identity interchange streaming", () => {
+  it("omits redundant kind predicates from an unfiltered export", async () => {
+    const { backend, captured } = createPlanCaptureBackend();
+    const source = await createInitializedStore(identityGraph, backend);
+
+    captured.length = 0;
+    await exportGraph(source);
+
+    const identityRead = requireDefined(
+      captured.find((statement) =>
+        statement.sql.includes("typegraph_identity_assertions"),
+      ),
+    );
+    expect(identityRead.sql).not.toContain("a_kind IN");
+    expect(identityRead.sql).not.toContain("b_kind IN");
+  });
+
   it("omits identity assertions whose endpoint kinds are filtered out", async () => {
     const source = await createInitializedStore(
       identityGraph,

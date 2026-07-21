@@ -1351,6 +1351,7 @@ function storageLabelFromLogicalName(logicalName: unknown): string {
 export type DatabaseOperationErrorDetails = Readonly<{
   operation: string;
   entity: string;
+  reason?: "no_row_returned";
 }>;
 
 /**
