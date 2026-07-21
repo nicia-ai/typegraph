@@ -52,7 +52,8 @@ export const NEO4J_IMAGE =
  * override via env for a newer build.
  */
 export const PGGRAPH_IMAGE =
-  process.env["TYPEGRAPH_BENCH_PGGRAPH_IMAGE"] ?? "ghcr.io/evokoa/pggraph:0.1.8";
+  process.env["TYPEGRAPH_BENCH_PGGRAPH_IMAGE"] ??
+  "ghcr.io/evokoa/pggraph:0.1.8";
 
 type CheckStatus = "ok" | "failed" | "skipped";
 
