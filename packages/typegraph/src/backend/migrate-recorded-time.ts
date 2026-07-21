@@ -9,7 +9,7 @@ import {
   RECORDED_MAX_REVISION,
   type RecordedInstant,
 } from "../core/temporal";
-import { ConfigurationError } from "../errors";
+import { ConfigurationError, ValidationError } from "../errors";
 import {
   createSqlSchema,
   type ResolvedSqlTableNames,
@@ -18,6 +18,7 @@ import {
 import { shortHash } from "../query/dialect/vector-strategy";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import { canonicalizeDatabaseTimestamp } from "../utils/date";
 import { postgresContributions, sqliteContributions } from "./drizzle/ddl";
 import { createPostgresTables } from "./drizzle/schema/postgres";
 import { createSqliteTables } from "./drizzle/schema/sqlite";
@@ -83,6 +84,7 @@ type MappingRow = Readonly<{
 
 type RemapRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
 type MappingCountRow = Readonly<{ anchors: unknown; graphs: unknown }>;
+type MissingMappingRow = Readonly<{ missing: unknown }>;
 type ColumnRow = Readonly<{ name: unknown }>;
 
 export type MigrateLegacyRecordedTimeOptions = Readonly<{
@@ -113,10 +115,15 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
-  backend: Pick<GraphBackend, "dialect" | "executeStatement" | "tableNames">;
+  backend: Pick<
+    GraphBackend,
+    "dialect" | "execute" | "executeStatement" | "tableNames" | "transaction"
+  >;
   graphId: string;
   tableNames?: Partial<SqlTableNames> | undefined;
   mappingTableName?: string | undefined;
+  /** Drop the mapping table when this deletion leaves it empty. */
+  dropWhenEmpty?: boolean | undefined;
 }>;
 
 function resolvedTableNames(
@@ -173,17 +180,14 @@ async function executeDdl(
 }
 
 function canonicalLegacyInstant(value: unknown): string {
-  const date =
-    value instanceof Date ? value
-    : typeof value === "string" ? new Date(value)
-    : undefined;
-  if (date === undefined || Number.isNaN(date.getTime())) {
+  const canonical = canonicalizeDatabaseTimestamp(value);
+  if (canonical === undefined) {
     throw new ConfigurationError(
       "Legacy recorded-time relation contained an invalid timestamp.",
       { value },
     );
   }
-  return date.toISOString();
+  return canonical;
 }
 
 function safeRevision(value: unknown): number {
@@ -422,6 +426,88 @@ function migratedColumn(column: string, legacyAlias: string): SqlFragment {
   return sql`${sql.raw(legacyAlias)}.${sql.identifier(column)}`;
 }
 
+function mappingMatch(
+  dialect: GraphBackend["dialect"],
+  mappingAlias: "anchor_map" | "from_map" | "to_map",
+  legacyColumn: "recorded_at" | "recorded_from" | "recorded_to",
+): SqlFragment {
+  const mapping = sql.raw(mappingAlias);
+  const legacy = sql.raw(`legacy.${legacyColumn}`);
+  return dialect === "postgres" ?
+      sql`${mapping}.recorded_at = ${legacy}`
+    : sql`${mapping}.legacy_recorded_at = ${legacy}`;
+}
+
+function missingMappingCount(value: unknown, legacyTable: string): number {
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new ConfigurationError(
+      "Recorded-time migration returned an invalid integrity-check count.",
+      { legacyTable, value },
+    );
+  }
+  return count;
+}
+
+async function assertRecordedRelationMappings(
+  target: TransactionBackend,
+  options: Readonly<{ legacyTable: string; mappingTable: string }>,
+): Promise<void> {
+  const fromMatch = mappingMatch(target.dialect, "from_map", "recorded_from");
+  const toMatch = mappingMatch(target.dialect, "to_map", "recorded_to");
+  const rows = await target.execute<MissingMappingRow>(
+    asCompiledRowsSql(sql`
+      SELECT COUNT(*) AS missing
+      FROM ${sql.identifier(options.legacyTable)} AS legacy
+      LEFT JOIN ${sql.identifier(options.mappingTable)} AS from_map
+        ON from_map.graph_id = legacy.graph_id AND ${fromMatch}
+      LEFT JOIN ${sql.identifier(options.mappingTable)} AS to_map
+        ON to_map.graph_id = legacy.graph_id AND ${toMatch}
+      WHERE from_map.revision IS NULL
+         OR (
+           legacy.recorded_to <> ${LEGACY_RECORDED_MAX}
+           AND to_map.revision IS NULL
+         )
+    `),
+  );
+  const missing = missingMappingCount(rows[0]?.missing, options.legacyTable);
+  if (missing === 0) return;
+  throw new ConfigurationError(
+    "Legacy recorded-time boundaries could not be mapped exactly.",
+    { legacyTable: options.legacyTable, missingRows: missing },
+    {
+      suggestion:
+        "Ensure every legacy boundary is a valid millisecond-precision timestamp produced by the preview recorded clock before retrying the offline migration.",
+    },
+  );
+}
+
+async function assertRecordedClockMappings(
+  target: TransactionBackend,
+  options: Readonly<{ legacyTable: string; mappingTable: string }>,
+): Promise<void> {
+  const match = mappingMatch(target.dialect, "anchor_map", "recorded_at");
+  const rows = await target.execute<MissingMappingRow>(
+    asCompiledRowsSql(sql`
+      SELECT COUNT(*) AS missing
+      FROM ${sql.identifier(options.legacyTable)} AS legacy
+      LEFT JOIN ${sql.identifier(options.mappingTable)} AS anchor_map
+        ON anchor_map.graph_id = legacy.graph_id AND ${match}
+      WHERE anchor_map.revision IS NULL
+    `),
+  );
+  const missing = missingMappingCount(rows[0]?.missing, options.legacyTable);
+  if (missing === 0) return;
+  throw new ConfigurationError(
+    "Legacy recorded clock values could not be mapped exactly.",
+    { legacyTable: options.legacyTable, missingRows: missing },
+    {
+      suggestion:
+        "Ensure every legacy clock value is a valid millisecond-precision timestamp produced by the preview recorded clock before retrying the offline migration.",
+    },
+  );
+}
+
 async function copyRecordedRelation(
   target: TransactionBackend,
   options: Readonly<{
@@ -435,14 +521,9 @@ async function copyRecordedRelation(
   const values = options.columns.map((column) =>
     migratedColumn(column, "legacy"),
   );
-  const fromMatch =
-    target.dialect === "postgres" ?
-      sql`from_map.recorded_at = legacy.recorded_from`
-    : sql`from_map.legacy_recorded_at = legacy.recorded_from`;
-  const toMatch =
-    target.dialect === "postgres" ?
-      sql`to_map.recorded_at = legacy.recorded_to`
-    : sql`to_map.legacy_recorded_at = legacy.recorded_to`;
+  await assertRecordedRelationMappings(target, options);
+  const fromMatch = mappingMatch(target.dialect, "from_map", "recorded_from");
+  const toMatch = mappingMatch(target.dialect, "to_map", "recorded_to");
   await executeStatement(
     target,
     sql`
@@ -450,6 +531,8 @@ async function copyRecordedRelation(
         (${sql.join(columnList, sql`, `)})
       SELECT ${sql.join(values, sql`, `)}
       FROM ${sql.identifier(options.legacyTable)} AS legacy
+      -- LEFT JOIN is deliberate: a missing mapping reaches the NOT NULL
+      -- revision columns and fails loud instead of silently dropping history.
       LEFT JOIN ${sql.identifier(options.mappingTable)} AS from_map
         ON from_map.graph_id = legacy.graph_id AND ${fromMatch}
       LEFT JOIN ${sql.identifier(options.mappingTable)} AS to_map
@@ -466,10 +549,8 @@ async function copyRecordedClock(
     temporaryTable: string;
   }>,
 ): Promise<void> {
-  const match =
-    target.dialect === "postgres" ?
-      sql`anchor_map.recorded_at = legacy.recorded_at`
-    : sql`anchor_map.legacy_recorded_at = legacy.recorded_at`;
+  await assertRecordedClockMappings(target, options);
+  const match = mappingMatch(target.dialect, "anchor_map", "recorded_at");
   await executeStatement(
     target,
     sql`
@@ -477,6 +558,7 @@ async function copyRecordedClock(
         (graph_id, revision, recorded_at)
       SELECT legacy.graph_id, anchor_map.revision, legacy.recorded_at
       FROM ${sql.identifier(options.legacyTable)} AS legacy
+      -- Preserve fail-loud behavior if the preflight invariant changes later.
       LEFT JOIN ${sql.identifier(options.mappingTable)} AS anchor_map
         ON anchor_map.graph_id = legacy.graph_id AND ${match}
     `,
@@ -649,8 +731,11 @@ export async function migrateLegacyRecordedTime(
 export async function migrateRecordedAnchor(
   options: MigrateRecordedAnchorOptions,
 ): Promise<RecordedInstant> {
-  if (options.anchor.startsWith("r1:"))
+  try {
     return asRecordedInstant(options.anchor);
+  } catch (error) {
+    if (!(error instanceof ValidationError)) throw error;
+  }
   const legacyRecordedAt = canonicalLegacyInstant(options.anchor);
   const tables = resolvedTableNames(options.backend, options.tableNames);
   const mapTable = mappingTableName(tables, options.mappingTableName);
@@ -679,7 +764,10 @@ export async function migrateRecordedAnchor(
   );
 }
 
-/** Deletes one graph's legacy remap rows after downstream checkpoints migrate. */
+/**
+ * Deletes one graph's legacy remap rows after downstream checkpoints migrate.
+ * Set `dropWhenEmpty` to remove the migration table after the final graph.
+ */
 export async function deleteLegacyRecordedAnchorMap(
   options: DeleteLegacyRecordedAnchorMapOptions,
 ): Promise<void> {
@@ -691,9 +779,27 @@ export async function deleteLegacyRecordedAnchorMap(
   }
   const tables = resolvedTableNames(options.backend, options.tableNames);
   const mapTable = mappingTableName(tables, options.mappingTableName);
-  await options.backend.executeStatement(
-    asCompiledStatementSql(sql`
-      DELETE FROM ${sql.identifier(mapTable)} WHERE graph_id = ${options.graphId}
-    `),
-  );
+  await options.backend.transaction(async (target) => {
+    await executeStatement(
+      target,
+      sql`
+        DELETE FROM ${sql.identifier(mapTable)}
+        WHERE graph_id = ${options.graphId}
+      `,
+    );
+    if (options.dropWhenEmpty !== true) return;
+    const rows = await target.execute<MappingCountRow>(
+      asCompiledRowsSql(sql`
+        SELECT COUNT(*) AS anchors, COUNT(DISTINCT graph_id) AS graphs
+        FROM ${sql.identifier(mapTable)}
+      `),
+    );
+    const remaining = missingMappingCount(rows[0]?.anchors, mapTable);
+    if (remaining === 0) {
+      await executeStatement(
+        target,
+        sql`DROP TABLE ${sql.identifier(mapTable)}`,
+      );
+    }
+  });
 }

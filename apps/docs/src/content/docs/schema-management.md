@@ -333,6 +333,7 @@ await checkpoints.replaceAnchor(oldTimestampOnlyAnchor, upgraded);
 await deleteLegacyRecordedAnchorMap({
   backend,
   graphId: "event-materializer",
+  dropWhenEmpty: true,
 });
 ```
 
@@ -343,10 +344,19 @@ stores can migrate separately. Re-running it after the cutover is a no-op.
 `migrateRecordedAnchor` also accepts an already-versioned `r1` anchor, making a
 mixed old/new checkpoint pass idempotent.
 
+The old allocator may have pushed a hot graph's physical timestamp ahead of
+real wall time. Migration preserves that value because lowering it would put
+the clock behind recorded relation boundaries. New commits advance the logical
+revision normally, while the physical component remains pinned until wall time
+catches up. During that window, diagonal reads use the inherited future valid
+time; recorded-only ordering and replay remain exact.
+
 The mapping is graph-scoped: the same timestamp can correspond to different
 revisions in different graphs. Keep writers stopped for the schema rewrite, and
 delete mapping rows only after every external checkpoint for that graph has
-been translated.
+been translated. `dropWhenEmpty: true` atomically drops the mapping table when
+the deleted graph was the final one. Without that option, the empty table is
+retained intentionally and can be dropped by your normal migration tooling.
 
 ## Schema Serialization
 

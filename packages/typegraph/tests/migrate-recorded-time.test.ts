@@ -26,6 +26,7 @@ type RevisionRow = Readonly<{
   recorded_to: unknown;
 }>;
 type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
+type TableNameRow = Readonly<{ name: unknown }>;
 
 async function createLegacyRecordedSchema(
   backend: ReturnType<typeof createTestBackend>,
@@ -169,6 +170,13 @@ describe("migrateLegacyRecordedTime", () => {
       migrateRecordedAnchor({
         backend,
         graphId: GRAPH_ID,
+        anchor: "2026-01-01 00:00:00.001",
+      }),
+    ).resolves.toBe(migratedAnchor);
+    await expect(
+      migrateRecordedAnchor({
+        backend,
+        graphId: GRAPH_ID,
         anchor: migratedAnchor,
       }),
     ).resolves.toBe(migratedAnchor);
@@ -181,6 +189,20 @@ describe("migrateLegacyRecordedTime", () => {
     await expect(
       migrateRecordedAnchor({ backend, graphId: GRAPH_ID, anchor: SECOND }),
     ).rejects.toThrow("No migrated recorded anchor");
+
+    await deleteLegacyRecordedAnchorMap({
+      backend,
+      graphId: GRAPH_ID,
+      dropWhenEmpty: true,
+    });
+    const mappingTables = await backend.execute<TableNameRow>(
+      asCompiledRowsSql(sql`
+        SELECT name
+        FROM sqlite_master
+        WHERE type = ${"table"} AND name = ${result.mappingTableName}
+      `),
+    );
+    expect(mappingTables).toEqual([]);
   });
 
   it("is a clean no-op on a fresh database", async () => {

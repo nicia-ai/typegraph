@@ -4,9 +4,10 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  ConfigurationError,
   migrateLegacyRecordedTime,
   migrateRecordedAnchor,
-} from "../../../src/backend/migrate-recorded-time";
+} from "../../../src";
 import {
   createPostgresBackend,
   createPostgresTables,
@@ -151,6 +152,38 @@ describe.runIf(process.env["POSTGRES_URL"])(
           anchor: FIRST,
         }),
       ).resolves.toBe("r1:0000000000000001:2026-01-01T00:00:00.000Z");
+
+      await backend.close();
+    });
+
+    it("fails typed before copying a boundary beyond millisecond precision", async () => {
+      if (pool === undefined) throw new Error("PostgreSQL pool unavailable");
+      await seedLegacySchema(pool);
+      await pool.query(
+        `UPDATE "${RECORDED_NODES}"
+         SET recorded_from = '2026-01-01T00:00:00.000123Z'
+         WHERE history_id = 'h1'`,
+      );
+      const tables = createPostgresTables({
+        recordedNodes: RECORDED_NODES,
+        recordedEdges: RECORDED_EDGES,
+        recordedClock: RECORDED_CLOCK,
+      });
+      const backend = createPostgresBackend(drizzle(pool), { tables });
+
+      const migration = migrateLegacyRecordedTime({ backend });
+      await expect(migration).rejects.toThrow(ConfigurationError);
+      await expect(migration).rejects.toThrow(
+        "Legacy recorded-time boundaries could not be mapped exactly.",
+      );
+
+      const columns = await pool.query<{ data_type: string }>(
+        `SELECT data_type
+         FROM information_schema.columns
+         WHERE table_name = $1 AND column_name = 'recorded_from'`,
+        [RECORDED_NODES],
+      );
+      expect(columns.rows).toEqual([{ data_type: "timestamp with time zone" }]);
 
       await backend.close();
     });

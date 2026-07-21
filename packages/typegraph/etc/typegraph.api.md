@@ -997,10 +997,11 @@ export function deleteLegacyRecordedAnchorMap(options: DeleteLegacyRecordedAncho
 
 // @public (undocumented)
 export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
-    backend: Pick<GraphBackend, "dialect" | "executeStatement" | "tableNames">;
+    backend: Pick<GraphBackend, "dialect" | "execute" | "executeStatement" | "tableNames" | "transaction">;
     graphId: string;
     tableNames?: Partial<SqlTableNames> | undefined;
     mappingTableName?: string | undefined;
+    dropWhenEmpty?: boolean | undefined;
 }>;
 
 // @public

@@ -9,7 +9,7 @@ import { type SqlSchema } from "../../query/compiler/schema";
 import type { SqlDialect } from "../../query/dialect/types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
-import { nowIso } from "../../utils/date";
+import { canonicalizeDatabaseTimestamp, nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import { executeStatement } from "./guards";
 
@@ -221,14 +221,7 @@ function recordedClockRevision(value: unknown): number {
 }
 
 function recordedClockWallTime(value: unknown): string {
-  const date =
-    value instanceof Date ? value
-    : typeof value === "string" ? new Date(value)
-    : undefined;
-  if (date === undefined || Number.isNaN(date.getTime())) {
-    return failInvalidClock(value);
-  }
-  return date.toISOString();
+  return canonicalizeDatabaseTimestamp(value) ?? failInvalidClock(value);
 }
 
 function recordedClockParts(row: ClockRow): RecordedClockParts | undefined {
