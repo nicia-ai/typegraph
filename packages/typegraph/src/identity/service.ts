@@ -18,6 +18,7 @@ import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
+import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { canonicalizeDatabaseTimestamp, nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -139,6 +140,20 @@ function plainRef<G extends GraphDef>(ref: GraphNodeRef<G>): PlainNodeRef {
 
 function refKey(ref: PlainNodeRef): string {
   return JSON.stringify([ref.kind, ref.id]);
+}
+
+/**
+ * Whether `ref` is one of `members`.
+ *
+ * Keys the probe once instead of re-serializing it for every member, which
+ * an inline `members.some((m) => refKey(m) === refKey(ref))` does.
+ */
+function containsRef(
+  members: readonly PlainNodeRef[],
+  ref: PlainNodeRef,
+): boolean {
+  const key = refKey(ref);
+  return members.some((member) => refKey(member) === key);
 }
 
 function compareReferences(left: PlainNodeRef, right: PlainNodeRef): number {
@@ -450,20 +465,12 @@ async function loadCurrentStructuralClasses(
   if (uniqueReferences.length === 0) return new Map();
   if (uniqueReferences.length > REFERENCE_CHUNK_SIZE) {
     const combined = new Map<string, readonly PlainNodeRef[]>();
-    for (
-      let offset = 0;
-      offset < uniqueReferences.length;
-      offset += REFERENCE_CHUNK_SIZE
-    ) {
-      const chunk = uniqueReferences.slice(
-        offset,
-        offset + REFERENCE_CHUNK_SIZE,
-      );
+    for (const refChunk of chunk(uniqueReferences, REFERENCE_CHUNK_SIZE)) {
       const classes = await loadCurrentStructuralClasses(
         target,
         schema,
         graphId,
-        chunk,
+        refChunk,
       );
       for (const [key, members] of classes) combined.set(key, members);
     }
@@ -550,9 +557,7 @@ async function loadCurrentVisibleMembers(
   const members = rows
     .map((row) => normalizeMemberRow(row).ref)
     .toSorted((left, right) => compareReferences(left, right));
-  return members.some((member) => refKey(member) === refKey(ref)) ? members : (
-      []
-    );
+  return containsRef(members, ref) ? members : [];
 }
 
 async function loadHistoricalVisibleMembers(
@@ -756,17 +761,12 @@ async function loadAssertionsTouching(
   if (references.length === 0) return [];
   if (references.length > REFERENCE_CHUNK_SIZE) {
     const byId = new Map<string, IdentityAssertionStorageRow>();
-    for (
-      let offset = 0;
-      offset < references.length;
-      offset += REFERENCE_CHUNK_SIZE
-    ) {
-      const chunk = references.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+    for (const refChunk of chunk(references, REFERENCE_CHUNK_SIZE)) {
       const assertions = await loadAssertionsTouching(
         target,
         schema,
         graphId,
-        chunk,
+        refChunk,
         coordinate,
         relation,
       );
@@ -985,9 +985,7 @@ function sameComponent(
   first: PlainNodeRef,
   second: PlainNodeRef,
 ): boolean {
-  return componentFor(snapshot, first).some(
-    (member) => refKey(member) === refKey(second),
-  );
+  return containsRef(componentFor(snapshot, first), second);
 }
 
 function classHasDisjointKinds(
@@ -1201,13 +1199,8 @@ async function loadLiveReferences(
   if (references.length === 0) return [];
   if (references.length > REFERENCE_CHUNK_SIZE) {
     const byKey = new Map<string, PlainNodeRef>();
-    for (
-      let offset = 0;
-      offset < references.length;
-      offset += REFERENCE_CHUNK_SIZE
-    ) {
-      const chunk = references.slice(offset, offset + REFERENCE_CHUNK_SIZE);
-      const live = await loadLiveReferences(target, schema, graphId, chunk);
+    for (const refChunk of chunk(references, REFERENCE_CHUNK_SIZE)) {
+      const live = await loadLiveReferences(target, schema, graphId, refChunk);
       for (const ref of live) byKey.set(refKey(ref), ref);
     }
     return [...byKey.values()];
@@ -1260,7 +1253,7 @@ async function validateCurrentRelation(
   const aClass = requireDefined(classes.get(refKey(a)));
   const bClass = requireDefined(classes.get(refKey(b)));
   if (relation === "different") {
-    if (!aClass.some((member) => refKey(member) === refKey(b))) return;
+    if (!containsRef(aClass, b)) return;
     throw new IdentityContradictionError({
       operation,
       a,
@@ -1369,26 +1362,20 @@ async function insertAssertionRows(
   schema: SqlSchema,
   rows: readonly IdentityAssertionStorageRow[],
 ): Promise<void> {
-  for (
-    let offset = 0;
-    offset < rows.length;
-    offset += ASSERTION_INSERT_CHUNK_SIZE
-  ) {
-    const values = rows
-      .slice(offset, offset + ASSERTION_INSERT_CHUNK_SIZE)
-      .map((row) => {
-        const validTo =
-          row.valid_to === undefined ? sql`NULL` : sql`${row.valid_to}`;
-        const deletedAt =
-          row.deleted_at === undefined ? sql`NULL` : sql`${row.deleted_at}`;
-        return sql`
-          (
-                  ${row.graph_id}, ${row.id}, ${row.rel}, ${row.a_kind}, ${row.a_id},
-                  ${row.b_kind}, ${row.b_id}, ${row.valid_from}, ${validTo},
-                  ${row.created_at}, ${row.updated_at}, ${deletedAt}
-                )
-        `;
-      });
+  for (const rowChunk of chunk(rows, ASSERTION_INSERT_CHUNK_SIZE)) {
+    const values = rowChunk.map((row) => {
+      const validTo =
+        row.valid_to === undefined ? sql`NULL` : sql`${row.valid_to}`;
+      const deletedAt =
+        row.deleted_at === undefined ? sql`NULL` : sql`${row.deleted_at}`;
+      return sql`
+        (
+                ${row.graph_id}, ${row.id}, ${row.rel}, ${row.a_kind}, ${row.a_id},
+                ${row.b_kind}, ${row.b_id}, ${row.valid_from}, ${validTo},
+                ${row.created_at}, ${row.updated_at}, ${deletedAt}
+              )
+      `;
+    });
     await executeStatement(
       target,
       sql`
@@ -1409,12 +1396,7 @@ async function loadAssertionsByIds(
 ): Promise<Map<string, IdentityAssertionStorageRow>> {
   const uniqueIds = [...new Set(ids)];
   const byId = new Map<string, IdentityAssertionStorageRow>();
-  for (
-    let offset = 0;
-    offset < uniqueIds.length;
-    offset += REFERENCE_CHUNK_SIZE
-  ) {
-    const idChunk = uniqueIds.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+  for (const idChunk of chunk(uniqueIds, REFERENCE_CHUNK_SIZE)) {
     const idList = sql.join(
       idChunk.map((id) => sql`${id}`),
       sql`, `,
@@ -1475,20 +1457,13 @@ async function insertClosureComponents(
     }
   }
   if (values.length === 0) return;
-  for (
-    let offset = 0;
-    offset < values.length;
-    offset += CLOSURE_INSERT_CHUNK_SIZE
-  ) {
+  for (const valueChunk of chunk(values, CLOSURE_INSERT_CHUNK_SIZE)) {
     await executeStatement(
       target,
       sql`
         INSERT INTO ${schema.identityClosureTable} (
           graph_id, member_kind, member_id, class_kind, class_id
-        ) VALUES ${sql.join(
-          values.slice(offset, offset + CLOSURE_INSERT_CHUNK_SIZE),
-          sql`, `,
-        )}
+        ) VALUES ${sql.join(valueChunk, sql`, `)}
       `,
     );
   }
@@ -1529,15 +1504,11 @@ async function replaceAffectedClosure(
     undefined,
     "same",
   );
-  for (
-    let offset = 0;
-    offset < affected.length;
-    offset += REFERENCE_CHUNK_SIZE
-  ) {
+  for (const affectedChunk of chunk(affected, REFERENCE_CHUNK_SIZE)) {
     const matches = referenceCondition(
       sql`member_kind`,
       sql`member_id`,
-      affected.slice(offset, offset + REFERENCE_CHUNK_SIZE),
+      affectedChunk,
     );
     await executeStatement(
       target,
@@ -1568,7 +1539,7 @@ async function mergeCurrentClasses(
   ]);
   const aClass = requireDefined(classes.get(refKey(a)));
   const bClass = requireDefined(classes.get(refKey(b)));
-  if (aClass.some((member) => refKey(member) === refKey(b))) return;
+  if (containsRef(aClass, b)) return;
 
   const [smaller, larger] =
     aClass.length <= bClass.length ? [aClass, bClass] : [bClass, aClass];
@@ -1936,14 +1907,9 @@ async function retractByIds(
   const uniqueIds = [...new Set(ids)];
   if (uniqueIds.length === 0) return [];
   const current: IdentityAssertionStorageRow[] = [];
-  for (
-    let offset = 0;
-    offset < uniqueIds.length;
-    offset += REFERENCE_CHUNK_SIZE
-  ) {
-    const chunk = uniqueIds.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+  for (const idChunk of chunk(uniqueIds, REFERENCE_CHUNK_SIZE)) {
     const placeholders = sql.join(
-      chunk.map((id) => sql`${id}`),
+      idChunk.map((id) => sql`${id}`),
       sql`, `,
     );
     const rows = await target.execute<RawIdentityAssertionRow>(
@@ -1974,10 +1940,9 @@ async function retractByIds(
     byValidTo.set(validTo, group);
   }
   for (const [validTo, ids] of byValidTo) {
-    for (let offset = 0; offset < ids.length; offset += REFERENCE_CHUNK_SIZE) {
-      const chunk = ids.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+    for (const idChunk of chunk(ids, REFERENCE_CHUNK_SIZE)) {
       const placeholders = sql.join(
-        chunk.map((id) => sql`${id}`),
+        idChunk.map((id) => sql`${id}`),
         sql`, `,
       );
       await executeStatement(
@@ -2065,7 +2030,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const first = plainRef(firstInput);
       const second = plainRef(secondInput);
       const members = await visibleMembersAtCoordinate(ctx, first);
-      return members.some((member) => refKey(member) === refKey(second));
+      return containsRef(members, second);
     },
 
     async areDifferent(firstInput, secondInput) {
@@ -2369,15 +2334,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
   const removedKinds = [...new Set(kinds)];
   await runIdentityMutation(ctx, async (target, touch) => {
     const matched = new Map<string, IdentityAssertionStorageRow>();
-    for (
-      let offset = 0;
-      offset < removedKinds.length;
-      offset += REFERENCE_CHUNK_SIZE
-    ) {
-      const kindChunk = removedKinds.slice(
-        offset,
-        offset + REFERENCE_CHUNK_SIZE,
-      );
+    for (const kindChunk of chunk(removedKinds, REFERENCE_CHUNK_SIZE)) {
       const kindList = sql.join(
         kindChunk.map((kind) => sql`${kind}`),
         sql`, `,
@@ -2396,8 +2353,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
       }
     }
     const ids = [...matched.keys()];
-    for (let offset = 0; offset < ids.length; offset += REFERENCE_CHUNK_SIZE) {
-      const idChunk = ids.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+    for (const idChunk of chunk(ids, REFERENCE_CHUNK_SIZE)) {
       const idList = sql.join(
         idChunk.map((id) => sql`${id}`),
         sql`, `,
@@ -2437,8 +2393,7 @@ export async function foldIdentityForCreatedNodes(
     // `nodes_id_idx (graph_id, id)` makes the kind-free probe an indexed seek,
     // so the whole cross-kind peer set comes back in a single round trip.
     const liveKindsById = new Map<string, Set<string>>();
-    for (let offset = 0; offset < ids.length; offset += REFERENCE_CHUNK_SIZE) {
-      const idChunk = ids.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+    for (const idChunk of chunk(ids, REFERENCE_CHUNK_SIZE)) {
       const idList = sql.join(
         idChunk.map((id) => sql`${id}`),
         sql`, `,
