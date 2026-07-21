@@ -104,6 +104,7 @@ export function compileIdentitySourcePredicate(
   // That was 5-7x SLOWER on the same benchmark (931ms-1.16s vs 172ms at
   // n=500). Removing the quadratic term needs the closure hoisted to a
   // query-level CTE keyed by all seeds, not a narrower per-seed relation.
+  // Tracked in typegraph#310.
   const sameIdEdges =
     (ctx.identitySameIdAcrossKinds ?? "fold") === "fold" ?
       sql`

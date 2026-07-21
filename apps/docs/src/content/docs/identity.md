@@ -167,7 +167,8 @@ size*. Measured on SQLite over a graph of *n* nodes, all of them source rows,
 end-to-end query time was 45 ms at *n* = 250, 172 ms at 500, 671 ms at 1000 and
 2.8 s at 2000 — quadratic. Keep historical expanded traversals narrowly
 filtered so few rows reach the hop; prefer current-coordinate expansion for
-wide scans.
+wide scans. Tracked in
+[typegraph#310](https://github.com/nicia-ai/typegraph/issues/310).
 
 ## Interchange and branch merge
 
