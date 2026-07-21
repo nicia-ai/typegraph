@@ -1,5 +1,20 @@
 # @nicia-ai/typegraph
 
+## 0.40.0
+
+### Minor Changes
+
+- [#308](https://github.com/nicia-ai/typegraph/pull/308) [`db2dc31`](https://github.com/nicia-ai/typegraph/commit/db2dc31e2a66f3195c0d5d7e3df19864cb64672c) Thanks [@pdlug](https://github.com/pdlug)! - Replace timestamp-only `RecordedInstant` values with versioned anchors that
+  encode a strict per-graph logical revision alongside a non-decreasing physical
+  wall-time high-water mark. Recorded relations store numeric revisions while the
+  public anchor remains one durable string. Upgrade timestamp-only preview tables
+  with `migrateLegacyRecordedTime()` and remap external checkpoints with
+  `migrateRecordedAnchor()`. Driver timestamps are normalized without host-local
+  timezone parsing, migration integrity failures are typed, and the retained
+  anchor map can be dropped automatically after its final graph is cleaned up.
+  History-enabled async store factories now reject an unmigrated recorded schema
+  at open, including when the legacy tables are empty.
+
 ## 0.39.0
 
 ### Minor Changes
