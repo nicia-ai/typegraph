@@ -416,7 +416,11 @@ describe("recorded read dispatch", () => {
     const recordedBackend = service.backendForCoordinate(
       {
         valid: { mode: "current" },
-        recorded: { asOf: asRecordedInstant("2026-01-01T00:00:00.000Z") },
+        recorded: {
+          asOf: asRecordedInstant(
+            "r1:0000000000000001:2026-01-01T00:00:00.000Z",
+          ),
+        },
       },
       "test-recorded-read",
     );
@@ -587,7 +591,11 @@ describe("backend overlay wrappers", () => {
     const recordedBackend = service.backendForCoordinate(
       {
         valid: { mode: "current" },
-        recorded: { asOf: asRecordedInstant("2026-01-01T00:00:00.000Z") },
+        recorded: {
+          asOf: asRecordedInstant(
+            "r1:0000000000000001:2026-01-01T00:00:00.000Z",
+          ),
+        },
       },
       "test-recorded-read",
     );

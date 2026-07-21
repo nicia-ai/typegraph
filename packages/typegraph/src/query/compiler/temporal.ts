@@ -5,6 +5,7 @@
  * and deleted_at timestamps. Consolidates the previously duplicated temporal
  * filter functions into a single, parameterized implementation.
  */
+import { parseRecordedInstant } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
 import { nowIso } from "../../utils/date";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -167,7 +168,7 @@ export function compileTemporalFilter(
         const now =
           recordedAsOf === undefined ?
             (currentTimestamp ?? currentReadInstant())
-          : sql`${recordedAsOf}`;
+          : sql`${parseRecordedInstant(recordedAsOf, "recordedAsOf").recordedAt}`;
         return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${now}) AND (${validTo} IS NULL OR ${validTo} > ${now})`;
       }
 

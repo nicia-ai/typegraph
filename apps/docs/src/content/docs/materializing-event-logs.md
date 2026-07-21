@@ -203,21 +203,18 @@ and resolves with the existing node. See
 [Transaction Receipts](#transaction-receipts) for how a coalesced upsert reads on
 a receipt.
 
-Transaction boundaries also consume the recorded clock. It is a strict,
-millisecond-resolution clock scoped to one graph, and every captured transaction
-advances it by at least one millisecond. Sustaining more than 1,000 captured
-commits per second pushes recorded time progressively ahead of wall time; that
-lead shrinks only when the per-graph commit rate falls below 1,000 per second or
-the graph becomes idle. Group changes by their durable replay/checkpoint boundary so one
-addressable source position consumes one recorded instant where practical. Cap
-transaction size independently: a source may expose one coarse checkpoint for a
-very large initial sync, but that does not make an unbounded transaction safe.
+Every captured transaction receives one versioned recorded instant: a strict
+per-graph logical revision paired with honest physical wall time. High commit
+rates consume revisions without pushing the timestamp into the future. Group
+changes by their durable replay/checkpoint boundary so one addressable source
+position consumes one recorded instant where practical. Cap transaction size
+independently: a source may expose one coarse checkpoint for a very large
+initial sync, but that does not make an unbounded transaction safe.
 
-Recorded clocks are independent per graph. Sharding a firehose across graphs
-multiplies the available clock budget when the belief model and its queries
-partition cleanly, but there is no cross-graph `recordedNow()` snapshot. See
-[Recorded-clock rate and wall-time lead](/queries/temporal#recorded-clock-rate-and-wall-time-lead)
-for the allocator behavior and the valid-time consequence of accumulated lead.
+Recorded clocks are independent per graph, and there is no cross-graph
+`recordedNow()` snapshot. See
+[Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time)
+for the anchor encoding and replay semantics.
 
 **Coalescing eliminates *re-delivery* churn, not replay cost.** The win is
 scoped to re-delivery of the current value — the realistic at-least-once case,

@@ -14,7 +14,7 @@ import { type GraphBackend } from "../../src/backend/types";
 import { createSqlSchema } from "../../src/query/compiler/schema";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
-import { toCanonicalIso } from "../../src/store/recorded-capture";
+import { toCanonicalRecordedBoundary } from "../../src/store/recorded-capture";
 import { createTestBackend } from "../test-utils";
 
 const Item = defineNode("Item", {
@@ -47,7 +47,7 @@ async function readRecordedClock(
     `),
   );
   const value = rows[0]?.recorded_at;
-  return value === undefined ? undefined : toCanonicalIso(value);
+  return value === undefined ? undefined : toCanonicalRecordedBoundary(value);
 }
 
 async function countRecordedRows(backend: GraphBackend): Promise<number> {

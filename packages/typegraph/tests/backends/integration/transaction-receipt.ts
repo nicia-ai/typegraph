@@ -16,7 +16,7 @@ import { RECORDED_MAX } from "../../../src/core/temporal";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
-import { toCanonicalIso } from "../../../src/store/recorded-capture";
+import { toCanonicalRecordedBoundary } from "../../../src/store/recorded-capture";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import {
   type HistoryIntegrationStore,
@@ -130,7 +130,7 @@ async function readOpenRecordedFrom(
   if (row === undefined) {
     throw new Error(`No open recorded row for ${kind}:${id}`);
   }
-  return toCanonicalIso(row.recorded_from);
+  return toCanonicalRecordedBoundary(row.recorded_from);
 }
 
 async function readOpenRecordedNodeFrom(

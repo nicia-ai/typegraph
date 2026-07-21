@@ -171,15 +171,17 @@ descriptors at runtime and rejects combining them with `history: true`.
 ### Reading at a recorded instant
 
 `store.asOfRecorded(T)` reconstructs the graph as TypeGraph recorded it at
-instant `T`. `T` is a `RecordedInstant` — a branded canonical timestamp that
-originates from `store.recordedNow()` (below) or, for an event time you already
-hold, from `asRecordedInstant(...)`:
+instant `T`. `T` is a `RecordedInstant`: a branded, versioned string containing
+both a per-graph logical revision and its physical commit time. It originates
+from `store.recordedNow()` (below), or from `asRecordedInstant(...)` when an
+anchor previously returned by TypeGraph has round-tripped through untyped
+storage:
 
 ```typescript
 import { asRecordedInstant } from "@nicia-ai/typegraph";
 
 const recorded = store.asOfRecorded(
-  asRecordedInstant("2024-06-01T12:00:00.000Z"),
+  asRecordedInstant("r1:0000000000000042:2024-06-01T12:00:00.000Z"),
 );
 
 const doc = await recorded.nodes.Document.getById(docId);
@@ -210,12 +212,12 @@ view throws a `ValidationError` instead of silently skipping data. Iterate each
 declared node and edge kind to reconstruct a complete historical graph snapshot.
 
 A raw wall-clock string — `store.asOfRecorded(new Date().toISOString())` — does
-**not** type-check, by design. Recorded instants are monotonic and can run ahead
-of wall-clock time, so a wall-clock value may sort *before* the most recent
-commits and silently omit them. The brand turns that footgun into a compile
-error: to pin "as things stand right now"
-deterministically, use `store.recordedNow()` (the recorded high-water mark),
-then guard the `undefined` case before passing it to `store.asOfRecorded()`.
+**not** type-check, by design. Wall time does not identify which commit to read
+when several commits share a millisecond. The anchor's logical revision provides
+that order; its ISO component records the honest physical commit time. To pin
+"as things stand right now" deterministically, use `store.recordedNow()` (the
+recorded high-water mark), then guard the `undefined` case before passing it to
+`store.asOfRecorded()`.
 
 ```typescript
 await store.nodes.Document.update(docId, { title: "Revised" });
@@ -236,39 +238,28 @@ confirm a specific write committed, observe the write itself (e.g. its return
 value, or run it inside `store.transaction(...)` and act on success), not the
 global clock.
 
-#### Recorded-clock rate and wall-time lead
+#### Logical revision and physical time
 
-The recorded clock is a strict, millisecond-resolution logical clock scoped to
-one graph. A captured transaction receives one instant, regardless of how many
-entities it writes. The allocator chooses the later of the current wall-clock
-millisecond and one millisecond after the graph's previous recorded commit.
+The canonical encoding is
+`r1:<16-digit revision>:<canonical UTC timestamp>`. Revisions are strict and
+monotonic within one graph. Physical timestamps are sampled independently and
+may repeat or move backward if the application clock does; they are not forced
+forward to manufacture ordering. Consequently, commit throughput cannot push
+recorded wall time into the future.
 
-That gives every captured transaction a distinct, addressable state, but it
-also establishes a per-graph rate boundary:
-
-- At a sustained rate above **1,000 captured commits per second**, recorded time
-  advances faster than wall time. At `R` commits per second, the lead grows by
-  approximately `(R - 1000)` milliseconds each second.
-- The lead does not self-heal while that rate continues. It shrinks only while
-  the graph commits below 1,000 times per second, or after an idle gap long
-  enough for wall time to pass the recorded high-water mark.
-- The clock and its `9999-12-31T23:59:59.999Z` ceiling are **per graph**.
-  Independent graphs have independent clocks. Partitioning a workload across
-  graphs multiplies the clock budget, but also partitions queries and recorded
-  snapshots; TypeGraph does not provide a cross-graph recorded anchor.
+The fixed-width revision prefix makes anchors lexicographically sortable within
+a graph and gives each captured transaction a distinct addressable state. The
+open interval sentinel reserves revision `9007199254740991`; real commits use
+lower revisions. Recorded clocks remain per graph, and TypeGraph does not
+provide one cross-graph recorded anchor.
 
 Batch related writes in `store.transaction(...)`: one transaction allocates one
 recorded instant. For event logs, align transactions with durable replay or
 checkpoint boundaries, and cap transaction size separately so an initial sync
 does not hold a write lock or capture buffer without bound.
 
-Until physical wall time and logical commit order are represented separately,
-large accumulated lead also affects the diagonal valid-time coordinate of
-`store.asOfRecorded(T)`, which uses `T` for both temporal axes. A short-lived or
-future-dated validity interval can therefore appear ended earlier than intended
-relative to wall time. High-rate applications that use bounded validity windows
-should pin the axes independently with
-`store.asOf(validT).asOfRecorded(recordedT)`.
+Direct `store.asOfRecorded(T)` uses the anchor's physical timestamp for its
+diagonal valid-time coordinate and its revision for the recorded-time axis.
 
 Direct `store.asOfRecorded(T)` is **diagonal** bitemporal sugar: it reads the
 recorded relation as of `T` *and* uses the same `T` for the valid-time axis. To
@@ -280,7 +271,9 @@ captured it at another* — chain from a valid-time view:
 // (e.g. after a correction was entered later).
 const corrected = store
   .asOf("2024-01-01T00:00:00.000Z")
-  .asOfRecorded(asRecordedInstant("2024-06-01T12:00:00.000Z"));
+  .asOfRecorded(
+    asRecordedInstant("r1:0000000000000042:2024-06-01T12:00:00.000Z"),
+  );
 
 const asKnownThen = await corrected.nodes.Invoice.getById(invoiceId);
 ```
@@ -302,8 +295,15 @@ reads that can be faithfully rebuilt from the recorded relations:
 Broad collection reads (`find` / `count` / `findFrom` / …), `search`, and
 fulltext / vector predicates are **refused** with a `ConfigurationError` /
 `UnsupportedPredicateError`: the fulltext and vector indexes reflect *current*
-state only, so they cannot answer a recorded-time question. `T` must be a
-canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+state only, so they cannot answer a recorded-time question. `T` must use the
+canonical versioned RecordedInstant encoding; a plain ISO timestamp is rejected.
+
+:::caution[Breaking preview-schema change]
+Timestamp-only anchors and recorded tables created by the initial preview are
+not compatible with the `r1` encoding. Recreate those recorded relations and
+reset durable checkpoints when upgrading. TypeGraph rejects an old anchor or
+clock row rather than silently selecting the wrong belief state.
+:::
 
 ### Writing with history enabled
 
@@ -401,8 +401,8 @@ collection writes is the one pattern that pays the per-write multiple. (Stores
 created without `history: true` are unaffected — graph writes never touch the
 capture path.) Batching also reduces recorded-clock consumption: one captured
 transaction advances the per-graph clock once, even when it contains many
-writes. See [Recorded-clock rate and wall-time lead](#recorded-clock-rate-and-wall-time-lead)
-for the 1,000-commit-per-second boundary.
+writes. See [Logical revision and physical time](#logical-revision-and-physical-time)
+for the anchor format.
 
 > **Performance.** Recorded reads reconstruct from the history relations rather
 > than the live tables, so they are slower than current-state reads — most

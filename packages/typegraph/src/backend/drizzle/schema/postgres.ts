@@ -164,10 +164,8 @@ export function createPostgresTables(
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
       deletedAt: timestamp("deleted_at", { withTimezone: true }),
-      recordedFrom: timestamp("recorded_from", {
-        withTimezone: true,
-      }).notNull(),
-      recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
+      recordedFrom: text("recorded_from").notNull(),
+      recordedTo: text("recorded_to").notNull(),
       op: text("op").notNull(),
       schemaVersion: integer("schema_version"),
       txId: text("tx_id"),
@@ -196,10 +194,8 @@ export function createPostgresTables(
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
       deletedAt: timestamp("deleted_at", { withTimezone: true }),
-      recordedFrom: timestamp("recorded_from", {
-        withTimezone: true,
-      }).notNull(),
-      recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
+      recordedFrom: text("recorded_from").notNull(),
+      recordedTo: text("recorded_to").notNull(),
       op: text("op").notNull(),
       schemaVersion: integer("schema_version"),
       txId: text("tx_id"),
@@ -215,7 +211,7 @@ export function createPostgresTables(
     n.recordedClock,
     {
       graphId: text("graph_id").notNull(),
-      recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+      recordedAt: text("recorded_at").notNull(),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
   );

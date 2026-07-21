@@ -1,13 +1,10 @@
 /**
  * Recorded commit-clock allocator tests.
  *
- * The clock is a logical, per-graph monotonic instant — deliberately NOT raw
- * wall time — so two commits in the same wall-clock millisecond still get
- * distinct, both-observable recorded instants (otherwise the second would open
- * its row at the same timestamp the first closed, a zero-width version the
- * half-open read excludes forever). These tests pin the wall clock to force the
- * collision the guard exists for; with real timers the commits separate
- * naturally and would pass even if the guard were removed.
+ * The clock combines a logical per-graph revision with honest physical wall
+ * time. Two commits in the same wall-clock millisecond get distinct,
+ * both-observable anchors without moving the physical timestamp into the
+ * future.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -22,12 +19,16 @@ import {
   sql,
 } from "../src";
 import { type GraphBackend } from "../src/backend/types";
+import {
+  parseRecordedInstant,
+  recordedInstantWallTime,
+} from "../src/core/temporal";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import {
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
-  toCanonicalIso,
+  toCanonicalRecordedInstant,
 } from "../src/store/recorded-capture";
 import { createTestBackend } from "./test-utils";
 
@@ -66,7 +67,7 @@ async function readOpenFrom(
   );
   const row = rows[0];
   if (row === undefined) throw new Error(`No recorded row for ${id}`);
-  return toCanonicalIso(row.recorded_from);
+  return toCanonicalRecordedInstant(row.recorded_from);
 }
 
 describe("recorded commit clock", () => {
@@ -134,13 +135,13 @@ describe("recorded commit clock", () => {
       "expected second recorded clock commit",
     );
 
-    expect(firstCommit).toBe("2026-06-01T12:00:00.000Z");
-    // The collision guard advances the second commit by one logical millisecond
-    // rather than colliding with the first.
-    expect(secondCommit).toBe("2026-06-01T12:00:00.001Z");
-    // The clock now runs ahead of the (still-pinned) wall clock — expected for a
-    // logical commit clock under bursty same-ms writes.
-    expect(secondCommit > new Date().toISOString()).toBe(true);
+    expect(firstCommit).toBe("r1:0000000000000001:2026-06-01T12:00:00.000Z");
+    expect(secondCommit).toBe("r1:0000000000000002:2026-06-01T12:00:00.000Z");
+    expect(parseRecordedInstant(secondCommit).revision).toBe(2);
+    expect(recordedInstantWallTime(firstCommit)).toBe(new Date().toISOString());
+    expect(recordedInstantWallTime(secondCommit)).toBe(
+      new Date().toISOString(),
+    );
 
     // Both instants are observable and isolate their own commit.
     const atFirst = store.asOfRecorded(firstCommit);
@@ -157,48 +158,54 @@ describe("recorded commit clock", () => {
     expect(bAtSecond?.label).toBe("second");
   });
 
-  it("canonicalizes a recorded-clock value, failing typed on an invalid instant", () => {
-    const iso = "2026-06-01T12:00:00.001Z";
-    // Valid Date and valid string canonicalize identically.
-    expect(toCanonicalIso(new Date(iso))).toBe(iso);
-    expect(toCanonicalIso(iso)).toBe(iso);
-    // An invalid Date must raise the typed ConfigurationError, not the bare
-    // RangeError that `new Date("bad").toISOString()` throws.
-    expect(() => toCanonicalIso(new Date("not a real date"))).toThrow(
-      ConfigurationError,
+  it("orders commits by revision when physical wall time moves backward", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(clockGraph, backend, {
+      history: true,
+    });
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-01T12:00:00.000Z"));
+    await store.nodes.Item.create({ label: "first" }, { id: "a" });
+    const firstCommit = requireRecordedInstant(
+      await store.recordedNow(),
+      "expected first recorded clock commit",
     );
-    expect(() => toCanonicalIso("not a real date")).toThrow(ConfigurationError);
-    expect(() => toCanonicalIso(42)).toThrow(ConfigurationError);
+
+    vi.setSystemTime(new Date("2026-06-01T11:00:00.000Z"));
+    await store.nodes.Item.create({ label: "second" }, { id: "b" });
+    const secondCommit = requireRecordedInstant(
+      await store.recordedNow(),
+      "expected second recorded clock commit",
+    );
+
+    expect(secondCommit > firstCommit).toBe(true);
+    expect(parseRecordedInstant(secondCommit)).toEqual({
+      revision: 2,
+      recordedAt: "2026-06-01T11:00:00.000Z",
+    });
+
+    const validAfterBothWrites = store.asOf("2026-06-01T13:00:00.000Z");
+    const atFirst = validAfterBothWrites.asOfRecorded(firstCommit);
+    expect(await atFirst.nodes.Item.getById("a" as never)).toBeDefined();
+    expect(await atFirst.nodes.Item.getById("b" as never)).toBeUndefined();
+
+    const atSecond = validAfterBothWrites.asOfRecorded(secondCommit);
+    expect(await atSecond.nodes.Item.getById("a" as never)).toBeDefined();
+    expect(await atSecond.nodes.Item.getById("b" as never)).toBeDefined();
   });
 
-  it("interprets a zoneless timestamp string as UTC, not host-local time", () => {
-    // A driver that yields a naive timestamp (no Z / offset) for the recorded
-    // columns must be read as UTC — otherwise recordedNow() drifts by the
-    // server's offset (and across DST). Both the space- and T-separated shapes
-    // canonicalize to the same UTC instant regardless of the host timezone.
-    expect(toCanonicalIso("2026-06-25 12:00:00")).toBe(
-      "2026-06-25T12:00:00.000Z",
+  it("accepts only canonical recorded tokens from text columns", () => {
+    const instant = "r1:0000000000000007:2026-06-01T12:00:00.001Z";
+
+    expect(toCanonicalRecordedInstant(instant)).toBe(instant);
+    expect(() => toCanonicalRecordedInstant(new Date())).toThrow(
+      ConfigurationError,
     );
-    expect(toCanonicalIso("2026-06-25T12:30")).toBe("2026-06-25T12:30:00.000Z");
-    expect(toCanonicalIso("2026-06-25T12:00:00.123")).toBe(
-      "2026-06-25T12:00:00.123Z",
-    );
-    // An explicit zone is still honored as written.
-    expect(toCanonicalIso("2026-06-25T12:00:00+02:00")).toBe(
-      "2026-06-25T10:00:00.000Z",
-    );
-    // PostgreSQL text renderings can be space-separated and use a colon-less
-    // offset. Normalize them instead of relying on implementation-defined
-    // Date.parse behavior for non-ISO shapes.
-    expect(toCanonicalIso("2026-06-25 12:00:00+00")).toBe(
-      "2026-06-25T12:00:00.000Z",
-    );
-    expect(toCanonicalIso("2026-06-25 12:00:00+0000")).toBe(
-      "2026-06-25T12:00:00.000Z",
-    );
-    expect(toCanonicalIso("2026-06-25 12:00:00-0230")).toBe(
-      "2026-06-25T14:30:00.000Z",
-    );
+    expect(() =>
+      toCanonicalRecordedInstant("2026-06-01T12:00:00.001Z"),
+    ).toThrow(ConfigurationError);
+    expect(() => toCanonicalRecordedInstant(42)).toThrow(ConfigurationError);
   });
 
   it("shares one recorded instant across every entity touched in a transaction", async () => {

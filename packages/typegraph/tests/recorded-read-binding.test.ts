@@ -55,7 +55,7 @@ describe("recorded read binding", () => {
       .select((context) => context.person.id);
     const ast = {
       ...query.toAst(),
-      recordedAsOf: "2026-01-01T00:00:00.000Z",
+      recordedAsOf: "r1:0000000000000001:2026-01-01T00:00:00.000Z",
     };
 
     expect(() =>

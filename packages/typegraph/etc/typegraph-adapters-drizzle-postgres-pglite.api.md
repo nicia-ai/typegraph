@@ -762,16 +762,16 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
             recordedFrom: drizzle_orm_pg_core.PgColumn<{
                 name: "recorded_from";
                 tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: undefined;
+                enumValues: [string, ...string[]];
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
@@ -779,16 +779,16 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
             recordedTo: drizzle_orm_pg_core.PgColumn<{
                 name: "recorded_to";
                 tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: undefined;
+                enumValues: [string, ...string[]];
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
@@ -1109,16 +1109,16 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
             recordedFrom: drizzle_orm_pg_core.PgColumn<{
                 name: "recorded_from";
                 tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: undefined;
+                enumValues: [string, ...string[]];
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
@@ -1126,16 +1126,16 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
             recordedTo: drizzle_orm_pg_core.PgColumn<{
                 name: "recorded_to";
                 tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: undefined;
+                enumValues: [string, ...string[]];
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;
@@ -1235,16 +1235,16 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
             recordedAt: drizzle_orm_pg_core.PgColumn<{
                 name: "recorded_at";
                 tableName: string;
-                dataType: "date";
-                columnType: "PgTimestamp";
-                data: Date;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
                 driverParam: string;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
-                enumValues: undefined;
+                enumValues: [string, ...string[]];
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;

@@ -35,7 +35,9 @@ const graph = defineGraph({
 });
 
 const VALID_AT = "2026-01-01T00:00:00.000Z";
-const RECORDED_AT = asRecordedInstant("2026-02-02T00:00:00.000Z");
+const RECORDED_AT = asRecordedInstant(
+  "r1:0000000000000001:2026-02-02T00:00:00.000Z",
+);
 
 describe("RecordedStoreView typed surface", () => {
   it("exposes only reconstructing-safe reads", () => {

@@ -28,8 +28,11 @@ import {
   rowPropsToJsonText,
   type TransactionBackend,
 } from "../../../src/backend/types";
-import { RECORDED_MAX } from "../../../src/core/temporal";
-import { type ReadCoordinate } from "../../../src/core/temporal";
+import {
+  type ReadCoordinate,
+  RECORDED_MAX,
+  recordedInstantWallTime,
+} from "../../../src/core/temporal";
 import {
   type GraphData,
   importGraph,
@@ -46,7 +49,7 @@ import {
   CURRENT_ONLY_READ_NAMES,
   EDGE_BATCH_READ_NAMES,
 } from "../../../src/store/collection-surface";
-import { toCanonicalIso } from "../../../src/store/recorded-capture";
+import { toCanonicalRecordedBoundary } from "../../../src/store/recorded-capture";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { TRANSACTION_RUNTIME } from "../../../src/store/types";
 import { requireDefined } from "../../../src/utils/presence";
@@ -479,7 +482,7 @@ async function readRecordedClock(
   }
   // The clock high-water mark is a genuine recorded instant (the same source
   // store.recordedNow() reads), so branding it is correct, not a cast-to-silence.
-  return asRecordedInstant(toCanonicalIso(row.recorded_at));
+  return asRecordedInstant(toCanonicalRecordedBoundary(row.recorded_at));
 }
 
 async function countRecordedNodeRows(
@@ -566,7 +569,7 @@ async function readRecordedNodeClosedAt(
   );
   const row = rows[0];
   if (row === undefined) throw new Error(`No recorded node row for ${nodeId}`);
-  return toCanonicalIso(row.recorded_to);
+  return toCanonicalRecordedBoundary(row.recorded_to);
 }
 
 async function readRecordedEdgeClosedAt(
@@ -586,7 +589,7 @@ async function readRecordedEdgeClosedAt(
   );
   const row = rows[0];
   if (row === undefined) throw new Error(`No recorded edge row for ${edgeId}`);
-  return toCanonicalIso(row.recorded_to);
+  return toCanonicalRecordedBoundary(row.recorded_to);
 }
 
 async function readRecordedNodeOpenFrom(
@@ -609,7 +612,7 @@ async function readRecordedNodeOpenFrom(
   if (row === undefined) {
     throw new Error(`No open recorded node row for ${nodeId}`);
   }
-  return toCanonicalIso(row.recorded_from);
+  return toCanonicalRecordedBoundary(row.recorded_from);
 }
 
 async function readRecordedEdgeOpenFrom(
@@ -632,7 +635,7 @@ async function readRecordedEdgeOpenFrom(
   if (row === undefined) {
     throw new Error(`No open recorded edge row for ${edgeId}`);
   }
-  return toCanonicalIso(row.recorded_from);
+  return toCanonicalRecordedBoundary(row.recorded_from);
 }
 
 async function readRecordedNodeOps(
@@ -738,10 +741,13 @@ export function registerRecordedTimeIntegrationTests(
           "expected second clock commit instant",
         );
 
-        // Same pinned wall instant, but the guard advances the second commit by
-        // one logical millisecond rather than colliding with the first.
-        expect(firstCommit).toBe("2026-06-01T12:00:00.000Z");
-        expect(secondCommit).toBe("2026-06-01T12:00:00.001Z");
+        // Same physical wall instant, distinct logical revisions.
+        expect(firstCommit).toBe(
+          "r1:0000000000000001:2026-06-01T12:00:00.000Z",
+        );
+        expect(secondCommit).toBe(
+          "r1:0000000000000002:2026-06-01T12:00:00.000Z",
+        );
 
         // Both instants are observable and isolate their own commit.
         const atFirst = store.asOfRecorded(firstCommit);
@@ -986,7 +992,7 @@ export function registerRecordedTimeIntegrationTests(
         const recordedAtCreate = await readRecordedClock(store);
 
         // Precondition: Alice was genuinely valid-current at the recorded instant.
-        expect(recordedAtCreate < validTo).toBe(true);
+        expect(recordedInstantWallTime(recordedAtCreate) < validTo).toBe(true);
 
         vi.setSystemTime(new Date("2000-06-01T12:00:02.000Z"));
 
@@ -1324,7 +1330,7 @@ export function registerRecordedTimeIntegrationTests(
             recordedAsOf: RECORDED_MAX as RecordedInstant,
           } as never,
         ),
-      ).rejects.toThrow("recordedAsOf must be before");
+      ).rejects.toThrow("canonical versioned recorded instant");
     });
 
     it("enforces the public recorded-coordinate boundary across every live read seam", async () => {
@@ -3007,7 +3013,7 @@ export function registerRecordedTimeIntegrationTests(
       );
       const instants = new Set(
         [...nodeFroms, ...edgeFroms].map((row) =>
-          toCanonicalIso(row.recorded_from),
+          toCanonicalRecordedBoundary(row.recorded_from),
         ),
       );
       expect(instants).toEqual(new Set([recordedInstant]));
@@ -3198,7 +3204,7 @@ export function registerRecordedTimeIntegrationTests(
       expect(removed.registry.hasEdgeType("removalLink")).toBe(true);
     });
 
-    it("fails loud when the recorded clock contains an invalid timestamp", async () => {
+    it("fails loud when the recorded clock contains an invalid anchor", async () => {
       const baseBackend = context.getStore().backend;
       const [store] = await createStoreWithSchema(
         integrationTestGraph,
@@ -3227,7 +3233,7 @@ export function registerRecordedTimeIntegrationTests(
         : corruptionOutcome;
 
       expect(observed).toMatch(
-        /Recorded clock row contained an invalid timestamp|invalid input syntax for type timestamp/i,
+        /Recorded clock row contained an invalid recorded instant/i,
       );
     });
 

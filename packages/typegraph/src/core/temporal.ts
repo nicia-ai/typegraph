@@ -6,58 +6,104 @@ import { validateCanonicalIsoDate } from "../utils/date";
 import { type TemporalMode } from "./types";
 
 /**
- * Open-ended recorded-time sentinel. Chosen so SQLite text ordering and
- * PostgreSQL `timestamptz` ordering both put every real commit instant before
- * the open interval end.
+ * Open-ended recorded-revision sentinel. Recorded instants put a fixed-width
+ * logical revision before their physical timestamp, so lexical ordering puts
+ * every allocatable revision before this value on both SQL backends.
  */
-export const RECORDED_MAX = "9999-12-31T23:59:59.999Z";
+export const RECORDED_MAX = "r1:9007199254740991:9999-12-31T23:59:59.999Z";
+
+const RECORDED_INSTANT_VERSION = "r1";
+const RECORDED_REVISION_WIDTH = 16;
+export const RECORDED_MAX_REVISION = Number.MAX_SAFE_INTEGER;
+const RECORDED_INSTANT_PATTERN =
+  /^r1:(\d{16}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/;
 
 declare const RECORDED_INSTANT_BRAND: unique symbol;
 
 /**
- * A canonical UTC ISO-8601 recorded-time instant (`YYYY-MM-DDTHH:mm:ss.sssZ`),
- * nominally branded so it can only originate from a recorded-time source —
- * {@link Store.recordedNow} or an explicit {@link asRecordedInstant} — never an
- * ad-hoc wall-clock string.
+ * A versioned recorded-time anchor containing a fixed-width logical revision
+ * and a canonical UTC physical timestamp:
+ * `r1:0000000000000001:YYYY-MM-DDTHH:mm:ss.sssZ`.
  *
- * The recorded commit clock is a millisecond-resolution logical, monotonic
- * clock scoped to one graph. Every captured commit advances it by at least one
- * millisecond. Sustaining more than 1,000 captured commits per second therefore
- * pushes it progressively ahead of wall time; that lead shrinks only while the
- * per-graph commit rate is below 1,000 per second or during an idle gap. A raw
- * `new Date().toISOString()` may consequently sort *before* recent commits and
- * silently omit them. The brand turns that footgun into a compile error:
- * `store.asOfRecorded` accepts only a `RecordedInstant`, so a bare wall-clock
- * string no longer type-checks — callers reach for `await store.recordedNow()`
- * (the monotonic high-water mark) or {@link asRecordedInstant} instead.
+ * Logical revisions are strictly monotonic per graph and make every commit
+ * addressable even when many commits share one wall-clock millisecond. The
+ * timestamp remains the honest physical commit time used by diagonal valid-time
+ * reads. The string is canonical and lexicographically ordered by revision, so
+ * it can round-trip through plain string checkpoint columns without a custom
+ * serializer.
  */
 export type RecordedInstant = string & {
   readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
 
-export function assertValidRecordedInstant(value: string, path: string): void {
-  validateCanonicalIsoDate(value, path);
-  if (value >= RECORDED_MAX) {
-    throw new ValidationError(
-      `${path} must be before the recorded-time open sentinel ${RECORDED_MAX}.`,
-      {
-        issues: [
-          {
-            path,
-            message: `Expected a timestamp before ${RECORDED_MAX}, got "${value}"`,
-          },
-        ],
-      },
-      {
-        suggestion:
-          "Use a real recorded-time commit instant, not the open-interval sentinel.",
-      },
-    );
+export type RecordedInstantParts = Readonly<{
+  revision: number;
+  recordedAt: string;
+}>;
+
+function invalidRecordedInstant(value: string, path: string): ValidationError {
+  return new ValidationError(
+    `${path} must be a canonical versioned recorded instant.`,
+    {
+      issues: [
+        {
+          path,
+          message: `Expected ${RECORDED_INSTANT_VERSION}:<${RECORDED_REVISION_WIDTH}-digit revision>:YYYY-MM-DDTHH:mm:ss.sssZ, got "${value}"`,
+        },
+      ],
+    },
+    {
+      suggestion:
+        "Persist the exact string returned by store.recordedNow(); timestamp-only anchors from the initial recorded-time schema are not compatible.",
+    },
+  );
+}
+
+export function parseRecordedInstant(
+  value: string,
+  path = "RecordedInstant",
+): RecordedInstantParts {
+  const match = RECORDED_INSTANT_PATTERN.exec(value);
+  if (match === null) throw invalidRecordedInstant(value, path);
+  const revisionText = match[1];
+  const recordedAt = match[2];
+  if (revisionText === undefined || recordedAt === undefined) {
+    throw invalidRecordedInstant(value, path);
   }
+  const revision = Number(revisionText);
+  if (
+    !Number.isSafeInteger(revision) ||
+    revision < 1 ||
+    revision >= RECORDED_MAX_REVISION
+  ) {
+    throw invalidRecordedInstant(value, path);
+  }
+  validateCanonicalIsoDate(recordedAt, path);
+  return { revision, recordedAt };
+}
+
+export function assertValidRecordedInstant(value: string, path: string): void {
+  parseRecordedInstant(value, path);
+}
+
+export function createRecordedInstant(
+  revision: number,
+  recordedAt: string,
+): RecordedInstant {
+  const revisionText = revision
+    .toString()
+    .padStart(RECORDED_REVISION_WIDTH, "0");
+  return asRecordedInstant(
+    `${RECORDED_INSTANT_VERSION}:${revisionText}:${recordedAt}`,
+  );
+}
+
+export function recordedInstantWallTime(instant: RecordedInstant): string {
+  return parseRecordedInstant(instant).recordedAt;
 }
 
 /**
- * Brands a canonical UTC ISO-8601 string as a {@link RecordedInstant}.
+ * Brands a canonical versioned anchor string as a {@link RecordedInstant}.
  *
  * The escape hatch for an instant that round-trips through untyped storage:
  * captured from {@link Store.recordedNow}, persisted as a plain string, read
@@ -67,7 +113,7 @@ export function assertValidRecordedInstant(value: string, path: string): void {
  * real captured commit; it only guarantees the value is well-formed enough to
  * compare correctly against the recorded relations.
  *
- * @throws {ValidationError} when `value` is not a canonical UTC ISO-8601 string.
+ * @throws {ValidationError} when `value` is not a canonical versioned anchor.
  */
 export function asRecordedInstant(value: string): RecordedInstant {
   assertValidRecordedInstant(value, "asRecordedInstant");

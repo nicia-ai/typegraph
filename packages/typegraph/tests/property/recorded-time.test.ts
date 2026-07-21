@@ -42,7 +42,7 @@ import {
 } from "../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
-import { toCanonicalIso } from "../../src/store/recorded-capture";
+import { toCanonicalRecordedBoundary } from "../../src/store/recorded-capture";
 import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
 
@@ -100,7 +100,7 @@ async function readRecordedClock(
   const value = rows[0]?.recorded_at;
   if (value === undefined) throw new Error("Recorded clock not written");
   // A value read from the recorded clock is a genuine recorded instant.
-  return asRecordedInstant(toCanonicalIso(value));
+  return asRecordedInstant(toCanonicalRecordedBoundary(value));
 }
 
 async function readIntervals(
@@ -122,8 +122,8 @@ async function readIntervals(
     const list = byId.get(row.id);
     if (list === undefined) continue;
     list.push({
-      from: toCanonicalIso(row.recorded_from),
-      to: toCanonicalIso(row.recorded_to),
+      from: toCanonicalRecordedBoundary(row.recorded_from),
+      to: toCanonicalRecordedBoundary(row.recorded_to),
     });
   }
   return byId;

@@ -54,7 +54,8 @@ export {
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
-  toCanonicalIso,
+  toCanonicalRecordedBoundary,
+  toCanonicalRecordedInstant,
 } from "./recorded-capture/clock";
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
 export {

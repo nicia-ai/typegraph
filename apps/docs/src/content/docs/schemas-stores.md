@@ -2210,21 +2210,20 @@ store.asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
 // also: store.asOf(validT).asOfRecorded(recordedT)
 //       store.view({ mode }).asOfRecorded(recordedT)
 store.recordedNow(): Promise<RecordedInstant | undefined>;
-asRecordedInstant(value: string): RecordedInstant; // brand an external timestamp
+asRecordedInstant(value: string): RecordedInstant; // re-brand a persisted anchor
 ```
 
 - **`store.asOfRecorded(T)`** is diagonal sugar — the recorded *and* valid axes
   both at `T`. Chain from `store.asOf(validT)` / `store.view({ mode })` to pin
   the two axes independently.
-- **`T` is a `RecordedInstant`**, a branded canonical timestamp. It comes from
-  `store.recordedNow()` or `asRecordedInstant(...)`; a raw wall-clock string
-  (`new Date().toISOString()`) is a compile error. Recorded instants are
-  monotonic per graph and advance by at least one millisecond per captured
-  commit. Above 1,000 captured commits per second they accumulate lead over
-  wall-clock time until the rate falls below that threshold or the graph becomes
-  idle, so a wall-clock value may sort before recent commits and silently omit
-  them — the brand prevents that at the type level. See the
-  [recorded-clock rate boundary](/queries/temporal#recorded-clock-rate-and-wall-time-lead).
+- **`T` is a `RecordedInstant`**, a branded canonical string encoded as
+  `r1:<16-digit revision>:<canonical UTC timestamp>`. It comes from
+  `store.recordedNow()` or from `asRecordedInstant(...)` after the exact anchor
+  has round-tripped through untyped storage. A raw wall-clock string
+  (`new Date().toISOString()`) is a compile error because it cannot distinguish
+  multiple commits in one millisecond. The logical revision orders commits; the
+  timestamp remains honest physical time. See
+  [Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time).
 - **`store.recordedNow()`** returns the recorded high-water mark — the latest
   captured recorded instant. After guarding the `undefined` case,
   `store.asOfRecorded(checkpoint)` reconstructs everything committed so far. Use

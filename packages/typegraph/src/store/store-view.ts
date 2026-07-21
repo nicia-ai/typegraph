@@ -1131,8 +1131,8 @@ export class RecordedStoreView<
     });
   }
 
-  /** The recorded/system-time timestamp this view reconstructs. */
-  get asOfRecorded(): string {
+  /** The recorded/system-time anchor this view reconstructs. */
+  get asOfRecorded(): RecordedInstant {
     const recorded = this.coordinate.recorded;
     if (recorded === undefined) {
       throw new ConfigurationError(

@@ -180,7 +180,9 @@ export function registerRecordedReadBindingIntegrationTests(
       expect(() =>
         context
           .getStore()
-          .asOfRecorded(asRecordedInstant("2026-01-01T00:00:00.000Z")),
+          .asOfRecorded(
+            asRecordedInstant("r1:0000000000000001:2026-01-01T00:00:00.000Z"),
+          ),
       ).toThrow("asOfRecorded() requires a recorded read relation");
     });
 
@@ -189,7 +191,9 @@ export function registerRecordedReadBindingIntegrationTests(
         context
           .getStore()
           .asOf("2026-01-01T00:00:00.000Z")
-          .asOfRecorded(asRecordedInstant("2026-01-01T00:00:00.000Z")),
+          .asOfRecorded(
+            asRecordedInstant("r1:0000000000000001:2026-01-01T00:00:00.000Z"),
+          ),
       ).toThrow("asOfRecorded() requires a recorded read relation");
     });
 
@@ -198,7 +202,7 @@ export function registerRecordedReadBindingIntegrationTests(
         (typeof integrationTestGraph)["nodes"]["Person"]["type"];
       const coordinate = withRecordedCoordinate(
         resolveReadCoordinate("asOf", "2026-01-01T00:00:00.000Z"),
-        asRecordedInstant("2026-01-01T00:00:00.000Z"),
+        asRecordedInstant("r1:0000000000000001:2026-01-01T00:00:00.000Z"),
       );
 
       await expect(

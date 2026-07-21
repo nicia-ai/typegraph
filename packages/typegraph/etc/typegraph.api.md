@@ -4125,7 +4125,7 @@ export type RecordedScanPage<T> = Readonly<{
 // @public
 export class RecordedStoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
-    get asOfRecorded(): string;
+    get asOfRecorded(): RecordedInstant;
     get edges(): RecordedStoreViewEdgeCollections<G>;
     get nodes(): RecordedStoreViewNodeCollections<G>;
 }

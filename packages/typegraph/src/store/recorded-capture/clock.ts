@@ -1,5 +1,10 @@
 import { type GraphBackend } from "../../backend/types";
-import { RECORDED_MAX } from "../../core/temporal";
+import {
+  createRecordedInstant,
+  parseRecordedInstant,
+  RECORDED_MAX,
+  RECORDED_MAX_REVISION,
+} from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import type { SqlDialect } from "../../query/dialect/types";
@@ -7,7 +12,6 @@ import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
-import { requireDefined } from "../../utils/presence";
 import { executeStatement } from "./guards";
 
 type ClockRow = Readonly<{ recorded_at: unknown }>;
@@ -26,11 +30,10 @@ type RevisionOriginBackend = Pick<
 /**
  * Floor sentinel used only to seed-and-lock a graph's clock row before the
  * read/advance/write sequence on SQLite-family backends. Always overwritten by
- * the real commit within the same transaction; chosen so every real wall-clock
- * instant sorts after it on both text and timestamp ordering.
+ * the real commit within the same transaction. Revision zero is reserved for
+ * this internal row and is never exposed as a valid recorded instant.
  */
-const RECORDED_MIN = "1970-01-01T00:00:00.000Z";
-const RECORDED_MAX_TIME = new Date(RECORDED_MAX).getTime();
+const RECORDED_MIN = "r1:0000000000000000:1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
 const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
   "typegraph:recorded-graph-write";
@@ -186,88 +189,47 @@ export async function lockRecordedGraphWrite(
   return graphWriteLockEvidence();
 }
 
-function failInvalidClockTimestamp(value: unknown): never {
+function failInvalidClockInstant(value: unknown, cause?: unknown): never {
   throw new ConfigurationError(
-    "Recorded clock row contained an invalid timestamp",
+    "Recorded clock row contained an invalid recorded instant",
     { value },
+    {
+      cause,
+      suggestion:
+        "Recreate recorded-time tables created by the timestamp-only preview schema before using this TypeGraph version.",
+    },
   );
 }
 
 /**
- * A `YYYY-MM-DD[ T]HH:MM:SS[.fff]` timestamp carrying no timezone designator
- * (no trailing `Z` and no `±HH:MM` offset). `new Date()` would parse such a
- * value in the host's *local* zone, so it must be pinned to UTC explicitly.
+ * Validates a recorded clock value read through a driver. Recorded clock
+ * columns are text on every built-in backend so the versioned anchor survives
+ * byte-for-byte; accepting a Date here would hide an incompatible preview
+ * schema instead of failing with migration guidance.
  */
-const ZONELESS_DATETIME_PATTERN =
-  /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
-const OFFSET_DATETIME_PATTERN =
-  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?)$/i;
-
-function normalizeOffsetDesignator(offset: string): string {
-  if (offset.toUpperCase() === "Z") return "Z";
-  if (/^[+-]\d{2}$/.test(offset)) return `${offset}:00`;
-  if (/^[+-]\d{4}$/.test(offset)) {
-    return `${offset.slice(0, 3)}:${offset.slice(3)}`;
+export function toCanonicalRecordedInstant(value: unknown): string {
+  if (typeof value !== "string") return failInvalidClockInstant(value);
+  try {
+    parseRecordedInstant(value, "recorded clock");
+    return value;
+  } catch (error) {
+    return failInvalidClockInstant(value, error);
   }
-  return offset;
+}
+
+export function toCanonicalRecordedBoundary(value: unknown): string {
+  if (value === RECORDED_MAX) return RECORDED_MAX;
+  return toCanonicalRecordedInstant(value);
 }
 
 /**
- * Milliseconds since the epoch for a recorded-clock timestamp string. A
- * zoneless timestamp is interpreted as UTC — not the host's local zone — so
- * `recordedNow()` never drifts by the server's offset (or by a DST transition)
- * on a backend whose driver yields a naive timestamp for the recorded columns.
- * Timezone-aware and date-only strings are parsed as-is (already unambiguous).
+ * The next logical revision for a graph. Physical wall time is sampled
+ * independently when the recorded instant is encoded, so high commit rates do
+ * not push that timestamp into the future.
  */
-function clockTimestampMs(value: string): number {
-  if (ZONELESS_DATETIME_PATTERN.test(value)) {
-    return Date.parse(`${value.replace(" ", "T")}Z`);
-  }
-  const offsetMatch = OFFSET_DATETIME_PATTERN.exec(value);
-  if (offsetMatch) {
-    const [, date, time, offset] = offsetMatch;
-    return Date.parse(
-      `${date}T${time}${normalizeOffsetDesignator(requireDefined(offset))}`,
-    );
-  }
-  return Date.parse(value);
-}
-
-/**
- * Canonicalizes a recorded-clock value (a driver `Date` or an ISO string) to a
- * canonical UTC ISO string. Both branches guard against an unrepresentable
- * instant: a `Date` whose `getTime()` is `NaN` would otherwise make
- * `toISOString()` throw a bare `RangeError`, masking the typed
- * {@link ConfigurationError} the string branch already raises for an
- * unparseable value. Exported for focused unit coverage of that guard.
- */
-export function toCanonicalIso(value: unknown): string {
-  if (value instanceof Date) {
-    if (Number.isNaN(value.getTime())) return failInvalidClockTimestamp(value);
-    return value.toISOString();
-  }
-  if (typeof value === "string") {
-    const timestamp = clockTimestampMs(value);
-    if (Number.isNaN(timestamp)) return failInvalidClockTimestamp(value);
-    return new Date(timestamp).toISOString();
-  }
-  return failInvalidClockTimestamp(value);
-}
-
-/**
- * The next monotonic recorded-commit instant (ms since epoch) for a graph: the
- * wall clock, or one millisecond past the previous commit when the wall clock
- * has not advanced. Returned as a number so the caller range-checks it against
- * the open sentinel before formatting — one parse in, one format out.
- */
-function nextRecordedCommitTime(previous: string | undefined): number {
-  // `nowIso()` (not `Date.now()`) so a mocked wall clock still drives capture;
-  // `Date.parse` of its canonical-Z string avoids the extra Date allocation +
-  // re-parse of `new Date(nowIso()).getTime()` on this per-commit hot path.
-  const wallTime = Date.parse(nowIso());
-  return previous === undefined ? wallTime : (
-      Math.max(wallTime, Date.parse(previous) + 1)
-    );
+function nextRecordedRevision(previous: string | undefined): number {
+  if (previous === undefined || previous === RECORDED_MIN) return 1;
+  return parseRecordedInstant(previous, "recorded clock").revision + 1;
 }
 
 /**
@@ -281,6 +243,15 @@ export async function readRecordedClock(
   schema: SqlSchema,
   graphId: string,
 ): Promise<string | undefined> {
+  const value = await readRecordedClockValue(target, schema, graphId);
+  return value === undefined ? undefined : toCanonicalRecordedInstant(value);
+}
+
+async function readRecordedClockValue(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<unknown> {
   const rows = await target.execute<ClockRow>(
     asCompiledRowsSql(sql`
       SELECT recorded_at
@@ -288,13 +259,12 @@ export async function readRecordedClock(
       WHERE graph_id = ${graphId}
     `),
   );
-  const first = rows[0];
-  return first === undefined ? undefined : toCanonicalIso(first.recorded_at);
+  return rows[0]?.recorded_at;
 }
 
 /**
  * Reads the durable, random origin assigned to one graph's revision clock.
- * The origin namespaces an otherwise timestamp-only revision anchor, so a
+ * The origin namespaces an otherwise graph-local revision anchor, so a
  * branch cannot mistake another store's coincident clock value for its base.
  */
 export async function readRevisionOrigin(
@@ -422,36 +392,39 @@ export async function allocateRecordedCommit(
   previousRevision?: string,
 ): Promise<string> {
   await lockRecordedClock(target, schema, graphId, ownsWriteLock);
-  const previous =
-    previousRevision ?? (await readRecordedClock(target, schema, graphId));
-  const recordedCommitTime = nextRecordedCommitTime(previous);
-  if (
-    !Number.isFinite(recordedCommitTime) ||
-    recordedCommitTime >= RECORDED_MAX_TIME
-  ) {
+  const clockValue =
+    previousRevision ?? (await readRecordedClockValue(target, schema, graphId));
+  const previous = canonicalPreviousClock(clockValue);
+  const revision = nextRecordedRevision(previous);
+  if (revision >= RECORDED_MAX_REVISION) {
     throw new ConfigurationError(
       `Recorded commit clock reached the open sentinel ${RECORDED_MAX}`,
-      { graphId, recordedCommitTime },
+      { graphId, revision },
       {
         suggestion:
-          "Use a graph with a normal recorded-time clock; the open sentinel is reserved for relation intervals.",
+          "Start a new graph before exhausting the per-graph recorded revision space.",
       },
     );
   }
-  const recordedCommit = new Date(recordedCommitTime).toISOString();
+  const recordedCommit = createRecordedInstant(revision, nowIso());
   await writeRecordedClock(target, schema, graphId, recordedCommit);
   return recordedCommit;
+}
+
+function canonicalPreviousClock(value: unknown): string | undefined {
+  if (value === undefined || value === RECORDED_MIN) return value;
+  return toCanonicalRecordedInstant(value);
 }
 
 /**
  * Advances the durable graph revision after a successful live-store write.
  *
- * Revision tracking deliberately reuses the monotonic per-graph clock already
+ * Revision tracking deliberately reuses the monotonic per-graph revision already
  * owned by recorded-time capture. The write path holds the graph write lock
  * before this runs. Callers additionally state whether their SQLite
  * transaction owns the write lock so `allocateRecordedCommit` can skip its
  * redundant seed-UPSERT only on bundled `BEGIN IMMEDIATE` paths. It preserves
- * monotonicity even when wall-clock milliseconds repeat. History capture calls
+ * monotonicity independently of wall-clock behavior. History capture calls
  * `allocateRecordedCommit` during its own flush instead, so a captured write
  * remains one revision rather than being advanced twice.
  */

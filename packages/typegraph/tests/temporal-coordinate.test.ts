@@ -1,6 +1,6 @@
 /**
  * Unit tests for the recorded/system-time pieces of the read coordinate:
- * sentinel + canonical-timestamp validation in `withRecordedCoordinate`, and
+ * sentinel + versioned-anchor validation in `withRecordedCoordinate`, and
  * the recorded projection in `describeCoordinate` / `coordinateContext`.
  */
 import { describe, expect, it } from "vitest";
@@ -8,19 +8,34 @@ import { describe, expect, it } from "vitest";
 import {
   asRecordedInstant,
   coordinateContext,
+  createRecordedInstant,
   describeCoordinate,
+  parseRecordedInstant,
   type ReadCoordinate,
   RECORDED_MAX,
   type RecordedInstant,
   resolveReadCoordinate,
   withRecordedCoordinate,
 } from "../src/core/temporal";
+import { ValidationError } from "../src/errors";
 
 const VALID_AT = "2026-01-01T00:00:00.000Z";
-const RECORDED_AT = asRecordedInstant("2026-02-02T00:00:00.000Z");
+const RECORDED_AT = asRecordedInstant(
+  "r1:0000000000000042:2026-02-02T00:00:00.000Z",
+);
 
 function validCoordinate(): ReadCoordinate {
   return resolveReadCoordinate("asOf", VALID_AT);
+}
+
+function captureValidationError(action: () => unknown): ValidationError {
+  try {
+    action();
+  } catch (error) {
+    if (error instanceof ValidationError) return error;
+    throw error;
+  }
+  throw new Error("Expected action to throw ValidationError");
 }
 
 describe("withRecordedCoordinate", () => {
@@ -37,10 +52,10 @@ describe("withRecordedCoordinate", () => {
         validCoordinate(),
         RECORDED_MAX as RecordedInstant,
       ),
-    ).toThrow("must be before the recorded-time open sentinel");
+    ).toThrow("canonical versioned recorded instant");
   });
 
-  it("rejects a non-canonical recorded timestamp", () => {
+  it("rejects timestamp-only and malformed recorded anchors", () => {
     expect(() =>
       withRecordedCoordinate(
         validCoordinate(),
@@ -59,7 +74,25 @@ describe("withRecordedCoordinate", () => {
 describe("asRecordedInstant", () => {
   it("rejects the open-interval sentinel itself", () => {
     expect(() => asRecordedInstant(RECORDED_MAX)).toThrow(
-      "must be before the recorded-time open sentinel",
+      "canonical versioned recorded instant",
+    );
+  });
+
+  it("round-trips the logical revision and physical wall time", () => {
+    const instant = createRecordedInstant(42, VALID_AT);
+
+    expect(instant).toBe("r1:0000000000000042:2026-01-01T00:00:00.000Z");
+    expect(parseRecordedInstant(instant)).toEqual({
+      revision: 42,
+      recordedAt: VALID_AT,
+    });
+  });
+
+  it("rejects timestamp-only preview anchors with migration guidance", () => {
+    const error = captureValidationError(() => asRecordedInstant(VALID_AT));
+
+    expect(error.suggestion).toContain(
+      "timestamp-only anchors from the initial recorded-time schema are not compatible",
     );
   });
 });

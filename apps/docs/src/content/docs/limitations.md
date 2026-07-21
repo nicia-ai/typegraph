@@ -350,22 +350,15 @@ adopt a caller-owned transaction:
   because snapshot isolation cannot safely allocate that per-graph recorded
   clock inside the captured transaction. Omit the transaction isolation option,
   or set it to `read_committed`.
-- **The recorded clock has millisecond resolution.** Each captured transaction
-  advances a graph's clock by at least one millisecond. A graph sustaining more
-  than 1,000 captured commits per second therefore accumulates lead over wall
-  time; the lead shrinks only while its commit rate is below that threshold or
-  during an idle gap. The clock and the year-9999 open-sentinel ceiling are per
-  graph. Batch writes at replay/checkpoint boundaries, or partition independent
-  workloads across graphs when queries do not require one graph-wide snapshot.
-  Sharding gives each graph a separate budget but provides no cross-graph
-  recorded anchor. See
-  [Recorded-clock rate and wall-time lead](/queries/temporal#recorded-clock-rate-and-wall-time-lead).
-- **Diagonal reads inherit recorded-clock lead.** Direct
-  `store.asOfRecorded(T)` uses `T` for both recorded and valid time. If a
-  high-rate graph has accumulated substantial lead, short-lived or future-dated
-  validity windows may appear ended relative to wall time. Pin the axes
-  independently with `store.asOf(validT).asOfRecorded(recordedT)` when that
-  distinction matters.
+- **Recorded anchors are per graph.** Each captured transaction advances a
+  fixed-width logical revision and pairs it with honest physical wall time.
+  TypeGraph does not provide a cross-graph recorded anchor. See
+  [Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time).
+- **The preview schema is intentionally incompatible.** Timestamp-only anchors
+  and PostgreSQL recorded relations using `timestamptz` predate the versioned
+  `r1:<revision>:<timestamp>` encoding. Recreate those recorded tables and reset
+  durable checkpoints when upgrading; old values fail validation instead of
+  being interpreted ambiguously.
 
 ## Schema Migration Constraints
 

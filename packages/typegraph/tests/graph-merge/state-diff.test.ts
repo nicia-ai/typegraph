@@ -9,6 +9,7 @@ import { exportGraph, importGraph } from "@nicia-ai/typegraph/interchange";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { parseRecordedInstant } from "../../src/core/temporal";
 import {
   computeBaseVersion,
   hasRevisionAnchor,
@@ -392,8 +393,10 @@ describe.each(backendMatrix())("computeBaseVersion [$name]", (entry) => {
       const afterClear = revisionAnchorOf(await computeBaseVersion(store));
 
       expect(afterClear).toBeDefined();
-      expect(Date.parse(requireDefined(afterClear))).toBeGreaterThan(
-        Date.parse(requireDefined(beforeClear)),
+      expect(
+        parseRecordedInstant(requireDefined(afterClear)).revision,
+      ).toBeGreaterThan(
+        parseRecordedInstant(requireDefined(beforeClear)).revision,
       );
     } finally {
       vi.useRealTimers();
