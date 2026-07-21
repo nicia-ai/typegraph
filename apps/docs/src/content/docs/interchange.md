@@ -255,6 +255,11 @@ The contract is deliberately narrow:
 - Recorded-time history, revision tracking, node uniqueness constraints,
   `searchable()` fields, and `embedding()` fields are rejected in this first
   version because their sidecar writes would otherwise be skipped.
+- An `identity` chunk is rejected with `details.reason === "invalid_stream"`.
+  The trusted session writes only the node and edge relations, so it cannot
+  persist assertions or materialize the derived closure — refusing keeps
+  identity truth from being silently dropped. Use `importGraphStream` for an
+  export that carries identity.
 - Nodes must precede edges. The `meta` timestamps and node version in an
   interchange row are not restored; the import creates new storage metadata.
 - The complete stream is one transaction. Data insertion, temporary secondary

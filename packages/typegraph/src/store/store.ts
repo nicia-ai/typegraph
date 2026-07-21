@@ -514,7 +514,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   asOf: (asOf: string) => StoreView<G>;
   asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
   recordedNow: () => Promise<RecordedInstant | undefined>;
-  revisionNow: () => Promise<string | undefined>;
+  revisionNow: () => Promise<RecordedInstant | undefined>;
   revisionOriginNow: () => Promise<string>;
   view: (coordinate: StoreViewCoordinate) => StoreView<G>;
   snapshot: () => StoreView<G>;
@@ -1729,7 +1729,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * @internal
    */
-  async revisionNow(): Promise<string | undefined> {
+  async revisionNow(): Promise<RecordedInstant | undefined> {
     if (!this.#revisionTrackingEnabled) return undefined;
     return readRecordedClock(this.#backend, this.#sqlSchema(), this.graphId);
   }
@@ -2788,7 +2788,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           )) as IdentityNode<G> | undefined;
         }
         const row = await backend.getNode(this.graphId, ref.kind, ref.id);
-        if (row === undefined || row.deleted_at !== undefined) return undefined;
+        if (row === undefined || row.deleted_at !== undefined) return;
         return rowToNode(row) as IdentityNode<G>;
       },
     };
@@ -4569,6 +4569,7 @@ type PreparedStore<G extends GraphDef> = Readonly<{
 
 async function assertHistorySchemaOnOpen(
   backend: GraphBackend,
+  graph: GraphDef,
   options: StoreOptions | undefined,
 ): Promise<void> {
   if (options?.history !== true) return;
@@ -4576,7 +4577,11 @@ async function assertHistorySchemaOnOpen(
     options.schema === undefined ?
       createSqlSchema(backend.tableNames)
     : requireSqlSchema(options.schema, "store schema");
-  await assertCurrentRecordedSchema(backend, schema);
+  await assertCurrentRecordedSchema(
+    backend,
+    schema,
+    graph.identity !== undefined,
+  );
 }
 
 async function prepareStoreWithSchema<G extends GraphDef>(
@@ -4654,7 +4659,7 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     );
   }
 
-  await assertHistorySchemaOnOpen(backend, options);
+  await assertHistorySchemaOnOpen(backend, merged, options);
 
   // #135/#143: this is the single durable-marker writer, and it MUST
   // run after ensureSchemaImpl so the breaking-change gate is reached
@@ -4922,7 +4927,7 @@ async function prepareVerifiedStore<G extends GraphDef>(
     activeRow,
     result,
   } = await loadAndVerifyGraph(backend, graph);
-  await assertHistorySchemaOnOpen(backend, options);
+  await assertHistorySchemaOnOpen(backend, merged, options);
   return {
     graph: merged,
     result,

@@ -8,7 +8,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type Store,
 } from "../src";
 import { IdentityContradictionError, ValidationError } from "../src/errors";
 import { asIdentityAssertionId } from "../src/identity";
@@ -24,7 +23,14 @@ import {
   asCompiledStatementSql,
 } from "../src/query/sql-intent";
 import { storeRuntime } from "../src/store/runtime-port";
-import { createInitializedStore, createTestBackend } from "./test-utils";
+import { requireDefined } from "../src/utils/presence";
+import {
+  createInitializedStore,
+  createTestBackend,
+  matchingArray,
+  matchingObject,
+  revisionsAdvanced,
+} from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -100,7 +106,7 @@ async function countAssertionsTouching<TNativeTransaction>(
         )
     `),
   );
-  return rows[0]!.total;
+  return requireDefined(rows[0]).total;
 }
 
 describe("identity review fixes", () => {
@@ -220,8 +226,8 @@ describe("identity review fixes", () => {
       ),
     ).rejects.toMatchObject({
       name: "ValidationError",
-      details: expect.objectContaining({
-        issues: expect.arrayContaining([
+      details: matchingObject({
+        issues: matchingArray([
           expect.objectContaining({
             code: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
           }),
@@ -254,8 +260,8 @@ describe("identity review fixes", () => {
       ),
     ).rejects.toMatchObject({
       name: "ValidationError",
-      details: expect.objectContaining({
-        issues: expect.arrayContaining([
+      details: matchingObject({
+        issues: matchingArray([
           expect.objectContaining({ code: "IDENTITY_IMPORT_INVALID_WINDOW" }),
         ]),
       }),
@@ -309,11 +315,8 @@ describe("identity review fixes", () => {
       unionFind.union(previous, next);
       previous = next;
     }
-    const components = unionFind.components();
-    const anyMember = components.get(
-      unionFind.components().keys().next().value!,
-    )!;
-    expect(anyMember.length).toBe(chainLength + 1);
+    const [anyMember] = unionFind.components().values();
+    expect(requireDefined(anyMember).length).toBe(chainLength + 1);
   });
 
   it("#8 bulkAssertSame detects a different-assertion spanning the batch", async () => {
@@ -409,7 +412,7 @@ describe("identity review fixes", () => {
           WHERE graph_id = ${store.graphId} AND id = ${assertion.id}
         `),
       );
-      const row = rows[0]!;
+      const row = requireDefined(rows[0]);
       expect(row.valid_to >= row.valid_from).toBe(true);
       expect(row.valid_to).toBe(row.valid_from);
     } finally {
@@ -427,44 +430,37 @@ describe("identity review fixes", () => {
 
     await expect(
       store.identity.retractAssertion(asIdentityAssertionId(assertion.id)),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ id: assertion.id });
     expect(await store.identity.areSame(a, b)).toBe(false);
   });
 
   it("#18 no-op identity mutations do not advance the revision clock", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
-    try {
-      const [store] = await createAdapterStoreWithSchema(
-        graph,
-        createTestBackend(),
-        {
-          revisionTracking: true,
-        },
-      );
-      const a = await store.nodes.Person.create({ name: "A" }, { id: "aaa" });
-      const b = await store.nodes.Person.create({ name: "B" }, { id: "bbb" });
-      const assertion = await store.identity.assertSame(a, b);
-      const before = await store.revisionNow();
-      expect(before).toBeDefined();
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      {
+        revisionTracking: true,
+      },
+    );
+    const a = await store.nodes.Person.create({ name: "A" }, { id: "aaa" });
+    const b = await store.nodes.Person.create({ name: "B" }, { id: "bbb" });
+    const assertion = await store.identity.assertSame(a, b);
+    const before = await store.revisionNow();
+    expect(before).toBeDefined();
 
-      // No-op: retract an id that is not currently open.
-      await store.identity.retractAssertion(
-        asIdentityAssertionId("does-not-exist"),
-      );
-      expect(await store.revisionNow()).toBe(before);
+    // No-op: retract an id that is not currently open.
+    await store.identity.retractAssertion(
+      asIdentityAssertionId("does-not-exist"),
+    );
+    expect(await store.revisionNow()).toBe(before);
 
-      // No-op: idempotent reassert of the already-current pair.
-      await store.identity.assertSame(a, b);
-      expect(await store.revisionNow()).toBe(before);
+    // No-op: idempotent reassert of the already-current pair.
+    await store.identity.assertSame(a, b);
+    expect(await store.revisionNow()).toBe(before);
 
-      // Real change advances exactly once.
-      await store.identity.retractAssertion(assertion.id);
-      const after = await store.revisionNow();
-      expect(Date.parse(after!) - Date.parse(before!)).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
+    // Real change advances exactly once.
+    await store.identity.retractAssertion(assertion.id);
+    expect(revisionsAdvanced(before, await store.revisionNow())).toBe(1);
   });
 
   it("#closure validateIdentity detects a stale materialized closure", async () => {
@@ -478,7 +474,11 @@ describe("identity review fixes", () => {
 
     // Corrupt the materialized closure out from under the engine.
     const schema = createSqlSchema(store.backend.tableNames);
-    await store.backend.executeStatement!(
+    const { executeStatement } = store.backend;
+    if (executeStatement === undefined) {
+      throw new Error("test backend must execute statements");
+    }
+    await executeStatement(
       asCompiledStatementSql(sql`
         DELETE FROM ${schema.identityClosureTable}
         WHERE graph_id = ${store.graphId}
@@ -487,7 +487,7 @@ describe("identity review fixes", () => {
 
     await expect(store.validateIdentity()).rejects.toMatchObject({
       name: "ConfigurationError",
-      details: expect.objectContaining({
+      details: matchingObject({
         code: "IDENTITY_SCHEMA_CONTRADICTION",
       }),
     });

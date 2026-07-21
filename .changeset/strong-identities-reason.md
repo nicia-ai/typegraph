@@ -27,6 +27,9 @@ recover, fix the graph definition; for a persisted extension document, correct
 the stored document before upgrading (or rewrite it through the previous minor,
 which still accepts it). Interchange documents remain readable across versions —
 `1.0` documents are still accepted on import, and exports write `2.0`.
+`trustedImportGraphStream` rejects an `identity` chunk (`invalid_stream`)
+rather than silently dropping assertions the trusted session cannot persist;
+use `importGraphStream` for an export that carries identity truth.
 `create()`/`upsert` of a soft-deleted same-`(kind, id)` row now resurrects that
 row on every graph (properties replaced, validity window reset so `validFrom`
 becomes the resurrection instant) rather than leaking a storage constraint

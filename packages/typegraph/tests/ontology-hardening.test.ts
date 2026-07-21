@@ -21,6 +21,7 @@ import {
   type SerializedSchema,
   serializeSchema,
 } from "../src/schema";
+import { matchingArray, matchingObject } from "./test-utils";
 
 const emptySchema = z.object({});
 const Person = defineNode("Person", { schema: emptySchema });
@@ -75,7 +76,7 @@ describe("ontology truth and hardening", () => {
     expect(() => buildKindRegistry(graph)).toThrow(
       expect.objectContaining({
         code: "CONFIGURATION_ERROR",
-        details: expect.objectContaining({
+        details: matchingObject({
           code: "ONTOLOGY_DISJOINT_CONFLICT",
         }),
       }),
@@ -93,7 +94,7 @@ describe("ontology truth and hardening", () => {
     expect(() => buildKindRegistry(graph)).toThrow(
       expect.objectContaining({
         code: "CONFIGURATION_ERROR",
-        details: expect.objectContaining({
+        details: matchingObject({
           code: "ONTOLOGY_DISJOINT_CONFLICT",
         }),
       }),
@@ -118,12 +119,12 @@ describe("ontology truth and hardening", () => {
 
     expect(() => buildKindRegistry(graph)).toThrow(
       expect.objectContaining({
-        details: expect.objectContaining({
+        details: matchingObject({
           code: "ONTOLOGY_DISJOINT_CONFLICT",
-          issues: expect.arrayContaining([
+          issues: matchingArray([
             expect.objectContaining({
               code: "ONTOLOGY_DISJOINT_CONFLICT",
-              details: expect.objectContaining({ kind: "Company" }),
+              details: matchingObject({ kind: "Company" }),
             }),
           ]),
         }),
@@ -144,7 +145,7 @@ describe("ontology truth and hardening", () => {
 
     expect(() => buildKindRegistry(graph)).toThrow(
       expect.objectContaining({
-        details: expect.objectContaining({
+        details: matchingObject({
           code: "ONTOLOGY_DISJOINT_CONFLICT",
         }),
       }),
@@ -172,7 +173,7 @@ describe("ontology truth and hardening", () => {
 
     expect(() => buildKindRegistry(graph)).toThrow(
       expect.objectContaining({
-        details: expect.objectContaining({
+        details: matchingObject({
           code: "ONTOLOGY_DISJOINT_CONFLICT",
         }),
       }),
@@ -281,7 +282,7 @@ describe("ontology truth and hardening", () => {
 
     expect(() => deserializeSchema(incoherent).buildRegistry()).toThrow(
       expect.objectContaining({
-        details: expect.objectContaining({ code: "ONTOLOGY_CYCLE" }),
+        details: matchingObject({ code: "ONTOLOGY_CYCLE" }),
       }),
     );
   });
@@ -309,7 +310,7 @@ describe("ontology truth and hardening", () => {
     expect(() => buildKindRegistry(graph)).toThrow(
       expect.objectContaining({
         code: "CONFIGURATION_ERROR",
-        details: expect.objectContaining({ metaEdge: "inverseOf" }),
+        details: matchingObject({ metaEdge: "inverseOf" }),
       }),
     );
   });
@@ -330,7 +331,7 @@ describe("ontology truth and hardening", () => {
     });
     expect(() => buildKindRegistry(conflicting)).toThrow(
       expect.objectContaining({
-        details: expect.objectContaining({
+        details: matchingObject({
           code: "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
         }),
       }),
@@ -360,7 +361,7 @@ describe("ontology truth and hardening", () => {
       }),
     ).toThrow(
       expect.objectContaining({
-        issues: expect.arrayContaining([
+        issues: matchingArray([
           expect.objectContaining({
             code: "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
             path: "/ontology/1",
@@ -403,7 +404,7 @@ describe("ontology truth and hardening", () => {
 
     expect(() => deserializeSchema(schema).buildRegistry()).toThrow(
       expect.objectContaining({
-        details: expect.objectContaining({ metaEdge: "inverseOf" }),
+        details: matchingObject({ metaEdge: "inverseOf" }),
       }),
     );
   });

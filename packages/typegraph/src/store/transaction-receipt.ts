@@ -1,8 +1,16 @@
 import { type GraphDef } from "../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import { ConfigurationError } from "../errors";
-import { type IdentityFacade } from "../identity/types";
+import {
+  type IdentityFacade,
+  type IdentityReadFacade,
+  type IdentityWriteSummary,
+} from "../identity/types";
 import { type Assert, type Equal } from "../utils/type-assert";
+import type {
+  IDENTITY_READ_NAMES,
+  IDENTITY_WRITE_NAMES,
+} from "./collection-surface";
 import { EDGE_WRITE_NAMES, NODE_WRITE_NAMES } from "./collection-surface";
 import type {
   EdgeWrites,
@@ -25,14 +33,34 @@ type _receiptNodeSurfaceIsComplete = Assert<
 type _receiptEdgeSurfaceIsComplete = Assert<
   Equal<EdgeWriteMethodName, keyof EdgeWrites<AnyEdgeType, NodeType, NodeType>>
 >;
+// wrapTransactionIdentity re-implements the facade method by method, so a new
+// IdentityFacade method that nobody adds here would silently bypass both the
+// receipt counters and the sealing guard.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _receiptIdentitySurfaceIsComplete = Assert<
+  Equal<
+    | (typeof IDENTITY_READ_NAMES)[number]
+    | (typeof IDENTITY_WRITE_NAMES)[number],
+    keyof IdentityFacade<GraphDef>
+  >
+>;
+// And the read/write split itself: a method the read facade exposes must be
+// classified as a read, so StoreView's read-only identity surface stays honest.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _identityReadSplitIsHonest = Assert<
+  Equal<
+    (typeof IDENTITY_READ_NAMES)[number],
+    keyof IdentityReadFacade<GraphDef>
+  >
+>;
+
+/** The receipt's identity counter buckets, minus the derived total. */
+type IdentityWriteCounterName = Exclude<keyof IdentityWriteSummary, "total">;
 
 export type TransactionReceiptRecorder = Readonly<{
   recordNode: (kind: string, count: number) => void;
   recordEdge: (kind: string, count: number) => void;
-  recordIdentity: (
-    kind: "sameAssertions" | "differentAssertions" | "retractions",
-    count: number,
-  ) => void;
+  recordIdentity: (kind: IdentityWriteCounterName, count: number) => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
   /**
    * Seals the recorder: every subsequent write through a collection wrapped with
@@ -125,12 +153,7 @@ function increment(
 interface WriteCounters {
   readonly nodes: Record<string, number>;
   readonly edges: Record<string, number>;
-  readonly identity: {
-    sameAssertions: number;
-    differentAssertions: number;
-    retractions: number;
-    total: number;
-  };
+  readonly identity: { -readonly [K in keyof IdentityWriteSummary]: number };
   total: number;
 }
 

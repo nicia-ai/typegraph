@@ -14,7 +14,7 @@ import { z } from "zod";
 import { createStore, defineGraph, defineNode } from "../src";
 import { ConfigurationError } from "../src/errors";
 import { rebuildIdentityClosure } from "../src/identity";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -38,7 +38,7 @@ type IdentityProbe = Readonly<{
 function identityNotEnabled(): unknown {
   return expect.objectContaining({
     name: "ConfigurationError",
-    details: expect.objectContaining({ code: "IDENTITY_NOT_ENABLED" }),
+    details: matchingObject({ code: "IDENTITY_NOT_ENABLED" }),
   });
 }
 

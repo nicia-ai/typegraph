@@ -1,6 +1,9 @@
-import { sql, type SqlFragment } from "../sql-fragment";
-
+import {
+  optionalRecordedInstantParts,
+  type RecordedInstantParts,
+} from "../../core/temporal";
 import { type QueryAst } from "../ast";
+import { sql, type SqlFragment } from "../sql-fragment";
 import { type TemporalFilterPass } from "./passes";
 import { type PredicateCompilerContext } from "./predicates";
 
@@ -27,8 +30,12 @@ export function compileIdentitySourcePredicate(
     temporalFilterPass,
   } = input;
   const memberVisibility = temporalFilterPass.forAlias("im");
+  const recorded = optionalRecordedInstantParts(
+    ast.recordedAsOf,
+    "recordedAsOf",
+  );
   const historical =
-    ast.recordedAsOf !== undefined || ast.temporalMode.mode !== "current";
+    recorded !== undefined || ast.temporalMode.mode !== "current";
 
   if (!historical) {
     return sql`
@@ -60,7 +67,7 @@ export function compileIdentitySourcePredicate(
   }
 
   const assertionTable =
-    ast.recordedAsOf === undefined ?
+    recorded === undefined ?
       ctx.schema.identityAssertionsTable
     : ctx.schema.recordedIdentityAssertionsTable;
   // Assertion validity is a point-in-time window that must NOT widen with the
@@ -71,14 +78,15 @@ export function compileIdentitySourcePredicate(
   // Mirrors src/identity/service.ts assertionSnapshotSource.
   const assertionVisibility = compileAssertionValidityFilter(
     ast,
+    recorded,
     temporalFilterPass,
   );
   const recordedStructuralFilter =
-    ast.recordedAsOf === undefined ?
+    recorded === undefined ?
       sql``
     : sql`
-      AND structural_node.recorded_from <= ${ast.recordedAsOf}
-      AND structural_node.recorded_to > ${ast.recordedAsOf}
+      AND structural_node.recorded_from <= ${recorded.revision}
+      AND structural_node.recorded_to > ${recorded.revision}
     `;
   const sameIdEdges =
     (ctx.identitySameIdAcrossKinds ?? "fold") === "fold" ?
@@ -150,13 +158,14 @@ export function compileIdentitySourcePredicate(
  */
 function resolveAssertionValidityInstant(
   ast: QueryAst,
+  recorded: RecordedInstantParts | undefined,
   temporalFilterPass: TemporalFilterPass,
 ): SqlFragment {
   if (ast.temporalMode.mode === "asOf" && ast.temporalMode.asOf !== undefined) {
     return sql`${ast.temporalMode.asOf}`;
   }
-  if (ast.recordedAsOf !== undefined) {
-    return sql`${ast.recordedAsOf}`;
+  if (recorded !== undefined) {
+    return sql`${recorded.recordedAt}`;
   }
   return temporalFilterPass.currentInstant;
 }
@@ -169,12 +178,17 @@ function resolveAssertionValidityInstant(
  */
 function compileAssertionValidityFilter(
   ast: QueryAst,
+  recorded: RecordedInstantParts | undefined,
   temporalFilterPass: TemporalFilterPass,
 ): SqlFragment {
-  const instant = resolveAssertionValidityInstant(ast, temporalFilterPass);
+  const instant = resolveAssertionValidityInstant(
+    ast,
+    recorded,
+    temporalFilterPass,
+  );
   const validity = sql`ia.deleted_at IS NULL AND ia.valid_from <= ${instant} AND (ia.valid_to IS NULL OR ia.valid_to > ${instant})`;
-  if (ast.recordedAsOf === undefined) {
+  if (recorded === undefined) {
     return validity;
   }
-  return sql`${validity} AND ia.recorded_from <= ${ast.recordedAsOf} AND ia.recorded_to > ${ast.recordedAsOf}`;
+  return sql`${validity} AND ia.recorded_from <= ${recorded.revision} AND ia.recorded_to > ${recorded.revision}`;
 }

@@ -151,7 +151,7 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import { hybridCandidatesRef, mapHybridSearchRow } from "./operations/hybrid";
+import { mapHybridSearchRow } from "./operations/hybrid";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
 import {

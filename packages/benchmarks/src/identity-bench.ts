@@ -16,7 +16,6 @@ import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { z } from "zod";
 import {
-  asCompiledRowsSql,
   createStore,
   createStoreWithSchema,
   defineEdge,
@@ -33,9 +32,9 @@ import {
   createPostgresBackend,
   createPostgresTables,
   generatePostgresMigrationSQL,
-} from "@nicia-ai/typegraph/postgres";
-import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 import { parseCliOptions } from "./cli";
 import { getPostgresUrl, type PerfBackend } from "./config";
@@ -47,6 +46,21 @@ const WARMUP_ITERATIONS = 2;
 const SAMPLE_ITERATIONS = 7;
 const SEED_ROWS_PER_KIND = 100;
 const WRITE_OPS = 20;
+type ExecuteRaw = <T>(
+  sqlText: string,
+  params: readonly unknown[],
+) => Promise<readonly T[]>;
+
+function requireExecuteRaw(backend: GraphBackend): ExecuteRaw {
+  const { executeRaw } = backend;
+  if (executeRaw === undefined) {
+    throw new Error(
+      "identity-bench fold probes need a backend with executeRaw support.",
+    );
+  }
+  return executeRaw;
+}
+
 const READ_OPS = 50;
 const HISTORICAL_READ_OPS = 10;
 
@@ -436,26 +450,27 @@ async function main(argv: readonly string[]): Promise<void> {
 
     const nodesTableName =
       resources.backend.tableNames?.nodes ?? "typegraph_nodes";
-    const nodesTable = sql.raw(nodesTableName);
+    // The fold-probe comparison measures raw index behavior, so it reads
+    // through `executeRaw` rather than the store — the public pre-compiled
+    // escape hatch, with dialect placeholders resolved per backend.
+    const executeRaw = requireExecuteRaw(resources.backend);
+    const placeholder =
+      resources.backend.dialect === "postgres" ?
+        (index: number) => `$${String(index)}`
+      : () => "?";
+    const perKindSql = `SELECT id FROM ${nodesTableName}
+      WHERE graph_id = ${placeholder(1)} AND kind = ${placeholder(2)}
+        AND id = ${placeholder(3)} AND deleted_at IS NULL`;
+    const globalSql = `SELECT kind, id FROM ${nodesTableName}
+      WHERE graph_id = ${placeholder(1)} AND id = ${placeholder(2)}
+        AND deleted_at IS NULL`;
     async function probeByKind(): Promise<void> {
       for (const kind of ["Person", "Author"] as const) {
-        await resources.backend.execute(
-          asCompiledRowsSql(sql`
-            SELECT id FROM ${nodesTable}
-            WHERE graph_id = ${graph.id} AND kind = ${kind}
-              AND id = ${"person-0"} AND deleted_at IS NULL
-          `),
-        );
+        await executeRaw(perKindSql, [graph.id, kind, "person-0"]);
       }
     }
     async function probeGlobally(): Promise<void> {
-      await resources.backend.execute(
-        asCompiledRowsSql(sql`
-          SELECT kind, id FROM ${nodesTable}
-          WHERE graph_id = ${graph.id} AND id = ${"person-0"}
-            AND deleted_at IS NULL
-        `),
-      );
+      await executeRaw(globalSql, [graph.id, "person-0"]);
     }
     await record(
       "identity:fold-probe-per-kind",

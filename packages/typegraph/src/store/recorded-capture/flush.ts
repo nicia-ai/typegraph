@@ -256,14 +256,16 @@ export async function flushIdentityAssertions(
   const chunkSize = recordedNodeChunkSize(target);
   for (const insertChunk of chunk(inserts, chunkSize)) {
     const values = insertChunk.map(
-      ({ row, operation }) => sql`(
-        ${generateId()}, ${row.graph_id}, ${row.id}, ${row.rel},
-        ${row.a_kind}, ${row.a_id}, ${row.b_kind}, ${row.b_id},
-        ${row.valid_from}, ${row.valid_to ?? sql.raw("NULL")},
-        ${row.created_at}, ${row.updated_at},
-        ${row.deleted_at ?? sql.raw("NULL")}, ${recordedRevision},
-        ${RECORDED_MAX_REVISION}, ${operation}
-      )`,
+      ({ row, operation }) => sql`
+        (
+                ${generateId()}, ${row.graph_id}, ${row.id}, ${row.rel},
+                ${row.a_kind}, ${row.a_id}, ${row.b_kind}, ${row.b_id},
+                ${row.valid_from}, ${row.valid_to ?? sql.raw("NULL")},
+                ${row.created_at}, ${row.updated_at},
+                ${row.deleted_at ?? sql.raw("NULL")}, ${recordedRevision},
+                ${RECORDED_MAX_REVISION}, ${operation}
+              )
+      `,
     );
     await executeStatement(
       target,

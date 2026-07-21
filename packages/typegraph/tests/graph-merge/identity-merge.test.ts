@@ -20,6 +20,7 @@ import { enumerateAllNodes } from "../../src/graph-merge/state-diff";
 import type { IdentityTransferAssertion } from "../../src/graph-merge/typegraph-internal";
 import type { BranchId } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -77,7 +78,7 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     );
     const assertion =
       withAssertion ?
-        await store.identity.assertSame(first, second)
+        (await store.identity.assertSame(first, second)).assertion
       : undefined;
     return { store, first, second, assertion };
   }
@@ -93,10 +94,8 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     const { store, first, second } = await createBase();
     const branchA = unwrap(await branch(store, () => makeBackend()));
     const branchB = unwrap(await branch(store, () => makeBackend()));
-    const firstAssertion = await branchA.store.identity.assertSame(
-      first,
-      second,
-    );
+    const { assertion: firstAssertion } =
+      await branchA.store.identity.assertSame(first, second);
     await new Promise((resolve) => setTimeout(resolve, 2));
     await branchB.store.identity.assertSame(first, second);
 
@@ -215,7 +214,11 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     // The applied assertion references the survivor, not the folded id.
     const assertions = await baseStore.identity.assertionsOf(anchor);
     expect(assertions).toHaveLength(1);
-    const endpointIds = [assertions[0]!.a.id, assertions[0]!.b.id].sort();
+    const [appliedAssertion] = assertions;
+    const endpointIds = [
+      requireDefined(appliedAssertion).a.id,
+      requireDefined(appliedAssertion).b.id,
+    ].sort();
     expect(endpointIds).toEqual(["anchor", "p-ana"]);
   });
 

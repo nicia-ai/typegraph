@@ -5,7 +5,7 @@
  * and deleted_at timestamps. Consolidates the previously duplicated temporal
  * filter functions into a single, parameterized implementation.
  */
-import { parseRecordedInstant } from "../../core/temporal";
+import { optionalRecordedInstantParts } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
 import { nowIso } from "../../utils/date";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -149,6 +149,7 @@ export function compileTemporalFilter(
   options: TemporalFilterOptions,
 ): SqlFragment {
   const { mode, asOf, tableAlias, currentTimestamp, recordedAsOf } = options;
+  const recorded = optionalRecordedInstantParts(recordedAsOf, "recordedAsOf");
 
   // Build column references with optional prefix
   const prefix = tableAlias ? sql.raw(`${tableAlias}.`) : sql.raw("");
@@ -166,9 +167,9 @@ export function compileTemporalFilter(
         // store.asOfRecorded(rt) and stops silently dropping rows that were
         // valid-current when recorded but ended before the read.
         const now =
-          recordedAsOf === undefined ?
+          recorded === undefined ?
             (currentTimestamp ?? currentReadInstant())
-          : sql`${parseRecordedInstant(recordedAsOf, "recordedAsOf").recordedAt}`;
+          : sql`${recorded.recordedAt}`;
         return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${now}) AND (${validTo} IS NULL OR ${validTo} > ${now})`;
       }
 
@@ -194,15 +195,12 @@ export function compileTemporalFilter(
     }
   })();
 
-  if (recordedAsOf === undefined) return validFilter;
+  if (recorded === undefined) return validFilter;
 
   const recordedFrom = sql`${prefix}recorded_from`;
   const recordedTo = sql`${prefix}recorded_to`;
-  const recordedRevision = parseRecordedInstant(
-    recordedAsOf,
-    "recordedAsOf",
-  ).revision;
-  return sql`(${validFilter}) AND ${recordedFrom} <= ${recordedRevision} AND ${recordedRevision} < ${recordedTo}`;
+  const { revision } = recorded;
+  return sql`(${validFilter}) AND ${recordedFrom} <= ${revision} AND ${revision} < ${recordedTo}`;
 }
 
 /**

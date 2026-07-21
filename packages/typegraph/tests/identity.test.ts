@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -12,16 +12,25 @@ import {
   defineNode,
   type GraphBackend,
 } from "../src";
+import {
+  type RecordedInstant,
+  recordedInstantRevision,
+} from "../src/core/temporal";
 import { ConfigurationError, IdentityContradictionError } from "../src/errors";
 import { exportGraph, importGraph } from "../src/interchange";
 import { disjointWith } from "../src/ontology";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
+import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,
   createTestBackend,
   disableTransactions,
+  matchingArray,
+  matchingObject,
+  recordedRevisionFromDriver,
+  revisionsAdvanced,
 } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -69,6 +78,15 @@ const disabledMigrationGraph = defineGraph({
   nodes: graph.nodes,
   edges: graph.edges,
 });
+
+function requireRecordedInstant(
+  instant: RecordedInstant | undefined,
+  message: string,
+): RecordedInstant {
+  expect(instant).toBeDefined();
+  if (instant === undefined) throw new Error(message);
+  return instant;
+}
 
 describe("Operational Identity", () => {
   it("supports the identity ledger without implicitly folding equal ids", async () => {
@@ -161,7 +179,7 @@ describe("Operational Identity", () => {
     expect(() => createStore(graph, backend)).toThrow(
       expect.objectContaining({
         name: "ConfigurationError",
-        details: expect.objectContaining({
+        details: matchingObject({
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
         }),
       }),
@@ -195,37 +213,33 @@ describe("Operational Identity", () => {
   });
 
   it("advances revision once per transaction and zero times for closure rebuild", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
-    try {
-      const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-        revisionTracking: true,
-      });
-      const first = await store.nodes.Person.create({ name: "First" });
-      const second = await store.nodes.Person.create({ name: "Second" });
-      const third = await store.nodes.Person.create({ name: "Third" });
-      const fourth = await store.nodes.Person.create({ name: "Fourth" });
-      const before = await store.revisionNow();
-      expect(before).toBeDefined();
+    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
+      revisionTracking: true,
+    });
+    const first = await store.nodes.Person.create({ name: "First" });
+    const second = await store.nodes.Person.create({ name: "Second" });
+    const third = await store.nodes.Person.create({ name: "Third" });
+    const fourth = await store.nodes.Person.create({ name: "Fourth" });
+    const before = await store.revisionNow();
+    expect(before).toBeDefined();
 
-      await store.transaction(async (tx) => {
-        await tx.identity.assertSame(first, second);
-        await tx.identity.assertDifferent(third, fourth);
-      });
-      const after = await store.revisionNow();
-      expect(Date.parse(after!) - Date.parse(before!)).toBe(1);
+    await store.transaction(async (tx) => {
+      await tx.identity.assertSame(first, second);
+      await tx.identity.assertDifferent(third, fourth);
+    });
+    const after = await store.revisionNow();
+    expect(revisionsAdvanced(before, after)).toBe(1);
 
-      const [sameAssertion] = await store.identity.assertionsOf(first);
-      expect(sameAssertion).toBeDefined();
-      await store.identity.retractAssertion(sameAssertion!.id);
-      const afterRetraction = await store.revisionNow();
-      expect(Date.parse(afterRetraction!) - Date.parse(after!)).toBe(1);
+    const [sameAssertion] = await store.identity.assertionsOf(first);
+    expect(sameAssertion).toBeDefined();
+    await store.identity.retractAssertion(
+      requireDefined(sameAssertion, "expected a same assertion").id,
+    );
+    const afterRetraction = await store.revisionNow();
+    expect(revisionsAdvanced(after, afterRetraction)).toBe(1);
 
-      await store.rebuildIdentityClosure();
-      expect(await store.revisionNow()).toBe(afterRetraction);
-    } finally {
-      vi.useRealTimers();
-    }
+    await store.rebuildIdentityClosure();
+    expect(await store.revisionNow()).toBe(afterRetraction);
   });
 
   it("captures identity after-images at the assertion commit instant", async () => {
@@ -237,25 +251,27 @@ describe("Operational Identity", () => {
     const person = await store.nodes.Person.create({ name: "Alice" });
     const author = await store.nodes.Author.create({ penName: "A." });
     const assertion = await store.identity.assertSame(person, author);
-    const assertionCommit = await store.recordedNow();
-    expect(assertionCommit).toBeDefined();
+    const assertionCommit = requireRecordedInstant(
+      await store.recordedNow(),
+      "expected a recorded instant for the assertion commit",
+    );
     const schema = createSqlSchema(store.backend.tableNames);
-    const rows = await store.backend.execute<{ recorded_from: string }>(
+    const rows = await store.backend.execute<{ recorded_from: unknown }>(
       asCompiledRowsSql(sql`
         SELECT recorded_from
         FROM ${schema.recordedIdentityAssertionsTable}
         WHERE graph_id = ${store.graphId} AND id = ${assertion.id}
       `),
     );
-    expect(new Date(rows[0]!.recorded_from).toISOString()).toBe(
-      assertionCommit,
-    );
+    expect(
+      recordedRevisionFromDriver(requireDefined(rows[0]).recorded_from),
+    ).toBe(recordedInstantRevision(assertionCommit));
 
     await store.identity.retractAssertion(assertion.id);
     expect(await store.identity.assertionsOf(person)).toEqual([]);
     expect(
-      await store.asOfRecorded(assertionCommit!).identity.assertionsOf(person),
-    ).toEqual([assertion]);
+      await store.asOfRecorded(assertionCommit).identity.assertionsOf(person),
+    ).toEqual([assertion.assertion]);
   });
 
   it("validates and materializes existing same-id groups during enablement", async () => {
@@ -305,7 +321,7 @@ describe("Operational Identity", () => {
       createStoreWithSchema(contradictory, backend),
     ).rejects.toMatchObject({
       name: "ConfigurationError",
-      details: expect.objectContaining({
+      details: matchingObject({
         code: "IDENTITY_SCHEMA_CONTRADICTION",
       }),
     });
@@ -335,22 +351,26 @@ describe("Operational Identity", () => {
       label: "author",
     });
     await evolved.identity.assertSame(person, tag as never);
-    const beforeRemoval = await evolved.recordedNow();
-    expect(beforeRemoval).toBeDefined();
+    const beforeRemoval = requireRecordedInstant(
+      await evolved.recordedNow(),
+      "expected a recorded instant before kind removal",
+    );
 
     const removed = await evolved.removeKinds(["Tag"]);
-    const afterRemoval = await removed.recordedNow();
-    expect(afterRemoval).toBeDefined();
+    const afterRemoval = requireRecordedInstant(
+      await removed.recordedNow(),
+      "expected a recorded instant after kind removal",
+    );
 
     expect(await removed.identity.assertionsOf(person)).toEqual([]);
     expect(await removed.identity.membersOf(person)).toEqual([
       { kind: "Person", id: person.id },
     ]);
     expect(
-      await removed.asOfRecorded(beforeRemoval!).identity.assertionsOf(person),
+      await removed.asOfRecorded(beforeRemoval).identity.assertionsOf(person),
     ).toHaveLength(1);
     expect(
-      await removed.asOfRecorded(afterRemoval!).identity.assertionsOf(person),
+      await removed.asOfRecorded(afterRemoval).identity.assertionsOf(person),
     ).toEqual([]);
   });
 
@@ -371,7 +391,7 @@ describe("Operational Identity", () => {
       ),
     ).rejects.toMatchObject({
       name: "ConfigurationError",
-      details: expect.objectContaining({
+      details: matchingObject({
         code: "IDENTITY_SCHEMA_CONTRADICTION",
       }),
     });
@@ -430,8 +450,8 @@ describe("Operational Identity", () => {
       store.identity.assertSame(person, person),
     ).rejects.toMatchObject({
       name: "ValidationError",
-      details: expect.objectContaining({
-        issues: expect.arrayContaining([
+      details: matchingObject({
+        issues: matchingArray([
           expect.objectContaining({ code: "IDENTITY_SELF_ASSERTION" }),
         ]),
       }),
@@ -530,7 +550,7 @@ describe("Operational Identity", () => {
       { penName: "A." },
       { id: "author" },
     );
-    const sourceAssertion = await source.identity.assertSame(
+    const { assertion: sourceAssertion } = await source.identity.assertSame(
       sourcePerson,
       sourceAuthor,
     );
@@ -551,38 +571,28 @@ describe("Operational Identity", () => {
   });
 
   it("advances revision exactly once for a state import with identity", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
-    try {
-      const source = await createInitializedStore(graph, createTestBackend());
-      const person = await source.nodes.Person.create(
-        { name: "Alice" },
-        { id: "import-person" },
-      );
-      const author = await source.nodes.Author.create(
-        { penName: "A." },
-        { id: "import-author" },
-      );
-      await source.identity.assertSame(person, author);
-      const state = await exportGraph(source, { includeTemporal: true });
+    const source = await createInitializedStore(graph, createTestBackend());
+    const person = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "import-person" },
+    );
+    const author = await source.nodes.Author.create(
+      { penName: "A." },
+      { id: "import-author" },
+    );
+    await source.identity.assertSame(person, author);
+    const state = await exportGraph(source, { includeTemporal: true });
 
-      const [target] = await createStoreWithSchema(graph, createTestBackend(), {
-        revisionTracking: true,
-      });
-      await target.nodes.Person.create(
-        { name: "Existing" },
-        { id: "existing" },
-      );
-      const before = await target.revisionNow();
-      expect(before).toBeDefined();
+    const [target] = await createStoreWithSchema(graph, createTestBackend(), {
+      revisionTracking: true,
+    });
+    await target.nodes.Person.create({ name: "Existing" }, { id: "existing" });
+    const before = await target.revisionNow();
+    expect(before).toBeDefined();
 
-      await importGraph(target, state, { onConflict: "skip" });
+    await importGraph(target, state, { onConflict: "skip" });
 
-      const after = await target.revisionNow();
-      expect(Date.parse(after!) - Date.parse(before!)).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(revisionsAdvanced(before, await target.revisionNow())).toBe(1);
   });
 
   it("exports and restores ended assertions only in archival mode", async () => {

@@ -3,6 +3,7 @@ import {
   createRecordedInstant,
   parseRecordedInstant,
   RECORDED_MAX_REVISION,
+  type RecordedInstant,
 } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
@@ -262,7 +263,7 @@ export async function readRecordedClock(
   target: Pick<GraphBackend, "execute">,
   schema: SqlSchema,
   graphId: string,
-): Promise<string | undefined> {
+): Promise<RecordedInstant | undefined> {
   const parts = await readRecordedClockParts(target, schema, graphId);
   return parts === undefined ? undefined : (
       createRecordedInstant(parts.revision, parts.recordedAt)

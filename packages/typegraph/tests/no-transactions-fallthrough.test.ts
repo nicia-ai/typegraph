@@ -31,6 +31,7 @@ import {
   createInitializedStore,
   createTestBackend,
   disableTransactions,
+  matchingObject,
 } from "./test-utils";
 
 // The message the shared `disableTransactions` helper rejects with; asserted by
@@ -221,7 +222,7 @@ describe("backends with transactions: false refuse schema commits", () => {
     expect(() => createStore(identityGraph, nonTxBackend)).toThrow(
       expect.objectContaining({
         name: "ConfigurationError",
-        details: expect.objectContaining({
+        details: matchingObject({
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
           transactions: false,
         }),

@@ -5,7 +5,7 @@
  */
 import type Database from "better-sqlite3";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { afterEach } from "vitest";
+import { afterEach, expect } from "vitest";
 
 import type { GraphDef, Store } from "../src";
 import {
@@ -20,6 +20,7 @@ import type { AdapterBackend, GraphBackend } from "../src/backend/types";
 import {
   createRecordedInstant,
   type RecordedInstant,
+  recordedInstantRevision,
 } from "../src/core/temporal";
 import { requireDefined } from "../src/utils/presence";
 
@@ -262,3 +263,33 @@ export const TEMPORAL_ANCHORS = {
   EDGE_ENDED: "2022-01-01T00:00:00.000Z",
   FUTURE: "2030-01-01T00:00:00.000Z",
 } as const;
+
+/**
+ * How many recorded revisions elapsed between two anchors. Recorded order is a
+ * logical revision, independent of wall time, so a "advanced exactly once"
+ * assertion needs no clock control.
+ */
+export function revisionsAdvanced(
+  before: RecordedInstant | undefined,
+  after: RecordedInstant | undefined,
+): number {
+  return (
+    recordedInstantRevision(requireDefined(after, "after anchor")) -
+    recordedInstantRevision(requireDefined(before, "before anchor"))
+  );
+}
+
+/**
+ * Wraps a nested asymmetric matcher so it enters an object literal as `unknown`
+ * rather than `any`, keeping the surrounding assertion type-checked. Vitest
+ * types `expect.objectContaining` as `any`, which would otherwise silently
+ * disable checking of the whole expected shape.
+ */
+export function matchingObject(shape: Record<string, unknown>): unknown {
+  return expect.objectContaining(shape);
+}
+
+/** Array counterpart of {@link matchingObject}. */
+export function matchingArray(items: unknown[]): unknown {
+  return expect.arrayContaining(items);
+}

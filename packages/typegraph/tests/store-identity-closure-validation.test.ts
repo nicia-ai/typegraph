@@ -24,6 +24,7 @@ import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
 } from "../src/backend/sqlite/local";
+import { matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -43,9 +44,9 @@ function rawClient(result: LocalSqliteBackendResult): Database.Database {
   return (result.db as unknown as { $client: Database.Database }).$client;
 }
 
-const schemaContradiction = expect.objectContaining({
+const schemaContradiction: unknown = expect.objectContaining({
   name: "ConfigurationError",
-  details: expect.objectContaining({ code: "IDENTITY_SCHEMA_CONTRADICTION" }),
+  details: matchingObject({ code: "IDENTITY_SCHEMA_CONTRADICTION" }),
 });
 
 describe("identity closure validation on createVerifiedStore", () => {

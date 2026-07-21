@@ -13,6 +13,7 @@ import { inverseOf } from "../../../src/ontology";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../../../src/query/sql-intent";
+import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
 /**
@@ -178,9 +179,11 @@ export function registerIdentityIntegrationTests(
       expect(bulk[0]?.meta.validFrom).toBe(recreatedValidFrom);
       expect(bulk[0]?.meta.validTo).toBe(recreatedValidTo);
       expect(bulk[0]?.name).toBe("Bulk recreated");
-      expect(await store.identity.assertionsOf(bulk[0]!)).toEqual([]);
+      expect(
+        await store.identity.assertionsOf(requireDefined(bulk[0])),
+      ).toEqual([]);
 
-      await store.nodes.Person.delete(bulk[1]!.id);
+      await store.nodes.Person.delete(requireDefined(bulk[1]).id);
       await store.nodes.Person.bulkInsert([
         { id: "bulk-new", props: { name: "Bulk inserted again" } },
       ]);
@@ -242,7 +245,9 @@ export function registerIdentityIntegrationTests(
           { a: first, b: second },
           { a: second, b: third },
         ]);
-        await tx.identity.bulkRetractAssertions([assertions[0]!.id]);
+        await tx.identity.bulkRetractAssertions([
+          requireDefined(assertions[0]).id,
+        ]);
       });
 
       expect(outcome.receipt.writes.identity).toEqual({
@@ -288,7 +293,11 @@ export function registerIdentityIntegrationTests(
 
       await store.identity.retractSameAssertion(second, third);
       expect(await store.identity.areSame(first, third)).toBe(false);
-      await store.identity.bulkRetractAssertions([same[0]!.id, same[0]!.id]);
+      const [firstSame] = same;
+      await store.identity.bulkRetractAssertions([
+        requireDefined(firstSame).id,
+        requireDefined(firstSame).id,
+      ]);
       expect(await store.identity.areSame(first, second)).toBe(false);
     });
 
@@ -408,7 +417,9 @@ export function registerIdentityIntegrationTests(
 
       expect(await store.identity.areSame(seed, far)).toBe(false);
       expect(
-        await store.asOfRecorded(beforeDelete!).identity.membersOf(seed),
+        await store
+          .asOfRecorded(requireDefined(beforeDelete))
+          .identity.membersOf(seed),
       ).toEqual([
         { kind: "Company", id: "bridge" },
         { kind: "Person", id: "bridge" },
@@ -445,7 +456,9 @@ export function registerIdentityIntegrationTests(
       expect(await store.identity.assertionsOf(person)).toEqual([]);
       expect(await store.identity.membersOf(person)).toEqual([]);
       expect(
-        await store.asOfRecorded(beforeClear!).identity.membersOf(person),
+        await store
+          .asOfRecorded(requireDefined(beforeClear))
+          .identity.membersOf(person),
       ).toEqual([]);
 
       const recreatedPerson = await store.nodes.Person.create(
@@ -488,11 +501,13 @@ export function registerIdentityIntegrationTests(
       expect(await removed.identity.assertionsOf(person)).toEqual([]);
       expect(
         await removed
-          .asOfRecorded(beforeRemoval!)
+          .asOfRecorded(requireDefined(beforeRemoval))
           .identity.assertionsOf(person),
       ).toHaveLength(1);
       expect(
-        await removed.asOfRecorded(afterRemoval!).identity.assertionsOf(person),
+        await removed
+          .asOfRecorded(requireDefined(afterRemoval))
+          .identity.assertionsOf(person),
       ).toEqual([]);
     });
 
@@ -523,7 +538,7 @@ export function registerIdentityIntegrationTests(
       const store = context.getStore();
       const person = await store.nodes.Person.create({ name: "Alice" });
       const company = await store.nodes.Company.create({ name: "Alice LLC" });
-      const assertion = await store.identity.assertSame(person, company);
+      const { assertion } = await store.identity.assertSame(person, company);
       const schema = createSqlSchema(store.backend.tableNames);
       if (store.backend.executeStatement === undefined) {
         throw new Error("Integration backend cannot corrupt derived closure");
@@ -798,7 +813,7 @@ export function registerIdentityIntegrationTests(
           .select((queryContext) => queryContext.friend.id)
           .execute();
         const recorded = await store
-          .asOfRecorded(beforeRetraction!)
+          .asOfRecorded(requireDefined(beforeRetraction))
           .query()
           .from("Person", "person")
           .whereNode("person", (node) => node.name.eq("Alice"))

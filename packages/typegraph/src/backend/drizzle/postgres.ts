@@ -164,7 +164,7 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import { hybridCandidatesRef, mapHybridSearchRow } from "./operations/hybrid";
+import { mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,

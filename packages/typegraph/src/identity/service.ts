@@ -1,6 +1,10 @@
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
-import { type ReadCoordinate } from "../core/temporal";
+import {
+  optionalRecordedInstantParts,
+  type ReadCoordinate,
+  type RecordedInstantParts,
+} from "../core/temporal";
 import {
   ConfigurationError,
   IdentityContradictionError,
@@ -13,11 +17,11 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
-import { toCanonicalIso } from "../store/recorded-capture";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
 import { compareCodePoints } from "../utils/compare";
-import { nowIso } from "../utils/date";
+import { canonicalizeDatabaseTimestamp, nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
+import { requireDefined } from "../utils/presence";
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
   type GraphNodeRef,
@@ -159,6 +163,27 @@ function clampValidTo(timestamp: string, validFrom: string): string {
   return compareCodePoints(timestamp, validFrom) < 0 ? validFrom : timestamp;
 }
 
+/**
+ * Canonicalizes a driver timestamp read back from an identity relation. Drivers
+ * hand back `Date` objects or zoneless strings depending on dialect; identity
+ * rows are compared as canonical UTC strings, so an unrepresentable value is a
+ * storage-boundary fault rather than a silently skewed comparison.
+ */
+function toCanonicalIso(value: unknown): string {
+  const canonical = canonicalizeDatabaseTimestamp(value);
+  if (canonical === undefined) {
+    throw new ConfigurationError(
+      "Identity relation returned a timestamp that is not a representable instant.",
+      { value },
+      {
+        suggestion:
+          "Inspect the identity assertion rows for a corrupt timestamp column.",
+      },
+    );
+  }
+  return canonical;
+}
+
 function optionalTimestamp(value: unknown): string | undefined {
   return value === undefined || value === null ?
       undefined
@@ -293,7 +318,16 @@ function assertionValidityInstant(
   const mode = coordinate?.valid.mode ?? "current";
   return mode === "asOf" ?
       (coordinate?.valid.asOf ?? currentInstant)
-    : (coordinate?.recorded?.asOf ?? currentInstant);
+    : (recordedPin(coordinate)?.recordedAt ?? currentInstant);
+}
+
+function recordedPin(
+  coordinate: ReadCoordinate | undefined,
+): RecordedInstantParts | undefined {
+  return optionalRecordedInstantParts(
+    coordinate?.recorded?.asOf,
+    "recorded.asOf",
+  );
 }
 
 function nodeSnapshotSource(
@@ -301,8 +335,8 @@ function nodeSnapshotSource(
   graphId: string,
   coordinate: ReadCoordinate | undefined,
 ): SqlFragment {
-  const recordedAsOf = coordinate?.recorded?.asOf;
-  return recordedAsOf === undefined ?
+  const recorded = recordedPin(coordinate);
+  return recorded === undefined ?
       sql`
         SELECT kind, id, valid_from, valid_to, created_at, deleted_at
         FROM ${schema.nodesTable}
@@ -312,8 +346,8 @@ function nodeSnapshotSource(
       SELECT kind, id, valid_from, valid_to, created_at, deleted_at
       FROM ${schema.recordedNodesTable}
       WHERE graph_id = ${graphId}
-        AND recorded_from <= ${recordedAsOf}
-        AND recorded_to > ${recordedAsOf}
+        AND recorded_from <= ${recorded.revision}
+        AND recorded_to > ${recorded.revision}
     `;
 }
 
@@ -324,12 +358,12 @@ function assertionSnapshotSource(
   currentInstant: string,
   relation: IdentityRelation | undefined,
 ): SqlFragment {
-  const recordedAsOf = coordinate?.recorded?.asOf;
+  const recorded = recordedPin(coordinate);
   const instant = assertionValidityInstant(coordinate, currentInstant);
   const validity = sql`AND valid_from <= ${instant} AND (valid_to IS NULL OR valid_to > ${instant})`;
   const relationFilter =
     relation === undefined ? sql`` : sql`AND rel = ${relation}`;
-  return recordedAsOf === undefined ?
+  return recorded === undefined ?
       sql`
         SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
                valid_from, valid_to, created_at, updated_at, deleted_at
@@ -344,8 +378,8 @@ function assertionSnapshotSource(
              valid_from, valid_to, created_at, updated_at, deleted_at
       FROM ${schema.recordedIdentityAssertionsTable}
       WHERE graph_id = ${graphId}
-        AND recorded_from <= ${recordedAsOf}
-        AND recorded_to > ${recordedAsOf}
+        AND recorded_from <= ${recorded.revision}
+        AND recorded_to > ${recorded.revision}
         AND deleted_at IS NULL
         ${relationFilter}
         ${validity}
@@ -362,7 +396,7 @@ function nodeVisibilitySql(
   const instant =
     mode === "asOf" ?
       (coordinate?.valid.asOf ?? currentInstant)
-    : (coordinate?.recorded?.asOf ?? currentInstant);
+    : (recordedPin(coordinate)?.recordedAt ?? currentInstant);
   return sql`
     n.deleted_at IS NULL
     AND (n.valid_from IS NULL OR n.valid_from <= ${instant})
@@ -522,7 +556,7 @@ async function loadHistoricalVisibleMembers(
     coordinate,
     sameIdAcrossKinds,
   );
-  return classes.get(refKey(ref))!.visible;
+  return requireDefined(classes.get(refKey(ref))).visible;
 }
 
 type HistoricalClass = Readonly<{
@@ -648,7 +682,8 @@ function visibleMembersAtCoordinate<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   ref: PlainNodeRef,
 ): Promise<readonly PlainNodeRef[]> {
-  if (isCurrentClosureCoordinate(ctx.coordinate)) {
+  const { coordinate } = ctx;
+  if (coordinate === undefined || isCurrentClosureCoordinate(coordinate)) {
     return loadCurrentVisibleMembers(ctx.backend, ctx.schema, ctx.graphId, ref);
   }
   return loadHistoricalVisibleMembers(
@@ -656,7 +691,7 @@ function visibleMembersAtCoordinate<G extends GraphDef>(
     ctx.schema,
     ctx.graphId,
     ref,
-    ctx.coordinate!,
+    coordinate,
     ctx.sameIdAcrossKinds,
   );
 }
@@ -799,7 +834,10 @@ export class UnionFind {
     }
     let cursor = key;
     while (cursor !== root) {
-      const next = this.#parents.get(cursor)!;
+      const next = requireDefined(
+        this.#parents.get(cursor),
+        `Unknown identity member ${cursor}`,
+      );
       this.#parents.set(cursor, root);
       cursor = next;
     }
@@ -815,8 +853,8 @@ export class UnionFind {
     const firstRoot = this.#find(refKey(first));
     const secondRoot = this.#find(refKey(second));
     if (firstRoot === secondRoot) return;
-    const firstSize = this.#sizes.get(firstRoot)!;
-    const secondSize = this.#sizes.get(secondRoot)!;
+    const firstSize = requireDefined(this.#sizes.get(firstRoot));
+    const secondSize = requireDefined(this.#sizes.get(secondRoot));
     const [root, child] =
       firstSize >= secondSize ?
         [firstRoot, secondRoot]
@@ -1011,14 +1049,8 @@ function validateSnapshotIntegrity(
   for (const [memberKey, component] of snapshot.components) {
     if (visited.has(memberKey)) continue;
     for (const member of component) visited.add(refKey(member));
-    for (let leftIndex = 0; leftIndex < component.length; leftIndex += 1) {
-      for (
-        let rightIndex = leftIndex + 1;
-        rightIndex < component.length;
-        rightIndex += 1
-      ) {
-        const left = component[leftIndex]!;
-        const right = component[rightIndex]!;
+    for (const [leftIndex, left] of component.entries()) {
+      for (const right of component.slice(leftIndex + 1)) {
         if (!registry.areDisjoint(left.kind, right.kind)) continue;
         throw new ConfigurationError(
           "Operational Identity class conflicts with ontology disjointness.",
@@ -1073,7 +1105,7 @@ async function assertClosureMatchesComponents(
   const emitted = new Set<string>();
   for (const [memberKey, component] of components) {
     if (emitted.has(memberKey) || component.length < 2) continue;
-    const canonical = component[0]!;
+    const canonical = requireDefined(component[0]);
     for (const member of component) {
       const key = refKey(member);
       emitted.add(key);
@@ -1210,8 +1242,8 @@ async function validateCurrentRelation(
     ctx.graphId,
     [a, b],
   );
-  const aClass = classes.get(refKey(a))!;
-  const bClass = classes.get(refKey(b))!;
+  const aClass = requireDefined(classes.get(refKey(a)));
+  const bClass = requireDefined(classes.get(refKey(b)));
   if (relation === "different") {
     if (!aClass.some((member) => refKey(member) === refKey(b))) return;
     throw new IdentityContradictionError({
@@ -1419,7 +1451,7 @@ async function insertClosureComponents(
   const values: SqlFragment[] = [];
   for (const [memberKey, component] of components) {
     if (emitted.has(memberKey) || component.length < 2) continue;
-    const canonical = component[0]!;
+    const canonical = requireDefined(component[0]);
     for (const member of component) {
       emitted.add(refKey(member));
       values.push(
@@ -1463,7 +1495,7 @@ async function replaceAffectedClosure(
     references,
   );
   for (const ref of references) {
-    for (const member of classes.get(refKey(ref))!) {
+    for (const member of requireDefined(classes.get(refKey(ref)))) {
       affectedByKey.set(refKey(member), member);
     }
   }
@@ -1519,21 +1551,23 @@ async function mergeCurrentClasses(
     a,
     b,
   ]);
-  const aClass = classes.get(refKey(a))!;
-  const bClass = classes.get(refKey(b))!;
+  const aClass = requireDefined(classes.get(refKey(a)));
+  const bClass = requireDefined(classes.get(refKey(b)));
   if (aClass.some((member) => refKey(member) === refKey(b))) return;
 
   const [smaller, larger] =
     aClass.length <= bClass.length ? [aClass, bClass] : [bClass, aClass];
-  const canonical = [...aClass, ...bClass].toSorted((left, right) =>
-    compareReferences(left, right),
-  )[0]!;
+  const canonical = requireDefined(
+    [...aClass, ...bClass].toSorted((left, right) =>
+      compareReferences(left, right),
+    )[0],
+  );
 
   async function relabelExistingClass(
     members: readonly PlainNodeRef[],
   ): Promise<void> {
     if (members.length < 2) return;
-    const previousCanonical = members[0]!;
+    const previousCanonical = requireDefined(members[0]);
     if (refKey(previousCanonical) === refKey(canonical)) return;
     await executeStatement(
       target,
@@ -1549,9 +1583,9 @@ async function mergeCurrentClasses(
 
   await relabelExistingClass(smaller);
   await relabelExistingClass(larger);
-  const singletonMembers = [smaller, larger]
-    .filter((members) => members.length === 1)
-    .map((members) => members[0]!);
+  const singletonMembers = [smaller, larger].flatMap((members) =>
+    members.length === 1 ? members : [],
+  );
   if (singletonMembers.length === 0) return;
   const values = singletonMembers.map(
     (member) =>
@@ -1943,19 +1977,15 @@ async function retractByIds(
       );
     }
   }
-  for (const row of current) {
-    const ended = {
-      ...row,
-      valid_to: endedById.get(row.id)!,
-      updated_at: now,
-    };
-    touch(ctx.graphId, row.id, ended);
-  }
-  return current.map((row) => ({
+  const ended = current.map((row) => ({
     ...row,
-    valid_to: endedById.get(row.id)!,
+    valid_to: requireDefined(endedById.get(row.id)),
     updated_at: now,
   }));
+  for (const row of ended) {
+    touch(ctx.graphId, row.id, { ...row });
+  }
+  return ended;
 }
 
 async function runIdentityMutation<G extends GraphDef, T>(
@@ -2026,7 +2056,8 @@ export function createIdentityReadFacade<G extends GraphDef>(
     async areDifferent(firstInput, secondInput) {
       const first = plainRef(firstInput);
       const second = plainRef(secondInput);
-      if (isCurrentClosureCoordinate(ctx.coordinate)) {
+      const { coordinate } = ctx;
+      if (coordinate === undefined || isCurrentClosureCoordinate(coordinate)) {
         const [firstVisible, secondVisible] = await Promise.all([
           loadCurrentVisibleMembers(
             ctx.backend,
@@ -2049,8 +2080,8 @@ export function createIdentityReadFacade<G extends GraphDef>(
           ctx.graphId,
           [first, second],
         );
-        const firstClass = classes.get(refKey(first))!;
-        const secondClass = classes.get(refKey(second))!;
+        const firstClass = requireDefined(classes.get(refKey(first)));
+        const secondClass = requireDefined(classes.get(refKey(second)));
         const different = await loadSpanningDifferentAssertion(
           ctx.backend,
           ctx.schema,
@@ -2069,11 +2100,11 @@ export function createIdentityReadFacade<G extends GraphDef>(
         ctx.schema,
         ctx.graphId,
         [first, second],
-        ctx.coordinate!,
+        coordinate,
         ctx.sameIdAcrossKinds,
       );
-      const firstClass = classes.get(refKey(first))!;
-      const secondClass = classes.get(refKey(second))!;
+      const firstClass = requireDefined(classes.get(refKey(first)));
+      const secondClass = requireDefined(classes.get(refKey(second)));
       if (firstClass.visible.length === 0 || secondClass.visible.length === 0)
         return false;
       const different = await loadSpanningDifferentAssertion(
@@ -2666,9 +2697,10 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
     // Pre-pass: validate every shape in input order and normalize endpoints,
     // then batch the two reads the loop would otherwise issue per item — the
     // existing-row-by-id lookup and the current-endpoint liveness check.
-    const normalizedPairs = assertions.map((assertion) =>
-      validateTransferShape(ctx, assertion, mode),
-    );
+    const normalized = assertions.map((assertion) => ({
+      assertion,
+      endpoints: validateTransferShape(ctx, assertion, mode),
+    }));
     const existingById = await loadAssertionsByIds(
       rawTarget,
       ctx.schema,
@@ -2676,9 +2708,9 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
       assertions.map((assertion) => assertion.id),
     );
     const currentEndpoints: PlainNodeRef[] = [];
-    for (const [index, assertion] of assertions.entries()) {
+    for (const { assertion, endpoints } of normalized) {
       if (assertion.validTo !== undefined) continue;
-      const [a, b] = normalizedPairs[index]!;
+      const [a, b] = endpoints;
       currentEndpoints.push(a, b);
     }
     await requireLiveEndpoints(
@@ -2688,8 +2720,8 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
       currentEndpoints,
     );
 
-    for (const [index, assertion] of assertions.entries()) {
-      const [a, b] = normalizedPairs[index]!;
+    for (const { assertion, endpoints } of normalized) {
+      const [a, b] = endpoints;
       const sameId = existingById.get(assertion.id);
       if (sameId !== undefined) {
         const exact =

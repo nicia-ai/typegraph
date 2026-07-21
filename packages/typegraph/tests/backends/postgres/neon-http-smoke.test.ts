@@ -37,6 +37,7 @@ import {
 } from "../../../src";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type { SerializedSchema } from "../../../src/schema/types";
+import { matchingObject } from "../../test-utils";
 
 const STUB_SCHEMA_DOC: SerializedSchema = {
   graphId: "neon_http_refusal",
@@ -104,7 +105,7 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
     expect(() => createStore(identityGraph, backend)).toThrow(
       expect.objectContaining({
         name: "ConfigurationError",
-        details: expect.objectContaining({
+        details: matchingObject({
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
           transactions: false,
         }),

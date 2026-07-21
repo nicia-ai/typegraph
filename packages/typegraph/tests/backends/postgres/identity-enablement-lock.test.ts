@@ -14,6 +14,7 @@ import { z } from "zod";
 import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { requireDefined } from "../../../src/utils/presence";
 import { raceTimeout, TIMEOUT_SENTINEL } from "../../concurrency-utils";
 
 const TEST_DATABASE_URL =
@@ -43,6 +44,10 @@ const enabledGraph = defineGraph({
 
 let pool: Pool | undefined;
 
+function requirePool(): Pool {
+  return requireDefined(pool, "PostgreSQL pool was not initialized");
+}
+
 beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
   const candidate = new Pool({
@@ -64,7 +69,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
     let writer: PoolClient | undefined;
 
     beforeEach(async () => {
-      await pool!.query(
+      await requirePool().query(
         `TRUNCATE typegraph_recorded_identity_assertions,
                   typegraph_identity_closure,
                   typegraph_identity_assertions,
@@ -84,10 +89,10 @@ describe.runIf(process.env["POSTGRES_URL"])(
     });
 
     it("waits for an in-flight legacy node write before building closure", async () => {
-      const backend = createPostgresBackend(drizzle(pool!));
+      const backend = createPostgresBackend(drizzle(requirePool()));
       await createStoreWithSchema(disabledGraph, backend);
 
-      writer = await pool!.connect();
+      writer = await requirePool().connect();
       await writer.query("BEGIN");
       await writer.query(
         `INSERT INTO typegraph_nodes
@@ -119,7 +124,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
     });
 
     it("serializes clear through the graph identity lock", async () => {
-      const backend = createPostgresBackend(drizzle(pool!));
+      const backend = createPostgresBackend(drizzle(requirePool()));
       const [store] = await createStoreWithSchema(enabledGraph, backend);
       const person = await store.nodes.Person.create(
         { name: "Alice" },
@@ -131,7 +136,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       );
       await store.identity.assertSame(person, company);
 
-      writer = await pool!.connect();
+      writer = await requirePool().connect();
       await writer.query("BEGIN");
       await writer.query(
         `SELECT pg_advisory_xact_lock(

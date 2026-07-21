@@ -20,10 +20,6 @@ import { afterEach, beforeEach, describe } from "vitest";
 import { createAdapterStoreWithSchema } from "../../src";
 import type { AdapterBackend } from "../../src/backend/types";
 import type { IntegrationStore, IntegrationTestContext } from "./integration";
-import type {
-  InspectableHistoryStore,
-  InspectableStore,
-} from "./integration/test-context";
 import {
   integrationTestGraph,
   registerAdvancedEdgePropertyIntegrationTests,
@@ -54,6 +50,7 @@ import {
   registerTraversalIntegrationTests,
   registerTrustedImportIntegrationTests,
 } from "./integration";
+import type { InspectableHistoryStore } from "./integration/test-context";
 
 /**
  * Result from a backend factory, including optional cleanup function.
@@ -116,7 +113,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
           adapterBackend,
           options,
         );
-        return createdStore as unknown as InspectableStore<typeof graph>;
+        return createdStore;
       },
       createHistoryStore: async (graph, options) => {
         if (adapterBackend === undefined) {

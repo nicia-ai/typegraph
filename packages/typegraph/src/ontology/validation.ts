@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 import { computeTransitiveClosure } from "./closures";
 import {
   META_EDGE_BROADER,
@@ -288,14 +289,14 @@ function buildEquivalenceRoots(
 
     let root = node;
     for (;;) {
-      const next = parent.get(root)!;
+      const next = requireDefined(parent.get(root));
       if (next === root) break;
       root = next;
     }
 
     let cursor = node;
     while (cursor !== root) {
-      const next = parent.get(cursor)!;
+      const next = requireDefined(parent.get(cursor));
       parent.set(cursor, root);
       cursor = next;
     }
@@ -306,8 +307,8 @@ function buildEquivalenceRoots(
     const rootLeft = find(left);
     const rootRight = find(right);
     if (rootLeft === rootRight) return;
-    const leftSize = size.get(rootLeft)!;
-    const rightSize = size.get(rootRight)!;
+    const leftSize = requireDefined(size.get(rootLeft));
+    const rightSize = requireDefined(size.get(rootRight));
     const [root, child] =
       leftSize >= rightSize ? [rootLeft, rootRight] : [rootRight, rootLeft];
     parent.set(child, root);

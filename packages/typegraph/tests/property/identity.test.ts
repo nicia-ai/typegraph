@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode } from "../../src";
+import { requireDefined } from "../../src/utils/presence";
 import { createInitializedStore, createTestBackend } from "../test-utils";
 
 const Person = defineNode("Person", {
@@ -39,10 +40,13 @@ describe("Operational Identity properties", () => {
             );
           }
           for (let index = 1; index < nodes.length; index += 1) {
-            await store.identity.assertSame(nodes[index - 1]!, nodes[index]!);
+            await store.identity.assertSame(
+              requireDefined(nodes[index - 1]),
+              requireDefined(nodes[index]),
+            );
           }
           const now = new Date().toISOString();
-          const seed = nodes[0]!;
+          const seed = requireDefined(nodes[0]);
 
           expect(await store.asOf(now).identity.membersOf(seed)).toEqual(
             await store.identity.membersOf(seed),

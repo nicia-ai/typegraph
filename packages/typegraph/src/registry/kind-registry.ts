@@ -19,8 +19,8 @@ import {
 } from "../ontology/constants";
 import { isExternalIri } from "../ontology/external-iri";
 import { type OntologyRelation } from "../ontology/types";
-import { requireDefined } from "../utils/presence";
 import { type NamedOntologyRelation } from "../ontology/validation";
+import { requireDefined } from "../utils/presence";
 
 /**
  * KindRegistry holds precomputed closures for ontological reasoning.

@@ -25,6 +25,7 @@ import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
 } from "../src/backend/sqlite/local";
+import { matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -143,7 +144,7 @@ describe("Operational Identity provisioning + enablement gating", () => {
       ).rejects.toThrow(
         expect.objectContaining({
           name: "ConfigurationError",
-          details: expect.objectContaining({
+          details: matchingObject({
             code: "IDENTITY_ENABLEMENT_PENDING",
           }),
         }),

@@ -4,6 +4,7 @@ import {
   type NamedOntologyRelation,
   validateOntologyRelations,
 } from "../ontology/validation";
+import { requireDefined } from "../utils/presence";
 import {
   computeClosuresFromNamedOntology,
   createEmptyClosures,
@@ -35,7 +36,7 @@ export function buildValidatedKindRegistry(
 
   const issues = validateOntologyRelations(input.ontology);
   if (issues.length > 0) {
-    const firstIssue = issues[0]!;
+    const firstIssue = requireDefined(issues[0]);
     throw new ConfigurationError(
       `Ontology is incoherent: ${firstIssue.message}`,
       {
