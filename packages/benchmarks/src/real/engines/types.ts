@@ -1,9 +1,9 @@
 import { type SnbIdPools } from "../dataset/ldbc-csv";
 import { type SnbEngineName } from "../harness/doctor";
 
-export type IsQueryId = "IS1" | "IS2" | "IS3" | "IS4" | "IS5" | "IS6" | "IS7";
+type IsQueryId = "IS1" | "IS2" | "IS3" | "IS4" | "IS5" | "IS6" | "IS7";
 
-export const IS_QUERY_IDS: readonly IsQueryId[] = [
+const IS_QUERY_IDS: readonly IsQueryId[] = [
   "IS1",
   "IS2",
   "IS3",
@@ -36,9 +36,9 @@ export const IS_QUERY_IDS: readonly IsQueryId[] = [
  *   pgGraph's `graph.shortest_path` is hop-only; ladybug's `WSHORTEST` is not
  *   wired), so this is a TypeGraph SQLite-vs-PostgreSQL comparison.
  */
-export type TraversalQueryId = "IC13" | "BFS3" | "IC14";
+type TraversalQueryId = "IC13" | "BFS3" | "IC14";
 
-export const TRAVERSAL_QUERY_IDS: readonly TraversalQueryId[] = [
+const TRAVERSAL_QUERY_IDS: readonly TraversalQueryId[] = [
   "IC13",
   "BFS3",
   "IC14",
@@ -54,13 +54,9 @@ export const TRAVERSAL_QUERY_IDS: readonly TraversalQueryId[] = [
  * - `IC9` — the most recent 20 messages by the person's friends and
  *   friends-of-friends (2-hop `knows`) created before `IC9_MAX_DATE`.
  */
-export type ComplexQueryId = "IC2" | "IC8" | "IC9";
+type ComplexQueryId = "IC2" | "IC8" | "IC9";
 
-export const COMPLEX_QUERY_IDS: readonly ComplexQueryId[] = [
-  "IC2",
-  "IC8",
-  "IC9",
-];
+const COMPLEX_QUERY_IDS: readonly ComplexQueryId[] = ["IC2", "IC8", "IC9"];
 
 /**
  * LDBC-Graphalytics-style graph algorithms over the `knows` graph. These are
@@ -74,9 +70,9 @@ export const COMPLEX_QUERY_IDS: readonly ComplexQueryId[] = [
  * - `GA_BFS` — nodes reachable from the seed over `knows` (whole component).
  * - `GA_SSSP` — unweighted shortest distance from the seed to all reachable.
  */
-export type AlgorithmQueryId = "GA_DEGREE" | "GA_WCC" | "GA_BFS" | "GA_SSSP";
+type AlgorithmQueryId = "GA_DEGREE" | "GA_WCC" | "GA_BFS" | "GA_SSSP";
 
-export const ALGORITHM_QUERY_IDS: readonly AlgorithmQueryId[] = [
+const ALGORITHM_QUERY_IDS: readonly AlgorithmQueryId[] = [
   "GA_DEGREE",
   "GA_WCC",
   "GA_BFS",
@@ -174,7 +170,7 @@ export function compareIdsAscending(left: string, right: string): number {
  * integer (no `null`) while staying identical across every engine that
  * reports "unreachable" for the same request.
  */
-export const IC13_UNREACHABLE = -1;
+const IC13_UNREACHABLE = -1;
 
 /**
  * Canonical IC13 result. Every engine funnels its native shortest-path
@@ -196,7 +192,7 @@ export function shortestPathDistanceResult(
 export const KNOWS_WEIGHT_PROPERTY = "weight";
 
 /** Modulus bounding the synthetic weight to `[1, KNOWS_WEIGHT_MODULUS]`. */
-export const KNOWS_WEIGHT_MODULUS = 97;
+const KNOWS_WEIGHT_MODULUS = 97;
 
 /**
  * Deterministic synthetic weight for a `knows` edge, hashed from the two
@@ -210,7 +206,7 @@ export const KNOWS_WEIGHT_MODULUS = 97;
  */
 export function synthesizeKnowsWeight(idA: string, idB: string): number {
   const [lo, hi] = idA <= idB ? [idA, idB] : [idB, idA];
-  const key = `${lo} ${hi}`;
+  const key = `${lo}\0${hi}`;
   let hash = 2_166_136_261;
   for (let index = 0; index < key.length; index++) {
     hash ^= key.charCodeAt(index);
@@ -220,7 +216,7 @@ export function synthesizeKnowsWeight(idA: string, idB: string): number {
 }
 
 /** Sentinel total weight for an unreachable IC14 pair (real weights are >= 1). */
-export const IC14_UNREACHABLE = -1;
+const IC14_UNREACHABLE = -1;
 
 /**
  * Canonical IC14 result: the minimum total weight of the weighted-shortest
