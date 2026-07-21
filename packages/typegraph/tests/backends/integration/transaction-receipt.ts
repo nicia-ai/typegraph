@@ -9,15 +9,16 @@ import {
   type EdgeId,
   type NodeId,
   type RecordedInstant,
+  recordedInstantRevision,
   type TransactionReceipt,
   ValidationError,
 } from "../../../src";
-import { RECORDED_MAX } from "../../../src/core/temporal";
+import { RECORDED_MAX_REVISION } from "../../../src/core/temporal";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
-import { toCanonicalRecordedBoundary } from "../../../src/store/recorded-capture";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
+import { recordedRevisionFromDriver } from "../../test-utils";
 import {
   type HistoryIntegrationStore,
   type IntegrationStore,
@@ -114,7 +115,7 @@ async function readOpenRecordedFrom(
   table: SqlFragment,
   kind: string,
   id: string,
-): Promise<string> {
+): Promise<number> {
   const backend = store[STORE_RUNTIME].backend;
   const rows = await backend.execute<RecordedFromRow>(
     asCompiledRowsSql(sql`
@@ -123,21 +124,21 @@ async function readOpenRecordedFrom(
       WHERE graph_id = ${store.graphId}
         AND kind = ${kind}
         AND id = ${id}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   const row = rows[0];
   if (row === undefined) {
     throw new Error(`No open recorded row for ${kind}:${id}`);
   }
-  return toCanonicalRecordedBoundary(row.recorded_from);
+  return recordedRevisionFromDriver(row.recorded_from);
 }
 
 async function readOpenRecordedNodeFrom(
   store: RecordedSqlStore,
   kind: string,
   id: string,
-): Promise<string> {
+): Promise<number> {
   return readOpenRecordedFrom(
     store,
     createSqlSchema(store[STORE_RUNTIME].backend.tableNames).recordedNodesTable,
@@ -150,7 +151,7 @@ async function readOpenRecordedEdgeFrom(
   store: RecordedSqlStore,
   kind: string,
   id: string,
-): Promise<string> {
+): Promise<number> {
   return readOpenRecordedFrom(
     store,
     createSqlSchema(store[STORE_RUNTIME].backend.tableNames).recordedEdgesTable,
@@ -509,10 +510,10 @@ export function registerTransactionReceiptIntegrationTests(
       );
       await expect(
         readOpenRecordedNodeFrom(store, "Person", outcome.result.alice.id),
-      ).resolves.toBe(recorded);
+      ).resolves.toBe(recordedInstantRevision(recorded));
       await expect(
         readOpenRecordedEdgeFrom(store, "knows", outcome.result.edge.id),
-      ).resolves.toBe(recorded);
+      ).resolves.toBe(recordedInstantRevision(recorded));
     });
 
     it("returns the recorded anchor for an edge-only transaction", async () => {
@@ -535,7 +536,7 @@ export function registerTransactionReceiptIntegrationTests(
       expect(outcome.receipt.writes.edges).toEqual({ knows: 1 });
       await expect(
         readOpenRecordedEdgeFrom(store, "knows", outcome.result.id),
-      ).resolves.toBe(recorded);
+      ).resolves.toBe(recordedInstantRevision(recorded));
     });
 
     it("leaves recorded undefined without history and for read-only transactions", async () => {

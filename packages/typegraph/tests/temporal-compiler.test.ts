@@ -155,9 +155,9 @@ describe("compileTemporalFilter", () => {
       expect(sql.trim().startsWith("(")).toBe(true);
       expect(sql).toContain("recorded_from <=");
       expect(sql).toContain("< recorded_to");
-      // Half-open: `recorded_from <= R AND R < recorded_to`, so R appears twice.
-      const occurrences = (sql.match(new RegExp(recordedAsOf, "g")) ?? [])
-        .length;
+      // Half-open: `recorded_from <= R AND R < recorded_to`, so the decoded
+      // numeric revision appears twice in the stored-range predicate.
+      const occurrences = (sql.match(/\b7\b/g) ?? []).length;
       expect(occurrences).toBe(2);
     });
 

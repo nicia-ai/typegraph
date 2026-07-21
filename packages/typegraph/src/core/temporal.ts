@@ -5,15 +5,9 @@ import { ValidationError } from "../errors";
 import { validateCanonicalIsoDate } from "../utils/date";
 import { type TemporalMode } from "./types";
 
-/**
- * Open-ended recorded-revision sentinel. Recorded instants put a fixed-width
- * logical revision before their physical timestamp, so lexical ordering puts
- * every allocatable revision before this value on both SQL backends.
- */
-export const RECORDED_MAX = "r1:9007199254740991:9999-12-31T23:59:59.999Z";
-
 const RECORDED_INSTANT_VERSION = "r1";
 const RECORDED_REVISION_WIDTH = 16;
+/** Open interval ceiling for numeric recorded-revision columns. */
 export const RECORDED_MAX_REVISION = Number.MAX_SAFE_INTEGER;
 const RECORDED_INSTANT_PATTERN =
   /^r1:(\d{16}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/;
@@ -56,7 +50,7 @@ function invalidRecordedInstant(value: string, path: string): ValidationError {
     },
     {
       suggestion:
-        "Persist the exact string returned by store.recordedNow(); timestamp-only anchors from the initial recorded-time schema are not compatible.",
+        "Persist the exact string returned by store.recordedNow(); migrate preview-schema checkpoints with migrateLegacyRecordedTime() and migrateRecordedAnchor().",
     },
   );
 }
@@ -108,6 +102,28 @@ export function createRecordedInstant(
  */
 export function recordedInstantWallTime(instant: RecordedInstant): string {
   return parseRecordedInstant(instant).recordedAt;
+}
+
+/** Returns the strict per-graph logical revision carried by an anchor. */
+export function recordedInstantRevision(instant: RecordedInstant): number {
+  return parseRecordedInstant(instant).revision;
+}
+
+/**
+ * Compares two recorded anchors by logical revision.
+ *
+ * Revisions are local to a graph, so only compare anchors produced by the same
+ * graph. The physical wall-time component deliberately does not participate.
+ */
+export function compareRecordedInstants(
+  left: RecordedInstant,
+  right: RecordedInstant,
+): -1 | 0 | 1 {
+  const leftRevision = recordedInstantRevision(left);
+  const rightRevision = recordedInstantRevision(right);
+  if (leftRevision < rightRevision) return -1;
+  if (leftRevision > rightRevision) return 1;
+  return 0;
 }
 
 /**

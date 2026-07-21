@@ -239,6 +239,17 @@ export type DeleteFulltextParams = Readonly<{
 }>;
 
 // @public
+export function deleteLegacyRecordedAnchorMap(options: DeleteLegacyRecordedAnchorMapOptions): Promise<void>;
+
+// @public (undocumented)
+export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
+    backend: Pick<GraphBackend, "dialect" | "executeStatement" | "tableNames">;
+    graphId: string;
+    tableNames?: Partial<SqlTableNames> | undefined;
+    mappingTableName?: string | undefined;
+}>;
+
+// @public
 export type DeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
@@ -1033,6 +1044,36 @@ export type LiveNodeRow = NodeRow & Readonly<{
 export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
+export function migrateLegacyRecordedTime(options: MigrateLegacyRecordedTimeOptions): Promise<MigrateLegacyRecordedTimeResult>;
+
+// @public
+export type MigrateLegacyRecordedTimeOptions = Readonly<{
+    backend: GraphBackend;
+    tableNames?: Partial<SqlTableNames> | undefined;
+    mappingTableName?: string | undefined;
+}>;
+
+// @public (undocumented)
+export type MigrateLegacyRecordedTimeResult = Readonly<{
+    migrated: boolean;
+    graphs: number;
+    anchors: number;
+    mappingTableName: string;
+}>;
+
+// @public
+export function migrateRecordedAnchor(options: MigrateRecordedAnchorOptions): Promise<RecordedInstant>;
+
+// @public (undocumented)
+export type MigrateRecordedAnchorOptions = Readonly<{
+    backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames">;
+    graphId: string;
+    anchor: string;
+    tableNames?: Partial<SqlTableNames> | undefined;
+    mappingTableName?: string | undefined;
+}>;
+
+// @public
 export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 
 // @public (undocumented)
@@ -1106,6 +1147,14 @@ export type RecordContributionMaterializationParams = Readonly<{
     materializedAt: string | undefined;
     error: string | undefined;
 }>;
+
+// @public (undocumented)
+const RECORDED_INSTANT_BRAND: unique symbol;
+
+// @public
+export type RecordedInstant = string & {
+    readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
+};
 
 // @public
 export type RecordIndexMaterializationParams = Readonly<{

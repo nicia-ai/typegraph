@@ -403,6 +403,11 @@ const graphAtOffset = store.asOfRecorded(anchor);
 const issue = await graphAtOffset.nodes.Issue.getById(issueId);
 ```
 
+If the cursor table contains timestamp-only anchors from the recorded-time
+preview, migrate the TypeGraph relations first and remap those cursor values
+with `migrateRecordedAnchor({ backend, graphId, anchor: stored })`. See
+[Migrating preview recorded time](/schema-management#migrating-preview-recorded-time).
+
 That answers "what did the materialized graph know after offset X?" even if
 later corrections changed or deleted rows. See
 [Recorded time](/queries/temporal/#recorded-time-bitemporal) for the full view

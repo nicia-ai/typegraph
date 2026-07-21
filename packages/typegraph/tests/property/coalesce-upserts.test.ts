@@ -14,8 +14,7 @@ import { type GraphBackend } from "../../src/backend/types";
 import { createSqlSchema } from "../../src/query/compiler/schema";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
-import { toCanonicalRecordedBoundary } from "../../src/store/recorded-capture";
-import { createTestBackend } from "../test-utils";
+import { createTestBackend, recordedInstantFromDriver } from "../test-utils";
 
 const Item = defineNode("Item", {
   schema: z.object({
@@ -31,7 +30,7 @@ const coalesceGraph = defineGraph({
   edges: {},
 });
 
-type ClockRow = Readonly<{ recorded_at: unknown }>;
+type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
 // Postgres returns COUNT(*) as a string/bigint, SQLite as a number, so the
 // value is genuinely not statically a number — Number(...) is a real coercion.
 type CountRow = Readonly<{ cnt: unknown }>;
@@ -41,13 +40,15 @@ async function readRecordedClock(
 ): Promise<string | undefined> {
   const rows = await backend.execute<ClockRow>(
     asCompiledRowsSql(sql`
-      SELECT recorded_at
+      SELECT revision, recorded_at
       FROM ${createSqlSchema(backend.tableNames).recordedClockTable}
       WHERE graph_id = ${coalesceGraph.id}
     `),
   );
-  const value = rows[0]?.recorded_at;
-  return value === undefined ? undefined : toCanonicalRecordedBoundary(value);
+  const row = rows[0];
+  return row === undefined ? undefined : (
+      recordedInstantFromDriver(row.revision, row.recorded_at)
+    );
 }
 
 async function countRecordedRows(backend: GraphBackend): Promise<number> {

@@ -12,7 +12,7 @@ import {
   describeCoordinate,
   parseRecordedInstant,
   type ReadCoordinate,
-  RECORDED_MAX,
+  RECORDED_MAX_REVISION,
   type RecordedInstant,
   resolveReadCoordinate,
   withRecordedCoordinate,
@@ -50,7 +50,7 @@ describe("withRecordedCoordinate", () => {
     expect(() =>
       withRecordedCoordinate(
         validCoordinate(),
-        RECORDED_MAX as RecordedInstant,
+        RECORDED_MAX_REVISION as unknown as RecordedInstant,
       ),
     ).toThrow("canonical versioned recorded instant");
   });
@@ -73,7 +73,7 @@ describe("withRecordedCoordinate", () => {
 
 describe("asRecordedInstant", () => {
   it("rejects the open-interval sentinel itself", () => {
-    expect(() => asRecordedInstant(RECORDED_MAX)).toThrow(
+    expect(() => asRecordedInstant(String(RECORDED_MAX_REVISION))).toThrow(
       "canonical versioned recorded instant",
     );
   });
@@ -91,9 +91,8 @@ describe("asRecordedInstant", () => {
   it("rejects timestamp-only preview anchors with migration guidance", () => {
     const error = captureValidationError(() => asRecordedInstant(VALID_AT));
 
-    expect(error.suggestion).toContain(
-      "timestamp-only anchors from the initial recorded-time schema are not compatible",
-    );
+    expect(error.suggestion).toContain("migrateLegacyRecordedTime()");
+    expect(error.suggestion).toContain("migrateRecordedAnchor()");
   });
 });
 

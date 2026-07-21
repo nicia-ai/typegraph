@@ -41,7 +41,9 @@ export {
 // Recorded-time instant brand (the typed anchor for store.asOfRecorded)
 export {
   asRecordedInstant,
+  compareRecordedInstants,
   type RecordedInstant,
+  recordedInstantRevision,
   recordedInstantWallTime,
 } from "./temporal";
 

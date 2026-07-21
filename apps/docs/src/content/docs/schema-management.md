@@ -302,6 +302,52 @@ and need a deliberate re-embed at a single dimension — see
 The vector and hybrid query API (`.similarTo()`, `store.search.vector`,
 `store.search.hybrid`) is storage-transparent and unchanged by this cutover.
 
+## Migrating Preview Recorded Time
+
+The initial recorded-time preview stored timestamps directly in
+`recorded_from`, `recorded_to`, and the graph clock. Versioned anchors now keep
+the durable string API while recorded relations compare numeric revisions.
+
+Stop writers and run the one-time migration before opening a Store with the new
+schema:
+
+```typescript
+import {
+  deleteLegacyRecordedAnchorMap,
+  migrateLegacyRecordedTime,
+  migrateRecordedAnchor,
+} from "@nicia-ai/typegraph";
+
+const result = await migrateLegacyRecordedTime({ backend });
+console.log(result.graphs, result.anchors);
+
+// Translate anchors stored in an application-owned checkpoint table.
+const upgraded = await migrateRecordedAnchor({
+  backend,
+  graphId: "event-materializer",
+  anchor: oldTimestampOnlyAnchor,
+});
+await checkpoints.replaceAnchor(oldTimestampOnlyAnchor, upgraded);
+
+// Do this only after every external checkpoint for the graph is upgraded.
+await deleteLegacyRecordedAnchorMap({
+  backend,
+  graphId: "event-materializer",
+});
+```
+
+The migration dense-ranks distinct legacy commit timestamps independently per
+graph, preserving their exact total order. It rewrites the recorded relations
+and clock atomically and retains a durable old-anchor mapping so downstream
+stores can migrate separately. Re-running it after the cutover is a no-op.
+`migrateRecordedAnchor` also accepts an already-versioned `r1` anchor, making a
+mixed old/new checkpoint pass idempotent.
+
+The mapping is graph-scoped: the same timestamp can correspond to different
+revisions in different graphs. Keep writers stopped for the schema rewrite, and
+delete mapping rows only after every external checkpoint for that graph has
+been translated.
+
 ## Schema Serialization
 
 Schemas are stored as JSON documents with computed hashes for fast comparison:

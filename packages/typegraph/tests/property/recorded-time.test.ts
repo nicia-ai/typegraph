@@ -25,7 +25,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  asRecordedInstant,
   createStore,
   createStoreWithSchema,
   defineEdge,
@@ -35,16 +34,19 @@ import {
   recordedRelation,
 } from "../../src";
 import { type GraphBackend } from "../../src/backend/types";
-import { RECORDED_MAX } from "../../src/core/temporal";
+import { RECORDED_MAX_REVISION } from "../../src/core/temporal";
 import {
   createSqlSchema,
   type SqlSchema,
 } from "../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
-import { toCanonicalRecordedBoundary } from "../../src/store/recorded-capture";
 import { requireDefined } from "../../src/utils/presence";
-import { createTestBackend } from "../test-utils";
+import {
+  createTestBackend,
+  recordedInstantFromDriver,
+  recordedRevisionFromDriver,
+} from "../test-utils";
 
 const Item = defineNode("Item", {
   schema: z.object({ label: z.string() }),
@@ -67,7 +69,7 @@ const EDGE_IDS = ["e0", "e1", "e2"] as const;
 const EDGE_FROM = "edge-from";
 const EDGE_TO = "edge-to";
 
-type ClockRow = Readonly<{ recorded_at: unknown }>;
+type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
 type IntervalRow = Readonly<{
   id: string;
   recorded_from: unknown;
@@ -92,22 +94,21 @@ async function readRecordedClock(
 ): Promise<RecordedInstant> {
   const rows = await backend.execute<ClockRow>(
     asCompiledRowsSql(sql`
-      SELECT recorded_at
+      SELECT revision, recorded_at
       FROM ${schemaFor(backend).recordedClockTable}
       WHERE graph_id = ${propertyGraph.id}
     `),
   );
-  const value = rows[0]?.recorded_at;
-  if (value === undefined) throw new Error("Recorded clock not written");
-  // A value read from the recorded clock is a genuine recorded instant.
-  return asRecordedInstant(toCanonicalRecordedBoundary(value));
+  const row = rows[0];
+  if (row === undefined) throw new Error("Recorded clock not written");
+  return recordedInstantFromDriver(row.revision, row.recorded_at);
 }
 
 async function readIntervals(
   backend: GraphBackend,
   table: SqlFragment,
   ids: readonly string[],
-): Promise<ReadonlyMap<string, readonly { from: string; to: string }[]>> {
+): Promise<ReadonlyMap<string, readonly { from: number; to: number }[]>> {
   const rows = await backend.execute<IntervalRow>(
     asCompiledRowsSql(sql`
       SELECT id, recorded_from, recorded_to
@@ -116,14 +117,14 @@ async function readIntervals(
       ORDER BY id, recorded_from
     `),
   );
-  const byId = new Map<string, { from: string; to: string }[]>();
+  const byId = new Map<string, { from: number; to: number }[]>();
   for (const id of ids) byId.set(id, []);
   for (const row of rows) {
     const list = byId.get(row.id);
     if (list === undefined) continue;
     list.push({
-      from: toCanonicalRecordedBoundary(row.recorded_from),
-      to: toCanonicalRecordedBoundary(row.recorded_to),
+      from: recordedRevisionFromDriver(row.recorded_from),
+      to: recordedRevisionFromDriver(row.recorded_to),
     });
   }
   return byId;
@@ -201,14 +202,14 @@ function snapshotOf(model: ReadonlyMap<string, EntityState>): Snapshot {
  * zero-width or overlap.
  */
 function assertIntervalInvariants(
-  intervals: ReadonlyMap<string, readonly { from: string; to: string }[]>,
+  intervals: ReadonlyMap<string, readonly { from: number; to: number }[]>,
   finalState: ReadonlyMap<string, EntityState>,
 ): void {
   for (const [id, rows] of intervals) {
     for (const { from, to } of rows) {
       expect(from < to).toBe(true);
     }
-    const openRows = rows.filter((row) => row.to === RECORDED_MAX);
+    const openRows = rows.filter((row) => row.to === RECORDED_MAX_REVISION);
     expect(openRows.length).toBe(
       expectedOpenRows(requireDefined(finalState.get(id))),
     );

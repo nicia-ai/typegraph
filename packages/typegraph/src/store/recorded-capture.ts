@@ -54,8 +54,6 @@ export {
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
-  toCanonicalRecordedBoundary,
-  toCanonicalRecordedInstant,
 } from "./recorded-capture/clock";
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
 export {
@@ -265,15 +263,27 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
           graphId,
           ownsWriteLock,
         );
-        recordedByGraph.set(graphId, recordedCommit);
+        recordedByGraph.set(graphId, recordedCommit.instant);
         const nodes = entities.filter(
           (entity): entity is TouchedNode => entity.entity === "node",
         );
         const edges = entities.filter(
           (entity): entity is TouchedEdge => entity.entity === "edge",
         );
-        await flushNodes(target, schema, graphId, nodes, recordedCommit);
-        await flushEdges(target, schema, graphId, edges, recordedCommit);
+        await flushNodes(
+          target,
+          schema,
+          graphId,
+          nodes,
+          recordedCommit.revision,
+        );
+        await flushEdges(
+          target,
+          schema,
+          graphId,
+          edges,
+          recordedCommit.revision,
+        );
       }
       touched.clear();
       return recordedByGraph;

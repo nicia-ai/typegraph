@@ -259,10 +259,13 @@ default validity timestamps: a later recorded anchor cannot pin valid time
 before an earlier commit's default `valid_from`.
 
 The fixed-width revision prefix makes anchors lexicographically sortable within
-a graph and gives each captured transaction a distinct addressable state. The
-open interval sentinel reserves revision `9007199254740991`; real commits use
-lower revisions. Recorded clocks remain per graph, and TypeGraph does not
-provide one cross-graph recorded anchor.
+a graph and gives each captured transaction a distinct addressable state. Use
+`compareRecordedInstants(a, b)` rather than manually comparing strings, and
+only compare anchors from the same graph. Recorded relations store the revision
+as an integer, so their open interval ceiling is independent of the `r1` API
+encoding and PostgreSQL range scans do not depend on text collation. Recorded
+clocks remain per graph, and TypeGraph does not provide one cross-graph recorded
+anchor.
 
 Batch related writes in `store.transaction(...)`: one transaction allocates one
 recorded instant. For event logs, align transactions with durable replay or
@@ -287,8 +290,8 @@ const corrected = store
 const asKnownThen = await corrected.nodes.Invoice.getById(invoiceId);
 ```
 
-Use `recordedInstantWallTime(T)` when an application needs the supported
-physical wall-time component for display or logging. Do not split the versioned
+Use `recordedInstantRevision(T)` for diagnostics and
+`recordedInstantWallTime(T)` for display or logging. Do not split the versioned
 anchor string manually.
 
 `store.view({ mode }).asOfRecorded(T)` composes recorded time with any
@@ -311,11 +314,12 @@ fulltext / vector predicates are **refused** with a `ConfigurationError` /
 state only, so they cannot answer a recorded-time question. `T` must use the
 canonical versioned RecordedInstant encoding; a plain ISO timestamp is rejected.
 
-:::caution[Breaking preview-schema change]
-Timestamp-only anchors and recorded tables created by the initial preview are
-not compatible with the `r1` encoding. Recreate those recorded relations and
-reset durable checkpoints when upgrading. TypeGraph rejects an old anchor or
-clock row rather than silently selecting the wrong belief state.
+:::caution[Preview-schema migration]
+Timestamp-only anchors and recorded tables created by the initial preview need
+an explicit offline migration. Run `migrateLegacyRecordedTime({ backend })`
+before opening the upgraded store, then translate externally persisted
+checkpoints with `migrateRecordedAnchor({ backend, graphId, anchor })`. See
+[Migrating preview recorded time](/schema-management#migrating-preview-recorded-time).
 :::
 
 ### Writing with history enabled

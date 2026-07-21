@@ -3,7 +3,6 @@ import { z } from "zod";
 
 import {
   type AnyEdgeType,
-  asRecordedInstant,
   type CompiledRowsSql,
   type CompiledStatementSql,
   ConfigurationError,
@@ -20,6 +19,7 @@ import {
   type NodeType,
   param as parameter,
   type RecordedInstant,
+  recordedInstantRevision,
   searchable,
   type StoreSearch,
 } from "../../../src";
@@ -30,7 +30,7 @@ import {
 } from "../../../src/backend/types";
 import {
   type ReadCoordinate,
-  RECORDED_MAX,
+  RECORDED_MAX_REVISION,
   recordedInstantWallTime,
 } from "../../../src/core/temporal";
 import {
@@ -49,14 +49,17 @@ import {
   CURRENT_ONLY_READ_NAMES,
   EDGE_BATCH_READ_NAMES,
 } from "../../../src/store/collection-surface";
-import { toCanonicalRecordedBoundary } from "../../../src/store/recorded-capture";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { TRANSACTION_RUNTIME } from "../../../src/store/types";
 import { requireDefined } from "../../../src/utils/presence";
+import {
+  recordedInstantFromDriver,
+  recordedRevisionFromDriver,
+} from "../../test-utils";
 import { type HistoryIntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
-type ClockRow = Readonly<{ recorded_at: unknown }>;
+type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
 type CountRow = Readonly<{ count: unknown }>;
 type RecordedToRow = Readonly<{ recorded_to: unknown }>;
 type RecordedFromRow = Readonly<{ recorded_from: unknown }>;
@@ -471,7 +474,7 @@ async function readRecordedClock(
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<ClockRow>(
     asCompiledRowsSql(sql`
-      SELECT recorded_at
+      SELECT revision, recorded_at
       FROM ${schema.recordedClockTable}
       WHERE graph_id = ${store.graphId}
     `),
@@ -480,9 +483,7 @@ async function readRecordedClock(
   if (row === undefined) {
     throw new Error("Recorded clock row was not written");
   }
-  // The clock high-water mark is a genuine recorded instant (the same source
-  // store.recordedNow() reads), so branding it is correct, not a cast-to-silence.
-  return asRecordedInstant(toCanonicalRecordedBoundary(row.recorded_at));
+  return recordedInstantFromDriver(row.revision, row.recorded_at);
 }
 
 async function countRecordedNodeRows(
@@ -514,7 +515,7 @@ async function countOpenRecordedNodeRowsByKind(
       FROM ${schema.recordedNodesTable}
       WHERE graph_id = ${store.graphId}
         AND kind = ${kind}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   return Number(rows[0]?.count ?? 0);
@@ -556,7 +557,7 @@ async function readRecordedNodeClosedAt(
   store: RecordedSqlStore,
   kind: string,
   nodeId: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<RecordedToRow>(
     asCompiledRowsSql(sql`
@@ -569,14 +570,14 @@ async function readRecordedNodeClosedAt(
   );
   const row = rows[0];
   if (row === undefined) throw new Error(`No recorded node row for ${nodeId}`);
-  return toCanonicalRecordedBoundary(row.recorded_to);
+  return recordedRevisionFromDriver(row.recorded_to);
 }
 
 async function readRecordedEdgeClosedAt(
   store: RecordedSqlStore,
   kind: string,
   edgeId: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<RecordedToRow>(
     asCompiledRowsSql(sql`
@@ -589,14 +590,14 @@ async function readRecordedEdgeClosedAt(
   );
   const row = rows[0];
   if (row === undefined) throw new Error(`No recorded edge row for ${edgeId}`);
-  return toCanonicalRecordedBoundary(row.recorded_to);
+  return recordedRevisionFromDriver(row.recorded_to);
 }
 
 async function readRecordedNodeOpenFrom(
   store: RecordedSqlStore,
   kind: string,
   nodeId: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<RecordedFromRow>(
     asCompiledRowsSql(sql`
@@ -605,21 +606,21 @@ async function readRecordedNodeOpenFrom(
       WHERE graph_id = ${store.graphId}
         AND kind = ${kind}
         AND id = ${nodeId}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   const row = rows[0];
   if (row === undefined) {
     throw new Error(`No open recorded node row for ${nodeId}`);
   }
-  return toCanonicalRecordedBoundary(row.recorded_from);
+  return recordedRevisionFromDriver(row.recorded_from);
 }
 
 async function readRecordedEdgeOpenFrom(
   store: RecordedSqlStore,
   kind: string,
   edgeId: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<RecordedFromRow>(
     asCompiledRowsSql(sql`
@@ -628,14 +629,14 @@ async function readRecordedEdgeOpenFrom(
       WHERE graph_id = ${store.graphId}
         AND kind = ${kind}
         AND id = ${edgeId}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   const row = rows[0];
   if (row === undefined) {
     throw new Error(`No open recorded edge row for ${edgeId}`);
   }
-  return toCanonicalRecordedBoundary(row.recorded_from);
+  return recordedRevisionFromDriver(row.recorded_from);
 }
 
 async function readRecordedNodeOps(
@@ -1319,7 +1320,9 @@ export function registerRecordedTimeIntegrationTests(
       const alice = await store.nodes.Person.create({ name: "Alice", age: 30 });
       const invalidCoordinate: ReadCoordinate = {
         valid: { mode: "asOf", asOf: "2026-01-01T00:00:00.000Z" },
-        recorded: { asOf: RECORDED_MAX as RecordedInstant },
+        recorded: {
+          asOf: RECORDED_MAX_REVISION as unknown as RecordedInstant,
+        },
       };
 
       await expect(
@@ -1327,7 +1330,7 @@ export function registerRecordedTimeIntegrationTests(
           alice.id,
           {
             edges: ["knows"],
-            recordedAsOf: RECORDED_MAX as RecordedInstant,
+            recordedAsOf: RECORDED_MAX_REVISION as unknown as RecordedInstant,
           } as never,
         ),
       ).rejects.toThrow("canonical versioned recorded instant");
@@ -3011,12 +3014,14 @@ export function registerRecordedTimeIntegrationTests(
           WHERE graph_id = ${store.graphId}
         `),
       );
-      const instants = new Set(
+      const revisions = new Set(
         [...nodeFroms, ...edgeFroms].map((row) =>
-          toCanonicalRecordedBoundary(row.recorded_from),
+          recordedRevisionFromDriver(row.recorded_from),
         ),
       );
-      expect(instants).toEqual(new Set([recordedInstant]));
+      expect(revisions).toEqual(
+        new Set([recordedInstantRevision(recordedInstant)]),
+      );
 
       const recorded = store.asOfRecorded(recordedInstant);
       const people = await recorded.nodes.Person.getByIds([
@@ -3053,7 +3058,7 @@ export function registerRecordedTimeIntegrationTests(
       ).toBeUndefined();
       expect(await countRecordedEdgeRows(store, edge.id)).toBe(1);
       expect(await readRecordedEdgeClosedAt(store, "knows", edge.id)).not.toBe(
-        RECORDED_MAX,
+        RECORDED_MAX_REVISION,
       );
     });
 
@@ -3096,7 +3101,7 @@ export function registerRecordedTimeIntegrationTests(
         "cascadeKnows",
         edge.id,
       );
-      expect(nodeClosedAt).not.toBe(RECORDED_MAX);
+      expect(nodeClosedAt).not.toBe(RECORDED_MAX_REVISION);
       expect(edgeClosedAt).toBe(nodeClosedAt);
     });
 
@@ -3128,7 +3133,7 @@ export function registerRecordedTimeIntegrationTests(
         "cascadeKnows",
         edge.id,
       );
-      expect(nodeTombstoneFrom).not.toBe(RECORDED_MAX);
+      expect(nodeTombstoneFrom).not.toBe(RECORDED_MAX_REVISION);
       expect(edgeTombstoneFrom).toBe(nodeTombstoneFrom);
 
       // The diagonal recorded read at that instant shows the node already gone.
@@ -3190,7 +3195,7 @@ export function registerRecordedTimeIntegrationTests(
       );
       expect(
         await readRecordedEdgeClosedAt(evolved, "removalLink", edge.id),
-      ).toBe(RECORDED_MAX);
+      ).toBe(RECORDED_MAX_REVISION);
 
       const removed = await evolved.removeKinds(["RemovalTag"]);
       await removed.materializeRemovals();
@@ -3200,7 +3205,7 @@ export function registerRecordedTimeIntegrationTests(
       );
       expect(
         await readRecordedEdgeClosedAt(removed, "removalLink", edge.id),
-      ).not.toBe(RECORDED_MAX);
+      ).not.toBe(RECORDED_MAX_REVISION);
       expect(removed.registry.hasEdgeType("removalLink")).toBe(true);
     });
 
@@ -3215,7 +3220,10 @@ export function registerRecordedTimeIntegrationTests(
         throw new Error("Integration backend should support executeStatement");
       }
       const schema = createSqlSchema(baseBackend.tableNames);
-      const corruptClock = sql`INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at) VALUES (${store.graphId}, ${"not-a-date"})`;
+      const corruptClock = sql`
+        INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+        VALUES (${store.graphId}, ${RECORDED_MAX_REVISION}, ${"2026-01-01T00:00:00.000Z"})
+      `;
       const corruptionOutcome = await baseBackend
         .executeStatement(asCompiledStatementSql(corruptClock))
         .then(
@@ -3233,7 +3241,7 @@ export function registerRecordedTimeIntegrationTests(
         : corruptionOutcome;
 
       expect(observed).toMatch(
-        /Recorded clock row contained an invalid recorded instant/i,
+        /Recorded clock row contained an invalid revision or wall time/i,
       );
     });
 

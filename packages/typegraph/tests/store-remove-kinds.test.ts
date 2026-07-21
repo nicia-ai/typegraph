@@ -20,7 +20,7 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, KindNotFoundError } from "../src";
 import type { GraphBackend } from "../src/backend/types";
-import { RECORDED_MAX } from "../src/core/temporal";
+import { RECORDED_MAX_REVISION } from "../src/core/temporal";
 import {
   defineGraphExtension,
   KindHasReferentsError,
@@ -50,7 +50,7 @@ async function countOpenRecordedNodeRows(
       FROM ${schema.recordedNodesTable}
       WHERE graph_id = ${graphId}
         AND kind = ${kind}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   return Number(rows[0]?.count ?? 0);

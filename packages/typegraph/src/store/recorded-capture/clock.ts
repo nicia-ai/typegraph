@@ -2,7 +2,6 @@ import { type GraphBackend } from "../../backend/types";
 import {
   createRecordedInstant,
   parseRecordedInstant,
-  RECORDED_MAX,
   RECORDED_MAX_REVISION,
 } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
@@ -14,7 +13,10 @@ import { nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import { executeStatement } from "./guards";
 
-type ClockRow = Readonly<{ recorded_at: unknown }>;
+type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
+type RecordedClockParts = Readonly<{ recordedAt: string; revision: number }>;
+export type AllocatedRecordedCommit = RecordedClockParts &
+  Readonly<{ instant: string }>;
 type RevisionOriginRow = Readonly<{ origin: unknown }>;
 
 type RecordedClockBackend = Pick<
@@ -33,7 +35,8 @@ type RevisionOriginBackend = Pick<
  * the real commit within the same transaction. Revision zero is reserved for
  * this internal row and is never exposed as a valid recorded instant.
  */
-const RECORDED_MIN = "r1:0000000000000000:1970-01-01T00:00:00.000Z";
+const RECORDED_MIN_REVISION = 0;
+const RECORDED_MIN_TIME = "1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
 const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
   "typegraph:recorded-graph-write";
@@ -189,54 +192,65 @@ export async function lockRecordedGraphWrite(
   return graphWriteLockEvidence();
 }
 
-function failInvalidClockInstant(value: unknown, cause?: unknown): never {
+function failInvalidClock(value: unknown, cause?: unknown): never {
   throw new ConfigurationError(
-    "Recorded clock row contained an invalid recorded instant",
+    "Recorded clock row contained an invalid revision or wall time",
     { value },
     {
       cause,
       suggestion:
-        "Recreate recorded-time tables created by the timestamp-only preview schema before using this TypeGraph version.",
+        "Run migrateLegacyRecordedTime() before using recorded-time tables created by the timestamp-only preview schema.",
     },
   );
 }
 
-/**
- * Validates a recorded clock value read through a driver. Recorded clock
- * columns are text on every built-in backend so the versioned anchor survives
- * byte-for-byte; accepting a Date here would hide an incompatible preview
- * schema instead of failing with migration guidance.
- */
-export function toCanonicalRecordedInstant(value: unknown): string {
-  if (typeof value !== "string") return failInvalidClockInstant(value);
-  try {
-    parseRecordedInstant(value, "recorded clock");
-    return value;
-  } catch (error) {
-    return failInvalidClockInstant(value, error);
+function recordedClockRevision(value: unknown): number {
+  const revision =
+    typeof value === "bigint" ? Number(value)
+    : typeof value === "string" && /^\d+$/.test(value) ? Number(value)
+    : value;
+  if (
+    typeof revision !== "number" ||
+    !Number.isSafeInteger(revision) ||
+    revision < RECORDED_MIN_REVISION ||
+    revision >= RECORDED_MAX_REVISION
+  ) {
+    return failInvalidClock(value);
   }
+  return revision;
 }
 
-export function toCanonicalRecordedBoundary(value: unknown): string {
-  if (value === RECORDED_MAX) return RECORDED_MAX;
-  return toCanonicalRecordedInstant(value);
+function recordedClockWallTime(value: unknown): string {
+  const date =
+    value instanceof Date ? value
+    : typeof value === "string" ? new Date(value)
+    : undefined;
+  if (date === undefined || Number.isNaN(date.getTime())) {
+    return failInvalidClock(value);
+  }
+  return date.toISOString();
+}
+
+function recordedClockParts(row: ClockRow): RecordedClockParts | undefined {
+  const revision = recordedClockRevision(row.revision);
+  if (revision === RECORDED_MIN_REVISION) return undefined;
+  return { revision, recordedAt: recordedClockWallTime(row.recorded_at) };
 }
 
 function nextRecordedCommitParts(
-  previous: string | undefined,
-): Readonly<{ revision: number; recordedAt: string }> {
+  previous: RecordedClockParts | undefined,
+): RecordedClockParts {
   const wallTime = nowIso();
-  if (previous === undefined || previous === RECORDED_MIN) {
+  if (previous === undefined) {
     return { revision: 1, recordedAt: wallTime };
   }
 
-  const previousParts = parseRecordedInstant(previous, "recorded clock");
   return {
-    revision: previousParts.revision + 1,
+    revision: previous.revision + 1,
     // Keep diagonal replay cumulative across backward clock corrections without
     // manufacturing a new millisecond for same-ms commits. Throughput can make
     // this component repeat, never run ahead of the greatest observed wall time.
-    recordedAt: nonDecreasingWallTime(wallTime, previousParts.recordedAt),
+    recordedAt: nonDecreasingWallTime(wallTime, previous.recordedAt),
   };
 }
 
@@ -256,23 +270,26 @@ export async function readRecordedClock(
   schema: SqlSchema,
   graphId: string,
 ): Promise<string | undefined> {
-  const value = await readRecordedClockValue(target, schema, graphId);
-  return value === undefined ? undefined : toCanonicalRecordedInstant(value);
+  const parts = await readRecordedClockParts(target, schema, graphId);
+  return parts === undefined ? undefined : (
+      createRecordedInstant(parts.revision, parts.recordedAt)
+    );
 }
 
-async function readRecordedClockValue(
+async function readRecordedClockParts(
   target: Pick<GraphBackend, "execute">,
   schema: SqlSchema,
   graphId: string,
-): Promise<unknown> {
+): Promise<RecordedClockParts | undefined> {
   const rows = await target.execute<ClockRow>(
     asCompiledRowsSql(sql`
-      SELECT recorded_at
+      SELECT revision, recorded_at
       FROM ${schema.recordedClockTable}
       WHERE graph_id = ${graphId}
     `),
   );
-  return rows[0]?.recorded_at;
+  const row = rows[0];
+  return row === undefined ? undefined : recordedClockParts(row);
 }
 
 /**
@@ -348,14 +365,15 @@ async function writeRecordedClock(
   target: RecordedClockBackend,
   schema: SqlSchema,
   graphId: string,
-  recordedAt: string,
+  parts: RecordedClockParts,
 ): Promise<void> {
   await executeStatement(
     target,
     sql`
-      INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at)
-      VALUES (${graphId}, ${recordedAt})
-      ON CONFLICT (graph_id) DO UPDATE SET recorded_at = ${recordedAt}
+      INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+      VALUES (${graphId}, ${parts.revision}, ${parts.recordedAt})
+      ON CONFLICT (graph_id) DO UPDATE
+      SET revision = ${parts.revision}, recorded_at = ${parts.recordedAt}
     `,
   );
 }
@@ -384,9 +402,9 @@ async function lockRecordedClock(
       await executeStatement(
         target,
         sql`
-          INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at)
-          VALUES (${graphId}, ${RECORDED_MIN})
-          ON CONFLICT (graph_id) DO UPDATE SET recorded_at = recorded_at
+          INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+          VALUES (${graphId}, ${RECORDED_MIN_REVISION}, ${RECORDED_MIN_TIME})
+          ON CONFLICT (graph_id) DO UPDATE SET revision = revision
         `,
       );
       return;
@@ -403,15 +421,16 @@ export async function allocateRecordedCommit(
   graphId: string,
   ownsWriteLock: boolean,
   previousRevision?: string,
-): Promise<string> {
+): Promise<AllocatedRecordedCommit> {
   await lockRecordedClock(target, schema, graphId, ownsWriteLock);
-  const clockValue =
-    previousRevision ?? (await readRecordedClockValue(target, schema, graphId));
-  const previous = canonicalPreviousClock(clockValue);
+  const previous =
+    previousRevision === undefined ?
+      await readRecordedClockParts(target, schema, graphId)
+    : parseRecordedInstant(previousRevision, "previous recorded revision");
   const { revision, recordedAt } = nextRecordedCommitParts(previous);
   if (revision >= RECORDED_MAX_REVISION) {
     throw new ConfigurationError(
-      `Recorded commit clock reached the open sentinel ${RECORDED_MAX}`,
+      `Recorded commit clock reached the open revision sentinel ${RECORDED_MAX_REVISION}`,
       { graphId, revision },
       {
         suggestion:
@@ -419,14 +438,9 @@ export async function allocateRecordedCommit(
       },
     );
   }
-  const recordedCommit = createRecordedInstant(revision, recordedAt);
-  await writeRecordedClock(target, schema, graphId, recordedCommit);
-  return recordedCommit;
-}
-
-function canonicalPreviousClock(value: unknown): string | undefined {
-  if (value === undefined || value === RECORDED_MIN) return value;
-  return toCanonicalRecordedInstant(value);
+  const instant = createRecordedInstant(revision, recordedAt);
+  await writeRecordedClock(target, schema, graphId, { revision, recordedAt });
+  return { instant, revision, recordedAt };
 }
 
 /**
@@ -448,11 +462,12 @@ export async function advanceRevisionClock(
   ownsWriteLock: boolean,
   previousRevision?: string,
 ): Promise<string> {
-  return allocateRecordedCommit(
+  const commit = await allocateRecordedCommit(
     target,
     schema,
     graphId,
     ownsWriteLock,
     previousRevision,
   );
+  return commit.instant;
 }

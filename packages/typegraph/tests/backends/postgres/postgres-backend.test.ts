@@ -455,6 +455,8 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
 
       expect(sql).toContain('"created_at" TIMESTAMPTZ NOT NULL');
       expect(sql).toContain('"valid_from" TIMESTAMPTZ');
+      expect(sql).toContain('"recorded_from" BIGINT NOT NULL');
+      expect(sql).toContain('"revision" BIGINT NOT NULL');
     });
 
     it("includes necessary indexes", () => {

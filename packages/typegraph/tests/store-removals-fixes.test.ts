@@ -21,7 +21,7 @@ import { z } from "zod";
 import { createSqliteTables } from "../src/backend/sqlite";
 import { type GraphBackend } from "../src/backend/types";
 import { defineGraph, defineNode } from "../src/core";
-import { RECORDED_MAX } from "../src/core/temporal";
+import { RECORDED_MAX_REVISION } from "../src/core/temporal";
 import {
   defineGraphExtension,
   GRAPH_EXTENSION_ISSUE_CODES,
@@ -151,7 +151,7 @@ describe("materializeRemovals recorded cleanup transaction recovery (history)", 
           FROM ${schema.recordedNodesTable}
           WHERE graph_id = ${baseGraph.id}
             AND kind = 'Tag'
-            AND recorded_to = ${RECORDED_MAX}
+            AND recorded_to = ${RECORDED_MAX_REVISION}
         `),
       );
       return rows[0]?.open_count ?? 0;

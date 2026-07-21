@@ -355,11 +355,12 @@ adopt a caller-owned transaction:
   wall-time high-water mark. TypeGraph does not provide a cross-graph recorded
   anchor. See
   [Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time).
-- **The preview schema is intentionally incompatible.** Timestamp-only anchors
-  and PostgreSQL recorded relations using `timestamptz` predate the versioned
-  `r1:<revision>:<timestamp>` encoding. Recreate those recorded tables and reset
-  durable checkpoints when upgrading; old values fail validation instead of
-  being interpreted ambiguously.
+- **The preview schema needs an offline migration.** Timestamp-only anchors and
+  PostgreSQL recorded relations using `timestamptz` predate numeric recorded
+  revisions and the `r1:<revision>:<timestamp>` API encoding. Run
+  `migrateLegacyRecordedTime()` while writers are stopped, then use
+  `migrateRecordedAnchor()` for checkpoints held outside TypeGraph. See
+  [Migrating preview recorded time](/schema-management#migrating-preview-recorded-time).
 
 ## Schema Migration Constraints
 

@@ -198,7 +198,11 @@ export function compileTemporalFilter(
 
   const recordedFrom = sql`${prefix}recorded_from`;
   const recordedTo = sql`${prefix}recorded_to`;
-  return sql`(${validFilter}) AND ${recordedFrom} <= ${recordedAsOf} AND ${recordedAsOf} < ${recordedTo}`;
+  const recordedRevision = parseRecordedInstant(
+    recordedAsOf,
+    "recordedAsOf",
+  ).revision;
+  return sql`(${validFilter}) AND ${recordedFrom} <= ${recordedRevision} AND ${recordedRevision} < ${recordedTo}`;
 }
 
 /**

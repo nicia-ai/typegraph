@@ -10,11 +10,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  ConfigurationError,
+  compareRecordedInstants,
   createStoreWithSchema,
   defineGraph,
   defineNode,
   type RecordedInstant,
+  recordedInstantRevision,
   recordedInstantWallTime,
   renderPostgres,
   sql,
@@ -22,13 +23,15 @@ import {
 import { type GraphBackend } from "../src/backend/types";
 import { parseRecordedInstant } from "../src/core/temporal";
 import { createSqlSchema } from "../src/query/compiler/schema";
-import { asCompiledRowsSql } from "../src/query/sql-intent";
+import {
+  asCompiledRowsSql,
+  asCompiledStatementSql,
+} from "../src/query/sql-intent";
 import {
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
-  toCanonicalRecordedInstant,
 } from "../src/store/recorded-capture";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, recordedRevisionFromDriver } from "./test-utils";
 
 const Item = defineNode("Item", {
   schema: z.object({ label: z.string() }),
@@ -54,7 +57,7 @@ function requireRecordedInstant(
 async function readOpenFrom(
   backend: GraphBackend,
   id: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(backend.tableNames);
   const rows = await backend.execute<FromRow>(
     asCompiledRowsSql(sql`
@@ -65,7 +68,7 @@ async function readOpenFrom(
   );
   const row = rows[0];
   if (row === undefined) throw new Error(`No recorded row for ${id}`);
-  return toCanonicalRecordedInstant(row.recorded_from);
+  return recordedRevisionFromDriver(row.recorded_from);
 }
 
 describe("recorded commit clock", () => {
@@ -105,6 +108,25 @@ describe("recorded commit clock", () => {
     expect(graphWriteParams[0]).not.toBe(recordedClockParams[0]);
   });
 
+  it("treats the internal revision-zero lock seed as no recorded commit", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(clockGraph, backend, {
+      history: true,
+    });
+    if (backend.executeStatement === undefined) {
+      throw new Error("test backend must execute statements");
+    }
+    const schema = createSqlSchema(backend.tableNames);
+    await backend.executeStatement(
+      asCompiledStatementSql(sql`
+        INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+        VALUES (${clockGraph.id}, ${0}, ${"1970-01-01T00:00:00.000Z"})
+      `),
+    );
+
+    await expect(store.recordedNow()).resolves.toBeUndefined();
+  });
+
   it("allocates distinct, both-observable instants for same-millisecond commits", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(clockGraph, backend, {
@@ -133,13 +155,27 @@ describe("recorded commit clock", () => {
       "expected second recorded clock commit",
     );
 
+    await store.transaction(async (tx) => {
+      await tx.nodes.Item.create({ label: "third" }, { id: "c" });
+    });
+    const thirdCommit = requireRecordedInstant(
+      await store.recordedNow(),
+      "expected third recorded clock commit",
+    );
+
     expect(firstCommit).toBe("r1:0000000000000001:2026-06-01T12:00:00.000Z");
     expect(secondCommit).toBe("r1:0000000000000002:2026-06-01T12:00:00.000Z");
+    expect(thirdCommit).toBe("r1:0000000000000003:2026-06-01T12:00:00.000Z");
     expect(parseRecordedInstant(secondCommit).revision).toBe(2);
+    expect(recordedInstantRevision(thirdCommit)).toBe(3);
+    expect(compareRecordedInstants(firstCommit, secondCommit)).toBe(-1);
+    expect(compareRecordedInstants(secondCommit, secondCommit)).toBe(0);
+    expect(compareRecordedInstants(thirdCommit, secondCommit)).toBe(1);
     expect(recordedInstantWallTime(firstCommit)).toBe(new Date().toISOString());
     expect(recordedInstantWallTime(secondCommit)).toBe(
       new Date().toISOString(),
     );
+    expect(recordedInstantWallTime(thirdCommit)).toBe(new Date().toISOString());
 
     // Both instants are observable and isolate their own commit.
     const atFirst = store.asOfRecorded(firstCommit);
@@ -154,6 +190,15 @@ describe("recorded commit clock", () => {
     const bAtSecond = await atSecond.nodes.Item.getById("b" as never);
     expect(aAtSecond?.label).toBe("first");
     expect(bAtSecond?.label).toBe("second");
+    expect(await atSecond.nodes.Item.getById("c" as never)).toBeUndefined();
+
+    const atThird = store.asOfRecorded(thirdCommit);
+    const aAtThird = await atThird.nodes.Item.getById("a" as never);
+    const bAtThird = await atThird.nodes.Item.getById("b" as never);
+    const cAtThird = await atThird.nodes.Item.getById("c" as never);
+    expect(aAtThird?.label).toBe("first");
+    expect(bAtThird?.label).toBe("second");
+    expect(cAtThird?.label).toBe("third");
   });
 
   it("clamps physical time when the wall clock moves backward", async () => {
@@ -194,19 +239,6 @@ describe("recorded commit clock", () => {
     expect(await atSecond.nodes.Item.getById("b" as never)).toBeDefined();
   });
 
-  it("accepts only canonical recorded tokens from text columns", () => {
-    const instant = "r1:0000000000000007:2026-06-01T12:00:00.001Z";
-
-    expect(toCanonicalRecordedInstant(instant)).toBe(instant);
-    expect(() => toCanonicalRecordedInstant(new Date())).toThrow(
-      ConfigurationError,
-    );
-    expect(() =>
-      toCanonicalRecordedInstant("2026-06-01T12:00:00.001Z"),
-    ).toThrow(ConfigurationError);
-    expect(() => toCanonicalRecordedInstant(42)).toThrow(ConfigurationError);
-  });
-
   it("shares one recorded instant across every entity touched in a transaction", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(clockGraph, backend, {
@@ -223,8 +255,13 @@ describe("recorded commit clock", () => {
 
     // One transaction → one recorded commit instant shared by both nodes, even
     // though their inserts are distinct statements.
-    expect(await readOpenFrom(backend, "x")).toBe(
-      await readOpenFrom(backend, "y"),
+    const sharedRevision = recordedInstantRevision(
+      requireRecordedInstant(
+        await store.recordedNow(),
+        "expected shared recorded commit",
+      ),
     );
+    expect(await readOpenFrom(backend, "x")).toBe(sharedRevision);
+    expect(await readOpenFrom(backend, "y")).toBe(sharedRevision);
   });
 });
