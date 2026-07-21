@@ -1274,6 +1274,7 @@ export type GraphBackend = Readonly<{
    * @internal
    */
   commitSchemaVersionWithPreflight?: (
+    this: void,
     params: CommitSchemaVersionParams,
     preflight: (target: TransactionBackend) => Promise<void>,
   ) => Promise<SchemaVersionRow>;
@@ -1423,7 +1424,7 @@ export type GraphBackend = Readonly<{
    *
    * @internal
    */
-  ensureIdentityTables?: () => Promise<void>;
+  ensureIdentityTables?: (this: void) => Promise<void>;
 
   /**
    * Look up a recorded materialization for a declared index by its
