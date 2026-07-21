@@ -146,13 +146,14 @@ type NodeCreatePrepared = Readonly<{
    */
   idProvided: boolean;
   /**
-   * The row the duplicate-existence probe already read under this write
-   * lock, or `undefined` when the id is free. Preparation throws on a LIVE
-   * row, so a defined row here is always a tombstone awaiting resurrection.
-   * Carried out so the create path branches on it instead of re-reading the
-   * same (graph, kind, id) a second time.
+   * The soft-deleted row occupying this id, or `undefined` when the id is
+   * free. Named for what it can hold rather than what it was read as: the
+   * duplicate-existence probe in {@link finishNodeCreatePreparation} throws
+   * on a LIVE row, so what survives is always a tombstone awaiting
+   * resurrection. Carrying it here is what lets the create path route
+   * insert-vs-resurrect without re-reading the same (graph, kind, id).
    */
-  existing: BackendNodeRow | undefined;
+  tombstone: BackendNodeRow | undefined;
 }>;
 
 type CachedNodeRow = Awaited<ReturnType<GraphBackend["getNode"]>>;
@@ -593,6 +594,14 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
 
+  // LOAD-BEARING for `tombstone` below: this throw is what makes a surviving
+  // row provably a tombstone, which is the entire basis on which the create
+  // path resurrects without re-reading. Keep the throw unconditional and keep
+  // it ahead of the return. Making it conditional, moving it after the other
+  // checks, or adding a create entrypoint that skips preparation would leave
+  // `tombstone` able to hold a LIVE row, and resurrection would then overwrite
+  // a live node's props instead of erroring. Anything that relaxes this must
+  // narrow `tombstone` at its source rather than at the consumer.
   const existingNode = await backend.getNode(ctx.graphId, kind, id);
   if (existingNode && !existingNode.deleted_at) {
     throw createNodeAlreadyExistsError(kind, id);
@@ -617,7 +626,7 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
     kind,
     id,
     idProvided: draft.idProvided,
-    existing: existingNode,
+    tombstone: existingNode,
     nodeKind: draft.nodeKind,
     validatedProps,
     uniqueConstraints,
@@ -1009,7 +1018,7 @@ function partitionCreates(
   }[] = [];
 
   for (const prepared of preparedCreates) {
-    const existing = prepared.existing;
+    const existing = prepared.tombstone;
     if (existing === undefined) {
       inserts.push(prepared);
     } else {
@@ -1026,6 +1035,13 @@ function resurrectPreparedNode<G extends GraphDef>(
   prepared: NodeCreatePrepared,
   existing: BackendNodeRow,
 ): Promise<BackendNodeRow> {
+  // Resurrection replaces the row's props outright, so being handed a live row
+  // would silently overwrite a node the caller never addressed. Unreachable
+  // while preparation throws on live rows, and cheap enough to keep as the
+  // backstop for a refactor that relaxes that.
+  if (existing.deleted_at === undefined) {
+    throw createNodeAlreadyExistsError(prepared.kind, prepared.id);
+  }
   return applyNodeUpdate(
     createNodeWriteContext(ctx.graphId, ctx.registry, lock),
     {
@@ -1156,10 +1172,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         options,
       );
 
-      // `prepared.existing` is the row the duplicate check already read
-      // under this lock: live rows threw there, so a defined row is a
-      // tombstone to resurrect.
-      const existing = prepared.existing;
+      const existing = prepared.tombstone;
       if (existing !== undefined) {
         const resurrected = await resurrectPreparedNode(
           ctx,
