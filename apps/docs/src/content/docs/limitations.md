@@ -351,8 +351,9 @@ adopt a caller-owned transaction:
   clock inside the captured transaction. Omit the transaction isolation option,
   or set it to `read_committed`.
 - **Recorded anchors are per graph.** Each captured transaction advances a
-  fixed-width logical revision and pairs it with honest physical wall time.
-  TypeGraph does not provide a cross-graph recorded anchor. See
+  fixed-width logical revision and pairs it with a non-decreasing physical
+  wall-time high-water mark. TypeGraph does not provide a cross-graph recorded
+  anchor. See
   [Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time).
 - **The preview schema is intentionally incompatible.** Timestamp-only anchors
   and PostgreSQL recorded relations using `timestamptz` predate the versioned

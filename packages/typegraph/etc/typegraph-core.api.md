@@ -628,6 +628,9 @@ export type RecordedInstant = string & {
 };
 
 // @public
+export function recordedInstantWallTime(instant: RecordedInstant): string;
+
+// @public
 type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 
 // @public

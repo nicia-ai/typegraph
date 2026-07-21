@@ -91,6 +91,7 @@ export {
   metaEdge,
   type NodeKinds,
   type RecordedInstant,
+  recordedInstantWallTime,
   // Vector-slot enumeration for manual provisioning (the boot step
   // createStoreWithSchema performs via backend.ensureVectorSlotContribution)
   resolveGraphVectorSlots,

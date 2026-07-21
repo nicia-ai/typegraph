@@ -204,12 +204,15 @@ and resolves with the existing node. See
 a receipt.
 
 Every captured transaction receives one versioned recorded instant: a strict
-per-graph logical revision paired with honest physical wall time. High commit
-rates consume revisions without pushing the timestamp into the future. Group
-changes by their durable replay/checkpoint boundary so one addressable source
-position consumes one recorded instant where practical. Cap transaction size
-independently: a source may expose one coarse checkpoint for a very large
-initial sync, but that does not make an unbounded transaction safe.
+per-graph logical revision paired with a non-decreasing physical wall-time
+high-water mark. High commit rates consume revisions without pushing the
+timestamp beyond observed wall time. A backward clock correction holds the
+physical component at its prior value until the clock catches up, preserving
+cumulative diagonal checkpoint replay. Group changes by their durable
+replay/checkpoint boundary so one addressable source position consumes one
+recorded instant where practical. Cap transaction size independently: a source
+may expose one coarse checkpoint for a very large initial sync, but that does
+not make an unbounded transaction safe.
 
 Recorded clocks are independent per graph, and there is no cross-graph
 `recordedNow()` snapshot. See

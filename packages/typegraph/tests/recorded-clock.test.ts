@@ -1,10 +1,10 @@
 /**
  * Recorded commit-clock allocator tests.
  *
- * The clock combines a logical per-graph revision with honest physical wall
- * time. Two commits in the same wall-clock millisecond get distinct,
- * both-observable anchors without moving the physical timestamp into the
- * future.
+ * The clock combines a logical per-graph revision with a non-decreasing
+ * physical wall-time high-water mark. Two commits in the same wall-clock
+ * millisecond get distinct, both-observable anchors without manufacturing
+ * timestamp increments.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -15,14 +15,12 @@ import {
   defineGraph,
   defineNode,
   type RecordedInstant,
+  recordedInstantWallTime,
   renderPostgres,
   sql,
 } from "../src";
 import { type GraphBackend } from "../src/backend/types";
-import {
-  parseRecordedInstant,
-  recordedInstantWallTime,
-} from "../src/core/temporal";
+import { parseRecordedInstant } from "../src/core/temporal";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import {
@@ -158,7 +156,7 @@ describe("recorded commit clock", () => {
     expect(bAtSecond?.label).toBe("second");
   });
 
-  it("orders commits by revision when physical wall time moves backward", async () => {
+  it("clamps physical time when the wall clock moves backward", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(clockGraph, backend, {
       history: true,
@@ -182,15 +180,16 @@ describe("recorded commit clock", () => {
     expect(secondCommit > firstCommit).toBe(true);
     expect(parseRecordedInstant(secondCommit)).toEqual({
       revision: 2,
-      recordedAt: "2026-06-01T11:00:00.000Z",
+      recordedAt: "2026-06-01T12:00:00.000Z",
     });
 
-    const validAfterBothWrites = store.asOf("2026-06-01T13:00:00.000Z");
-    const atFirst = validAfterBothWrites.asOfRecorded(firstCommit);
+    const atFirst = store.asOfRecorded(firstCommit);
     expect(await atFirst.nodes.Item.getById("a" as never)).toBeDefined();
     expect(await atFirst.nodes.Item.getById("b" as never)).toBeUndefined();
 
-    const atSecond = validAfterBothWrites.asOfRecorded(secondCommit);
+    // The later diagonal checkpoint remains cumulative even though its write
+    // happened after the application clock stepped backward.
+    const atSecond = store.asOfRecorded(secondCommit);
     expect(await atSecond.nodes.Item.getById("a" as never)).toBeDefined();
     expect(await atSecond.nodes.Item.getById("b" as never)).toBeDefined();
   });

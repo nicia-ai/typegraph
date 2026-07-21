@@ -27,9 +27,11 @@ declare const RECORDED_INSTANT_BRAND: unique symbol;
  *
  * Logical revisions are strictly monotonic per graph and make every commit
  * addressable even when many commits share one wall-clock millisecond. The
- * timestamp remains the honest physical commit time used by diagonal valid-time
- * reads. The string is canonical and lexicographically ordered by revision, so
- * it can round-trip through plain string checkpoint columns without a custom
+ * timestamp is a non-decreasing physical wall-time high-water mark used by
+ * diagonal valid-time reads. Same-millisecond commits repeat it; backward clock
+ * corrections hold it at the previous value until wall time catches up. The
+ * string is canonical and lexicographically ordered by revision, so it can
+ * round-trip through plain string checkpoint columns without a custom
  * serializer.
  */
 export type RecordedInstant = string & {
@@ -98,6 +100,12 @@ export function createRecordedInstant(
   );
 }
 
+/**
+ * Returns the canonical UTC wall-time component of a recorded anchor.
+ *
+ * The value is non-decreasing per graph, but it is not the commit-order key;
+ * use the complete {@link RecordedInstant} when ordering or replaying commits.
+ */
 export function recordedInstantWallTime(instant: RecordedInstant): string {
   return parseRecordedInstant(instant).recordedAt;
 }

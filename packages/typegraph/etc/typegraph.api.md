@@ -4085,6 +4085,9 @@ export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
 
+// @public
+export function recordedInstantWallTime(instant: RecordedInstant): string;
+
 // @public (undocumented)
 type RecordedReadBinding = RecordedReadSource;
 

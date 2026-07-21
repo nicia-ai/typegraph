@@ -222,14 +222,27 @@ export function toCanonicalRecordedBoundary(value: unknown): string {
   return toCanonicalRecordedInstant(value);
 }
 
-/**
- * The next logical revision for a graph. Physical wall time is sampled
- * independently when the recorded instant is encoded, so high commit rates do
- * not push that timestamp into the future.
- */
-function nextRecordedRevision(previous: string | undefined): number {
-  if (previous === undefined || previous === RECORDED_MIN) return 1;
-  return parseRecordedInstant(previous, "recorded clock").revision + 1;
+function nextRecordedCommitParts(
+  previous: string | undefined,
+): Readonly<{ revision: number; recordedAt: string }> {
+  const wallTime = nowIso();
+  if (previous === undefined || previous === RECORDED_MIN) {
+    return { revision: 1, recordedAt: wallTime };
+  }
+
+  const previousParts = parseRecordedInstant(previous, "recorded clock");
+  return {
+    revision: previousParts.revision + 1,
+    // Keep diagonal replay cumulative across backward clock corrections without
+    // manufacturing a new millisecond for same-ms commits. Throughput can make
+    // this component repeat, never run ahead of the greatest observed wall time.
+    recordedAt: nonDecreasingWallTime(wallTime, previousParts.recordedAt),
+  };
+}
+
+function nonDecreasingWallTime(current: string, previous: string): string {
+  if (current < previous) return previous;
+  return current;
 }
 
 /**
@@ -395,7 +408,7 @@ export async function allocateRecordedCommit(
   const clockValue =
     previousRevision ?? (await readRecordedClockValue(target, schema, graphId));
   const previous = canonicalPreviousClock(clockValue);
-  const revision = nextRecordedRevision(previous);
+  const { revision, recordedAt } = nextRecordedCommitParts(previous);
   if (revision >= RECORDED_MAX_REVISION) {
     throw new ConfigurationError(
       `Recorded commit clock reached the open sentinel ${RECORDED_MAX}`,
@@ -406,7 +419,7 @@ export async function allocateRecordedCommit(
       },
     );
   }
-  const recordedCommit = createRecordedInstant(revision, nowIso());
+  const recordedCommit = createRecordedInstant(revision, recordedAt);
   await writeRecordedClock(target, schema, graphId, recordedCommit);
   return recordedCommit;
 }

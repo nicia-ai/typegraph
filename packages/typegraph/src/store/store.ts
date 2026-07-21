@@ -1358,17 +1358,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Returns a narrow read-only view pinned to a recorded/system-time instant.
    *
    * Direct `store.asOfRecorded(T)` is diagonal bitemporal sugar: it reads the
-   * recorded-time relation as of `T` and uses the same `T` for the valid-time
-   * axis. Use `store.asOf(validT).asOfRecorded(recordedT)` when the valid and
-   * recorded axes should differ.
+   * recorded-time relation at the anchor's logical revision and uses the
+   * anchor's wall-time component for the valid-time axis. Use
+   * `store.asOf(validT).asOfRecorded(recordedT)` when the valid and recorded
+   * axes should differ.
    *
    * The returned view exposes only reconstructing-safe reads: query,
    * subgraph, graph algorithms, and collection point reads.
    *
    * Prefer `await store.recordedNow()` over a wall-clock timestamp. The anchor
-   * carries both the graph's strict logical revision and honest physical commit
-   * time, so several commits in one millisecond remain independently
-   * addressable without moving the timestamp into the future.
+   * carries both the graph's strict logical revision and a non-decreasing
+   * physical wall-time high-water mark, so several commits in one millisecond
+   * remain independently addressable without manufacturing timestamp
+   * increments.
    */
   asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G> {
     const validCoordinate = resolveReadCoordinate(
@@ -1387,8 +1389,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * recorded high-water mark. After guarding the `undefined` case,
    * `store.asOfRecorded(checkpoint)` reconstructs everything committed so far, a
    * deterministic anchor that avoids guessing with the wall clock. Its logical
-   * revision is monotonic per graph while its timestamp is the physical commit
-   * time. Capture each anchor right after the writes it should cover.
+   * revision is strictly monotonic per graph while its timestamp is a
+   * non-decreasing physical wall-time high-water mark. Capture each anchor right
+   * after the writes it should cover.
    *
    * Returns `undefined` until the first write has been captured, so on a
    * brand-new graph guard the composition — `asOfRecorded(undefined)` rejects

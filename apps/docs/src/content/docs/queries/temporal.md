@@ -172,13 +172,16 @@ descriptors at runtime and rejects combining them with `history: true`.
 
 `store.asOfRecorded(T)` reconstructs the graph as TypeGraph recorded it at
 instant `T`. `T` is a `RecordedInstant`: a branded, versioned string containing
-both a per-graph logical revision and its physical commit time. It originates
-from `store.recordedNow()` (below), or from `asRecordedInstant(...)` when an
-anchor previously returned by TypeGraph has round-tripped through untyped
-storage:
+both a per-graph logical revision and a physical wall-time high-water mark. It
+originates from `store.recordedNow()` (below), or from
+`asRecordedInstant(...)` when an anchor previously returned by TypeGraph has
+round-tripped through untyped storage:
 
 ```typescript
-import { asRecordedInstant } from "@nicia-ai/typegraph";
+import {
+  asRecordedInstant,
+  recordedInstantWallTime,
+} from "@nicia-ai/typegraph";
 
 const recorded = store.asOfRecorded(
   asRecordedInstant("r1:0000000000000042:2024-06-01T12:00:00.000Z"),
@@ -214,15 +217,16 @@ declared node and edge kind to reconstruct a complete historical graph snapshot.
 A raw wall-clock string — `store.asOfRecorded(new Date().toISOString())` — does
 **not** type-check, by design. Wall time does not identify which commit to read
 when several commits share a millisecond. The anchor's logical revision provides
-that order; its ISO component records the honest physical commit time. To pin
-"as things stand right now" deterministically, use `store.recordedNow()` (the
-recorded high-water mark), then guard the `undefined` case before passing it to
-`store.asOfRecorded()`.
+that order; its ISO component records a non-decreasing physical wall-time
+high-water mark. To pin "as things stand right now" deterministically, use
+`store.recordedNow()` (the recorded high-water mark), then guard the `undefined`
+case before passing it to `store.asOfRecorded()`.
 
 ```typescript
 await store.nodes.Document.update(docId, { title: "Revised" });
 const checkpoint = await store.recordedNow(); // a stable anchor for this state
 if (checkpoint === undefined) throw new Error("expected a recorded checkpoint");
+console.log(recordedInstantWallTime(checkpoint)); // canonical UTC wall time
 // ...later, however much the graph has changed:
 const asOfCheckpoint = store.asOfRecorded(checkpoint);
 ```
@@ -242,10 +246,17 @@ global clock.
 
 The canonical encoding is
 `r1:<16-digit revision>:<canonical UTC timestamp>`. Revisions are strict and
-monotonic within one graph. Physical timestamps are sampled independently and
-may repeat or move backward if the application clock does; they are not forced
-forward to manufacture ordering. Consequently, commit throughput cannot push
-recorded wall time into the future.
+monotonic within one graph. The physical component is sampled from the
+application clock and clamped to the previous anchor only when that clock moves
+backward. It may repeat, but never decreases. TypeGraph does not add one
+millisecond per commit, so throughput cannot push recorded wall time beyond the
+greatest wall time the graph has actually observed. After a backward clock
+correction, the component remains at its prior high-water mark until wall time
+catches up.
+
+This non-decreasing physical component preserves cumulative diagonal replay for
+default validity timestamps: a later recorded anchor cannot pin valid time
+before an earlier commit's default `valid_from`.
 
 The fixed-width revision prefix makes anchors lexicographically sortable within
 a graph and gives each captured transaction a distinct addressable state. The
@@ -258,13 +269,11 @@ recorded instant. For event logs, align transactions with durable replay or
 checkpoint boundaries, and cap transaction size separately so an initial sync
 does not hold a write lock or capture buffer without bound.
 
-Direct `store.asOfRecorded(T)` uses the anchor's physical timestamp for its
-diagonal valid-time coordinate and its revision for the recorded-time axis.
-
-Direct `store.asOfRecorded(T)` is **diagonal** bitemporal sugar: it reads the
-recorded relation as of `T` *and* uses the same `T` for the valid-time axis. To
-pin the two axes independently — *what was valid at one instant, as TypeGraph
-captured it at another* — chain from a valid-time view:
+Direct `store.asOfRecorded(T)` is **diagonal** bitemporal sugar: it uses the
+anchor's logical revision for the recorded-time axis and its physical wall-time
+component for the valid-time axis. To pin the two axes independently — *what was
+valid at one instant, as TypeGraph captured it at another* — chain from a
+valid-time view:
 
 ```typescript
 // The state valid on Jan 1, as TypeGraph recorded it on Jun 1
@@ -277,6 +286,10 @@ const corrected = store
 
 const asKnownThen = await corrected.nodes.Invoice.getById(invoiceId);
 ```
+
+Use `recordedInstantWallTime(T)` when an application needs the supported
+physical wall-time component for display or logging. Do not split the versioned
+anchor string manually.
 
 `store.view({ mode }).asOfRecorded(T)` composes recorded time with any
 valid-time mode — e.g. `includeTombstones` to reconstruct soft-deleted rows at a

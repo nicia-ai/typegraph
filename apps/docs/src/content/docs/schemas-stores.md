@@ -2211,6 +2211,7 @@ store.asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
 //       store.view({ mode }).asOfRecorded(recordedT)
 store.recordedNow(): Promise<RecordedInstant | undefined>;
 asRecordedInstant(value: string): RecordedInstant; // re-brand a persisted anchor
+recordedInstantWallTime(value: RecordedInstant): string;
 ```
 
 - **`store.asOfRecorded(T)`** is diagonal sugar — the recorded *and* valid axes
@@ -2222,7 +2223,8 @@ asRecordedInstant(value: string): RecordedInstant; // re-brand a persisted ancho
   has round-tripped through untyped storage. A raw wall-clock string
   (`new Date().toISOString()`) is a compile error because it cannot distinguish
   multiple commits in one millisecond. The logical revision orders commits; the
-  timestamp remains honest physical time. See
+  timestamp is a non-decreasing physical wall-time high-water mark. Use
+  `recordedInstantWallTime(T)` instead of splitting the anchor string. See
   [Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time).
 - **`store.recordedNow()`** returns the recorded high-water mark — the latest
   captured recorded instant. After guarding the `undefined` case,
