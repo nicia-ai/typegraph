@@ -6,8 +6,8 @@ below). EC2 `r7i.4xlarge` (128 GB). **Parity green** — `failures: []` on both
 component runs.
 
 Assembled from two runs (see "Operational" below): the 4 server/embedded engines
-(tg-postgres, neo4j, ladybug, pgGraph) from `ec2-20260718T062800Z`, and tg-sqlite
-+ ladybug from a `--check` fill-in `ec2-20260718T162911Z`. The two runs' ladybug
+(tg-postgres, neo4j, ladybug, pgGraph) from `ec2-20260718T062800Z`, and tg-sqlite +
+ladybug from a `--check` fill-in `ec2-20260718T162911Z`. The two runs' ladybug
 numbers agree within shared-vCPU noise, so the merge is sound; tg-sqlite's SF10
 correctness is verified by the fill-in's `--check` against ladybug.
 
@@ -98,8 +98,8 @@ does not). Parity holds via the synthetic edge weight.
 Two disk issues surfaced (both fixed on ref `57c64a76`):
 
 1. **Anonymous PG volume leak.** `docker rm -f` (without `-v`) left each PG
-   container's `/var/lib/postgresql/data` volume behind; at ~70 GB (tg-postgres)
-   + ~40 GB (pgGraph) they overflowed the 150 GiB disk before the last engine
+   container's `/var/lib/postgresql/data` volume behind; at ~70 GB (tg-postgres) +
+   ~40 GB (pgGraph) they overflowed the 150 GiB disk before the last engine
    loaded. Fixed with `rm -f -v` in `postgres-container.ts` + `pggraph.ts`.
 2. **tg-sqlite's SF10 DB exceeds 150 GiB.** Even with no PG containers, tg-sqlite
    alone (~90 GB DB + load-time WAL, on top of the ~15 GB dataset + OS/repo)

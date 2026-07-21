@@ -18,13 +18,13 @@ machine. Relative to the old store `bulkInsert` path (`store-live-indexes`):
 | **`trusted-public-atomic-deferred-indexes`** (what the SNB loader now uses) | **2238** | **3.18×** |
 | `trusted-native-live-indexes` (internal fast path) | 2065 | 3.41× |
 
-The public trusted path the SNB loaders call lands at **3.18×**, in line with
-#273's synthetic SQLite figure (2.98×). The win is drop-secondary-indexes +
+The public trusted path the SNB loaders call lands at **3.18×**, in line with #273's
+synthetic SQLite figure (2.98×). The win is drop-secondary-indexes +
 prepared/`UNNEST` writes in one transaction, then rebuild indexes + `ANALYZE`.
 
 ## 2. Reads are unaffected — full query set, not just IS1–7
 
-#273 verified IS1–7 parity. The `bench/pggraph-comparison` lanes (IC13, BFS3,
+Issue #273 verified IS1–7 parity. The `bench/pggraph-comparison` lanes (IC13, BFS3,
 IC2/IC8/IC9, GA_DEGREE, and the algorithm lane) were re-run at smoke through the
 trusted-import-loaded store: **every query that runs is `comparable=yes`**
 against the other engines. The SNB covering index is still built post-import by
