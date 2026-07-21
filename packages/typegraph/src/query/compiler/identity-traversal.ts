@@ -88,6 +88,22 @@ export function compileIdentitySourcePredicate(
       AND structural_node.recorded_from <= ${recorded.revision}
       AND structural_node.recorded_to > ${recorded.revision}
     `;
+  // COST: this whole block is a correlated subquery — it rebuilds the identity
+  // class from the assertion ledger once per source row, and under "fold" the
+  // structural relation it joins spans every live node in the graph. A
+  // historical expanded hop therefore costs ~(source rows × graph size), which
+  // measures as clean quadratic growth (SQLite, n nodes all acting as source
+  // rows: 45ms at n=250, 172ms at 500, 671ms at 1000, 2.8s at 2000). The
+  // current-coordinate branch above has no such term: it seeks the
+  // materialized closure table, which only exists for the present.
+  //
+  // Seeding the structural relation from the queried refs instead was measured
+  // and REJECTED: restricting it to (seed id + assertion endpoint ids) is
+  // closure-equivalent, but it makes the relation correlated on the seed, so
+  // the engine re-materializes it per source row instead of hoisting one scan.
+  // That was 5-7x SLOWER on the same benchmark (931ms-1.16s vs 172ms at
+  // n=500). Removing the quadratic term needs the closure hoisted to a
+  // query-level CTE keyed by all seeds, not a narrower per-seed relation.
   const sameIdEdges =
     (ctx.identitySameIdAcrossKinds ?? "fold") === "fold" ?
       sql`

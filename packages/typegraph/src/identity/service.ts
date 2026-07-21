@@ -261,6 +261,21 @@ async function executeStatement(
   await target.executeStatement(asCompiledStatementSql(statement));
 }
 
+/**
+ * Serializes identity-affecting writers on one graph (Postgres only; SQLite
+ * writers are already serialized by its single-writer lock).
+ *
+ * The lock is deliberately whole-graph rather than scoped to the kinds a write
+ * touches. Identity closures are transitive: an assertion between two kinds
+ * merges their classes, so a "which kinds participate" test would have to
+ * evaluate the closure — the very thing the lock protects. A coarse lock is
+ * the only scope that is correct without reading what it guards.
+ *
+ * The cost is a known throughput ceiling: concurrent writers on a single
+ * identity-enabled graph serialize even when their kinds share no relation.
+ * Scoping the lock to connected components of the assertion graph is the
+ * refinement if that ceiling ever binds.
+ */
 export async function lockIdentityGraph(
   target: Backend,
   graphId: string,
@@ -2418,43 +2433,46 @@ export async function foldIdentityForCreatedNodes(
   await lockIdentityGraph(target, ctx.graphId);
   await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
     const ids = [...new Set(references.map((ref) => ref.id))];
-    // Deliberately per-kind (no global id index): one chunked SELECT per node
-    // kind over ALL created ids, rather than getNode per (ref, kind) pair.
-    const liveIdsByKind = new Map<string, Set<string>>();
-    for (const kind of ctx.registry.nodeKinds.keys()) {
-      const liveIds = new Set<string>();
-      for (
-        let offset = 0;
-        offset < ids.length;
-        offset += REFERENCE_CHUNK_SIZE
-      ) {
-        const idChunk = ids.slice(offset, offset + REFERENCE_CHUNK_SIZE);
-        const idList = sql.join(
-          idChunk.map((id) => sql`${id}`),
-          sql`, `,
-        );
-        const rows = await rawTarget.execute<
-          Readonly<{ kind: string; id: string }>
-        >(
-          asCompiledRowsSql(sql`
-            SELECT kind, id
-            FROM ${ctx.schema.nodesTable}
-            WHERE graph_id = ${ctx.graphId}
-              AND kind = ${kind}
-              AND id IN (${idList})
-              AND deleted_at IS NULL
-          `),
-        );
-        for (const row of rows) liveIds.add(row.id);
+    // One chunked bare-id SELECT over ALL created ids, not one per node kind:
+    // `nodes_id_idx (graph_id, id)` makes the kind-free probe an indexed seek,
+    // so the whole cross-kind peer set comes back in a single round trip.
+    const liveKindsById = new Map<string, Set<string>>();
+    for (let offset = 0; offset < ids.length; offset += REFERENCE_CHUNK_SIZE) {
+      const idChunk = ids.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+      const idList = sql.join(
+        idChunk.map((id) => sql`${id}`),
+        sql`, `,
+      );
+      const rows = await rawTarget.execute<
+        Readonly<{ kind: string; id: string }>
+      >(
+        asCompiledRowsSql(sql`
+          SELECT kind, id
+          FROM ${ctx.schema.nodesTable}
+          WHERE graph_id = ${ctx.graphId}
+            AND id IN (${idList})
+            AND deleted_at IS NULL
+        `),
+      );
+      for (const row of rows) {
+        const kinds = liveKindsById.get(row.id) ?? new Set<string>();
+        kinds.add(row.kind);
+        liveKindsById.set(row.id, kinds);
       }
-      if (liveIds.size > 0) liveIdsByKind.set(kind, liveIds);
     }
     const closureReferences: PlainNodeRef[] = [];
     for (const ref of references) {
+      // Registry order, not row-arrival order: which conflicting peer
+      // `validateCurrentRelation` reports first must not depend on how the
+      // engine happened to return rows. Iterating the registry also drops
+      // rows whose kind is outside it — those never participate in identity.
+      const liveKinds = liveKindsById.get(ref.id);
       const peers: PlainNodeRef[] = [];
-      for (const [kind, liveIds] of liveIdsByKind) {
-        if (kind === ref.kind) continue;
-        if (liveIds.has(ref.id)) peers.push({ kind, id: ref.id });
+      if (liveKinds !== undefined) {
+        for (const kind of ctx.registry.nodeKinds.keys()) {
+          if (kind === ref.kind || !liveKinds.has(kind)) continue;
+          peers.push({ kind, id: ref.id });
+        }
       }
       if (peers.length === 0) continue;
       for (const peer of peers) {

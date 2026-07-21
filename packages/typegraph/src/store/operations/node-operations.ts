@@ -139,6 +139,20 @@ type NodeCreatePrepared = Readonly<{
   validatedProps: Record<string, unknown>;
   uniqueConstraints: readonly UniqueConstraint[];
   insertParams: InsertNodeParams;
+  /**
+   * `true` when the caller supplied `input.id`. A generated id cannot
+   * already exist under another kind, so identity folding can skip its
+   * cross-kind probe entirely for those rows.
+   */
+  idProvided: boolean;
+  /**
+   * The row the duplicate-existence probe already read under this write
+   * lock, or `undefined` when the id is free. Preparation throws on a LIVE
+   * row, so a defined row here is always a tombstone awaiting resurrection.
+   * Carried out so the create path branches on it instead of re-reading the
+   * same (graph, kind, id) a second time.
+   */
+  existing: BackendNodeRow | undefined;
 }>;
 
 type CachedNodeRow = Awaited<ReturnType<GraphBackend["getNode"]>>;
@@ -521,6 +535,7 @@ type NodeCreateInternalOptions = Readonly<{
 export type NodeCreateDraft = Readonly<{
   kind: string;
   id: string;
+  idProvided: boolean;
   nodeKind: NodeType;
   uniqueConstraints: readonly UniqueConstraint[];
   validatedProps: Record<string, unknown>;
@@ -554,6 +569,7 @@ function draftNodeCreate<G extends GraphDef>(
   return {
     kind,
     id,
+    idProvided: input.id !== undefined,
     nodeKind,
     uniqueConstraints: registration.unique ?? [],
     validatedProps,
@@ -562,7 +578,14 @@ function draftNodeCreate<G extends GraphDef>(
   };
 }
 
-/** The async half: existence, disjointness, and uniqueness checks. */
+/**
+ * The async half: existence, disjointness, and uniqueness checks.
+ *
+ * The existence probe's row is returned on the prepared record: the create
+ * path needs the same row to choose between a fresh insert and a tombstone
+ * resurrection, and re-reading it would double the round trips of every
+ * create.
+ */
 async function finishNodeCreatePreparation<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   draft: NodeCreateDraft,
@@ -593,6 +616,8 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   return {
     kind,
     id,
+    idProvided: draft.idProvided,
+    existing: existingNode,
     nodeKind: draft.nodeKind,
     validatedProps,
     uniqueConstraints,
@@ -643,6 +668,22 @@ async function finalizeNodeCreateBatch<G extends GraphDef>(
     })),
     backend,
   );
+}
+
+/**
+ * The created references identity folding actually has to consider.
+ *
+ * Folding looks for a live node carrying the SAME id under a DIFFERENT kind.
+ * A generated id is fresh — nothing can already hold it — so only
+ * caller-supplied ids can participate, and a batch of purely auto-id creates
+ * needs no cross-kind probe at all.
+ */
+function foldReferences(
+  preparedCreates: readonly NodeCreatePrepared[],
+): readonly Readonly<{ kind: string; id: string }>[] {
+  return preparedCreates
+    .filter((prepared) => prepared.idProvided)
+    .map((prepared) => ({ kind: prepared.kind, id: prepared.id }));
 }
 
 async function finalizeNodeCreate<G extends GraphDef>(
@@ -898,15 +939,7 @@ async function prepareBatchCreates<G extends GraphDef>(
   inputs: readonly CreateNodeInput[],
   backend: GraphBackend | TransactionBackend,
   options?: NodeCreateInternalOptions,
-): Promise<{
-  preparedCreates: NodeCreatePrepared[];
-  /**
-   * The rows the existence probe already read, keyed by node cache key.
-   * `undefined` when the backend has no batch primitive and priming was
-   * skipped, in which case the caller falls back to per-row reads.
-   */
-  primedExisting: ReadonlyMap<string, BackendNodeRow> | undefined;
-}> {
+): Promise<readonly NodeCreatePrepared[]> {
   const {
     backend: validationBackend,
     registerPendingNode,
@@ -914,14 +947,6 @@ async function prepareBatchCreates<G extends GraphDef>(
     seedNodeRow,
     seedUniqueRow,
   } = createNodeBatchValidationBackend(ctx.graphId, ctx.registry, backend);
-
-  // Capture what priming reads so the create partition (live insert vs
-  // tombstone resurrection) reuses those rows instead of re-probing the same
-  // ids under the same write lock.
-  const primed =
-    backend.getNodes === undefined ?
-      undefined
-    : new Map<string, BackendNodeRow>();
 
   // Pass 1 (synchronous): validate every input and assign ids. This
   // surfaces a later row's validation error before an earlier row's
@@ -932,12 +957,7 @@ async function prepareBatchCreates<G extends GraphDef>(
   );
 
   await primeBatchValidationCaches(ctx, drafts, backend, {
-    seedNodeRow: (kind, id, row) => {
-      if (row !== undefined) {
-        primed?.set(buildNodeCacheKey(ctx.graphId, kind, id), row);
-      }
-      seedNodeRow(kind, id, row);
-    },
+    seedNodeRow,
     seedUniqueRow,
   });
 
@@ -960,7 +980,7 @@ async function prepareBatchCreates<G extends GraphDef>(
     );
   }
 
-  return { preparedCreates, primedExisting: primed };
+  return preparedCreates;
 }
 
 type CreatePartition = Readonly<{
@@ -971,48 +991,26 @@ type CreatePartition = Readonly<{
   }>[];
 }>;
 
-async function readExistingNodesPerRow(
-  graphId: string,
+/**
+ * Splits prepared creates into fresh inserts and tombstone resurrections.
+ *
+ * Purely in-memory: preparation already read each id's row under this write
+ * lock (batched through `getNodes` when the backend has it, per-row through
+ * the validation cache otherwise) and carried it on the prepared record, so
+ * routing costs no additional round trip.
+ */
+function partitionCreates(
   preparedCreates: readonly NodeCreatePrepared[],
-  target: GraphBackend | TransactionBackend,
-): Promise<ReadonlyMap<string, BackendNodeRow>> {
-  const existingByKey = new Map<string, BackendNodeRow>();
-  for (const prepared of preparedCreates) {
-    const existing = await target.getNode(graphId, prepared.kind, prepared.id);
-    if (existing !== undefined) {
-      existingByKey.set(
-        buildNodeCacheKey(graphId, prepared.kind, prepared.id),
-        existing,
-      );
-    }
-  }
-  return existingByKey;
-}
-
-async function partitionCreates(
-  graphId: string,
-  preparedCreates: readonly NodeCreatePrepared[],
-  target: GraphBackend | TransactionBackend,
-  primedExisting: ReadonlyMap<string, BackendNodeRow> | undefined,
-): Promise<CreatePartition> {
+): CreatePartition {
   const inserts: NodeCreatePrepared[] = [];
   const resurrections: {
     prepared: NodeCreatePrepared;
     existing: BackendNodeRow;
   }[] = [];
 
-  // Batch validation already probed these ids (one getNodes per kind, under
-  // this write lock), so reuse those rows. Backends without the batch
-  // primitive skip priming and keep the per-row fallback.
-  const existingByKey =
-    primedExisting ??
-    (await readExistingNodesPerRow(graphId, preparedCreates, target));
-
   for (const prepared of preparedCreates) {
-    const existing = existingByKey.get(
-      buildNodeCacheKey(graphId, prepared.kind, prepared.id),
-    );
-    if (existing?.deleted_at === undefined) {
+    const existing = prepared.existing;
+    if (existing === undefined) {
       inserts.push(prepared);
     } else {
       resurrections.push({ prepared, existing });
@@ -1158,8 +1156,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         options,
       );
 
-      const existing = await target.getNode(ctx.graphId, kind, id);
-      if (existing?.deleted_at !== undefined) {
+      // `prepared.existing` is the row the duplicate check already read
+      // under this lock: live rows threw there, so a defined row is a
+      // tombstone to resurrect.
+      const existing = prepared.existing;
+      if (existing !== undefined) {
         const resurrected = await resurrectPreparedNode(
           ctx,
           target,
@@ -1168,9 +1169,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           existing,
         );
         if (identity !== undefined) {
-          await identity.foldCreated(target, [
-            { kind: prepared.kind, id: prepared.id },
-          ]);
+          await identity.foldCreated(target, foldReferences([prepared]));
         }
         return shouldReturnRow ? rowToNode(resurrected) : undefined;
       }
@@ -1187,9 +1186,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
 
       await finalizeNodeCreate(ctx, prepared, target, lock);
       if (identity !== undefined) {
-        await identity.foldCreated(target, [
-          { kind: prepared.kind, id: prepared.id },
-        ]);
+        await identity.foldCreated(target, foldReferences([prepared]));
       }
 
       if (row === undefined) return;
@@ -1241,18 +1238,9 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   await runInWriteTransaction(ctx, backend, async (target, lock) => {
     const identity = ctx.identity;
     if (identity !== undefined) await identity.lock(target);
-    const { preparedCreates, primedExisting } = await prepareBatchCreates(
-      ctx,
-      inputs,
-      target,
-    );
+    const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
 
-    const partition = await partitionCreates(
-      ctx.graphId,
-      preparedCreates,
-      target,
-      primedExisting,
-    );
+    const partition = partitionCreates(preparedCreates);
     await runInsertBatch(
       nodeInsertDispatch(target),
       partition.inserts.map((prepared) => prepared.insertParams),
@@ -1262,13 +1250,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     }
     await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
     if (identity !== undefined) {
-      await identity.foldCreated(
-        target,
-        preparedCreates.map((prepared) => ({
-          kind: prepared.kind,
-          id: prepared.id,
-        })),
-      );
+      await identity.foldCreated(target, foldReferences(preparedCreates));
     }
   });
 }
@@ -1293,19 +1275,14 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   return runInWriteTransaction(ctx, backend, async (target, lock) => {
     const identity = ctx.identity;
     if (identity !== undefined) await identity.lock(target);
-    const { preparedCreates, primedExisting } = await prepareBatchCreates(
+    const preparedCreates = await prepareBatchCreates(
       ctx,
       inputs,
       target,
       options,
     );
 
-    const partition = await partitionCreates(
-      ctx.graphId,
-      preparedCreates,
-      target,
-      primedExisting,
-    );
+    const partition = partitionCreates(preparedCreates);
     const inserted = await runInsertBatchReturning(
       nodeInsertDispatch(target),
       partition.inserts.map((prepared) => prepared.insertParams),
@@ -1330,13 +1307,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       ),
     );
     if (identity !== undefined) {
-      await identity.foldCreated(
-        target,
-        preparedCreates.map((prepared) => ({
-          kind: prepared.kind,
-          id: prepared.id,
-        })),
-      );
+      await identity.foldCreated(target, foldReferences(preparedCreates));
     }
 
     return rows.map((row) => rowToNode(row));

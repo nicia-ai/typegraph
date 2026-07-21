@@ -155,6 +155,20 @@ physical edge within the step. Recursive traversal supports the same option.
 TypeGraph does not perform automatic graph-wide expansion and collection reads
 such as `getById` have no identity option.
 
+At the current coordinate the hop is two indexed seeks into the materialized
+closure table, and its cost does not grow with graph size. A **historical** hop
+— one under `asOf`, `asOfRecorded`, or a non-current `view()` — cannot use that
+table, because the closure is only materialized for the present. It instead
+rebuilds the class from the assertion ledger with a recursive query, per source
+row. Under `sameIdAcrossKinds: "fold"` that rebuild also has to consider the
+structural same-id relation, which is proportional to the number of live nodes
+in the graph, so a historical expanded hop costs roughly *source rows × graph
+size*. Measured on SQLite over a graph of *n* nodes, all of them source rows,
+end-to-end query time was 45 ms at *n* = 250, 172 ms at 500, 671 ms at 1000 and
+2.8 s at 2000 — quadratic. Keep historical expanded traversals narrowly
+filtered so few rows reach the hop; prefer current-coordinate expansion for
+wide scans.
+
 ## Interchange and branch merge
 
 Interchange format `2.0` optionally carries an identity section. State export

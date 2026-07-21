@@ -651,6 +651,8 @@ async function processNodeSlice(
       draft: {
         kind: node.kind,
         id: node.id,
+        // Interchange rows always carry an explicit id.
+        idProvided: true,
         nodeKind: schemaEntry.registration.type,
         uniqueConstraints: schemaEntry.registration.unique ?? [],
         validatedProps: propsResult.data,
