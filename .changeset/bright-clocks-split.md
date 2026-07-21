@@ -10,3 +10,5 @@ with `migrateLegacyRecordedTime()` and remap external checkpoints with
 `migrateRecordedAnchor()`. Driver timestamps are normalized without host-local
 timezone parsing, migration integrity failures are typed, and the retained
 anchor map can be dropped automatically after its final graph is cleaned up.
+History-enabled async store factories now reject an unmigrated recorded schema
+at open, including when the legacy tables are empty.

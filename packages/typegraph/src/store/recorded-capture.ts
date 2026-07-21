@@ -68,6 +68,7 @@ export {
   RECORDED_EDGE_COLUMNS,
   RECORDED_NODE_COLUMNS,
 } from "./recorded-capture/relations";
+export { assertCurrentRecordedSchema } from "./recorded-capture/schema-version";
 export {
   RECORDED_OPTIONAL_WRITE_METHODS,
   RECORDED_REQUIRED_WRITE_METHODS,

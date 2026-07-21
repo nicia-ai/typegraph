@@ -441,7 +441,8 @@ const graph = defineGraph({
 Creates the portable store contract for a graph definition. It contains the
 complete TypeGraph API and graph-owned transactions, but deliberately omits
 adapter-native handles, caller-owned transaction adoption, and mutable backend
-internals.
+internals. This synchronous factory performs no database I/O, including schema
+shape checks. Use an async factory below when startup must verify storage.
 
 ```typescript
 import { createStore } from "@nicia-ai/typegraph";
@@ -493,6 +494,13 @@ for any graph with `searchable()` fields: it durably materializes the
 fulltext storage. Bare `createStore()` does not, and the first fulltext
 operation against an uninitialized database throws
 `StoreNotInitializedError`.
+
+With `history: true`, the async open also verifies the recorded node, edge, and
+clock column shapes before returning. Databases created by the timestamp-only
+recorded-time preview must run `migrateLegacyRecordedTime({ backend })` first;
+an unmigrated schema throws a typed `ConfigurationError` with
+`details.code === "RECORDED_SCHEMA_INCOMPATIBLE"` at open rather than on the
+first write.
 
 ```typescript
 import { createStoreWithSchema } from "@nicia-ai/typegraph";

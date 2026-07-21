@@ -1,7 +1,12 @@
 /** End-to-end migration coverage for the timestamp-only preview schema. */
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
+  ConfigurationError,
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
   deleteLegacyRecordedAnchorMap,
   migrateLegacyRecordedTime,
   migrateRecordedAnchor,
@@ -21,15 +26,39 @@ const THIRD = "2026-01-01T00:00:00.002Z";
 const LEGACY_MAX = "9999-12-31T23:59:59.999Z";
 const GRAPH_ID = "legacy-recorded-graph";
 
+const LegacyItem = defineNode("LegacyItem", {
+  schema: z.object({ label: z.string() }),
+});
+
+const legacyGraph = defineGraph({
+  id: GRAPH_ID,
+  nodes: { LegacyItem: { type: LegacyItem } },
+  edges: {},
+});
+
+async function captureConfigurationError(
+  promise: Promise<unknown>,
+): Promise<ConfigurationError> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof ConfigurationError) return error;
+    throw error;
+  }
+  throw new Error("Expected ConfigurationError");
+}
+
 type RevisionRow = Readonly<{
   recorded_from: unknown;
   recorded_to: unknown;
 }>;
 type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
 type TableNameRow = Readonly<{ name: unknown }>;
+type ColumnTypeRow = Readonly<{ name: unknown; type: unknown }>;
 
 async function createLegacyRecordedSchema(
   backend: ReturnType<typeof createTestBackend>,
+  options: Readonly<{ withRows?: boolean }> = {},
 ): Promise<void> {
   if (backend.executeStatement === undefined) {
     throw new Error("SQLite test backend must execute statements");
@@ -100,6 +129,7 @@ async function createLegacyRecordedSchema(
   for (const statement of statements) {
     await backend.executeStatement(asCompiledStatementSql(statement));
   }
+  if (options.withRows === false) return;
   await backend.executeStatement(
     asCompiledStatementSql(sql`
       INSERT INTO ${schema.recordedNodesTable} (
@@ -203,6 +233,49 @@ describe("migrateLegacyRecordedTime", () => {
       `),
     );
     expect(mappingTables).toEqual([]);
+  });
+
+  it("rewrites existing empty legacy tables to the current schema", async () => {
+    const backend = createTestBackend();
+    await createLegacyRecordedSchema(backend, { withRows: false });
+
+    await expect(migrateLegacyRecordedTime({ backend })).resolves.toMatchObject(
+      {
+        migrated: true,
+        anchors: 0,
+        graphs: 0,
+      },
+    );
+
+    const schema = createSqlSchema(backend.tableNames);
+    const nodeColumns = await backend.execute<ColumnTypeRow>(
+      asCompiledRowsSql(sql`PRAGMA table_info(${schema.recordedNodesTable})`),
+    );
+    const clockColumns = await backend.execute<ColumnTypeRow>(
+      asCompiledRowsSql(sql`PRAGMA table_info(${schema.recordedClockTable})`),
+    );
+    expect(
+      nodeColumns.find((column) => column.name === "recorded_from")?.type,
+    ).toBe("INTEGER");
+    expect(
+      clockColumns.find((column) => column.name === "revision")?.type,
+    ).toBe("INTEGER");
+  });
+
+  it("rejects a history-enabled async open until legacy tables migrate", async () => {
+    const backend = createTestBackend();
+    await createLegacyRecordedSchema(backend, { withRows: false });
+
+    const error = await captureConfigurationError(
+      createStoreWithSchema(legacyGraph, backend, { history: true }),
+    );
+    expect(error.details["code"]).toBe("RECORDED_SCHEMA_INCOMPATIBLE");
+    expect(error.suggestion).toContain("migrateLegacyRecordedTime");
+
+    await migrateLegacyRecordedTime({ backend });
+    await expect(
+      createStoreWithSchema(legacyGraph, backend, { history: true }),
+    ).resolves.toBeDefined();
   });
 
   it("is a clean no-op on a fresh database", async () => {

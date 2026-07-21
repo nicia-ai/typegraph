@@ -172,6 +172,7 @@ import {
 } from "./operations";
 import {
   advanceRevisionClock,
+  assertCurrentRecordedSchema,
   assertRecordedCaptureTransactionIsolation,
   assertRevisionTrackableBackend,
   createRecordedBackend,
@@ -4122,6 +4123,18 @@ type PreparedStore<G extends GraphDef> = Readonly<{
   schemaMetadata: StoreSchemaMetadata;
 }>;
 
+async function assertHistorySchemaOnOpen(
+  backend: GraphBackend,
+  options: StoreOptions | undefined,
+): Promise<void> {
+  if (options?.history !== true) return;
+  const schema =
+    options.schema === undefined ?
+      createSqlSchema(backend.tableNames)
+    : requireSqlSchema(options.schema, "store schema");
+  await assertCurrentRecordedSchema(backend, schema);
+}
+
 async function prepareStoreWithSchema<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
@@ -4143,6 +4156,8 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     ...options,
     preloaded: { activeRow, storedSchema },
   });
+
+  await assertHistorySchemaOnOpen(backend, options);
 
   // #135/#143: this is the single durable-marker writer, and it MUST
   // run after ensureSchemaImpl so the breaking-change gate is reached
@@ -4389,7 +4404,7 @@ export async function createVerifiedStore<G extends GraphDef>(
 ): Promise<
   [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
 > {
-  const prepared = await prepareVerifiedStore(graph, backend);
+  const prepared = await prepareVerifiedStore(graph, backend, options);
   return [
     new StoreImplementation(
       prepared.graph,
@@ -4404,12 +4419,14 @@ export async function createVerifiedStore<G extends GraphDef>(
 async function prepareVerifiedStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
+  options: StoreOptions | undefined,
 ): Promise<PreparedStore<G>> {
   const {
     graph: merged,
     activeRow,
     result,
   } = await loadAndVerifyGraph(backend, graph);
+  await assertHistorySchemaOnOpen(backend, options);
   return {
     graph: merged,
     result,
@@ -4495,7 +4512,7 @@ export async function createVerifiedAdapterStore<
     SchemaValidationResult,
   ]
 > {
-  const prepared = await prepareVerifiedStore(graph, backend);
+  const prepared = await prepareVerifiedStore(graph, backend, options);
   return [
     asAdapterStoreSurface(
       new AdapterStoreImplementation(

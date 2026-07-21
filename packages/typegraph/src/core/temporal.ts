@@ -86,6 +86,23 @@ export function createRecordedInstant(
   revision: number,
   recordedAt: string,
 ): RecordedInstant {
+  if (
+    !Number.isSafeInteger(revision) ||
+    revision < 1 ||
+    revision >= RECORDED_MAX_REVISION
+  ) {
+    throw new ValidationError(
+      "createRecordedInstant revision must be a valid recorded revision.",
+      {
+        issues: [
+          {
+            path: "createRecordedInstant.revision",
+            message: `Expected a safe integer from 1 through ${String(RECORDED_MAX_REVISION - 1)}, got ${String(revision)}`,
+          },
+        ],
+      },
+    );
+  }
   const revisionText = revision
     .toString()
     .padStart(RECORDED_REVISION_WIDTH, "0");

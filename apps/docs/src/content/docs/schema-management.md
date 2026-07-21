@@ -308,8 +308,10 @@ The initial recorded-time preview stored timestamps directly in
 `recorded_from`, `recorded_to`, and the graph clock. Versioned anchors now keep
 the durable string API while recorded relations compare numeric revisions.
 
-Stop writers and run the one-time migration before opening a Store with the new
-schema:
+**Stop writers and run the one-time migration before enabling `history: true`
+with the new library version.** `createStoreWithSchema` and
+`createVerifiedStore` validate the recorded table shapes during an async open
+and reject an unmigrated preview schema before returning a store:
 
 ```typescript
 import {
@@ -343,6 +345,12 @@ and clock atomically and retains a durable old-anchor mapping so downstream
 stores can migrate separately. Re-running it after the cutover is a no-op.
 `migrateRecordedAnchor` also accepts an already-versioned `r1` anchor, making a
 mixed old/new checkpoint pass idempotent.
+
+The synchronous `createStore` factory is an attach-only, zero-I/O path, so it
+cannot inspect table shapes during construction. If used with `history: true`,
+an unmigrated schema still fails loudly on the first recorded operation. Prefer
+one of the async factories above at application startup when early schema
+verification matters.
 
 The old allocator may have pushed a hot graph's physical timestamp ahead of
 real wall time. Migration preserves that value because lowering it would put

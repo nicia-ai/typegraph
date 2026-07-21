@@ -48,7 +48,10 @@ beforeEach(async () => {
   }
 });
 
-async function seedLegacySchema(target: Pool): Promise<void> {
+async function seedLegacySchema(
+  target: Pool,
+  options: Readonly<{ withRows?: boolean }> = {},
+): Promise<void> {
   await target.query(`
     CREATE TABLE "${RECORDED_NODES}" (
       history_id TEXT NOT NULL PRIMARY KEY,
@@ -96,6 +99,7 @@ async function seedLegacySchema(target: Pool): Promise<void> {
       recorded_at TIMESTAMPTZ NOT NULL
     );
   `);
+  if (options.withRows === false) return;
   await target.query(
     `INSERT INTO "${RECORDED_NODES}" (
        history_id, graph_id, kind, id, props, version, created_at, updated_at,
@@ -152,6 +156,65 @@ describe.runIf(process.env["POSTGRES_URL"])(
           anchor: FIRST,
         }),
       ).resolves.toBe("r1:0000000000000001:2026-01-01T00:00:00.000Z");
+
+      await backend.close();
+    });
+
+    it("rewrites existing empty legacy tables and normalizes constraint names", async () => {
+      if (pool === undefined) throw new Error("PostgreSQL pool unavailable");
+      await seedLegacySchema(pool, { withRows: false });
+      const tables = createPostgresTables({
+        recordedNodes: RECORDED_NODES,
+        recordedEdges: RECORDED_EDGES,
+        recordedClock: RECORDED_CLOCK,
+      });
+      const backend = createPostgresBackend(drizzle(pool), { tables });
+
+      await expect(
+        migrateLegacyRecordedTime({ backend }),
+      ).resolves.toMatchObject({ migrated: true, anchors: 0, graphs: 0 });
+      const columns = await pool.query<{
+        column_name: string;
+        data_type: string;
+      }>(
+        `SELECT column_name, data_type
+         FROM information_schema.columns
+         WHERE table_name IN ($1, $2)
+           AND column_name IN ('recorded_from', 'revision')
+         ORDER BY column_name`,
+        [RECORDED_NODES, RECORDED_CLOCK],
+      );
+      expect(columns.rows).toEqual([
+        { column_name: "recorded_from", data_type: "bigint" },
+        { column_name: "revision", data_type: "bigint" },
+      ]);
+
+      const constraints = await pool.query<{
+        constraint_name: string;
+        table_name: string;
+      }>(
+        `SELECT constraint_name, table_name
+         FROM information_schema.table_constraints
+         WHERE table_schema = current_schema()
+           AND constraint_type = 'PRIMARY KEY'
+           AND table_name IN ($1, $2, $3)
+         ORDER BY table_name`,
+        [RECORDED_NODES, RECORDED_EDGES, RECORDED_CLOCK],
+      );
+      expect(constraints.rows).toEqual([
+        {
+          constraint_name: `${RECORDED_CLOCK}_pkey`,
+          table_name: RECORDED_CLOCK,
+        },
+        {
+          constraint_name: `${RECORDED_EDGES}_pkey`,
+          table_name: RECORDED_EDGES,
+        },
+        {
+          constraint_name: `${RECORDED_NODES}_pkey`,
+          table_name: RECORDED_NODES,
+        },
+      ]);
 
       await backend.close();
     });

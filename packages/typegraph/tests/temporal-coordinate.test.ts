@@ -88,6 +88,15 @@ describe("asRecordedInstant", () => {
     });
   });
 
+  it.each([0, -1, 1.5, Number.NaN, RECORDED_MAX_REVISION])(
+    "rejects an unencodable revision (%s)",
+    (revision) => {
+      expect(() => createRecordedInstant(revision, VALID_AT)).toThrow(
+        "createRecordedInstant revision must be a valid recorded revision",
+      );
+    },
+  );
+
   it("rejects timestamp-only preview anchors with migration guidance", () => {
     const error = captureValidationError(() => asRecordedInstant(VALID_AT));
 

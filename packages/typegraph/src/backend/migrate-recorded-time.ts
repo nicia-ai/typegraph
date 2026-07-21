@@ -618,6 +618,21 @@ async function replaceLegacyTables(
   await renameTable(target, temporary.recordedNodes, tables.recordedNodes);
   await renameTable(target, temporary.recordedEdges, tables.recordedEdges);
   await renameTable(target, temporary.recordedClock, tables.recordedClock);
+  await renamePrimaryKeyConstraint(
+    target,
+    temporary.recordedNodes,
+    tables.recordedNodes,
+  );
+  await renamePrimaryKeyConstraint(
+    target,
+    temporary.recordedEdges,
+    tables.recordedEdges,
+  );
+  await renamePrimaryKeyConstraint(
+    target,
+    temporary.recordedClock,
+    tables.recordedClock,
+  );
   for (const statement of [
     ...ddl.nodes.slice(1),
     ...ddl.edges.slice(1),
@@ -625,6 +640,22 @@ async function replaceLegacyTables(
   ]) {
     await executeDdl(target, statement);
   }
+}
+
+async function renamePrimaryKeyConstraint(
+  target: TransactionBackend,
+  temporaryTable: string,
+  finalTable: string,
+): Promise<void> {
+  if (target.dialect !== "postgres") return;
+  await executeStatement(
+    target,
+    sql`
+      ALTER TABLE ${sql.identifier(finalTable)}
+      RENAME CONSTRAINT ${sql.identifier(`${temporaryTable}_pkey`)}
+      TO ${sql.identifier(shortenedIdentifier(`${finalTable}_pkey`))}
+    `,
+  );
 }
 
 function requireCreateTable(statements: readonly string[]): string {
