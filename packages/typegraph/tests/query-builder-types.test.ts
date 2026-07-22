@@ -25,8 +25,10 @@ import {
   type Store,
   type TypedEdgeCollection,
 } from "../src";
+import { ConfigurationError } from "../src/errors";
 import { buildKindRegistry } from "../src/registry";
 import type { Edge } from "../src/store/types";
+import { matchingObject } from "./test-utils";
 
 // ============================================================
 // Test Graph Definition
@@ -94,6 +96,16 @@ const identityGraph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
+function identityNotEnabled(): unknown {
+  return expect.objectContaining({
+    name: "ConfigurationError",
+    details: matchingObject({
+      code: "IDENTITY_NOT_ENABLED",
+      graphId: graph.id,
+    }),
+  });
+}
+
 // ============================================================
 // Type-Level Tests
 // ============================================================
@@ -141,7 +153,26 @@ describe("Query Builder Type Safety", () => {
         createQueryBuilder<typeof graph>(graph.id, registry, {
           identityEnabled: true,
         }),
-      ).toThrow(/identity-enabled graph registry/u);
+      ).toThrow(identityNotEnabled());
+    });
+
+    it("uses one error code for disabled builder identity features", () => {
+      expect(() =>
+        createQueryBuilder<typeof graph>(graph.id, registry, {
+          identitySameIdAcrossKinds: "fold",
+        }),
+      ).toThrow(identityNotEnabled());
+
+      const builder = createQueryBuilder<typeof graph>(graph.id, registry).from(
+        "Person",
+        "person",
+      );
+      const unsafeOptions = { includeIdentityMembers: true } as never;
+      const traverseWithIdentity = () =>
+        builder.traverse("knows", "edge", unsafeOptions);
+
+      expect(traverseWithIdentity).toThrow(ConfigurationError);
+      expect(traverseWithIdentity).toThrow(identityNotEnabled());
     });
   });
 

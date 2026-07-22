@@ -1291,7 +1291,7 @@ export class QueryBuilder<
     }
     throw new ConfigurationError(
       "includeIdentityMembers requires an identity-enabled graph registry.",
-      { code: "IDENTITY_TRAVERSAL_REQUIRES_PROFILE" },
+      { code: "IDENTITY_NOT_ENABLED", graphId: this.#config.graphId },
       {
         suggestion:
           "Enable defineGraph(...).identity and build the registry from that graph.",

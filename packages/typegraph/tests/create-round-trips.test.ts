@@ -38,6 +38,8 @@ const identityGraph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
+const PEER_RESURRECTION_VALID_FROM = "2024-01-01T00:00:00.000Z";
+
 type ReadCounts = Readonly<{
   /** `getNode` probes issued for the node being created. */
   targetNodeReads: number;
@@ -142,6 +144,7 @@ function peerResurrectionBackend(targetId: string): GraphBackend {
                 await updateNode.call(source, {
                   ...params,
                   props: { name: "Peer" },
+                  validFrom: PEER_RESURRECTION_VALID_FROM,
                 });
               }
               try {
@@ -217,7 +220,7 @@ describe("create-path round trips", () => {
     ).rejects.toThrow(/already exists/u);
   });
 
-  it("lets an upsert overwrite a peer resurrection", async () => {
+  it("lets an upsert overwrite a peer resurrection without replacing its validity window", async () => {
     const store = await createInitializedStore(
       plainGraph,
       peerResurrectionBackend("contended-upsert"),
@@ -228,11 +231,14 @@ describe("create-path round trips", () => {
     );
     await store.nodes.Person.delete(original.id);
 
-    const revived = await store.nodes.Person.upsertById("contended-upsert", {
-      name: "Late writer",
-    });
+    const revived = await store.nodes.Person.upsertById(
+      "contended-upsert",
+      { name: "Late writer" },
+      { validFrom: "2025-01-01T00:00:00.000Z" },
+    );
 
     expect(revived.name).toBe("Late writer");
+    expect(revived.meta.validFrom).toBe(PEER_RESURRECTION_VALID_FROM);
   });
 
   it("skips the identity fold probe for generated ids", async () => {

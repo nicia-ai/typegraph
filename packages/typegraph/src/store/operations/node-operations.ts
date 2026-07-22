@@ -853,7 +853,9 @@ async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
     // Another writer may resurrect the tombstone after this upsert's probe.
     // Upsert still owns the requested properties, so converge by re-reading
     // the now-live row and applying an ordinary update instead of exposing
-    // the resurrection UPDATE's internal zero-row sentinel.
+    // the resurrection UPDATE's internal zero-row sentinel. The peer owns the
+    // new validity window: this late writer updates its props without replacing
+    // the peer's validFrom, matching upsert's documented update semantics.
     const current = await target.getNode(ctx.graphId, input.kind, input.id);
     if (current === undefined || current.deleted_at !== undefined) throw error;
     return performNodeUpdate(ctx, input, target, lock);
