@@ -48,7 +48,7 @@ const jsonSchema = toJSONSchema(GraphDataSchema);
 
 ```typescript
 interface GraphData {
-  formatVersion: "1.0";
+  formatVersion: "2.0";
   exportedAt: string; // ISO datetime
   source: {
     type: "typegraph-export" | "external";
@@ -79,6 +79,18 @@ interface GraphData {
       updatedAt?: string;
     };
   }>;
+  identity?: {
+    profile: "typegraph-identity-v1";
+    mode: "state" | "archival";
+    assertions: Array<{
+      id: string;
+      relation: "same" | "different";
+      a: { kind: string; id: string };
+      b: { kind: string; id: string };
+      validFrom: string;
+      validTo?: string;
+    }>;
+  };
 }
 ```
 
@@ -88,6 +100,15 @@ import's own creation timestamp. An **explicit `null`** means the source
 row is confirmed to have no lower bound (open-left validity) — import
 preserves that instead of re-stamping it. A **string** is an explicit
 value, carried through unchanged.
+
+### Format Version Compatibility
+
+Exports always write `formatVersion: "2.0"`. The read side — both
+`importGraph`/`importGraphStream` and `GraphDataSchema.parse` — additionally
+accepts `"1.0"`. A 1.0 document is structurally a valid 2.0 document: the only
+2.0 change is the additive optional `identity` section, so pre-existing 1.0
+exports validate and import unchanged. You never need to rewrite the version
+field of an older backup; validation and import handle both.
 
 ## Exporting Data
 
@@ -123,7 +144,27 @@ const withTemporal = await exportGraph(store, {
 const withDeleted = await exportGraph(store, {
   includeDeleted: true,
 });
+
+// Identity-enabled graphs export current assertions by default.
+// Include ended assertion history explicitly:
+const archival = await exportGraph(store, {
+  identityMode: "archival",
+});
+
+// A self-contained archive pairs archival identity with includeDeleted:
+const selfContainedArchive = await exportGraph(store, {
+  identityMode: "archival",
+  includeDeleted: true,
+});
 ```
+
+**Archival identity and soft-deleted endpoints:** `identityMode: "archival"`
+also exports *ended* assertions, and an ended assertion can reference an
+endpoint that was later soft-deleted. A default export omits soft-deleted rows,
+so such an archive is not self-contained on its own — import tolerates the
+missing endpoints for ended rows, but the archived nodes are gone. When the
+archive must stand alone (backup, cold storage), pair it with
+`includeDeleted: true` so those endpoints travel with it.
 
 ### Export Options
 
@@ -134,6 +175,7 @@ const withDeleted = await exportGraph(store, {
 | `includeMeta` | `boolean` | `false` | Include version and timestamps |
 | `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields |
 | `includeDeleted` | `boolean` | `false` | Include soft-deleted records |
+| `identityMode` | `"state" \| "archival"` | `"state"` | Export current identity assertions, or current plus ended assertions |
 
 **Round-trip caveat:** with the default `includeTemporal: false`, exported
 records carry no `validFrom`/`validTo`. On import, an omitted `validFrom`
@@ -213,6 +255,11 @@ The contract is deliberately narrow:
 - Recorded-time history, revision tracking, node uniqueness constraints,
   `searchable()` fields, and `embedding()` fields are rejected in this first
   version because their sidecar writes would otherwise be skipped.
+- An `identity` chunk is rejected with `details.reason === "invalid_stream"`.
+  The trusted session writes only the node and edge relations, so it cannot
+  persist assertions or materialize the derived closure — refusing keeps
+  identity truth from being silently dropped. Use `importGraphStream` for an
+  export that carries identity.
 - Nodes must precede edges. The `meta` timestamps and node version in an
   interchange row are not restored; the import creates new storage metadata.
 - The complete stream is one transaction. Data insertion, temporary secondary
@@ -385,7 +432,7 @@ function transformExternalData(externalRecords: ExternalRecord[]): GraphData {
   const validatedNodes = nodes.map((node) => InterchangeNodeSchema.parse(node));
 
   return {
-    formatVersion: "1.0",
+    formatVersion: "2.0",
     exportedAt: new Date().toISOString(),
     source: {
       type: "external",

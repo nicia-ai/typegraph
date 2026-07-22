@@ -9,6 +9,7 @@ export { branch } from "./branch";
 export {
   BaseVersionMismatchError,
   BranchError,
+  IdentityMergeConflictError,
   MERGE_ERROR_CODES,
   MergeConflictError,
   MergeError,

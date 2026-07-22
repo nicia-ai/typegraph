@@ -82,6 +82,19 @@ export function assertValidRecordedInstant(value: string, path: string): void {
   parseRecordedInstant(value, path);
 }
 
+/**
+ * Splits an optional recorded anchor into the numeric revision that recorded
+ * relations store their `recorded_from`/`recorded_to` boundaries as, and the
+ * wall time that valid-time windows are measured against. Compilers that
+ * consult both halves parse once through this instead of per predicate.
+ */
+export function optionalRecordedInstantParts(
+  value: string | undefined,
+  path = "RecordedInstant",
+): RecordedInstantParts | undefined {
+  return value === undefined ? undefined : parseRecordedInstant(value, path);
+}
+
 export function createRecordedInstant(
   revision: number,
   recordedAt: string,

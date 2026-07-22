@@ -44,6 +44,40 @@ export type WriteTransactionContext = Readonly<{
   revisionSchema: SqlSchema;
 }>;
 
+interface WriteTransactionSession {
+  readonly ctx: WriteTransactionContext;
+  lock: GraphWriteLock | undefined;
+  wrote: boolean;
+}
+
+const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
+
+/**
+ * Binds nested typed mutations to one caller-owned transaction commit so a
+ * multi-operation `store.transaction(...)` advances its durable revision once.
+ */
+export async function withWriteTransactionSession<T>(
+  target: TransactionBackend,
+  ctx: WriteTransactionContext,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const session: WriteTransactionSession = {
+    ctx,
+    lock: undefined,
+    wrote: false,
+  };
+  writeTransactionSessions.set(target, session);
+  try {
+    const result = await fn();
+    if (session.wrote && ctx.revisionTrackingEnabled && !ctx.historyEnabled) {
+      await advanceRevisionClock(target, ctx.revisionSchema, ctx.graphId, true);
+    }
+    return result;
+  } finally {
+    writeTransactionSessions.delete(target);
+  }
+}
+
 /**
  * Runs a graph-entity mutation cascade inside a single top-level transaction.
  *
@@ -66,19 +100,42 @@ export function runInWriteTransaction<T>(
     target: GraphBackend | TransactionBackend,
     lock: GraphWriteLock,
   ) => Promise<T>,
+  options?: Readonly<{
+    /**
+     * Gate consulted AFTER `fn` resolves (autocommit path only): return false to
+     * skip advancing the durable revision clock. Defaults to advancing
+     * unconditionally. Identity mutations use this so a successful no-op
+     * (retracting an unknown id, an idempotent reassert) does not tick the clock.
+     */
+    shouldAdvanceRevision?: () => boolean;
+  }>,
 ): Promise<T> {
   const ownsWriteLock =
     "transaction" in backend && backend.capabilities.transactions;
   return runOptionallyInTransaction(backend, async (target) => {
-    const lock =
+    const session =
       ctx.historyEnabled || ctx.revisionTrackingEnabled ?
+        writeTransactionSessions.get(target)
+      : undefined;
+    const lock =
+      session?.lock ??
+      (ctx.historyEnabled || ctx.revisionTrackingEnabled ?
         await lockRecordedGraphWrite(target, ctx.graphId)
-      : uncapturedGraphWriteLock();
+      : uncapturedGraphWriteLock());
+    if (session !== undefined) session.lock = lock;
     const result = await fn(target, lock);
+    if (session !== undefined) {
+      session.wrote = true;
+      return result;
+    }
     // History capture advances the same clock when it flushes its recorded
     // after-images. Live stores opt into revisions independently, so advance
     // only there and only after every row/sidecar write succeeded.
-    if (ctx.revisionTrackingEnabled && !ctx.historyEnabled) {
+    if (
+      ctx.revisionTrackingEnabled &&
+      !ctx.historyEnabled &&
+      (options?.shouldAdvanceRevision?.() ?? true)
+    ) {
       await advanceRevisionClock(
         target,
         ctx.revisionSchema,

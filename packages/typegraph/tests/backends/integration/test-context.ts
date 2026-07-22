@@ -9,7 +9,7 @@ import { type IntegrationStore } from "./fixtures";
 type InspectableStore<G extends GraphDef> = Store<G> &
   Readonly<{ backend: GraphBackend }>;
 
-type InspectableHistoryStore<G extends GraphDef> = HistoryStore<G> &
+export type InspectableHistoryStore<G extends GraphDef> = HistoryStore<G> &
   Readonly<{ backend: HistoryStoreBackend }>;
 
 export type IntegrationTestContext = Readonly<{

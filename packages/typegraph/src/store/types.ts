@@ -9,7 +9,7 @@ import {
   type TransactionBackend,
   type TransactionReadBackend,
 } from "../backend/types";
-import { type GraphDef } from "../core/define-graph";
+import { type GraphDef, type GraphIdentityConfig } from "../core/define-graph";
 import { type RecordedInstant } from "../core/temporal";
 import {
   type AnyEdgeType,
@@ -22,6 +22,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
+import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
 import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
 import {
@@ -523,7 +524,9 @@ export type TransactionReceipt = Readonly<{
     nodes: Readonly<Record<string, number>>;
     /** Completed edge write intents by edge kind. */
     edges: Readonly<Record<string, number>>;
-    /** Sum of all node and edge write intents. */
+    /** Completed identity assertion and retraction write intents. */
+    identity: IdentityWriteSummary;
+    /** Sum of all node, edge, and identity write intents. */
     total: number;
   }>;
   /**
@@ -1550,6 +1553,11 @@ type TransactionRuntime = Readonly<{
  * });
  * ```
  */
+type TransactionIdentitySurface<G extends GraphDef> =
+  G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ identity: IdentityFacade<G> }>
+  : Readonly<Record<never, never>>;
+
 type TransactionCollections<G extends GraphDef> = Readonly<{
   [TRANSACTION_RUNTIME]: TransactionRuntime;
   nodes: GraphNodeCollections<G>;
@@ -1562,7 +1570,8 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
    * registered in this graph.
    */
   getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
-}>;
+}> &
+  TransactionIdentitySurface<G>;
 
 /**
  * A portable transaction context containing only TypeGraph-owned graph

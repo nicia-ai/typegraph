@@ -391,6 +391,8 @@ export type UpdateNodeParams = Readonly<{
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
+  /** Applied when resurrecting a tombstone; omitted means the resurrection instant. */
+  validFrom?: string | null;
   validTo?: string;
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
@@ -1264,6 +1266,19 @@ export type GraphBackend = Readonly<{
     params: CommitSchemaVersionParams,
   ) => Promise<SchemaVersionRow>;
   /**
+   * Internal schema-lifecycle seam for features whose data preflight must
+   * commit atomically with the schema CAS. The callback runs in the same
+   * write transaction before the schema lock and version write; it receives
+   * only the ordinary transaction backend, so callers cannot bypass the CAS.
+   *
+   * @internal
+   */
+  commitSchemaVersionWithPreflight?: (
+    this: void,
+    params: CommitSchemaVersionParams,
+    preflight: (target: TransactionBackend) => Promise<void>,
+  ) => Promise<SchemaVersionRow>;
+  /**
    * Atomically flips the active schema pointer to an existing version,
    * with optimistic compare-and-swap on the currently active version.
    * Used by `rollbackSchema` and any other "promote/demote existing
@@ -1391,6 +1406,25 @@ export type GraphBackend = Readonly<{
    * without replaying all base-table DDL during a merge read.
    */
   ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+
+  /**
+   * Idempotently ensure ONLY the three Operational Identity relations exist —
+   * the current-assertions table, the recorded-time assertions table, and the
+   * derived closure table — with their indexes (CREATE TABLE / CREATE INDEX IF
+   * NOT EXISTS).
+   *
+   * First enablement of identity on an existing populated deployment attaches
+   * via `createStore` / `createSqliteBackend` / `createPostgresBackend`, none
+   * of which run DDL, so the enablement preflight would otherwise
+   * SELECT/DELETE/INSERT tables that do not exist yet. The store calls this
+   * before the enablement locks and closure rebuild. Focused rather than
+   * `bootstrapTables` for the same concurrency rationale as
+   * {@link ensureRevisionOriginsTable}. Postgres callers run it inside the
+   * schema-commit transaction — Postgres DDL is transactional.
+   *
+   * @internal
+   */
+  ensureIdentityTables?: (this: void) => Promise<void>;
 
   /**
    * Look up a recorded materialization for a declared index by its

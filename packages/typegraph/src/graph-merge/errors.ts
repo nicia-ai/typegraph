@@ -19,6 +19,7 @@ export const MERGE_ERROR_CODES = {
   branch: "GRAPH_MERGE_BRANCH_ERROR",
   similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE",
   conflict: "GRAPH_MERGE_CONFLICT",
+  identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT",
   baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH",
 } as const;
 
@@ -113,6 +114,16 @@ export class MergeConflictError extends MergeError {
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "MergeConflictError";
+  }
+}
+
+/** Raised when identity branches contain opposing or retract/reassert truth. */
+export class IdentityMergeConflictError extends MergeError {
+  override readonly code = MERGE_ERROR_CODES.identityConflict;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "IdentityMergeConflictError";
   }
 }
 

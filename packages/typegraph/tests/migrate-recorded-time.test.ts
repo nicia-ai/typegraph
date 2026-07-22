@@ -18,6 +18,7 @@ import {
   asCompiledRowsSql,
   asCompiledStatementSql,
 } from "../src/query/sql-intent";
+import { assertCurrentRecordedSchema } from "../src/store/recorded-capture";
 import { createTestBackend, recordedRevisionFromDriver } from "./test-utils";
 
 const FIRST = "2026-01-01T00:00:00.000Z";
@@ -34,6 +35,13 @@ const legacyGraph = defineGraph({
   id: GRAPH_ID,
   nodes: { LegacyItem: { type: LegacyItem } },
   edges: {},
+});
+
+const identityGraph = defineGraph({
+  id: `${GRAPH_ID}-identity`,
+  nodes: { LegacyItem: { type: LegacyItem } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
 });
 
 async function captureConfigurationError(
@@ -276,6 +284,26 @@ describe("migrateLegacyRecordedTime", () => {
     await expect(
       createStoreWithSchema(legacyGraph, backend, { history: true }),
     ).resolves.toBeDefined();
+  });
+
+  it("distinguishes missing recorded identity enablement from malformed columns", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(identityGraph, backend, { history: true });
+    const schema = createSqlSchema(backend.tableNames);
+    if (backend.executeStatement === undefined) {
+      throw new Error("SQLite test backend must execute statements");
+    }
+    await backend.executeStatement(
+      asCompiledStatementSql(
+        sql`DROP TABLE ${schema.recordedIdentityAssertionsTable}`,
+      ),
+    );
+
+    const error = await captureConfigurationError(
+      assertCurrentRecordedSchema(backend, schema, true),
+    );
+    expect(error.details["code"]).toBe("RECORDED_IDENTITY_SCHEMA_MISSING");
+    expect(error.suggestion).toContain("createStoreWithSchema");
   });
 
   it("is a clean no-op on a fresh database", async () => {

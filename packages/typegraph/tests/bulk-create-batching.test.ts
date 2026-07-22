@@ -25,6 +25,7 @@ import {
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { UniquenessError } from "../src/errors";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), email: z.string() }),
@@ -293,26 +294,35 @@ describe("bulkCreate batching semantics (must not drift)", () => {
     });
   });
 
-  it("still rejects create over a tombstoned id at the insert", async () => {
-    // Pins current semantics: the existence probe lets tombstoned ids
-    // through (only live rows raise NodeAlreadyExistsError) and the INSERT
-    // then fails on the primary key — resurrect goes through upsert paths,
-    // not create. Probe batching must not change this.
+  it("resurrects a tombstoned id instead of failing at the insert", async () => {
+    // Pins current semantics: the existence probe lets tombstoned ids through
+    // (only live rows raise NodeAlreadyExistsError) and the batch partitions
+    // them into resurrections — properties replaced, validity window reset.
+    // Probe batching must not change this.
     await withCountedStore(async (store) => {
-      const node = await store.nodes.Person.create({
-        name: "first",
-        email: "gone@example.com",
-      });
+      const originalValidFrom = "2020-01-01T00:00:00.000Z";
+      const node = await store.nodes.Person.create(
+        {
+          name: "first",
+          email: "gone@example.com",
+        },
+        { validFrom: originalValidFrom },
+      );
       await store.nodes.Person.delete(node.id);
 
-      await expect(
-        store.nodes.Person.bulkCreate([
-          {
-            id: node.id,
-            props: { name: "second", email: "back@example.com" },
-          },
-        ]),
-      ).rejects.toThrow();
+      const [resurrected] = await store.nodes.Person.bulkCreate([
+        {
+          id: node.id,
+          props: { name: "second", email: "back@example.com" },
+        },
+      ]);
+
+      expect(resurrected).toMatchObject({ id: node.id, name: "second" });
+      expect(requireDefined(resurrected).meta.deletedAt).toBeUndefined();
+      expect(requireDefined(resurrected).meta.validFrom).not.toBe(
+        originalValidFrom,
+      );
+      expect(requireDefined(resurrected).meta.validTo).toBeUndefined();
     });
   });
 });

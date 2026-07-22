@@ -19,7 +19,11 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import { type EdgeRegistration, type NodeRegistration } from "../core/types";
-import { UniquenessError } from "../errors";
+import {
+  ConfigurationError,
+  UniquenessError,
+  ValidationError,
+} from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   createNodeBatchValidationBackend,
@@ -33,19 +37,22 @@ import {
 } from "../store/operations/node-write-pipeline";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
-import { storeBackend } from "../store/runtime-port";
+import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { checkUniquenessConstraints } from "../store/uniqueness";
 import { validateOptionalCanonicalIsoDate } from "../utils/date";
 import {
   type GraphData,
   type GraphDataHeader,
+  GraphDataHeaderSchema,
   type GraphInterchangeChunk,
   type ImportError,
   type ImportOptions,
   ImportOptionsSchema,
   type ImportResult,
   type InterchangeEdge,
+  type InterchangeIdentityAssertion,
+  InterchangeIdentitySchema,
   type InterchangeNode,
   type ResolvedImportOptions,
   type UnknownPropertyStrategy,
@@ -85,12 +92,20 @@ export async function importGraph<G extends GraphDef>(
   // only exist after parsing, and every internal stage reads them
   // directly.
   const options = ImportOptionsSchema.parse(rawOptions);
+
+  // Reject an identity payload aimed at an identity-disabled graph, and
+  // runtime-validate the (bounded) identity section, BEFORE any entity write —
+  // see assertIdentityImportSupported / validateIdentitySection.
+  assertIdentityImportSupported(store, data.identity !== undefined);
+  validateIdentitySection(data.identity);
+
   const result = emptyImportResult();
 
   const errors: ImportError[] = [];
   const graph = store.graph;
   const graphId = store.graphId;
   const backend = storeBackend(store);
+  const runtime = storeRuntime(store);
   const registry = store.registry;
 
   // Build lookup maps for schema validation
@@ -105,6 +120,7 @@ export async function importGraph<G extends GraphDef>(
   // runInWriteTransaction for the shared lock-before-rows contract every
   // writer follows.
   await runInWriteTransaction(store, backend, async (target, lock) => {
+    await runtime.lockIdentityImportTarget(target);
     await processNodes(
       target,
       graphId,
@@ -116,6 +132,12 @@ export async function importGraph<G extends GraphDef>(
       errors,
       importedNodeIds,
       lock,
+    );
+    await runtime.foldImportedIdentityNodes(
+      target,
+      data.nodes
+        .filter((node) => importedNodeIds.has(makeNodeKey(node.kind, node.id)))
+        .map((node) => ({ kind: node.kind, id: node.id })),
     );
     await processEdges(
       target,
@@ -129,6 +151,15 @@ export async function importGraph<G extends GraphDef>(
       errors,
       importedNodeIds,
     );
+    if (data.identity !== undefined) {
+      const identity = await runtime.importIdentityAssertionsAtTarget(
+        target,
+        data.identity.assertions,
+        data.identity.mode,
+      );
+      result.identity.created += identity.created;
+      result.identity.skipped += identity.skipped;
+    }
   });
 
   // A bulk load runs against stale planner statistics until ANALYZE runs
@@ -170,6 +201,7 @@ export async function importGraphStream<G extends GraphDef>(
   const result = emptyImportResult();
   let header: GraphDataHeader | undefined;
   let receivedEdges = false;
+  let receivedIdentity = false;
 
   for await (const chunk of chunks) {
     switch (chunk.type) {
@@ -179,6 +211,16 @@ export async function importGraphStream<G extends GraphDef>(
             "Graph interchange stream emitted more than one header.",
           );
         }
+        // The header is bounded, so validate it at the runtime stream boundary.
+        // In particular, an invalid identity profile/mode must not slip through
+        // merely because the stream's identity assertion chunk is empty.
+        validateStreamHeader(chunk.header);
+        // Reject an identity-bearing header aimed at an identity-disabled graph
+        // before any chunk is processed, matching importGraph's guard.
+        assertIdentityImportSupported(
+          store,
+          chunk.header.identity !== undefined,
+        );
         header = chunk.header;
         break;
       }
@@ -186,7 +228,7 @@ export async function importGraphStream<G extends GraphDef>(
         if (header === undefined) {
           throw new Error("Graph interchange stream must start with a header.");
         }
-        if (receivedEdges) {
+        if (receivedEdges || receivedIdentity) {
           throw new Error(
             "Graph interchange stream cannot emit nodes after edges.",
           );
@@ -194,10 +236,14 @@ export async function importGraphStream<G extends GraphDef>(
         if (chunk.nodes.length === 0) break;
         mergeImportResult(
           result,
-          await importGraph(store, graphDataForChunk(header, chunk.nodes, []), {
-            ...options,
-            refreshStatistics: false,
-          }),
+          await importGraph(
+            store,
+            graphDataForChunk(header, chunk.nodes, [], []),
+            {
+              ...options,
+              refreshStatistics: false,
+            },
+          ),
         );
         throwIfStreamChunkFailed(result, options);
         break;
@@ -206,14 +252,45 @@ export async function importGraphStream<G extends GraphDef>(
         if (header === undefined) {
           throw new Error("Graph interchange stream must start with a header.");
         }
+        if (receivedIdentity) {
+          throw new Error(
+            "Graph interchange stream cannot emit edges after identity assertions.",
+          );
+        }
         receivedEdges = true;
         if (chunk.edges.length === 0) break;
         mergeImportResult(
           result,
-          await importGraph(store, graphDataForChunk(header, [], chunk.edges), {
-            ...options,
-            refreshStatistics: false,
-          }),
+          await importGraph(
+            store,
+            graphDataForChunk(header, [], chunk.edges, []),
+            {
+              ...options,
+              refreshStatistics: false,
+            },
+          ),
+        );
+        throwIfStreamChunkFailed(result, options);
+        break;
+      }
+      case "identity": {
+        if (header === undefined) {
+          throw new Error("Graph interchange stream must start with a header.");
+        }
+        if (header.identity === undefined) {
+          throw new Error(
+            "Graph interchange stream emitted identity rows without an identity header.",
+          );
+        }
+        receivedIdentity = true;
+        if (chunk.assertions.length === 0) break;
+        mergeImportResult(
+          result,
+          await importGraph(
+            store,
+            graphDataForChunk(header, [], [], chunk.assertions),
+            { ...options, refreshStatistics: false },
+          ),
         );
         throwIfStreamChunkFailed(result, options);
         break;
@@ -246,11 +323,75 @@ function throwIfStreamChunkFailed(
   );
 }
 
+/**
+ * Rejects an identity payload aimed at an identity-disabled graph BEFORE any
+ * entity write. The internal identity import coordinator raises the same
+ * typed `ConfigurationError` (code `IDENTITY_IMPORT_REQUIRES_PROFILE`), but only
+ * after `processNodes`/`processEdges` have run — a partial write on a
+ * non-transactional backend — and only for a NON-empty assertions array (an
+ * empty envelope short-circuits and silently succeeds there). This guard fires
+ * first and regardless of assertion count.
+ */
+function assertIdentityImportSupported<G extends GraphDef>(
+  store: Store<G>,
+  hasIdentitySection: boolean,
+): void {
+  if (hasIdentitySection && store.graph.identity === undefined) {
+    throw new ConfigurationError(
+      "Cannot import identity assertions into an identity-disabled graph.",
+      { code: "IDENTITY_IMPORT_REQUIRES_PROFILE", graphId: store.graphId },
+    );
+  }
+}
+
+/**
+ * Runtime-validates just the identity section of an otherwise pre-typed
+ * `GraphData`. {@link importGraph} deliberately trusts the type for the
+ * (potentially graph-sized) node and edge arrays to preserve its per-row
+ * performance, but a JS caller can still smuggle an out-of-domain `relation` or
+ * a non-canonical timestamp straight into SQL — which SQLite accepts and
+ * PostgreSQL rejects, a backend-parity divergence. The identity section is
+ * bounded, so parsing only it closes that gap without the whole-envelope cost.
+ */
+function validateIdentitySection(identity: GraphData["identity"]): void {
+  if (identity === undefined) return;
+  const parsed = InterchangeIdentitySchema.safeParse(identity);
+  if (parsed.success) return;
+  throw new ValidationError(
+    `Invalid identity interchange section: ${parsed.error.message}`,
+    {
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+        code: issue.code,
+      })),
+    },
+    { cause: parsed.error },
+  );
+}
+
+function validateStreamHeader(header: GraphDataHeader): void {
+  const parsed = GraphDataHeaderSchema.safeParse(header);
+  if (parsed.success) return;
+  throw new ValidationError(
+    `Invalid graph interchange stream header: ${parsed.error.message}`,
+    {
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+        code: issue.code,
+      })),
+    },
+    { cause: parsed.error },
+  );
+}
+
 function emptyImportResult(): ImportResult {
   return {
     success: true,
     nodes: { created: 0, updated: 0, skipped: 0 },
     edges: { created: 0, updated: 0, skipped: 0 },
+    identity: { created: 0, skipped: 0 },
     errors: [],
   };
 }
@@ -259,8 +400,19 @@ function graphDataForChunk(
   header: GraphDataHeader,
   nodes: GraphData["nodes"],
   edges: GraphData["edges"],
+  assertions: readonly InterchangeIdentityAssertion[],
 ): GraphData {
-  return { ...header, nodes, edges };
+  const { identity, ...headerWithoutIdentity } = header;
+  return {
+    ...headerWithoutIdentity,
+    nodes,
+    edges,
+    ...(identity === undefined ?
+      {}
+    : {
+        identity: { ...identity, assertions: [...assertions] },
+      }),
+  };
 }
 function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.nodes.created += source.nodes.created;
@@ -269,6 +421,8 @@ function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.edges.created += source.edges.created;
   target.edges.updated += source.edges.updated;
   target.edges.skipped += source.edges.skipped;
+  target.identity.created += source.identity.created;
+  target.identity.skipped += source.identity.skipped;
   target.errors.push(...source.errors);
 }
 
@@ -282,7 +436,8 @@ async function refreshStatisticsAfterImport<G extends GraphDef>(
     result.nodes.created +
     result.nodes.updated +
     result.edges.created +
-    result.edges.updated;
+    result.edges.updated +
+    result.identity.created;
   if ((options.refreshStatistics ?? true) && mutationCount > 0) {
     try {
       await store.refreshStatistics();
@@ -497,6 +652,8 @@ async function processNodeSlice(
       draft: {
         kind: node.kind,
         id: node.id,
+        // Interchange rows always carry an explicit id.
+        idProvided: true,
         nodeKind: schemaEntry.registration.type,
         uniqueConstraints: schemaEntry.registration.unique ?? [],
         validatedProps: propsResult.data,

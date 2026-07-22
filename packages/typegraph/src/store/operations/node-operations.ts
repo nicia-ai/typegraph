@@ -118,6 +118,18 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     ctx: OperationHookContext,
     fn: () => Promise<T>,
   ) => Promise<T>;
+  identity?: Readonly<{
+    lock: (target: GraphBackend | TransactionBackend) => Promise<void>;
+    foldCreated: (
+      target: GraphBackend | TransactionBackend,
+      references: readonly Readonly<{ kind: string; id: string }>[],
+    ) => Promise<void>;
+    detachDeleted: (
+      target: GraphBackend | TransactionBackend,
+      ref: Readonly<{ kind: string; id: string }>,
+      mode: "soft" | "hard",
+    ) => Promise<void>;
+  }>;
 }>;
 
 type NodeCreatePrepared = Readonly<{
@@ -127,6 +139,21 @@ type NodeCreatePrepared = Readonly<{
   validatedProps: Record<string, unknown>;
   uniqueConstraints: readonly UniqueConstraint[];
   insertParams: InsertNodeParams;
+  /**
+   * `true` when the caller supplied `input.id`. A generated id cannot
+   * already exist under another kind, so identity folding can skip its
+   * cross-kind probe entirely for those rows.
+   */
+  idProvided: boolean;
+  /**
+   * The soft-deleted row occupying this id, or `undefined` when the id is
+   * free. Named for what it can hold rather than what it was read as: the
+   * duplicate-existence probe in {@link finishNodeCreatePreparation} throws
+   * on a LIVE row, so what survives is always a tombstone awaiting
+   * resurrection. Carrying it here is what lets the create path route
+   * insert-vs-resurrect without re-reading the same (graph, kind, id).
+   */
+  tombstone: BackendNodeRow | undefined;
 }>;
 
 type CachedNodeRow = Awaited<ReturnType<GraphBackend["getNode"]>>;
@@ -509,6 +536,7 @@ type NodeCreateInternalOptions = Readonly<{
 export type NodeCreateDraft = Readonly<{
   kind: string;
   id: string;
+  idProvided: boolean;
   nodeKind: NodeType;
   uniqueConstraints: readonly UniqueConstraint[];
   validatedProps: Record<string, unknown>;
@@ -542,6 +570,7 @@ function draftNodeCreate<G extends GraphDef>(
   return {
     kind,
     id,
+    idProvided: input.id !== undefined,
     nodeKind,
     uniqueConstraints: registration.unique ?? [],
     validatedProps,
@@ -550,7 +579,14 @@ function draftNodeCreate<G extends GraphDef>(
   };
 }
 
-/** The async half: existence, disjointness, and uniqueness checks. */
+/**
+ * The async half: existence, disjointness, and uniqueness checks.
+ *
+ * The existence probe's row is returned on the prepared record so fresh
+ * inserts avoid a second read. Resurrection is the rare exception: it
+ * re-checks the row immediately before writing because another transaction
+ * may have resurrected it after preparation.
+ */
 async function finishNodeCreatePreparation<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   draft: NodeCreateDraft,
@@ -558,6 +594,8 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
 
+  // This is the fast-path existence gate. Resurrection repeats it immediately
+  // before the update because the row can change while constraints are checked.
   const existingNode = await backend.getNode(ctx.graphId, kind, id);
   if (existingNode && !existingNode.deleted_at) {
     throw createNodeAlreadyExistsError(kind, id);
@@ -581,6 +619,8 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   return {
     kind,
     id,
+    idProvided: draft.idProvided,
+    tombstone: existingNode,
     nodeKind: draft.nodeKind,
     validatedProps,
     uniqueConstraints,
@@ -631,6 +671,22 @@ async function finalizeNodeCreateBatch<G extends GraphDef>(
     })),
     backend,
   );
+}
+
+/**
+ * The created references identity folding actually has to consider.
+ *
+ * Folding looks for a live node carrying the SAME id under a DIFFERENT kind.
+ * A generated id is fresh — nothing can already hold it — so only
+ * caller-supplied ids can participate, and a batch of purely auto-id creates
+ * needs no cross-kind probe at all.
+ */
+function foldReferences(
+  preparedCreates: readonly NodeCreatePrepared[],
+): readonly Readonly<{ kind: string; id: string }>[] {
+  return preparedCreates
+    .filter((prepared) => prepared.idProvided)
+    .map((prepared) => ({ kind: prepared.kind, id: prepared.id }));
 }
 
 async function finalizeNodeCreate<G extends GraphDef>(
@@ -782,6 +838,30 @@ async function performNodeUpdate<G extends GraphDef>(
   return rowToNode(row);
 }
 
+async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: UpdateNodeInput,
+  target: GraphBackend | TransactionBackend,
+  lock: GraphWriteLock,
+  options?: Readonly<{ clearDeleted?: boolean }>,
+): Promise<Node> {
+  try {
+    return await performNodeUpdate(ctx, input, target, lock, options);
+  } catch (error) {
+    if (!options?.clearDeleted || !isNodeUpdateNoRowError(error)) throw error;
+
+    // Another writer may resurrect the tombstone after this upsert's probe.
+    // Upsert still owns the requested properties, so converge by re-reading
+    // the now-live row and applying an ordinary update instead of exposing
+    // the resurrection UPDATE's internal zero-row sentinel. The peer owns the
+    // new validity window: this late writer updates its props without replacing
+    // the peer's validFrom, matching upsert's documented update semantics.
+    const current = await target.getNode(ctx.graphId, input.kind, input.id);
+    if (current === undefined || current.deleted_at !== undefined) throw error;
+    return performNodeUpdate(ctx, input, target, lock);
+  }
+}
+
 // ============================================================
 // Shared Batch Preparation
 //
@@ -886,10 +966,7 @@ async function prepareBatchCreates<G extends GraphDef>(
   inputs: readonly CreateNodeInput[],
   backend: GraphBackend | TransactionBackend,
   options?: NodeCreateInternalOptions,
-): Promise<{
-  preparedCreates: NodeCreatePrepared[];
-  batchInsertParams: InsertNodeParams[];
-}> {
+): Promise<readonly NodeCreatePrepared[]> {
   const {
     backend: validationBackend,
     registerPendingNode,
@@ -930,11 +1007,98 @@ async function prepareBatchCreates<G extends GraphDef>(
     );
   }
 
-  const batchInsertParams = preparedCreates.map(
-    (prepared) => prepared.insertParams,
-  );
+  return preparedCreates;
+}
 
-  return { preparedCreates, batchInsertParams };
+type CreatePartition = Readonly<{
+  inserts: readonly NodeCreatePrepared[];
+  resurrections: readonly NodeCreatePrepared[];
+}>;
+
+/**
+ * Splits prepared creates into fresh inserts and tombstone resurrections.
+ *
+ * Purely in-memory: preparation already read each id's row under this write
+ * lock (batched through `getNodes` when the backend has it, per-row through
+ * the validation cache otherwise) and carried it on the prepared record, so
+ * routing costs no additional round trip.
+ */
+function partitionCreates(
+  preparedCreates: readonly NodeCreatePrepared[],
+): CreatePartition {
+  const inserts: NodeCreatePrepared[] = [];
+  const resurrections: NodeCreatePrepared[] = [];
+
+  for (const prepared of preparedCreates) {
+    if (prepared.tombstone === undefined) {
+      inserts.push(prepared);
+    } else {
+      resurrections.push(prepared);
+    }
+  }
+  return { inserts, resurrections };
+}
+
+function isNodeUpdateNoRowError(
+  error: unknown,
+): error is DatabaseOperationError {
+  return (
+    error instanceof DatabaseOperationError &&
+    error.details.operation === "update" &&
+    error.details.entity === "node" &&
+    error.details.reason === "no_row_returned"
+  );
+}
+
+async function resurrectPreparedNode<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: GraphBackend | TransactionBackend,
+  lock: GraphWriteLock,
+  prepared: NodeCreatePrepared,
+): Promise<BackendNodeRow> {
+  const current = await target.getNode(ctx.graphId, prepared.kind, prepared.id);
+  if (current === undefined) {
+    throw new DatabaseOperationError(
+      `Node tombstone disappeared before resurrection: ${prepared.kind} ${prepared.id}`,
+      { operation: "update", entity: "node" },
+    );
+  }
+  if (current.deleted_at === undefined) {
+    throw createNodeAlreadyExistsError(prepared.kind, prepared.id);
+  }
+  try {
+    return await applyNodeUpdate(
+      createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+      {
+        existing: current,
+        clearDeleted: true,
+        schema: prepared.nodeKind.schema,
+        validatedProps: prepared.validatedProps,
+        uniqueConstraints: prepared.uniqueConstraints,
+        ...(prepared.insertParams.validFrom === undefined ?
+          {}
+        : { validFrom: prepared.insertParams.validFrom }),
+        ...(prepared.insertParams.validTo === undefined ?
+          {}
+        : { validTo: prepared.insertParams.validTo }),
+      },
+      target,
+    );
+  } catch (error) {
+    if (!isNodeUpdateNoRowError(error)) throw error;
+    // The UPDATE itself has a tombstone predicate, closing the remaining gap
+    // between the re-read and write. Translate a peer resurrection into the
+    // create API's stable duplicate error instead of leaking a 0-row update.
+    const afterFailure = await target.getNode(
+      ctx.graphId,
+      prepared.kind,
+      prepared.id,
+    );
+    if (afterFailure !== undefined && afterFailure.deleted_at === undefined) {
+      throw createNodeAlreadyExistsError(prepared.kind, prepared.id);
+    }
+    throw error;
+  }
 }
 
 // ============================================================
@@ -1038,6 +1202,8 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     opContext,
     backend,
     async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
       const prepared = await validateAndPrepareNodeCreate(
         ctx,
         input,
@@ -1045,6 +1211,20 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         target,
         options,
       );
+
+      const existing = prepared.tombstone;
+      if (existing !== undefined) {
+        const resurrected = await resurrectPreparedNode(
+          ctx,
+          target,
+          lock,
+          prepared,
+        );
+        if (identity !== undefined) {
+          await identity.foldCreated(target, foldReferences([prepared]));
+        }
+        return shouldReturnRow ? rowToNode(resurrected) : undefined;
+      }
 
       let row: BackendNodeRow | undefined;
       if (shouldReturnRow) {
@@ -1057,6 +1237,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       }
 
       await finalizeNodeCreate(ctx, prepared, target, lock);
+      if (identity !== undefined) {
+        await identity.foldCreated(target, foldReferences([prepared]));
+      }
 
       if (row === undefined) return;
       return rowToNode(row);
@@ -1105,15 +1288,22 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   if (inputs.length === 0) return;
 
   await runInWriteTransaction(ctx, backend, async (target, lock) => {
-    const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
-      ctx,
-      inputs,
-      target,
+    const identity = ctx.identity;
+    if (identity !== undefined) await identity.lock(target);
+    const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
+
+    const partition = partitionCreates(preparedCreates);
+    await runInsertBatch(
+      nodeInsertDispatch(target),
+      partition.inserts.map((prepared) => prepared.insertParams),
     );
-
-    await runInsertBatch(nodeInsertDispatch(target), batchInsertParams);
-
-    await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
+    for (const prepared of partition.resurrections) {
+      await resurrectPreparedNode(ctx, target, lock, prepared);
+    }
+    await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
+    if (identity !== undefined) {
+      await identity.foldCreated(target, foldReferences(preparedCreates));
+    }
   });
 }
 
@@ -1135,19 +1325,42 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   if (inputs.length === 0) return [];
 
   return runInWriteTransaction(ctx, backend, async (target, lock) => {
-    const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
+    const identity = ctx.identity;
+    if (identity !== undefined) await identity.lock(target);
+    const preparedCreates = await prepareBatchCreates(
       ctx,
       inputs,
       target,
       options,
     );
 
-    const rows = await runInsertBatchReturning(
+    const partition = partitionCreates(preparedCreates);
+    const inserted = await runInsertBatchReturning(
       nodeInsertDispatch(target),
-      batchInsertParams,
+      partition.inserts.map((prepared) => prepared.insertParams),
     );
-
-    await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
+    const resurrected: BackendNodeRow[] = [];
+    for (const prepared of partition.resurrections) {
+      resurrected.push(
+        await resurrectPreparedNode(ctx, target, lock, prepared),
+      );
+    }
+    await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
+    const byReference = new Map(
+      [...inserted, ...resurrected].map((row) => [
+        JSON.stringify([row.kind, row.id]),
+        row,
+      ]),
+    );
+    const rows = preparedCreates.map((prepared) =>
+      requireDefined(
+        byReference.get(JSON.stringify([prepared.kind, prepared.id])),
+        `Missing written row for ${prepared.kind} ${prepared.id}`,
+      ),
+    );
+    if (identity !== undefined) {
+      await identity.foldCreated(target, foldReferences(preparedCreates));
+    }
 
     return rows.map((row) => rowToNode(row));
   });
@@ -1169,8 +1382,29 @@ export async function executeNodeUpdate<G extends GraphDef>(
     input.kind,
     input.id,
   );
-  return runHookedWriteOperation(ctx, opContext, backend, (target, lock) =>
-    performNodeUpdate(ctx, input, target, lock, options),
+  return runHookedWriteOperation(
+    ctx,
+    opContext,
+    backend,
+    async (target, lock) => {
+      const identity = ctx.identity;
+      if (options?.clearDeleted && identity !== undefined) {
+        await identity.lock(target);
+      }
+      const node = await performNodeUpdateWithResurrectionRecovery(
+        ctx,
+        input,
+        target,
+        lock,
+        options,
+      );
+      if (options?.clearDeleted && identity !== undefined) {
+        await identity.foldCreated(target, [
+          { kind: input.kind, id: input.id },
+        ]);
+      }
+      return node;
+    },
   );
 }
 
@@ -1184,9 +1418,23 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
-  return runInWriteTransaction(ctx, backend, (target, lock) =>
-    performNodeUpdate(ctx, input, target, lock, options),
-  );
+  return runInWriteTransaction(ctx, backend, async (target, lock) => {
+    const identity = ctx.identity;
+    if (options?.clearDeleted && identity !== undefined) {
+      await identity.lock(target);
+    }
+    const node = await performNodeUpdateWithResurrectionRecovery(
+      ctx,
+      input,
+      target,
+      lock,
+      options,
+    );
+    if (options?.clearDeleted && identity !== undefined) {
+      await identity.foldCreated(target, [{ kind: input.kind, id: input.id }]);
+    }
+    return node;
+  });
 }
 
 // ============================================================
@@ -1214,6 +1462,8 @@ export async function executeNodeDelete<G extends GraphDef>(
     opContext,
     backend,
     async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
       const registration = getNodeRegistration(ctx.graph, kind);
       // This preflight is NOT removable round-trip fat: the soft-delete
       // pipeline consumes the pre-image (uniqueness entries are keyed by
@@ -1236,6 +1486,9 @@ export async function executeNodeDelete<G extends GraphDef>(
         },
         target,
       );
+      if (identity !== undefined) {
+        await identity.detachDeleted(target, { kind, id }, "soft");
+      }
     },
   );
 }
@@ -1265,6 +1518,8 @@ export async function executeNodeHardDelete<G extends GraphDef>(
     opContext,
     backend,
     async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
       const registration = getNodeRegistration(ctx.graph, kind);
       // No in-transaction preflight (unlike soft delete, whose pipeline
       // consumes the pre-image for uniqueness-key cleanup): every hard
@@ -1288,6 +1543,9 @@ export async function executeNodeHardDelete<G extends GraphDef>(
         },
         target,
       );
+      if (identity !== undefined) {
+        await identity.detachDeleted(target, { kind, id }, "hard");
+      }
     },
   );
 }

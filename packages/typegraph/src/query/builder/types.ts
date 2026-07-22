@@ -612,6 +612,10 @@ export type QueryBuilderConfig = Readonly<{
   schemaIntrospector: SchemaIntrospector;
   /** Default traversal ontology expansion mode. */
   defaultTraversalExpansion: TraversalExpansion;
+  /** Whether this builder's graph enables Operational Identity. */
+  identityEnabled: boolean;
+  /** Equal-id behavior used by historical identity traversal compilation. */
+  identitySameIdAcrossKinds: "fold" | "ignore";
   backend?: GraphBackend;
   dialect?: SqlDialect;
   /** SQL schema configuration from createSqlSchema(...) for custom table names. */
@@ -663,4 +667,15 @@ export type CreateQueryBuilderOptions = Readonly<{
   schema?: SqlSchema;
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
+  /**
+   * Overrides whether a builder may compile identity-aware traversals
+   * (`traverse(..., { includeIdentityMembers: true })`).
+   *
+   * Defaults to the graph capability carried by `buildKindRegistry(graph)`.
+   * Passing `true` with a registry from a graph that does not enable identity
+   * throws a `ConfigurationError` instead of producing invalid SQL.
+   */
+  identityEnabled?: boolean;
+  /** Overrides the graph registry's same-id behavior. */
+  identitySameIdAcrossKinds?: "fold" | "ignore";
 }>;

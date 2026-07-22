@@ -17,6 +17,7 @@ import { z } from "zod";
 
 import {
   ConfigurationError,
+  createStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -30,6 +31,7 @@ import {
   createInitializedStore,
   createTestBackend,
   disableTransactions,
+  matchingObject,
 } from "./test-utils";
 
 // The message the shared `disableTransactions` helper rejects with; asserted by
@@ -66,6 +68,13 @@ const graph = defineGraph({
       cardinality: "many",
     },
   },
+});
+
+const identityGraph = defineGraph({
+  id: "no_tx_identity_refusal",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
 });
 
 describe("backends with transactions: false fall through to sequential execution", () => {
@@ -207,6 +216,18 @@ describe("backends with transactions: false refuse schema commits", () => {
 
   afterEach(() => {
     sqlite.close();
+  });
+
+  it("refuses Operational Identity with the stable driver capability code", () => {
+    expect(() => createStore(identityGraph, nonTxBackend)).toThrow(
+      expect.objectContaining({
+        name: "ConfigurationError",
+        details: matchingObject({
+          code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+          transactions: false,
+        }),
+      }),
+    );
   });
 
   it("commitSchemaVersion throws ConfigurationError", async () => {

@@ -203,6 +203,7 @@ export {
 // Supporting vocabulary referenced by the authoring contracts above. Keeping
 // it nameable from this entrypoint makes API Extractor's forgotten-export
 // diagnostic a zero-tolerance gate for future backend contract additions.
+export type { GraphIdentityConfig } from "../core/define-graph";
 export type { RecordedInstant } from "../core/temporal";
 export type {
   Cardinality,

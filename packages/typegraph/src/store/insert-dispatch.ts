@@ -87,6 +87,7 @@ export async function runInsertBatchReturning<Params, Row>(
   dispatch: InsertDispatch<Params, Row>,
   params: readonly Params[],
 ): Promise<readonly Row[]> {
+  if (params.length === 0) return [];
   if (dispatch.batchReturning !== undefined) {
     return dispatch.batchReturning(params);
   }

@@ -15,8 +15,8 @@ import {
   type NullCheckOp,
 } from "../core/types";
 import { ConfigurationError } from "../errors";
-import { computeTransitiveClosure } from "../ontology/closures";
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
+import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
 import { RESERVED_EDGE_KEYS, RESERVED_NODE_KEYS } from "../store/reserved-keys";
 import { compactUndefined, freezeDeep, isPlainObject } from "../utils/object";
@@ -290,7 +290,7 @@ export function validateGraphExtension(
     strict,
   );
   if (ontology !== undefined) {
-    validateOntology(ontology, nodes, issues);
+    validateOntology(ontology, issues);
   }
 
   const indexes = validateIndexesSection(
@@ -707,204 +707,18 @@ function validateOntologySection(
 
 function validateOntology(
   ontology: readonly ExtensionOntologyRelation[],
-  _nodes: Record<string, ExtensionNodeDef> | undefined,
   issues: GraphExtensionIssue[],
 ): void {
-  const seenKey = new Set<string>();
-
-  for (const [index, relation] of ontology.entries()) {
-    const path = `/ontology/${index}`;
-
-    if (
-      relation.from === relation.to &&
-      isStrictlyHierarchicalMetaEdge(relation.metaEdge)
-    ) {
-      issues.push({
-        path,
-        message: `Hierarchical meta-edge "${relation.metaEdge}" cannot be a self-loop ("${relation.from}" → "${relation.to}").`,
-        code: "ONTOLOGY_SELF_LOOP",
-      });
-    }
-
-    const key = `${relation.metaEdge}::${relation.from}->${relation.to}`;
-    if (seenKey.has(key)) {
-      issues.push({
-        path,
-        message: `Duplicate ontology relation "${relation.metaEdge}" (${relation.from} → ${relation.to}).`,
-        code: "DUPLICATE_ONTOLOGY_RELATION",
-      });
-      continue;
-    }
-    seenKey.add(key);
-  }
-
-  // Cycle detection on transitive hierarchical relations declared *within*
-  // this document. Cross-document cycles will be caught at evolve() time
-  // when the graph extension is merged with the existing graph.
-  detectHierarchicalCycles(ontology, issues);
-
-  // disjointWith ↔ subClassOf contradictions: declaring two kinds as
-  // both subclass-related (subClassOf, broader, narrower) AND
-  // disjointWith is incoherent — a subclass instance is also an
-  // instance of its parent, so they can't be in disjoint sets.
-  // Detect within the document; cross-document detection happens at
-  // merge time when the registry's closures are rebuilt.
-  detectDisjointHierarchyContradictions(ontology, issues);
-}
-
-const STRICTLY_HIERARCHICAL: ReadonlySet<MetaEdgeName> = new Set([
-  "subClassOf",
-  "broader",
-  "narrower",
-  "partOf",
-  "hasPart",
-]);
-
-function isStrictlyHierarchicalMetaEdge(name: MetaEdgeName): boolean {
-  return STRICTLY_HIERARCHICAL.has(name);
-}
-
-/**
- * Maps each hierarchical meta-edge to the canonical group it normalizes
- * into, mirroring the registry's relation-table flattening
- * (`computeClosuresFromOntology`). `narrower A→B` is the inverse of
- * `broader A→B`; `hasPart A→B` is the inverse of `partOf A→B`. Cycle
- * detection must run on the same normalized set the registry will, or
- * mixed-direction cycles like `broader A→B` + `narrower A→B` slip
- * through validation and surface only at runtime.
- */
-const HIERARCHICAL_NORMALIZATION: ReadonlyMap<
-  MetaEdgeName,
-  Readonly<{ canonical: MetaEdgeName; flip: boolean }>
-> = new Map([
-  ["subClassOf", { canonical: "subClassOf", flip: false }],
-  ["broader", { canonical: "broader", flip: false }],
-  ["narrower", { canonical: "broader", flip: true }],
-  ["partOf", { canonical: "partOf", flip: false }],
-  ["hasPart", { canonical: "partOf", flip: true }],
-]);
-
-type NormalizedHierarchicalEdge = Readonly<{
-  from: string;
-  to: string;
-  originalIndex: number;
-}>;
-
-/**
- * Group ontology relations by their canonical hierarchical meta-edge,
- * flipping `narrower` / `hasPart` entries into their canonical direction.
- * Mirrors `computeClosuresFromOntology`'s flattening so cycle and
- * disjoint-contradiction detection see the same edge set the registry
- * will. `skipSelfLoops` is set by the cycle detector (self-loops are
- * already reported by `detectOntologySelfLoops`) and unset by the
- * disjoint-contradiction detector (which still wants `(A, A)` in the
- * closure for a `disjointWith(A, A)` check).
- */
-function buildHierarchicalGroups(
-  ontology: readonly ExtensionOntologyRelation[],
-  options: Readonly<{ skipSelfLoops: boolean }>,
-): Map<MetaEdgeName, NormalizedHierarchicalEdge[]> {
-  const groups = new Map<MetaEdgeName, NormalizedHierarchicalEdge[]>();
-  for (const [index, relation] of ontology.entries()) {
-    const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
-    if (normalization === undefined) continue;
-    if (options.skipSelfLoops && relation.from === relation.to) continue;
-
-    const from = normalization.flip ? relation.to : relation.from;
-    const to = normalization.flip ? relation.from : relation.to;
-
-    const list = groups.get(normalization.canonical) ?? [];
-    list.push({ from, to, originalIndex: index });
-    groups.set(normalization.canonical, list);
-  }
-  return groups;
-}
-
-function detectHierarchicalCycles(
-  ontology: readonly ExtensionOntologyRelation[],
-  issues: GraphExtensionIssue[],
-): void {
-  const groups = buildHierarchicalGroups(ontology, { skipSelfLoops: true });
-
-  for (const [name, edges] of groups) {
-    const closure = computeTransitiveClosure(
-      edges.map((edge) => [edge.from, edge.to] as const),
-    );
-    const reportedNodes = new Set<string>();
-    for (const [from, reachable] of closure) {
-      if (!reachable.has(from) || reportedNodes.has(from)) continue;
-      reportedNodes.add(from);
-      const offendingEdge = edges.find((edge) => edge.from === from);
-      const path =
-        offendingEdge === undefined ? "/ontology" : (
-          `/ontology/${offendingEdge.originalIndex}`
-        );
-      issues.push({
-        path,
-        message: `Cycle detected in "${name}" relations involving "${from}".`,
-        code: "ONTOLOGY_CYCLE",
-      });
-    }
-  }
-}
-
-/**
- * Detects `disjointWith` ↔ subClassOf-family contradictions: declaring
- * `(A, B) disjointWith` AND `(A, B) subClassOf` (or any subclass-
- * relating meta-edge) in the same document is incoherent — a subclass
- * instance is also an instance of its parent, so they can't be in
- * disjoint sets.
- *
- * Detection runs against the closure of the hierarchical relations
- * because `(A, B) subClassOf` plus `(B, C) subClassOf` makes A and C
- * disjoint-incompatible too. `narrower` / `hasPart` are flipped to
- * their canonical direction during normalization, mirroring how
- * `detectHierarchicalCycles` builds its groups.
- *
- * Cross-document contradictions (extension declares `disjointWith(A,B)`
- * while a previously-evolved extension declared `subClassOf(A,B)`) are
- * caught at merge time when the registry's closures are rebuilt.
- */
-function detectDisjointHierarchyContradictions(
-  ontology: readonly ExtensionOntologyRelation[],
-  issues: GraphExtensionIssue[],
-): void {
-  const disjointPairs = new Set<string>();
-  const disjointPath = new Map<string, string>();
-  for (const [index, relation] of ontology.entries()) {
-    if (relation.metaEdge !== "disjointWith") continue;
-    // disjointWith is symmetric; record both orderings so the closure
-    // check below catches the contradiction regardless of which side
-    // the subclass relation orders by.
-    disjointPairs.add(`${relation.from}|${relation.to}`);
-    disjointPairs.add(`${relation.to}|${relation.from}`);
-    disjointPath.set(`${relation.from}|${relation.to}`, `/ontology/${index}`);
-    disjointPath.set(`${relation.to}|${relation.from}`, `/ontology/${index}`);
-  }
-  if (disjointPairs.size === 0) return;
-
-  // Walk the closure of every hierarchical group; any (from, reachable)
-  // pair that also appears in `disjointPairs` is a contradiction.
-  const groups = buildHierarchicalGroups(ontology, { skipSelfLoops: false });
-  const reported = new Set<string>();
-  for (const [name, edges] of groups) {
-    const closure = computeTransitiveClosure(
-      edges.map((edge) => [edge.from, edge.to] as const),
-    );
-    for (const [from, reachable] of closure) {
-      for (const to of reachable) {
-        const pairKey = `${from}|${to}`;
-        if (!disjointPairs.has(pairKey)) continue;
-        if (reported.has(pairKey)) continue;
-        reported.add(pairKey);
-        issues.push({
-          path: disjointPath.get(pairKey) ?? "/ontology",
-          message: `Contradiction: "${from}" and "${to}" are declared disjointWith but also related by "${name}" (directly or transitively).`,
-          code: "ONTOLOGY_DISJOINT_CONFLICT",
-        });
-      }
-    }
-  }
+  issues.push(
+    ...validateOntologyRelations(ontology).map((issue) => ({
+      path:
+        issue.relationIndex === undefined ?
+          "/ontology"
+        : `/ontology/${issue.relationIndex}`,
+      message: issue.message,
+      code: issue.code,
+    })),
+  );
 }
 
 // ============================================================

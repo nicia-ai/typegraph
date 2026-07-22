@@ -187,6 +187,7 @@ describe("sameAs - Alias for equivalentTo", () => {
       Account: { type: Account },
     },
     edges: {},
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- pins the migration-period alias behavior
     ontology: [sameAs(User, Account)],
   });
 

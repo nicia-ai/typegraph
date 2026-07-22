@@ -583,6 +583,38 @@ export class DisjointError extends TypeGraphError {
   }
 }
 
+export type IdentityContradictionErrorDetails = Readonly<{
+  operation: "assertSame" | "assertDifferent" | "fold" | "import";
+  a: Readonly<{ kind: string; id: string }>;
+  b: Readonly<{ kind: string; id: string }>;
+  reason: "different-assertion" | "same-class" | "disjoint-kinds";
+  conflictingAssertionId?: string;
+  conflictingKinds?: readonly [string, string];
+}>;
+
+/** Thrown when an identity mutation would make the ledger contradictory. */
+export class IdentityContradictionError extends TypeGraphError {
+  declare readonly details: IdentityContradictionErrorDetails;
+
+  constructor(
+    details: IdentityContradictionErrorDetails,
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    super(
+      `Identity contradiction: ${details.a.kind}/${details.a.id} and ${details.b.kind}/${details.b.id} cannot satisfy ${details.operation}.`,
+      "IDENTITY_CONTRADICTION",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Retract the conflicting identity assertion or correct the graph ontology before retrying.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "IdentityContradictionError";
+  }
+}
+
 /**
  * Details for RestrictedDeleteError.
  */
@@ -1319,6 +1351,7 @@ function storageLabelFromLogicalName(logicalName: unknown): string {
 export type DatabaseOperationErrorDetails = Readonly<{
   operation: string;
   entity: string;
+  reason?: "no_row_returned";
 }>;
 
 /**

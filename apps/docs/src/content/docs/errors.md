@@ -142,6 +142,53 @@ try {
 }
 ```
 
+### `IdentityContradictionError`
+
+Thrown when an identity mutation would make the assertion ledger contradictory —
+for example asserting two nodes are the same after they were asserted different,
+folding a same-class pair the ontology forbids, or importing an archive whose
+assertions conflict with the target graph. Only raised on identity-enabled
+graphs.
+
+```typescript
+try {
+  await tx.identity.assertSame(alice, aliceCopy);
+} catch (error) {
+  if (error instanceof IdentityContradictionError) {
+    console.log(error.code); // "IDENTITY_CONTRADICTION"
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // {
+    //   operation: "assertSame",       // "assertSame" | "assertDifferent" | "fold" | "import"
+    //   a: { kind: "Person", id: "..." },
+    //   b: { kind: "Person", id: "..." },
+    //   reason: "different-assertion", // "different-assertion" | "same-class" | "disjoint-kinds"
+    //   conflictingAssertionId: "...", // present when an existing assertion conflicts
+    //   conflictingKinds: ["Person", "Organization"], // present when reason is "disjoint-kinds"
+    // }
+    console.log(error.suggestion);
+    // "Retract the conflicting identity assertion or correct the graph ontology before retrying."
+  }
+}
+```
+
+### `IdentityMergeConflictError`
+
+Thrown by branch `merge()` when two branches carry opposing identity truth —
+one asserts a pair same while the other asserts it different, or a branch
+retracts an assertion the other reasserts. Extends `MergeError`, so an
+`instanceof MergeError` catch covers it alongside the other merge failures.
+
+```typescript
+try {
+  await merge(target, branch);
+} catch (error) {
+  if (error instanceof IdentityMergeConflictError) {
+    console.log(error.code); // "GRAPH_MERGE_IDENTITY_CONFLICT"
+  }
+}
+```
+
 ### `EndpointError`
 
 Thrown when an edge is created with invalid endpoint types.
@@ -606,6 +653,8 @@ try {
 |------|-------------|----------|-------------|
 | `VALIDATION_ERROR` | `ValidationError` | user | Schema validation failed |
 | `DISJOINT_ERROR` | `DisjointError` | constraint | Disjointness constraint violated |
+| `IDENTITY_CONTRADICTION` | `IdentityContradictionError` | constraint | Identity mutation would make the assertion ledger contradictory |
+| `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
 | `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |

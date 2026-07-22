@@ -71,7 +71,23 @@ function isCompatibleColumnType(
 
 function requiredRecordedColumns(
   schema: SqlSchema,
+  includeIdentity: boolean,
 ): readonly RequiredRecordedColumn[] {
+  const identityColumns: readonly RequiredRecordedColumn[] =
+    includeIdentity ?
+      [
+        {
+          table: schema.tables.recordedIdentityAssertions,
+          column: "recorded_from",
+          kind: "revision",
+        },
+        {
+          table: schema.tables.recordedIdentityAssertions,
+          column: "recorded_to",
+          kind: "revision",
+        },
+      ]
+    : [];
   return [
     {
       table: schema.tables.recordedNodes,
@@ -103,6 +119,7 @@ function requiredRecordedColumns(
       column: "recorded_at",
       kind: "wall-time",
     },
+    ...identityColumns,
   ];
 }
 
@@ -110,12 +127,16 @@ function requiredRecordedColumns(
  * Verifies that a history-enabled async store open targets the current
  * physical recorded schema. The synchronous `createStore` attach path cannot
  * perform this I/O and retains its fail-loud first-operation behavior.
+ *
+ * `includeIdentity` extends the check to the recorded identity relation, which
+ * only exists for graphs that enable the TypeGraph Identity Profile.
  */
 export async function assertCurrentRecordedSchema(
   backend: Pick<GraphBackend, "dialect" | "execute">,
   schema: SqlSchema,
+  includeIdentity = false,
 ): Promise<void> {
-  const requirements = requiredRecordedColumns(schema);
+  const requirements = requiredRecordedColumns(schema, includeIdentity);
   const tables = [...new Set(requirements.map((entry) => entry.table))];
   const columnTypes = new Map(
     await Promise.all(
@@ -125,6 +146,24 @@ export async function assertCurrentRecordedSchema(
       ),
     ),
   );
+  const recordedIdentityTable = schema.tables.recordedIdentityAssertions;
+  if (
+    includeIdentity &&
+    (columnTypes.get(recordedIdentityTable)?.size ?? 0) === 0
+  ) {
+    throw new ConfigurationError(
+      "Recorded identity history is not provisioned for this database.",
+      {
+        code: "RECORDED_IDENTITY_SCHEMA_MISSING",
+        dialect: backend.dialect,
+        table: recordedIdentityTable,
+      },
+      {
+        suggestion:
+          "Run createStoreWithSchema(...) after enabling graph identity so the recorded identity relation is created before opening with history: true.",
+      },
+    );
+  }
   const incompatible = requirements.flatMap((requirement) => {
     const actual = columnTypes.get(requirement.table)?.get(requirement.column);
     if (

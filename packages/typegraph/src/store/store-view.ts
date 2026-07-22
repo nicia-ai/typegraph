@@ -39,6 +39,7 @@ import {
   type TemporalMode,
 } from "../core/types";
 import { ConfigurationError } from "../errors";
+import { type IdentityReadFacadeFor } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { requireDefined } from "../utils/presence";
 import {
@@ -831,6 +832,11 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   /** The pinned valid-time `asOf` timestamp, or `undefined` for other modes. */
   get asOf(): string | undefined {
     return this.coordinate.valid.asOf;
+  }
+
+  /** Identity reads pinned to this view's valid and recorded coordinates. */
+  get identity(): IdentityReadFacadeFor<G> {
+    return storeRuntime(this.store).identityAtCoordinate(this.coordinate);
   }
 
   /**

@@ -189,6 +189,16 @@ async function consumeTrustedChunks<G extends GraphDef>(
         edgeCount += chunk.edges.length;
         break;
       }
+      case "identity": {
+        // The trusted session writes only the node and edge relations, so it
+        // has no way to persist assertions or materialize the derived closure.
+        // Refuse rather than drop identity truth from an identity-enabled
+        // export: `importGraph` / `importGraphStream` carry it correctly.
+        throw invalidStream(
+          "Trusted graph interchange import does not support identity assertions. " +
+            "Use importGraphStream() for an export that carries identity truth.",
+        );
+      }
     }
   }
 

@@ -135,6 +135,42 @@ describe("trusted import", () => {
     ).toBeUndefined();
   });
 
+  it("refuses an identity chunk instead of dropping identity truth", async () => {
+    const backend = createTestBackend();
+    const store = createStore(trustedGraph, backend);
+    const data = graphData([
+      { kind: "TrustedPerson", id: "alice", properties: { name: "Alice" } },
+    ]);
+    const { nodes, edges, ...header } = data;
+
+    await expect(
+      trustedImportGraphStream(
+        store,
+        chunkStream([
+          { type: "header", header },
+          { type: "nodes", nodes },
+          {
+            type: "identity",
+            assertions: [
+              {
+                id: "assertion-1",
+                relation: "same",
+                a: { kind: "TrustedPerson", id: "alice" },
+                b: { kind: "TrustedPerson", id: "alias" },
+                validFrom: "2026-01-01T00:00:00.000Z",
+              },
+            ],
+          },
+          { type: "edges", edges },
+        ]),
+      ),
+    ).rejects.toEqual(expectReason("invalid_stream"));
+
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
+    ).toBeUndefined();
+  });
+
   it("rolls back the complete import on a database constraint failure", async () => {
     const store = createStore(trustedGraph, createTestBackend());
     await expect(
