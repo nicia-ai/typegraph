@@ -1,5 +1,25 @@
 # @nicia-ai/typegraph
 
+## 0.41.0
+
+### Minor Changes
+
+- [#311](https://github.com/nicia-ai/typegraph/pull/311) [`008fa20`](https://github.com/nicia-ai/typegraph/commit/008fa2008d199f997f45af967ba2f1a1fbad4970) Thanks [@pdlug](https://github.com/pdlug)! - Make verified adapter stores reusable across connections so serverless/edge
+  deployments that open a fresh database connection per request can verify once
+  per isolate instead of paying a schema-reconcile round-trip on every request.
+
+  `AdapterStore` now exposes `reconciledSchema`, an opaque snapshot of a store's
+  reconciled (compile-time + runtime-committed) graph and committed schema
+  version. Pass it to a synchronous `createAdapterStore(graph, backend,
+{ reconciled })` — which issues **zero** database queries and still validates
+  reads and writes against runtime-committed kinds — or call
+  `store.withBackend(freshBackend)` to rebind an already-verified store onto a new
+  connection with no re-verify (the store's connection is captured immutably, so
+  this returns a new equivalent store rather than mutating in place). The new
+  `getCommittedSchemaVersion(backend, graphId)` reads the committed version with a
+  single indexed SELECT, the cheap cross-isolate probe for detecting when another
+  process committed a schema change and the cached snapshot must be refreshed.
+
 ## 0.40.0
 
 ### Minor Changes
