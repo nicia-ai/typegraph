@@ -4075,6 +4075,19 @@ export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   | AdapterHistoryStore<G, TNativeTransaction>
   | AdapterRecordedReadStore<G, TNativeTransaction> {
   const reconciled = options?.reconciled;
+  if (reconciled !== undefined && reconciled.graph.id !== graph.id) {
+    // Same-shaped graphs are structurally interchangeable to TypeScript, so a
+    // snapshot from a different graph would silently reroute reads/writes to
+    // the wrong graph ID. Reject it — this is a zero-query check.
+    throw new ConfigurationError(
+      `Reconciled snapshot is for graph "${reconciled.graph.id}", not "${graph.id}".`,
+      { code: "RECONCILED_GRAPH_MISMATCH" },
+      {
+        suggestion:
+          "Pass the ReconciledSchema produced from the same graph you are building the store with; snapshots are not interchangeable across graphs.",
+      },
+    );
+  }
   const storeOptions = stripReconciledOption(options);
   // A reconciled snapshot is a pre-computed (graph, schemaMetadata) — the
   // zero-round-trip equivalent of `prepareVerifiedStore`. Resolve the inputs,

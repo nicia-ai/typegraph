@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createAdapterStore,
   createAdapterStoreWithSchema,
   createVerifiedAdapterStore,
   defineGraph,
@@ -41,6 +42,28 @@ const refundTicketExtension = defineGraphExtension({
       },
     },
   },
+});
+
+describe("createAdapterStore reconciled-graph guard", () => {
+  it("rejects a snapshot built for a different graph", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const [seed] = await createAdapterStoreWithSchema(baseGraph, backend);
+
+    const otherGraph = defineGraph({
+      id: "other_reconciled_store",
+      nodes: { Person: { type: Person } },
+      edges: {},
+    });
+
+    // Same-shaped graphs are structurally interchangeable to TypeScript, so a
+    // snapshot for `baseGraph` type-checks against `otherGraph` with no cast.
+    // The runtime guard is what stops it silently routing to the wrong graph ID.
+    expect(() =>
+      createAdapterStore(otherGraph, backend, {
+        reconciled: seed.reconciledSchema,
+      }),
+    ).toThrow(/not "other_reconciled_store"/);
+  });
 });
 
 describe("store.withBackend", () => {

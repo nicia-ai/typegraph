@@ -177,5 +177,42 @@ export function registerReconciledSchemaIntegrationTests(
       );
       expect(read.name).toBe("Rebound");
     });
+
+    it("evolve through a reconciled store commits the kind and bumps the committed version", async () => {
+      const backend = context.getBackend();
+      const [verified] = await createVerifiedAdapterStore(
+        integrationTestGraph,
+        backend,
+      );
+      const before = requireDefined(
+        await getCommittedSchemaVersion(backend, integrationTestGraph.id),
+      );
+
+      // The write path a brain actually hits: evolve a new kind through a
+      // per-request store built from the cached snapshot, not a verified one.
+      const perRequest = createAdapterStore(integrationTestGraph, backend, {
+        reconciled: verified.reconciledSchema,
+      });
+      const evolved = await perRequest.evolve(
+        defineGraphExtension({
+          nodes: {
+            EvolveProbe: { properties: { label: { type: "string" } } },
+          },
+        }),
+      );
+
+      // The new kind is committed and writable through the evolved handle...
+      const probes = requireDefined(evolved.getNodeCollection("EvolveProbe"));
+      const created = await probes.create({ label: "via-reconciled" });
+      expect(requireDefined(await probes.getById(created.id))).toMatchObject({
+        label: "via-reconciled",
+      });
+
+      // ...and the committed version moved, so another isolate's probe catches it.
+      const after = requireDefined(
+        await getCommittedSchemaVersion(backend, integrationTestGraph.id),
+      );
+      expect(after).toBeGreaterThan(before);
+    });
   });
 }

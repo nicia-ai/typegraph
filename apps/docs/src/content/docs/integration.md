@@ -149,16 +149,7 @@ export const typegraphTables = createSqliteTables({
 });
 
 // Export individual tables for drizzle-kit
-export const {
-  nodes: myappGraphNodes,
-  edges: myappGraphEdges,
-  uniques: myappGraphUniques,
-  schemaVersions: myappGraphSchemaVersions,
-  embeddings: myappGraphEmbeddings,
-  indexMaterializations: myappGraphIndexMaterializations,
-  kindRemovals: myappGraphKindRemovals,
-  reconciliationMarkers: myappGraphReconciliationMarkers,
-} = typegraphTables;
+export const { nodes: myappGraphNodes, edges: myappGraphEdges, uniques: myappGraphUniques, schemaVersions: myappGraphSchemaVersions, embeddings: myappGraphEmbeddings, indexMaterializations: myappGraphIndexMaterializations, kindRemovals: myappGraphKindRemovals, reconciliationMarkers: myappGraphReconciliationMarkers } = typegraphTables;
 
 // SQLite fulltext is an FTS5 virtual table — drizzle-kit can't model
 // virtual tables, so this name is exposed as a string. The backend
@@ -166,8 +157,7 @@ export const {
 // `ensureFulltextTable()` ensure (idempotent CREATE VIRTUAL TABLE
 // IF NOT EXISTS), so drizzle-kit-managed setups work without an
 // extra manual step.
-export const myappGraphFulltextTableName =
-  typegraphTables.fulltextTableName;
+export const myappGraphFulltextTableName = typegraphTables.fulltextTableName;
 ```
 
 For PostgreSQL with the default `tsvectorStrategy`, the factory
@@ -363,14 +353,7 @@ stores only the relationships and graph-specific metadata.
 Use the `externalRef()` helper to create type-safe references to external tables:
 
 ```typescript
-import {
-  createExternalRef,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  embedding,
-  externalRef,
-} from "@nicia-ai/typegraph";
+import { createExternalRef, defineEdge, defineGraph, defineNode, embedding, externalRef } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
 // Define nodes that reference your existing tables
@@ -474,10 +457,7 @@ async function findRelatedDocuments(documentId: string) {
 
   // Hydrate with full data from app database
   const externalIds = related.map((r) => r.source.id);
-  const fullDocuments = await appDb
-    .select()
-    .from(documents)
-    .where(inArray(documents.id, externalIds));
+  const fullDocuments = await appDb.select().from(documents).where(inArray(documents.id, externalIds));
 
   return related.map((r) => ({
     ...r,
@@ -746,41 +726,56 @@ Verify **once per isolate**, then build a zero-query store per request from the
 cached reconciled schema:
 
 ```typescript
-import {
-  createAdapterStore,
-  createVerifiedAdapterStore,
-  getCommittedSchemaVersion,
-  type ReconciledSchema,
-} from "@nicia-ai/typegraph";
+import { createAdapterStore, createVerifiedAdapterStore, getCommittedSchemaVersion, type GraphBackend, type ReconciledSchema } from "@nicia-ai/typegraph";
 import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
-// Per-isolate cache. Populated on the first request the isolate serves.
-let cached: { reconciled: ReconciledSchema<typeof graph>; version: number | undefined } | undefined;
+type Cached = {
+  reconciled: ReconciledSchema<typeof graph>;
+  version: number | undefined;
+};
 
-async function reconcileOnce(verifyBackend: GraphBackend) {
-  const [store, result] = await createVerifiedAdapterStore(graph, verifyBackend);
-  cached = {
-    reconciled: store.reconciledSchema,
-    version: result.status === "unchanged" ? result.version : store.reconciledSchema.version,
-  };
+// Per-isolate cache, plus the in-flight reconciliation. Memoizing the promise
+// collapses concurrent cold (or stale) requests onto ONE verify instead of each
+// running its own — otherwise a burst of first requests reproduces the fan-out
+// stampede this pattern exists to avoid.
+let cached: Cached | undefined;
+let inFlight: Promise<Cached> | undefined;
+
+function reconcileOnce(verifyBackend: GraphBackend): Promise<Cached> {
+  inFlight ??= (async () => {
+    const [store, result] = await createVerifiedAdapterStore(graph, verifyBackend);
+    cached = {
+      reconciled: store.reconciledSchema,
+      version: result.status === "unchanged" ? result.version : store.reconciledSchema.version,
+    };
+    return cached;
+  })().finally(() => {
+    inFlight = undefined;
+  });
+  return inFlight;
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const backend = createPostgresBackend(newPoolForThisRequest(env));
 
-    // First request per isolate verifies; later requests reuse the snapshot.
-    if (cached === undefined) await reconcileOnce(backend);
+    // Cold start: concurrent first requests all await the same reconciliation.
+    let snapshot = cached ?? (await reconcileOnce(backend));
 
-    // A cheap single-row probe detects a schema commit from another isolate.
+    // A one-row probe detects a schema commit from another isolate; a moved
+    // version refreshes through the same single-flight path.
     const committed = await getCommittedSchemaVersion(backend, graph.id);
-    if (committed !== cached!.version) await reconcileOnce(backend);
+    if (committed !== snapshot.version) snapshot = await reconcileOnce(backend);
 
     // Zero database round-trips. Reads and writes still validate against
     // runtime-committed kinds carried by the reconciled snapshot.
-    const store = createAdapterStore(graph, backend, { reconciled: cached!.reconciled });
+    const store = createAdapterStore(graph, backend, { reconciled: snapshot.reconciled });
 
-    const results = await store.query().from("Document", "d").select((ctx) => ctx.d).execute();
+    const results = await store
+      .query()
+      .from("Document", "d")
+      .select((ctx) => ctx.d)
+      .execute();
     return Response.json(results);
   },
 };
@@ -794,10 +789,11 @@ runtime remain writable without re-verifying. If you already hold a verified
 store and only need to swap the connection, `store.withBackend(freshBackend)`
 returns an equivalent store bound to the new connection with no re-verify.
 
-The `getCommittedSchemaVersion` probe is your read-your-writes seam: it is a
-single indexed `SELECT`, far cheaper than the full verified open, and re-verify
-only fires when the version actually moves. Skip the probe entirely (and accept
-bounded cross-isolate staleness) if your schema only changes on deploy.
+The `getCommittedSchemaVersion` probe is your read-your-writes seam: one
+round-trip, far cheaper than the full verified open (which also reconciles the
+schema and checks index materialization), and re-verify only fires when the
+version actually moves. Skip the probe entirely (and accept bounded
+cross-isolate staleness) if your schema only changes on deploy.
 
 ### Read Replica Separation
 
@@ -886,16 +882,11 @@ function createTenantQuery(store: Store, tenantId: string) {
       store
         .query()
         .from("Document", "d")
-        .whereNode("d", (d) =>
-          d.tenantId
-            .eq(tenantId)
-            .and(d.embedding.similarTo(queryEmbedding, 10)),
-        )
+        .whereNode("d", (d) => d.tenantId.eq(tenantId).and(d.embedding.similarTo(queryEmbedding, 10)))
         .select((ctx) => ctx.d)
         .execute(),
 
-    createDocument: (data: Omit<DocumentInput, "tenantId">) =>
-      store.nodes.Document.create({ ...data, tenantId }),
+    createDocument: (data: Omit<DocumentInput, "tenantId">) => store.nodes.Document.create({ ...data, tenantId }),
   };
 }
 
