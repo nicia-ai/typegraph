@@ -552,6 +552,64 @@ export type Store<G extends GraphDef> = StoreCore<G> &
   StoreEvolution<G, Store<G>>;
 
 /**
+ * An opaque, in-memory snapshot of a store's reconciled schema: the merged
+ * compile-time + runtime-committed graph plus the committed schema version and
+ * hash it reflects. Produced by {@link AdapterStore.reconciledSchema} after a
+ * verified open, cached once per isolate/process, and handed to
+ * {@link createAdapterStore} via `{ reconciled }` (or used implicitly by
+ * {@link AdapterStore.withBackend}) to build request-scoped stores against
+ * fresh connections with **zero** database round-trips. Reads and writes are
+ * validated against the reconciled graph, so runtime-committed kinds seen at
+ * the reconcile are honored without re-querying.
+ *
+ * Treat it as opaque and immutable — do not construct or mutate it. Its
+ * `version` is the value to compare against {@link getCommittedSchemaVersion}
+ * to detect a schema commit from another process and refresh the snapshot.
+ */
+export type ReconciledSchema<G extends GraphDef> = Readonly<{
+  graph: G;
+  version: number | undefined;
+  hash: string | undefined;
+}>;
+
+/** Construction option carrying a cached {@link ReconciledSchema}. */
+type ReconciledOption<G extends GraphDef> = Readonly<{
+  reconciled?: ReconciledSchema<G>;
+}>;
+
+/**
+ * The reconciliation surface shared by every adapter store flavor: read the
+ * cached {@link ReconciledSchema} and rebind to a fresh connection with no
+ * verify round-trip. `Self` is the receiver's own surface so `withBackend`
+ * preserves the store flavor (live / history / recorded-read).
+ *
+ * Declared as an `interface` (not a `type`): the surface aliases intersect it
+ * with `Self` bound to themselves, which a `type` alias rejects as a circular
+ * self-reference (TS2456) but an interface resolves lazily — the same idiom as
+ * {@link StoreEvolution}.
+ */
+interface AdapterStoreReconciliation<
+  G extends GraphDef,
+  TNativeTransaction,
+  Self,
+> {
+  /**
+   * An opaque snapshot of this store's reconciled schema. Cache it after a
+   * verified open and pass it to {@link createAdapterStore} `{ reconciled }`
+   * to build per-request stores with zero database round-trips.
+   */
+  readonly reconciledSchema: ReconciledSchema<G>;
+  /**
+   * Build an equivalent store bound to a fresh backend/connection, reusing
+   * this store's already-reconciled schema — no verify round-trip. The
+   * per-request primitive for serverless deployments that open a new
+   * connection per request; the returned store validates writes against the
+   * same reconciled graph as the receiver.
+   */
+  readonly withBackend: (backend: AdapterBackend<TNativeTransaction>) => Self;
+}
+
+/**
  * A Store with explicit adapter interoperability. Adapter entrypoints return
  * this surface so native transaction handles remain precisely typed without
  * leaking into the default Store contract.
@@ -562,6 +620,11 @@ export type AdapterStore<
 > = StoreCore<G> &
   StoreEvolution<G, AdapterStore<G, TNativeTransaction>> &
   AdapterStoreTransactions<G, TNativeTransaction> &
+  AdapterStoreReconciliation<
+    G,
+    TNativeTransaction,
+    AdapterStore<G, TNativeTransaction>
+  > &
   Readonly<{ backend: GraphBackend }>;
 
 type AdapterStoreTransactions<
@@ -729,6 +792,43 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** The kind registry for ontology lookups */
   get registry(): KindRegistry {
     return this.#registry;
+  }
+
+  /**
+   * An opaque, in-memory snapshot of this store's reconciled schema — the
+   * merged compile-time + runtime-committed graph plus the committed version
+   * it reflects. Cache it after a verified open and hand it to
+   * {@link createAdapterStore} via `{ reconciled }` (or call
+   * {@link AdapterStoreImplementation.withBackend}) to build request-scoped
+   * stores against fresh connections with zero database round-trips. Refresh
+   * it when {@link getCommittedSchemaVersion} reports a moved version.
+   */
+  get reconciledSchema(): ReconciledSchema<G> {
+    return Object.freeze({
+      graph: this.#graph,
+      version: this.#schemaMetadata.schemaVersion,
+      hash: this.#schemaMetadata.schemaHash,
+    });
+  }
+
+  /**
+   * Reconstruction inputs for a connection rebind: the merged graph, the
+   * verbatim construction options, and the reconciled schema metadata. Lets an
+   * adapter subclass rebuild an equivalent store against a fresh backend
+   * without a verify round-trip.
+   *
+   * @internal
+   */
+  protected reconstructionState(): Readonly<{
+    graph: G;
+    options: StoreOptions | undefined;
+    schemaMetadata: StoreSchemaMetadata;
+  }> {
+    return {
+      graph: this.#graph,
+      options: this.#options,
+      schemaMetadata: this.#schemaMetadata,
+    };
   }
 
   /**
@@ -3600,6 +3700,26 @@ class AdapterStoreImplementation<
         );
   }
 
+  /**
+   * Rebind this store's already-reconciled schema onto a fresh backend/
+   * connection, returning a new equivalent store with **no** verify round-trip.
+   * The connection is captured at construction and never mutated, so this
+   * returns a new instance rather than rebinding in place — the serverless
+   * per-request primitive: verify once per isolate, then `withBackend` the
+   * per-request connection.
+   */
+  withBackend(
+    backend: AdapterBackend<TNativeTransaction>,
+  ): AdapterStoreImplementation<G, TNativeTransaction> {
+    const state = this.reconstructionState();
+    return new AdapterStoreImplementation(
+      state.graph,
+      backend,
+      state.options,
+      state.schemaMetadata,
+    );
+  }
+
   override async evolve<TRefStore extends StoreCore<G>>(
     extension: GraphExtension,
     options?: Readonly<{
@@ -3790,6 +3910,11 @@ export type AdapterRecordedReadStore<
 > = StoreCore<G> &
   StoreEvolution<G, AdapterRecordedReadStore<G, TNativeTransaction>> &
   AdapterStoreTransactions<G, TNativeTransaction> &
+  AdapterStoreReconciliation<
+    G,
+    TNativeTransaction,
+    AdapterRecordedReadStore<G, TNativeTransaction>
+  > &
   Readonly<{
     backend: GraphBackend;
     recordedReadBound: true;
@@ -3814,6 +3939,11 @@ export type AdapterHistoryStore<
 > = StoreCore<G> &
   StoreEvolution<G, AdapterHistoryStore<G, TNativeTransaction>> &
   AdapterHistoryStoreTransactions<G, TNativeTransaction> &
+  AdapterStoreReconciliation<
+    G,
+    TNativeTransaction,
+    AdapterHistoryStore<G, TNativeTransaction>
+  > &
   Readonly<{
     backend: HistoryStoreBackend;
     historyEnabled: true;
@@ -3909,29 +4039,29 @@ export function createStore<G extends GraphDef>(
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options: HistoryStoreOptions,
+  options: HistoryStoreOptions & ReconciledOption<G>,
 ): AdapterHistoryStore<G, TNativeTransaction>;
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options: RecordedReadStoreOptions,
+  options: RecordedReadStoreOptions & ReconciledOption<G>,
 ): AdapterRecordedReadStore<G, TNativeTransaction>;
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options?: UnboundLiveStoreOptions,
+  options?: UnboundLiveStoreOptions & ReconciledOption<G>,
 ): AdapterStore<G, TNativeTransaction>;
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options: LiveStoreOptions | undefined,
+  options: (LiveStoreOptions & ReconciledOption<G>) | undefined,
 ):
   | AdapterStore<G, TNativeTransaction>
   | AdapterRecordedReadStore<G, TNativeTransaction>;
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options: StoreOptions | undefined,
+  options: (StoreOptions & ReconciledOption<G>) | undefined,
 ):
   | AdapterStore<G, TNativeTransaction>
   | AdapterHistoryStore<G, TNativeTransaction>
@@ -3939,13 +4069,40 @@ export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options?: StoreOptions,
+  options?: StoreOptions & ReconciledOption<G>,
 ):
   | AdapterStore<G, TNativeTransaction>
   | AdapterHistoryStore<G, TNativeTransaction>
   | AdapterRecordedReadStore<G, TNativeTransaction> {
+  const reconciled = options?.reconciled;
+  if (reconciled !== undefined && reconciled.graph.id !== graph.id) {
+    // Same-shaped graphs are structurally interchangeable to TypeScript, so a
+    // snapshot from a different graph would silently reroute reads/writes to
+    // the wrong graph ID. Reject it — this is a zero-query check.
+    throw new ConfigurationError(
+      `Reconciled snapshot is for graph "${reconciled.graph.id}", not "${graph.id}".`,
+      { code: "RECONCILED_GRAPH_MISMATCH" },
+      {
+        suggestion:
+          "Pass the ReconciledSchema produced from the same graph you are building the store with; snapshots are not interchangeable across graphs.",
+      },
+    );
+  }
+  const storeOptions = stripReconciledOption(options);
+  // A reconciled snapshot is a pre-computed (graph, schemaMetadata) — the
+  // zero-round-trip equivalent of `prepareVerifiedStore`. Resolve the inputs,
+  // then take the single construction path. The merged graph is a superset of
+  // the compile-time `graph`, so runtime-committed kinds validate.
+  const resolvedGraph = reconciled?.graph ?? graph;
+  const schemaMetadata =
+    reconciled === undefined ? undefined : reconciledSchemaMetadata(reconciled);
   return asAdapterStoreSurface(
-    new AdapterStoreImplementation(graph, backend, options),
+    new AdapterStoreImplementation(
+      resolvedGraph,
+      backend,
+      storeOptions,
+      schemaMetadata,
+    ),
   );
 }
 
@@ -3967,6 +4124,29 @@ function schemaMetadataFromRow(
     schemaVersion: row.version,
     schemaHash: row.schema_hash,
   });
+}
+
+function reconciledSchemaMetadata(
+  reconciled: ReconciledSchema<GraphDef>,
+): StoreSchemaMetadata {
+  return Object.freeze({
+    schemaVersion: reconciled.version,
+    schemaHash: reconciled.hash,
+  });
+}
+
+/**
+ * Splits the construction-time `reconciled` snapshot off the persisted store
+ * options. The store keeps its options verbatim to reconstruct the next store
+ * on `evolve()`, so the snapshot — a one-shot construction source — must never
+ * be carried forward.
+ */
+function stripReconciledOption<G extends GraphDef>(
+  options: (StoreOptions & ReconciledOption<G>) | undefined,
+): StoreOptions | undefined {
+  if (options === undefined || !("reconciled" in options)) return options;
+  const { reconciled: _reconciled, ...rest } = options;
+  return rest;
 }
 
 function schemaMetadataForResult(

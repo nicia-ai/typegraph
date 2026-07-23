@@ -630,6 +630,9 @@ type FulltextStrategy = Readonly<{
 export function getActiveSchema(backend: GraphBackend, graphId: string): Promise<SerializedSchema | undefined>;
 
 // @public
+export function getCommittedSchemaVersion(backend: GraphBackend, graphId: string): Promise<number | undefined>;
+
+// @public
 export function getMigrationActions(diff: SchemaDiff): readonly string[];
 
 // @public

@@ -383,6 +383,7 @@ export type {
   RebuildFulltextOptions,
   RebuildFulltextResult,
   ReclaimedVectorFieldEntry,
+  ReconciledSchema,
   RecordedReadStore,
   RecordedScanOptions,
   RecordedScanPage,
@@ -440,6 +441,9 @@ export {
   StoreSearch,
   StoreView,
 } from "./store";
+// The cross-isolate invalidation probe for a cached ReconciledSchema. Also
+// available from the "./schema" subpath alongside its schema-read siblings.
+export { getCommittedSchemaVersion } from "./schema";
 export type {
   AlgorithmCyclePolicy,
   BaseTraversalOptions,

@@ -38,6 +38,7 @@ import {
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
   registerProvenanceIntegrationTests,
+  registerReconciledSchemaIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
@@ -102,6 +103,12 @@ export function createIntegrationTestSuite<TNativeTransaction>(
         }
         return store;
       },
+      getBackend: () => {
+        if (adapterBackend === undefined) {
+          throw new Error("Integration backend is not initialized.");
+        }
+        return adapterBackend as AdapterBackend<unknown>;
+      },
       createStore: async (graph, options) => {
         if (adapterBackend === undefined) {
           throw new Error("Integration backend is not initialized.");
@@ -155,6 +162,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerLateMaterializationIntegrationTests(context);
     registerTemporalIntegrationTests(context);
     registerTransactionReceiptIntegrationTests(context);
+    registerReconciledSchemaIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);

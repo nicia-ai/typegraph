@@ -22,7 +22,7 @@ export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
 export type AdapterBackendTransactions<TNativeTransaction> = Pick<AdapterBackend<TNativeTransaction>, "transactionWithNative" | "adoptTransaction">;
 
 // @public (undocumented)
-export type AdapterHistoryStore<G extends GraphDef, TNativeTransaction> = StoreCore<G> & StoreEvolution<G, AdapterHistoryStore<G, TNativeTransaction>> & AdapterHistoryStoreTransactions<G, TNativeTransaction> & Readonly<{
+export type AdapterHistoryStore<G extends GraphDef, TNativeTransaction> = StoreCore<G> & StoreEvolution<G, AdapterHistoryStore<G, TNativeTransaction>> & AdapterHistoryStoreTransactions<G, TNativeTransaction> & AdapterStoreReconciliation<G, TNativeTransaction, AdapterHistoryStore<G, TNativeTransaction>> & Readonly<{
     backend: HistoryStoreBackend;
     historyEnabled: true;
     recordedReadBound: true;
@@ -41,15 +41,21 @@ export type AdapterHistoryTransactionContext<G extends GraphDef, TNativeTransact
 }>;
 
 // @public (undocumented)
-export type AdapterRecordedReadStore<G extends GraphDef, TNativeTransaction> = StoreCore<G> & StoreEvolution<G, AdapterRecordedReadStore<G, TNativeTransaction>> & AdapterStoreTransactions<G, TNativeTransaction> & Readonly<{
+export type AdapterRecordedReadStore<G extends GraphDef, TNativeTransaction> = StoreCore<G> & StoreEvolution<G, AdapterRecordedReadStore<G, TNativeTransaction>> & AdapterStoreTransactions<G, TNativeTransaction> & AdapterStoreReconciliation<G, TNativeTransaction, AdapterRecordedReadStore<G, TNativeTransaction>> & Readonly<{
     backend: GraphBackend;
     recordedReadBound: true;
 }>;
 
 // @public
-export type AdapterStore<G extends GraphDef, TNativeTransaction> = StoreCore<G> & StoreEvolution<G, AdapterStore<G, TNativeTransaction>> & AdapterStoreTransactions<G, TNativeTransaction> & Readonly<{
+export type AdapterStore<G extends GraphDef, TNativeTransaction> = StoreCore<G> & StoreEvolution<G, AdapterStore<G, TNativeTransaction>> & AdapterStoreTransactions<G, TNativeTransaction> & AdapterStoreReconciliation<G, TNativeTransaction, AdapterStore<G, TNativeTransaction>> & Readonly<{
     backend: GraphBackend;
 }>;
+
+// @public
+interface AdapterStoreReconciliation<G extends GraphDef, TNativeTransaction, Self> {
+    readonly reconciledSchema: ReconciledSchema<G>;
+    readonly withBackend: (backend: AdapterBackend<TNativeTransaction>) => Self;
+}
 
 // @public (undocumented)
 type AdapterStoreTransactions<G extends GraphDef, TNativeTransaction> = Readonly<{
@@ -681,19 +687,19 @@ type CountNodesByKindParams = Readonly<{
 }>;
 
 // @public (undocumented)
-export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options: HistoryStoreOptions): AdapterHistoryStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options: HistoryStoreOptions & ReconciledOption<G>): AdapterHistoryStore<G, TNativeTransaction>;
 
 // @public (undocumented)
-export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options: RecordedReadStoreOptions): AdapterRecordedReadStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options: RecordedReadStoreOptions & ReconciledOption<G>): AdapterRecordedReadStore<G, TNativeTransaction>;
 
 // @public (undocumented)
-export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options?: UnboundLiveStoreOptions): AdapterStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options?: UnboundLiveStoreOptions & ReconciledOption<G>): AdapterStore<G, TNativeTransaction>;
 
 // @public (undocumented)
-export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options: LiveStoreOptions | undefined): AdapterStore<G, TNativeTransaction> | AdapterRecordedReadStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options: (LiveStoreOptions & ReconciledOption<G>) | undefined): AdapterStore<G, TNativeTransaction> | AdapterRecordedReadStore<G, TNativeTransaction>;
 
 // @public (undocumented)
-export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options: StoreOptions | undefined): AdapterStore<G, TNativeTransaction> | AdapterHistoryStore<G, TNativeTransaction> | AdapterRecordedReadStore<G, TNativeTransaction>;
+export function createAdapterStore<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options: (StoreOptions & ReconciledOption<G>) | undefined): AdapterStore<G, TNativeTransaction> | AdapterHistoryStore<G, TNativeTransaction> | AdapterRecordedReadStore<G, TNativeTransaction>;
 
 // @public (undocumented)
 export function createAdapterStoreWithSchema<G extends GraphDef, TNativeTransaction>(graph: G, backend: AdapterBackend<TNativeTransaction>, options: HistoryStoreOptions & SchemaManagerOptions): Promise<[
@@ -2018,6 +2024,9 @@ export type FulltextStrategy = Readonly<{
 
 // @public
 export function generateId(): string;
+
+// @public
+export function getCommittedSchemaVersion(backend: GraphBackend, graphId: string): Promise<number | undefined>;
 
 // @public
 export function getEdgeKinds<G extends GraphDef>(graph: G): readonly (keyof G["edges"] & string)[];
@@ -4086,6 +4095,18 @@ export type ReclaimedVectorFieldEntry = Readonly<{
     fieldPath: string;
     status: "reclaimed" | "failed";
     error?: Error;
+}>;
+
+// @public
+type ReconciledOption<G extends GraphDef> = Readonly<{
+    reconciled?: ReconciledSchema<G>;
+}>;
+
+// @public
+export type ReconciledSchema<G extends GraphDef> = Readonly<{
+    graph: G;
+    version: number | undefined;
+    hash: string | undefined;
 }>;
 
 // @public

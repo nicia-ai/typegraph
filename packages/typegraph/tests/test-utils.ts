@@ -190,6 +190,30 @@ export function createPlanCaptureBackend(): PlanCaptureHarness {
 }
 
 /**
+ * Wraps an adapter backend so calls to `getActiveSchema` — the schema-reconcile
+ * read a verified open performs — can be counted, using the same spread-override
+ * idiom as {@link createPlanCaptureBackend}. Every other method delegates
+ * unchanged. Used to assert that the cacheable-store path issues no verify
+ * round-trip, and that `getCommittedSchemaVersion` is a single read.
+ */
+export function spyGetActiveSchema<TNativeTransaction>(
+  backend: AdapterBackend<TNativeTransaction>,
+): Readonly<{
+  backend: AdapterBackend<TNativeTransaction>;
+  calls: () => number;
+}> {
+  let calls = 0;
+  const wrapped: AdapterBackend<TNativeTransaction> = {
+    ...backend,
+    getActiveSchema: (graphId) => {
+      calls += 1;
+      return backend.getActiveSchema(graphId);
+    },
+  };
+  return { backend: wrapped, calls: () => calls };
+}
+
+/**
  * The `EXPLAIN QUERY PLAN` detail lines for a captured statement, joined
  * with newlines — assert index usage with `toContain("<index name>")` and
  * scan absence with `not.toContain("SCAN <table>")`.
