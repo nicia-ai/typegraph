@@ -14,6 +14,7 @@ import type {
   EndpointNotFoundErrorDetails,
   KindNotFoundErrorDetails,
   MigrationErrorDetails,
+  MigrationFailureReason,
   NodeConstraintNotFoundErrorDetails,
   NodeIndexNotFoundErrorDetails,
   NodeNotFoundErrorDetails,
@@ -42,6 +43,7 @@ import {
   isTypeGraphError,
   isUserRecoverable,
   KindNotFoundError,
+  MIGRATION_FAILURE_REASONS,
   MigrationError,
   NodeConstraintNotFoundError,
   NodeIndexNotFoundError,
@@ -378,6 +380,7 @@ describe("MigrationError", () => {
       graphId: "my-graph",
       fromVersion: 1,
       toVersion: 2,
+      reason: "breaking-change",
     });
     expect(error.message).toBe("Column type mismatch");
     expect(error.code).toBe("MIGRATION_ERROR");
@@ -390,7 +393,8 @@ describe("MigrationError", () => {
       graphId: "test-graph",
       fromVersion: 3,
       toVersion: 5,
-    };
+      reason: "schema-behind",
+    } as const;
     const error = new MigrationError("Migration failed", details);
     expect(error.details).toEqual(details);
   });
@@ -400,9 +404,23 @@ describe("MigrationError", () => {
       graphId: "test-graph",
       fromVersion: 3,
       toVersion: 5,
+      reason: "schema-behind",
     });
     expectTypeOf(error.details).toEqualTypeOf<MigrationErrorDetails>();
     expectTypeOf(error.details.fromVersion).toBeNumber();
+  });
+
+  it("carries a stable reason discriminant, no message matching needed", () => {
+    const error = new MigrationError("wording is free to change", {
+      graphId: "test-graph",
+      fromVersion: 3,
+      toVersion: 4,
+      reason: "schema-behind",
+    });
+    // The whole point: branch on the discriminant, not the sentence.
+    expect(error.details.reason).toBe("schema-behind");
+    expect(MIGRATION_FAILURE_REASONS).toContain(error.details.reason);
+    expectTypeOf(error.details.reason).toEqualTypeOf<MigrationFailureReason>();
   });
 });
 
@@ -1014,6 +1032,7 @@ describe("error inheritance chain", () => {
         graphId: "g",
         fromVersion: 1,
         toVersion: 2,
+        reason: "breaking-change",
       }),
       new UnsupportedPredicateError("test"),
       new DatabaseOperationError("test", {

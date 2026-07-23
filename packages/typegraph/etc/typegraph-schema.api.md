@@ -74,6 +74,9 @@ type ClaimIndexMaterializationParams = Readonly<{
 }>;
 
 // @public
+export function classifySchemaChanges(diff: SchemaDiff): SchemaChangeClassification;
+
+// @public
 type Collation = "binary" | "caseInsensitive";
 
 // @public
@@ -1323,10 +1326,16 @@ type ReleaseIndexMaterializationClaimParams = Readonly<{
 type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
 
 // @public
+export function requiresMigration<G extends GraphDef>(backend: GraphBackend, graph: G): Promise<boolean>;
+
+// @public
 export function rollbackSchema(backend: GraphBackend, graphId: string, targetVersion: number): Promise<void>;
 
 // @public
 type RowProps = string | Readonly<Record<string, unknown>>;
+
+// @public
+export type SchemaChangeClassification = "identical" | "additive" | "incompatible";
 
 // @public
 export type SchemaDiff = Readonly<{

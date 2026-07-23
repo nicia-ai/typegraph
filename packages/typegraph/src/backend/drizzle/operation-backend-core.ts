@@ -795,6 +795,7 @@ export function createCommonOperationBackend(
             graphId: params.graphId,
             fromVersion: actualActiveVersion,
             toVersion: params.version,
+            reason: "version-not-found",
           },
         );
       }

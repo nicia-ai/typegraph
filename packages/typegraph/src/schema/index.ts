@@ -48,6 +48,7 @@ export {
   migrateSchema,
   type MigrationHookContext,
   parseSerializedSchema,
+  requiresMigration,
   rollbackSchema,
   type SchemaManagerOptions,
   type SchemaValidationResult,
@@ -60,6 +61,7 @@ export {
 export {
   type ChangeSeverity,
   type ChangeType,
+  classifySchemaChanges,
   computeSchemaDiff,
   type DeprecatedKindsChange,
   type EdgeChange,
@@ -69,6 +71,7 @@ export {
   isBackwardsCompatible,
   type NodeChange,
   type OntologyChange,
+  type SchemaChangeClassification,
   type SchemaDiff,
 } from "./migration";
 

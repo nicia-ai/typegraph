@@ -1021,6 +1021,30 @@ export function isBackwardsCompatible(diff: SchemaDiff): boolean {
 }
 
 /**
+ * How a proposed graph relates to the committed schema.
+ *
+ * - `identical` — a semantic no-op; committing it changes nothing.
+ * - `additive` — changes exist and are all backwards compatible.
+ * - `incompatible` — at least one breaking change; needs a deliberate
+ *   migration decision.
+ */
+export type SchemaChangeClassification =
+  "identical" | "additive" | "incompatible";
+
+/**
+ * Classifies a schema diff into the three outcomes a caller actually branches
+ * on. Pure — no I/O, no DDL. Pair with `getSchemaChanges(backend, graph)` (or
+ * `store.schemaChanges()`) to pre-flight a proposal *before* touching a
+ * privileged, migration-gated path.
+ */
+export function classifySchemaChanges(
+  diff: SchemaDiff,
+): SchemaChangeClassification {
+  if (!diff.hasChanges) return "identical";
+  return diff.hasBreakingChanges ? "incompatible" : "additive";
+}
+
+/**
  * Gets a list of actions needed for migration.
  */
 export function getMigrationActions(diff: SchemaDiff): readonly string[] {

@@ -23,6 +23,7 @@
  */
 
 import type { KindEntity } from "../core/types";
+import type { SchemaDiff } from "../schema/migration";
 // Type-only import: `materialize-indexes.ts` value-imports
 // `ConfigurationError` from this file, but type-only imports are erased
 // at runtime so this back-edge does not create a value cycle.
@@ -699,11 +700,43 @@ export class SchemaMismatchError extends TypeGraphError {
 /**
  * Details for MigrationError.
  */
+/**
+ * Why a migration operation failed. A stable discriminant so callers can
+ * branch on the outcome instead of matching the message text, which is free
+ * to be reworded in any release.
+ */
+export const MIGRATION_FAILURE_REASONS = [
+  /**
+   * The persisted schema is behind the code graph. Raised on the
+   * least-privilege runtime path, which cannot run DDL — a privileged
+   * migrator must advance the schema first. Inspect `details.diff`
+   * (`hasBreakingChanges`) to tell an additive change from an incompatible
+   * one.
+   */
+  "schema-behind",
+  /** Breaking changes were detected while `throwOnBreaking` was set. */
+  "breaking-change",
+  /** No active schema version exists for the graph. */
+  "no-active-version",
+  /** The requested schema version does not exist for the graph. */
+  "version-not-found",
+] as const;
+
+export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
+
 export type MigrationErrorDetails = Readonly<{
   graphId: string;
   fromVersion: number;
   toVersion: number;
-  reason?: string;
+  /** Stable discriminant for the failure — branch on this, not the message. */
+  reason: MigrationFailureReason;
+  /**
+   * The structured diff behind the failure, when one was computed
+   * (`schema-behind` and `breaking-change`). Carries per-change `severity`
+   * alongside `hasChanges` / `hasBreakingChanges`, so a caller can decide
+   * "additive → proceed, incompatible → ask the user" without re-querying.
+   */
+  diff?: SchemaDiff;
 }>;
 
 /**

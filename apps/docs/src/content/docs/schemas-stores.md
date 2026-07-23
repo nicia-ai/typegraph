@@ -434,6 +434,63 @@ const graph = defineGraph({
 });
 ```
 
+### Graph identity and the kind namespace
+
+`id` is the isolation boundary, and it is the most important operational fact
+about a TypeGraph deployment: **kinds are scoped to the `graph_id`** — not to the
+module, file, or proposal that declared them.
+
+Everything committed under one `id` shares a single schema document and a single
+set of physical collections:
+
+- Two graphs with the **same `id`** share one kind namespace. Committing a graph
+  that declares `Invoice` makes `Invoice` part of *that graph's* schema for every
+  process that opens it — including ones whose compile-time graph never mentioned
+  it. Re-committing a different graph under the same `id` is a **schema change**,
+  diffed against what is already committed; it is not a separate scope.
+- Two graphs with **different `id`s** are fully independent: separate kind
+  namespaces, separate data, separate schema versions. They can hold divergent
+  schemas in the same database.
+
+The practical consequence: a namespace *is* a `graph_id`. If you want two units
+(tenants, test suites, per-customer graphs) to declare kinds without colliding,
+give them different `id`s — do not rely on separate declaration sites, module
+boundaries, or naming conventions to isolate them. A shared test database where
+every suite commits under one `id` will see those suites fight over one schema.
+
+See [Multi-Tenant Architecture](/integration#multi-tenant-architecture) for
+running many `graph_id`s in a single database.
+
+### Pre-flighting a schema change
+
+Committing a schema is a privileged, migration-gated operation — in a
+least-privilege deployment the runtime role cannot run DDL at all. Both of these
+are **SELECT-only**: they report what a commit *would* do without attempting it.
+
+```typescript
+import { classifySchemaChanges } from "@nicia-ai/typegraph/schema";
+
+// Cheapest check: does this need the privileged path at all?
+if (await store.requiresMigration()) {
+  // Route to the privileged bootstrap instead of failing mid-request.
+}
+
+// Or decide additive-vs-incompatible before committing:
+const diff = await store.schemaChanges();
+const classification =
+  diff === undefined ? "uninitialized" : classifySchemaChanges(diff);
+// "identical" | "additive" | "incompatible"
+```
+
+`requiresMigration()` is `true` when the committed schema is behind the graph
+**and** when nothing has been committed yet, since both need the privileged path.
+
+If a commit does fail, branch on the structured outcome rather than the message
+text (which is free to be reworded in any release): `MigrationError.details.reason`
+is a stable discriminant (`MIGRATION_FAILURE_REASONS`), and `details.diff` carries
+the same structured diff — with per-change `severity` — that `getSchemaChanges`
+returns. See [Handling Breaking Changes](/schema-management#handling-breaking-changes).
+
 ## Store Creation
 
 ### `createStore(graph, backend, options?)`

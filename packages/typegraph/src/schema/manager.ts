@@ -423,6 +423,8 @@ export async function ensureSchema<G extends GraphDef>(
         graphId: graph.id,
         fromVersion: activeSchema.version,
         toVersion: activeSchema.version + 1,
+        reason: "breaking-change",
+        diff,
       },
     );
   }
@@ -537,6 +539,8 @@ function schemaBehindError(
       graphId,
       fromVersion,
       toVersion: fromVersion + 1,
+      reason: "schema-behind",
+      diff,
     },
   );
 }
@@ -736,7 +740,12 @@ export async function rollbackSchema(
   if (activeRow === undefined) {
     throw new MigrationError(
       `Cannot rollback graph "${graphId}": no active schema version exists.`,
-      { graphId, fromVersion: 0, toVersion: targetVersion },
+      {
+        graphId,
+        fromVersion: 0,
+        toVersion: targetVersion,
+        reason: "no-active-version",
+      },
     );
   }
   await backend.setActiveVersion({
@@ -795,6 +804,31 @@ export async function getSchemaChanges<G extends GraphDef>(
   const currentSchema = serializeSchema(graph, activeSchema.version + 1);
 
   return computeSchemaDiff(storedSchema, currentSchema);
+}
+
+/**
+ * Whether committing `graph` would require a schema migration — a SELECT-only
+ * pre-flight with no DDL and no writes.
+ *
+ * Returns `true` when the schema has not been initialized yet (the privileged
+ * bootstrap is required) and when the committed schema is behind `graph`.
+ * This is the predicate a least-privilege runtime checks to route to the
+ * privileged path *before* a write discovers the migration wall mid-request.
+ *
+ * For the additive-vs-incompatible distinction, use `getSchemaChanges` and
+ * {@link classifySchemaChanges} instead — this collapses both to `true`.
+ *
+ * @param backend - The database backend
+ * @param graph - The current graph definition
+ * @returns Whether a privileged migration/bootstrap is required.
+ */
+export async function requiresMigration<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+): Promise<boolean> {
+  const diff = await getSchemaChanges(backend, graph);
+  if (diff === undefined) return true;
+  return diff.hasChanges;
 }
 
 /**
