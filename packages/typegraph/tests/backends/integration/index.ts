@@ -16,6 +16,7 @@ export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
+export { registerReconciledSchemaIntegrationTests } from "./reconciled-schema";
 export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-binding";
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";

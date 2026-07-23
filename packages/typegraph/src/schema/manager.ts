@@ -796,3 +796,27 @@ export async function getSchemaChanges<G extends GraphDef>(
 
   return computeSchemaDiff(storedSchema, currentSchema);
 }
+
+/**
+ * Reads the committed schema version for a graph with a single indexed
+ * SELECT — no reconcile, no diff, no materialization-marker reads.
+ *
+ * This is the cheap cross-isolate invalidation probe for a cached
+ * reconciled schema: compare the returned version against the one a verified
+ * open recorded (`store.reconciledSchema.version`); when it has moved, another
+ * process committed a schema change and the cached reconciliation must be
+ * refreshed via `createVerifiedAdapterStore`. One row read replaces the full
+ * three-query verified open on the steady-state (unchanged) path.
+ *
+ * @param backend - The database backend
+ * @param graphId - The graph ID
+ * @returns The active committed version, or `undefined` if the schema has not
+ *   been initialized for this graph.
+ */
+export async function getCommittedSchemaVersion(
+  backend: GraphBackend,
+  graphId: string,
+): Promise<number | undefined> {
+  const row = await backend.getActiveSchema(graphId);
+  return row?.version;
+}

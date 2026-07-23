@@ -734,6 +734,71 @@ const store = createStore(graph, backend);
 - Vector search (cosine/L2): sqlite-vec on the local better-sqlite3 backend;
   libSQL's built-in vectors on the libSQL / Turso backend
 
+### Per-Request Connections (Cache the Verified Store)
+
+Some serverless Postgres setups — Cloudflare Workers behind Hyperdrive, or any
+platform that pools connections for you — want a **fresh connection per
+request**. `createVerifiedAdapterStore` reconciles the committed schema and
+checks index materialization at open time (a few `SELECT`s), so re-opening a
+verified store on every request adds that cost to every graph-backed route.
+
+Verify **once per isolate**, then build a zero-query store per request from the
+cached reconciled schema:
+
+```typescript
+import {
+  createAdapterStore,
+  createVerifiedAdapterStore,
+  getCommittedSchemaVersion,
+  type ReconciledSchema,
+} from "@nicia-ai/typegraph";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+
+// Per-isolate cache. Populated on the first request the isolate serves.
+let cached: { reconciled: ReconciledSchema<typeof graph>; version: number | undefined } | undefined;
+
+async function reconcileOnce(verifyBackend: GraphBackend) {
+  const [store, result] = await createVerifiedAdapterStore(graph, verifyBackend);
+  cached = {
+    reconciled: store.reconciledSchema,
+    version: result.status === "unchanged" ? result.version : store.reconciledSchema.version,
+  };
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const backend = createPostgresBackend(newPoolForThisRequest(env));
+
+    // First request per isolate verifies; later requests reuse the snapshot.
+    if (cached === undefined) await reconcileOnce(backend);
+
+    // A cheap single-row probe detects a schema commit from another isolate.
+    const committed = await getCommittedSchemaVersion(backend, graph.id);
+    if (committed !== cached!.version) await reconcileOnce(backend);
+
+    // Zero database round-trips. Reads and writes still validate against
+    // runtime-committed kinds carried by the reconciled snapshot.
+    const store = createAdapterStore(graph, backend, { reconciled: cached!.reconciled });
+
+    const results = await store.query().from("Document", "d").select((ctx) => ctx.d).execute();
+    return Response.json(results);
+  },
+};
+```
+
+`store.reconciledSchema` is an opaque snapshot of the reconciled graph
+(compile-time kinds folded with any runtime-committed kinds) plus the committed
+version it reflects. `createAdapterStore(graph, backend, { reconciled })` issues
+**no** queries and validates writes against that snapshot, so kinds committed at
+runtime remain writable without re-verifying. If you already hold a verified
+store and only need to swap the connection, `store.withBackend(freshBackend)`
+returns an equivalent store bound to the new connection with no re-verify.
+
+The `getCommittedSchemaVersion` probe is your read-your-writes seam: it is a
+single indexed `SELECT`, far cheaper than the full verified open, and re-verify
+only fires when the version actually moves. Skip the probe entirely (and accept
+bounded cross-isolate staleness) if your schema only changes on deploy.
+
 ### Read Replica Separation
 
 Route heavy graph queries to read replicas while writes go to primary.

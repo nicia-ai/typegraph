@@ -39,6 +39,7 @@ export {
   assertSchemaCurrent,
   ensureSchema,
   getActiveSchema,
+  getCommittedSchemaVersion,
   getSchemaChanges,
   initializeSchema,
   isSchemaInitialized,

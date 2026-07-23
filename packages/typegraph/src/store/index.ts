@@ -112,6 +112,7 @@ export type {
   AdapterStore,
   HistoryStore,
   MeasurableAdapterHistoryTransactionContext,
+  ReconciledSchema,
   RecordedReadStore,
   ReembedFunction,
   ReembedVectorFieldOptions,
