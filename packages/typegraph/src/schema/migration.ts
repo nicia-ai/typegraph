@@ -326,6 +326,33 @@ function diffNodes(
  */
 const SET_VALUED_KEYWORDS: ReadonlySet<string> = new Set(["required", "enum"]);
 
+/**
+ * Keywords whose value is *instance data*, not a subschema. Their contents are
+ * user values that merely happen to be JSON, so a nested key named `required`
+ * or `enum` inside one carries no schema meaning and must not be normalized —
+ * changing a `default` of `{ required: ["a", "b"] }` to `{ required: ["b",
+ * "a"] }` is a real change to the stored default.
+ */
+const INSTANCE_VALUED_KEYWORDS: ReadonlySet<string> = new Set([
+  "default",
+  "const",
+  "examples",
+]);
+
+/**
+ * Keywords holding a *map of subschemas keyed by user-chosen names*. Their keys
+ * are property names, not keywords, so a property called `default` or `enum`
+ * must not be read as the keyword of the same name — its value is an ordinary
+ * subschema and still needs normalizing.
+ */
+const SUBSCHEMA_MAP_KEYWORDS: ReadonlySet<string> = new Set([
+  "properties",
+  "patternProperties",
+  "dependentSchemas",
+  "$defs",
+  "definitions",
+]);
+
 function canonicalKey(value: unknown): string {
   return JSON.stringify(value, sortedReplacer);
 }
@@ -355,15 +382,46 @@ function orderNormalizedSchema(value: unknown): unknown {
   if (value !== null && typeof value === "object") {
     const normalized: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
-      const child = orderNormalizedSchema(entry);
-      normalized[key] =
-        SET_VALUED_KEYWORDS.has(key) && Array.isArray(child) ?
-          sortedByCanonicalForm(child)
-        : child;
+      normalized[key] = normalizedKeywordValue(key, entry);
     }
     return normalized;
   }
   return value;
+}
+
+/**
+ * Normalizes one keyword's value according to what that keyword *holds*.
+ *
+ * The distinction matters: descending into a keyword blindly would apply
+ * schema semantics to instance data, so a reordered array inside a `default`
+ * (or inside an `enum` member) would be silently treated as unchanged.
+ */
+function normalizedKeywordValue(key: string, value: unknown): unknown {
+  // Instance data: preserve verbatim — its keys are not schema keywords.
+  if (INSTANCE_VALUED_KEYWORDS.has(key)) return value;
+  if (SET_VALUED_KEYWORDS.has(key) && Array.isArray(value)) {
+    // Order-normalize the set itself, but leave each member alone: `enum`
+    // members are instance values and `required` members are plain names.
+    return sortedByCanonicalForm(value);
+  }
+  if (SUBSCHEMA_MAP_KEYWORDS.has(key)) return normalizedSubschemaMap(value);
+  return orderNormalizedSchema(value);
+}
+
+/**
+ * Normalizes a map of subschemas without treating its user-chosen keys as
+ * keywords — so a property named `default` is still normalized as the
+ * subschema it is.
+ */
+function normalizedSubschemaMap(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return orderNormalizedSchema(value);
+  }
+  const normalized: Record<string, unknown> = {};
+  for (const [name, subschema] of Object.entries(value)) {
+    normalized[name] = orderNormalizedSchema(subschema);
+  }
+  return normalized;
 }
 
 /**

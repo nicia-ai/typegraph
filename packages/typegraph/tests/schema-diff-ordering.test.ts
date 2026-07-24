@@ -165,6 +165,74 @@ describe("real changes are still detected", () => {
   });
 });
 
+// `default`, `const`, and `enum` members hold user values, not subschemas. A
+// key named `required` or `enum` inside one carries no schema meaning, so
+// normalizing it would hide a real change to the stored value.
+function withDefault(order: readonly string[]): SerializedSchema {
+  return nodeGraph(
+    z.object({
+      config: z
+        .object({ required: z.array(z.string()) })
+        .default({ required: [...order] }),
+    }),
+  );
+}
+
+// A user field can be *named* like a keyword. `properties` keys are names, not
+// keywords, so the subschema under one still has to be normalized.
+function keywordNamedField(reversed: boolean): SerializedSchema {
+  return nodeGraph(
+    z.object({
+      default:
+        reversed ?
+          z.object({ b: z.string(), a: z.string() })
+        : z.object({ a: z.string(), b: z.string() }),
+    }),
+  );
+}
+
+function defaultedShape(reversed: boolean): SerializedSchema {
+  return nodeGraph(
+    reversed ?
+      z.object({ b: z.string(), a: z.string().default("x") })
+    : z.object({ a: z.string().default("x"), b: z.string() }),
+  );
+}
+
+describe("instance data is not normalized as schema", () => {
+  it("detects a reordered array inside a default value", () => {
+    const diff = computeSchemaDiff(
+      withDefault(["a", "b"]),
+      withDefault(["b", "a"]),
+    );
+
+    expect(diff.hasChanges).toBe(true);
+  });
+
+  it("still treats an unchanged default as unchanged", () => {
+    const diff = computeSchemaDiff(
+      withDefault(["a", "b"]),
+      withDefault(["a", "b"]),
+    );
+
+    expect(diff.hasChanges).toBe(false);
+  });
+
+  it("normalizes a subschema under a field named like a keyword", () => {
+    expect(
+      computeSchemaDiff(keywordNamedField(false), keywordNamedField(true))
+        .hasChanges,
+    ).toBe(false);
+  });
+
+  it("normalizes the schema's own required list even when a default is present", () => {
+    // The declaration order changed; the default did not.
+    expect(
+      computeSchemaDiff(defaultedShape(false), defaultedShape(true)).hasChanges,
+    ).toBe(false);
+  });
+});
+
 describe("the committed schema hash is unaffected", () => {
   it("still hashes a reordered declaration differently", async () => {
     // The order-normalization is scoped to diff comparison on purpose: the
