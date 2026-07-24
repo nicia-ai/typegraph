@@ -1,0 +1,191 @@
+---
+title: "TypeGraph 0.35: A Performance Release"
+date: 2026-07-13
+excerpt: "A 2M-row bulk load that used to never finish now takes seconds. Prepared queries got their caching back without reintroducing the staleness bug that caching caused last time. ~35 performance changes across writes, reads, traversals, and search; the six biggest, measured."
+tags:
+  - announcements
+cover:
+  alt: "Six stat cards showing measured before/after performance numbers from TypeGraph 0.35: repeated point query, bulk node/edge creation, importGraph, cascade delete, approximate vector search, and SQLite bulk-load statistics refresh"
+  image: "./cover.png"
+social:
+  alt: "TypeGraph 0.35: A Performance Release"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+A 2M-row bulk load into SQLite used to never finish: over 4.5 hours in,
+still running. The cause was an auto-triggered statistics refresh that ran
+a bare, unscoped `ANALYZE` after large batches: unbounded, and scanning
+every table in the database file, not just TypeGraph's own. A 100k-row
+reproduction of the same shape now completes in about 8 seconds, with cost
+growing log-ishly instead of quadratically as the table grows. That's one
+fix. 0.35 has roughly 35 of them, spanning bulk writes, point operations,
+traversals, and search. Here are the six most dramatic, measured, plus
+the ones worth knowing about before you upgrade.
+
+## Bulk writes
+
+Four changes compound on top of each other for anything that writes a lot
+of rows at once:
+
+- **SQLite pragmas at open.** `createLocalSqliteBackend` now applies
+  `journal_mode=WAL`, `synchronous=NORMAL`, and a busy timeout by default:
+  roughly **5x faster** single-operation writes on file-backed databases
+  than the better-sqlite3 driver's own defaults, which pay a full-durability
+  fsync per write in rollback-journal mode.
+- **Real bind-parameter budgets.** The backend used to assume the historic
+  999-parameter SQLite limit for every driver. It now probes the actual
+  compiled limit (32,766 for better-sqlite3, 100 for Cloudflare D1), so
+  batch chunking uses **~33x fewer statements** on drivers that support it
+  (111-row chunks became 3,640-row chunks).
+- **bulkCreate/bulkInsert batching end to end.** Per-row existence checks,
+  uniqueness pre-checks, and side effects (fulltext, embeddings) all
+  collapse into one round trip each instead of one per row: **~1,600 →
+  ~4,100 rows/s (~2.6x)** on the write bench.
+- **importGraph batching**, the same way: **~26k → ~96k entities/s (~4x)**.
+  The default `batchSize` also moved from 100 to 1,000 (and now actually
+  applies; a schema-parsing gap meant the old default was silently
+  ignored), which alone dropped a 20k-node + 5k-edge PostgreSQL import from
+  1,515ms to 781ms.
+
+And the fix that opened this post: SQLite's `refreshStatistics()`, the
+`ANALYZE` that `bulkCreate`/`bulkInsert` trigger automatically after a
+large autocommit write, is now scoped to TypeGraph's own tables and
+bounded with `PRAGMA analysis_limit`, matching how PostgreSQL's version
+already worked. There's also a new `walAutocheckpointPages` pragma for
+tuning WAL checkpoint frequency during heavy bulk loads, which cut a 2M-row
+load's wall-clock time by over 50% at the largest scale tested on its own.
+
+## The regression, and both halves of its fix
+
+0.34 fixed a real correctness bug: a "current" read compared against the
+_database's_ clock instead of the _application's_, so on any deployment
+where the two clocks drift (app and database on separate hosts, the
+norm), a freshly-created row could be invisible to the very read that
+followed its own creation. The fix bound the read instant fresh on every
+compile. That was correct, but it had two costs nobody caught until this
+release:
+
+**It was slow.** Every `execute()`, including the recommended
+`.prepare()`-once-`.execute()`-many pattern, recompiled the full query AST
+to SQL from scratch, every single time. A repeated point-query execution
+cost about 47µs. 0.35 caches the compiled SQL text again, with only the
+"now" instant re-bound as a parameter per call: **47µs → 2.4µs, ~20x
+faster**, with freshness unchanged: a row created after `.prepare()` is
+still visible on the next `.execute()`.
+
+**It was, separately, briefly broken worse than the bug it fixed.** All
+four query-builder classes (`ExecutableQuery`, prepared queries, aggregate
+queries, set operations) cached their _compiled SQL text_ across calls,
+so a `.prepare()`-once pattern silently froze "now" at the moment of first
+compilation. Any row created after that point had a later `valid_from`
+than the frozen read instant, so it stayed invisible to that query for its
+entire remaining lifetime. This reproduced unconditionally, in a single
+process, on the very next insert after preparing a query: worse than the
+clock-skew bug it replaced, which at least required drift across hosts.
+Both are fixed the same way: the SQL text caches, the instant doesn't.
+
+We're not thrilled this shipped, and we're not going to bury it in a
+changelog line. If you're on 0.34 and lean on `.prepare()`, upgrade.
+
+## Point operations and traversals
+
+- **CRUD statements reuse the prepared-statement cache.** Drizzle's
+  `db.all()`/`db.run()` re-prepared every statement on synchronous
+  drivers; now they route through the same cached path the query engine
+  already used. Single-op creates: **~18.3k → ~28.8k ops/s (~1.6x)**.
+- **Cascade deletes batch their edge removals** instead of issuing one
+  statement per connected edge: a 50-edge cascade on local PostgreSQL went
+  from **24.4ms to 3.6ms**.
+- **`degree()` counts are index-seekable again.** The direction filter used
+  to compile to a bare `from_id = ?` that neither composite edge index
+  could seek. It's now shaped to match the index prefix: **0.30ms → 0.06ms**
+  on PostgreSQL 18, and (this part matters more) it's _correct_ again on
+  every version, including PostgreSQL ≤ 17, which previously fell back to a
+  full partition scan.
+- **Subgraph extraction is ~4x faster on PostgreSQL** (322ms → 82ms on a
+  depth-3 stress shape), from running the recursive traversal once instead
+  of twice and passing closure ids as a single parameterized array instead
+  of re-embedding the CTE in both the node and edge fetch.
+
+## Search
+
+- **Hybrid search runs as one SQL statement**, not two searches plus a
+  JS-side fusion step, and the candidate set (liveness/currency filter, or
+  a compiled `where`) is now computed once as a shared CTE instead of once
+  per source. Filtered hybrid search: **26.5ms → 17.1ms at 5k docs**.
+- **PostgreSQL fulltext queries parse the kind's language as a plan-time
+  constant** instead of referencing a per-row column, so the GIN index can
+  actually serve the match: **12.9ms → 2.3ms at 5,000 docs**.
+- **Non-approximate `.similarTo()` on SQLite now routes through
+  sqlite-vec's vec0 KNN**: exact by construction, engine speed instead of
+  a SQL distance scan. **489ms → 124ms** for top-10 over 50k 384-dim
+  embeddings.
+- **Approximate vector search on PostgreSQL actually uses the ANN index
+  now.** Two bugs compounded: a stray `DISTINCT` kept the planner off the
+  ordered index scan entirely, and the inline path never applied the same
+  pgvector tuning the search facade uses. Fixed together: unfiltered
+  approximate search went from **174ms to 2.1ms** (recall 0.995).
+- New declared indexing options: **`method: "gin" | "trigram"`** on
+  `defineNodeIndex`/`defineEdgeIndex`, for array-containment and
+  substring/case-insensitive matching that a btree can never serve.
+
+There's also a correctness fix worth knowing here: non-approximate
+`.similarTo()` was **silently approximate** whenever a matching ANN index
+existed, because pgvector will happily serve an exact-looking
+`ORDER BY ... LIMIT k` from an HNSW/IVFFlat index if one's there. Measured
+recall was as low as 0.000 under a selective filter at 50k documents. Not
+slightly off, wrong. The exact branch now forces a true flat scan
+regardless of any index.
+
+## Found by benchmarking against Neo4j and LadybugDB
+
+Two of the fixes above came from a real LDBC Social Network Benchmark run
+against Neo4j and LadybugDB at 1M-to-22M-row scale, not from profiling
+TypeGraph in isolation. `bulkCreate`/`bulkInsert` for edges had
+an N+1 endpoint-existence check that turned linear growth into something
+much worse as the graph grew (~90ms → ~630ms per batch); the default edge
+traversal indexes were missing columns a join needed to stay fully
+index-only, which was invisible until the table outgrew the page cache and
+then produced a multi-second latency cliff. Full writeup, including where
+TypeGraph wins and where it doesn't, coming in a dedicated post.
+
+**One operational note if you're upgrading an existing database:** the
+widened edge traversal indexes only materialize on fresh databases.
+`CREATE INDEX IF NOT EXISTS` is a no-op against an index that already
+exists, regardless of how its column list changed, so an upgraded
+deployment keeps the old, narrower index and the latency cliff it was
+exposed to until you rebuild it. See
+[Performance → Indexes](/performance/indexes) for the exact
+`DROP`/`CREATE INDEX CONCURRENTLY` steps for both backends.
+
+## Also in this release
+
+- **`.aggregate({...}).orderBy(key, direction?)`**: the most common
+  aggregate shape, "top N groups by count," no longer requires fetching
+  every group and sorting in JS.
+- **`asNodeId`/`asEdgeId`** brand constructors, for re-typing a persisted
+  id that round-tripped through untyped storage.
+- **Breaking, ontology:** `implies(edgeA, edgeB)` now validates that the
+  two edges' endpoint kinds are actually compatible, instead of silently
+  accepting a declaration where they aren't. This also runs on
+  `deserializeSchema()`, so a schema persisted under 0.34 with a
+  now-invalid `implies()` relation throws on load; audit persisted
+  schemas before rolling out, not just source.
+- **Revision-anchored graph branches and streaming interchange.**
+  `revisionTracking: true` gives branch/merge validation a durable
+  per-graph revision instead of fingerprinting every live row, and large
+  branch copies now stream in bounded batches instead of materializing the
+  full graph in memory. Substantial enough that it's getting its own
+  coverage later rather than a bullet here.
+
+## Try it
+
+- [Performance overview](/performance/overview) and
+  [Indexes](/performance/indexes): tuning guidance and the index-rebuild
+  steps above
+- [Changelog](/changelog#0350): the full 0.35.0 entry
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

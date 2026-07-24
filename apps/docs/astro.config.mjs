@@ -3,6 +3,7 @@ import { satteri } from "@astrojs/markdown-satteri";
 import starlight from "@astrojs/starlight";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, envField, passthroughImageService } from "astro/config";
+import starlightBlog from "starlight-blog";
 import starlightLlmsTxt from "starlight-llms-txt";
 
 // Pages to include in llms-small.txt (unlisted pages are excluded automatically)
@@ -183,15 +184,64 @@ const llmsSmallExclude = extractSlugs(sidebar).filter(
   (slug) => !LLMS_SMALL_PAGES.has(slug),
 );
 
+// Entrypoints that are only discovered lazily by Vite's dependency
+// optimizer (see the "optimize-ssr-deps" plugin comment below) — shared
+// between the client and non-client `optimizeDeps.include` lists so they
+// can't drift out of sync.
+const LAZILY_DISCOVERED_DEPS = [
+  "astro/actions/runtime/entrypoints/client.js",
+  "astro/assets/services/noop",
+  "astro/zod",
+  "starlight-blog/middleware",
+  "starlight-blog/routes/rss",
+  "starlight-blog/routes/rss-archive",
+];
+
 export default defineConfig({
   site: "https://typegraph.dev",
   markdown: {
     processor: satteri(),
   },
   vite: {
-    plugins: [tailwindcss()],
+    plugins: [
+      tailwindcss(),
+      // Works around a known upstream issue (withastro/astro#16248): Vite's
+      // initial crawl only sees statically-imported modules, so
+      // integration-injected entrypoints that only get imported once a
+      // matching route is actually hit (actions, the passthrough image
+      // service, Zod re-exports, starlight-blog's route middleware/RSS
+      // feeds) get discovered lazily instead. Each lazy discovery forces a
+      // mid-session "optimized dependencies changed" reload, which the
+      // Cloudflare/workerd dev runner doesn't survive (`deps_ssr` chunk
+      // hashes change out from under an already-warm worker isolate),
+      // crashing with "The file does not exist at .../deps_ssr/*.js".
+      //
+      // The root-level `optimizeDeps.include` below only reliably reaches
+      // the client Vite Environment — the SSR/workerd environment
+      // (`@cloudflare/vite-plugin`) has its own separate optimizer, so
+      // fixing this for real requires `configEnvironment` to inject the
+      // include list directly into every non-client environment. This is
+      // the same workaround Astro maintainers confirmed fixes the bug
+      // (see the issue above) pending an upstream fix in the adapter.
+      //
+      // If dev crashes again with this error, the offending module is
+      // named right before the crash in `astro dev logs` as
+      // "dependency optimized: <name>" — add it to this list.
+      {
+        name: "optimize-ssr-deps",
+        configEnvironment(name) {
+          if (name === "client") return;
+          return {
+            optimizeDeps: {
+              include: LAZILY_DISCOVERED_DEPS,
+            },
+          };
+        },
+      },
+    ],
     optimizeDeps: {
       exclude: ["astro/actions/runtime/entrypoints/route.js"],
+      include: LAZILY_DISCOVERED_DEPS,
     },
   },
   image: {
@@ -203,7 +253,21 @@ export default defineConfig({
         Head: "./src/components/starlight/Head.astro",
         ThemeProvider: "./src/components/starlight/ThemeProvider.astro",
       },
+      routeMiddleware: "./src/starlight-route-data.ts",
       plugins: [
+        starlightBlog({
+          title: "Blog",
+          authors: {
+            paul: {
+              name: "Paul Dlug",
+              title: "Creator of TypeGraph",
+              url: "https://x.com/pdlug",
+            },
+          },
+          metrics: {
+            readingTime: true,
+          },
+        }),
         starlightLlmsTxt({
           details: [
             "Use these files progressively to control context size:",
@@ -234,7 +298,9 @@ export default defineConfig({
             "errors*",
           ],
           demote: ["ejecting*", "examples/*"],
-          exclude: llmsSmallExclude,
+          // Blog posts are narrative, not reference material — keep them out of
+          // the generated llms-*.txt bundles.
+          exclude: [...llmsSmallExclude, "blog/**"],
           rawContent: true,
           customSets: [
             {

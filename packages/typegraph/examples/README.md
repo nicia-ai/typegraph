@@ -103,8 +103,14 @@ the only diff from example 10 is the import line and connection setup.
 |---------|-------------|
 | [11-semantic-search.ts](./11-semantic-search.ts) | Vector embeddings and similarity search |
 | [12-knowledge-graph-rag.ts](./12-knowledge-graph-rag.ts) | What graph structure adds to RAG beyond vector similarity: entity linking, multi-hop traversal, context window expansion via chunk chains, and hybrid vector + graph retrieval |
-| [14-research-copilot.ts](./14-research-copilot.ts) | End-to-end showcase: semantic search + ontology-expanded topics + all five Tier 1 graph algorithms over a citation graph |
+| [14-research-copilot.ts](./14-research-copilot.ts) | End-to-end showcase: semantic search + ontology-expanded topics + point-query graph algorithms (`shortestPath`, `reachable`, `canReach`, `neighbors`, `degree`) over a citation graph |
 | [15-fulltext-hybrid-search.ts](./15-fulltext-hybrid-search.ts) | BM25 fulltext + hybrid (vector + fulltext) retrieval with RRF, query modes, and index rebuild |
+
+### Graph Algorithms
+
+| Example | Description |
+|---------|-------------|
+| [27-graph-analytics.ts](./27-graph-analytics.ts) | The next chapter of 14-research-copilot: whole-graph analytics over the same citation DAG — `weaklyConnectedComponents`, `weightedShortestPath` (fewest hops vs. cheapest lineage under a convex cost), `pageRank` vs. raw citation count, `personalizedPageRank` seeded on one paper, and `labelPropagation` community detection (including the oscillate-then-fixed-round contract) |
 
 ### Runtime Schema & Application Showcases
 
@@ -182,7 +188,9 @@ Each example follows a consistent pattern:
     durable candidates with **27-durable-merge-review**
 11. For production, see **10-postgresql** for backend configuration
 12. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
-13. For end-to-end application demos, see **14-research-copilot**
+13. For end-to-end application demos, see **14-research-copilot**, then see
+    **27-graph-analytics** for the whole-graph algorithms (PageRank,
+    communities, weighted paths) over the same corpus
 14. For read lenses over one graph — view modes, pinned reads, consistent
     snapshots — see **26-store-views**
 15. For time travel and bitemporal history, start with **20-bitemporal-time-travel**,

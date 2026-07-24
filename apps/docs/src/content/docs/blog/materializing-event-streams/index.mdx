@@ -1,0 +1,243 @@
+---
+title: "Materializing Event Streams: Two Bots, One Jane Doe, Zero Duplicates"
+date: 2026-07-14
+excerpt: "Two CRM bots each stream what they've seen about the same person into their own bitemporal belief graph. One crashes mid-stream and resumes without duplicating a row. Neither bot alone knows 'Jane Doe' and 'J. Doe' are the same person; entity resolution is what makes one canonical graph out of two durable streams."
+tags:
+  - announcements
+cover:
+  alt: "Diagram of two durable event streams, sales-bot and support-bot, each ticking through offsets (sales-bot crashes and resumes without duplication), converging into one canonical graph entry for Jane Doe with four flagged property conflicts"
+  image: "./cover.png"
+social:
+  alt: "Materializing Event Streams: Two Bots, One Jane Doe, Zero Duplicates"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+A sales bot and a support bot both talk to the same person. Neither knows
+it. The sales bot has "Jane Doe," VP Engineering, at `jane@acme.com`. The
+support bot has "J. Doe," VP Eng, same email, plus two companies the
+sales bot has never heard of, and one it retracted a day later. Both bots
+emit durable, at-least-once event streams of what they've seen. External
+logs are good at that: delivery, ordering, replay. They're not an entity
+resolution engine, and they're not a place to ask "what did this agent
+believe last Tuesday?" That's the layer
+[Materializing Event Logs](/materializing-event-logs) describes, and
+[`@nicia-ai/agent-stream-graph`](https://github.com/nicia-ai/agent-stream-graph)
+is the reference implementation, built on 0.35's
+`store.transactionWithReceipt()`.
+
+## Idempotent projection, not append
+
+A stream can redeliver the same change more than once: after a crash, a
+reconnect, a replay. The rule that makes that safe: the second delivery of
+a change has to reach the same row identity as the first. `upsertById` for
+nodes, `getOrCreateByEndpoints` for edges, and never bare `create` unless
+the source event itself carries a unique id you pass through as the
+TypeGraph id.
+
+```typescript
+const project: Projector<typeof intelGraph> = async (belief, change) => {
+  switch (change.shape) {
+    case "person": {
+      if (change.operation === "delete") {
+        await belief.nodes.Person.delete(asNodeId(change.key));
+        return;
+      }
+      await belief.nodes.Person.upsertById(change.key, {
+        name: change.value.name,
+        email: change.value.email,
+        title: change.value.title,
+      });
+      return;
+    }
+    case "employment": {
+      await belief.edges.worksAt.getOrCreateByEndpoints(
+        { kind: "Person", id: change.value.person },
+        { kind: "Company", id: change.value.company },
+        {},
+      );
+      return;
+    }
+  }
+};
+```
+
+## Crash, resume, no duplicate
+
+`consume()` checkpoints the last processed offset and a recorded-time
+anchor after every change, using `store.transactionWithReceipt()` to know
+whether the projector actually wrote anything. Run the sales bot's stream,
+stop it deliberately after two of its four changes, then simulate the
+worst crash window there is. A change gets projected, but the process
+dies before the checkpoint write lands:
+
+```text
+(b) Durable consumer — resume from checkpoint, replay safely after crash
+
+  consumer ran, then crashed after 2 messages
+    durable cursor: last offset = 002
+    sales-bot belief so far: 1 person, 1 company
+
+  crash window: projected 003, then died before checkpoint
+    uncheckpointed anchor existed: 2026-07-14T16:32:30.397Z
+    durable cursor is still:       002
+    belief already has worksAt edges: 1
+
+  restarted — replayed 003, then processed 004 (2 messages)
+    sales-bot belief now: 1 person, 1 company — Jane Doe (VP Eng & Product)
+    worksAt edges after replay: 1 (no duplicate edge)
+
+  re-run (at-least-once): 0 messages processed; belief unchanged: 1 person, 1 company
+```
+
+The durable cursor still says `002` even though offset `003` was already
+projected into the belief graph; that's the crash window, on purpose.
+Restarting replays `003` (idempotent: `getOrCreateByEndpoints` finds the
+edge it already wrote, doesn't duplicate it) and continues normally.
+Running the whole stream a third time processes zero messages: the cursor
+is already at the end, exactly the at-least-once contract doing its job.
+
+## Replaying the whole stream from zero
+
+The crash-resume case above is at-least-once safety within a live
+stream; a redelivered change converges, a caught-up cursor processes
+zero messages. A full **rebuild** is a different case: replay every
+event from offset zero into a fresh belief graph, for recovery or a
+schema migration. Before 0.36, that rewrote every row even when the
+replayed value exactly matched what was already there. Every re-delivered
+event cost one wasted write and one new recorded-history row, growing
+history by the length of the log on every rebuild.
+
+`createStore(graph, backend, { coalesceUnchangedUpserts: true })` makes
+a value-identical re-delivery a true no-op: no write, no history row, no
+revision advance, and the call resolves with the existing node. It's
+scoped to genuine re-delivery. A stream that supersedes a value in
+place (an old value written back over a newer one, then corrected again)
+still writes both times, faithfully replaying the history that actually
+happened. The same release adds
+[`tx.measure()`](/schemas-stores/#scoped-receipts-txmeasure), which scopes
+a transaction receipt to exactly the writes one callback makes. That
+matters when a materializer's own bookkeeping (a cursor update, a
+checkpoint row) shares a transaction with the projector and would
+otherwise be indistinguishable from a projector that silently dropped a
+change. Both
+are covered in depth in
+[Materializing External Event Logs](/materializing-event-logs).
+
+## What did each agent believe, and when
+
+Each bot's belief graph is history-enabled, so `book.anchorFor(stream,
+offset)` gives you a recorded-time coordinate to read the graph as of any
+processed offset (what _this_ bot believed, at _that_ point in its own
+stream):
+
+```text
+(c) What did each agent believe, at which offset?
+
+  sales-bot's own belief graph:
+    @offset 001: people: Jane Doe (VP Engineering) | companies: —
+    @offset 004: people: Jane Doe (VP Eng & Product) | companies: Acme Corp (Series A)  (title corrected)
+
+  support-bot's own belief graph (same person, different surface form):
+    @offset 004: people: J. Doe (VP Eng) | companies: Umbrella (unverified), Acme (Series B), Globex (Series C)
+    @offset 005: people: J. Doe (VP Eng) | companies: Acme (Series B), Globex (Series C)  (Umbrella retracted)
+
+  → Same email, but neither agent alone knows 'Jane Doe' and 'J. Doe'
+    are one person. The retracted company also remains visible in past belief.
+```
+
+Support-bot's belief at offset 4 still shows "Umbrella (unverified)" even
+after it's deleted at offset 5. That's the point of recorded-time
+history: a past belief reconstructs faithfully, retraction and all.
+
+## Merging beliefs into one canonical graph
+
+Each agent's belief exports through streaming interchange into a
+graph-merge branch, then `mergeIncremental()` folds it into the canonical
+graph. This is the same entity-resolution machinery the
+[Graph Merge](/graph-merge) post covered, run once per agent as new
+streams arrive rather than once for a fixed set of branches:
+
+```typescript
+await importGraphStream(
+  agentBranch.store,
+  exportGraphStream(belief, { includeTemporal: true }),
+  { onConflict: "update" },
+);
+
+const result = await mergeIncremental({
+  forkPoint,
+  target: canonical,
+  branches: [agentBranch],
+  options: {
+    resolve: {
+      Person: {
+        similarity: { kind: "fulltext", fields: ["name"] },
+        threshold: 0.9,
+      },
+      Company: {
+        similarity: { kind: "fulltext", fields: ["name"] },
+        threshold: 0.9,
+      },
+    },
+    onPropertyConflict: "flag",
+    onBasePropertyConflict: "flag",
+    branchOrder: [branchId],
+    persistProvenance: true,
+  },
+});
+```
+
+Merging sales-bot first is a clean append. Merging support-bot second is
+where the same-person, different-spelling problem actually resolves:
+
+```text
+[wave 1] merged sales-bot  — conflicts: 0
+[wave 2] merged support-bot — conflicts: 4
+  conflict: Company.name on c1: support-bot="Acme"; kept "Acme Corp"
+  conflict: Company.stage on c1: support-bot="Series B"; kept "Series A"
+  conflict: Person.name on p1: support-bot="J. Doe"; kept "Jane Doe"
+  conflict: Person.title on p1: support-bot="VP Eng"; kept "VP Eng & Product"
+
+canonical now: 1 person, 2 companies — Jane Doe (VP Eng & Product)
+  provenance — sales-bot contributed to 3 canonical entities
+  provenance — support-bot contributed to 3 canonical entities
+```
+
+`Person.email` matched, so `Jane Doe` and `J. Doe` fulltext-cleared the
+0.9 similarity threshold and collapsed to one canonical row, flagged
+rather than silently overwritten. Globex, which only support-bot ever
+saw, joins the canonical graph as new; Umbrella, which support-bot
+retracted before the merge, never shows up there at all. The canonical
+graph is itself history-enabled too, so it time-travels across merge
+waves the same way:
+
+```text
+canonical, time-travelled:
+  asOfRecorded(after wave 1): 1 person, 1 company
+  asOfRecorded(after wave 2): 1 person, 2 companies
+```
+
+## A bigger example
+
+The demo above is deliberately small: one person, two bots, five offsets.
+The repo's flagship demo (`pnpm demo`) runs the same mechanics against
+Electric Deep Survey-shaped shared state: multiple wiki entries, each
+mentioning overlapping concepts under different surface forms, converging
+into one canonical concept graph with full source attribution per
+mention. Extraction runs via substring alias matching, resolution via the
+same fulltext-similarity merge shown above.
+
+## Try it
+
+- [Materializing Event Logs](/materializing-event-logs): the full
+  pattern of idempotent projectors, cursor bookkeeping, transaction
+  receipts, and bitemporal event/ingest-time mapping
+- [Graph Merge](/graph-merge): the entity-resolution mechanics this post
+  builds on
+- [`agent-stream-graph`](https://github.com/nicia-ai/agent-stream-graph):
+  the reference implementation, `pnpm demo` and `pnpm demo:mechanics`
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

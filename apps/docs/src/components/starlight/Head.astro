@@ -4,16 +4,80 @@ import Default from "@astrojs/starlight/components/Head.astro";
 import Analytics from "../Analytics.astro";
 import StructuredData from "../StructuredData.astro";
 
-const ogImageUrl = new URL("/og-image.png", Astro.site).href;
-const ogImageAlt =
+const defaultOgImageUrl = new URL("/og-image.png", Astro.site).href;
+const defaultOgImageAlt =
   "TypeGraph — The Knowledge Graph for TypeScript. Define with Zod, query with a fluent builder, embedded on SQLite or Postgres.";
+
+// Shape of the blog schema's `cover`/`social` frontmatter fields (see
+// starlight-blog/schema and src/content.config.ts). Declared locally rather
+// than imported: `Astro.locals.starlightRoute` isn't part of Astro's ambient
+// `Locals` type from this file, so its contents are typed explicitly at this
+// one boundary instead of threading `any` through the rest of the file.
+interface CoverImage {
+  src: string;
+  width: number;
+  height: number;
+}
+interface CoverFrontmatter {
+  alt: string;
+  image?: CoverImage | string;
+  dark?: CoverImage | string;
+}
+interface SocialFrontmatter {
+  alt: string;
+  image: CoverImage | string;
+}
+
+const { starlightRoute } = Astro.locals as unknown as {
+  starlightRoute: {
+    entry: {
+      data: { cover?: CoverFrontmatter; social?: SocialFrontmatter };
+    };
+  };
+};
+
+// Blog posts carry a `social` frontmatter image (title baked in, generated
+// alongside the on-page `cover` illustration — see
+// scripts/generate-blog-images.mjs) — prefer it for the share-card image so
+// each post gets a distinct link preview instead of the sitewide default.
+// `cover` is a plain fallback should a post only set that.
+const { data } = starlightRoute.entry;
+const shareImage = data.social ?? data.cover;
+const shareImageSource =
+  shareImage ?
+    "image" in shareImage ?
+      shareImage.image
+    : shareImage.dark
+  : undefined;
+
+// Resolve the union once into a plain { url, width, height } record, rather
+// than re-discriminating shareImageSource's type separately for each field.
+const resolvedOgImage =
+  shareImageSource === undefined ?
+    { url: defaultOgImageUrl, width: 1200, height: 630 }
+  : typeof shareImageSource === "string" ?
+    {
+      url: new URL(shareImageSource, Astro.site).href,
+      width: 1200,
+      height: 630,
+    }
+  : {
+      url: new URL(shareImageSource.src, Astro.site).href,
+      width: shareImageSource.width,
+      height: shareImageSource.height,
+    };
+
+const ogImageUrl = resolvedOgImage.url;
+const ogImageWidth = String(resolvedOgImage.width);
+const ogImageHeight = String(resolvedOgImage.height);
+const ogImageAlt = shareImage?.alt ?? defaultOgImageAlt;
 ---
 
 <Default {...Astro.props} />
 <meta property="og:image" content={ogImageUrl} />
 <meta property="og:image:type" content="image/png" />
-<meta property="og:image:width" content="1200" />
-<meta property="og:image:height" content="630" />
+<meta property="og:image:width" content={ogImageWidth} />
+<meta property="og:image:height" content={ogImageHeight} />
 <meta property="og:image:alt" content={ogImageAlt} />
 <meta name="twitter:image" content={ogImageUrl} />
 <meta name="twitter:image:alt" content={ogImageAlt} />
