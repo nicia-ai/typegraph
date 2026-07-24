@@ -6,8 +6,9 @@
  */
 import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
+import { compareStrings } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
-import { canonicalEqual } from "./canonical";
+import { canonicalEqual, sortedReplacer } from "./canonical";
 import {
   type JsonSchema,
   type SerializedEdgeDef,
@@ -314,6 +315,82 @@ function diffNodes(
 }
 
 /**
+ * JSON-Schema keywords whose array value is semantically a *set*: `required`
+ * lists which properties must be present, `enum` lists which values are
+ * allowed. Reordering either changes nothing a validator — or a stored row —
+ * can observe, so a reordering must not read as a schema change.
+ *
+ * Other arrays are deliberately left in order: `prefixItems` is positional,
+ * and composition members (`allOf` / `anyOf` / `oneOf`) can carry
+ * order-dependent evaluation semantics.
+ */
+const SET_VALUED_KEYWORDS: ReadonlySet<string> = new Set(["required", "enum"]);
+
+function canonicalKey(value: unknown): string {
+  return JSON.stringify(value, sortedReplacer);
+}
+
+function sortedByCanonicalForm(items: readonly unknown[]): readonly unknown[] {
+  // `compareStrings`, not `localeCompare`: the ordering has to be identical in
+  // every process that diffs this schema, and locale-aware collation varies
+  // with the host's ICU configuration.
+  return items.toSorted((left, right) =>
+    compareStrings(canonicalKey(left), canonicalKey(right)),
+  );
+}
+
+/**
+ * Recursively order-normalizes {@link SET_VALUED_KEYWORDS} arrays so that a
+ * pure reordering compares equal.
+ *
+ * Deliberately *not* folded into `canonicalEqual` / `sortedReplacer`: that
+ * canonical form also feeds `computeSchemaHash`, and normalizing arrays there
+ * would change the hash of every schema already committed to a database.
+ * This normalization is scoped to diff comparison only.
+ */
+function orderNormalizedSchema(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => orderNormalizedSchema(item));
+  }
+  if (value !== null && typeof value === "object") {
+    const normalized: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      const child = orderNormalizedSchema(entry);
+      normalized[key] =
+        SET_VALUED_KEYWORDS.has(key) && Array.isArray(child) ?
+          sortedByCanonicalForm(child)
+        : child;
+    }
+    return normalized;
+  }
+  return value;
+}
+
+/**
+ * Whether two property JSON-Schemas are the same schema. Insensitive to the
+ * order of set-valued keywords, so restating a kind with its fields declared
+ * in a different order is correctly a no-op rather than a "modified" kind that
+ * forces a migration.
+ */
+function propertySchemasEqual(before: unknown, after: unknown): boolean {
+  return canonicalEqual(
+    orderNormalizedSchema(before),
+    orderNormalizedSchema(after),
+  );
+}
+
+/**
+ * Endpoint kind lists are sets — the order edge endpoints are declared in
+ * carries no meaning.
+ */
+function endpointKindsEqual(
+  before: readonly string[] | undefined,
+  after: readonly string[] | undefined,
+): boolean {
+  return canonicalEqual(before?.toSorted(), after?.toSorted());
+}
+
+/**
  * Computes changes to a single node definition.
  */
 function diffNodeDef(
@@ -324,7 +401,7 @@ function diffNodeDef(
   const changes: NodeChange[] = [];
 
   // Check property schema changes
-  if (!canonicalEqual(before.properties, after.properties)) {
+  if (!propertySchemasEqual(before.properties, after.properties)) {
     const { severity, details } = classifyPropertyChanges(
       name,
       before.properties,
@@ -439,7 +516,12 @@ function isBreakingPropertyChange(
   before: JsonSchema,
   after: JsonSchema,
 ): boolean {
-  if (canonicalEqual(stripSchemaMetadata(before), stripSchemaMetadata(after))) {
+  if (
+    propertySchemasEqual(
+      stripSchemaMetadata(before),
+      stripSchemaMetadata(after),
+    )
+  ) {
     return false;
   }
   if (propertyTypeSignature(before) !== propertyTypeSignature(after)) {
@@ -622,7 +704,7 @@ function diffEdgeDef(
   const changes: EdgeChange[] = [];
 
   // Check endpoint kinds
-  if (!canonicalEqual(before.fromKinds, after.fromKinds)) {
+  if (!endpointKindsEqual(before.fromKinds, after.fromKinds)) {
     changes.push({
       type: "modified",
       kind: name,
@@ -633,7 +715,7 @@ function diffEdgeDef(
     });
   }
 
-  if (!canonicalEqual(before.toKinds, after.toKinds)) {
+  if (!endpointKindsEqual(before.toKinds, after.toKinds)) {
     changes.push({
       type: "modified",
       kind: name,
@@ -657,7 +739,7 @@ function diffEdgeDef(
   }
 
   // Check properties
-  if (!canonicalEqual(before.properties, after.properties)) {
+  if (!propertySchemasEqual(before.properties, after.properties)) {
     const { severity, details } = classifyPropertyChanges(
       name,
       before.properties,
