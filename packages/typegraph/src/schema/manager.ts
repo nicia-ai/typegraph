@@ -797,11 +797,18 @@ export async function getSchemaChanges<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
 ): Promise<SchemaDiff | undefined> {
-  const activeSchema = await backend.getActiveSchema(graph.id);
-  if (activeSchema === undefined) return undefined;
+  const activeRow = await backend.getActiveSchema(graph.id);
+  if (activeRow === undefined) return undefined;
 
-  const storedSchema = parseSerializedSchema(activeSchema.schema_doc);
-  const currentSchema = serializeSchema(graph, activeSchema.version + 1);
+  // Fold in the persisted graph-extension first — the same merge the commit
+  // path performs. Without it a compile-time graph is diffed against a stored
+  // schema that also contains runtime-committed kinds, so those kinds read as
+  // removals and an unchanged schema looks like it needs a breaking migration.
+  const { graph: merged, storedSchema } = mergeStoredGraphExtension(
+    graph,
+    activeRow,
+  );
+  const currentSchema = serializeSchema(merged, activeRow.version + 1);
 
   return computeSchemaDiff(storedSchema, currentSchema);
 }

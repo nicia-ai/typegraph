@@ -929,19 +929,38 @@ This is the cheap alternative to N physical databases when you want divergent
 per-tenant schemas without N connections. See
 [Graph identity and the kind namespace](/schemas-stores#graph-identity-and-the-kind-namespace).
 
-**One caveat — index names are database-global.** Materialized SQL index names
+**Caveat 1 — index names are database-global.** Materialized SQL index names
 are derived from `(kind, fields, shape)` and are **not** namespaced by `graph_id`,
 because a SQL index name is a database-global identifier. Two graphs declaring
 the same kind name *and* the same index therefore resolve to one physical index:
 
-- **Same shape** — the second graph reuses the first graph's index. This is safe:
-  the index covers the shared table and `graph_id` applies as a residual filter.
+- **Same shape** — the second graph reuses the first graph's index. For a
+  graph-scoped index this is safe: the index is keyed by `graph_id` (or
+  `graph_id, kind`), so each graph still gets its own region of the index.
 - **Different shape** (say one `unique`, one not) — materialization fails loudly
   with a signature-drift error instead of silently sharing a mismatched index.
   Rename the declaration, or drop the existing index and retry.
 
-The coupling is confined to physical index reuse — it cannot cross-contaminate
-data, which stays filtered by `graph_id`.
+**Caveat 2 — a unique index must stay graph-scoped.** `scope` decides which
+TypeGraph system columns prefix the index key:
+
+| `scope` | Key prefix | Unique constraint applies |
+|---------|-----------|---------------------------|
+| `"graphAndKind"` (default) | `(graph_id, kind)` | per kind, per graph |
+| `"graph"` | `(graph_id)` | per graph |
+| `"none"` | *(none)* | **across every graph in the table** |
+
+A `unique` index declared with `scope: "none"` omits `graph_id` from the key, so
+the database enforces that value as unique across **all** graphs sharing the
+table — one tenant's row will block another tenant's insert. That is a real
+cross-tenant effect, and it holds whether or not two graphs share the physical
+index. Keep unique indexes on the default `"graphAndKind"` (or `"graph"`) scope
+in a multi-graph database; reserve `scope: "none"` for non-unique indexes where
+you deliberately want one index spanning every graph.
+
+Subject to those two rules, per-`graph_id` isolation holds: reads and writes
+stay filtered by `graph_id`, and the coupling is confined to physical index
+reuse.
 
 #### Option 3: Schema per tenant (PostgreSQL)
 

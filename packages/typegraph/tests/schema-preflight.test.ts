@@ -17,6 +17,7 @@ import {
   defineNode,
   MigrationError,
 } from "../src";
+import { defineGraphExtension } from "../src/graph-extension";
 import {
   assertSchemaCurrent,
   classifySchemaChanges,
@@ -119,6 +120,23 @@ describe("store-handle pre-flight", () => {
     expect(await store.requiresMigration()).toBe(false);
     const diff = requireDefined(await store.schemaChanges());
     expect(diff.hasChanges).toBe(false);
+  });
+
+  it("ignores runtime-committed kinds absent from the compile-time graph", async () => {
+    const backend = createTestBackend();
+    const [seed] = await createStoreWithSchema(baseGraph, backend);
+    await seed.evolve(
+      defineGraphExtension({
+        nodes: { RuntimeKind: { properties: { label: { type: "string" } } } },
+      }),
+    );
+
+    // A plain store carries only the compile-time graph. `RuntimeKind` lives
+    // in the committed schema but not in `store.graph`, and must not read as
+    // a removal — the schema is current.
+    const plain = createStore(baseGraph, backend);
+    expect(await plain.requiresMigration()).toBe(false);
+    expect(requireDefined(await plain.schemaChanges()).hasChanges).toBe(false);
   });
 
   it("detects the privileged wall before a write hits it", async () => {
