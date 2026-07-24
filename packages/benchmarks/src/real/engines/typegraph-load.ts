@@ -24,6 +24,7 @@ import {
   type SnbPersonRow,
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
+import { synthesizeKnowsWeight } from "./types";
 import type { SnbStore } from "../schema/snb-graph";
 
 type KnowsEdgeRow = Extract<SnbEdgeRow, { kind: "knows" }>;
@@ -258,7 +259,10 @@ async function produceTrustedChunks(
         id: edgeId(row),
         from: { kind: "Person", id: row.fromId },
         to: { kind: "Person", id: row.toId },
-        properties: { since: row.createdAt },
+        properties: {
+          since: row.createdAt,
+          weight: synthesizeKnowsWeight(row.fromId, row.toId),
+        },
       })),
     }),
   );

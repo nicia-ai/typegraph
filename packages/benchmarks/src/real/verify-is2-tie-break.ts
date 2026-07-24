@@ -31,6 +31,7 @@ import {
 } from "./dataset/smoke-fixture-constants";
 import { createLadybugEngine } from "./engines/ladybug";
 import { createNeo4jEngine } from "./engines/neo4j";
+import { createPgGraphEngine } from "./engines/pggraph";
 import { createTypegraphPostgresEngine } from "./engines/typegraph-postgres";
 import { createTypegraphSqliteEngine } from "./engines/typegraph-sqlite";
 import { type SnbEngineFactory } from "./engines/types";
@@ -41,6 +42,7 @@ const ENGINE_FACTORIES: Readonly<Record<SnbEngineName, SnbEngineFactory>> = {
   "typegraph-postgres": createTypegraphPostgresEngine,
   neo4j: createNeo4jEngine,
   ladybugdb: createLadybugEngine,
+  pggraph: createPgGraphEngine,
 };
 
 // The true answer, derived numerically from the full candidate set — not
