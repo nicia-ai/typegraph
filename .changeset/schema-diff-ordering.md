@@ -21,13 +21,20 @@ applied to the canonical form behind `computeSchemaHash`, so no schema hash
 already committed to a database changes.
 
 The normalization walks the document as JSON Schema rather than as plain JSON,
-because a key's meaning depends on where it appears:
+because a key's meaning depends on where it appears. Recursion is an
+**allowlist** of known schema-valued keywords; everything else is preserved
+verbatim:
 
-- `default`, `const`, and `examples` hold *instance data*, so their contents are
-  compared verbatim — otherwise a nested key merely *named* `required`
-  (`default: { required: ["a", "b"] }`) would be sorted, hiding a real change to
-  a stored default. `enum` members are likewise left untouched; only the member
-  set itself is order-normalized.
+- Instance data (`default`, `const`, `examples`) and unknown extension keys —
+  Zod's `.meta()` merges arbitrary keys straight into the generated schema — are
+  compared verbatim. Recursing into them would sort a nested key merely *named*
+  `required`, silently normalizing away a real change to a stored value.
 - Keys under `properties`, `patternProperties`, `dependentSchemas`, `$defs`, and
   `definitions` are user-chosen field names, not keywords, so a field *named*
   `default` still has its subschema normalized like any other.
+- `dependentRequired` maps a name to a set of names, so each set is
+  order-normalized.
+
+The allowlist fails in the safe direction: an unrecognized schema-valued keyword
+is left unsorted, so a reordering inside it reads as a change rather than being
+hidden.

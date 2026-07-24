@@ -233,6 +233,46 @@ describe("instance data is not normalized as schema", () => {
   });
 });
 
+// Zod's `.meta()` merges arbitrary keys straight into the generated JSON
+// Schema, so an unrecognized keyword can hold user data shaped like a schema.
+function withExtensionKeyword(order: readonly string[]): SerializedSchema {
+  return nodeGraph(
+    z.object({
+      field: z.string().meta({ "x-config": { required: [...order] } }),
+    }),
+  );
+}
+
+function withDependentRequired(order: readonly string[]): SerializedSchema {
+  return nodeGraph(
+    z.object({ a: z.string(), b: z.string() }).meta({
+      dependentRequired: { a: [...order] },
+    }),
+  );
+}
+
+describe("recursion is limited to known schema keywords", () => {
+  it("detects a change inside an unknown extension keyword", () => {
+    // `x-config` is not a schema keyword — its contents are user data, so a
+    // reordering inside it is a real change and must not be normalized away.
+    const diff = computeSchemaDiff(
+      withExtensionKeyword(["a", "b"]),
+      withExtensionKeyword(["b", "a"]),
+    );
+
+    expect(diff.hasChanges).toBe(true);
+  });
+
+  it("normalizes dependentRequired name sets", () => {
+    const diff = computeSchemaDiff(
+      withDependentRequired(["x", "y"]),
+      withDependentRequired(["y", "x"]),
+    );
+
+    expect(diff.hasChanges).toBe(false);
+  });
+});
+
 describe("the committed schema hash is unaffected", () => {
   it("still hashes a reordered declaration differently", async () => {
     // The order-normalization is scoped to diff comparison on purpose: the

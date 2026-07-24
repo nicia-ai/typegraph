@@ -327,16 +327,33 @@ function diffNodes(
 const SET_VALUED_KEYWORDS: ReadonlySet<string> = new Set(["required", "enum"]);
 
 /**
- * Keywords whose value is *instance data*, not a subschema. Their contents are
- * user values that merely happen to be JSON, so a nested key named `required`
- * or `enum` inside one carries no schema meaning and must not be normalized —
- * changing a `default` of `{ required: ["a", "b"] }` to `{ required: ["b",
- * "a"] }` is a real change to the stored default.
+ * Keywords whose value is a subschema, or an array of subschemas. Recursion is
+ * an **allowlist**: anything not named here is preserved verbatim.
+ *
+ * That direction matters. Recursing by default would apply schema semantics to
+ * values that are not schemas — instance data (`default`, `const`, `examples`)
+ * and arbitrary extension keys, which Zod's `.meta()` merges straight into the
+ * generated JSON Schema. A key merely *named* `required` inside one of those
+ * would then be sorted, silently normalizing away a real change. Failing the
+ * other way is safe: an unrecognized schema-valued keyword is left unsorted, so
+ * a reordering inside it reads as a change rather than being hidden.
  */
-const INSTANCE_VALUED_KEYWORDS: ReadonlySet<string> = new Set([
-  "default",
-  "const",
-  "examples",
+const SCHEMA_VALUED_KEYWORDS: ReadonlySet<string> = new Set([
+  "additionalProperties",
+  "allOf",
+  "anyOf",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "oneOf",
+  "prefixItems",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
 ]);
 
 /**
@@ -352,6 +369,13 @@ const SUBSCHEMA_MAP_KEYWORDS: ReadonlySet<string> = new Set([
   "$defs",
   "definitions",
 ]);
+
+/**
+ * Maps a property name to the set of property names it requires. User-keyed
+ * like {@link SUBSCHEMA_MAP_KEYWORDS}, but each value is a set of names rather
+ * than a subschema.
+ */
+const DEPENDENT_REQUIRED_KEYWORD = "dependentRequired";
 
 function canonicalKey(value: unknown): string {
   return JSON.stringify(value, sortedReplacer);
@@ -397,15 +421,33 @@ function orderNormalizedSchema(value: unknown): unknown {
  * (or inside an `enum` member) would be silently treated as unchanged.
  */
 function normalizedKeywordValue(key: string, value: unknown): unknown {
-  // Instance data: preserve verbatim — its keys are not schema keywords.
-  if (INSTANCE_VALUED_KEYWORDS.has(key)) return value;
   if (SET_VALUED_KEYWORDS.has(key) && Array.isArray(value)) {
     // Order-normalize the set itself, but leave each member alone: `enum`
     // members are instance values and `required` members are plain names.
     return sortedByCanonicalForm(value);
   }
   if (SUBSCHEMA_MAP_KEYWORDS.has(key)) return normalizedSubschemaMap(value);
-  return orderNormalizedSchema(value);
+  if (key === DEPENDENT_REQUIRED_KEYWORD) {
+    return normalizedDependentRequired(value);
+  }
+  if (SCHEMA_VALUED_KEYWORDS.has(key)) return orderNormalizedSchema(value);
+  // Everything else is preserved verbatim: annotations (`title`), instance
+  // data (`default`, `const`, `examples`), and unknown extension keys. See
+  // {@link SCHEMA_VALUED_KEYWORDS} for why recursion is an allowlist.
+  return value;
+}
+
+/** Order-normalizes each name set in a `dependentRequired` map. */
+function normalizedDependentRequired(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const normalized: Record<string, unknown> = {};
+  for (const [name, required] of Object.entries(value)) {
+    normalized[name] =
+      Array.isArray(required) ? sortedByCanonicalForm(required) : required;
+  }
+  return normalized;
 }
 
 /**
