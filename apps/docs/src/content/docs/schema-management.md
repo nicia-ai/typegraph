@@ -216,6 +216,59 @@ if (result.status === "breaking") {
 }
 ```
 
+### Pre-flighting before you commit
+
+Both checks below are **SELECT-only** — no DDL, no writes — so a least-privilege
+runtime can decide what to do *before* it hits the privileged migration wall:
+
+```typescript
+import { classifySchemaChanges } from "@nicia-ai/typegraph/schema";
+
+// Cheapest: does this need the privileged path at all?
+// (true when the schema is behind, and when nothing is committed yet)
+if (await store.requiresMigration()) {
+  // Route to the privileged bootstrap instead of failing mid-request.
+}
+
+// Or get the three-way decision:
+const diff = await store.schemaChanges();
+const classification =
+  diff === undefined ? "uninitialized" : classifySchemaChanges(diff);
+// "identical" | "additive" | "incompatible"
+```
+
+### Classifying a failure
+
+If a commit does fail, branch on the structured outcome rather than the message
+text, which is free to be reworded in any release:
+
+```typescript
+import { MigrationError } from "@nicia-ai/typegraph";
+
+try {
+  await commitSomething();
+} catch (error) {
+  if (error instanceof MigrationError) {
+    switch (error.details.reason) {
+      case "schema-behind": {
+        // The runtime can't migrate. `diff` says whether it's safe to proceed.
+        const additive = error.details.diff?.hasBreakingChanges === false;
+        break;
+      }
+      case "breaking-change": {
+        break;
+      }
+      // "no-active-version" | "version-not-found"
+    }
+  }
+}
+```
+
+`details.reason` is a stable discriminant (the `MIGRATION_FAILURE_REASONS`
+union), and `details.diff` carries the same structured diff — with per-change
+`severity` — that `getSchemaChanges` returns, so you never need a second query
+to decide.
+
 ## Schema Introspection
 
 Query the stored schema at runtime:

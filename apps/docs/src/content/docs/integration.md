@@ -859,7 +859,7 @@ async function createDocument(data: DocumentInput) {
 
 ### Multi-Tenant Architecture
 
-Three approaches for multi-tenant deployments, each with different tradeoffs.
+Four approaches for multi-tenant deployments, each with different tradeoffs.
 
 #### Option 1: Shared tables with tenant isolation (simplest)
 
@@ -897,7 +897,72 @@ function withTenant(req: Request) {
 }
 ```
 
-#### Option 2: Schema per tenant (PostgreSQL)
+#### Option 2: Separate `graph_id` per tenant (divergent schemas, one database)
+
+Every TypeGraph row is keyed by `graph_id`, and so is the committed schema. Two
+graphs with different `id`s coexist in one database with **independent schemas** —
+tenant A can declare kinds tenant B has never heard of, and neither sees the
+other's nodes, edges, or kind namespace.
+
+```typescript
+function tenantGraph(tenantId: string) {
+  return defineGraph({
+    id: `tenant_${tenantId}`, // the isolation boundary
+    nodes: { Document: { type: Document } },
+    edges: {},
+  });
+}
+
+// Each tenant commits — and evolves — its own schema, in the same database.
+const [store] = await createStoreWithSchema(tenantGraph("acme"), backend);
+```
+
+What `graph_id` isolates:
+
+- **Kinds** — the kind namespace is per `graph_id`. Declaring `Invoice` in one
+  graph does not create it in another.
+- **Data** — nodes and edges are filtered by `graph_id` on every read and write.
+- **Schema version and evolution** — each graph owns its committed schema
+  document and version, so tenants migrate independently.
+
+This is the cheap alternative to N physical databases when you want divergent
+per-tenant schemas without N connections. See
+[Graph identity and the kind namespace](/schemas-stores#graph-identity-and-the-kind-namespace).
+
+**Caveat 1 — index names are database-global.** Materialized SQL index names
+are derived from `(kind, fields, shape)` and are **not** namespaced by `graph_id`,
+because a SQL index name is a database-global identifier. Two graphs declaring
+the same kind name *and* the same index therefore resolve to one physical index:
+
+- **Same shape** — the second graph reuses the first graph's index. For a
+  graph-scoped index this is safe: the index is keyed by `graph_id` (or
+  `graph_id, kind`), so each graph still gets its own region of the index.
+- **Different shape** (say one `unique`, one not) — materialization fails loudly
+  with a signature-drift error instead of silently sharing a mismatched index.
+  Rename the declaration, or drop the existing index and retry.
+
+**Caveat 2 — a unique index must stay graph-scoped.** `scope` decides which
+TypeGraph system columns prefix the index key:
+
+| `scope` | Key prefix | Unique constraint applies |
+|---------|-----------|---------------------------|
+| `"graphAndKind"` (default) | `(graph_id, kind)` | per kind, per graph |
+| `"graph"` | `(graph_id)` | per graph |
+| `"none"` | *(none)* | **across every graph in the table** |
+
+A `unique` index declared with `scope: "none"` omits `graph_id` from the key, so
+the database enforces that value as unique across **all** graphs sharing the
+table — one tenant's row will block another tenant's insert. That is a real
+cross-tenant effect, and it holds whether or not two graphs share the physical
+index. Keep unique indexes on the default `"graphAndKind"` (or `"graph"`) scope
+in a multi-graph database; reserve `scope: "none"` for non-unique indexes where
+you deliberately want one index spanning every graph.
+
+Subject to those two rules, per-`graph_id` isolation holds: reads and writes
+stay filtered by `graph_id`, and the coupling is confined to physical index
+reuse.
+
+#### Option 3: Schema per tenant (PostgreSQL)
 
 ```typescript
 import { sql } from "drizzle-orm";
@@ -930,7 +995,7 @@ async function getTenantStore(tenantId: string): Promise<Store> {
 }
 ```
 
-#### Option 3: Database per tenant (strongest isolation)
+#### Option 4: Database per tenant (strongest isolation)
 
 ```typescript
 interface TenantConfig {

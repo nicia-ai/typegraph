@@ -3278,6 +3278,9 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 // @public
+export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found"];
+
+// @public
 export class MigrationError extends TypeGraphError {
     constructor(message: string, details: MigrationErrorDetails, options?: {
         cause?: unknown;
@@ -3286,13 +3289,17 @@ export class MigrationError extends TypeGraphError {
     readonly details: MigrationErrorDetails;
 }
 
-// @public
+// @public (undocumented)
 export type MigrationErrorDetails = Readonly<{
     graphId: string;
     fromVersion: number;
     toVersion: number;
-    reason?: string;
+    reason: MigrationFailureReason;
+    diff?: SchemaDiff;
 }>;
+
+// @public (undocumented)
+export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
 
 // @public
 type MigrationHookContext = Readonly<{
@@ -4915,6 +4922,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     getEdgePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
     getEdgePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
     introspect: () => SchemaIntrospection;
+    schemaChanges: () => Promise<SchemaDiff | undefined>;
+    requiresMigration: () => Promise<boolean>;
     query: () => InitialQueryBuilder<G, "open">;
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;

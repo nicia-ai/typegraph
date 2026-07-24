@@ -98,13 +98,16 @@ import {
   applyDeprecatedKinds,
   commitNewSchemaVersion,
   ensureSchema as ensureSchemaImpl,
+  getSchemaChanges,
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
   loadAndVerifyGraph,
   parseSerializedSchema,
+  requiresMigration as requiresMigrationImpl,
   type SchemaManagerOptions,
   type SchemaValidationResult,
 } from "../schema/manager";
+import { type SchemaDiff } from "../schema/migration";
 import { type SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -447,6 +450,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
   getEdgePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
   getEdgePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
   introspect: () => SchemaIntrospection;
+  schemaChanges: () => Promise<SchemaDiff | undefined>;
+  requiresMigration: () => Promise<boolean>;
   query: () => InitialQueryBuilder<G, "open">;
   asOf: (asOf: string) => StoreView<G>;
   asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
@@ -1122,6 +1127,32 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       schemaVersion: this.#schemaMetadata.schemaVersion,
       schemaHash: this.#schemaMetadata.schemaHash,
     });
+  }
+
+  /**
+   * Pre-flights this store's graph against the committed schema — one SELECT,
+   * no DDL, no writes. Returns the structured diff, or `undefined` when no
+   * schema has been committed for this graph yet.
+   *
+   * Pass the diff to `classifySchemaChanges` for the
+   * `identical | additive | incompatible` decision, so a caller can choose
+   * between "proceed" and "ask the user" *before* attempting a commit.
+   */
+  async schemaChanges(): Promise<SchemaDiff | undefined> {
+    return getSchemaChanges(this.#backend, this.#graph);
+  }
+
+  /**
+   * Whether committing this store's graph would require a schema migration —
+   * a SELECT-only pre-flight. Also `true` when no schema has been committed
+   * yet, since that needs the privileged bootstrap too.
+   *
+   * Lets a least-privilege runtime detect "this needs the privileged path"
+   * and route accordingly, instead of discovering the migration wall partway
+   * through a user's request.
+   */
+  async requiresMigration(): Promise<boolean> {
+    return requiresMigrationImpl(this.#backend, this.#graph);
   }
 
   /**

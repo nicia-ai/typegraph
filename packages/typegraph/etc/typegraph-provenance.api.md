@@ -154,6 +154,12 @@ false
 type Cardinality = "many" | "one" | "unique" | "oneActive";
 
 // @public
+type ChangeSeverity = "safe" | "warning" | "breaking";
+
+// @public
+type ChangeType = "added" | "removed" | "modified" | "renamed";
+
+// @public
 type CheckUniqueBatchParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -422,6 +428,14 @@ type DeleteUniqueParams = Readonly<{
     key: string;
 }>;
 
+// @public
+type DeprecatedKindsChange = Readonly<{
+    added: readonly string[];
+    removed: readonly string[];
+    severity: ChangeSeverity;
+    details: string;
+}>;
+
 // @public (undocumented)
 type Depth = 0 | 1 | 2 | 3 | 4 | 5;
 
@@ -544,6 +558,16 @@ type EdgeAlias<E extends AnyEdgeType = EdgeType, Optional extends boolean = fals
 
 // @public
 type EdgeAliasMap = Readonly<Record<string, EdgeAlias<EdgeType, boolean>>>;
+
+// @public
+type EdgeChange = Readonly<{
+    type: ChangeType;
+    kind: string;
+    severity: ChangeSeverity;
+    details: string;
+    before?: SerializedEdgeDef | undefined;
+    after?: SerializedEdgeDef | undefined;
+}>;
 
 // @public
 type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType> = Readonly<{
@@ -845,6 +869,13 @@ type ExtensionArrayProperty = Readonly<{
 type ExtensionBooleanProperty = Readonly<{
     type: "boolean";
 }> & ExtensionPropertyModifiers;
+
+// @public
+type ExtensionChange = Readonly<{
+    type: ChangeType;
+    severity: ChangeSeverity;
+    details: string;
+}>;
 
 // @public
 type ExtensionEdgeDef = Readonly<{
@@ -1453,6 +1484,17 @@ type HybridVectorOptions = Readonly<{
 type IfExistsMode = "return" | "update";
 
 // @public
+type IndexChange = Readonly<{
+    type: ChangeType;
+    name: string;
+    entity: IndexEntity;
+    severity: ChangeSeverity;
+    details: string;
+    before?: IndexDeclaration | undefined;
+    after?: IndexDeclaration | undefined;
+}>;
+
+// @public
 type IndexDeclaration = RelationalIndexDeclaration | VectorIndexDeclaration;
 
 // @public
@@ -1976,6 +2018,16 @@ type NodeBulkFindByIndexOptions = Readonly<{
 }>;
 
 // @public
+type NodeChange = Readonly<{
+    type: ChangeType;
+    kind: string;
+    severity: ChangeSeverity;
+    details: string;
+    before?: SerializedNodeDef | undefined;
+    after?: SerializedNodeDef | undefined;
+}>;
+
+// @public
 type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
     create: (props: z.input<N["schema"]>, options?: Readonly<{
         id?: string;
@@ -2196,6 +2248,15 @@ type ObjectPredicate = Readonly<{
     value?: LiteralValue;
     valueType?: ValueType;
     elementType?: ValueType;
+}>;
+
+// @public
+type OntologyChange = Readonly<{
+    type: ChangeType;
+    entity: "metaEdge" | "relation";
+    name: string;
+    severity: ChangeSeverity;
+    details: string;
 }>;
 
 // @public (undocumented)
@@ -2792,6 +2853,22 @@ export type RetractionReport<G extends GraphDef = GraphDef, FactKind extends Nod
 type RowProps = string | Readonly<Record<string, unknown>>;
 
 // @public
+type SchemaDiff = Readonly<{
+    fromVersion: number;
+    toVersion: number;
+    nodes: readonly NodeChange[];
+    edges: readonly EdgeChange[];
+    ontology: readonly OntologyChange[];
+    indexes: readonly IndexChange[];
+    extension?: ExtensionChange;
+    deprecatedKinds?: DeprecatedKindsChange;
+    hasBreakingChanges: boolean;
+    isBackwardsCompatible: boolean;
+    hasChanges: boolean;
+    summary: string;
+}>;
+
+// @public
 type SchemaIntrospection = Readonly<{
     graphId: string;
     schemaVersion: number | undefined;
@@ -3157,6 +3234,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     getEdgePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
     getEdgePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
     introspect: () => SchemaIntrospection;
+    schemaChanges: () => Promise<SchemaDiff | undefined>;
+    requiresMigration: () => Promise<boolean>;
     query: () => InitialQueryBuilder<G, "open">;
     asOf: (asOf: string) => StoreView<G>;
     asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
