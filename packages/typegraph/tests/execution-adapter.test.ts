@@ -362,6 +362,47 @@ describe("postgres execution adapter", () => {
     expect(compiled.params).toEqual([1]);
   });
 
+  it("rejects statements over the configured bind limit before dispatch", async () => {
+    const query = vi.fn(() =>
+      Promise.resolve({ rows: [] as readonly unknown[] }),
+    );
+    const db = {
+      $client: { query },
+      dialect: {
+        sqlToQuery() {
+          return {
+            params: [1, 2] as const,
+            sql: "SELECT $1, $2",
+          };
+        },
+      },
+      execute: vi.fn(() => Promise.resolve({ rows: [] as readonly unknown[] })),
+    } as unknown as AnyPgDatabase;
+    const adapter = createPostgresExecutionAdapter(db, {
+      maxBindParameters: 1,
+    });
+    const expectedError = {
+      code: "CONFIGURATION_ERROR",
+      details: {
+        capability: "maxBindParameters",
+        maxBindParameters: 1,
+        parameterCount: 2,
+      },
+    };
+
+    await expect(adapter.execute(sql`SELECT ${1}, ${2}`)).rejects.toMatchObject(
+      expectedError,
+    );
+    await expect(
+      adapter.executeCompiled?.({ params: [1, 2], sql: "SELECT $1, $2" }),
+    ).rejects.toMatchObject(expectedError);
+    await expect(
+      adapter.prepare?.("SELECT $1, $2").execute([1, 2]),
+    ).rejects.toMatchObject(expectedError);
+
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it("exposes executeCompiled and prepare when raw client is available", async () => {
     // The fast path now wraps the node-postgres client to use named
     // server-side prepared statements: it calls

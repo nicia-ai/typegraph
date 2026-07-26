@@ -23,8 +23,9 @@ import { drizzle } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, embedding } from "../../../src";
+import { defineEdge, defineGraph, defineNode, embedding } from "../../../src";
 import { generatePostgresDDL } from "../../../src/backend/drizzle/ddl";
+import { PGLITE_MAX_BIND_PARAMETERS } from "../../../src/backend/drizzle/execution/postgres-execution";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { createStore, createStoreWithSchema } from "../../../src/store";
@@ -46,6 +47,24 @@ const documentsGraph = defineGraph({
   id: "pglite_docs",
   nodes: { Doc: { type: Document } },
   edges: {},
+});
+
+const BatchNode = defineNode("BatchNode", {
+  schema: z.object({ name: z.string() }),
+});
+const batchRelation = defineEdge("batchRelation", {
+  schema: z.object({ index: z.number() }),
+});
+const batchGraph = defineGraph({
+  id: "pglite_bind_budget",
+  nodes: { BatchNode: { type: BatchNode } },
+  edges: {
+    batchRelation: {
+      type: batchRelation,
+      from: [BatchNode],
+      to: [BatchNode],
+    },
+  },
 });
 
 describe("PGlite backend", () => {
@@ -79,6 +98,58 @@ describe("PGlite backend", () => {
 
       expect(fetched).toBeDefined();
       expect(requireDefined(fetched).name).toBe("Alice");
+    });
+
+    it("chunks live edge inserts below PGlite's bind limit", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      cleanups.push(() => backend.close());
+      expect(backend.capabilities.maxBindParameters).toBe(
+        PGLITE_MAX_BIND_PARAMETERS,
+      );
+      const store = createStore(batchGraph, backend);
+      const from = await store.nodes.BatchNode.create({ name: "from" });
+      const to = await store.nodes.BatchNode.create({ name: "to" });
+
+      const created = await store.edges.batchRelation.bulkCreate(
+        Array.from({ length: 2979 }, (_, index) => ({
+          from,
+          props: { index },
+          to,
+        })),
+      );
+
+      expect(created).toHaveLength(2979);
+      expect(await store.edges.batchRelation.count()).toBe(2979);
+      await expect(client.query("SELECT 1 AS value")).resolves.toMatchObject({
+        rows: [{ value: 1 }],
+      });
+    });
+
+    it("chunks recorded edge inserts below PGlite's bind limit", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      cleanups.push(() => backend.close());
+      const store = createStore(batchGraph, backend, { history: true });
+      const from = await store.nodes.BatchNode.create({ name: "from" });
+      const to = await store.nodes.BatchNode.create({ name: "to" });
+
+      const created = await store.edges.batchRelation.bulkCreate(
+        Array.from({ length: 2048 }, (_, index) => ({
+          from,
+          props: { index },
+          to,
+        })),
+      );
+
+      expect(created).toHaveLength(2048);
+      expect(await store.edges.batchRelation.count()).toBe(2048);
+      expect(await store.recordedNow()).toBeDefined();
+      await expect(client.query("SELECT 1 AS value")).resolves.toMatchObject({
+        rows: [{ value: 1 }],
+      });
     });
   });
 
