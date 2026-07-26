@@ -6,6 +6,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { type ExtractTablesWithRelations } from "drizzle-orm/relations";
 
+import { ConfigurationError } from "../../../errors";
 import { isSqlFragment } from "../../../query/sql-fragment";
 import { shouldForceCustomPlan } from "../../../query/sql-intent";
 import { getOrCreateLru } from "./lru";
@@ -156,6 +157,19 @@ function isPgliteClient(candidate: unknown): candidate is NodePgClient {
     hasFunctionProperty(candidate, "query") &&
     hasFunctionProperty(candidate, "dumpDataDir")
   );
+}
+
+/**
+ * PGlite 0.5.x serializes the wire-protocol parameter count as a signed
+ * 16-bit integer. At 32,768 binds it silently returns no rows and leaves the
+ * client returning false-empty results, so the advertised budget must stay at
+ * the largest signed 16-bit value.
+ */
+export const PGLITE_MAX_BIND_PARAMETERS = 32_767;
+
+/** Detects a root Drizzle database backed by PGlite without importing it. */
+export function isPgliteDatabase(db: AnyPgDatabase): boolean {
+  return isPgliteClient((db as PgClientCarrier).$client);
 }
 
 function transactionSession(
@@ -489,9 +503,11 @@ async function executeDrizzleQuery<TRow>(
 function createPgPreparedStatement(
   pgClient: PgQueryClient,
   sqlText: string,
+  maxBindParameters: number | undefined,
 ): PreparedSqlStatement {
   return {
     async execute<TRow>(params: readonly unknown[]): Promise<readonly TRow[]> {
+      assertWithinBindParameterLimit(params.length, maxBindParameters);
       const result = await pgClient.query(sqlText, params);
       return result.rows as readonly TRow[];
     },
@@ -531,6 +547,12 @@ export type PostgresExecutionAdapterOptions = Readonly<{
    */
   preparedStatementCacheMax?: number;
   /**
+   * Maximum parameters that one statement may dispatch. Backend factories
+   * pass their normalized capability here so every execution surface has a
+   * final fail-loud guard after batch sizing.
+   */
+  maxBindParameters?: number;
+  /**
    * @internal Resolve Drizzle's pinned transaction client. Trusted import uses
    * this on its private adapter; ordinary transaction backends deliberately do
    * not expose a new raw-execution surface that would change routing behavior.
@@ -545,6 +567,7 @@ export function createPostgresExecutionAdapter(
   const prepareStatements = options.prepareStatements ?? true;
   const cacheMax =
     options.preparedStatementCacheMax ?? DEFAULT_POSTGRES_STATEMENT_CACHE_MAX;
+  const maxBindParameters = options.maxBindParameters;
   const pgClient = resolvePgClient(
     db,
     prepareStatements,
@@ -556,10 +579,20 @@ export function createPostgresExecutionAdapter(
     return compileQueryWithDialect(db, query, "PostgreSQL");
   }
 
+  function assertCompiledWithinBindParameterLimit(
+    compiledQuery: CompiledSqlQuery,
+  ): void {
+    assertWithinBindParameterLimit(
+      compiledQuery.params.length,
+      maxBindParameters,
+    );
+  }
+
   if (pgClient === undefined) {
     return {
       compile,
       async execute<TRow>(query: ExecutableSql): Promise<readonly TRow[]> {
+        assertCompiledWithinBindParameterLimit(compile(query));
         return executeDrizzleQuery<TRow>(
           db,
           isSqlFragment(query) ? toDrizzleSql(query, "postgres") : query,
@@ -573,6 +606,7 @@ export function createPostgresExecutionAdapter(
   async function executeCompiled<TRow>(
     compiledQuery: CompiledSqlQuery,
   ): Promise<readonly TRow[]> {
+    assertCompiledWithinBindParameterLimit(compiledQuery);
     const result = await pgQueryClient.query(
       compiledQuery.sql,
       compiledQuery.params,
@@ -590,6 +624,7 @@ export function createPostgresExecutionAdapter(
       // the server-side prepared-statement path because the wrapped
       // client assigns each unique SQL a stable statement name.
       const compiled = compile(query);
+      assertCompiledWithinBindParameterLimit(compiled);
       if (isSqlFragment(query) && shouldForceCustomPlan(query)) {
         const result = await pgQueryClient.queryUnnamed(
           compiled.sql,
@@ -601,7 +636,36 @@ export function createPostgresExecutionAdapter(
     },
     executeCompiled,
     prepare(sqlText: string): PreparedSqlStatement {
-      return createPgPreparedStatement(pgQueryClient, sqlText);
+      return createPgPreparedStatement(
+        pgQueryClient,
+        sqlText,
+        maxBindParameters,
+      );
     },
   };
+}
+
+function assertWithinBindParameterLimit(
+  parameterCount: number,
+  maxBindParameters: number | undefined,
+): void {
+  if (
+    maxBindParameters === undefined ||
+    parameterCount <= maxBindParameters
+  ) {
+    return;
+  }
+  throw new ConfigurationError(
+    `PostgreSQL statement uses ${parameterCount} bound parameters, exceeding ` +
+      `this backend's limit of ${maxBindParameters}.`,
+    {
+      capability: "maxBindParameters",
+      maxBindParameters,
+      parameterCount,
+    },
+    {
+      suggestion:
+        "Split the operation into smaller batches or lower the batch size before retrying.",
+    },
+  );
 }

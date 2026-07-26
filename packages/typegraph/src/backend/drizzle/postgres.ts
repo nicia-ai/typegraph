@@ -137,6 +137,8 @@ import {
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
   isNeonHttpClient,
+  isPgliteDatabase,
+  PGLITE_MAX_BIND_PARAMETERS,
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
@@ -266,42 +268,67 @@ export type PostgresBackendOptions = Readonly<{
 
 const NODE_INSERT_PARAM_COUNT = 9;
 const EDGE_INSERT_PARAM_COUNT = 12;
-const POSTGRES_NODE_INSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / NODE_INSERT_PARAM_COUNT),
-);
-const POSTGRES_EDGE_INSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / EDGE_INSERT_PARAM_COUNT),
-);
-const POSTGRES_GET_NODES_ID_CHUNK_SIZE = Math.max(
-  1,
-  POSTGRES_MAX_BIND_PARAMETERS - 2,
-);
-const POSTGRES_GET_EDGES_ID_CHUNK_SIZE = Math.max(
-  1,
-  POSTGRES_MAX_BIND_PARAMETERS - 1,
-);
+const GET_NODES_FIXED_PARAM_COUNT = 2;
+const GET_EDGES_FIXED_PARAM_COUNT = 1;
 const FULLTEXT_UPSERT_PARAM_COUNT = 6;
 const FULLTEXT_DELETE_FIXED_PARAM_COUNT = 2;
-const POSTGRES_FULLTEXT_UPSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / FULLTEXT_UPSERT_PARAM_COUNT),
-);
-const POSTGRES_FULLTEXT_DELETE_CHUNK_SIZE = Math.max(
-  1,
-  POSTGRES_MAX_BIND_PARAMETERS - FULLTEXT_DELETE_FIXED_PARAM_COUNT,
-);
 const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
-const POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE = Math.max(
-  1,
-  POSTGRES_MAX_BIND_PARAMETERS - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
-);
 const UNIQUE_INSERT_PARAM_COUNT = 6;
-const POSTGRES_UNIQUE_INSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / UNIQUE_INSERT_PARAM_COUNT),
-);
+
+type PostgresBatchChunkSizes = Readonly<{
+  checkUniqueBatchChunkSize: number;
+  edgeInsertBatchSize: number;
+  embeddingUpsertBatchSize: number;
+  fulltextDeleteChunkSize: number;
+  fulltextUpsertBatchSize: number;
+  getEdgesChunkSize: number;
+  getNodesChunkSize: number;
+  nodeInsertBatchSize: number;
+  uniqueInsertBatchSize: number;
+}>;
+
+function computePostgresBatchChunkSizes(
+  maxBindParameters: number,
+): PostgresBatchChunkSizes {
+  return {
+    checkUniqueBatchChunkSize: Math.max(
+      1,
+      maxBindParameters - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
+    ),
+    edgeInsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / EDGE_INSERT_PARAM_COUNT),
+    ),
+    embeddingUpsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / EMBEDDING_UPSERT_PARAM_COUNT),
+    ),
+    fulltextDeleteChunkSize: Math.max(
+      1,
+      maxBindParameters - FULLTEXT_DELETE_FIXED_PARAM_COUNT,
+    ),
+    fulltextUpsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / FULLTEXT_UPSERT_PARAM_COUNT),
+    ),
+    getEdgesChunkSize: Math.max(
+      1,
+      maxBindParameters - GET_EDGES_FIXED_PARAM_COUNT,
+    ),
+    getNodesChunkSize: Math.max(
+      1,
+      maxBindParameters - GET_NODES_FIXED_PARAM_COUNT,
+    ),
+    nodeInsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / NODE_INSERT_PARAM_COUNT),
+    ),
+    uniqueInsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / UNIQUE_INSERT_PARAM_COUNT),
+    ),
+  };
+}
 
 // ============================================================
 // Utilities
@@ -376,10 +403,22 @@ export function createPostgresBackend(
         },
       }
     : {};
+  const configuredMaxBindParameters =
+    options.capabilities?.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS;
+  const driverBindParameterOverrides =
+    isPgliteDatabase(db) ?
+      {
+        maxBindParameters: Math.min(
+          configuredMaxBindParameters,
+          PGLITE_MAX_BIND_PARAMETERS,
+        ),
+      }
+    : {};
   const capabilities = normalizeGraphAnalyticsCapabilities({
     ...baseCapabilities,
     ...httpOnlyOverrides,
     ...options.capabilities,
+    ...driverBindParameterOverrides,
   });
   const adapterOptions: PostgresExecutionAdapterOptions = {
     ...(options.prepareStatements === undefined ?
@@ -388,6 +427,8 @@ export function createPostgresBackend(
     ...(options.preparedStatementCacheMax === undefined ?
       {}
     : { preparedStatementCacheMax: options.preparedStatementCacheMax }),
+    maxBindParameters:
+      capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
   };
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
   const tableNames: ResolvedSqlTableNames = {
@@ -1476,24 +1517,9 @@ function createPostgresOperationBackend(
     });
   }
 
-  const batchConfig = {
-    checkUniqueBatchChunkSize: POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
-    edgeInsertBatchSize: POSTGRES_EDGE_INSERT_BATCH_SIZE,
-    // Unlike the static siblings, the embedding upsert honors a runtime
-    // `maxBindParameters` override so its chunk size tracks the connection's
-    // actual bind budget.
-    embeddingUpsertBatchSize: Math.max(
-      1,
-      Math.floor(
-        (capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS) /
-          EMBEDDING_UPSERT_PARAM_COUNT,
-      ),
-    ),
-    getEdgesChunkSize: POSTGRES_GET_EDGES_ID_CHUNK_SIZE,
-    getNodesChunkSize: POSTGRES_GET_NODES_ID_CHUNK_SIZE,
-    nodeInsertBatchSize: POSTGRES_NODE_INSERT_BATCH_SIZE,
-    uniqueInsertBatchSize: POSTGRES_UNIQUE_INSERT_BATCH_SIZE,
-  };
+  const batchConfig = computePostgresBatchChunkSizes(
+    capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+  );
 
   const commonBackend = createCommonOperationBackend({
     batchConfig,
@@ -1837,7 +1863,7 @@ function createPostgresOperationBackend(
       // batch inserts.
       for (const rows of chunkArray(
         params.rows,
-        POSTGRES_FULLTEXT_UPSERT_BATCH_SIZE,
+        batchConfig.fulltextUpsertBatchSize,
       )) {
         const statements = operationStrategy.buildUpsertFulltextBatch(
           { ...params, rows },
@@ -1855,7 +1881,7 @@ function createPostgresOperationBackend(
       if (params.nodeIds.length === 0) return;
       for (const nodeIds of chunkArray(
         params.nodeIds,
-        POSTGRES_FULLTEXT_DELETE_CHUNK_SIZE,
+        batchConfig.fulltextDeleteChunkSize,
       )) {
         const statements = operationStrategy.buildDeleteFulltextBatch({
           ...params,
