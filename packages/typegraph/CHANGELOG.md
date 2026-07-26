@@ -1,5 +1,14 @@
 # @nicia-ai/typegraph
 
+## 0.42.1
+
+### Patch Changes
+
+- [#317](https://github.com/nicia-ai/typegraph/pull/317) [`8024711`](https://github.com/nicia-ai/typegraph/commit/80247111bde9282dbbe1a9ef3c31ca66bd16ae39) Thanks [@pdlug](https://github.com/pdlug)! - Prevent large PGlite bulk writes from silently leaving the connection unable
+  to return rows. PGlite backends now advertise their safe 32,767-parameter
+  limit, PostgreSQL batch sizes follow the active backend capability, and
+  over-budget statements fail before driver dispatch.
+
 ## 0.42.0
 
 ### Minor Changes
