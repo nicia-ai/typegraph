@@ -209,6 +209,11 @@ export async function materializeRemovals(
   // the health signal for this subsystem, and a silent skip gives it a
   // legitimate non-zero steady state that no output explains — an operator
   // could not tell "nothing pending" from "declined on purpose".
+  //
+  // `reclaimRemovedVectorFieldTables` above independently keys its orphan test
+  // on the same active schema, for the same reason. The two filters are
+  // written separately but must keep agreeing on that authority — see the
+  // note there.
   const liveKinds = liveKindNamesFrom(activeSchema);
 
   const kindFilter =
@@ -760,6 +765,17 @@ async function reclaimRemovedVectorFieldTables(
     }
   }
 
+  // Both clauses key on the ACTIVE schema, which is what keeps this pass from
+  // dropping storage for a kind that was removed and later re-added:
+  // `survivingKinds` requires the kind to be live now, so a re-added kind with
+  // its field re-declared is not an orphan, and a still-removed kind is left
+  // to the candidate loop in `materializeRemovals` instead.
+  //
+  // That is the same authority the live-kind guard there uses — two
+  // independently written filters agreeing on one source. Keep them agreeing:
+  // weakening either (e.g. keying this on schema *history* rather than the
+  // active document) reopens the re-add data-loss path from the other side,
+  // and no test spans both.
   const orphans = [...historical.values()].filter(
     (field) =>
       !activeVectorFields.has(vectorFieldKey(field.kind, field.fieldPath)) &&
