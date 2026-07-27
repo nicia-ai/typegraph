@@ -81,7 +81,7 @@ export function registerBulkFindEndpointIntegrationTests(
     it("returns an empty result for empty input without reading", async () => {
       const store = context.getStore();
       const backend = context.getBackend();
-      const spy = vi.spyOn(backend, "findEdgesByKind");
+      const spy = vi.spyOn(backend, "findEdgesByEndpointSet");
       try {
         expect(await store.edges.knows.bulkFindFrom([])).toEqual([]);
         expect(await store.edges.knows.bulkFindTo([])).toEqual([]);
@@ -95,9 +95,11 @@ export function registerBulkFindEndpointIntegrationTests(
       const { store, alice, bob, carol, dave } = await seedKnowsGraph(context);
       const backend = context.getBackend();
 
-      const spy = vi.spyOn(backend, "findEdgesByKind");
+      const spy = vi.spyOn(backend, "findEdgesByEndpointSet");
       try {
         await store.edges.knows.bulkFindFrom([alice, bob, carol, dave]);
+        // One endpoint-set read — not four singleton reads, and not a
+        // findEdgesByKind scan the collection would rebucket.
         expect(spy).toHaveBeenCalledTimes(1);
       } finally {
         spy.mockRestore();
@@ -250,6 +252,74 @@ export function registerBulkFindEndpointIntegrationTests(
       expect(results[1]?.map((edge) => edge.year)).toEqual(["1925"]);
     });
 
+    it("reads every endpoint kind at ONE instant", async () => {
+      // A mixed-kind read issues one statement per kind. Resolving the read
+      // coordinate per statement would let `current` mode pick a fresh "now"
+      // for each, so an edge whose validity ends between them could be both
+      // present and absent within one logical read. Racing a real clock would
+      // only catch that when the boundary happened to fall in a sub-millisecond
+      // gap, so assert the property itself: every statement gets one `asOf`.
+      const Author = defineNode("Author", {
+        schema: z.object({ name: z.string() }),
+      });
+      const Studio = defineNode("Studio", {
+        schema: z.object({ name: z.string() }),
+      });
+      const Work = defineNode("Work", {
+        schema: z.object({ name: z.string() }),
+      });
+      const produced = defineEdge("produced", {
+        schema: z.object({ year: z.string() }),
+      });
+      const graph = defineGraph({
+        id: "bulk_endpoint_single_instant",
+        nodes: {
+          Author: { type: Author },
+          Studio: { type: Studio },
+          Work: { type: Work },
+        },
+        edges: {
+          produced: { type: produced, from: [Author, Studio], to: [Work] },
+        },
+      });
+
+      const store = await context.createStore(graph);
+      const author = await store.nodes.Author.create({ name: "Ada" });
+      const studio = await store.nodes.Studio.create({ name: "Bell" });
+      const work = await store.nodes.Work.create({ name: "Notes" });
+      await store.edges.produced.create(author, work, { year: "1843" });
+      await store.edges.produced.create(studio, work, { year: "1925" });
+
+      // `nowIso()` has millisecond resolution and two in-memory reads land in
+      // the same millisecond, so a bare spy cannot tell the two shapes apart.
+      // Delay each read past that resolution: with the coordinate resolved per
+      // statement the second `asOf` would advance, with it resolved once it
+      // cannot.
+      const backend = context.getBackend();
+      // Declared `this: void`, so the reference stands alone — no bind needed.
+      const readEndpointSet = requireDefined(
+        backend.findEdgesByEndpointSet,
+        "bundled backends implement findEdgesByEndpointSet",
+      );
+      const spy = vi
+        .spyOn(backend, "findEdgesByEndpointSet")
+        .mockImplementation(async (params) => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return readEndpointSet(params);
+        });
+      try {
+        await store.edges.produced.bulkFindFrom([author, studio]);
+
+        // Two endpoint kinds -> two statements, and they must agree on `asOf`.
+        expect(spy.mock.calls.length).toBeGreaterThan(1);
+        const instants = new Set(spy.mock.calls.map(([params]) => params.asOf));
+        expect([...instants][0]).toBeDefined();
+        expect(instants.size).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("splits an endpoint set that exceeds the bound-parameter budget", async () => {
       const { store, alice, bob } = await seedKnowsGraph(context);
       const backend = context.getBackend();
@@ -282,75 +352,50 @@ export function registerBulkFindEndpointIntegrationTests(
     });
 
     describe("endpoint-set parameter validation", () => {
-      it("rejects a scalar endpoint id combined with its id set", async () => {
+      // The rules that used to need runtime checks are now unrepresentable in
+      // `FindEdgesByEndpointSetParams`, so there is nothing left to test for
+      // them: one `side` means both endpoints cannot fan out at once, the
+      // absence of scalar `fromId` / `toId` means a scalar and a set cannot
+      // disagree, and the absence of `limit` / `offset` / `after` means no
+      // caller can ask for a global slice across a chunked read. The type
+      // checker rejects each of those; only the numeric bound needs code.
+      it("rejects a non-positive limitPerEndpoint at the backend boundary", async () => {
         const store = context.getStore();
-        const backend = context.getBackend();
+        const readEndpointSet = requireDefined(
+          context.getBackend().findEdgesByEndpointSet,
+          "bundled backends implement findEdgesByEndpointSet",
+        );
 
-        await expect(
-          backend.findEdgesByKind({
-            graphId: store.graphId,
-            kind: "knows",
-            fromId: "a",
-            fromIds: ["a", "b"],
-          }),
-        ).rejects.toBeInstanceOf(ConfigurationError);
-
-        await expect(
-          backend.findEdgesByKind({
-            graphId: store.graphId,
-            kind: "knows",
-            toId: "a",
-            toIds: ["a", "b"],
-          }),
-        ).rejects.toBeInstanceOf(ConfigurationError);
-      });
-
-      it("rejects fanning out both endpoints at once", async () => {
-        const store = context.getStore();
-        const backend = context.getBackend();
-
-        await expect(
-          backend.findEdgesByKind({
-            graphId: store.graphId,
-            kind: "knows",
-            fromIds: ["a"],
-            toIds: ["b"],
-          }),
-        ).rejects.toBeInstanceOf(ConfigurationError);
-      });
-
-      it("rejects a global limit / offset / after beside an id set", async () => {
-        const store = context.getStore();
-        const backend = context.getBackend();
-
-        for (const slice of [
-          { limit: 10 },
-          { offset: 5 },
-          { orderBy: "id", after: "x" },
-        ] as const) {
+        for (const limitPerEndpoint of [0, -1, 1.5]) {
           await expect(
-            backend.findEdgesByKind({
+            readEndpointSet({
               graphId: store.graphId,
               kind: "knows",
-              fromIds: ["a"],
-              ...slice,
+              side: "from",
+              endpointKind: "Person",
+              endpointIds: ["a"],
+              limitPerEndpoint,
             }),
           ).rejects.toBeInstanceOf(ConfigurationError);
         }
       });
 
-      it("rejects limitPerEndpoint without an id set", async () => {
+      it("reads nothing for an empty endpoint set", async () => {
         const store = context.getStore();
-        const backend = context.getBackend();
+        const readEndpointSet = requireDefined(
+          context.getBackend().findEdgesByEndpointSet,
+          "bundled backends implement findEdgesByEndpointSet",
+        );
 
         await expect(
-          backend.findEdgesByKind({
+          readEndpointSet({
             graphId: store.graphId,
             kind: "knows",
-            fromId: "a",
-            limitPerEndpoint: 1,
+            side: "from",
+            endpointKind: "Person",
+            endpointIds: [],
           }),
-        ).rejects.toBeInstanceOf(ConfigurationError);
+        ).resolves.toEqual([]);
       });
     });
   });

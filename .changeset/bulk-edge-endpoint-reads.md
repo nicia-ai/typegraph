@@ -21,7 +21,20 @@ SQL via `ROW_NUMBER()` where the backend supports window functions). Inputs
 larger than the backend's bound-parameter budget are split across statements
 transparently.
 
-Backend authors: `FindEdgesByKindParams` gains `fromIds` / `toIds` /
-`limitPerEndpoint`. The set form is mutually exclusive with the scalar `fromId`
-/ `toId`, may fan out over only one endpoint, and cannot be combined with
-`limit` / `offset` / `after`; violations throw a `ConfigurationError`.
+Backend authors: this adds a new **optional** `GraphBackend` operation,
+`findEdgesByEndpointSet(params)`, with its own `FindEdgesByEndpointSetParams`.
+`FindEdgesByKindParams` is unchanged.
+
+It is a separate operation rather than optional fields on `findEdgesByKind` so
+that a backend which does not implement it cannot degrade silently. Optional
+params would have left an existing backend type-correct while it ignored the id
+list and returned every edge of the kind — which the collection would rebucket
+into a correct-looking answer at unbounded cost. Support is now detected by the
+method's presence, before any read is issued, and `bulkFindFrom` / `bulkFindTo`
+refuse with a typed `ConfigurationError` on a backend without it rather than
+looping `findFrom` per input.
+
+The parameter shape also makes the previously-validated illegal states
+unrepresentable: one `side` instead of two id lists, no scalar `fromId` /
+`toId` to disagree with a set, and no `limit` / `offset` / `after` to slice a
+read the backend splits into bind-budget chunks.

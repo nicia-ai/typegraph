@@ -1193,6 +1193,13 @@ fan-out; it keeps the leading edges of that endpoint's `findFrom` order. Large
 inputs are transparently split across statements to respect the backend's
 bound-parameter budget.
 
+Requires a backend that implements the `findEdgesByEndpointSet` operation —
+both bundled Drizzle backends do. On a custom backend without it, these
+methods throw a `ConfigurationError` instead of falling back to one
+`findFrom` per input: a caller reaching for a bulk read is asking for one
+statement, so quietly issuing N would be the cost surprise the method exists
+to remove. Loop over `findFrom` / `findTo` yourself if that trade is fine.
+
 ```typescript
 store.edges.worksAt.bulkFindFrom(
   froms: readonly NodeRef<Person>[],

@@ -1202,6 +1202,25 @@ export type GraphBackend = Readonly<{
     this: void,
     params: FindEdgesByKindParams,
   ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Reads the edges of a SET of endpoints in one statement per bind-budget
+   * chunk — see {@link FindEdgesByEndpointSetParams}.
+   *
+   * **Optional, and its absence is the capability signal.** `store.edges.<kind>
+   * .bulkFindFrom` / `.bulkFindTo` check for this method before issuing any
+   * read and refuse with a typed `ConfigurationError` when it is missing,
+   * rather than degrading to a per-endpoint loop. A caller reaching for a bulk
+   * endpoint read is asking for one statement; quietly giving them N is the
+   * surprise the method exists to prevent.
+   *
+   * Both bundled Drizzle backends implement it. A custom backend that does not
+   * simply omits it and the bulk reads refuse; the singleton `findEdgesByKind`
+   * path is unaffected.
+   */
+  findEdgesByEndpointSet?: (
+    this: void,
+    params: FindEdgesByEndpointSetParams,
+  ) => Promise<readonly EdgeRow[]>;
   countEdgesByKind: (
     this: void,
     params: CountEdgesByKindParams,
@@ -1842,6 +1861,7 @@ export type EdgeEntityReadBackend = Pick<
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
+  | "findEdgesByEndpointSet"
   | "countEdgesByKind"
 >;
 
@@ -2440,32 +2460,8 @@ export type FindEdgesByKindParams = Readonly<{
   kind: string;
   fromKind?: string;
   fromId?: string;
-  /**
-   * Source-node id SET. Compiles to `from_id IN (...)` — a prefix seek on the
-   * same `(graph_id, from_kind, from_id, kind, ...)` index the scalar
-   * {@link fromId} takes, so one statement serves a whole page of sources
-   * instead of one statement per source.
-   *
-   * Mutually exclusive with {@link fromId} and with {@link toIds}; incompatible
-   * with `limit` / `offset` / `after` (whose global ordering cannot survive
-   * bind-budget chunking) — use {@link limitPerEndpoint} to bound fan-out.
-   * See {@link resolveEdgeEndpointSet} for the exact rules.
-   */
-  fromIds?: readonly string[];
   toKind?: string;
   toId?: string;
-  /** Target-node id set. Mirrors {@link fromIds} on the `to_id` column. */
-  toIds?: readonly string[];
-  /**
-   * Maximum rows returned per distinct endpoint id, applied inside the
-   * statement via `ROW_NUMBER()` over the read's own ordering. Requires an
-   * endpoint id set ({@link fromIds} / {@link toIds}) and a backend whose
-   * `capabilities.windowFunctions` is true — callers that cannot guarantee the
-   * capability must cap client-side instead. Unlike `limit`, a per-endpoint cap
-   * composes with bind-budget chunking: each endpoint's rows fall entirely in
-   * one chunk.
-   */
-  limitPerEndpoint?: number;
   limit?: number;
   offset?: number;
   /** If true, exclude deleted edges. Default true. */
@@ -2488,6 +2484,71 @@ export type FindEdgesByKindParams = Readonly<{
    * `offset` — callers pick one. Mirrors {@link FindNodesByKindParams.after}.
    */
   after?: string;
+}>;
+
+/**
+ * The endpoint side a {@link FindEdgesByEndpointSetParams} read fans out over.
+ */
+export type EdgeEndpointSide = "from" | "to";
+
+/**
+ * Parameters for reading the edges of a SET of endpoints in one statement —
+ * the widened form of {@link FindEdgesByKindParams}'s scalar `fromId` / `toId`.
+ *
+ * Deliberately a SEPARATE parameter type on a separate operation rather than
+ * optional fields on `FindEdgesByKindParams`. A backend that did not implement
+ * set membership would still type-check while ignoring the id list, and would
+ * then return every edge of the kind — which the caller would rebucket into a
+ * correct-looking answer at unbounded cost. Splitting the operation makes that
+ * failure unreachable: support is detected by the method's presence, before any
+ * read is issued.
+ *
+ * The shape also makes the previously-validated illegal states
+ * unrepresentable. One `side` instead of two independent id lists means both
+ * endpoints can never fan out at once; no scalar `fromId` / `toId` field means
+ * a scalar and a set can never disagree; no `limit` / `offset` / `after` means
+ * a global slice can never be requested across a read the backend splits into
+ * bind-budget chunks.
+ */
+export type FindEdgesByEndpointSetParams = Readonly<{
+  graphId: string;
+  kind: string;
+  /** Which endpoint column the id set constrains. */
+  side: EdgeEndpointSide;
+  /**
+   * Kind of the fanned-out endpoint. Required: it is the index prefix that
+   * makes the set a seek rather than a scan, so a set is always scoped to one
+   * endpoint kind and a heterogeneous page costs one read per distinct kind.
+   */
+  endpointKind: string;
+  /**
+   * Endpoint NODE ids to match — deliberately not named `ids`, which in the
+   * backend params vocabulary means edge ids (see
+   * {@link DeleteEdgesBatchParams}); the write-surface assertion in
+   * `recorded-capture/write-surface.ts` classifies params structurally and a
+   * `{ graphId, ids }` read would be misread as a write.
+   *
+   * The backend deduplicates before splitting the list across bind-budget
+   * chunks — a repeated id spanning two chunks would return its edges twice.
+   * An empty list reads nothing and yields no rows.
+   */
+  endpointIds: readonly string[];
+  /**
+   * Maximum rows per distinct endpoint id, applied inside the statement (via
+   * `ROW_NUMBER()` over the read's own ordering) rather than by the caller.
+   * Only meaningful on a backend whose `capabilities.windowFunctions` is true;
+   * callers must still cap client-side, so a backend that ignores this returns
+   * a superset rather than a wrong answer. Unlike a global `limit`, a
+   * per-endpoint cap composes with chunking: each endpoint's rows fall
+   * entirely within one chunk.
+   */
+  limitPerEndpoint?: number;
+  /** If true, exclude deleted edges. Default true. */
+  excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
 }>;
 
 /**

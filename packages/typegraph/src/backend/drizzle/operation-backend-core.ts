@@ -14,10 +14,7 @@ import type {
   CompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
-import {
-  resolveEdgeEndpointSet,
-  withEndpointIdChunk,
-} from "../edge-endpoint-sets";
+import { resolveEdgeEndpointIds } from "../edge-endpoint-sets";
 import { nowIso as defaultNowIso } from "../row-mappers";
 import type {
   CheckUniqueBatchParams,
@@ -32,6 +29,7 @@ import type {
   DeleteUniqueParams,
   EdgeExistsBetweenParams,
   EdgeRow,
+  FindEdgesByEndpointSetParams,
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
@@ -79,6 +77,7 @@ export type CommonOperationBackend = Pick<
   | "executeStatement"
   | "executeTemporaryStatement"
   | "findEdgesByKind"
+  | "findEdgesByEndpointSet"
   | "findEdgesConnectedTo"
   | "findNodesByKind"
   | "getActiveSchema"
@@ -552,14 +551,15 @@ export function createCommonOperationBackend(
     async findEdgesByKind(
       params: FindEdgesByKindParams,
     ): Promise<readonly EdgeRow[]> {
-      const endpointSet = resolveEdgeEndpointSet(params);
+      const query = operationStrategy.buildFindEdgesByKind(params);
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      return rows.map((row) => rowMappers.toEdgeRow(row));
+    },
 
-      if (endpointSet === undefined) {
-        const query = operationStrategy.buildFindEdgesByKind(params);
-        const rows = await execution.execAll<Record<string, unknown>>(query);
-        return rows.map((row) => rowMappers.toEdgeRow(row));
-      }
-
+    async findEdgesByEndpointSet(
+      params: FindEdgesByEndpointSetParams,
+    ): Promise<readonly EdgeRow[]> {
+      const ids = resolveEdgeEndpointIds(params);
       // Each endpoint id lands in exactly one chunk (the set is deduped), so
       // every endpoint's rows come back from a single statement in that
       // statement's order — the per-endpoint ordering and `limitPerEndpoint`
@@ -567,11 +567,12 @@ export function createCommonOperationBackend(
       // result is only globally ordered when one chunk covers the set.
       const edgeRows: EdgeRow[] = [];
       for (const idChunk of chunkArray(
-        endpointSet.ids,
+        ids,
         batchConfig.findEdgesEndpointChunkSize,
       )) {
-        const query = operationStrategy.buildFindEdgesByKind(
-          withEndpointIdChunk(params, endpointSet.side, idChunk),
+        const query = operationStrategy.buildFindEdgesByEndpointSet(
+          params,
+          idChunk,
         );
         const rows = await execution.execAll<Record<string, unknown>>(query);
         for (const row of rows) edgeRows.push(rowMappers.toEdgeRow(row));

@@ -1054,8 +1054,15 @@ export type EdgeCollection<
    * statements to respect the backend's bound-parameter budget, which is
    * invisible in the result.
    *
+   * Requires a backend implementing `findEdgesByEndpointSet` — both bundled
+   * Drizzle backends do. On one that does not, this **refuses** with a
+   * `ConfigurationError` rather than looping `findFrom` per input: asking for
+   * a bulk read is asking for one statement, and silently issuing N is the
+   * cost surprise the method exists to remove.
+   *
    * @param froms - Source nodes to read the edges of
    * @param options - Temporal coordinate plus optional `limitPerInput`
+   * @throws {ConfigurationError} when the backend cannot read an endpoint set
    */
   bulkFindFrom: (
     froms: readonly NodeRef<From>[],

@@ -6,6 +6,7 @@
 import { type z } from "zod";
 
 import {
+  type EdgeEndpointSide,
   type FindEdgesByKindParams,
   type GraphBackend,
   rowPropsToObject,
@@ -13,7 +14,11 @@ import {
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type TemporalMode } from "../../core/types";
-import { UnsupportedPredicateError, ValidationError } from "../../errors";
+import {
+  ConfigurationError,
+  UnsupportedPredicateError,
+  ValidationError,
+} from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import type { BatchableQuery } from "../../query/builder/types";
 import { groupBy } from "../../utils/array";
@@ -190,15 +195,10 @@ function buildCreateEdgeInput(
   return input;
 }
 
-/**
- * The endpoint predicate of an edge read: one side, constrained by a scalar id
- * (`findFrom` / `findTo`) or by an id set (`bulkFindFrom` / `bulkFindTo`).
- */
+/** The scalar endpoint predicate of a `findFrom` / `findTo` read. */
 type EdgeEndpointPredicate =
   | Readonly<{ fromKind: string; fromId: string }>
-  | Readonly<{ fromKind: string; fromIds: readonly string[] }>
-  | Readonly<{ toKind: string; toId: string }>
-  | Readonly<{ toKind: string; toIds: readonly string[] }>;
+  | Readonly<{ toKind: string; toId: string }>;
 
 type EdgeUpdateInput = Readonly<{
   id: string;
@@ -332,14 +332,9 @@ export function createEdgeCollection<
    */
   function buildEndpointFindParams(
     endpoint: EdgeEndpointPredicate,
-    options: QueryOptions | undefined,
+    temporal: TemporalReadParams,
   ): FindEdgesByKindParams {
-    return {
-      graphId,
-      kind,
-      ...endpoint,
-      ...resolveTemporalReadParams(options, defaultTemporalMode),
-    };
+    return { graphId, kind, ...endpoint, ...temporal };
   }
 
   async function findEdgesFrom(
@@ -350,7 +345,7 @@ export function createEdgeCollection<
     const rows = await target.findEdgesByKind(
       buildEndpointFindParams(
         { fromKind: from.kind, fromId: from.id },
-        options,
+        resolveTemporalReadParams(options, defaultTemporalMode),
       ),
     );
     return mapRows(rows);
@@ -362,7 +357,10 @@ export function createEdgeCollection<
     options?: QueryOptions,
   ): Promise<Edge<E>[]> {
     const rows = await target.findEdgesByKind(
-      buildEndpointFindParams({ toKind: to.kind, toId: to.id }, options),
+      buildEndpointFindParams(
+        { toKind: to.kind, toId: to.id },
+        resolveTemporalReadParams(options, defaultTemporalMode),
+      ),
     );
     return mapRows(rows);
   }
@@ -378,14 +376,43 @@ export function createEdgeCollection<
    * case) therefore cost exactly one statement.
    */
   async function findEdgesByEndpointSet(
-    side: "from" | "to",
+    side: EdgeEndpointSide,
     references: readonly NodeRef[],
     options?: EdgeBulkFindEndpointOptions,
   ): Promise<Edge<E>[][]> {
     if (references.length === 0) return [];
 
+    const method = side === "from" ? "bulkFindFrom" : "bulkFindTo";
+    const readEndpointSet = backend.findEdgesByEndpointSet;
+    if (readEndpointSet === undefined) {
+      throw new ConfigurationError(
+        `store.edges.${kind}.${method}() requires a backend that can read a set of ` +
+          `endpoints in one statement, and this backend does not implement ` +
+          `findEdgesByEndpointSet.`,
+        {
+          backend: backend.dialect,
+          capability: "findEdgesByEndpointSet",
+          kind,
+          operation: method,
+        },
+        {
+          suggestion:
+            `Falling back to one findFrom/findTo per endpoint is deliberately NOT done here: ` +
+            `a caller reaching for a bulk endpoint read is asking for one statement, and ` +
+            `silently issuing N is the cost surprise this method exists to avoid. Loop over ` +
+            `findFrom/findTo explicitly if that trade is acceptable.`,
+        },
+      );
+    }
+
     const limitPerInput = options?.limitPerInput;
     assertLimitPerInput(kind, limitPerInput);
+
+    // Resolve the read coordinate ONCE. `current` mode materializes an `asOf`
+    // of "now", so resolving per endpoint kind would let a mixed-kind read
+    // straddle a validity boundary and return an internally inconsistent
+    // answer from a single logical read.
+    const temporal = resolveTemporalReadParams(options, defaultTemporalMode);
 
     // The per-endpoint cap is pushed into SQL when the engine has window
     // functions; otherwise the rows arrive uncapped and the JS slice below
@@ -396,15 +423,17 @@ export function createEdgeCollection<
       : {};
 
     const edgesByEndpoint = new Map<string, Edge<E>[]>();
-    for (const [endpointKind, ids] of groupEndpointIdsByKind(references)) {
-      const rows = await backend.findEdgesByKind({
-        ...buildEndpointFindParams(
-          side === "from" ?
-            { fromKind: endpointKind, fromIds: ids }
-          : { toKind: endpointKind, toIds: ids },
-          options,
-        ),
+    for (const [endpointKind, endpointIds] of groupEndpointIdsByKind(
+      references,
+    )) {
+      const rows = await readEndpointSet({
+        graphId,
+        kind,
+        side,
+        endpointKind,
+        endpointIds,
         ...limitPerEndpoint,
+        ...temporal,
       });
       for (const edge of mapRows(rows)) {
         const key =

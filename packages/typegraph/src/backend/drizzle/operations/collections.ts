@@ -4,6 +4,7 @@ import { type TemporalMode } from "../../../core/types";
 import type {
   CountEdgesByKindParams,
   CountNodesByKindParams,
+  FindEdgesByEndpointSetParams,
   FindEdgesByKindParams,
   FindNodesByKindParams,
 } from "../../types";
@@ -163,14 +164,6 @@ function buildEdgeOrdering(
 /**
  * Builds a query to find edges by kind with optional endpoint filters.
  *
- * Endpoints are constrained either by a scalar id (`fromId` / `toId`) or by an
- * id set (`fromIds` / `toIds`, compiled to `IN (...)`). `limitPerEndpoint`
- * wraps the read in a `ROW_NUMBER()` partitioned by the fanned-out endpoint
- * column, capping each source's rows in the statement rather than in the
- * caller. Callers reach this builder through `resolveEdgeEndpointSet`
- * (`src/backend/edge-endpoint-sets.ts`), which owns the compatibility rules
- * between these predicates.
- *
  * Pagination mirrors {@link buildFindNodesByKind}:
  * - Offset pagination (`limit` + `offset`): keeps the historical
  *   `ORDER BY created_at DESC` and adds `id DESC` as a deterministic tiebreaker
@@ -199,10 +192,6 @@ export function buildFindEdgesByKind(
     conditions.push(sql`${edges.fromId} = ${params.fromId}`);
   }
 
-  if (params.fromIds !== undefined) {
-    conditions.push(buildIdSetCondition(edges.fromId, params.fromIds));
-  }
-
   if (params.toKind !== undefined) {
     conditions.push(sql`${edges.toKind} = ${params.toKind}`);
   }
@@ -211,35 +200,16 @@ export function buildFindEdgesByKind(
     conditions.push(sql`${edges.toId} = ${params.toId}`);
   }
 
-  if (params.toIds !== undefined) {
-    conditions.push(buildIdSetCondition(edges.toId, params.toIds));
-  }
-
   if (params.orderBy === "id" && params.after !== undefined) {
     conditions.push(sql`${edges.id} > ${params.after}`);
   }
 
   const whereClause = sql.join(conditions, sql` AND `);
 
-  const { qualified: orderByClause, bare: derivedOrderByClause } =
-    buildEdgeOrdering(tables, params.orderBy);
-
-  if (params.limitPerEndpoint !== undefined) {
-    const partitionColumn =
-      params.fromIds === undefined ? edges.toId : edges.fromId;
-    const ranked = sql`
-      SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY ${partitionColumn} ORDER BY ${orderByClause}
-      ) AS endpoint_rank
-      FROM ${edges}
-      WHERE ${whereClause}
-    `;
-    return sql`
-      SELECT * FROM (${ranked}) AS ranked_edges
-      WHERE endpoint_rank <= ${params.limitPerEndpoint}
-      ORDER BY ${derivedOrderByClause}
-    `;
-  }
+  const { qualified: orderByClause } = buildEdgeOrdering(
+    tables,
+    params.orderBy,
+  );
 
   if (params.limit !== undefined && params.offset !== undefined) {
     return sql`
@@ -263,6 +233,64 @@ export function buildFindEdgesByKind(
     SELECT * FROM ${edges}
     WHERE ${whereClause}
     ORDER BY ${orderByClause}
+  `;
+}
+
+/**
+ * Builds a query to read the edges of a SET of endpoints.
+ *
+ * The id list compiles to `IN (...)` on the fanned-out side, scoped to one
+ * `endpointKind` so the predicate is a prefix seek on the edge relation's
+ * system index rather than a scan. `limitPerEndpoint` wraps the read in a
+ * `ROW_NUMBER()` partitioned by that same column, capping each endpoint's rows
+ * inside the statement instead of in the caller.
+ *
+ * Ordering matches {@link buildFindEdgesByKind}'s default so a set read
+ * returns each endpoint's edges in the same order the singleton read does.
+ */
+export function buildFindEdgesByEndpointSet(
+  tables: Tables,
+  params: FindEdgesByEndpointSetParams,
+  endpointIds: readonly string[],
+): SQL {
+  const { edges } = tables;
+  const fromSide = params.side === "from";
+  const kindColumn = fromSide ? edges.fromKind : edges.toKind;
+  const idColumn = fromSide ? edges.fromId : edges.toId;
+
+  const whereClause = sql.join(
+    [
+      sql`${edges.graphId} = ${params.graphId}`,
+      sql`${edges.kind} = ${params.kind}`,
+      ...buildTemporalConditions(edges, params),
+      sql`${kindColumn} = ${params.endpointKind}`,
+      buildIdSetCondition(idColumn, endpointIds),
+    ],
+    sql` AND `,
+  );
+
+  const { qualified: orderByClause, bare: derivedOrderByClause } =
+    buildEdgeOrdering(tables, undefined);
+
+  if (params.limitPerEndpoint === undefined) {
+    return sql`
+      SELECT * FROM ${edges}
+      WHERE ${whereClause}
+      ORDER BY ${orderByClause}
+    `;
+  }
+
+  const ranked = sql`
+    SELECT *, ROW_NUMBER() OVER (
+      PARTITION BY ${idColumn} ORDER BY ${orderByClause}
+    ) AS endpoint_rank
+    FROM ${edges}
+    WHERE ${whereClause}
+  `;
+  return sql`
+    SELECT * FROM (${ranked}) AS ranked_edges
+    WHERE endpoint_rank <= ${params.limitPerEndpoint}
+    ORDER BY ${derivedOrderByClause}
   `;
 }
 
