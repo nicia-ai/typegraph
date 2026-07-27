@@ -1089,6 +1089,14 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   // Validate matchOn fields
   validateMatchOnFields(edgeKind.schema, matchOn, kind);
 
+  // Validate temporal inputs before the read probe so validity of a call does
+  // not depend on whether its endpoint identity already exists.
+  const validFrom = validateOptionalCanonicalIsoDate(
+    options?.validFrom,
+    "validFrom",
+  );
+  const validTo = validateOptionalCanonicalIsoDate(options?.validTo, "validTo");
+
   // Probe outside the transaction: with ifExists "return", the common found
   // path performs no write, so it must not pay for a write transaction
   // (BEGIN IMMEDIATE on SQLite, the per-graph advisory lock under history).
@@ -1151,10 +1159,8 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         toKind,
         toId,
         props: validatedProps,
-        ...(options?.validFrom !== undefined && {
-          validFrom: options.validFrom,
-        }),
-        ...(options?.validTo !== undefined && { validTo: options.validTo }),
+        ...(validFrom !== undefined && { validFrom }),
+        ...(validTo !== undefined && { validTo }),
       };
       const edge = await executeEdgeCreate(ctx, input, backend);
       return { edge, action: "created" };
@@ -1171,9 +1177,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         {
           id: liveRow.id,
           props: validatedProps,
-          ...(options?.validTo !== undefined && {
-            validTo: options.validTo,
-          }),
+          ...(validTo !== undefined && { validTo }),
         },
         backend,
       );
@@ -1186,7 +1190,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       throw new Error("Expected deletedRow to be defined");
     }
     const matchedDeletedRow = deletedRow;
-    const effectiveValidTo = options?.validTo ?? matchedDeletedRow.valid_to;
+    const effectiveValidTo = validTo ?? matchedDeletedRow.valid_to;
     const constraintContext: ConstraintContext = {
       graphId: ctx.graphId,
       registry: ctx.registry,
@@ -1208,7 +1212,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       {
         id: matchedDeletedRow.id,
         props: validatedProps,
-        ...(options?.validTo !== undefined && { validTo: options.validTo }),
+        ...(validTo !== undefined && { validTo }),
       },
       backend,
       { clearDeleted: true },
@@ -1275,6 +1279,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       kind,
       operation: "create",
     });
+    const validFrom = validateOptionalCanonicalIsoDate(
+      item.validFrom,
+      "validFrom",
+    );
+    const validTo = validateOptionalCanonicalIsoDate(item.validTo, "validTo");
 
     const compositeKey = buildEdgeCompositeKey(
       item.fromKind,
@@ -1299,8 +1308,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       validatedProps,
       compositeKey,
       endpointKey,
-      ...(item.validFrom !== undefined && { validFrom: item.validFrom }),
-      ...(item.validTo !== undefined && { validTo: item.validTo }),
+      ...(validFrom !== undefined && { validFrom }),
+      ...(validTo !== undefined && { validTo }),
     });
   }
 

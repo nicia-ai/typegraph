@@ -1381,9 +1381,14 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
 >;
 ```
 
-Temporal fields belong to each item so one batch can materialize relationships
-with different validity windows. Their create, update, and resurrection
-semantics match the single operation.
+Temporal fields belong to each item so identities with different endpoints or
+`matchOn` values can carry different validity windows in one batch. Items with
+the same endpoint-plus-`matchOn` identity are duplicates: the first item
+supplies the write values and later items return that edge with the `"found"`
+action. To represent multiple periods between the same endpoints, add a stable
+period or source-event field to the edge schema and include it in `matchOn`.
+Their create, update, and resurrection semantics otherwise match the single
+operation.
 
 #### `findByEndpoints(from, to, options?, temporal?)`
 
