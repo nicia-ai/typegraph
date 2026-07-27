@@ -119,6 +119,8 @@ export type EdgeCollectionConfig = Readonly<{
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
+      validFrom?: string;
+      validTo?: string;
     }>,
   ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>>;
   executeBulkGetOrCreateByEndpoints: (
@@ -129,6 +131,8 @@ export type EdgeCollectionConfig = Readonly<{
       toKind: string;
       toId: string;
       props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
     }>[],
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{
@@ -736,14 +740,18 @@ export function createEdgeCollection<
       props: z.input<E["schema"]>,
       options?: EdgeGetOrCreateByEndpointsOptions<E>,
     ): Promise<EdgeGetOrCreateByEndpointsResult<E>> {
-      const getOrCreateOptions: {
-        matchOn?: readonly string[];
-        ifExists?: IfExistsMode;
-      } = {};
-      if (options?.matchOn !== undefined)
-        getOrCreateOptions.matchOn = options.matchOn as readonly string[];
-      if (options?.ifExists !== undefined)
-        getOrCreateOptions.ifExists = options.ifExists;
+      const getOrCreateOptions = {
+        ...(options?.matchOn !== undefined && {
+          matchOn: options.matchOn as readonly string[],
+        }),
+        ...(options?.ifExists !== undefined && {
+          ifExists: options.ifExists,
+        }),
+        ...(options?.validFrom !== undefined && {
+          validFrom: options.validFrom,
+        }),
+        ...(options?.validTo !== undefined && { validTo: options.validTo }),
+      };
 
       const result = await config.executeGetOrCreateByEndpoints(
         kind,
@@ -763,8 +771,13 @@ export function createEdgeCollection<
         from: NodeRef;
         to: NodeRef;
         props: z.input<E["schema"]>;
+        validFrom?: string;
+        validTo?: string;
       }>[],
-      options?: EdgeGetOrCreateByEndpointsOptions<E>,
+      options?: Pick<
+        EdgeGetOrCreateByEndpointsOptions<E>,
+        "matchOn" | "ifExists"
+      >,
     ): Promise<EdgeGetOrCreateByEndpointsResult<E>[]> {
       if (items.length === 0) return [];
 
@@ -774,16 +787,18 @@ export function createEdgeCollection<
         toKind: item.to.kind,
         toId: item.to.id,
         props: item.props,
+        ...(item.validFrom !== undefined && { validFrom: item.validFrom }),
+        ...(item.validTo !== undefined && { validTo: item.validTo }),
       }));
 
-      const getOrCreateOptions: {
-        matchOn?: readonly string[];
-        ifExists?: IfExistsMode;
-      } = {};
-      if (options?.matchOn !== undefined)
-        getOrCreateOptions.matchOn = options.matchOn as readonly string[];
-      if (options?.ifExists !== undefined)
-        getOrCreateOptions.ifExists = options.ifExists;
+      const getOrCreateOptions = {
+        ...(options?.matchOn !== undefined && {
+          matchOn: options.matchOn as readonly string[],
+        }),
+        ...(options?.ifExists !== undefined && {
+          ifExists: options.ifExists,
+        }),
+      };
 
       const getOrCreateAll = async (
         target: GraphBackend | TransactionBackend,

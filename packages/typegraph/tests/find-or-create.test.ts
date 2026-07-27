@@ -710,6 +710,60 @@ describe("store.edges.*.getOrCreateByEndpoints()", () => {
       }),
     ).rejects.toThrow(CardinalityError);
   });
+
+  it("uses the resulting validTo when checking cardinality on resurrect", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+    const bigCo = await store.nodes.Company.create({ name: "BigCo" });
+
+    const endedEmployment = await store.edges.oneActiveEdge.create(
+      alice,
+      acme,
+      { label: "first" },
+    );
+    await store.edges.oneActiveEdge.delete(endedEmployment.id);
+    await store.edges.oneActiveEdge.create(alice, bigCo, { label: "second" });
+
+    const result = await store.edges.oneActiveEdge.getOrCreateByEndpoints(
+      alice,
+      acme,
+      { label: "first" },
+      { validTo: "2024-12-31T23:59:59.999Z" },
+    );
+
+    expect(result.action).toBe("resurrected");
+    expect(result.edge.id).toBe(endedEmployment.id);
+    expect(result.edge.meta.validTo).toBe("2024-12-31T23:59:59.999Z");
+  });
+
+  it("validates temporal fields on the branches where they are applied", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    await expect(
+      store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "eng" },
+        { validFrom: "not-a-date" },
+      ),
+    ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validFrom"/);
+
+    await store.edges.worksAt.getOrCreateByEndpoints(alice, acme, {
+      role: "eng",
+    });
+
+    await expect(
+      store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "manager" },
+        { ifExists: "update", validTo: "not-a-date" },
+      ),
+    ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validTo"/);
+  });
 });
 
 // ============================================================
@@ -822,13 +876,21 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     await store.edges.worksAt.delete(first.id);
 
     const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
-      { from: alice, to: acme, props: { role: "resurrected", since: 2025 } },
+      {
+        from: alice,
+        to: acme,
+        props: { role: "resurrected", since: 2025 },
+        validTo: "2025-12-31T23:59:59.999Z",
+      },
     ]);
 
     expect(results).toHaveLength(1);
     expect(requireDefined(results[0]).action).toBe("resurrected");
     expect(requireDefined(results[0]).edge.id).toBe(first.id);
     expect(requireDefined(results[0]).edge.role).toBe("resurrected");
+    expect(requireDefined(results[0]).edge.meta.validTo).toBe(
+      "2025-12-31T23:59:59.999Z",
+    );
     expect(requireDefined(results[0]).edge.meta.deletedAt).toBeUndefined();
   });
 
