@@ -1,18 +1,21 @@
 /**
- * `migrateSchema` must never orphan data.
+ * `migrateSchema` must never destroy data as a side effect.
  *
  * Two guarantees, both regressions of a real data-loss incident (#322):
  *
  * 1. **Extension fold.** Kinds committed at runtime by `Store.evolve()` live
  *    in `schema_doc.extension`, not in the caller's compile-time graph.
  *    Committing the caller's graph verbatim erased them from the active
- *    document while their rows stayed in `typegraph_nodes` — readable by
- *    nothing, and with `typegraph_kind_removals` empty so no cleanup was ever
- *    queued.
+ *    document while their rows stayed in `typegraph_nodes`, readable by
+ *    nothing. The persisted document is the sole authority, so a *stale*
+ *    graph cannot resurrect a kind another writer removed either.
  *
- * 2. **Drop refusal.** Removing a kind is `Store.removeKinds()`'s job; it
- *    queues the data-cleanup rows that make the removal reconcilable. A
- *    schema commit must not do it as a side effect.
+ * 2. **Drop refusal.** A commit that drops a kind still holding rows is
+ *    refused. Committing makes those rows unreachable, and the next
+ *    `materializeRemovals` — which re-derives removals by walking schema
+ *    history — deletes them, so the commit is the point of no return.
+ *    Dropping an *empty* kind is permitted: that is Deploy 3 of the
+ *    documented three-deploy removal flow.
  *
  * The path that produced the incident is exercised end-to-end in
  * "the reported incident": open → evolve → write → breaking change →
@@ -266,7 +269,7 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
     expect(kinds).toEqual({ nodes: ["Person"], edges: [] });
   });
 
-  it("allows dropping a kind whose rows were deleted first, and queues their cleanup", async () => {
+  it("allows dropping a kind whose rows were deleted first, and the reconciler reclaims the tombstones", async () => {
     // Deploy 2 of the documented flow. The probe counts live rows only —
     // same `excludeDeleted` default `Store.evolve`'s tightening probe uses —
     // so a soft delete is enough to unblock Deploy 3.
@@ -296,6 +299,33 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
     expect(
       reclaimed.results.find((entry) => entry.kind === "Company")?.status,
     ).toBe("removed");
+    expect(
+      await backend.countNodesByKind({
+        graphId: baseGraph.id,
+        kind: "Company",
+        excludeDeleted: false,
+      }),
+    ).toBe(0);
+  });
+
+  it("discardDroppedKindRows: the rows really are deleted by the next reconcile", async () => {
+    // This is the claim the flag's name and its rewritten docs rest on, and
+    // an earlier revision of this PR asserted the opposite — so pin it.
+    // No `typegraph_kind_removals` row is written on this path; the reconciler
+    // re-derives the removal from schema history and deletes anyway.
+    const backend = createTestBackend();
+    await seedCompany(backend);
+
+    await migrateSchema(backend, graphWithoutCompany, 1, {
+      discardDroppedKindRows: true,
+    });
+
+    const [reopened] = await createStoreWithSchema(
+      graphWithoutCompany,
+      backend,
+    );
+    await reopened.materializeRemovals();
+
     expect(
       await backend.countNodesByKind({
         graphId: baseGraph.id,

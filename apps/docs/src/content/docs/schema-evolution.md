@@ -261,7 +261,7 @@ Remove the node type from `defineGraph()` and force migrate. Deploy 2 is what
 makes this step legal: `migrateSchema()` refuses to drop a kind that still
 holds rows, so if any remain you will get a `MigrationError` with
 `details.reason === "kind-removal"` naming the kind and its row count rather
-than a silently orphaned table.
+than silent data loss.
 
 ### Changing a Property Type
 

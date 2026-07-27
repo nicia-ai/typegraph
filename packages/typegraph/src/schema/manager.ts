@@ -448,7 +448,7 @@ export async function ensureSchema<G extends GraphDef>(
         `Use getSchemaChanges() to review, then migrateSchema() to apply.` +
         (removesKind ?
           ` To remove a kind, use Store.removeKinds() — migrateSchema() ` +
-          `refuses a commit that drops kinds so their rows cannot be orphaned.`
+          `refuses a commit that would drop a kind still holding rows.`
         : ""),
       {
         graphId: graph.id,
@@ -746,18 +746,8 @@ export async function migrateSchema<G extends GraphDef>(
     storedSchema === undefined ?
       []
     : [
-        ...droppedKinds(
-          storedSchema.nodes,
-          getNodeKinds(target),
-          "node",
-          storedSchema.graphId,
-        ),
-        ...droppedKinds(
-          storedSchema.edges,
-          getEdgeKinds(target),
-          "edge",
-          storedSchema.graphId,
-        ),
+        ...droppedKinds(storedSchema.nodes, getNodeKinds(target), "node"),
+        ...droppedKinds(storedSchema.edges, getEdgeKinds(target), "edge"),
       ];
   if (dropped.length > 0 && options?.discardDroppedKindRows !== true) {
     await assertNoPopulatedKindDropped(
@@ -768,13 +758,18 @@ export async function migrateSchema<G extends GraphDef>(
     );
   }
 
-  // No cleanup is queued here, deliberately. `materializeRemovals` derives
-  // removals by walking schema-version history (`reconcilePendingRemovals`),
-  // so a kind dropped by this commit is discovered and reclaimed on the next
-  // reconcile whether or not a `typegraph_kind_removals` row was written.
-  // Writing one would be redundant — and actively harmful on the
-  // `discardDroppedKindRows` path, where it hands a routine reconcile a mandate to
-  // hard-delete the live rows the caller deliberately kept.
+  // No cleanup is queued here, deliberately, and redundancy is the whole
+  // reason. `materializeRemovals` derives removals by walking schema-version
+  // history (`reconcilePendingRemovals` diffs consecutive documents' kind
+  // sets), so a kind dropped by this commit is discovered and reclaimed on
+  // the next reconcile whether or not a `typegraph_kind_removals` row exists
+  // — on every path, `discardDroppedKindRows` included. Writing one would
+  // change nothing except adding a second source of truth.
+  //
+  // The walk is only as good as retained history: `reconcilePendingRemovals`
+  // stops at the first absent prior version, so a drop below a pruned or
+  // gapped range becomes undiscoverable. Callers who prune schema versions
+  // should run `materializeRemovals` before pruning.
   const committed = await commitNewSchemaVersion(
     backend,
     target,
@@ -784,14 +779,16 @@ export async function migrateSchema<G extends GraphDef>(
 }
 
 /**
- * Refuses a schema commit that would orphan rows.
+ * Refuses a schema commit that would destroy rows.
  *
  * The invariant is not "no kind is dropped" — it is "no *populated* kind is
- * orphaned". Dropping an empty kind loses nothing and is the last step of
- * the documented three-deploy removal flow (stop writing → delete the rows →
- * drop from `defineGraph`). Dropping a kind that still holds rows strands
- * them: they stay in the base relations, reachable by nothing, with no
- * `typegraph_kind_removals` row queued for `materializeRemovals` to clean up.
+ * destroyed by accident". Dropping an empty kind loses nothing and is the
+ * last step of the documented three-deploy removal flow (stop writing →
+ * delete the rows → drop from `defineGraph`). Dropping a kind that still
+ * holds rows makes them unreachable immediately, and the next
+ * `materializeRemovals` — which re-derives removals from schema history —
+ * deletes them. The commit is the point of no return, which is why the
+ * refusal happens here rather than being left to the reconciler.
  *
  * Mirrors the probe `Store.evolve` already runs for tightening changes, and
  * lives in the public `migrateSchema` rather than in
@@ -853,7 +850,6 @@ async function assertNoPopulatedKindDropped(
 }
 
 type DroppedKind = Readonly<{
-  graphId: string;
   kind: string;
   entity: KindEntity;
 }>;
@@ -867,13 +863,12 @@ function droppedKinds(
   committed: Readonly<Record<string, unknown>>,
   present: readonly string[],
   entity: KindEntity,
-  graphId: string,
 ): readonly DroppedKind[] {
   const kinds = new Set(present);
   return Object.keys(committed)
     .filter((name) => !kinds.has(name))
     .toSorted()
-    .map((kind) => ({ graphId, kind, entity }));
+    .map((kind) => ({ kind, entity }));
 }
 
 /**

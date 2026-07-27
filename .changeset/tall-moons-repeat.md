@@ -8,9 +8,8 @@ Fix `migrateSchema()` silently dropping runtime-committed kinds
 did not fold the persisted graph extension, so kinds committed at runtime by
 `Store.evolve()` — which live in `schema_doc.extension`, not in the
 compile-time graph — were erased from the active schema document while their
-rows stayed in `typegraph_nodes` / `typegraph_edges`, reachable by nothing and
-with no `typegraph_kind_removals` row ever queued to clean them up. The
-persisted `deprecatedKinds` set was erased the same way.
+rows stayed in `typegraph_nodes` / `typegraph_edges`, reachable by nothing.
+The persisted `deprecatedKinds` set was erased the same way.
 
 This was reachable by following the library's own advice: the `MigrationError`
 raised for a breaking change told callers to "use `getSchemaChanges()` to
@@ -29,8 +28,8 @@ Two changes:
   `{ discardDroppedKindRows: true }` if losing those rows is the intent — the
   name says what the flag does, because the next reconcile deletes them.
 
-The guard fires on the actual harm — orphaned rows — not on kind removal as
-such. Dropping an *empty* kind is unaffected, so the documented three-deploy
+The guard fires on the actual harm — rows the next reconcile would delete —
+not on kind removal as such. Dropping an *empty* kind is unaffected, so the documented three-deploy
 removal flow (stop writing → delete the rows → drop from `defineGraph()` and
 migrate) still works exactly as written; Deploy 2 is now what makes Deploy 3
 legal instead of being merely advisory. Live rows only, matching the
