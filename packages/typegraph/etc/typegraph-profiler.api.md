@@ -1928,8 +1928,9 @@ type MaterializeIndexesResult = Readonly<{
 type MaterializeRemovalsEntry = Readonly<{
     kind: string;
     entity: KindEntity;
-    status: "removed" | "failed";
+    status: "removed" | "failed" | "skipped";
     error?: Error;
+    reason?: "kind-is-live";
 }>;
 
 // @public

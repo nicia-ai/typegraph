@@ -223,7 +223,9 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
 
     expect(error).toBeInstanceOf(MigrationError);
     const details = (error as MigrationError).details;
-    expect(details.reason).toBe("kind-removal");
+    // Narrowing on `reason` is what makes `droppedKinds` reachable — the
+    // details type is a discriminated union, not one shape with optionals.
+    if (details.reason !== "kind-removal") throw new Error("wrong reason");
     // `worksAt` is dropped too, but it has no rows to strand.
     expect(details.droppedKinds).toEqual({ nodes: ["Company"], edges: [] });
     expect((error as MigrationError).message).toContain('node "Company" (1)');
@@ -250,10 +252,9 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
     const error = await migrateSchema(backend, graphWithoutEdge, 1).catch(
       (error_: unknown) => error_,
     );
-    expect((error as MigrationError).details.droppedKinds).toEqual({
-      nodes: [],
-      edges: ["worksAt"],
-    });
+    const edgeDetails = (error as MigrationError).details;
+    if (edgeDetails.reason !== "kind-removal") throw new Error("wrong reason");
+    expect(edgeDetails.droppedKinds).toEqual({ nodes: [], edges: ["worksAt"] });
   });
 
   it("allows dropping an EMPTY kind — the documented three-deploy removal", async () => {

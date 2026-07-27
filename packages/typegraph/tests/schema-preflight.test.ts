@@ -173,6 +173,12 @@ describe("MigrationError discriminant", () => {
 
     // The attached diff carries the additive-vs-incompatible decision, so a
     // caller never has to re-query or read the sentence.
+    if (
+      migrationError.details.reason !== "schema-behind" &&
+      migrationError.details.reason !== "breaking-change"
+    ) {
+      throw new Error(`unexpected reason: ${migrationError.details.reason}`);
+    }
     const diff = requireDefined(migrationError.details.diff);
     expect(diff.hasBreakingChanges).toBe(true);
     expect(classifySchemaChanges(diff)).toBe("incompatible");
@@ -193,6 +199,12 @@ describe("MigrationError discriminant", () => {
     const migrationError = thrown as MigrationError;
     // Same reason as the breaking case — the diff is what separates them.
     expect(migrationError.details.reason).toBe("schema-behind");
+    if (
+      migrationError.details.reason !== "schema-behind" &&
+      migrationError.details.reason !== "breaking-change"
+    ) {
+      throw new Error(`unexpected reason: ${migrationError.details.reason}`);
+    }
     const diff = requireDefined(migrationError.details.diff);
     expect(diff.hasBreakingChanges).toBe(false);
     expect(classifySchemaChanges(diff)).toBe("additive");

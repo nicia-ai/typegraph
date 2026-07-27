@@ -3145,8 +3145,9 @@ export type MaterializeIndexesResult = Readonly<{
 export type MaterializeRemovalsEntry = Readonly<{
     kind: string;
     entity: KindEntity;
-    status: "removed" | "failed";
+    status: "removed" | "failed" | "skipped";
     error?: Error;
+    reason?: "kind-is-live";
 }>;
 
 // @public
@@ -3293,14 +3294,24 @@ export class MigrationError extends TypeGraphError {
     readonly details: MigrationErrorDetails;
 }
 
-// @public (undocumented)
+// @public
 export type MigrationErrorDetails = Readonly<{
     graphId: string;
     fromVersion: number;
     toVersion: number;
-    reason: MigrationFailureReason;
+    reason: "schema-behind" | "breaking-change";
     diff?: SchemaDiff;
-    droppedKinds?: Readonly<{
+}> | Readonly<{
+    graphId: string;
+    fromVersion: number;
+    toVersion: number;
+    reason: "no-active-version" | "version-not-found";
+}> | Readonly<{
+    graphId: string;
+    fromVersion: number;
+    toVersion: number;
+    reason: "kind-removal";
+    droppedKinds: Readonly<{
         nodes: readonly string[];
         edges: readonly string[];
     }>;

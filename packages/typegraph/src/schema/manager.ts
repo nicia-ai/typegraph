@@ -19,6 +19,7 @@ import {
   ConfigurationError,
   DatabaseOperationError,
   MigrationError,
+  StaleVersionError,
 } from "../errors";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { stripGraphExtension } from "../graph-extension/remove";
@@ -439,6 +440,12 @@ export async function ensureSchema<G extends GraphDef>(
     // The kind-removal pointer is noise on the dominant case (a property
     // change), so it appears only when the diff actually removes a kind —
     // which is exactly when `migrateSchema()` would refuse the commit.
+    //
+    // It must NOT point at `Store.removeKinds()`. A kind missing from the
+    // *code graph* is a compile-time kind, and `removeKinds` rejects those by
+    // design (`RemoveCompileTimeKindError`) — they are removed by recompiling
+    // and redeploying. `removeKinds` is for runtime extension kinds, which
+    // cannot be the cause of this diff.
     const removesKind = [...diff.nodes, ...diff.edges].some(
       (change) => change.type === "removed",
     );
@@ -447,8 +454,9 @@ export async function ensureSchema<G extends GraphDef>(
         `${actions.length} migration action(s) needed. ` +
         `Use getSchemaChanges() to review, then migrateSchema() to apply.` +
         (removesKind ?
-          ` To remove a kind, use Store.removeKinds() — migrateSchema() ` +
-          `refuses a commit that would drop a kind still holding rows.`
+          ` This diff removes a kind: migrateSchema() refuses to drop one ` +
+          `that still holds rows, so export or delete those rows first and ` +
+          `retry.`
         : ""),
       {
         graphId: graph.id,
@@ -740,8 +748,27 @@ export async function migrateSchema<G extends GraphDef>(
   currentVersion: number,
   options?: MigrateSchemaOptions,
 ): Promise<number> {
-  const { graph: target, storedSchema } =
-    await loadAndMergeGraphExtensionDocument(backend, graph);
+  const {
+    graph: target,
+    storedSchema,
+    activeRow,
+  } = await loadAndMergeGraphExtensionDocument(backend, graph);
+
+  // Staleness first. The commit's CAS would catch this anyway, but only after
+  // the guard below has probed row counts against a baseline the caller never
+  // saw — so a stale caller dropping a populated kind would get a
+  // `kind-removal` MigrationError quoting versions that were never theirs,
+  // instead of the `StaleVersionError` the concurrency contract documents.
+  // Diagnose the caller's actual problem, and leave the CAS to catch writers
+  // that advance the version after this point.
+  if (activeRow !== undefined && activeRow.version !== currentVersion) {
+    throw new StaleVersionError({
+      graphId: graph.id,
+      expected: currentVersion,
+      actual: activeRow.version,
+    });
+  }
+
   const dropped =
     storedSchema === undefined ?
       []
@@ -796,12 +823,20 @@ export async function migrateSchema<G extends GraphDef>(
  * primitive and drops populated kinds *by design*, having queued their
  * cleanup rows first.
  *
- * The probe and the commit are not atomic: the version CAS protects the
- * schema row, not the row counts, so a concurrent insert can land after a
- * kind reads as empty. `Store.evolve`'s tightening probe has the same window.
- * The queued cleanup narrows the consequence — a row inserted into a
- * just-dropped kind is reclaimed by `materializeRemovals` rather than
- * stranded.
+ * **The probe and the commit are not atomic** (#336). The version CAS protects
+ * the schema row, not the row counts, so a concurrent insert can land after a
+ * kind reads as empty: it is written against a schema that still declares the
+ * kind, and is unreachable a moment later.
+ *
+ * Wrapping both in one transaction would not close this. Schema commits run
+ * under a dialect write-lock (`pg_advisory_xact_lock` on Postgres) that
+ * serializes schema writers against each other, but ordinary data writes do
+ * not take it, so the inserting session is neither holding nor blocked by the
+ * fence. Closing it properly means data writes participating in a shared lock
+ * keyed on the graph — a cost on every write, tracked separately.
+ *
+ * `Store.evolve`'s tightening probe has the identical window and predates
+ * this one.
  */
 async function assertNoPopulatedKindDropped(
   backend: GraphBackend,

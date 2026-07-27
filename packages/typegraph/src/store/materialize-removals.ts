@@ -13,6 +13,7 @@ import {
   type GraphBackend,
   type KindRemovalRow,
   type RecordKindRemovalParams,
+  type SchemaVersionRow,
   type TransactionBackend,
 } from "../backend/types";
 import type { KindEntity } from "../core/types";
@@ -25,6 +26,7 @@ import type {
 import { sql } from "../query/sql-fragment";
 import { asCompiledStatementSql } from "../query/sql-intent";
 import { parseSerializedSchema } from "../schema/manager";
+import type { SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
@@ -66,8 +68,20 @@ export type MaterializeRemovalsOptions = Readonly<{
 export type MaterializeRemovalsEntry = Readonly<{
   kind: string;
   entity: KindEntity;
-  status: "removed" | "failed";
+  /**
+   * `"skipped"` means the queued removal was declined because the active
+   * schema declares the kind again — it was dropped, then re-added, and
+   * deleting its rows now would destroy live data. The row stays pending, so
+   * a later removal of the same kind still reclaims it.
+   *
+   * Reported rather than silent: an empty `results` array would otherwise be
+   * indistinguishable from "nothing was pending", leaving the queue at a
+   * non-zero depth with nothing explaining why.
+   */
+  status: "removed" | "failed" | "skipped";
   error?: Error;
+  /** Why a `"skipped"` entry was declined. */
+  reason?: "kind-is-live";
 }>;
 
 /**
@@ -161,17 +175,62 @@ export async function materializeRemovals(
   // The add-only `materializeIndexes` path never reclaims it and the
   // candidate loop below only handles whole kinds, so reclaim here before
   // the no-candidates short-circuit.
-  const reclaimedVectorFields = await reclaimRemovedVectorFieldTables(context);
+  // One read of the active schema, shared by the vector-reclaim pass and the
+  // live-kind guard below. Both need the same document and both key on the
+  // ACTIVE version — see `liveKindNamesFrom`.
+  const activeRow = await backend.getActiveSchema(graphId);
+  const activeSchema =
+    activeRow === undefined ? undefined : (
+      parseSerializedSchema(activeRow.schema_doc)
+    );
+
+  const reclaimedVectorFields = await reclaimRemovedVectorFieldTables(
+    context,
+    activeRow,
+  );
 
   const pending = await backend.getPendingKindRemovals(graphId);
 
+  // Never delete the rows of a kind the ACTIVE schema still declares.
+  //
+  // A pending removal only records that a kind was absent at some version. It
+  // does not mean the kind is absent *now*: a drop at v3 followed by a re-add
+  // at v4 leaves the v3 removal queued (and `reconcilePendingRemovals` keeps
+  // re-deriving it from history, since that walk compares each consecutive
+  // pair of documents and is blind to what happened later). Cleanup is an
+  // unconditional `DELETE ... WHERE kind = ?`, so acting on that row would
+  // destroy live data belonging to a kind applications are actively writing.
+  //
+  // Skipped rather than completed: the kind genuinely has not been cleaned up,
+  // and leaving the row pending means a later removal of the same kind is
+  // still reclaimed. Self-healing rather than sticky.
+  //
+  // The decline is REPORTED (`status: "skipped"`), not silent. Queue depth is
+  // the health signal for this subsystem, and a silent skip gives it a
+  // legitimate non-zero steady state that no output explains — an operator
+  // could not tell "nothing pending" from "declined on purpose".
+  const liveKinds = liveKindNamesFrom(activeSchema);
+
   const kindFilter =
     options.kinds === undefined ? undefined : new Set(options.kinds);
-  const candidates = pending.filter((row) =>
-    kindFilter === undefined ? true : kindFilter.has(row.kindName),
+  const selected = pending.filter(
+    (row) => kindFilter === undefined || kindFilter.has(row.kindName),
   );
+  const candidates = selected.filter(
+    (row) => !liveKinds[row.entity].has(row.kindName),
+  );
+  const skipped: readonly MaterializeRemovalsEntry[] = selected
+    .filter((row) => liveKinds[row.entity].has(row.kindName))
+    .map((row) => ({
+      kind: row.kindName,
+      entity: row.entity,
+      status: "skipped" as const,
+      reason: "kind-is-live" as const,
+    }));
 
-  if (candidates.length === 0) return { results: [], reclaimedVectorFields };
+  if (candidates.length === 0) {
+    return { results: skipped, reclaimedVectorFields };
+  }
 
   const tableNames = backend.tableNames;
   const nodesTable = tableNames?.nodes ?? "typegraph_nodes";
@@ -199,12 +258,12 @@ export async function materializeRemovals(
   // parallelizes round-trips across pool connections, SQLite serializes
   // writes at the engine level either way. `stopOnError` honors strict
   // sequential semantics; the first failure short-circuits the rest.
-  return {
-    results: await runMaterialization(candidates, options, (removal) =>
-      materializeOne(removal, ctx),
-    ),
-    reclaimedVectorFields,
-  };
+  const materialized = await runMaterialization(
+    candidates,
+    options,
+    (removal) => materializeOne(removal, ctx),
+  );
+  return { results: [...materialized, ...skipped], reclaimedVectorFields };
 }
 
 /**
@@ -342,6 +401,25 @@ async function reconcilePendingRemovals(
   if (backend.setReconciliationMarker !== undefined) {
     await backend.setReconciliationMarker(graphId, activeRow.version);
   }
+}
+
+/**
+ * Node and edge kind names the active schema declares, by entity.
+ *
+ * Used to refuse cleanup for a kind that has since been re-added. Returns
+ * empty sets when no schema is committed — nothing is live, so nothing is
+ * protected, and the pending rows proceed as before.
+ */
+function liveKindNamesFrom(
+  schema: SerializedSchema | undefined,
+): Readonly<Record<KindEntity, ReadonlySet<string>>> {
+  if (schema === undefined) {
+    return { node: new Set<string>(), edge: new Set<string>() };
+  }
+  return {
+    node: new Set(Object.keys(schema.nodes)),
+    edge: new Set(Object.keys(schema.edges)),
+  };
 }
 
 function kindRemovalKey(
@@ -624,13 +702,12 @@ type HistoricalVectorField = Readonly<{
  */
 async function reclaimRemovedVectorFieldTables(
   context: MaterializeRemovalsContext,
+  activeRow: SchemaVersionRow | undefined,
 ): Promise<readonly ReclaimedVectorFieldEntry[]> {
   const { backend, graphId } = context;
   const vectorStrategy = backend.vectorStrategy;
   const executeDdl = backend.executeDdl;
   if (vectorStrategy === undefined || executeDdl === undefined) return [];
-
-  const activeRow = await backend.getActiveSchema(graphId);
   if (activeRow === undefined) return [];
 
   // The orphan set is a pure function of (graphId, active version) over

@@ -734,30 +734,53 @@ export const MIGRATION_FAILURE_REASONS = [
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
 
-export type MigrationErrorDetails = Readonly<{
-  graphId: string;
-  fromVersion: number;
-  toVersion: number;
-  /** Stable discriminant for the failure — branch on this, not the message. */
-  reason: MigrationFailureReason;
-  /**
-   * The structured diff behind the failure, when one was computed
-   * (`schema-behind` and `breaking-change`). Carries per-change `severity`
-   * alongside `hasChanges` / `hasBreakingChanges`, so a caller can decide
-   * "additive → proceed, incompatible → ask the user" without re-querying.
-   */
-  diff?: SchemaDiff;
-  /**
-   * The dropped kinds that still held rows, and so caused the refusal
-   * (`kind-removal`). A kind the commit drops but that is already empty is
-   * permitted and does NOT appear here. Both lists are sorted; at least one
-   * is non-empty.
-   */
-  droppedKinds?: Readonly<{
-    nodes: readonly string[];
-    edges: readonly string[];
-  }>;
-}>;
+/**
+ * Structured context for a {@link MigrationError}, discriminated on `reason`.
+ *
+ * Modelled as a union rather than one shape with optional fields so the
+ * payload a reason promises is the payload it must carry: narrowing on
+ * `reason === "kind-removal"` gives you a non-optional `droppedKinds`, and the
+ * constructor cannot be handed a `kind-removal` without one.
+ *
+ * The common fields are repeated per member rather than factored into a shared
+ * base alias, which would be a hoisted-unexported symbol on the public
+ * entrypoint.
+ */
+export type MigrationErrorDetails =
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      /** Stable discriminant — branch on this, not the message. */
+      reason: "schema-behind" | "breaking-change";
+      /**
+       * The structured diff behind the failure. Carries per-change `severity`
+       * alongside `hasChanges` / `hasBreakingChanges`, so a caller can decide
+       * "additive → proceed, incompatible → ask the user" without re-querying.
+       */
+      diff?: SchemaDiff;
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      reason: "no-active-version" | "version-not-found";
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      reason: "kind-removal";
+      /**
+       * The dropped kinds that still held rows, and so caused the refusal. A
+       * kind the commit drops but that is already empty is permitted and does
+       * NOT appear here. Both lists are sorted; at least one is non-empty.
+       */
+      droppedKinds: Readonly<{
+        nodes: readonly string[];
+        edges: readonly string[];
+      }>;
+    }>;
 
 /**
  * Thrown when schema migration fails.
