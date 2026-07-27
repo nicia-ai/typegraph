@@ -1,5 +1,15 @@
 # @nicia-ai/typegraph
 
+## 0.43.0
+
+### Minor Changes
+
+- [#320](https://github.com/nicia-ai/typegraph/pull/320) [`010132a`](https://github.com/nicia-ai/typegraph/commit/010132a6ce2625b83f6256ef78bbc9bbd78867ee) Thanks [@pdlug](https://github.com/pdlug)! - Allow idempotent endpoint-based edge writes to set application-time validity.
+  `getOrCreateByEndpoints` now accepts `validFrom` and `validTo`, while
+  `bulkGetOrCreateByEndpoints` accepts them per item. Creation applies both
+  fields, updates and resurrections apply `validTo`, and pure found results leave
+  the existing window unchanged.
+
 ## 0.42.1
 
 ### Patch Changes
