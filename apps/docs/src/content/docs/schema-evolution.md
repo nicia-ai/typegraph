@@ -218,17 +218,20 @@ if (result.status === "breaking") {
 }
 ```
 
-`migrateSchema()` forces breaking **property** changes. It will not remove a
-**kind**: a commit that drops node or edge kinds the active schema carries is
-refused with a `MigrationError` whose `details.reason` is `"kind-removal"`,
-because the dropped kinds' rows would stay in the database with nothing able
-to read them. Use [`removeKinds()`](#removing-a-node-type) for that — it
-queues the cleanup rows that make the removal reconcilable.
+Two things `migrateSchema()` will not let you do by accident:
 
-You also do not need to know whether kinds were added at runtime by
-`evolve()`. `migrateSchema()` folds the persisted graph extension into the
-graph you hand it, the same way `createStoreWithSchema()` does, so passing
-your compile-time graph never erases runtime-committed kinds.
+- **Drop a kind that still holds rows.** The commit is refused with a
+  `MigrationError` whose `details.reason` is `"kind-removal"`, because those
+  rows would stay in the database with nothing able to read them. Delete the
+  rows first (see [Removing a Node Type](#removing-a-node-type)), or pass
+  `{ allowKindRemoval: true }` to accept the orphaning deliberately. Dropping
+  an *empty* kind needs no flag.
+- **Erase kinds added at runtime.** `migrateSchema()` folds the persisted
+  graph extension into the graph you hand it, the same way
+  `createStoreWithSchema()` does, so passing your compile-time graph never
+  drops a kind that `evolve()` committed. To remove one of those
+  deliberately, use `removeKinds()` — it queues the cleanup rows that make
+  the removal reconcilable.
 
 ### Removing a Node Type
 
@@ -252,7 +255,11 @@ for (const node of deprecated) {
 
 #### Deploy 3 — Remove from schema
 
-Remove the node type from `defineGraph()` and force migrate.
+Remove the node type from `defineGraph()` and force migrate. Deploy 2 is what
+makes this step legal: `migrateSchema()` refuses to drop a kind that still
+holds rows, so if any remain you will get a `MigrationError` with
+`details.reason === "kind-removal"` naming the kind and its row count rather
+than a silently orphaned table.
 
 ### Changing a Property Type
 

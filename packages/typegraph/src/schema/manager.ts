@@ -14,6 +14,7 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
+import { type KindEntity } from "../core/types";
 import {
   ConfigurationError,
   DatabaseOperationError,
@@ -419,12 +420,20 @@ export async function ensureSchema<G extends GraphDef>(
   const actions = getMigrationActions(diff);
 
   if (throwOnBreaking) {
+    // The kind-removal pointer is noise on the dominant case (a property
+    // change), so it appears only when the diff actually removes a kind —
+    // which is exactly when `migrateSchema()` would refuse the commit.
+    const removesKind = [...diff.nodes, ...diff.edges].some(
+      (change) => change.type === "removed",
+    );
     throw new MigrationError(
       `Schema migration required: ${diff.summary}. ` +
         `${actions.length} migration action(s) needed. ` +
-        `Use getSchemaChanges() to review, then migrateSchema() to apply. ` +
-        `To remove a kind, use Store.removeKinds() — migrateSchema() refuses ` +
-        `a commit that drops kinds so their rows cannot be orphaned.`,
+        `Use getSchemaChanges() to review, then migrateSchema() to apply.` +
+        (removesKind ?
+          ` To remove a kind, use Store.removeKinds() — migrateSchema() ` +
+          `refuses a commit that drops kinds so their rows cannot be orphaned.`
+        : ""),
       {
         graphId: graph.id,
         fromVersion: activeSchema.version,
@@ -664,15 +673,13 @@ export async function initializeSchema<G extends GraphDef>(
 
 export type MigrateSchemaOptions = Readonly<{
   /**
-   * Commit even when the resulting schema drops node or edge kinds the
-   * active schema carries. **This orphans data**: the dropped kinds' rows
-   * stay in `typegraph_nodes` / `typegraph_edges` and become reachable by
-   * nothing, and no `typegraph_kind_removals` row is queued, so
-   * `materializeRemovals` will never clean them up.
+   * Commit even when a dropped kind still holds rows. **This orphans that
+   * data**: the rows stay in `typegraph_nodes` / `typegraph_edges` and
+   * become reachable by nothing, and no `typegraph_kind_removals` row is
+   * queued, so `materializeRemovals` will never clean them up.
    *
-   * `Store.removeKinds()` is the reconcilable removal path and is what you
-   * almost certainly want. Reach for this flag only to reproduce the
-   * pre-guard behavior against a database you have separately accounted for.
+   * Dropping an *empty* kind needs no flag — it orphans nothing, and it is
+   * the last step of the documented three-deploy kind-removal flow.
    *
    * @defaultValue false
    */
@@ -689,21 +696,11 @@ export type MigrateSchemaOptions = Readonly<{
  * active version since `currentVersion` was read, this throws
  * `StaleVersionError`; the caller should refetch and retry.
  *
- * **The persisted graph extension is folded into `graph` first**, exactly as
- * `createStoreWithSchema` and `getSchemaChanges` do. Kinds committed at
- * runtime by `Store.evolve()` live in `schema_doc.extension`, not in the
- * compile-time graph, so committing the caller's graph verbatim would erase
- * them from the active document while leaving their rows behind. Callers
- * pass the same graph they pass everywhere else; they do not have to know
- * the extension exists.
- *
- * **A commit that would drop kinds is refused** with a `MigrationError`
- * whose `details.reason` is `"kind-removal"`. Dropping a kind is what
- * `Store.removeKinds()` is for — it queues the `typegraph_kind_removals`
- * rows that let `materializeRemovals` reconcile the data. A schema commit
- * must never do it as a side effect. Property-level breaking changes (the
- * documented "force the contract deploy" use for this function) are
- * unaffected.
+ * Folds the persisted graph extension into `graph` first, like every other
+ * commit path — kinds committed at runtime by `Store.evolve()` live in
+ * `schema_doc.extension`, so committing the caller's graph verbatim would
+ * erase them while leaving their rows behind. Property-level breaking
+ * changes (the documented "force the contract deploy" use) are unaffected.
  *
  * @param backend - The database backend
  * @param graph - The current graph definition
@@ -711,7 +708,7 @@ export type MigrateSchemaOptions = Readonly<{
  * @param options - See {@link MigrateSchemaOptions}
  * @returns The new version number
  * @throws MigrationError with `reason: "kind-removal"` when the commit would
- *   drop kinds the active schema carries and `allowKindRemoval` is not set.
+ *   drop a kind that still holds rows and `allowKindRemoval` is not set.
  */
 export async function migrateSchema<G extends GraphDef>(
   backend: GraphBackend,
@@ -719,24 +716,15 @@ export async function migrateSchema<G extends GraphDef>(
   currentVersion: number,
   options?: MigrateSchemaOptions,
 ): Promise<number> {
-  const activeRow = await backend.getActiveSchema(graph.id);
-  // No active row: nothing to fold and nothing to drop. `commitSchemaVersion`
-  // owns the "is `currentVersion` real?" question either way.
-  if (activeRow === undefined) {
-    const committed = await commitNewSchemaVersion(
+  const { graph: target, storedSchema } =
+    await loadAndMergeGraphExtensionDocument(backend, graph);
+  if (storedSchema !== undefined && options?.allowKindRemoval !== true) {
+    await assertNoPopulatedKindDropped(
       backend,
-      graph,
+      storedSchema,
+      target,
       currentVersion,
     );
-    return committed.version;
-  }
-
-  const { graph: target, storedSchema } = mergeStoredGraphExtension(
-    graph,
-    activeRow,
-  );
-  if (options?.allowKindRemoval !== true) {
-    assertNoKindRemoval(storedSchema, target, currentVersion);
   }
 
   const committed = await commitNewSchemaVersion(
@@ -748,42 +736,69 @@ export async function migrateSchema<G extends GraphDef>(
 }
 
 /**
- * Refuses a schema commit that would drop kinds the active document
- * carries.
+ * Refuses a schema commit that would orphan rows.
  *
- * Deliberately placed in the public `migrateSchema` rather than in
- * `commitNewSchemaVersion`: `Store.removeKinds` commits through that
- * primitive and drops kinds *by design*, having first queued the
- * `typegraph_kind_removals` rows that make the drop reconcilable. Guarding
- * the primitive would break the one path allowed to do this.
+ * The invariant is not "no kind is dropped" — it is "no *populated* kind is
+ * orphaned". Dropping an empty kind loses nothing and is the last step of
+ * the documented three-deploy removal flow (stop writing → delete the rows →
+ * drop from `defineGraph`). Dropping a kind that still holds rows strands
+ * them: they stay in the base relations, reachable by nothing, with no
+ * `typegraph_kind_removals` row queued for `materializeRemovals` to clean up.
+ *
+ * Mirrors the probe `Store.evolve` already runs for tightening changes, and
+ * lives in the public `migrateSchema` rather than in
+ * `commitNewSchemaVersion` because `Store.removeKinds` commits through that
+ * primitive and drops populated kinds *by design*, having queued their
+ * cleanup rows first.
  */
-function assertNoKindRemoval<G extends GraphDef>(
+async function assertNoPopulatedKindDropped(
+  backend: GraphBackend,
   storedSchema: SerializedSchema,
-  graph: G,
+  graph: GraphDef,
   currentVersion: number,
-): void {
-  const nodes = droppedKinds(storedSchema.nodes, getNodeKinds(graph));
-  const edges = droppedKinds(storedSchema.edges, getEdgeKinds(graph));
-  if (nodes.length === 0 && edges.length === 0) return;
+): Promise<void> {
+  const dropped = [
+    ...droppedKinds(storedSchema.nodes, getNodeKinds(graph), "node"),
+    ...droppedKinds(storedSchema.edges, getEdgeKinds(graph), "edge"),
+  ];
+  if (dropped.length === 0) return;
 
-  const named = [
-    ...nodes.map((name) => `node "${name}"`),
-    ...edges.map((name) => `edge "${name}"`),
-  ].join(", ");
+  const graphId = storedSchema.graphId;
+  const counted = await Promise.all(
+    dropped.map(async (entry) => {
+      const count =
+        entry.entity === "node" ?
+          await backend.countNodesByKind({ graphId, kind: entry.kind })
+        : await backend.countEdgesByKind({ graphId, kind: entry.kind });
+      return { ...entry, count };
+    }),
+  );
+  const populated = counted.filter((entry) => entry.count > 0);
+  if (populated.length === 0) return;
+
+  const named = populated
+    .map((entry) => `${entry.entity} "${entry.kind}" (${String(entry.count)})`)
+    .join(", ");
   throw new MigrationError(
-    `Refusing to commit a schema for graph "${storedSchema.graphId}" that ` +
-      `drops ${String(nodes.length + edges.length)} kind(s) the active ` +
-      `version carries: ${named}. Their rows would remain in the database, ` +
-      `reachable by nothing. Use Store.removeKinds() to remove a kind ` +
-      `together with the data-cleanup rows that make the removal ` +
-      `reconcilable, or pass { allowKindRemoval: true } to accept the ` +
-      `orphaning.`,
+    `Refusing to commit a schema for graph "${graphId}" that drops kinds ` +
+      `still holding rows: ${named}. Those rows would remain in the ` +
+      `database, reachable by nothing. Delete them first — or, for a kind ` +
+      `added at runtime by evolve(), use Store.removeKinds(), which queues ` +
+      `the cleanup rows that make the removal reconcilable. Pass ` +
+      `{ allowKindRemoval: true } to accept the orphaning.`,
     {
-      graphId: storedSchema.graphId,
+      graphId,
       fromVersion: currentVersion,
       toVersion: currentVersion + 1,
       reason: "kind-removal",
-      droppedKinds: { nodes, edges },
+      droppedKinds: {
+        nodes: populated
+          .filter((entry) => entry.entity === "node")
+          .map((entry) => entry.kind),
+        edges: populated
+          .filter((entry) => entry.entity === "edge")
+          .map((entry) => entry.kind),
+      },
     },
   );
 }
@@ -796,11 +811,13 @@ function assertNoKindRemoval<G extends GraphDef>(
 function droppedKinds(
   committed: Readonly<Record<string, unknown>>,
   present: readonly string[],
-): readonly string[] {
+  entity: KindEntity,
+): readonly Readonly<{ kind: string; entity: KindEntity }>[] {
   const kinds = new Set(present);
   return Object.keys(committed)
     .filter((name) => !kinds.has(name))
-    .toSorted();
+    .toSorted()
+    .map((kind) => ({ kind, entity }));
 }
 
 /**

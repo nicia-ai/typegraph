@@ -3282,7 +3282,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 // @public
-export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found"];
+export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found", "kind-removal"];
 
 // @public
 export class MigrationError extends TypeGraphError {
@@ -3300,6 +3300,10 @@ export type MigrationErrorDetails = Readonly<{
     toVersion: number;
     reason: MigrationFailureReason;
     diff?: SchemaDiff;
+    droppedKinds?: Readonly<{
+        nodes: readonly string[];
+        edges: readonly string[];
+    }>;
 }>;
 
 // @public (undocumented)

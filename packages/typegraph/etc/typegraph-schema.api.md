@@ -1165,7 +1165,12 @@ type MetaEdgeProperties = Readonly<{
 }>;
 
 // @public
-export function migrateSchema<G extends GraphDef>(backend: GraphBackend, graph: G, currentVersion: number): Promise<number>;
+export function migrateSchema<G extends GraphDef>(backend: GraphBackend, graph: G, currentVersion: number, options?: MigrateSchemaOptions): Promise<number>;
+
+// @public (undocumented)
+export type MigrateSchemaOptions = Readonly<{
+    allowKindRemoval?: boolean;
+}>;
 
 // @public
 export type MigrationHookContext = Readonly<{
