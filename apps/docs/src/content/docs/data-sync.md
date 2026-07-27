@@ -147,10 +147,19 @@ const membership = await store.edges.memberOf.getOrCreateByEndpoints(
   user,
   org,
   { role: "admin", source: "sync" },
-  { matchOn: ["role"], ifExists: "update" }
+  {
+    matchOn: ["role"],
+    ifExists: "update",
+    validFrom: sourceMembership.startedAt,
+    validTo: sourceMembership.endedAt,
+  }
 );
 // membership.action: "created" | "found" | "updated" | "resurrected"
 ```
+
+For endpoint writes, `validFrom` applies only when a new edge is created.
+`validTo` also applies to the `"updated"` and `"resurrected"` branches. A
+`"found"` result performs no write and preserves the existing validity window.
 
 ### Edge Bulk Operations
 

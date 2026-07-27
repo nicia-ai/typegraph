@@ -618,6 +618,16 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
     matchOn?: readonly (keyof z.input<E["schema"]>)[];
     /** Existing record behavior. Default: "return" */
     ifExists?: IfExistsMode;
+    /**
+     * Valid-time start for a newly created edge. Ignored when an edge is found,
+     * updated, or resurrected.
+     */
+    validFrom?: string;
+    /**
+     * Valid-time end for a created, updated, or resurrected edge. Ignored when
+     * the operation returns an existing edge without writing.
+     */
+    validTo?: string;
   }>;
 
 // ============================================================
@@ -1173,6 +1183,11 @@ export type EdgeCollection<
    * property fields, only edges whose properties match on those fields are considered.
    * Soft-deleted matches are resurrected when cardinality allows.
    *
+   * `validFrom` only applies on the create branch, defaulting to the
+   * operation's creation timestamp when omitted. `validTo` applies on create,
+   * update, and resurrection, but not when an existing edge is returned
+   * without a write.
+   *
    * @param from - Source node
    * @param to - Target node
    * @param props - Full properties for create, or merge source for update
@@ -1196,8 +1211,13 @@ export type EdgeCollection<
       from: NodeRef<From>;
       to: NodeRef<To>;
       props: z.input<E["schema"]>;
+      validFrom?: string;
+      validTo?: string;
     }>[],
-    options?: EdgeGetOrCreateByEndpointsOptions<E>,
+    options?: Pick<
+      EdgeGetOrCreateByEndpointsOptions<E>,
+      "matchOn" | "ifExists"
+    >,
   ) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>[]>;
 }>;
 

@@ -1341,12 +1341,20 @@ store.edges.worksAt.getOrCreateByEndpoints(
   options?: {
     matchOn?: readonly ("role")[]; // Default: []
     ifExists?: "return" | "update"; // Default: "return"
+    validFrom?: string;
+    validTo?: string;
   }
 ): Promise<{
   edge: Edge<worksAt>;
   action: "created" | "found" | "updated" | "resurrected";
 }>;
 ```
+
+`validFrom` applies only when the operation creates the edge and otherwise
+leaves the existing start unchanged. `validTo` applies when the edge is
+created, updated, or resurrected. When `ifExists` is omitted or `"return"`, a
+live match produces the `"found"` action and neither temporal option changes
+the edge.
 
 #### `bulkGetOrCreateByEndpoints(items, options?)`
 
@@ -1358,6 +1366,8 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
     from: NodeRef<Person>;
     to: NodeRef<Company>;
     props: { role: string };
+    validFrom?: string;
+    validTo?: string;
   }[],
   options?: {
     matchOn?: readonly ("role")[];
@@ -1370,6 +1380,15 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
   }[]
 >;
 ```
+
+Temporal fields belong to each item so identities with different endpoints or
+`matchOn` values can carry different validity windows in one batch. Items with
+the same endpoint-plus-`matchOn` identity are duplicates: the first item
+supplies the write values and later items return that edge with the `"found"`
+action. To represent multiple periods between the same endpoints, add a stable
+period or source-event field to the edge schema and include it in `matchOn`.
+Their create, update, and resurrection semantics otherwise match the single
+operation.
 
 #### `findByEndpoints(from, to, options?, temporal?)`
 

@@ -1070,6 +1070,8 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   options?: Readonly<{
     matchOn?: readonly string[];
     ifExists?: IfExistsMode;
+    validFrom?: string;
+    validTo?: string;
   }>,
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
   const ifExists = options?.ifExists ?? "return";
@@ -1086,6 +1088,14 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
 
   // Validate matchOn fields
   validateMatchOnFields(edgeKind.schema, matchOn, kind);
+
+  // Validate temporal inputs before the read probe so validity of a call does
+  // not depend on whether its endpoint identity already exists.
+  const validFrom = validateOptionalCanonicalIsoDate(
+    options?.validFrom,
+    "validFrom",
+  );
+  const validTo = validateOptionalCanonicalIsoDate(options?.validTo, "validTo");
 
   // Probe outside the transaction: with ifExists "return", the common found
   // path performs no write, so it must not pay for a write transaction
@@ -1149,6 +1159,8 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         toKind,
         toId,
         props: validatedProps,
+        ...(validFrom !== undefined && { validFrom }),
+        ...(validTo !== undefined && { validTo }),
       };
       const edge = await executeEdgeCreate(ctx, input, backend);
       return { edge, action: "created" };
@@ -1162,7 +1174,11 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       // ifExists === "update"
       const edge = await executeEdgeUpsertUpdate(
         ctx,
-        { id: liveRow.id, props: validatedProps },
+        {
+          id: liveRow.id,
+          props: validatedProps,
+          ...(validTo !== undefined && { validTo }),
+        },
         backend,
       );
       return { edge, action: "updated" };
@@ -1174,7 +1190,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       throw new Error("Expected deletedRow to be defined");
     }
     const matchedDeletedRow = deletedRow;
-    const effectiveValidTo = matchedDeletedRow.valid_to;
+    const effectiveValidTo = validTo ?? matchedDeletedRow.valid_to;
     const constraintContext: ConstraintContext = {
       graphId: ctx.graphId,
       registry: ctx.registry,
@@ -1193,7 +1209,11 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
 
     const edge = await executeEdgeUpsertUpdate(
       ctx,
-      { id: matchedDeletedRow.id, props: validatedProps },
+      {
+        id: matchedDeletedRow.id,
+        props: validatedProps,
+        ...(validTo !== undefined && { validTo }),
+      },
       backend,
       { clearDeleted: true },
     );
@@ -1220,6 +1240,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     toKind: string;
     toId: string;
     props: Record<string, unknown>;
+    validFrom?: string;
+    validTo?: string;
   }>[],
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{
@@ -1248,6 +1270,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     validatedProps: Record<string, unknown>;
     compositeKey: string;
     endpointKey: string;
+    validFrom?: string;
+    validTo?: string;
   }[] = [];
 
   for (const item of items) {
@@ -1255,6 +1279,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       kind,
       operation: "create",
     });
+    const validFrom = validateOptionalCanonicalIsoDate(
+      item.validFrom,
+      "validFrom",
+    );
+    const validTo = validateOptionalCanonicalIsoDate(item.validTo, "validTo");
 
     const compositeKey = buildEdgeCompositeKey(
       item.fromKind,
@@ -1279,6 +1308,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       validatedProps,
       compositeKey,
       endpointKey,
+      ...(validFrom !== undefined && { validFrom }),
+      ...(validTo !== undefined && { validTo }),
     });
   }
 
@@ -1334,6 +1365,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     fromId: string;
     toKind: string;
     toId: string;
+    validTo?: string;
   }
   interface DuplicateEntry {
     index: number;
@@ -1383,6 +1415,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             toKind: entry.toKind,
             toId: entry.toId,
             props: entry.validatedProps,
+            ...(entry.validFrom !== undefined && {
+              validFrom: entry.validFrom,
+            }),
+            ...(entry.validTo !== undefined && { validTo: entry.validTo }),
           },
         });
       } else {
@@ -1400,6 +1436,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           fromId: entry.fromId,
           toKind: entry.toKind,
           toId: entry.toId,
+          ...(entry.validTo !== undefined && { validTo: entry.validTo }),
         });
       }
     }
@@ -1459,7 +1496,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     for (const entry of toFetch) {
       if (entry.isDeleted) {
         // Check cardinality before resurrect
-        const effectiveValidTo = entry.row.valid_to;
+        const effectiveValidTo = entry.validTo ?? entry.row.valid_to;
         const constraintContext: ConstraintContext = {
           graphId: ctx.graphId,
           registry: ctx.registry,
@@ -1478,7 +1515,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
 
         const edge = await executeEdgeUpsertUpdate(
           ctx,
-          { id: entry.row.id, props: entry.validatedProps },
+          {
+            id: entry.row.id,
+            props: entry.validatedProps,
+            ...(entry.validTo !== undefined && { validTo: entry.validTo }),
+          },
           target,
           { clearDeleted: true },
         );
@@ -1486,7 +1527,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       } else if (ifExists === "update") {
         const edge = await executeEdgeUpsertUpdate(
           ctx,
-          { id: entry.row.id, props: entry.validatedProps },
+          {
+            id: entry.row.id,
+            props: entry.validatedProps,
+            ...(entry.validTo !== undefined && { validTo: entry.validTo }),
+          },
           target,
         );
         results[entry.index] = { edge, action: "updated" };

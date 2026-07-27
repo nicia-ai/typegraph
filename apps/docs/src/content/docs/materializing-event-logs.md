@@ -74,6 +74,12 @@ value in a matched field, it no longer matches the earlier edge and you get a
 **second** edge instead of convergence. Reach for `matchOn` when the domain
 needs the extra edges, not as a reflex.
 
+Validity timestamps do not become part of this identity key. If the same
+endpoints can have multiple application-time periods, include a stable period
+or source-event identifier in the edge schema and in `matchOn`. This keeps a
+re-delivery of one period convergent without collapsing a later period into the
+same edge.
+
 ## Cursor Bookkeeping
 
 A cursor is application state: the last source offset you have safely processed.

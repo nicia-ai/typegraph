@@ -656,7 +656,9 @@ type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To 
         from: NodeRef<From>;
         to: NodeRef<To>;
         props: z.input<E["schema"]>;
-    }>[], options?: EdgeGetOrCreateByEndpointsOptions<E>) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>[]>;
+        validFrom?: string;
+        validTo?: string;
+    }>[], options?: Pick<EdgeGetOrCreateByEndpointsOptions<E>, "matchOn" | "ifExists">) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>[]>;
 }>;
 
 // @public
@@ -701,6 +703,8 @@ type EdgeFromTypes<R extends EdgeRegistration> = R["from"] extends readonly (inf
 type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> = Readonly<{
     matchOn?: readonly (keyof z.input<E["schema"]>)[];
     ifExists?: IfExistsMode;
+    validFrom?: string;
+    validTo?: string;
 }>;
 
 // @public
