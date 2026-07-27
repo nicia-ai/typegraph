@@ -1,0 +1,302 @@
+/**
+ * `migrateSchema` must never orphan data.
+ *
+ * Two guarantees, both regressions of a real data-loss incident (#322):
+ *
+ * 1. **Extension fold.** Kinds committed at runtime by `Store.evolve()` live
+ *    in `schema_doc.extension`, not in the caller's compile-time graph.
+ *    Committing the caller's graph verbatim erased them from the active
+ *    document while their rows stayed in `typegraph_nodes` — readable by
+ *    nothing, and with `typegraph_kind_removals` empty so no cleanup was ever
+ *    queued.
+ *
+ * 2. **Drop refusal.** Removing a kind is `Store.removeKinds()`'s job; it
+ *    queues the data-cleanup rows that make the removal reconcilable. A
+ *    schema commit must not do it as a side effect.
+ *
+ * The path that produced the incident is exercised end-to-end in
+ * "the reported incident": open → evolve → write → breaking change →
+ * `MigrationError` → follow the error's own advice.
+ */
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { MigrationError } from "../src";
+import { defineGraph } from "../src/core/define-graph";
+import { defineEdge } from "../src/core/edge";
+import { defineNode } from "../src/core/node";
+import { defineGraphExtension } from "../src/graph-extension";
+import { getActiveSchema, migrateSchema } from "../src/schema";
+import type { SerializedSchema } from "../src/schema/types";
+import { createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
+import { createTestBackend } from "./test-utils";
+
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+
+const Company = defineNode("Company", {
+  schema: z.object({ name: z.string() }),
+});
+
+const worksAt = defineEdge("worksAt", {
+  schema: z.object({ since: z.string() }),
+});
+
+/** The compile-time graph, as an application would declare it. */
+const baseGraph = defineGraph({
+  id: "migrate_kind_preservation",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: { worksAt: { type: worksAt, from: [Person], to: [Company] } },
+});
+
+/**
+ * The same graph after a breaking property change — the documented reason to
+ * reach for `migrateSchema` ("force the contract deploy"). Removing a
+ * required property is breaking; removing a *kind* is not what this is.
+ */
+const baseGraphWithRenamedProperty = defineGraph({
+  id: baseGraph.id,
+  nodes: {
+    Person: {
+      type: defineNode("Person", {
+        schema: z.object({ fullName: z.string() }),
+      }),
+    },
+    Company: { type: Company },
+  },
+  edges: { worksAt: { type: worksAt, from: [Person], to: [Company] } },
+});
+
+const widgetExtension = defineGraphExtension({
+  nodes: {
+    Widget: { properties: { label: { type: "string" } } },
+  },
+});
+
+async function activeSchema(
+  backend: ReturnType<typeof createTestBackend>,
+): Promise<SerializedSchema> {
+  const active = await getActiveSchema(backend, baseGraph.id);
+  return requireDefined(active, "active schema");
+}
+
+async function activeKindNames(
+  backend: ReturnType<typeof createTestBackend>,
+): Promise<Readonly<{ nodes: readonly string[]; edges: readonly string[] }>> {
+  const active = await activeSchema(backend);
+  return {
+    nodes: Object.keys(active.nodes).toSorted(),
+    edges: Object.keys(active.edges).toSorted(),
+  };
+}
+
+async function activeVersion(
+  backend: ReturnType<typeof createTestBackend>,
+): Promise<number> {
+  const active = await activeSchema(backend);
+  return active.version;
+}
+
+describe("migrateSchema — graph-extension fold", () => {
+  it("preserves runtime-committed kinds when handed the compile-time graph", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    await store.evolve(widgetExtension);
+
+    // The caller passes the graph they have — the compile-time one. They do
+    // not know `Widget` exists; that is the whole point.
+    await migrateSchema(backend, baseGraph, await activeVersion(backend));
+
+    const kinds = await activeKindNames(backend);
+    expect(kinds.nodes).toContain("Widget");
+    // ...and the folded document still drives a working Store.
+    const [reopened] = await createStoreWithSchema(baseGraph, backend);
+    expect(reopened.registry.hasNodeType("Widget")).toBe(true);
+  });
+
+  it("keeps rows of a runtime-committed kind readable after the migration", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(widgetExtension);
+    const widget = await evolved
+      .getNodeCollectionOrThrow("Widget")
+      .create({ label: "left-handed" });
+
+    await migrateSchema(backend, baseGraph, await activeVersion(backend));
+
+    const [reopened] = await createStoreWithSchema(baseGraph, backend);
+    const found = await reopened
+      .getNodeCollectionOrThrow("Widget")
+      .getById(widget.id);
+    expect(found?.["label"]).toBe("left-handed");
+  });
+
+  it("the reported incident: MigrationError recovery no longer orphans kinds", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(widgetExtension);
+    const widget = await evolved
+      .getNodeCollectionOrThrow("Widget")
+      .create({ label: "still here" });
+
+    // A breaking compile-time change: re-opening throws and points the
+    // caller at migrateSchema().
+    const error = await createStoreWithSchema(
+      baseGraphWithRenamedProperty,
+      backend,
+    ).catch((error_: unknown) => error_);
+    expect(error).toBeInstanceOf(MigrationError);
+    const fromVersion = (error as MigrationError).details.fromVersion;
+
+    // Do exactly what the error says.
+    await migrateSchema(backend, baseGraphWithRenamedProperty, fromVersion);
+
+    const kinds = await activeKindNames(backend);
+    expect(kinds.nodes).toContain("Widget");
+    const [reopened] = await createStoreWithSchema(
+      baseGraphWithRenamedProperty,
+      backend,
+    );
+    expect(
+      await reopened.getNodeCollectionOrThrow("Widget").getById(widget.id),
+    ).toBeDefined();
+  });
+});
+
+describe("migrateSchema — kind-drop refusal", () => {
+  /** The compile-time graph minus `Company` and the edge that needs it. */
+  const graphWithoutCompany = defineGraph({
+    id: baseGraph.id,
+    nodes: { Person: { type: Person } },
+    edges: {},
+  });
+
+  it("refuses a commit that drops a node kind, naming it", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+
+    const error = await migrateSchema(backend, graphWithoutCompany, 1).catch(
+      (error_: unknown) => error_,
+    );
+
+    expect(error).toBeInstanceOf(MigrationError);
+    const details = (error as MigrationError).details;
+    expect(details.reason).toBe("kind-removal");
+    expect(details.droppedKinds).toEqual({
+      nodes: ["Company"],
+      edges: ["worksAt"],
+    });
+    expect((error as MigrationError).message).toContain('node "Company"');
+    expect((error as MigrationError).message).toContain("Store.removeKinds()");
+  });
+
+  it("leaves the active version untouched when it refuses", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+
+    await expect(
+      migrateSchema(backend, graphWithoutCompany, 1),
+    ).rejects.toThrow(MigrationError);
+
+    const active = await getActiveSchema(backend, baseGraph.id);
+    expect(active?.version).toBe(1);
+    expect(Object.keys(requireDefined(active, "active").nodes)).toContain(
+      "Company",
+    );
+  });
+
+  it("refuses a commit that drops only an edge kind", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+
+    const graphWithoutEdge = defineGraph({
+      id: baseGraph.id,
+      nodes: { Person: { type: Person }, Company: { type: Company } },
+      edges: {},
+    });
+
+    const error = await migrateSchema(backend, graphWithoutEdge, 1).catch(
+      (error_: unknown) => error_,
+    );
+    expect((error as MigrationError).details.droppedKinds).toEqual({
+      nodes: [],
+      edges: ["worksAt"],
+    });
+  });
+
+  it("refuses a commit that drops a runtime-committed kind the caller re-declared away", async () => {
+    // `allowKindRemoval` aside, the fold means a compile-time graph can never
+    // drop an extension kind by omission. It takes an explicit removal —
+    // which is `Store.removeKinds()`'s job.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(widgetExtension);
+    const afterRemoval = await evolved.removeKinds(["Widget"]);
+
+    expect(afterRemoval.registry.hasNodeType("Widget")).toBe(false);
+    const kinds = await activeKindNames(backend);
+    expect(kinds.nodes).not.toContain("Widget");
+  });
+
+  it("commits the drop when allowKindRemoval is set", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+
+    const version = await migrateSchema(backend, graphWithoutCompany, 1, {
+      allowKindRemoval: true,
+    });
+
+    expect(version).toBe(2);
+    expect(await activeKindNames(backend)).toEqual({
+      nodes: ["Person"],
+      edges: [],
+    });
+  });
+});
+
+describe("migrateSchema — unaffected paths", () => {
+  it("still forces a breaking property change (the documented use)", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+
+    const version = await migrateSchema(
+      backend,
+      baseGraphWithRenamedProperty,
+      1,
+    );
+
+    expect(version).toBe(2);
+    const active = await activeSchema(backend);
+    const personProperties = active.nodes["Person"]?.properties as
+      Readonly<{ properties?: Readonly<Record<string, unknown>> }> | undefined;
+    expect(Object.keys(personProperties?.properties ?? {})).toEqual([
+      "fullName",
+    ]);
+  });
+
+  it("commits an additive change without reading a kind as dropped", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+
+    const graphWithExtraKind = defineGraph({
+      id: baseGraph.id,
+      nodes: {
+        Person: { type: Person },
+        Company: { type: Company },
+        Project: {
+          type: defineNode("Project", {
+            schema: z.object({ name: z.string() }),
+          }),
+        },
+      },
+      edges: { worksAt: { type: worksAt, from: [Person], to: [Company] } },
+    });
+
+    await migrateSchema(backend, graphWithExtraKind, 1);
+
+    const kinds = await activeKindNames(backend);
+    expect(kinds.nodes).toEqual(["Company", "Person", "Project"]);
+  });
+});

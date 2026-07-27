@@ -218,6 +218,18 @@ if (result.status === "breaking") {
 }
 ```
 
+`migrateSchema()` forces breaking **property** changes. It will not remove a
+**kind**: a commit that drops node or edge kinds the active schema carries is
+refused with a `MigrationError` whose `details.reason` is `"kind-removal"`,
+because the dropped kinds' rows would stay in the database with nothing able
+to read them. Use [`removeKinds()`](#removing-a-node-type) for that — it
+queues the cleanup rows that make the removal reconcilable.
+
+You also do not need to know whether kinds were added at runtime by
+`evolve()`. `migrateSchema()` folds the persisted graph extension into the
+graph you hand it, the same way `createStoreWithSchema()` does, so passing
+your compile-time graph never erases runtime-committed kinds.
+
 ### Removing a Node Type
 
 #### Deploy 1 — Stop creating new instances

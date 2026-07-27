@@ -307,7 +307,10 @@ import { initializeSchema, migrateSchema, rollbackSchema, ensureSchema } from "@
 const row = await initializeSchema(backend, graph);
 console.log("Created version:", row.version);
 
-// Migrate to new version
+// Migrate to new version. Folds the persisted graph extension into `graph`
+// first, and refuses (MigrationError, reason "kind-removal") if the commit
+// would drop kinds the active schema carries — use store.removeKinds() for
+// that.
 const newVersion = await migrateSchema(backend, graph, currentVersion);
 console.log("Migrated to version:", newVersion);
 

@@ -720,6 +720,14 @@ export const MIGRATION_FAILURE_REASONS = [
   "no-active-version",
   /** The requested schema version does not exist for the graph. */
   "version-not-found",
+  /**
+   * The schema about to be committed drops node or edge kinds the active
+   * schema carries. Their rows would stay in the database, reachable by
+   * nothing. Inspect `details.droppedKinds` for the names. Use
+   * `Store.removeKinds()` — the removal path that queues data cleanup — or
+   * pass `allowKindRemoval` to `migrateSchema` to accept the orphaning.
+   */
+  "kind-removal",
 ] as const;
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
@@ -737,6 +745,14 @@ export type MigrationErrorDetails = Readonly<{
    * "additive → proceed, incompatible → ask the user" without re-querying.
    */
   diff?: SchemaDiff;
+  /**
+   * The kind names the refused commit would have dropped (`kind-removal`).
+   * Both lists are sorted; at least one is non-empty.
+   */
+  droppedKinds?: Readonly<{
+    nodes: readonly string[];
+    edges: readonly string[];
+  }>;
 }>;
 
 /**
