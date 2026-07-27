@@ -22,6 +22,7 @@ import { type GraphBackend } from "../../backend/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
 import {
   type BetweenPredicate,
+  type ComparisonOp,
   type ComparisonPredicate,
   type ComposableQuery,
   type LiteralValue,
@@ -41,6 +42,7 @@ import {
 import { isParameterRef } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
 import {
+  assertListBinding,
   buildQueryTemplate,
   type CompiledTemplate,
   fillTemplateParams,
@@ -81,6 +83,22 @@ function toLiteral(value: unknown): LiteralValue {
   );
 }
 
+/** Whether a comparison operator takes a list of values rather than a scalar. */
+function isListComparisonOp(op: ComparisonOp): boolean {
+  return op === "in" || op === "notIn";
+}
+
+/**
+ * Expands a list-valued binding into the literal array the compiler's
+ * non-parameterized `in`/`notIn` path expects. Used only on the fallback
+ * (no `executeRaw`) path — the fast path keeps the list packed behind a
+ * single placeholder.
+ */
+function toLiteralList(parameterName: string, value: unknown): LiteralValue[] {
+  assertListBinding(parameterName, value);
+  return value.map((element) => toLiteral(element));
+}
+
 /**
  * Walks a predicate expression tree and replaces ParameterRef nodes
  * with LiteralValue nodes using the provided bindings.
@@ -92,16 +110,13 @@ function substitutePredicateExpression(
   switch (expr.__type) {
     case "comparison": {
       if (isParameterRef(expr.right)) {
-        const value = bindings[expr.right.name];
-        if (value === undefined) {
-          throw new ConfigurationError(
-            `Missing binding for parameter "${expr.right.name}"`,
-            { parameterName: expr.right.name },
-          );
-        }
+        const value = resolveBinding(bindings, expr.right.name);
         return {
           ...expr,
-          right: toLiteral(value),
+          right:
+            isListComparisonOp(expr.op) ?
+              toLiteralList(expr.right.name, value)
+            : toLiteral(value),
         } satisfies ComparisonPredicate;
       }
       return expr;
@@ -297,6 +312,7 @@ export class PreparedQuery<R> {
     this.#selectFn = config.selectFn;
     this.#schemaIntrospector = config.schemaIntrospector;
     this.#parameterMetadata = collectParameterMetadata(this.#ast);
+    assertDistinctParameterRoles(this.#parameterMetadata);
   }
 
   /**
@@ -405,6 +421,7 @@ export class PreparedQuery<R> {
         template.params,
         bindings,
         this.#dialect,
+        this.#parameterMetadata.listParameters,
       );
       const rawRows = await executeRaw<Record<string, unknown>>(
         template.sql,
@@ -429,15 +446,49 @@ type ParameterMetadata = Readonly<{
   names: ReadonlySet<string>;
   /** Parameters used in string_op predicates (must receive string values). */
   stringOpParameters: ReadonlySet<string>;
+  /** Parameters used as the whole list of `in`/`notIn` (must receive arrays). */
+  listParameters: ReadonlySet<string>;
+  /** Parameters used in any position that binds a single scalar. */
+  scalarParameters: ReadonlySet<string>;
+}>;
+
+/** The mutable form {@link collectParameterMetadataFromAst} fills. */
+type ParameterMetadataAccumulator = Readonly<{
+  names: Set<string>;
+  stringOpParameters: Set<string>;
+  listParameters: Set<string>;
+  scalarParameters: Set<string>;
 }>;
 
 function collectParameterMetadata(ast: QueryAst): ParameterMetadata {
-  const names = new Set<string>();
-  const stringOpParameters = new Set<string>();
+  const accumulator: ParameterMetadataAccumulator = {
+    names: new Set<string>(),
+    stringOpParameters: new Set<string>(),
+    listParameters: new Set<string>(),
+    scalarParameters: new Set<string>(),
+  };
 
-  collectParameterMetadataFromAst(ast, names, stringOpParameters);
+  collectParameterMetadataFromAst(ast, accumulator);
 
-  return { names, stringOpParameters };
+  return accumulator;
+}
+
+/**
+ * A name used both as a whole list and as a scalar cannot be satisfied by one
+ * binding — the same value would have to be an array in one position and a
+ * scalar in the other. Called at prepare time so the query fails before its
+ * first execute() rather than on whichever binding happens to arrive.
+ */
+function assertDistinctParameterRoles(metadata: ParameterMetadata): void {
+  const conflicting = [...metadata.listParameters].filter((name) =>
+    metadata.scalarParameters.has(name),
+  );
+  if (conflicting.length === 0) return;
+
+  throw new ConfigurationError(
+    `Parameter${conflicting.length === 1 ? "" : "s"} ${conflicting.map((name) => `"${name}"`).join(", ")} used both as an in()/notIn() list and as a scalar value`,
+    { conflictingParameters: conflicting },
+  );
 }
 
 export function hasParameterReferences(ast: QueryAst): boolean {
@@ -458,70 +509,58 @@ export function composableQueryHasParameterReferences(
 
 function collectParameterMetadataFromAst(
   ast: QueryAst,
-  names: Set<string>,
-  stringOpParameters: Set<string>,
+  accumulator: ParameterMetadataAccumulator,
 ): void {
   for (const predicate of ast.predicates) {
-    collectParameterMetadataFromExpression(
-      predicate.expression,
-      names,
-      stringOpParameters,
-    );
+    collectParameterMetadataFromExpression(predicate.expression, accumulator);
   }
   if (ast.having !== undefined) {
-    collectParameterMetadataFromExpression(
-      ast.having,
-      names,
-      stringOpParameters,
-    );
+    collectParameterMetadataFromExpression(ast.having, accumulator);
   }
 }
 
 function collectParameterMetadataFromExpression(
   expression: PredicateExpression,
-  names: Set<string>,
-  stringOpParameters: Set<string>,
+  accumulator: ParameterMetadataAccumulator,
 ): void {
   switch (expression.__type) {
     case "comparison": {
       if (isParameterRef(expression.right)) {
-        names.add(expression.right.name);
+        accumulator.names.add(expression.right.name);
+        const role =
+          isListComparisonOp(expression.op) ?
+            accumulator.listParameters
+          : accumulator.scalarParameters;
+        role.add(expression.right.name);
       }
       return;
     }
     case "string_op": {
       if (isParameterRef(expression.pattern)) {
-        names.add(expression.pattern.name);
-        stringOpParameters.add(expression.pattern.name);
+        accumulator.names.add(expression.pattern.name);
+        accumulator.scalarParameters.add(expression.pattern.name);
+        accumulator.stringOpParameters.add(expression.pattern.name);
       }
       return;
     }
     case "between": {
-      if (isParameterRef(expression.lower)) {
-        names.add(expression.lower.name);
-      }
-      if (isParameterRef(expression.upper)) {
-        names.add(expression.upper.name);
+      for (const bound of [expression.lower, expression.upper]) {
+        if (isParameterRef(bound)) {
+          accumulator.names.add(bound.name);
+          accumulator.scalarParameters.add(bound.name);
+        }
       }
       return;
     }
     case "and":
     case "or": {
       for (const predicate of expression.predicates) {
-        collectParameterMetadataFromExpression(
-          predicate,
-          names,
-          stringOpParameters,
-        );
+        collectParameterMetadataFromExpression(predicate, accumulator);
       }
       return;
     }
     case "not": {
-      collectParameterMetadataFromExpression(
-        expression.predicate,
-        names,
-        stringOpParameters,
-      );
+      collectParameterMetadataFromExpression(expression.predicate, accumulator);
       return;
     }
     case "null_check":
@@ -532,20 +571,9 @@ function collectParameterMetadataFromExpression(
     case "fulltext_match": {
       return;
     }
-    case "exists": {
-      collectParameterMetadataFromAst(
-        expression.subquery,
-        names,
-        stringOpParameters,
-      );
-      return;
-    }
+    case "exists":
     case "in_subquery": {
-      collectParameterMetadataFromAst(
-        expression.subquery,
-        names,
-        stringOpParameters,
-      );
+      collectParameterMetadataFromAst(expression.subquery, accumulator);
       return;
     }
   }
@@ -555,7 +583,7 @@ function validateBindings(
   bindings: Readonly<Record<string, unknown>>,
   metadata: ParameterMetadata,
 ): void {
-  const { names: expectedNames, stringOpParameters } = metadata;
+  const { names: expectedNames, stringOpParameters, listParameters } = metadata;
 
   const missing: string[] = [];
   for (const name of expectedNames) {
@@ -585,7 +613,22 @@ function validateBindings(
   // fallback path (AST substitution) reject the same invalid inputs.
   for (const name of expectedNames) {
     const value = bindings[name];
+    if (listParameters.has(name)) {
+      validateListBinding(name, value);
+      continue;
+    }
     validateBindingValue(name, value, stringOpParameters.has(name));
+  }
+}
+
+/**
+ * Validates a list-valued binding is an array of scalars, so the packed
+ * parameter the dialect unpacks holds exactly what a literal list would.
+ */
+function validateListBinding(name: string, value: unknown): void {
+  assertListBinding(name, value);
+  for (const element of value) {
+    validateBindingValue(name, element, false);
   }
 }
 

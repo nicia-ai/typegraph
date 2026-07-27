@@ -639,6 +639,15 @@ function compileComparisonPredicate(
       undefined,
       cteColumnPrefix,
     );
+    if (expr.op === "in" || expr.op === "notIn") {
+      return compileListParameterPredicate(
+        left,
+        expr.right.name,
+        parameterValueType,
+        expr.op === "notIn",
+        dialect,
+      );
+    }
     const opSql = COMPARISON_OP_SQL[expr.op];
     if (!opSql) {
       throw new UnsupportedPredicateError(
@@ -691,6 +700,43 @@ function compileComparisonPredicate(
     );
   }
   return sql`${left} ${sql.raw(opSql)} ${convertedRight}`;
+}
+
+/**
+ * Compiles `field.in(param("ids"))` / `field.notIn(param("ids"))`.
+ *
+ * The whole list rides on ONE placeholder — the dialect unpacks it — so the
+ * emitted SQL text is independent of how many elements the caller eventually
+ * binds. That is what lets a prepared query compile once and serve every
+ * arity from the same cached template, including the empty list (which yields
+ * an empty relation, hence `IN` false / `NOT IN` true, matching the literal
+ * form's short circuit).
+ */
+function compileListParameterPredicate(
+  left: SqlFragment,
+  parameterName: string,
+  elementType: ValueType | undefined,
+  negated: boolean,
+  dialect: DialectAdapter,
+): SqlFragment {
+  if (
+    elementType === "array" ||
+    elementType === "object" ||
+    elementType === "embedding"
+  ) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN is not supported for ${elementType} values`,
+      { valueType: elementType },
+      {
+        suggestion:
+          "Use scalar fields (string/number/boolean/date) in IN/NOT IN predicates.",
+      },
+    );
+  }
+  return dialect.inListParameter(left, sql.placeholder(parameterName), {
+    negated,
+    elementType,
+  });
 }
 
 /**

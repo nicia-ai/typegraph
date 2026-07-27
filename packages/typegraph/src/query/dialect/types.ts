@@ -6,6 +6,7 @@
  * implementing this interface.
  */
 import { type VectorMetric } from "../../backend/types";
+import { type ValueType } from "../ast";
 import { type JsonPointer } from "../json-pointer";
 import { type SqlFragment } from "../sql-fragment";
 import { type FulltextStrategy } from "./fulltext-strategy";
@@ -84,6 +85,19 @@ export type DialectCapabilities = Readonly<{
    * Whether the dialect supports fulltext MATCH predicates.
    */
   supportsFulltext: boolean;
+}>;
+
+/**
+ * Shape of a list-valued `IN` parameter, resolved at compile time.
+ */
+export type InListParameterOptions = Readonly<{
+  /** Whether the predicate is `notIn` rather than `in`. */
+  negated: boolean;
+  /**
+   * The value type the left operand was compiled for. `undefined` when the
+   * schema declares nothing usable, in which case the comparison is textual.
+   */
+  elementType: ValueType | undefined;
 }>;
 
 /**
@@ -382,6 +396,40 @@ export interface DialectAdapter {
     values: readonly unknown[],
     negated: boolean,
   ) => SqlFragment;
+
+  /**
+   * Tests scalar membership in a list supplied as a SINGLE bound parameter —
+   * the `field.in(param("ids"))` form.
+   *
+   * The emitted SQL must not depend on how many elements the list holds, so a
+   * prepared statement compiles once and serves every arity from the same
+   * cached template. Both bundled dialects therefore unpack a JSON-encoded
+   * array (produced by {@link DialectAdapter.packListValue}) into a one-column
+   * relation instead of emitting one placeholder per element.
+   *
+   * `elementType` is the value type the left operand was compiled for, so a
+   * dialect that extracts JSON as text can cast the unpacked elements to the
+   * same type; `undefined` means text.
+   *
+   * @example
+   * SQLite: left IN (SELECT value FROM json_each(?))
+   * PostgreSQL: left IN (SELECT e.value::numeric FROM jsonb_array_elements_text($1::jsonb) AS e(value))
+   */
+  readonly inListParameter: (
+    this: void,
+    left: SqlFragment,
+    packedValues: SqlFragment,
+    options: InListParameterOptions,
+  ) => SqlFragment;
+
+  /**
+   * Packs the scalar list bound to an `in()`/`notIn()` parameter into the
+   * single driver value {@link DialectAdapter.inListParameter} unpacks.
+   * Elements arrive as plain JavaScript scalars and must be bound with the
+   * same rules a literal of that type would be (SQLite booleans as 0/1, dates
+   * as ISO text), so the parameterized and literal forms match row for row.
+   */
+  readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
 
   // ============================================================
   // String Operations

@@ -4,11 +4,16 @@
  * Implements dialect-specific SQL generation for PostgreSQL databases.
  * Uses PostgreSQL's native JSONB operators for JSON operations.
  */
+import { type ValueType } from "../ast";
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { tsvectorStrategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
-import { getSqlDialectProfile, inlineSqlStringLiteral } from "./profile";
+import {
+  getSqlDialectProfile,
+  inlineSqlStringLiteral,
+  packSqlListValue,
+} from "./profile";
 import { type DialectAdapter } from "./types";
 
 /**
@@ -56,6 +61,36 @@ function toPostgresPath(pointer: JsonPointer): SqlFragment {
     .map((segment) => inlineSqlStringLiteral(segment, "postgres"))
     .join(", ");
   return sql.raw(`ARRAY[${escapedSegments}]`);
+}
+
+/**
+ * The cast that turns a text element of a list-valued `IN` parameter into the
+ * type its left operand was extracted as. Mirrors the `jsonExtract*` casts:
+ * `jsonExtractNumber` yields numeric, `jsonExtractBoolean` boolean,
+ * `jsonExtractDate` timestamptz, and everything else stays text.
+ */
+function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
+  switch (elementType) {
+    case "number": {
+      return sql.raw("::numeric");
+    }
+    case "boolean": {
+      return sql.raw("::boolean");
+    }
+    case "date": {
+      return sql.raw("::timestamptz");
+    }
+    // `jsonExtractText` leaves these as text, so the elements must stay text
+    // too. The compiler rejects array/object/embedding before reaching here.
+    case "string":
+    case "array":
+    case "object":
+    case "embedding":
+    case "unknown":
+    case undefined: {
+      return sql.empty();
+    }
+  }
 }
 
 /**
@@ -217,6 +252,21 @@ export const postgresDialect: DialectAdapter = {
     const operator = negated ? sql.raw("NOT IN") : sql.raw("IN");
     const placeholders = values.map((value) => sql`${value}`);
     return sql`${left} ${operator} (${sql.join(placeholders, sql`, `)})`;
+  },
+
+  inListParameter(left, packedValues, { negated, elementType }) {
+    const operator = negated ? sql.raw("NOT IN") : sql.raw("IN");
+    // One placeholder for the whole list: the binding is JSON text, cast to
+    // jsonb and expanded into a one-column relation, so arity never reaches
+    // the SQL text. Elements arrive as text (`jsonb_array_elements_text`) and
+    // are cast to whatever type the left operand was extracted as, mirroring
+    // the jsonExtract* casts above.
+    const element = sql`in_list_element.value${postgresElementCast(elementType)}`;
+    return sql`${left} ${operator} (SELECT ${element} FROM jsonb_array_elements_text(${packedValues}::jsonb) AS in_list_element(value))`;
+  },
+
+  packListValue(values) {
+    return packSqlListValue(values, "postgres");
   },
 
   // ============================================================

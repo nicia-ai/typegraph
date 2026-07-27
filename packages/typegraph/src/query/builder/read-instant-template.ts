@@ -21,6 +21,7 @@ import { nowIso } from "../../utils/date";
 import { type ComposableQuery, type QueryAst } from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "../compiler/temporal";
+import { getDialect } from "../dialect";
 import { bindSqlValue } from "../dialect/profile";
 import { type SqlDialect } from "../dialect/types";
 import { isSqlPlaceholder, type SqlFragment } from "../sql-fragment";
@@ -155,6 +156,8 @@ export function buildQueryTemplate(
   });
 }
 
+const EMPTY_LIST_PARAMETERS: ReadonlySet<string> = new Set<string>();
+
 /**
  * Resolves a template's positional parameters for `executeRaw`, replacing
  * every {@link Placeholder} with a concrete value:
@@ -164,12 +167,16 @@ export function buildQueryTemplate(
  *   per statement" invariant the literal path guaranteed;
  * - a user `param()` placeholder → its binding, mapped the same way the
  *   compile path binds a literal (Date → ISO string; everything else through
- *   the dialect's `bindValue`).
+ *   the dialect's `bindValue`);
+ * - a list-valued `param()` placeholder (the whole right side of
+ *   `in()`/`notIn()`) → the dialect's packed representation of the array, so
+ *   the statement binds ONE value no matter how long the list is.
  */
 export function fillTemplateParams(
   params: readonly unknown[],
   bindings: Readonly<Record<string, unknown>>,
   dialect: SqlDialect,
+  listParameters: ReadonlySet<string> = EMPTY_LIST_PARAMETERS,
 ): unknown[] {
   let readInstant: string | undefined;
   return params.map((parameter) => {
@@ -187,6 +194,26 @@ export function fillTemplateParams(
         parameterName: name,
       });
     }
+    if (listParameters.has(name)) {
+      assertListBinding(name, value);
+      return getDialect(dialect).packListValue(value);
+    }
     return bindSqlValue(value, dialect);
   });
+}
+
+/**
+ * Narrows a binding destined for an `in()`/`notIn()` parameter to an array.
+ * An empty array is valid — it compiles to an empty relation, matching the
+ * literal `in([])` short circuit.
+ */
+export function assertListBinding(
+  name: string,
+  value: unknown,
+): asserts value is readonly unknown[] {
+  if (Array.isArray(value)) return;
+  throw new ConfigurationError(
+    `Parameter "${name}" must be an array for in()/notIn()`,
+    { parameterName: name, actualType: typeof value },
+  );
 }
