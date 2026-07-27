@@ -1022,6 +1022,10 @@ export type EdgeCollection<
    *
    * Returns a `BatchableQuery` instead of executing immediately. Accepts
    * the same temporal `options` as {@link EdgeCollection.findFrom}.
+   *
+   * Batching these still issues one statement per call — it shares a
+   * connection and a snapshot, it does not merge the reads. To read edges for
+   * many sources in one statement, traverse from them in a single query.
    */
   batchFindFrom: (
     from: NodeRef<From>,
@@ -1032,7 +1036,8 @@ export type EdgeCollection<
    * Deferred variant of `findTo` for use with `store.batch()`.
    *
    * Returns a `BatchableQuery` instead of executing immediately. Accepts
-   * the same temporal `options` as {@link EdgeCollection.findTo}.
+   * the same temporal `options` as {@link EdgeCollection.findTo}. Costs one
+   * statement per call, like {@link EdgeCollection.batchFindFrom}.
    */
   batchFindTo: (
     to: NodeRef<To>,
@@ -1043,7 +1048,8 @@ export type EdgeCollection<
    * Deferred variant of `findByEndpoints` for use with `store.batch()`.
    *
    * Returns a `BatchableQuery` that yields a 0-or-1 element array
-   * (matching `findByEndpoints`' at-most-one semantics).
+   * (matching `findByEndpoints`' at-most-one semantics). Costs one statement
+   * per call, like {@link EdgeCollection.batchFindFrom}.
    */
   batchFindByEndpoints: (
     from: NodeRef<From>,

@@ -1688,19 +1688,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   // === Batch Query Execution ===
 
   /**
-   * Executes multiple queries and returns a typed tuple of results.
+   * Runs several queries on one checked-out connection and returns a typed
+   * tuple of their results.
    *
-   * Each query preserves its own result type, projection, filtering, sorting,
-   * and pagination.
+   * **N queries cost N+2 statements** — `begin`, one per query, `commit` —
+   * each a separate round trip on a networked backend. This collapses
+   * connection acquisition, not latency: it does not pipeline, and it will
+   * not fix an N+1. To collapse round trips, fold the work into one
+   * statement instead — `store.subgraph()` for everything reachable from a
+   * root, `.traverse()` for a filtered or projected join, `getByIds` /
+   * `bulkFindByIndex` for a keyed fan-out.
    *
-   * **Snapshot consistency is conditional.** When
-   * `backend.capabilities.transactions` is `true`, queries run sequentially
-   * on a single connection inside an implicit transaction and observe the
-   * same database snapshot. When transactions are unavailable
-   * (Cloudflare D1, `drizzle-orm/neon-http`), queries run sequentially over
-   * independent connections and may observe writes that landed between them.
-   * Branch on `backend.capabilities.transactions` if you need a guaranteed
-   * snapshot.
+   * What it does buy: one pooled connection instead of N (the `Promise.all`
+   * pool-pressure problem), per-query result types, and — only when
+   * `backend.capabilities.transactions` is `true` — one database snapshot
+   * across all queries. Without transactions (Cloudflare D1,
+   * `drizzle-orm/neon-http`) each query runs on its own connection and may
+   * observe writes that landed between them.
    *
    * Read-only — use `bulkCreate`, `bulkInsert`, etc. for write batching.
    *

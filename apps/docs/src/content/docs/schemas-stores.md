@@ -1185,6 +1185,10 @@ Deferred variants of `findFrom`, `findTo`, and `findByEndpoints` for use with
 executing immediately. `batchFindFrom` / `batchFindTo` accept the same temporal
 `options` as `findFrom` / `findTo`.
 
+Batching them shares a connection and a snapshot; it does not merge the reads — each still costs
+its own statement. To read edges for many sources in one statement, traverse from them in a single
+query.
+
 ```typescript
 store.edges.worksAt.batchFindFrom(
   from: NodeRef<Person>,
@@ -1614,9 +1618,16 @@ Executes multiple independent queries over a single connection with snapshot con
 Accepts two or more queries (from `.select()`, set operations, or edge collection `batchFind*` methods)
 and returns a typed tuple of results preserving input order.
 
-All queries run within an implicit transaction — they see the same database snapshot.
-This avoids connection pool pressure from `Promise.all` patterns (N connections → 1) while
-giving each query independent projection, filtering, sorting, and pagination.
+**Cost: N queries are N+2 round trips** — `begin`, one statement per query, `commit`. `batch()`
+collapses connection acquisition, not latency; it does not pipeline and it will not fix an N+1.
+To collapse round trips, fold the work into one statement instead: a `.traverse()` chain,
+[`store.subgraph()`](#subgraph-extraction), or `getByIds()` / `bulkFindByIndex()` for keyed fan-out.
+
+What it does buy: one connection instead of N (removing the `Promise.all` pool pressure),
+per-query result types, and — when `backend.capabilities.transactions` is `true` — one database
+snapshot across every query, while each query keeps its own projection, filtering, sorting, and
+pagination. On backends without transactions each query runs on its own connection and may observe
+writes that landed between them; see [Limitations](/limitations).
 
 ```typescript
 store.batch<R1, R2, ...Rn>(
@@ -1720,6 +1731,7 @@ const [skills, employer, colleague] = await store.batch(
 |---------|-----|
 | Multiple queries with different shapes/filters | `store.batch()` |
 | Load entity with all relationships (uniform) | `store.subgraph()` |
+| Fixing an N+1 / reducing round trips | `.traverse()`, `store.subgraph()`, `getByIds()` — not `batch()` |
 | Single query | `.execute()` directly |
 | Writes interleaved with reads | `store.transaction()` |
 | Same-shape queries merged into one result | `.union()` / `.intersect()` / `.except()` |
@@ -2015,7 +2027,8 @@ const results = await store
 
 #### `store.batch(...queries)`
 
-Execute multiple queries over a single connection. See [Batch Query Execution](#batch-query-execution).
+Execute multiple queries over a single connection — one statement each, not one round trip. See
+[Batch Query Execution](#batch-query-execution).
 
 ### Dynamic Collection Access
 

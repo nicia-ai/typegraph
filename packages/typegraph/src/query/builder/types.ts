@@ -63,10 +63,14 @@ export type QueryCoordinateState = "open" | "sealed";
 // ============================================================
 
 /**
- * A query that can be executed within a `store.batch()` call.
+ * A query deferred for execution inside a `store.batch()` call.
  *
  * Both `ExecutableQuery` and `UnionableQuery` satisfy this interface.
  * The result type `R` is preserved per-query in the batch return tuple.
+ *
+ * Deferring costs nothing and saves nothing on its own: `store.batch()` runs
+ * each query as its own statement on a shared connection, so it does not fold
+ * these into a single round trip. See `store.batch()` for the full cost model.
  */
 export type BatchableQuery<R = unknown> = Readonly<{
   executeOn: (

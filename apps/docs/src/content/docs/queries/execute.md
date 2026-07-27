@@ -247,6 +247,11 @@ async function exportAllUsers(): Promise<void> {
 When you need multiple independent queries with different result types, use `store.batch()` to
 execute them over a single connection with snapshot consistency.
 
+`batch()` does not batch round trips. It issues `begin`, one statement per query, then `commit` —
+N queries are N+2 round trips. It collapses connection acquisition, not latency, and it will not
+fix an N+1. For that, fold the work into one statement: a `.traverse()` chain, `store.subgraph()`,
+or `getByIds()` / `bulkFindByIndex()` for keyed fan-out.
+
 ```typescript
 const [people, companies] = await store.batch(
   store
@@ -268,7 +273,8 @@ const [people, companies] = await store.batch(
 Each query preserves its own projection, filtering, sorting, and pagination. Results are returned
 as a typed tuple matching the input order.
 
-Edge collection `batchFind*` methods also return `BatchableQuery` and can be mixed freely with fluent queries:
+Edge collection `batchFind*` methods also return `BatchableQuery` and can be mixed freely with
+fluent queries — each still costs its own statement:
 
 ```typescript
 const [skills, employer] = await store.batch(
