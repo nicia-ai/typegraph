@@ -44,8 +44,8 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 312,
-    sha256: "9c41137a0292a9ecb5f57ca6e677e73a90eb9096a200d4327970d4998a3952e0",
+    count: 311,
+    sha256: "396495e52a5b95facd91da1caa0948674fdbe749ddfd08a67be0292cb4d47425",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
