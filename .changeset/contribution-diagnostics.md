@@ -13,7 +13,8 @@ disagreement as `orphaned-marker` (marker records a success, table absent),
 recorded at a different shape), with the `owner` / `logicalName` /
 `physicalName` and, for vector slots, the `kind` and `fieldPath` needed to route
 straight to `store.reembedVectorField` — no reconstructing internal marker
-strings. It is read-only (one existence query per contribution table, no DDL, no
+strings. `lastError` carries the reason the marker recorded, when it recorded
+one: `state` says which repair to run, `lastError` says why it broke. It is read-only (one existence query per contribution table, no DDL, no
 writes) and deliberately not a boot step; the fast-path caching stays the
 default. Backends that cannot probe their own catalog throw `ConfigurationError`
 rather than reporting a clean bill of health.

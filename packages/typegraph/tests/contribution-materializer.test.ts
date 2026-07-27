@@ -810,6 +810,65 @@ describe("verifyContributions crosses durable markers against the catalog", () =
     ]);
   });
 
+  it("carries the marker's recorded error through the state fold", async () => {
+    // `missing` and `failed` deliberately collapse to one state because
+    // they share one repair. The recorded reason must NOT collapse with
+    // them: it is the only thing the catalog cannot supply, and it is what
+    // separates "sqlite-vec not loaded" from "no marker row at all".
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const failure = "could not open shared library: sqlite-vec";
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set([...runtimeTables(), vectorTableOf(VECTOR_SLOT)]),
+    );
+    for (const contribution of pgvectorStrategy.ownedTables(VECTOR_SLOT)) {
+      recordMarkerInto(markers, {
+        graphId: GRAPH_ID,
+        logicalName: contribution.logicalName,
+        owner: contribution.owner,
+        tableName: contribution.tableName,
+        signature: "unused-signature",
+        attemptedAt: new Date().toISOString(),
+        materializedAt: undefined,
+        error: failure,
+      });
+    }
+
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toMatchObject([{ state: "missing-marker", lastError: failure }]);
+  });
+
+  it("omits lastError entirely when the marker recorded none", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set(runtimeTables()),
+    );
+
+    // `toStrictEqual` (not `toEqual`) so a present-but-undefined
+    // `lastError` key would fail: the field is absent, not blank.
+    const [owned] = pgvectorStrategy.ownedTables(VECTOR_SLOT);
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toStrictEqual([
+      {
+        owner: owned?.owner,
+        logicalName: owned?.logicalName,
+        physicalName: vectorTableOf(VECTOR_SLOT),
+        kind: VECTOR_SLOT.nodeKind,
+        fieldPath: VECTOR_SLOT.fieldPath,
+        state: "orphaned-marker",
+      },
+    ]);
+  });
+
   it("reports signature drift against a live table as stale", async () => {
     const markers = new Map<string, ContributionMaterializationRow>();
     await provision(markers);

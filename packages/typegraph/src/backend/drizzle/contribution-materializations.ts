@@ -957,8 +957,9 @@ export function createContributionMaterializer(
         );
       for (const { contribution, kind, fieldPath } of targets) {
         const key = contributionKey(id, contribution);
+        const row = rows.get(key);
         const state = diagnoseContribution(
-          rows.get(key),
+          row,
           await resolveContributionSignature(key, contribution),
           await tableExists(contribution.tableName),
         );
@@ -970,6 +971,11 @@ export function createContributionMaterializer(
           ...(kind === undefined ? {} : { kind }),
           ...(fieldPath === undefined ? {} : { fieldPath }),
           state,
+          // The recorded reason, carried through verbatim. `state` folds
+          // several marker verdicts together because they share a repair;
+          // this is what keeps the fold from also discarding the one thing
+          // the catalog can never tell the operator.
+          ...(row?.lastError === undefined ? {} : { lastError: row.lastError }),
         });
       }
     }

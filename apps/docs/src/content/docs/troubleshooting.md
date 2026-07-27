@@ -409,6 +409,8 @@ completely clean and fails at the first read of the affected slot.
 **Solution:** Run the diagnostic and route each entry to its repair:
 
 ```typescript
+// `adminBackend` must be a FRESH privileged backend — see the note on
+// warm instances below.
 for (const entry of await store.verifyContributions()) {
   if (entry.kind !== undefined && entry.fieldPath !== undefined) {
     // A vector slot: recreate storage at the declared shape, then
@@ -426,11 +428,35 @@ for (const entry of await store.verifyContributions()) {
 Each entry carries `owner`, `logicalName`, `physicalName`, and a
 `state` of `orphaned-marker` (marker says initialized, table absent),
 `missing-marker` (table present, nothing attests it), or `stale`
-(marker recorded at a different shape). It is read-only — one
-existence query per contribution table, no DDL and no writes — so it
-is safe to run on a live store under a least-privilege role. It is
-deliberately **not** a boot step; call it from a health check or an
-operator script.
+(marker recorded at a different shape). When the marker recorded an
+error against its last attempt, `lastError` carries it — `state` tells
+you which repair to run, `lastError` tells you why it broke, which is
+often a different question. It is read-only — one existence query per
+contribution table, no DDL and no writes — so it is safe to run on a
+live store under a least-privilege role. It is deliberately **not** a
+boot step; call it from a health check or an operator script.
+
+**Run the fulltext repair from a fresh privileged backend.**
+`ensureRuntimeContributions` does not force: it skips any contribution
+already cached as initialized on that backend instance, and then skips
+again if the marker row alone looks healthy. On the same warm instance
+whose marker the diagnostic just flagged, it returns early and silently
+does nothing — the diagnostic is not lying, the repair simply never
+ran. Open a new privileged backend for the repair pass. (The vector
+path has no such caveat: `reembedVectorField` forces past both caches
+by design.)
+
+**An empty result does not mean everything was checked.** A backend
+that cannot probe its own catalog throws `ConfigurationError` rather
+than reporting a clean bill of health, but vector slots on a backend
+without vector support are skipped silently and correctly — that
+backend never materialized them, so there is nothing to compare, and
+reporting them would be a false positive on every store it opens. The
+return type cannot distinguish "checked and healthy" from "did not
+check", so `(await store.verifyContributions()).length === 0` reads
+identically in both cases. If you are building a health check on this,
+assert `backend.capabilities.vector?.supported` separately rather than
+treating an empty array as proof that embedding storage is intact.
 
 ## Semantic Search Issues
 

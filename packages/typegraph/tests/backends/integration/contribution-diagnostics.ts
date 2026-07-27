@@ -97,8 +97,12 @@ export function registerContributionDiagnosticIntegrationTests(
     }
 
     beforeEach(async () => {
+      // One backend reference throughout: `contributions` and `snapshots`
+      // must describe the same object the restore writes back to, or a
+      // future divergence between the two accessors would silently restore
+      // a different set than was captured.
       const backend = context.getBackend();
-      contributions = ownedContributions(context.getStore().backend);
+      contributions = ownedContributions(backend);
       const read = requireDefined(
         backend.getContributionMaterialization,
         "backend must read contribution markers",
@@ -115,32 +119,59 @@ export function registerContributionDiagnosticIntegrationTests(
       );
     });
 
-    // Restore both halves of the state these tests corrupt: re-run the
-    // idempotent contribution DDL (a no-op when the table survived) and
-    // re-record each marker exactly as it was found.
-    afterEach(async () => {
-      const backend = context.getBackend();
-      const record = requireDefined(
+    /**
+     * Restore both halves of the state one test corrupted: re-run the
+     * idempotent contribution DDL (a no-op when the table survived) and
+     * re-record the marker exactly as it was found.
+     */
+    async function restoreContribution(
+      backend: AdapterBackend<unknown>,
+      contribution: StrategyTableContribution,
+      snapshot: ContributionMaterializationRow | undefined,
+    ): Promise<void> {
+      for (const ddl of contribution.createDdl) {
+        await executeDdl(backend, ddl);
+      }
+      // No snapshot means no marker existed at capture time, so there is
+      // nothing to put back. A test that CREATES a marker where none was
+      // would leak it past this hook — not reachable today (boot
+      // materializes the fulltext contribution for every graph, so every
+      // contribution this suite touches is already marked), but the day a
+      // test provisions a new slot, this branch needs a delete.
+      if (snapshot === undefined) return;
+      await requireDefined(
         backend.recordContributionMaterialization,
         "backend must record contribution markers",
-      );
+      )({
+        graphId: snapshot.graphId,
+        logicalName: snapshot.logicalName,
+        owner: snapshot.owner,
+        tableName: snapshot.tableName,
+        signature: snapshot.signature,
+        attemptedAt: snapshot.lastAttemptedAt,
+        materializedAt: snapshot.materializedAt,
+        error: snapshot.lastError,
+      });
+    }
+
+    // This hook exists because an unrestored drop of the database-global
+    // fulltext table once broke every later test in the shared-engine
+    // lane. It must therefore not fail PARTIALLY: one contribution that
+    // cannot be restored must not abort the restore of the others. Every
+    // restore is attempted in turn — serially, because these are DDL
+    // statements and concurrent DDL is its own hazard — and the first
+    // failure is rethrown once they have all had their chance.
+    afterEach(async () => {
+      const backend = context.getBackend();
+      let failure: unknown;
       for (const [index, contribution] of contributions.entries()) {
-        for (const ddl of contribution.createDdl) {
-          await executeDdl(backend, ddl);
+        try {
+          await restoreContribution(backend, contribution, snapshots[index]);
+        } catch (error) {
+          failure ??= error;
         }
-        const snapshot = snapshots[index];
-        if (snapshot === undefined) continue;
-        await record({
-          graphId: snapshot.graphId,
-          logicalName: snapshot.logicalName,
-          owner: snapshot.owner,
-          tableName: snapshot.tableName,
-          signature: snapshot.signature,
-          attemptedAt: snapshot.lastAttemptedAt,
-          materializedAt: snapshot.materializedAt,
-          error: snapshot.lastError,
-        });
       }
+      if (failure !== undefined) throw failure;
     });
 
     it("reports nothing on a database whose markers match the catalog", async () => {
@@ -221,9 +252,52 @@ export function registerContributionDiagnosticIntegrationTests(
       });
 
       const diagnostics = await store.verifyContributions();
-      expect(entryFor(diagnostics, contribution.tableName)?.state).toBe(
-        "missing-marker",
+      // The recorded reason survives the state fold — it is the only
+      // thing distinguishing this from a marker row that never existed.
+      expect(entryFor(diagnostics, contribution.tableName)).toMatchObject({
+        state: "missing-marker",
+        lastError: "simulated materialization failure",
+      });
+    });
+
+    it("reports a live table with no marker row at all as missing-marker", async (ctx) => {
+      const store = context.getStore();
+      const strategy = store.backend.vectorStrategy;
+      const deleteMarker = context.getBackend().deleteVectorSlotContribution;
+      if (
+        store.backend.capabilities.vector?.supported !== true ||
+        strategy === undefined ||
+        deleteMarker === undefined
+      ) {
+        // Deleting a marker while leaving its table standing is only
+        // expressible for vector slots; the dialect-free unit suite covers
+        // the same branch for every owner.
+        ctx.skip();
+        return;
+      }
+
+      // The no-row case — what a freshly bootstrapped marker table looks
+      // like against storage that already exists. Distinct from the
+      // recorded-failure case above, which collapses to the same state but
+      // carries a `lastError`.
+      const slot = requireDefined(
+        resolveGraphVectorSlots(integrationTestGraph).find(
+          (candidate) =>
+            candidate.nodeKind === ARTICLE_KIND &&
+            candidate.fieldPath === ARTICLE_EMBEDDING_FIELD,
+        ),
+        "fixture graph must declare the Article embedding slot",
       );
+      await deleteMarker(slot);
+
+      const tableName = strategy.tableName(
+        integrationTestGraph.id,
+        ARTICLE_KIND,
+        ARTICLE_EMBEDDING_FIELD,
+      );
+      const entry = entryFor(await store.verifyContributions(), tableName);
+      expect(entry).toMatchObject({ state: "missing-marker" });
+      expect(entry?.lastError).toBeUndefined();
     });
 
     it("changes nothing it observes — repeated calls report identically", async () => {

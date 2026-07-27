@@ -1008,7 +1008,9 @@ export type RecordContributionMaterializationParams = Readonly<{
  * - `missing-marker` — the physical table exists but no marker attests
  *   it as initialized (no row, no recorded success, or a recorded
  *   failure). Reads and writes are refused with
- *   `StoreNotInitializedError` even though storage is present.
+ *   `StoreNotInitializedError` even though storage is present. These
+ *   three causes share one state because they share one repair; check
+ *   {@link ContributionDiagnostic.lastError} to tell them apart.
  * - `stale` — the table exists and the marker records a prior success
  *   at a different signature (a strategy swap, or a declared embedding
  *   dimension that has moved ahead of the provisioned table).
@@ -1038,6 +1040,21 @@ export type ContributionDiagnostic = Readonly<{
   /** Embedding field path — vector slots only. */
   fieldPath?: string;
   state: ContributionDiagnosticState;
+  /**
+   * The error the marker recorded against its last attempt, when it
+   * recorded one. Absent otherwise.
+   *
+   * This is the part of the picture the catalog cannot supply. `state`
+   * says what to do — the states are chosen so that each maps to one
+   * repair — while this says *why it broke*, which is a different
+   * question and often a different investigation. "sqlite-vec not
+   * loaded", "permission denied for schema public", and "no marker row
+   * at all" all surface as `missing-marker` because they are all
+   * repaired by re-running the ensure under a privileged role; only
+   * this field tells them apart. Present on any state whose marker row
+   * carries an error, not just `missing-marker`.
+   */
+  lastError?: string;
 }>;
 
 // ============================================================
