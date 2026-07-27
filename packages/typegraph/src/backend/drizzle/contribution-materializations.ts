@@ -32,6 +32,8 @@ import { isMissingTableError } from "../../utils/sql-errors";
 import { formatPostgresTimestamp, nowIso } from "../row-mappers";
 import type { StrategyTableContribution } from "../table-contribution";
 import {
+  type ContributionDiagnostic,
+  type ContributionDiagnosticState,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
   createBackendOverlay,
@@ -225,6 +227,59 @@ function evaluateContributionState(
   return "initialized";
 }
 
+/**
+ * Cross the durable marker verdict with physical-catalog reality and
+ * name the disagreement, or `undefined` when the two agree.
+ *
+ * Table absence is evaluated first and dominates: whatever the marker
+ * claims about shape is moot once the storage is gone, and the repair
+ * (recreate, then re-stamp) is the same. It counts as an orphan only
+ * when a *successful* materialization was recorded — a marker whose
+ * only attempt failed and whose table is absent is a consistent
+ * never-provisioned state, not an inconsistency.
+ *
+ * With the table present, `missing` and `failed` collapse to
+ * `missing-marker`: both mean "storage exists but no marker attests
+ * it", and both are repaired by re-running the ensure. `stale` stays
+ * distinct because its repair is a shape change, not a re-stamp.
+ */
+function diagnoseContribution(
+  row: ContributionMaterializationRow | undefined,
+  signature: string,
+  tableExists: boolean,
+): ContributionDiagnosticState | undefined {
+  if (!tableExists) {
+    return row?.materializedAt === undefined ? undefined : "orphaned-marker";
+  }
+  const state = evaluateContributionState(row, signature);
+  switch (state) {
+    case "initialized": {
+      return undefined;
+    }
+    case "stale": {
+      return "stale";
+    }
+    case "missing":
+    case "failed": {
+      return "missing-marker";
+    }
+    default: {
+      return state satisfies never;
+    }
+  }
+}
+
+/**
+ * A contribution `verifyContributions` will check, tagged with the
+ * vector-slot coordinates that produced it. Both tags are absent for the
+ * runtime (fulltext) contributions, which are not per-`(kind, field)`.
+ */
+type VerificationTarget = Readonly<{
+  contribution: StrategyTableContribution;
+  kind?: string;
+  fieldPath?: string;
+}>;
+
 function identityOf(
   graphId: string,
   contribution: StrategyTableContribution,
@@ -380,6 +435,14 @@ export type ContributionMaterializerDeps = Readonly<{
   deleteMarker: (
     identity: ContributionMaterializationIdentity,
   ) => Promise<void>;
+  /**
+   * Whether `tableName` exists in the connection's catalog right now.
+   * The dialect-specific half of `verifyContributions`; the backend
+   * supplies its `buildTableExists` probe. Must NOT be cached across
+   * calls — a table confirmed present earlier is exactly the table this
+   * diagnostic has to re-check.
+   */
+  tableExists: (tableName: string) => Promise<boolean>;
 }>;
 
 export type ContributionMaterializer = Readonly<{
@@ -429,6 +492,17 @@ export type ContributionMaterializer = Readonly<{
    * orphaned marker. No-op when vector support is disabled.
    */
   dropVectorSlot: (slot: VectorSlot) => Promise<void>;
+  /**
+   * Diagnostic: cross every durable marker for `graphId` — the runtime
+   * (fulltext) contributions plus each supplied vector slot's
+   * `ownedTables` — against the physical catalog and report the
+   * disagreements. Read-only: no DDL, no marker writes, and no effect
+   * on the per-instance caches the hot path relies on.
+   */
+  verifyContributions: (
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<readonly ContributionDiagnostic[]>;
 }>;
 
 // NUL separator for the per-instance contribution cache key: collision-safe
@@ -828,6 +902,80 @@ export function createContributionMaterializer(
     }
   }
 
+  async function verifyContributions(
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ): Promise<readonly ContributionDiagnostic[]> {
+    // Vector slots carry their own graph id, exactly as `ensureVectorSlots`
+    // reads them, so the marker read stays one query per distinct graph.
+    const targetsByGraph = new Map<string, VerificationTarget[]>();
+    function addTarget(id: string, target: VerificationTarget): void {
+      const existing = targetsByGraph.get(id);
+      if (existing === undefined) targetsByGraph.set(id, [target]);
+      else existing.push(target);
+    }
+
+    for (const contribution of runtimeContributions()) {
+      addTarget(graphId, { contribution });
+    }
+    const { vectorStrategy } = deps;
+    if (vectorStrategy !== undefined) {
+      for (const slot of vectorSlots) {
+        for (const contribution of vectorStrategy.ownedTables(slot)) {
+          addTarget(slot.graphId, {
+            contribution,
+            kind: slot.nodeKind,
+            fieldPath: slot.fieldPath,
+          });
+        }
+      }
+    }
+
+    // One probe per distinct physical table, scoped to THIS call: a
+    // strategy may own several contributions over one table, and paying a
+    // round trip per contribution would be waste. Deliberately not the
+    // backend's long-lived `createCachedTableExistence` — a cache that
+    // outlived the call would answer from the very state this diagnostic
+    // exists to re-check.
+    const probes = new Map<string, Promise<boolean>>();
+    function tableExists(tableName: string): Promise<boolean> {
+      const pending = probes.get(tableName);
+      if (pending !== undefined) return pending;
+      const probe = deps.tableExists(tableName);
+      probes.set(tableName, probe);
+      return probe;
+    }
+
+    const diagnostics: ContributionDiagnostic[] = [];
+    for (const [id, targets] of targetsByGraph) {
+      // A never-bootstrapped marker table means no contribution is marked,
+      // which the per-target verdict already models as an empty row set.
+      const read = await readMarkerRows(id);
+      const rows =
+        read.kind === "rows" ? read.rows : (
+          new Map<string, ContributionMaterializationRow>()
+        );
+      for (const { contribution, kind, fieldPath } of targets) {
+        const key = contributionKey(id, contribution);
+        const state = diagnoseContribution(
+          rows.get(key),
+          await resolveContributionSignature(key, contribution),
+          await tableExists(contribution.tableName),
+        );
+        if (state === undefined) continue;
+        diagnostics.push({
+          owner: contribution.owner,
+          logicalName: contribution.logicalName,
+          physicalName: contribution.tableName,
+          ...(kind === undefined ? {} : { kind }),
+          ...(fieldPath === undefined ? {} : { fieldPath }),
+          state,
+        });
+      }
+    }
+    return diagnostics;
+  }
+
   async function dropVectorSlot(slot: VectorSlot): Promise<void> {
     if (deps.vectorStrategy === undefined) return;
     for (const contribution of deps.vectorStrategy.ownedTables(slot)) {
@@ -846,5 +994,6 @@ export function createContributionMaterializer(
     assertVectorSlot,
     assertVectorSlots,
     dropVectorSlot,
+    verifyContributions,
   };
 }

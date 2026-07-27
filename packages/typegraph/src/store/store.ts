@@ -26,6 +26,7 @@ import {
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type ContributionDiagnostic,
   createTransactionReadBackend,
   type GraphBackend,
   runOptionallyInTransaction,
@@ -490,6 +491,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     fieldPath: string,
     options?: ReembedVectorFieldOptions,
   ) => Promise<ReembedVectorFieldResult>;
+  verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
   materializeRemovals: (
     options?: MaterializeRemovalsOptions,
   ) => Promise<MaterializeRemovalsResult>;
@@ -3184,6 +3186,58 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       if (batch.length < batchSize) break;
     }
     return { recreated: true, reembedded };
+  }
+
+  /**
+   * Diagnostic: report every strategy-owned contribution whose durable
+   * materialization marker disagrees with the physical catalog. Returns
+   * an empty array on a healthy database.
+   *
+   * Opening a store never probes the catalog — `ensureRuntimeContributions`
+   * and the runtime asserts short-circuit on a per-instance signature cache
+   * and then on the marker row alone, which is the right default for a hot
+   * path. The cost is that a database whose contribution tables were dropped
+   * out of band (a partial restore, a hand-run `DROP`, a schema-scoped
+   * restore that missed them) opens completely clean and then fails at the
+   * first read of the affected slot. This is the explicit, operator-invoked
+   * check for that state; it is not, and should not become, a boot step.
+   *
+   * Purely read-only: one existence query per distinct contribution table
+   * plus one marker read per graph, no DDL and no writes, so it is safe to
+   * run under a least-privilege runtime role and safe to run on a live
+   * store. Each entry carries the marker's own identity, so callers route
+   * to the matching repair — {@link Store.reembedVectorField} for an entry
+   * with `kind`/`fieldPath`, a privileged `ensureRuntimeContributions` for
+   * the rest — without reconstructing any internal naming contract.
+   *
+   * Vector slots are enumerated from the graph's declared embedding fields
+   * and are checked only when the backend advertises vector support; a
+   * backend without it never materialized them, so there is nothing to
+   * compare. Fulltext contributions are always checked.
+   *
+   * @throws {ConfigurationError} when the backend cannot probe its own
+   *   catalog. Reporting "no problems found" on a backend that never
+   *   looked would be the one answer this diagnostic must never give.
+   */
+  async verifyContributions(): Promise<readonly ContributionDiagnostic[]> {
+    const backend = this.#baseBackend;
+    const verify = backend.verifyContributions;
+    if (verify === undefined) {
+      throw new ConfigurationError(
+        "verifyContributions requires a backend that can probe its catalog " +
+          "for contribution tables.",
+        {
+          backend: backend.dialect,
+          capability: "contributions",
+          operation: "verify",
+        },
+      );
+    }
+    const vectorSlots =
+      backend.capabilities.vector?.supported === true ?
+        resolveGraphVectorSlots(this.#graph)
+      : [];
+    return verify(this.graphId, vectorSlots);
   }
 
   /**

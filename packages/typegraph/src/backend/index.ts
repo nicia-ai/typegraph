@@ -99,6 +99,8 @@ export type {
   ClaimIndexMaterializationParams,
   CommitSchemaVersionExpected,
   CommitSchemaVersionParams,
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
   ContributionMaterializationBackend,
   ContributionMaterializationIdentity,
   ContributionMaterializationRow,

@@ -87,6 +87,7 @@ import {
   type BackendCapabilities,
   type ClaimIndexMaterializationParams,
   type CommitSchemaVersionParams,
+  type ContributionDiagnostic,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
   createBackendOverlay,
@@ -166,6 +167,7 @@ import { mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
+  tableExistsFromRow,
 } from "./operations/strategy";
 import {
   type PostgresTables,
@@ -584,6 +586,19 @@ export function createPostgresBackend(
       );
   }
 
+  /**
+   * Uncached catalog probe backing `verifyContributions`. The shared
+   * `createCachedTableExistence` wrapper is deliberately NOT used: this
+   * diagnostic's whole job is to notice that a table confirmed present
+   * earlier has since been dropped.
+   */
+  async function contributionTableExists(tableName: string): Promise<boolean> {
+    const rows = await executionAdapter.execute<Record<string, unknown>>(
+      operationStrategy.buildTableExists(tableName),
+    );
+    return tableExistsFromRow(rows[0]);
+  }
+
   const contributionMaterializer = createContributionMaterializer({
     dialect: "postgres",
     fulltextStrategy,
@@ -596,6 +611,7 @@ export function createPostgresBackend(
     getMarkers: getContributionMaterializationRows,
     recordMarker: recordContributionMaterializationRow,
     deleteMarker: deleteContributionMaterializationRow,
+    tableExists: contributionTableExists,
   });
 
   const operations = createPostgresOperationBackend({
@@ -965,6 +981,13 @@ export function createPostgresBackend(
      */
     async ensureFulltextTable(graphId: string): Promise<void> {
       await contributionMaterializer.ensureRuntimeContributions(graphId);
+    },
+
+    async verifyContributions(
+      graphId: string,
+      vectorSlots: readonly VectorSlot[],
+    ): Promise<readonly ContributionDiagnostic[]> {
+      return contributionMaterializer.verifyContributions(graphId, vectorSlots);
     },
 
     // Vector counterparts of the runtime-contribution methods. Present

@@ -59,6 +59,7 @@ import {
   type AdapterBackend,
   type BackendCapabilities,
   type CommitSchemaVersionParams,
+  type ContributionDiagnostic,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
   type CreateVectorIndexParams,
@@ -149,7 +150,10 @@ import {
   type InternalOperationBackend,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
-import { createSqliteOperationStrategy } from "./operations/strategy";
+import {
+  createSqliteOperationStrategy,
+  tableExistsFromRow,
+} from "./operations/strategy";
 import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
 import {
   analyzeImportedTables,
@@ -1150,6 +1154,19 @@ export function createSqliteBackend(
       );
   }
 
+  /**
+   * Uncached catalog probe backing `verifyContributions`. The shared
+   * `createCachedTableExistence` wrapper is deliberately NOT used: this
+   * diagnostic's whole job is to notice that a table confirmed present
+   * earlier has since been dropped.
+   */
+  async function contributionTableExists(tableName: string): Promise<boolean> {
+    const rows = await executionAdapter.execute<Record<string, unknown>>(
+      operationStrategy.buildTableExists(tableName),
+    );
+    return tableExistsFromRow(rows[0]);
+  }
+
   const contributionMaterializer = createContributionMaterializer({
     dialect: "sqlite",
     fulltextStrategy,
@@ -1162,6 +1179,7 @@ export function createSqliteBackend(
     getMarkers: getContributionMaterializationRows,
     recordMarker: recordContributionMaterializationRow,
     deleteMarker: deleteContributionMaterializationRow,
+    tableExists: contributionTableExists,
   });
 
   const operations = createSqliteOperationBackend({
@@ -1522,6 +1540,13 @@ export function createSqliteBackend(
      */
     async ensureFulltextTable(graphId: string): Promise<void> {
       await contributionMaterializer.ensureRuntimeContributions(graphId);
+    },
+
+    async verifyContributions(
+      graphId: string,
+      vectorSlots: readonly VectorSlot[],
+    ): Promise<readonly ContributionDiagnostic[]> {
+      return contributionMaterializer.verifyContributions(graphId, vectorSlots);
     },
 
     // Vector counterparts of the runtime-contribution methods. Present

@@ -84,6 +84,7 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "assertVectorSlotInitialized",
   "assertVectorSlotsInitialized",
   "deleteVectorSlotContribution",
+  "verifyContributions",
   "ensureFulltextTable",
   "getReconciliationMarker",
   "setReconciliationMarker",

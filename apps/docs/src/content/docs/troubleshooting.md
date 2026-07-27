@@ -395,6 +395,43 @@ check), and prefer `createVerifiedStore()` over bare `createStore()` so
 drift fails fast. See
 [Database roles & least privilege](/backend-setup#database-roles--least-privilege).
 
+### The store opens clean but a fulltext or vector read fails
+
+**Cause:** The durable contribution marker still says `initialized`
+while the physical table it names is gone — a partial restore, a
+hand-run `DROP`, or a schema-scoped restore that missed the
+strategy-owned tables. Nothing on the open path probes the catalog:
+boot and the runtime asserts short-circuit on a per-instance signature
+cache and then on the marker row alone, which keeps the hot path free
+of catalog round trips. The cost is that this database opens
+completely clean and fails at the first read of the affected slot.
+
+**Solution:** Run the diagnostic and route each entry to its repair:
+
+```typescript
+for (const entry of await store.verifyContributions()) {
+  if (entry.kind !== undefined && entry.fieldPath !== undefined) {
+    // A vector slot: recreate storage at the declared shape, then
+    // re-embed (pass `embed` to repopulate in the same pass).
+    await store.reembedVectorField(entry.kind, entry.fieldPath);
+  } else {
+    // Everything else (fulltext): re-materialize under the
+    // privileged role.
+    await adminBackend.ensureRuntimeContributions?.(store.graphId);
+  }
+}
+```
+
+`verifyContributions()` returns an empty array on a healthy database.
+Each entry carries `owner`, `logicalName`, `physicalName`, and a
+`state` of `orphaned-marker` (marker says initialized, table absent),
+`missing-marker` (table present, nothing attests it), or `stale`
+(marker recorded at a different shape). It is read-only — one
+existence query per contribution table, no DDL and no writes — so it
+is safe to run on a live store under a least-privilege role. It is
+deliberately **not** a boot step; call it from a health check or an
+operator script.
+
 ## Semantic Search Issues
 
 ### "Extension not found" / "vector type not available"

@@ -994,6 +994,52 @@ export type RecordContributionMaterializationParams = Readonly<{
   error: string | undefined;
 }>;
 
+/**
+ * How a contribution's durable marker disagrees with the physical
+ * catalog. Every member is an inconsistency: a contribution whose
+ * marker and table agree is simply not reported.
+ *
+ * - `orphaned-marker` — the marker records a successful materialization
+ *   but the physical table is gone (a partial restore, an out-of-band
+ *   `DROP`, a schema-scoped restore that missed the contribution
+ *   tables). The state {@link GraphBackend.verifyContributions} exists
+ *   to surface: nothing on the open path probes the catalog, so this
+ *   database opens clean and fails at the first read of the slot.
+ * - `missing-marker` — the physical table exists but no marker attests
+ *   it as initialized (no row, no recorded success, or a recorded
+ *   failure). Reads and writes are refused with
+ *   `StoreNotInitializedError` even though storage is present.
+ * - `stale` — the table exists and the marker records a prior success
+ *   at a different signature (a strategy swap, or a declared embedding
+ *   dimension that has moved ahead of the provisioned table).
+ */
+export type ContributionDiagnosticState =
+  "orphaned-marker" | "missing-marker" | "stale";
+
+/**
+ * One contribution whose durable marker and physical table disagree,
+ * reported by {@link GraphBackend.verifyContributions}.
+ *
+ * The identity fields are the marker's own — a caller routes an entry
+ * to the matching repair (`store.reembedVectorField(kind, fieldPath)`
+ * for a vector slot, `ensureRuntimeContributions` /
+ * `ensureVectorSlotContribution({ force: true })` otherwise) without
+ * reconstructing any internal naming contract.
+ */
+export type ContributionDiagnostic = Readonly<{
+  /** Producing strategy, e.g. `"fts5"` / `"tsvector"` / `"pgvector"`. */
+  owner: string;
+  /** Stable logical slot, e.g. `"fulltext"`. Never the SQL name. */
+  logicalName: string;
+  /** Resolved physical table name that was probed. */
+  physicalName: string;
+  /** Node kind — vector slots only. */
+  kind?: string;
+  /** Embedding field path — vector slots only. */
+  fieldPath?: string;
+  state: ContributionDiagnosticState;
+}>;
+
 // ============================================================
 // Kind Removals (data-cleanup status)
 // ============================================================
@@ -1632,6 +1678,33 @@ export type GraphBackend = Readonly<{
     this: void,
     slot: VectorSlot,
   ) => Promise<void>;
+
+  /**
+   * Diagnostic: compare every durable contribution marker for `graphId`
+   * against the physical catalog and report the disagreements.
+   *
+   * Covers the strategy-owned `runtimeEnsure` contributions (fulltext)
+   * plus the `ownedTables` contribution(s) of each supplied vector slot.
+   * Returns one {@link ContributionDiagnostic} per inconsistency and an
+   * empty array when marker and catalog agree everywhere.
+   *
+   * Deliberately NOT part of the open path. `ensureRuntimeContributions`
+   * and `assertRuntimeContributionsInitialized` short-circuit on a
+   * per-instance signature cache and then on the marker row alone, which
+   * is the right default for a hot path but leaves a database whose
+   * contribution tables were dropped out of band opening clean and
+   * failing at the first read. This method is the explicit, operator-
+   * invoked catalog probe that fills that gap: it issues one uncached
+   * existence query per distinct physical table and performs ZERO DDL
+   * and ZERO writes, so it is safe under a least-privilege runtime role.
+   *
+   * Present only on backends that can probe their own catalog.
+   */
+  verifyContributions?: (
+    this: void,
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<readonly ContributionDiagnostic[]>;
 
   /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`

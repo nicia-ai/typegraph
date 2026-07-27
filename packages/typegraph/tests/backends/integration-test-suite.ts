@@ -27,6 +27,7 @@ import {
   registerAlgorithmIntegrationTests,
   registerBulkFindByIndexIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
+  registerContributionDiagnosticIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeOperationIntegrationTests,
@@ -156,6 +157,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerAggregateIntegrationTests(context);
     registerBulkFindByIndexIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
+    registerContributionDiagnosticIntegrationTests(context);
     registerPredicateIntegrationTests(context);
     registerProvenanceIntegrationTests(context);
     registerOrderingIntegrationTests(context);
