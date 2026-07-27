@@ -794,8 +794,9 @@ interface TimelineEvent {
 async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]> {
   const events: TimelineEvent[] = [];
 
-  // Run both history reads snapshot-consistent on a single connection so the
-  // state-change and task views can't observe interleaved writes.
+  // Run both history reads on one connection. Two statements, not one, and
+  // not a snapshot — under read-committed isolation the task view can observe
+  // a write the state-change view did not.
   const [stateHistory, tasks] = await store.batch(
     store
       .query()

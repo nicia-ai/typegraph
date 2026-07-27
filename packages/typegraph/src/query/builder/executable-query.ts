@@ -583,9 +583,11 @@ export class ExecutableQuery<
   /**
    * Executes the query against a provided backend.
    *
-   * Used by `store.batch()` to run multiple queries over a single connection
-   * (e.g., within a transaction). The full compile → execute → transform
-   * pipeline runs identically to `execute()`, but against the given backend.
+   * Used by `store.batch()` to run several queries in sequence against one
+   * target — a transaction on backends that have them, the backend itself
+   * otherwise. Still one statement per query either way. The full compile →
+   * execute → transform pipeline runs identically to `execute()`, but against
+   * the given backend.
    */
   async executeOn(
     backend: GraphBackend | TransactionBackend,

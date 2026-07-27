@@ -15,8 +15,8 @@ your knowledge graph scales with your application.
 2. **Precomputed Ontology**: Transitive closures, subclass hierarchies, and edge implications are
    computed once at schema initialization, not during every query.
 3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes. On the read
-   side that job belongs to the query compiler — `store.batch()` shares a connection and a snapshot
-   (on transactional backends), it does not reduce round trips.
+   side that job belongs to the query compiler — `store.batch()` only shares a connection, it does
+   not reduce round trips and it is not a snapshot.
 4. **Zero-Cost Abstractions**: Type safety and ontological reasoning add no measurable runtime overhead.
 
 ## N+1 Prevention
@@ -174,11 +174,11 @@ const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 ```
 
 For multiple independent queries with different shapes and filters, use
-[`store.batch()`](/schemas-stores#batch-query-execution) to execute them over a single connection.
+[`store.batch()`](/schemas-stores#batch-query-execution) to run them in sequence against one target.
 Note the cost: on a transactional backend it still issues one statement per query plus
-`begin`/`commit`, so N queries are N+2 round trips; without transactions it is N statements on N
-connections. It buys a connection profile that never peaks at N — and, with transactions, one
-snapshot — not lower latency:
+`begin`/`commit`, so N queries are N+2 round trips; without transactions there is no framing and no
+shared connection. It buys a connection profile that never peaks at N — not lower latency, and not
+a snapshot (PostgreSQL's default read-committed isolation lets a later query see a newer commit):
 
 ```typescript
 const [activeUsers, recentOrders] = await store.batch(
@@ -194,9 +194,9 @@ const [activeUsers, recentOrders] = await store.batch(
 
 Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
 participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
-onto one connection and one snapshot — the statement count is unchanged either way. If the round
-trips are what hurt, replace the calls with a traversal or `store.subgraph()` instead, which
-compile to one statement.
+onto one connection — the statement count is unchanged either way. If the round trips are what
+hurt, replace the calls with a traversal (one statement) or `store.subgraph()` (a fixed 2 on
+SQLite, 3 on PostgreSQL, however large the result).
 
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
@@ -238,7 +238,8 @@ parallel, size up accordingly.
 **Reducing pool pressure with `batch()`:** When loading multiple independent queries (e.g., a
 detail page with several relationship types), `Promise.all` acquires N connections simultaneously.
 [`store.batch()`](/schemas-stores#batch-query-execution) runs all queries over a single connection
-within an implicit transaction, reducing N connections to 1 while guaranteeing snapshot consistency.
+within an implicit transaction, reducing peak connection use from N to 1. It does not reduce the
+statement count, and read-committed isolation means it is not a snapshot.
 
 ### SQLite concurrency
 

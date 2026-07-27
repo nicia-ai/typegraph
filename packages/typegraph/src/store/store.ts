@@ -1688,28 +1688,35 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   // === Batch Query Execution ===
 
   /**
-   * Runs queries in sequence and returns a typed tuple of their results.
+   * Runs several queries in sequence, returning a typed tuple — N query
+   * executions, never one round trip.
    *
-   * **On a transactional backend, N queries cost N+2 statements** — `begin`,
-   * one per query, `commit` — each a separate round trip on a networked
-   * backend, all on one checked-out connection, all seeing one snapshot.
-   * **Without transactions** (Cloudflare D1, `drizzle-orm/neon-http`) there
-   * is no `begin`/`commit` and no shared connection: N statements, each
-   * acquiring its own connection, each free to observe writes the earlier
-   * ones did not. Branch on `backend.capabilities.transactions` when the
-   * difference matters.
+   * **Cost.** With `backend.capabilities.transactions`, the queries run in
+   * one transaction on one connection; on a SQL backend that is `begin` + N +
+   * `commit`, so a networked one sees N+2 round trips. Without transactions
+   * there is no framing and no shared connection — whether each query costs a
+   * fresh pooled connection, an HTTP request, or a reuse of the same client
+   * is up to the adapter. Either way it is N executions, serialized.
    *
-   * Either way the queries are serialized, so this collapses connection
-   * acquisition at best, never latency: it does not pipeline, and it will
-   * not fix an N+1. To collapse round trips, fold the work into one
-   * statement instead — `store.subgraph()` for everything reachable from a
-   * root, `.traverse()` for a filtered or projected join, `getByIds` /
-   * `bulkFindByIndex` for a keyed fan-out.
+   * **Not a snapshot.** PostgreSQL defaults to read-committed isolation, so a
+   * later query can observe a commit the earlier ones did not. When you need
+   * a stable snapshot, use
+   * `store.transaction(fn, { isolationLevel: "repeatable_read" })`.
    *
-   * Versus `Promise.all`: `batch()` never holds N connections at once, and on
-   * a transactional backend it acquires only one. That is the whole win — on
-   * a networked backend it is *slower* than `Promise.all`, which runs the
-   * same queries concurrently.
+   * **Will not fix an N+1.** Serializing N queries does not reduce their
+   * number. To make the cost independent of N, fold the work into one query:
+   * `.traverse()` compiles a whole chain to a single statement;
+   * `store.subgraph()` costs a fixed 2 statements on SQLite and 3 on
+   * PostgreSQL however large the result; `bulkFindByIndex()` costs one probe
+   * plus one hydration read; `getByIds()` costs one statement where the
+   * backend exposes a batch read, degrading to one per distinct id where it
+   * does not.
+   *
+   * **Versus `Promise.all`.** `batch()` never holds N connections at once.
+   * Which is faster depends on the workload: against a pool with idle
+   * capacity `Promise.all` overlaps its queries and wins on latency while
+   * `batch()` pays their sum; against a single client or a saturated pool
+   * both serialize.
    *
    * Read-only — use `bulkCreate`, `bulkInsert`, etc. for write batching.
    *

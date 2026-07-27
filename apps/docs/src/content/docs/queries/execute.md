@@ -244,15 +244,19 @@ async function exportAllUsers(): Promise<void> {
 
 ## Batch Execution
 
-When you need multiple independent queries with different result types, use `store.batch()` to
-execute them over a single connection with snapshot consistency.
+When you need multiple independent queries with different result types, use `store.batch()` to run
+them in sequence against one target.
 
 `batch()` does not batch round trips. On a transactional backend it issues `begin`, one statement
 per query, then `commit` — N queries are N+2 round trips on one connection. Without transactions
-there is no `begin`/`commit` and no shared connection: N statements, each acquiring its own. Either
-way the queries are serialized, so `batch()` collapses connection acquisition at best, never
-latency, and it will not fix an N+1. For that, fold the work into one statement: a `.traverse()`
+there is no framing and no shared connection; what each query costs there is up to the adapter.
+Either way it is N executions, serialized, so `batch()` collapses connection acquisition at best,
+never latency, and it will not fix an N+1. For that, fold the work into one query: a `.traverse()`
 chain, `store.subgraph()`, or `getByIds()` / `bulkFindByIndex()` for keyed fan-out.
+
+It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can
+observe a commit the earlier ones did not. Use
+`store.transaction(fn, { isolationLevel: "repeatable_read" })` when you need one.
 
 ```typescript
 const [people, companies] = await store.batch(
@@ -286,9 +290,11 @@ const [skills, employer] = await store.batch(
 ```
 
 **vs `Promise.all`**: `batch()` never holds N connections at once, and on a transactional backend
-uses exactly 1 with snapshot consistency — but it runs the queries serially, so on a networked
-backend it is slower.
-**vs `transaction()`**: Same consistency, but cleaner API — no callback, typed tuple return.
+uses exactly 1. Which is faster depends on the workload — against a pool with idle capacity
+`Promise.all` overlaps its queries and wins on latency; against a single client or a saturated pool
+both serialize.
+**vs `transaction()`**: Same transaction, lighter API — no callback, typed tuple return. Use
+`transaction()` when you need an explicit `isolationLevel`.
 
 See [Batch Query Execution](/schemas-stores#batch-query-execution) for full API reference.
 

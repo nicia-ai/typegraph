@@ -1206,7 +1206,7 @@ store.edges.worksAt.batchFindByEndpoints(
 ```
 
 ```typescript
-// Execute multiple edge lookups over a single connection
+// Execute multiple edge lookups in sequence — one statement each
 const [skills, employer] = await store.batch(
   store.edges.hasSkill.batchFindFrom(alice),
   store.edges.worksAt.batchFindFrom(alice),
@@ -1614,24 +1614,31 @@ const person = await store.nodes.Person.create({ name: "Alice" });
 
 #### `store.batch(...queries)`
 
-Executes multiple independent queries over a single connection with snapshot consistency.
-Accepts two or more queries (from `.select()`, set operations, or edge collection `batchFind*` methods)
-and returns a typed tuple of results preserving input order.
+Runs several independent queries in sequence and returns a typed tuple of results preserving input
+order — N query executions, never one round trip. Accepts two or more queries (from `.select()`,
+set operations, or edge collection `batchFind*` methods), each keeping its own projection,
+filtering, sorting, and pagination.
 
-**Cost: on a transactional backend, N queries are N+2 round trips** — `begin`, one statement per
-query, `commit` — all on one checked-out connection, all seeing one snapshot. **Without
-transactions** there is no `begin`/`commit` and no shared connection: N statements, each acquiring
-its own, each free to observe writes the earlier ones did not (see [Limitations](/limitations)).
-Branch on `backend.capabilities.transactions` when the difference matters.
+**Cost.** With `backend.capabilities.transactions`, the queries run in one transaction on one
+connection; on a SQL backend that is `begin` + N + `commit`, so a networked one sees N+2 round
+trips. Without transactions there is no framing and no shared connection — whether each query costs
+a fresh pooled connection, an HTTP request, or a reuse of the same client is up to the adapter (see
+[Limitations](/limitations)). Either way it is N executions, serialized.
 
-Either way the queries are serialized, so `batch()` collapses connection acquisition at best, never
-latency; it does not pipeline and it will not fix an N+1. To collapse round trips, fold the work
-into one statement instead: a `.traverse()` chain, [`store.subgraph()`](#subgraph-extraction), or
-`getByIds()` / `bulkFindByIndex()` for keyed fan-out.
+**Not a snapshot.** PostgreSQL defaults to read-committed isolation, so a later query in the batch
+can observe a commit the earlier ones did not. When you need a stable snapshot, use
+`store.transaction(fn, { isolationLevel: "repeatable_read" })`.
 
-What it does buy: per-query result types, and a connection profile that never peaks at N the way
-`Promise.all` does — at the cost of running serially, which on a networked backend is slower than
-`Promise.all`. Each query keeps its own projection, filtering, sorting, and pagination.
+**Will not fix an N+1.** Serializing N queries does not reduce their number. To make the cost
+independent of N, fold the work into one query: `.traverse()` compiles a whole chain to a single
+statement; [`store.subgraph()`](#subgraph-extraction) costs a fixed 2 statements on SQLite and 3 on
+PostgreSQL however large the result; `bulkFindByIndex()` costs one probe plus one hydration read;
+`getByIds()` costs one statement where the backend exposes a batch read, degrading to one per
+distinct id where it does not.
+
+**Versus `Promise.all`.** `batch()` never holds N connections at once. Which is faster depends on
+the workload: against a pool with idle capacity `Promise.all` overlaps its queries and wins on
+latency while `batch()` pays their sum; against a single client or a saturated pool both serialize.
 
 ```typescript
 store.batch<R1, R2, ...Rn>(
@@ -1939,23 +1946,24 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 
 | Pattern | Best strategy | Why |
 |---------|--------------|-----|
-| Load entity with all relationships | `subgraph(maxDepth: 1)` | Single SQL round trip — fans out across all edge types in one recursive CTE |
-| Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop in one query |
-| Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes |
-| Multiple independent queries with per-query control | `store.batch()` | Single connection, snapshot consistency, typed tuple results |
+| Load entity with all relationships | `subgraph(maxDepth: 1)` | Fixed statement count — fans out across all edge types in one recursive CTE |
+| Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop without extra round trips per hop |
+| Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes, in one statement |
+| Multiple independent queries with per-query control | `store.batch()` | One connection and typed tuple results — still one statement per query |
 | Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed; honors the graph's temporal mode by default |
 | Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit; pass `temporalMode` / `asOf` when reading history |
 | Shortest path, reachability, neighborhoods, degree | `store.algorithms.*` | Set-based BFS frontier or a single `COUNT` — see [Graph Algorithms](/graph-algorithms) |
 
-**Key insight:** `subgraph()` issues a single SQL statement regardless of how many edge types it
-traverses. Parallel `findFrom` calls scale linearly in round trips — one per edge type, plus
+**Key insight:** `subgraph()` costs a fixed number of statements — 2 on SQLite (nodes, edges) and 3
+on PostgreSQL (closure ids, then nodes and edges) — regardless of how many edge types it traverses
+or how much it returns. Parallel `findFrom` calls scale linearly instead: one per edge type, plus
 additional queries for node resolution. The gap widens as relationship count grows.
 
 For the common "load an entity and everything it touches" pattern (detail pages, config hydration,
 template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach. When you need
 per-query filtering, sorting, or pagination across multiple independent queries, use
-[`store.batch()`](#batch-query-execution) to run them over a single connection with snapshot
-consistency. Reserve individual fluent queries for one-off operations.
+[`store.batch()`](#batch-query-execution) — but note it still costs one statement per query, so it
+does not narrow this gap. Reserve individual fluent queries for one-off operations.
 
 ### Graph Algorithms
 
@@ -2031,7 +2039,7 @@ const results = await store
 
 #### `store.batch(...queries)`
 
-Execute multiple queries over a single connection — one statement each, not one round trip. See
+Run several queries in sequence — one statement each, never one round trip. See
 [Batch Query Execution](#batch-query-execution).
 
 ### Dynamic Collection Access
