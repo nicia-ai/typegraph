@@ -26,7 +26,8 @@ Two changes:
 - **A commit that would drop a kind still holding rows is refused** with a
   `MigrationError` whose `details.reason` is the new `"kind-removal"`
   discriminant and whose `details.droppedKinds` names them. Pass
-  `{ allowKindRemoval: true }` to accept the orphaning deliberately.
+  `{ discardDroppedKindRows: true }` if losing those rows is the intent — the
+  name says what the flag does, because the next reconcile deletes them.
 
 The guard fires on the actual harm — orphaned rows — not on kind removal as
 such. Dropping an *empty* kind is unaffected, so the documented three-deploy
@@ -37,3 +38,21 @@ legal instead of being merely advisory. Live rows only, matching the
 
 Breaking property changes — the documented reason to reach for
 `migrateSchema()` — are unaffected.
+
+Two further corrections found while reviewing the above:
+
+- **A stale store can no longer resurrect a removed kind.** The fold now
+  strips the supplied graph's own extension slice before applying the
+  persisted one, so the committed document is a function of the database
+  alone. Previously `migrateSchema(backend, store.graph, v)` — `store.graph`
+  is public and returns the merged graph — unioned a stale slice back in and
+  silently undid `Store.removeKinds()`, leaving a kind the schema called live
+  while its `typegraph_kind_removals` row stayed queued for a later
+  hard-delete. `Store.#catchUpToStored` has stripped for this exact reason;
+  the schema layer now matches it.
+- **`discardDroppedKindRows`'s documentation was wrong.** It claimed the dropped
+  kind's rows stay and that `materializeRemovals` "will never clean them up".
+  `materializeRemovals` re-derives removals by walking schema-version history,
+  so the next reconcile hard-deletes them regardless. The flag buys a
+  committed schema, not retained data; the docstring now says so and points
+  callers at copying the rows out first.

@@ -124,6 +124,31 @@ describe("migrateSchema — graph-extension fold", () => {
     expect(found?.["label"]).toBe("left-handed");
   });
 
+  it("a stale store's merged graph cannot resurrect a kind another writer removed", async () => {
+    // `store.graph` is public and returns the MERGED graph, so passing it to
+    // migrateSchema is a reachable call. If the fold unioned that stale
+    // extension slice back in, `removeKinds` would be silently undone — and
+    // worse, the resurrected kind would keep its queued `kind_removals` row,
+    // so the next `materializeRemovals` would delete the rows of a kind the
+    // active schema calls live. The persisted document is the sole authority.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(widgetExtension);
+    await evolved.getNodeCollectionOrThrow("Widget").create({ label: "keep" });
+    const staleGraph = evolved.graph;
+
+    // Another writer removes the kind through the sanctioned path.
+    await evolved.removeKinds(["Widget"]);
+    const afterRemoval = await activeKindNames(backend);
+    expect(afterRemoval.nodes).not.toContain("Widget");
+
+    // The stale holder migrates using the graph it still has.
+    await migrateSchema(backend, staleGraph, await activeVersion(backend));
+
+    const final = await activeKindNames(backend);
+    expect(final.nodes).not.toContain("Widget");
+  });
+
   it("preserves the persisted deprecated-kind set", async () => {
     // `deprecatedKinds` rides the same stored document as the extension, so
     // the verbatim commit erased it too.
@@ -241,7 +266,7 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
     expect(kinds).toEqual({ nodes: ["Person"], edges: [] });
   });
 
-  it("allows dropping a kind whose rows were deleted first", async () => {
+  it("allows dropping a kind whose rows were deleted first, and queues their cleanup", async () => {
     // Deploy 2 of the documented flow. The probe counts live rows only —
     // same `excludeDeleted` default `Store.evolve`'s tightening probe uses —
     // so a soft delete is enough to unblock Deploy 3.
@@ -257,14 +282,53 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
     await expect(migrateSchema(backend, graphWithoutCompany, 1)).resolves.toBe(
       2,
     );
+
+    // The soft-deleted row survives the commit, and is reclaimable: no
+    // `typegraph_kind_removals` row is written here, but `materializeRemovals`
+    // re-derives removals by walking schema history, so the next reconcile
+    // finds the dropped kind and clears it. Permitting the drop does not
+    // strand the tombstone permanently.
+    const [reopened] = await createStoreWithSchema(
+      graphWithoutCompany,
+      backend,
+    );
+    const reclaimed = await reopened.materializeRemovals();
+    expect(
+      reclaimed.results.find((entry) => entry.kind === "Company")?.status,
+    ).toBe("removed");
+    expect(
+      await backend.countNodesByKind({
+        graphId: baseGraph.id,
+        kind: "Company",
+        excludeDeleted: false,
+      }),
+    ).toBe(0);
   });
 
-  it("commits the orphaning drop when allowKindRemoval is set", async () => {
+  it("discardDroppedKindRows does not fabricate a cleanup mandate", async () => {
+    // The flag means "commit anyway", not "queue a hard delete". Writing a
+    // removal row here would let a routine reconcile destroy live rows on a
+    // path whose whole purpose is the caller taking responsibility for them.
+    const backend = createTestBackend();
+    await seedCompany(backend);
+
+    await migrateSchema(backend, graphWithoutCompany, 1, {
+      discardDroppedKindRows: true,
+    });
+
+    const pending = await requireDefined(
+      backend.getPendingKindRemovals,
+      "getPendingKindRemovals",
+    )(baseGraph.id);
+    expect(pending.filter((row) => row.kindName === "Company")).toEqual([]);
+  });
+
+  it("commits the orphaning drop when discardDroppedKindRows is set", async () => {
     const backend = createTestBackend();
     await seedCompany(backend);
 
     const version = await migrateSchema(backend, graphWithoutCompany, 1, {
-      allowKindRemoval: true,
+      discardDroppedKindRows: true,
     });
 
     expect(version).toBe(2);

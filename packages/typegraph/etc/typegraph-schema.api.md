@@ -1169,7 +1169,7 @@ export function migrateSchema<G extends GraphDef>(backend: GraphBackend, graph: 
 
 // @public (undocumented)
 export type MigrateSchemaOptions = Readonly<{
-    allowKindRemoval?: boolean;
+    discardDroppedKindRows?: boolean;
 }>;
 
 // @public

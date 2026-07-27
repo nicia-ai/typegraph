@@ -221,10 +221,12 @@ if (result.status === "breaking") {
 Two things `migrateSchema()` will not let you do by accident:
 
 - **Drop a kind that still holds rows.** The commit is refused with a
-  `MigrationError` whose `details.reason` is `"kind-removal"`, because those
-  rows would stay in the database with nothing able to read them. Delete the
+  `MigrationError` whose `details.reason` is `"kind-removal"`. Committing
+  would make those rows unreachable, and the next `materializeRemovals()`
+  would delete them — it re-derives removals by walking schema history, so
+  the drop is not reversible by putting the kind back. Export or delete the
   rows first (see [Removing a Node Type](#removing-a-node-type)), or pass
-  `{ allowKindRemoval: true }` to accept the orphaning deliberately. Dropping
+  `{ discardDroppedKindRows: true }` if losing them is the intent. Dropping
   an *empty* kind needs no flag.
 - **Erase kinds added at runtime.** `migrateSchema()` folds the persisted
   graph extension into the graph you hand it, the same way
