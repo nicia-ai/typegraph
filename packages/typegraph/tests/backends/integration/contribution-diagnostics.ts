@@ -300,6 +300,72 @@ export function registerContributionDiagnosticIntegrationTests(
       expect(entry?.lastError).toBeUndefined();
     });
 
+    it("reports a failed attempt that produced no table as failed-materialization", async (ctx) => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const strategy = store.backend.vectorStrategy;
+      const deleteMarker = backend.deleteVectorSlotContribution;
+      if (
+        store.backend.capabilities.vector?.supported !== true ||
+        strategy === undefined ||
+        deleteMarker === undefined
+      ) {
+        // Needs a marker with NO prior success, which the upsert's COALESCE
+        // will not produce over boot's successful row — so the row must be
+        // deleted first, and only vector slots expose that. The dialect-free
+        // unit suite covers this branch for every owner.
+        ctx.skip();
+        return;
+      }
+
+      const slot = requireDefined(
+        resolveGraphVectorSlots(integrationTestGraph).find(
+          (candidate) =>
+            candidate.nodeKind === ARTICLE_KIND &&
+            candidate.fieldPath === ARTICLE_EMBEDDING_FIELD,
+        ),
+        "fixture graph must declare the Article embedding slot",
+      );
+      const tableName = strategy.tableName(
+        integrationTestGraph.id,
+        ARTICLE_KIND,
+        ARTICLE_EMBEDDING_FIELD,
+      );
+      const failure = 'extension "vector" is not available';
+
+      // Reproduce a genuine first-attempt failure: no marker row, then a
+      // recorded failure, and no table to show for it.
+      await deleteMarker(slot);
+      await executeDdl(backend, `DROP TABLE IF EXISTS ${tableName}`);
+      for (const contribution of strategy.ownedTables(slot)) {
+        await requireDefined(
+          backend.recordContributionMaterialization,
+          "backend must record contribution markers",
+        )({
+          graphId: integrationTestGraph.id,
+          logicalName: contribution.logicalName,
+          owner: contribution.owner,
+          tableName: contribution.tableName,
+          signature: IMPOSSIBLE_SIGNATURE,
+          attemptedAt: new Date().toISOString(),
+          materializedAt: undefined,
+          error: failure,
+        });
+      }
+
+      // Marker and catalog agree that nothing is there — and it is still
+      // broken. Reporting clean here is the one answer this must never give.
+      expect(
+        entryFor(await store.verifyContributions(), tableName),
+      ).toMatchObject({
+        physicalName: tableName,
+        kind: ARTICLE_KIND,
+        fieldPath: ARTICLE_EMBEDDING_FIELD,
+        state: "failed-materialization",
+        lastError: failure,
+      });
+    });
+
     it("changes nothing it observes — repeated calls report identically", async () => {
       const store = context.getStore();
       const contribution = fulltextContribution();

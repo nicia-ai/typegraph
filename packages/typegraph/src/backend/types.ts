@@ -995,9 +995,11 @@ export type RecordContributionMaterializationParams = Readonly<{
 }>;
 
 /**
- * How a contribution's durable marker disagrees with the physical
- * catalog. Every member is an inconsistency: a contribution whose
- * marker and table agree is simply not reported.
+ * Why a contribution is not usable. Most members are a disagreement
+ * between the durable marker and the physical catalog; one
+ * (`failed-materialization`) is a state the two agree on and that is
+ * broken anyway. A contribution that is genuinely healthy — or that was
+ * simply never attempted — is not reported at all.
  *
  * - `orphaned-marker` — the marker records a successful materialization
  *   but the physical table is gone (a partial restore, an out-of-band
@@ -1011,12 +1013,22 @@ export type RecordContributionMaterializationParams = Readonly<{
  *   `StoreNotInitializedError` even though storage is present. These
  *   three causes share one state because they share one repair; check
  *   {@link ContributionDiagnostic.lastError} to tell them apart.
+ * - `failed-materialization` — the marker records a *failed* attempt
+ *   and no table was produced. Marker and catalog agree here, so this
+ *   is not a disagreement — but it is where a contribution lands when
+ *   provisioning genuinely broke (the `fts5` module is absent, the role
+ *   lacks `CREATE`, the extension was never loaded), and calling it
+ *   healthy on the grounds that both sides agree would be the one
+ *   answer this method must never give. Distinguished from a
+ *   contribution that was never attempted, which has no marker row and
+ *   is correctly silent. {@link ContributionDiagnostic.lastError}
+ *   carries the reason it failed.
  * - `stale` — the table exists and the marker records a prior success
  *   at a different signature (a strategy swap, or a declared embedding
  *   dimension that has moved ahead of the provisioned table).
  */
 export type ContributionDiagnosticState =
-  "orphaned-marker" | "missing-marker" | "stale";
+  "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
 
 /**
  * One contribution whose durable marker and physical table disagree,

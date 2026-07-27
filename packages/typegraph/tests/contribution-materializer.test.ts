@@ -888,9 +888,48 @@ describe("verifyContributions crosses durable markers against the catalog", () =
     ).resolves.toMatchObject([{ state: "stale" }]);
   });
 
+  it("reports a failed attempt that produced no table as failed-materialization", async () => {
+    // The state a contribution lands in when provisioning genuinely broke:
+    // `fts5` module absent, no CREATE privilege, extension never loaded.
+    // Marker and catalog AGREE (both say "nothing there") — reporting it
+    // clean on that basis would hide the exact case an operator is hunting.
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const failure = "no such module: fts5";
+    const contributions = fts5Strategy
+      .ownedTables(FULLTEXT_TABLE)
+      .filter((contribution) => contribution.runtimeEnsure);
+    for (const contribution of contributions) {
+      recordMarkerInto(markers, {
+        graphId: GRAPH_ID,
+        logicalName: contribution.logicalName,
+        owner: contribution.owner,
+        tableName: contribution.tableName,
+        signature: "unused-signature",
+        attemptedAt: new Date().toISOString(),
+        materializedAt: undefined,
+        error: failure,
+      });
+    }
+
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      undefined,
+      new Set(),
+    );
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, []),
+    ).resolves.toMatchObject([
+      { state: "failed-materialization", lastError: failure },
+    ]);
+  });
+
   it("stays silent on a contribution that was never provisioned at all", async () => {
-    // No marker AND no table is a consistent never-initialized state, not
-    // an inconsistency — boot will create it.
+    // No marker row AND no table means nothing was ever attempted — boot
+    // will provision it on the next privileged run. This is the ONLY silent
+    // table-absent case; the discriminating counterpart is the test above,
+    // where a marker row recording a failure makes the same missing table
+    // `failed-materialization` rather than silence.
     const { materializer } = createMockMaterializer(
       new Map(),
       undefined,

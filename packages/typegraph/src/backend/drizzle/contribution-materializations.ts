@@ -229,16 +229,22 @@ function evaluateContributionState(
 
 /**
  * Cross the durable marker verdict with physical-catalog reality and
- * name the disagreement, or `undefined` when the two agree.
+ * name why the contribution is unusable, or `undefined` when it is fine.
  *
- * Table absence is evaluated first and dominates: whatever the marker
- * claims about shape is moot once the storage is gone, and the repair
- * (recreate, then re-stamp) is the same. It counts as an orphan only
- * when a *successful* materialization was recorded — a marker whose
- * only attempt failed and whose table is absent is a consistent
- * never-provisioned state, not an inconsistency.
+ * With the table ABSENT there are three cases, and only one of them is
+ * silence:
+ * - a marker recording a prior success is an `orphaned-marker`. Table
+ *   absence dominates whatever the marker claims about shape: once the
+ *   storage is gone the recorded signature is moot and the repair
+ *   (recreate, then re-stamp) is the same either way.
+ * - a marker recording a FAILED attempt is `failed-materialization`.
+ *   Marker and catalog agree — provisioning was tried and it broke —
+ *   but agreement is not health, and staying silent here would hide the
+ *   exact state an operator is looking for.
+ * - no marker row at all is genuinely silent: nothing has been
+ *   attempted, and boot will provision it on the next privileged run.
  *
- * With the table present, `missing` and `failed` collapse to
+ * With the table PRESENT, `missing` and `failed` collapse to
  * `missing-marker`: both mean "storage exists but no marker attests
  * it", and both are repaired by re-running the ensure. `stale` stays
  * distinct because its repair is a shape change, not a re-stamp.
@@ -249,7 +255,9 @@ function diagnoseContribution(
   tableExists: boolean,
 ): ContributionDiagnosticState | undefined {
   if (!tableExists) {
-    return row?.materializedAt === undefined ? undefined : "orphaned-marker";
+    if (row === undefined) return undefined;
+    if (row.materializedAt !== undefined) return "orphaned-marker";
+    return row.lastError === undefined ? undefined : "failed-materialization";
   }
   const state = evaluateContributionState(row, signature);
   switch (state) {

@@ -1059,11 +1059,13 @@ least-privilege, DML-only database role.
   Every gate above trusts the marker row without probing the catalog, so
   a database whose strategy-owned tables were dropped out of band opens
   clean and fails at the first read. This method compares each marker
-  against the catalog and reports the disagreements. It is read-only
+  against the catalog and reports what is unusable. It is read-only
   (`SELECT` only, no DDL) so the least-privilege role can run it, and it
   is deliberately not part of any open path — call it from a health check
-  or an operator script. See
-  [The store opens clean but a fulltext or vector read fails](/troubleshooting#the-store-opens-clean-but-a-fulltext-or-vector-read-fails).
+  or an operator script. Repair is state-specific and one wrong choice
+  destroys embeddings, so follow the per-state tables in
+  [The store opens clean but a fulltext or vector read fails](/troubleshooting#the-store-opens-clean-but-a-fulltext-or-vector-read-fails)
+  rather than applying one repair to every entry.
 
 ### Recommended deployment shape
 
