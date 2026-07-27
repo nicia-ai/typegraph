@@ -1026,19 +1026,42 @@ export type RecordContributionMaterializationParams = Readonly<{
  * - `stale` — the table exists and the marker records a prior success
  *   at a different signature (a strategy swap, or a declared embedding
  *   dimension that has moved ahead of the provisioned table).
+ *
+ * **Do not re-frame this union as "how the marker disagrees with the
+ * catalog."** It was described that way once, and the description was
+ * load-bearing in the wrong direction: under it, a marker recording a
+ * failed attempt with no table looks like agreement, therefore not a
+ * disagreement, therefore correctly silent — and a contribution that
+ * had genuinely broken was reported as healthy. The gap read as
+ * principled rather than as an oversight precisely because the framing
+ * endorsed it. "Why the contribution is unusable" is the question that
+ * makes `failed-materialization` obviously belong, and any future
+ * tidy-up that narrows the framing back will re-open the same hole.
  */
 export type ContributionDiagnosticState =
   "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
 
 /**
- * One contribution whose durable marker and physical table disagree,
- * reported by {@link GraphBackend.verifyContributions}.
+ * One contribution that is not usable, reported by
+ * {@link GraphBackend.verifyContributions}.
  *
- * The identity fields are the marker's own — a caller routes an entry
- * to the matching repair (`store.reembedVectorField(kind, fieldPath)`
- * for a vector slot, `ensureRuntimeContributions` /
- * `ensureVectorSlotContribution({ force: true })` otherwise) without
- * reconstructing any internal naming contract.
+ * The identity fields are the marker's own, so a caller can route an
+ * entry to its repair without reconstructing any internal naming
+ * contract.
+ *
+ * **Route on {@link ContributionDiagnosticState}, not on whether the
+ * entry is a vector slot.** The repair differs per state and the wrong
+ * choice destroys data: `store.reembedVectorField` drops and recreates
+ * storage, so applying it to a `missing-marker` — where the table is
+ * intact and only the bookkeeping is wrong — discards every embedding
+ * to fix a marker, and without an `embed` callback it leaves the field
+ * empty. For `missing-marker` and `failed-materialization` prefer
+ * `ensureVectorSlotContribution(slot, { force: true })`, whose DDL is
+ * `CREATE ... IF NOT EXISTS` and never drops. Note also that
+ * `ensureRuntimeContributions` does NOT repair a fulltext
+ * `orphaned-marker`: it short-circuits on the marker, which still
+ * reads as initialized. See the per-state repair tables in the
+ * troubleshooting guide.
  */
 export type ContributionDiagnostic = Readonly<{
   /** Producing strategy, e.g. `"fts5"` / `"tsvector"` / `"pgvector"`. */

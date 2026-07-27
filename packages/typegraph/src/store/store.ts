@@ -3205,10 +3205,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Purely read-only: one existence query per distinct contribution table
    * plus one marker read per graph, no DDL and no writes, so it is safe to
    * run under a least-privilege runtime role and safe to run on a live
-   * store. Each entry carries the marker's own identity, so callers route
-   * to the matching repair — {@link Store.reembedVectorField} for an entry
-   * with `kind`/`fieldPath`, a privileged `ensureRuntimeContributions` for
-   * the rest — without reconstructing any internal naming contract.
+   * store. Each entry carries the marker's own identity, so callers can
+   * route to a repair without reconstructing any internal naming contract.
+   *
+   * Route on `state`, NOT on whether the entry is a vector slot: the
+   * repairs differ per state and the wrong one destroys data.
+   * {@link Store.reembedVectorField} drops and recreates storage, so
+   * applying it to a `missing-marker` — table intact, only the marker
+   * wrong — discards every embedding to fix bookkeeping. See
+   * {@link ContributionDiagnostic} and the per-state repair tables in the
+   * troubleshooting guide.
    *
    * Vector slots are enumerated from the graph's declared embedding fields
    * and are checked only when the backend advertises vector support; a
