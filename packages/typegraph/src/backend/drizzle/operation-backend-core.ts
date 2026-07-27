@@ -14,6 +14,10 @@ import type {
   CompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
+import {
+  resolveEdgeEndpointSet,
+  withEndpointIdChunk,
+} from "../edge-endpoint-sets";
 import { nowIso as defaultNowIso } from "../row-mappers";
 import type {
   CheckUniqueBatchParams,
@@ -153,6 +157,7 @@ type OperationBackendExecution = Readonly<{
 type OperationBackendBatchConfig = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
+  findEdgesEndpointChunkSize: number;
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
@@ -547,9 +552,31 @@ export function createCommonOperationBackend(
     async findEdgesByKind(
       params: FindEdgesByKindParams,
     ): Promise<readonly EdgeRow[]> {
-      const query = operationStrategy.buildFindEdgesByKind(params);
-      const rows = await execution.execAll<Record<string, unknown>>(query);
-      return rows.map((row) => rowMappers.toEdgeRow(row));
+      const endpointSet = resolveEdgeEndpointSet(params);
+
+      if (endpointSet === undefined) {
+        const query = operationStrategy.buildFindEdgesByKind(params);
+        const rows = await execution.execAll<Record<string, unknown>>(query);
+        return rows.map((row) => rowMappers.toEdgeRow(row));
+      }
+
+      // Each endpoint id lands in exactly one chunk (the set is deduped), so
+      // every endpoint's rows come back from a single statement in that
+      // statement's order — the per-endpoint ordering and `limitPerEndpoint`
+      // cap therefore hold across the whole read even though the concatenated
+      // result is only globally ordered when one chunk covers the set.
+      const edgeRows: EdgeRow[] = [];
+      for (const idChunk of chunkArray(
+        endpointSet.ids,
+        batchConfig.findEdgesEndpointChunkSize,
+      )) {
+        const query = operationStrategy.buildFindEdgesByKind(
+          withEndpointIdChunk(params, endpointSet.side, idChunk),
+        );
+        const rows = await execution.execAll<Record<string, unknown>>(query);
+        for (const row of rows) edgeRows.push(rowMappers.toEdgeRow(row));
+      }
+      return edgeRows;
     },
 
     async countEdgesByKind(params: CountEdgesByKindParams): Promise<number> {

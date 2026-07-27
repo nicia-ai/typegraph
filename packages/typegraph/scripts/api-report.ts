@@ -80,36 +80,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "0f36d8f84e9a9d75255b39940c5308ae4df2c3dbe1e0cb2683b00ee8cb974f73",
   },
   "./graph-merge": {
-    count: 531,
-    sha256: "c01270cc56ee41cea3de0a4df078338249867886f764e0db4fb1b4764bf86cbd",
+    count: 533,
+    sha256: "4f2f676ad2a445d92b7c5dbe2094e636c7c3ff69603a3bc5c72f28ea736900f2",
   },
   "./indexes": {
     count: 43,
     sha256: "49144a0eeda76d83d8ebe63f533e25796e1b7d46fe521a4adc997fb58cb876bb",
   },
   "./interchange": {
-    count: 517,
-    sha256: "2f9bb412c760efb33a9f1133fb62faec09eeb91f8309f28aa2df38f6331b54d9",
+    count: 519,
+    sha256: "8040b060ca0ee06db6cf28d5a34260b8b80724eec2a84a20f0a2c7c8721ffb22",
   },
   "./postgres/pglite": {
-    count: 531,
-    sha256: "e7bfd582d3ff47def583b5a00b8b042a725de493757170cba27b68d457a50cb2",
+    count: 533,
+    sha256: "82402dd556f0868f57f7ce82b60f0d11674d8df2315c98afed98308f3e01230e",
   },
   "./profiler": {
-    count: 519,
-    sha256: "0b26c48fca60e516c80bae8523f985b541dc96d0f128b9dd3d4c9ef5fc440b3f",
+    count: 521,
+    sha256: "61d88de1d6229307785600e5f8371c6646ae7c4fbf656d4581bb9d8cc30667d1",
   },
   "./provenance": {
-    count: 525,
-    sha256: "5573d39d577594facdb9599e3e7a2e4c52268fb5454956aea7a011ecf8e32542",
+    count: 527,
+    sha256: "df8eaa53592717a4487fcc4c531c8baffe73f5c49dd3cbb7c6334f733ff5fe9a",
   },
   "./schema": {
     count: 189,
     sha256: "ecef7303ae1380caa6170fff330a0f8ca0a5290508409c4ad679272a72457d03",
   },
   "./sqlite/local": {
-    count: 531,
-    sha256: "e7bfd582d3ff47def583b5a00b8b042a725de493757170cba27b68d457a50cb2",
+    count: 533,
+    sha256: "82402dd556f0868f57f7ce82b60f0d11674d8df2315c98afed98308f3e01230e",
   },
 };
 

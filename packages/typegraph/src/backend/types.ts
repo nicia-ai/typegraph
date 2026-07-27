@@ -2440,8 +2440,32 @@ export type FindEdgesByKindParams = Readonly<{
   kind: string;
   fromKind?: string;
   fromId?: string;
+  /**
+   * Source-node id SET. Compiles to `from_id IN (...)` — a prefix seek on the
+   * same `(graph_id, from_kind, from_id, kind, ...)` index the scalar
+   * {@link fromId} takes, so one statement serves a whole page of sources
+   * instead of one statement per source.
+   *
+   * Mutually exclusive with {@link fromId} and with {@link toIds}; incompatible
+   * with `limit` / `offset` / `after` (whose global ordering cannot survive
+   * bind-budget chunking) — use {@link limitPerEndpoint} to bound fan-out.
+   * See {@link resolveEdgeEndpointSet} for the exact rules.
+   */
+  fromIds?: readonly string[];
   toKind?: string;
   toId?: string;
+  /** Target-node id set. Mirrors {@link fromIds} on the `to_id` column. */
+  toIds?: readonly string[];
+  /**
+   * Maximum rows returned per distinct endpoint id, applied inside the
+   * statement via `ROW_NUMBER()` over the read's own ordering. Requires an
+   * endpoint id set ({@link fromIds} / {@link toIds}) and a backend whose
+   * `capabilities.windowFunctions` is true — callers that cannot guarantee the
+   * capability must cap client-side instead. Unlike `limit`, a per-endpoint cap
+   * composes with bind-budget chunking: each endpoint's rows fall entirely in
+   * one chunk.
+   */
+  limitPerEndpoint?: number;
   limit?: number;
   offset?: number;
   /** If true, exclude deleted edges. Default true. */

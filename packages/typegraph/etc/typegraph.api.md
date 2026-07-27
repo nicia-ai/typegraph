@@ -1176,7 +1176,7 @@ export type Edge<E extends AnyEdgeType = EdgeType, From extends NodeType = NodeT
 const EDGE_BATCH_READ_NAMES: readonly ["batchFindFrom", "batchFindTo", "batchFindByEndpoints"];
 
 // @public
-const EDGE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findFrom", "findTo", "findByEndpoints"];
+const EDGE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findFrom", "findTo", "bulkFindFrom", "bulkFindTo", "findByEndpoints"];
 
 // @public
 const EDGE_TYPE_BRAND: "__edgeType";
@@ -1206,6 +1206,14 @@ type EdgeAliasMap = Readonly<Record<string, EdgeAlias<EdgeType, boolean>>>;
 export type EdgeBatchReads<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType> = Pick<EdgeCollection<E, From, To>, (typeof EDGE_BATCH_READ_NAMES)[number]>;
 
 // @public
+export type EdgeBulkFindEndpointOptions = QueryOptions & EdgeBulkFindOptions;
+
+// @public
+export type EdgeBulkFindOptions = Readonly<{
+    limitPerInput?: number;
+}>;
+
+// @public
 type EdgeChange = Readonly<{
     type: ChangeType;
     kind: string;
@@ -1225,6 +1233,8 @@ export type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeTy
     }>) => Promise<Edge<E, From, To>>;
     findFrom: (from: NodeRef<From>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
+    bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
+    bulkFindTo: (tos: readonly NodeRef<To>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
     batchFindFrom: (from: NodeRef<From>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindTo: (to: NodeRef<To>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, options?: EdgeFindByEndpointsOptions<E>, temporal?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
@@ -1893,8 +1903,11 @@ type FindEdgesByKindParams = Readonly<{
     kind: string;
     fromKind?: string;
     fromId?: string;
+    fromIds?: readonly string[];
     toKind?: string;
     toId?: string;
+    toIds?: readonly string[];
+    limitPerEndpoint?: number;
     limit?: number;
     offset?: number;
     excludeDeleted?: boolean;
@@ -5103,6 +5116,8 @@ export type StoreViewEdgeCollection<E extends AnyEdgeType, From extends NodeType
     }>) => Promise<number>;
     findFrom: (from: NodeRef<From>) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
+    bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindOptions) => Promise<readonly Edge<E, From, To>[][]>;
+    bulkFindTo: (tos: readonly NodeRef<To>[], options?: EdgeBulkFindOptions) => Promise<readonly Edge<E, From, To>[][]>;
     findByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, options?: EdgeFindByEndpointsOptions<E>) => Promise<Edge<E, From, To> | undefined>;
 }>;
 

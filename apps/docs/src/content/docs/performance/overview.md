@@ -191,6 +191,21 @@ Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFind
 participate in `store.batch()`, replacing N individual `findFrom`/`findTo` calls with a single
 transactional round-trip.
 
+To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
+[Edge Collections](/schemas-stores#edge-collections)).
+Where `store.batch()` runs N singleton reads over one connection, these widen the endpoint predicate
+itself to `from_id IN (...)` — one statement per endpoint kind, on the same index prefix seek the
+singleton read uses — and return the edges grouped per input:
+
+```typescript
+const people = await store.nodes.Person.find({ limit: 50 });
+const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
+// jobsPerPerson[i] holds the worksAt edges of people[i]
+```
+
+This is the fix for the "list view with relationship counts" N+1: the read stays constant in
+statement count as the page grows. Pass `limitPerInput` to bound each endpoint's fan-out.
+
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
 throughput. Query hooks still fire normally. See

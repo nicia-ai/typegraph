@@ -591,6 +591,14 @@ type EdgeAlias<E extends AnyEdgeType = EdgeType, Optional extends boolean = fals
 type EdgeAliasMap = Readonly<Record<string, EdgeAlias<EdgeType, boolean>>>;
 
 // @public
+type EdgeBulkFindEndpointOptions = QueryOptions & EdgeBulkFindOptions;
+
+// @public
+type EdgeBulkFindOptions = Readonly<{
+    limitPerInput?: number;
+}>;
+
+// @public
 type EdgeChange = Readonly<{
     type: ChangeType;
     kind: string;
@@ -610,6 +618,8 @@ type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To 
     }>) => Promise<Edge<E, From, To>>;
     findFrom: (from: NodeRef<From>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
+    bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
+    bulkFindTo: (tos: readonly NodeRef<To>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
     batchFindFrom: (from: NodeRef<From>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindTo: (to: NodeRef<To>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, options?: EdgeFindByEndpointsOptions<E>, temporal?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
@@ -1089,8 +1099,11 @@ type FindEdgesByKindParams = Readonly<{
     kind: string;
     fromKind?: string;
     fromId?: string;
+    fromIds?: readonly string[];
     toKind?: string;
     toId?: string;
+    toIds?: readonly string[];
+    limitPerEndpoint?: number;
     limit?: number;
     offset?: number;
     excludeDeleted?: boolean;
@@ -3425,6 +3438,8 @@ type StoreViewEdgeCollection<E extends AnyEdgeType, From extends NodeType = Node
     }>) => Promise<number>;
     findFrom: (from: NodeRef<From>) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
+    bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindOptions) => Promise<readonly Edge<E, From, To>[][]>;
+    bulkFindTo: (tos: readonly NodeRef<To>[], options?: EdgeBulkFindOptions) => Promise<readonly Edge<E, From, To>[][]>;
     findByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, options?: EdgeFindByEndpointsOptions<E>) => Promise<Edge<E, From, To> | undefined>;
 }>;
 

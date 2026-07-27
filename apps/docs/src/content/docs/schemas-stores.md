@@ -1178,6 +1178,34 @@ store.edges.worksAt.findTo(
 ): Promise<Edge<worksAt>[]>;
 ```
 
+#### `bulkFindFrom(froms, options?)` / `bulkFindTo(tos, options?)`
+
+Finds the edges of a **set** of endpoints in one read. This is `findFrom` /
+`findTo` with the endpoint predicate widened from `from_id = ?` to
+`from_id IN (...)` — the same index prefix seek, the same temporal model, the
+same per-endpoint ordering — so a page of N nodes costs one statement per
+endpoint kind instead of N.
+
+Results are grouped per input: index `i` of the returned array holds the edges
+of `froms[i]`, an endpoint with no edges gets an empty array, and repeated
+inputs each get their own copy. Pass `limitPerInput` to bound each endpoint's
+fan-out; it keeps the leading edges of that endpoint's `findFrom` order. Large
+inputs are transparently split across statements to respect the backend's
+bound-parameter budget.
+
+```typescript
+store.edges.worksAt.bulkFindFrom(
+  froms: readonly NodeRef<Person>[],
+  options?: { temporalMode?: TemporalMode; asOf?: string; limitPerInput?: number }
+): Promise<readonly Edge<worksAt>[][]>;
+```
+
+```typescript
+const people = await store.nodes.Person.find({ limit: 50 });
+const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
+// jobsPerPerson[i] holds the worksAt edges of people[i]
+```
+
 #### `batchFindFrom(from, options?)` / `batchFindTo(to, options?)` / `batchFindByEndpoints(from, to, options?)`
 
 Deferred variants of `findFrom`, `findTo`, and `findByEndpoints` for use with
@@ -2245,7 +2273,7 @@ coordinate:
 | Surface | Behavior |
 | --- | --- |
 | `view.nodes` / `view.edges`: `getById`, `getByIds`, `find`, `count` | pinned |
-| `view.edges`: `findFrom`, `findTo`, `findByEndpoints` | pinned |
+| `view.edges`: `findFrom`, `findTo`, `bulkFindFrom`, `bulkFindTo`, `findByEndpoints` | pinned |
 | `view.query()` | a pinned query builder with a **sealed** temporal axis — `.temporal(...)` throws |
 | `view.subgraph(rootId, options)` | pinned |
 | `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree` | pinned |

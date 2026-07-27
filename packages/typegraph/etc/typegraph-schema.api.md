@@ -536,8 +536,11 @@ type FindEdgesByKindParams = Readonly<{
     kind: string;
     fromKind?: string;
     fromId?: string;
+    fromIds?: readonly string[];
     toKind?: string;
     toId?: string;
+    toIds?: readonly string[];
+    limitPerEndpoint?: number;
     limit?: number;
     offset?: number;
     excludeDeleted?: boolean;

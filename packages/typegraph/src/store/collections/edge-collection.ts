@@ -13,15 +13,17 @@ import {
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type TemporalMode } from "../../core/types";
-import { UnsupportedPredicateError } from "../../errors";
+import { UnsupportedPredicateError, ValidationError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import type { BatchableQuery } from "../../query/builder/types";
+import { groupBy } from "../../utils/array";
 import { requireDefined } from "../../utils/presence";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import { type EdgeRow } from "../row-mappers";
 import {
   type CreateEdgeInput,
   type Edge,
+  type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
   type EdgeFindByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsOptions,
@@ -188,6 +190,16 @@ function buildCreateEdgeInput(
   return input;
 }
 
+/**
+ * The endpoint predicate of an edge read: one side, constrained by a scalar id
+ * (`findFrom` / `findTo`) or by an id set (`bulkFindFrom` / `bulkFindTo`).
+ */
+type EdgeEndpointPredicate =
+  | Readonly<{ fromKind: string; fromId: string }>
+  | Readonly<{ fromKind: string; fromIds: readonly string[] }>
+  | Readonly<{ toKind: string; toId: string }>
+  | Readonly<{ toKind: string; toIds: readonly string[] }>;
+
 type EdgeUpdateInput = Readonly<{
   id: string;
   props: Partial<Record<string, unknown>>;
@@ -206,6 +218,61 @@ function buildUpdateEdgeInput(
   } = { id, props };
   if (options?.validTo !== undefined) input.validTo = options.validTo;
   return input;
+}
+
+/**
+ * Composite bucket key for an endpoint. Node ids are unique per kind, not
+ * globally, so the kind is part of the key — the same key shape the endpoint
+ * predicate itself uses (`from_kind` + `from_id`).
+ */
+function endpointKey(endpointKind: string, id: string): string {
+  return `${endpointKind}\u0000${id}`;
+}
+
+/**
+ * Buckets endpoint refs into one id list per kind, preserving input order.
+ * Repeated ids are left in place — the backend dedupes an endpoint set before
+ * splitting it into bind-budget chunks, which is the only place duplicates
+ * could do harm.
+ */
+function groupEndpointIdsByKind(
+  references: readonly NodeRef[],
+): Map<string, string[]> {
+  const referencesByKind = groupBy(references, (ref) => ref.kind);
+  return new Map(
+    [...referencesByKind].map(([endpointKind, group]) => [
+      endpointKind,
+      group.map((ref) => ref.id),
+    ]),
+  );
+}
+
+/**
+ * Validates the caller-facing fan-out cap. This runs in the collection rather
+ * than only in the backend because the cap is not always pushed into SQL: on a
+ * backend without window functions it is applied in JS, where an invalid value
+ * would silently truncate instead of failing.
+ */
+function assertLimitPerInput(
+  kind: string,
+  limitPerInput: number | undefined,
+): void {
+  if (limitPerInput === undefined) return;
+  if (Number.isInteger(limitPerInput) && limitPerInput > 0) return;
+  throw new ValidationError(
+    "bulk endpoint reads require limitPerInput to be a positive integer",
+    {
+      entityType: "edge",
+      kind,
+      issues: [
+        {
+          path: "limitPerInput",
+          message: `Expected a positive integer, received ${String(limitPerInput)}`,
+          code: "invalid_value",
+        },
+      ],
+    },
+  );
 }
 
 function mapBulkEdgeInputs(
@@ -258,11 +325,13 @@ export function createEdgeCollection<
    * `options` win, falling back to the graph's default mode. Keeps
    * `findFrom` / `findTo` honoring the temporal model instead of silently
    * returning every non-deleted edge.
+   *
+   * The scalar and set forms of the endpoint predicate share this builder, so
+   * `bulkFindFrom` / `bulkFindTo` cannot resolve a different coordinate than
+   * the singleton reads they widen.
    */
   function buildEndpointFindParams(
-    endpoint:
-      | Readonly<{ fromKind: string; fromId: string }>
-      | Readonly<{ toKind: string; toId: string }>,
+    endpoint: EdgeEndpointPredicate,
     options: QueryOptions | undefined,
   ): FindEdgesByKindParams {
     return {
@@ -296,6 +365,67 @@ export function createEdgeCollection<
       buildEndpointFindParams({ toKind: to.kind, toId: to.id }, options),
     );
     return mapRows(rows);
+  }
+
+  /**
+   * Shared implementation of `bulkFindFrom` / `bulkFindTo`: `findEdgesFrom` /
+   * `findEdgesTo` with the endpoint equality widened to set membership.
+   *
+   * The edge relation's system index is keyed
+   * `(graph_id, from_kind, from_id, kind, ...)`, so the id set is issued per
+   * endpoint KIND — a set within one kind is a prefix seek, while mixing kinds
+   * would force a scan. Inputs of a single kind (the overwhelmingly common
+   * case) therefore cost exactly one statement.
+   */
+  async function findEdgesByEndpointSet(
+    side: "from" | "to",
+    references: readonly NodeRef[],
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<Edge<E>[][]> {
+    if (references.length === 0) return [];
+
+    const limitPerInput = options?.limitPerInput;
+    assertLimitPerInput(kind, limitPerInput);
+
+    // The per-endpoint cap is pushed into SQL when the engine has window
+    // functions; otherwise the rows arrive uncapped and the JS slice below
+    // (which every path applies) keeps the same leading edges.
+    const limitPerEndpoint =
+      limitPerInput !== undefined && backend.capabilities.windowFunctions ?
+        { limitPerEndpoint: limitPerInput }
+      : {};
+
+    const edgesByEndpoint = new Map<string, Edge<E>[]>();
+    for (const [endpointKind, ids] of groupEndpointIdsByKind(references)) {
+      const rows = await backend.findEdgesByKind({
+        ...buildEndpointFindParams(
+          side === "from" ?
+            { fromKind: endpointKind, fromIds: ids }
+          : { toKind: endpointKind, toIds: ids },
+          options,
+        ),
+        ...limitPerEndpoint,
+      });
+      for (const edge of mapRows(rows)) {
+        const key =
+          side === "from" ?
+            endpointKey(edge.fromKind, edge.fromId)
+          : endpointKey(edge.toKind, edge.toId);
+        const bucket = edgesByEndpoint.get(key);
+        if (bucket === undefined) edgesByEndpoint.set(key, [edge]);
+        else bucket.push(edge);
+      }
+    }
+
+    // Each input position gets its own array: repeated inputs share an
+    // endpoint bucket, and callers must not see one input's mutation in
+    // another's.
+    return references.map((ref) => {
+      const bucket = edgesByEndpoint.get(endpointKey(ref.kind, ref.id)) ?? [];
+      return limitPerInput === undefined ?
+          [...bucket]
+        : bucket.slice(0, limitPerInput);
+    });
   }
 
   function buildFindByEndpointsOptions(
@@ -382,6 +512,20 @@ export function createEdgeCollection<
 
     async findTo(to: NodeRef, options?: QueryOptions): Promise<Edge<E>[]> {
       return findEdgesTo(to, backend, options);
+    },
+
+    async bulkFindFrom(
+      froms: readonly NodeRef[],
+      options?: EdgeBulkFindEndpointOptions,
+    ): Promise<readonly Edge<E>[][]> {
+      return findEdgesByEndpointSet("from", froms, options);
+    },
+
+    async bulkFindTo(
+      tos: readonly NodeRef[],
+      options?: EdgeBulkFindEndpointOptions,
+    ): Promise<readonly Edge<E>[][]> {
+      return findEdgesByEndpointSet("to", tos, options);
     },
 
     batchFindFrom(
