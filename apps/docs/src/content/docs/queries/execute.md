@@ -367,6 +367,11 @@ not depend on the list's length: one statement serves every arity, and a list of
 still costs one bound parameter rather than blowing past the engine's bind limit. An empty list is
 valid — `in([])` matches nothing, `notIn([])` matches everything.
 
+Every element must be the field's type. A mixed list — `[1, "a"]` bound against a number field — is
+not rejected, because each element is individually a legal scalar, and the two backends disagree
+about it: PostgreSQL fails at execution, SQLite matches nothing for the offending element. Keep the
+list homogeneous.
+
 :::caution
 A `param()` sitting among the **elements** of a literal list — `p.name.in(["Alice", param("other")])` —
 is rejected with an `UnsupportedPredicateError`. Bind the whole list instead.

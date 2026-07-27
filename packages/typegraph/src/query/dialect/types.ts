@@ -428,6 +428,15 @@ export interface DialectAdapter {
    * Elements arrive as plain JavaScript scalars and must be bound with the
    * same rules a literal of that type would be (SQLite booleans as 0/1, dates
    * as ISO text), so the parameterized and literal forms match row for row.
+   *
+   * A list whose elements are not all the field's type — `[1, "a"]` against a
+   * number field — is the one input where the dialects diverge, and it is not
+   * normalized here. Each element is individually a legal scalar, so binding
+   * validation accepts it; PostgreSQL then fails at execution casting `"a"` to
+   * the element type, while SQLite's dynamic typing simply matches nothing for
+   * that element. Left as-is deliberately: the list is already malformed at
+   * the call site, and per-element type checking would run on every execution
+   * of the hot path it exists to make fast.
    */
   readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
 

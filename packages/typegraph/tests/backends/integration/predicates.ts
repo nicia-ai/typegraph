@@ -31,6 +31,27 @@ async function seedNullShapeEdges(store: IntegrationStore): Promise<void> {
   await store.edges.knows.create(anna, numeric, { weight: 7 });
 }
 
+/**
+ * Runs the same membership test as a literal list and as a bound list
+ * parameter, and asserts they agree.
+ *
+ * String is the element type that needs this least — it is the one Postgres
+ * does not cast. Number, boolean, and date each ride an element cast that has
+ * to mirror the `jsonExtract*` cast the left operand was compiled with, so
+ * those are the pairs where a drift shows up as wrong rows rather than as an
+ * error.
+ */
+async function expectAgreement(
+  literal: () => Promise<readonly string[]>,
+  parameterized: () => Promise<readonly string[]>,
+  expected: readonly string[],
+): Promise<void> {
+  const fromLiteral = await literal();
+  const fromParameter = await parameterized();
+  expect(fromParameter.toSorted()).toEqual(fromLiteral.toSorted());
+  expect(fromLiteral.toSorted()).toEqual(expected);
+}
+
 export function registerPredicateIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -214,27 +235,97 @@ export function registerPredicateIntegrationTests(
       expect(threeAgain.toSorted()).toEqual(["Alice", "Charlie"]);
     });
 
-    it("agrees with the literal in() form", async () => {
+    it("agrees with the literal in() form for every element type", async () => {
       const store = context.getStore();
+      const published = new Date("2024-03-01T00:00:00.000Z");
+      await store.nodes.Document.create({
+        title: "Dated",
+        publishedAt: published,
+      });
+      await store.nodes.Document.create({
+        title: "Other",
+        publishedAt: new Date("2024-09-09T00:00:00.000Z"),
+      });
+
       const names = ["Alice", "Diana", "Nobody"];
+      await expectAgreement(
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.name.in(names))
+            .select((ctx) => ctx.p.name)
+            .execute(),
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.name.in(parameter("names")))
+            .select((ctx) => ctx.p.name)
+            .prepare()
+            .execute({ names }),
+        ["Alice", "Diana"],
+      );
 
-      const literal = await store
-        .query()
-        .from("Person", "p")
-        .whereNode("p", (p) => p.name.in(names))
-        .select((ctx) => ctx.p.name)
-        .execute();
+      const ages = [25, 35, 99];
+      await expectAgreement(
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.age.in(ages))
+            .select((ctx) => ctx.p.name)
+            .execute(),
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.age.in(parameter("ages")))
+            .select((ctx) => ctx.p.name)
+            .prepare()
+            .execute({ ages }),
+        ["Bob", "Charlie"],
+      );
 
-      const parameterized = await store
-        .query()
-        .from("Person", "p")
-        .whereNode("p", (p) => p.name.in(parameter("names")))
-        .select((ctx) => ctx.p.name)
-        .prepare()
-        .execute({ names });
+      const flags = [false];
+      await expectAgreement(
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.isActive.in(flags))
+            .select((ctx) => ctx.p.name)
+            .execute(),
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.isActive.in(parameter("flags")))
+            .select((ctx) => ctx.p.name)
+            .prepare()
+            .execute({ flags }),
+        ["Bob"],
+      );
 
-      expect(parameterized.toSorted()).toEqual(literal.toSorted());
-      expect(literal.toSorted()).toEqual(["Alice", "Diana"]);
+      const dates = [published];
+      await expectAgreement(
+        () =>
+          store
+            .query()
+            .from("Document", "d")
+            .whereNode("d", (d) => d.publishedAt.in(dates))
+            .select((ctx) => ctx.d.title)
+            .execute(),
+        () =>
+          store
+            .query()
+            .from("Document", "d")
+            .whereNode("d", (d) => d.publishedAt.in(parameter("dates")))
+            .select((ctx) => ctx.d.title)
+            .prepare()
+            .execute({ dates }),
+        ["Dated"],
+      );
     });
 
     it("binds a notIn list, including the empty list", async () => {
@@ -322,29 +413,6 @@ export function registerPredicateIntegrationTests(
         .prepare()
         .execute({ flags: [false] });
       expect(flags.toSorted()).toEqual(["Bob"]);
-    });
-
-    it("binds a date list", async () => {
-      const store = context.getStore();
-      const wanted = new Date("2024-03-01T00:00:00.000Z");
-      await store.nodes.Document.create({
-        title: "Dated",
-        publishedAt: wanted,
-      });
-      await store.nodes.Document.create({
-        title: "Other",
-        publishedAt: new Date("2024-09-09T00:00:00.000Z"),
-      });
-
-      const results = await store
-        .query()
-        .from("Document", "d")
-        .whereNode("d", (d) => d.publishedAt.in(parameter("dates")))
-        .select((ctx) => ctx.d.title)
-        .prepare()
-        .execute({ dates: [wanted] });
-
-      expect(results).toEqual(["Dated"]);
     });
 
     it("composes with a scalar parameter in the same query", async () => {
