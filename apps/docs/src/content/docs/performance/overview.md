@@ -15,8 +15,8 @@ your knowledge graph scales with your application.
 2. **Precomputed Ontology**: Transitive closures, subclass hierarchies, and edge implications are
    computed once at schema initialization, not during every query.
 3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes. On the read
-   side that job belongs to the query compiler — `store.batch()` shares a connection and a
-   snapshot, it does not reduce round trips.
+   side that job belongs to the query compiler — `store.batch()` shares a connection and a snapshot
+   (on transactional backends), it does not reduce round trips.
 4. **Zero-Cost Abstractions**: Type safety and ontological reasoning add no measurable runtime overhead.
 
 ## N+1 Prevention
@@ -175,8 +175,10 @@ const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 
 For multiple independent queries with different shapes and filters, use
 [`store.batch()`](/schemas-stores#batch-query-execution) to execute them over a single connection.
-Note the cost: it still issues one statement per query plus `begin`/`commit`, so N queries are N+2
-round trips. It buys one connection and one snapshot, not lower latency:
+Note the cost: on a transactional backend it still issues one statement per query plus
+`begin`/`commit`, so N queries are N+2 round trips; without transactions it is N statements on N
+connections. It buys a connection profile that never peaks at N — and, with transactions, one
+snapshot — not lower latency:
 
 ```typescript
 const [activeUsers, recentOrders] = await store.batch(
@@ -191,9 +193,10 @@ const [activeUsers, recentOrders] = await store.batch(
 ```
 
 Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
-participate in `store.batch()`. They move N `findFrom`/`findTo` calls onto one connection and one
-snapshot — the statement count is unchanged. If the round trips are what hurt, replace the calls
-with a traversal or `store.subgraph()` instead, which compile to one statement.
+participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
+onto one connection and one snapshot — the statement count is unchanged either way. If the round
+trips are what hurt, replace the calls with a traversal or `store.subgraph()` instead, which
+compile to one statement.
 
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for

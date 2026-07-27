@@ -247,10 +247,12 @@ async function exportAllUsers(): Promise<void> {
 When you need multiple independent queries with different result types, use `store.batch()` to
 execute them over a single connection with snapshot consistency.
 
-`batch()` does not batch round trips. It issues `begin`, one statement per query, then `commit` —
-N queries are N+2 round trips. It collapses connection acquisition, not latency, and it will not
-fix an N+1. For that, fold the work into one statement: a `.traverse()` chain, `store.subgraph()`,
-or `getByIds()` / `bulkFindByIndex()` for keyed fan-out.
+`batch()` does not batch round trips. On a transactional backend it issues `begin`, one statement
+per query, then `commit` — N queries are N+2 round trips on one connection. Without transactions
+there is no `begin`/`commit` and no shared connection: N statements, each acquiring its own. Either
+way the queries are serialized, so `batch()` collapses connection acquisition at best, never
+latency, and it will not fix an N+1. For that, fold the work into one statement: a `.traverse()`
+chain, `store.subgraph()`, or `getByIds()` / `bulkFindByIndex()` for keyed fan-out.
 
 ```typescript
 const [people, companies] = await store.batch(
@@ -283,7 +285,9 @@ const [skills, employer] = await store.batch(
 );
 ```
 
-**vs `Promise.all`**: `batch()` uses 1 connection instead of N and guarantees snapshot consistency.
+**vs `Promise.all`**: `batch()` never holds N connections at once, and on a transactional backend
+uses exactly 1 with snapshot consistency — but it runs the queries serially, so on a networked
+backend it is slower.
 **vs `transaction()`**: Same consistency, but cleaner API — no callback, typed tuple return.
 
 See [Batch Query Execution](/schemas-stores#batch-query-execution) for full API reference.

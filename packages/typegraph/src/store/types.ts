@@ -1023,9 +1023,10 @@ export type EdgeCollection<
    * Returns a `BatchableQuery` instead of executing immediately. Accepts
    * the same temporal `options` as {@link EdgeCollection.findFrom}.
    *
-   * Batching these still issues one statement per call — it shares a
-   * connection and a snapshot, it does not merge the reads. To read edges for
-   * many sources in one statement, traverse from them in a single query.
+   * Batching these still issues one statement per call — it does not merge
+   * the reads, and it only shares a connection and a snapshot when the
+   * backend supports transactions. To read edges for many sources in one
+   * statement, traverse from them in a single query.
    */
   batchFindFrom: (
     from: NodeRef<From>,

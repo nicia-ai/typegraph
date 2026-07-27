@@ -1688,23 +1688,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   // === Batch Query Execution ===
 
   /**
-   * Runs several queries on one checked-out connection and returns a typed
-   * tuple of their results.
+   * Runs queries in sequence and returns a typed tuple of their results.
    *
-   * **N queries cost N+2 statements** — `begin`, one per query, `commit` —
-   * each a separate round trip on a networked backend. This collapses
-   * connection acquisition, not latency: it does not pipeline, and it will
+   * **On a transactional backend, N queries cost N+2 statements** — `begin`,
+   * one per query, `commit` — each a separate round trip on a networked
+   * backend, all on one checked-out connection, all seeing one snapshot.
+   * **Without transactions** (Cloudflare D1, `drizzle-orm/neon-http`) there
+   * is no `begin`/`commit` and no shared connection: N statements, each
+   * acquiring its own connection, each free to observe writes the earlier
+   * ones did not. Branch on `backend.capabilities.transactions` when the
+   * difference matters.
+   *
+   * Either way the queries are serialized, so this collapses connection
+   * acquisition at best, never latency: it does not pipeline, and it will
    * not fix an N+1. To collapse round trips, fold the work into one
    * statement instead — `store.subgraph()` for everything reachable from a
    * root, `.traverse()` for a filtered or projected join, `getByIds` /
    * `bulkFindByIndex` for a keyed fan-out.
    *
-   * What it does buy: one pooled connection instead of N (the `Promise.all`
-   * pool-pressure problem), per-query result types, and — only when
-   * `backend.capabilities.transactions` is `true` — one database snapshot
-   * across all queries. Without transactions (Cloudflare D1,
-   * `drizzle-orm/neon-http`) each query runs on its own connection and may
-   * observe writes that landed between them.
+   * Versus `Promise.all`: `batch()` never holds N connections at once, and on
+   * a transactional backend it acquires only one. That is the whole win — on
+   * a networked backend it is *slower* than `Promise.all`, which runs the
+   * same queries concurrently.
    *
    * Read-only — use `bulkCreate`, `bulkInsert`, etc. for write batching.
    *

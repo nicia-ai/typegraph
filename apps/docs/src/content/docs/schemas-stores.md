@@ -1185,9 +1185,9 @@ Deferred variants of `findFrom`, `findTo`, and `findByEndpoints` for use with
 executing immediately. `batchFindFrom` / `batchFindTo` accept the same temporal
 `options` as `findFrom` / `findTo`.
 
-Batching them shares a connection and a snapshot; it does not merge the reads — each still costs
-its own statement. To read edges for many sources in one statement, traverse from them in a single
-query.
+Batching them does not merge the reads — each still costs its own statement, and they only share a
+connection and a snapshot when the backend supports transactions. To read edges for many sources in
+one statement, traverse from them in a single query.
 
 ```typescript
 store.edges.worksAt.batchFindFrom(
@@ -1618,16 +1618,20 @@ Executes multiple independent queries over a single connection with snapshot con
 Accepts two or more queries (from `.select()`, set operations, or edge collection `batchFind*` methods)
 and returns a typed tuple of results preserving input order.
 
-**Cost: N queries are N+2 round trips** — `begin`, one statement per query, `commit`. `batch()`
-collapses connection acquisition, not latency; it does not pipeline and it will not fix an N+1.
-To collapse round trips, fold the work into one statement instead: a `.traverse()` chain,
-[`store.subgraph()`](#subgraph-extraction), or `getByIds()` / `bulkFindByIndex()` for keyed fan-out.
+**Cost: on a transactional backend, N queries are N+2 round trips** — `begin`, one statement per
+query, `commit` — all on one checked-out connection, all seeing one snapshot. **Without
+transactions** there is no `begin`/`commit` and no shared connection: N statements, each acquiring
+its own, each free to observe writes the earlier ones did not (see [Limitations](/limitations)).
+Branch on `backend.capabilities.transactions` when the difference matters.
 
-What it does buy: one connection instead of N (removing the `Promise.all` pool pressure),
-per-query result types, and — when `backend.capabilities.transactions` is `true` — one database
-snapshot across every query, while each query keeps its own projection, filtering, sorting, and
-pagination. On backends without transactions each query runs on its own connection and may observe
-writes that landed between them; see [Limitations](/limitations).
+Either way the queries are serialized, so `batch()` collapses connection acquisition at best, never
+latency; it does not pipeline and it will not fix an N+1. To collapse round trips, fold the work
+into one statement instead: a `.traverse()` chain, [`store.subgraph()`](#subgraph-extraction), or
+`getByIds()` / `bulkFindByIndex()` for keyed fan-out.
+
+What it does buy: per-query result types, and a connection profile that never peaks at N the way
+`Promise.all` does — at the cost of running serially, which on a networked backend is slower than
+`Promise.all`. Each query keeps its own projection, filtering, sorting, and pagination.
 
 ```typescript
 store.batch<R1, R2, ...Rn>(
