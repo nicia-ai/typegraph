@@ -429,14 +429,12 @@ export interface DialectAdapter {
    * same rules a literal of that type would be (SQLite booleans as 0/1, dates
    * as ISO text), so the parameterized and literal forms match row for row.
    *
-   * A list whose elements are not all the field's type — `[1, "a"]` against a
-   * number field — is the one input where the dialects diverge, and it is not
-   * normalized here. Each element is individually a legal scalar, so binding
-   * validation accepts it; PostgreSQL then fails at execution casting `"a"` to
-   * the element type, while SQLite's dynamic typing simply matches nothing for
-   * that element. Left as-is deliberately: the list is already malformed at
-   * the call site, and per-element type checking would run on every execution
-   * of the hot path it exists to make fast.
+   * Every element is guaranteed to match the compiled element type, and to be
+   * a finite number when that type is numeric: `PreparedQuery` validates the
+   * binding before it reaches this method. Implementations therefore do not
+   * need to normalize or reject anything — and must not paper over a mismatch,
+   * since doing so is what would let one dialect quietly disagree with
+   * another.
    */
   readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
 

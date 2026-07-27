@@ -367,10 +367,11 @@ not depend on the list's length: one statement serves every arity, and a list of
 still costs one bound parameter rather than blowing past the engine's bind limit. An empty list is
 valid — `in([])` matches nothing, `notIn([])` matches everything.
 
-Every element must be the field's type. A mixed list — `[1, "a"]` bound against a number field — is
-not rejected, because each element is individually a legal scalar, and the two backends disagree
-about it: PostgreSQL fails at execution, SQLite matches nothing for the offending element. Keep the
-list homogeneous.
+Every element must be the field's type, and numbers must be finite. A mixed list — `[1, "a"]` bound
+against a number field — is rejected with a `ConfigurationError` before it reaches the database, on
+every backend, as is `NaN` or `Infinity`. This matches the literal form, which already refuses a
+mixed list, and it is what keeps the two backends in step: left unchecked, PostgreSQL would fail
+casting while SQLite silently matched nothing.
 
 :::caution
 A `param()` sitting among the **elements** of a literal list — `p.name.in(["Alice", param("other")])` —

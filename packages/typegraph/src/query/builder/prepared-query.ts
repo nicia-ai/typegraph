@@ -30,8 +30,10 @@ import {
   type QueryAst,
   type SelectiveField,
   type StringPredicate,
+  type ValueType,
 } from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
+import { resolveParameterValueType } from "../compiler/predicates";
 import { type SqlDialect } from "../dialect/types";
 import {
   mapResults,
@@ -446,26 +448,35 @@ type ParameterMetadata = Readonly<{
   names: ReadonlySet<string>;
   /** Parameters used in string_op predicates (must receive string values). */
   stringOpParameters: ReadonlySet<string>;
-  /** Parameters used as the whole list of `in`/`notIn` (must receive arrays). */
-  listParameters: ReadonlySet<string>;
+  /**
+   * Parameters used as the whole list of `in`/`notIn`, mapped to the element
+   * type their bindings must have. `undefined` means the schema declares
+   * nothing usable, so no element check applies.
+   */
+  listParameters: ReadonlyMap<string, ValueType | undefined>;
   /** Parameters used in any position that binds a single scalar. */
   scalarParameters: ReadonlySet<string>;
+  /** Names bound in two `in`/`notIn` positions with different element types. */
+  conflictingElementTypes: ReadonlySet<string>;
 }>;
 
 /** The mutable form {@link collectParameterMetadataFromAst} fills. */
 type ParameterMetadataAccumulator = Readonly<{
   names: Set<string>;
   stringOpParameters: Set<string>;
-  listParameters: Set<string>;
+  listParameters: Map<string, ValueType | undefined>;
   scalarParameters: Set<string>;
+  /** Names bound in two `in`/`notIn` positions with different element types. */
+  conflictingElementTypes: Set<string>;
 }>;
 
 function collectParameterMetadata(ast: QueryAst): ParameterMetadata {
   const accumulator: ParameterMetadataAccumulator = {
     names: new Set<string>(),
     stringOpParameters: new Set<string>(),
-    listParameters: new Set<string>(),
+    listParameters: new Map<string, ValueType | undefined>(),
     scalarParameters: new Set<string>(),
+    conflictingElementTypes: new Set<string>(),
   };
 
   collectParameterMetadataFromAst(ast, accumulator);
@@ -480,7 +491,15 @@ function collectParameterMetadata(ast: QueryAst): ParameterMetadata {
  * first execute() rather than on whichever binding happens to arrive.
  */
 function assertDistinctParameterRoles(metadata: ParameterMetadata): void {
-  const conflicting = [...metadata.listParameters].filter((name) =>
+  if (metadata.conflictingElementTypes.size > 0) {
+    const names = [...metadata.conflictingElementTypes];
+    throw new ConfigurationError(
+      `Parameter${names.length === 1 ? "" : "s"} ${names.map((name) => `"${name}"`).join(", ")} bound as an in()/notIn() list against fields of different types; one list cannot satisfy both`,
+      { conflictingParameters: names },
+    );
+  }
+
+  const conflicting = [...metadata.listParameters.keys()].filter((name) =>
     metadata.scalarParameters.has(name),
   );
   if (conflicting.length === 0) return;
@@ -489,6 +508,32 @@ function assertDistinctParameterRoles(metadata: ParameterMetadata): void {
     `Parameter${conflicting.length === 1 ? "" : "s"} ${conflicting.map((name) => `"${name}"`).join(", ")} used both as an in()/notIn() list and as a scalar value`,
     { conflictingParameters: conflicting },
   );
+}
+
+/**
+ * Records the element type a list parameter's bindings must have.
+ *
+ * A name reused across two `in()` positions keeps the declared type when only
+ * one side declares one; two *different* declared types are irreconcilable —
+ * one array cannot be both — so the name is flagged and `prepare()` rejects it.
+ */
+function recordListElementType(
+  accumulator: ParameterMetadataAccumulator,
+  name: string,
+  elementType: ValueType | undefined,
+): void {
+  if (!accumulator.listParameters.has(name)) {
+    accumulator.listParameters.set(name, elementType);
+    return;
+  }
+  const existing = accumulator.listParameters.get(name);
+  if (existing === undefined) {
+    accumulator.listParameters.set(name, elementType);
+    return;
+  }
+  if (elementType !== undefined && elementType !== existing) {
+    accumulator.conflictingElementTypes.add(name);
+  }
 }
 
 export function hasParameterReferences(ast: QueryAst): boolean {
@@ -526,12 +571,17 @@ function collectParameterMetadataFromExpression(
   switch (expression.__type) {
     case "comparison": {
       if (isParameterRef(expression.right)) {
-        accumulator.names.add(expression.right.name);
-        const role =
-          isListComparisonOp(expression.op) ?
-            accumulator.listParameters
-          : accumulator.scalarParameters;
-        role.add(expression.right.name);
+        const name = expression.right.name;
+        accumulator.names.add(name);
+        if (isListComparisonOp(expression.op)) {
+          recordListElementType(
+            accumulator,
+            name,
+            resolveParameterValueType(expression.left, expression.right),
+          );
+        } else {
+          accumulator.scalarParameters.add(name);
+        }
       }
       return;
     }
@@ -614,7 +664,7 @@ function validateBindings(
   for (const name of expectedNames) {
     const value = bindings[name];
     if (listParameters.has(name)) {
-      validateListBinding(name, value);
+      validateListBinding(name, value, listParameters.get(name));
       continue;
     }
     validateBindingValue(name, value, stringOpParameters.has(name));
@@ -622,14 +672,72 @@ function validateBindings(
 }
 
 /**
- * Validates a list-valued binding is an array of scalars, so the packed
- * parameter the dialect unpacks holds exactly what a literal list would.
+ * Validates a list-valued binding is an array of scalars of the field's type.
+ *
+ * The element-type check is what keeps the two backends in step. Without it
+ * `[1, "a"]` against a number field passes — each element is individually a
+ * legal scalar — and then PostgreSQL fails casting `"a"` to numeric while
+ * SQLite's dynamic typing silently matches nothing for that element: the same
+ * query, two behaviors. It also brings the parameterized form in line with the
+ * literal one, which already refuses a mixed list when it compiles ("Mixed
+ * literal value types are not supported in predicates") — the parameterized
+ * form has no literals to inspect, so it reaches the same verdict from the
+ * binding instead.
+ *
+ * The check rides the walk that was already validating every element, so it
+ * costs a comparison per element rather than a second pass.
  */
-function validateListBinding(name: string, value: unknown): void {
+function validateListBinding(
+  name: string,
+  value: unknown,
+  elementType: ValueType | undefined,
+): void {
   assertListBinding(name, value);
   for (const element of value) {
     validateBindingValue(name, element, false);
+    if (elementType === undefined) continue;
+    if (matchesElementType(element, elementType)) continue;
+    throw new ConfigurationError(
+      `Parameter "${name}" is bound against a ${elementType} field, so every ` +
+        `element must be a ${elementType}; got ${describeBindingType(element)}`,
+      { parameterName: name, valueType: elementType },
+    );
   }
+}
+
+/** Whether `value` can be bound as `elementType` in an `in()`/`notIn()` list. */
+function matchesElementType(value: unknown, elementType: ValueType): boolean {
+  switch (elementType) {
+    case "string": {
+      return typeof value === "string";
+    }
+    case "number": {
+      return typeof value === "number";
+    }
+    case "boolean": {
+      return typeof value === "boolean";
+    }
+    case "date": {
+      // Either a Date or the ISO text TypeGraph stores. Arbitrary strings are
+      // not parsed here: the literal form does not validate them either, and
+      // guessing which formats PostgreSQL accepts would reject valid input.
+      return value instanceof Date || typeof value === "string";
+    }
+    // No element cast is emitted for these, so there is no divergence to
+    // prevent — `array`/`object` are rejected earlier, at compile time.
+    case "array":
+    case "object":
+    case "embedding":
+    case "unknown": {
+      return true;
+    }
+  }
+}
+
+/** A binding's type as it should read in an error message. */
+function describeBindingType(value: unknown): string {
+  if (value instanceof Date) return "date";
+  return typeof value;
 }
 
 function validateBindingValue(
@@ -652,10 +760,23 @@ function validateBindingValue(
     }
     return;
   }
+  if (typeof value === "number") {
+    // JSON.stringify turns NaN and +/-Infinity into `null`, which the packed
+    // list form would bind as SQL NULL — silently poisoning the predicate
+    // (`NOT IN (NULL)` matches no row at all). The scalar form is no better:
+    // SQLite stores a bound NaN as NULL, so `eq(NaN)` quietly matches nothing.
+    // Neither is a value any comparison can mean, so reject both shapes here.
+    if (!Number.isFinite(value)) {
+      throw new ConfigurationError(
+        `Parameter "${name}" must be a finite number, got ${String(value)}`,
+        { parameterName: name, actualType: "number" },
+      );
+    }
+    return;
+  }
   if (
     value instanceof Date ||
     typeof value === "string" ||
-    typeof value === "number" ||
     typeof value === "boolean"
   ) {
     return;

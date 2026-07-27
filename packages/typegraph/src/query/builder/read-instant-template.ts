@@ -156,7 +156,7 @@ export function buildQueryTemplate(
   });
 }
 
-const EMPTY_LIST_PARAMETERS: ReadonlySet<string> = new Set<string>();
+const EMPTY_LIST_PARAMETERS: ReadonlyMap<string, unknown> = new Map();
 
 /**
  * Resolves a template's positional parameters for `executeRaw`, replacing
@@ -176,7 +176,7 @@ export function fillTemplateParams(
   params: readonly unknown[],
   bindings: Readonly<Record<string, unknown>>,
   dialect: SqlDialect,
-  listParameters: ReadonlySet<string> = EMPTY_LIST_PARAMETERS,
+  listParameters: ReadonlyMap<string, unknown> = EMPTY_LIST_PARAMETERS,
 ): unknown[] {
   let readInstant: string | undefined;
   return params.map((parameter) => {

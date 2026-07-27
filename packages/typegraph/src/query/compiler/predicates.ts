@@ -141,6 +141,24 @@ function normalizeValueType(
 }
 
 /**
+ * The value type a `param()` in a comparison binds as: the parameter's own
+ * declared type when it has one, else the field's.
+ *
+ * Shared so the two things that must agree about it cannot drift — the
+ * compiler picks the `jsonExtract*` variant (and, for a list parameter, the
+ * matching element cast) from this, and `PreparedQuery` validates the caller's
+ * bindings against the same answer.
+ */
+export function resolveParameterValueType(
+  left: FieldRef,
+  right: ParameterRef,
+): ValueType | undefined {
+  return (
+    normalizeValueType(right.valueType) ?? normalizeValueType(left.valueType)
+  );
+}
+
+/**
  * Compiles a field reference to SQL with appropriate type extraction.
  */
 export function compileFieldValue(
@@ -628,9 +646,7 @@ function compileComparisonPredicate(
 ): SqlFragment {
   // Handle ParameterRef on the right side
   if (isParameterRef(expr.right)) {
-    const parameterValueType =
-      normalizeValueType(expr.right.valueType) ??
-      normalizeValueType(expr.left.valueType);
+    const parameterValueType = resolveParameterValueType(expr.left, expr.right);
     const left = compileFieldValue(
       expr.left,
       dialect,

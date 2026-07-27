@@ -472,6 +472,70 @@ export function registerPredicateIntegrationTests(
       ).rejects.toThrow(/must not be null/);
     });
 
+    it("rejects a list element that is not the field's type", async () => {
+      const store = context.getStore();
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.age.in(parameter("ages")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+
+      // Unchecked, this is the one input the two backends disagree about:
+      // PostgreSQL fails casting "a" to numeric, SQLite matches nothing for
+      // that element and returns the rest. Rejected on both instead.
+      await expect(prepared.execute({ ages: [30, "a"] })).rejects.toThrow(
+        /every element must be a number/,
+      );
+
+      // The literal form already refuses a mixed list when it compiles; the
+      // parameterized form, which has no literals to inspect at compile time,
+      // now reaches the same verdict from the binding.
+      await expect(
+        store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (p) => p.age.in([30, "a"]))
+          .select((ctx) => ctx.p.name)
+          .execute(),
+      ).rejects.toThrow(/Mixed literal value types/);
+    });
+
+    it("rejects non-finite numbers, which JSON would launder into NULL", async () => {
+      const store = context.getStore();
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.age.notIn(parameter("ages")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+
+      // JSON.stringify turns these into `null`, so the packed list would bind
+      // SQL NULL: `NOT IN (NULL)` is NULL for every row and silently returns
+      // nothing at all — the same laundering the null-element check closes.
+      for (const value of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+      ]) {
+        await expect(prepared.execute({ ages: [value] })).rejects.toThrow(
+          /must be a finite number/,
+        );
+      }
+
+      // Same hole on the scalar path: SQLite binds NaN as NULL, so `eq(NaN)`
+      // quietly matched no rows rather than failing.
+      const scalar = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.age.eq(parameter("age")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+      await expect(scalar.execute({ age: Number.NaN })).rejects.toThrow(
+        /must be a finite number/,
+      );
+    });
+
     it("rejects one parameter used as both a list and a scalar", () => {
       const store = context.getStore();
       expect(() =>
