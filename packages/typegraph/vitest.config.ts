@@ -15,6 +15,8 @@ const GRAPH_MERGE_GLOBS = [
   ...(UNIT_SCOPE ? [] : ["tests/property/graph-merge/**/*.test.ts"]),
 ];
 
+const PGLITE_GLOBS = ["tests/backends/postgres/pglite-*.test.ts"];
+
 const SHARED_EXCLUDE = [
   ...configDefaults.exclude,
   // #140: workerd-only do-sqlite suite — runs via `test:do`
@@ -98,8 +100,24 @@ export default defineConfig({
           exclude: [
             ...SHARED_EXCLUDE,
             ...GRAPH_MERGE_GLOBS,
+            ...PGLITE_GLOBS,
             ...UNIT_PROPERTY_EXCLUDE,
           ],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "pglite",
+          include: PGLITE_GLOBS,
+          exclude: SHARED_EXCLUDE,
+          // These suites provision in-process Postgres instances and exercise
+          // persistence plus bulk-write paths. Keep their normal startup and
+          // teardown latency from competing with file-parallel unit tests or
+          // the default five-second budget.
+          fileParallelism: false,
+          testTimeout: 60_000,
+          hookTimeout: 60_000,
         },
       },
       {
