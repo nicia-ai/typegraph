@@ -63,6 +63,8 @@ export const EDGE_TEMPORAL_READ_NAMES = [
   "count",
   "findFrom",
   "findTo",
+  "bulkFindFrom",
+  "bulkFindTo",
   "findByEndpoints",
 ] as const satisfies readonly (keyof EdgeCollection<
   AnyEdgeType,

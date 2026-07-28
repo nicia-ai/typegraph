@@ -103,8 +103,9 @@ maintain.
 
 ### PostgreSQL parameter limits
 
-PostgreSQL has a 65,535 bind parameter limit per statement. TypeGraph automatically chunks bulk
-operations to stay within this limit:
+PostgreSQL's protocol can encode 65,535 bind parameters, while TypeGraph uses a portable
+65,533-parameter budget across its bundled drivers. Bulk operations are automatically chunked to
+stay within that budget:
 
 - Node inserts: ~7,200 per chunk (9 params per node)
 - Edge inserts: ~5,400 per chunk (12 params per edge)
@@ -190,6 +191,22 @@ const [activeUsers, recentOrders] = await store.batch(
 Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
 participate in `store.batch()`, replacing N individual `findFrom`/`findTo` calls with a single
 transactional round-trip.
+
+To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
+[Edge Collections](/schemas-stores#edge-collections)).
+Where `store.batch()` runs N singleton reads over one connection, these widen the endpoint predicate
+itself to `from_id IN (...)` — one set-oriented statement per endpoint kind and bind-budget chunk,
+on the same index prefix seek the singleton read uses — and return the edges grouped per input:
+
+```typescript
+const people = await store.nodes.Person.find({ limit: 50 });
+const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
+// jobsPerPerson[i] holds the worksAt edges of people[i]
+```
+
+This is the fix for the "list view with relationship counts" N+1: statement count grows with
+endpoint kinds and bind-budget chunks instead of with every item on the page. Pass `limitPerInput`
+to bound each endpoint's fan-out.
 
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for

@@ -514,6 +514,10 @@ function pinnedEdgeCollection(
     count: (filter) => live.count(filter, temporal),
     findFrom: (from) => live.findFrom(from, temporal),
     findTo: (to) => live.findTo(to, temporal),
+    bulkFindFrom: (froms, options) =>
+      live.bulkFindFrom(froms, { ...options, ...temporal }),
+    bulkFindTo: (tos, options) =>
+      live.bulkFindTo(tos, { ...options, ...temporal }),
     findByEndpoints: (from, to, options) =>
       live.findByEndpoints(from, to, options, temporal),
   };

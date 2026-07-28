@@ -199,7 +199,9 @@ export type BackendCapabilities = Readonly<{
    * Maximum number of bound parameters the engine accepts in one statement.
    * SQLite defaults to 999 (raisable at compile time via
    * `SQLITE_MAX_VARIABLE_NUMBER`), while hosted SQLite runtimes may impose a
-   * lower platform ceiling; PostgreSQL's wire protocol caps it at 65535.
+   * lower platform ceiling. PostgreSQL's wire protocol encodes a 65535-count,
+   * but postgres.js accepts at most 65533 bound values, so the bundled
+   * PostgreSQL capability advertises that lower shared-driver ceiling.
    * Recorded-time capture and recorded point reads size their multi-row
    * statements to this ceiling — the same budget the backend's own batched
    * inserts use — instead of a conservative dialect-blind constant. Custom
@@ -1202,6 +1204,25 @@ export type GraphBackend = Readonly<{
     this: void,
     params: FindEdgesByKindParams,
   ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Reads the edges of a SET of endpoints in one statement per bind-budget
+   * chunk — see {@link FindEdgesByEndpointSetParams}.
+   *
+   * **Optional, and its absence is the capability signal.** `store.edges.<kind>
+   * .bulkFindFrom` / `.bulkFindTo` check for this method before issuing any
+   * read and refuse with a typed `ConfigurationError` when it is missing,
+   * rather than degrading to a per-endpoint loop. A caller reaching for a bulk
+   * endpoint read is asking for set-oriented statements; quietly giving them N
+   * singleton statements is the surprise the method exists to prevent.
+   *
+   * Both bundled Drizzle backends implement it. A custom backend that does not
+   * simply omits it and the bulk reads refuse; the singleton `findEdgesByKind`
+   * path is unaffected.
+   */
+  findEdgesByEndpointSet?: (
+    this: void,
+    params: FindEdgesByEndpointSetParams,
+  ) => Promise<readonly EdgeRow[]>;
   countEdgesByKind: (
     this: void,
     params: CountEdgesByKindParams,
@@ -1842,6 +1863,7 @@ export type EdgeEntityReadBackend = Pick<
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
+  | "findEdgesByEndpointSet"
   | "countEdgesByKind"
 >;
 
@@ -2467,6 +2489,72 @@ export type FindEdgesByKindParams = Readonly<{
 }>;
 
 /**
+ * The endpoint side a {@link FindEdgesByEndpointSetParams} read fans out over.
+ */
+export type EdgeEndpointSide = "from" | "to";
+
+/**
+ * Parameters for reading the edges of a SET of endpoints in one statement per
+ * bind-budget chunk — the widened form of {@link FindEdgesByKindParams}'s
+ * scalar `fromId` / `toId`.
+ *
+ * Deliberately a SEPARATE parameter type on a separate operation rather than
+ * optional fields on `FindEdgesByKindParams`. A backend that did not implement
+ * set membership would still type-check while ignoring the id list, and would
+ * then return every edge of the kind — which the caller would rebucket into a
+ * correct-looking answer at unbounded cost. Splitting the operation makes that
+ * failure unreachable: support is detected by the method's presence, before any
+ * read is issued.
+ *
+ * The shape also makes the previously-validated illegal states
+ * unrepresentable. One `side` instead of two independent id lists means both
+ * endpoints can never fan out at once; no scalar `fromId` / `toId` field means
+ * a scalar and a set can never disagree; no `limit` / `offset` / `after` means
+ * a global slice can never be requested across a read the backend splits into
+ * bind-budget chunks.
+ */
+export type FindEdgesByEndpointSetParams = Readonly<{
+  graphId: string;
+  kind: string;
+  /** Which endpoint column the id set constrains. */
+  side: EdgeEndpointSide;
+  /**
+   * Kind of the fanned-out endpoint. Required: it is the index prefix that
+   * makes the set a seek rather than a scan, so a set is always scoped to one
+   * endpoint kind and a heterogeneous page costs one read per distinct kind.
+   */
+  endpointKind: string;
+  /**
+   * Endpoint NODE ids to match — deliberately not named `ids`, which in the
+   * backend params vocabulary means edge ids (see
+   * {@link DeleteEdgesBatchParams}); the write-surface assertion in
+   * `recorded-capture/write-surface.ts` classifies params structurally and a
+   * `{ graphId, ids }` read would be misread as a write.
+   *
+   * The backend deduplicates before splitting the list across bind-budget
+   * chunks — a repeated id spanning two chunks would return its edges twice.
+   * An empty list reads nothing and yields no rows.
+   */
+  endpointIds: readonly string[];
+  /**
+   * Maximum rows per distinct endpoint id, applied inside the statement (via
+   * `ROW_NUMBER()` over the read's own ordering) rather than by the caller.
+   * Only meaningful on a backend whose `capabilities.windowFunctions` is true;
+   * callers must still cap client-side, so a backend that ignores this returns
+   * a superset rather than a wrong answer. Unlike a global `limit`, a
+   * per-endpoint cap composes with chunking: each endpoint's rows fall
+   * entirely within one chunk.
+   */
+  limitPerEndpoint?: number;
+  /** If true, exclude deleted edges. Default true. */
+  excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
+}>;
+
+/**
  * Parameters for counting edges by kind.
  */
 export type CountEdgesByKindParams = Readonly<{
@@ -2519,11 +2607,11 @@ export const D1_MAX_BIND_PARAMETERS = 100;
 export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
 
 /**
- * PostgreSQL's wire-protocol bound-parameter ceiling (a 16-bit count). Single
- * source of truth for {@link POSTGRES_CAPABILITIES} and the Postgres backend's
- * batch math.
+ * Safe bound-parameter ceiling shared by every bundled PostgreSQL driver.
+ * The protocol count can represent 65535, but postgres.js rejects a statement
+ * with 65534 bound values, so backend batch math uses the lower portable limit.
  */
-export const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
+export const POSTGRES_MAX_BIND_PARAMETERS = 65_533;
 
 /**
  * Default capabilities for SQLite.
