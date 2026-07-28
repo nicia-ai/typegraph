@@ -4,6 +4,10 @@
 // branch()/merge(), the stable option/report types, working-copy extension
 // points, typed errors, and durable provenance helpers. The phase-level
 // algorithms stay internal and are covered through relative test imports.
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../backend/types";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
 export {

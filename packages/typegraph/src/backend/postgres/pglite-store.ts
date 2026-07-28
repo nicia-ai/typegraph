@@ -23,6 +23,11 @@ import { createPostgresTables } from "../drizzle/schema/postgres";
 import { closeAfterFailure } from "../types";
 import { createLocalPgliteBackend } from "./pglite";
 
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../types";
+
 export type LocalPgliteStoreOptions<
   TStoreOptions extends StoreOptions = StoreOptions,
 > = Readonly<{

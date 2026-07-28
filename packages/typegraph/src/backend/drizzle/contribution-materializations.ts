@@ -503,9 +503,11 @@ export type ContributionMaterializer = Readonly<{
   /**
    * Diagnostic: cross every durable marker for `graphId` — the runtime
    * (fulltext) contributions plus each supplied vector slot's
-   * `ownedTables` — against the physical catalog and report the
-   * disagreements. Read-only: no DDL, no marker writes, and no effect
-   * on the per-instance caches the hot path relies on.
+   * `ownedTables` — against the physical catalog and report every unusable
+   * contribution. This includes a recorded failed materialization even when
+   * marker and catalog agree that no table exists. Read-only: no DDL, no
+   * marker writes, and no effect on the per-instance caches the hot path
+   * relies on.
    */
   verifyContributions: (
     graphId: string,

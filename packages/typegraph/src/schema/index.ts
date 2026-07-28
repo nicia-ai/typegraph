@@ -19,6 +19,11 @@
  * ```
  */
 
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../backend/types";
+
 // ============================================================
 // Serialization
 // ============================================================

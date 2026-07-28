@@ -3189,9 +3189,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Diagnostic: report every strategy-owned contribution whose durable
-   * materialization marker disagrees with the physical catalog. Returns
-   * an empty array on a healthy database.
+   * Diagnostic: compare each strategy-owned contribution's durable marker
+   * with the physical catalog and report every unusable contribution,
+   * including a recorded failed materialization whose absent table agrees
+   * with the marker. Returns an empty array on a healthy database.
    *
    * Opening a store never probes the catalog — `ensureRuntimeContributions`
    * and the runtime asserts short-circuit on a per-instance signature cache

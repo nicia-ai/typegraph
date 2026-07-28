@@ -61,6 +61,10 @@ export {
   type PostgresTables,
   tables,
 } from "../drizzle/postgres";
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../types";
 
 // Schema: table definitions and factory options
 export {

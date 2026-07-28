@@ -1733,12 +1733,14 @@ export type GraphBackend = Readonly<{
 
   /**
    * Diagnostic: compare every durable contribution marker for `graphId`
-   * against the physical catalog and report the disagreements.
+   * against the physical catalog and report every unusable contribution.
    *
    * Covers the strategy-owned `runtimeEnsure` contributions (fulltext)
    * plus the `ownedTables` contribution(s) of each supplied vector slot.
-   * Returns one {@link ContributionDiagnostic} per inconsistency and an
-   * empty array when marker and catalog agree everywhere.
+   * Returns one {@link ContributionDiagnostic} per unusable contribution and
+   * an empty array when every contribution is healthy. A recorded failed
+   * materialization is unusable even when marker and catalog agree that no
+   * table was produced.
    *
    * Deliberately NOT part of the open path. `ensureRuntimeContributions`
    * and `assertRuntimeContributionsInitialized` short-circuit on a

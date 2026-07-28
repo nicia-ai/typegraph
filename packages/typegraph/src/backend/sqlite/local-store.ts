@@ -24,6 +24,10 @@ import { type BackendCapabilities, closeAfterFailure } from "../types";
 import { createLocalSqliteBackend } from "./local";
 import { type LocalSqlitePragmaOptions } from "./local-options";
 
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../types";
 export {
   DEFAULT_LOCAL_SQLITE_PRAGMAS,
   type LocalSqliteJournalMode,
