@@ -299,9 +299,9 @@ import { param } from "@nicia-ai/typegraph";
 ### `prepare()`
 
 Call `.prepare()` on an executable query to build and validate the AST once. Returns a
-`PreparedQuery<R>` that can be executed with different bindings; SQL text is compiled fresh on each
-`.execute()` call (see [Prepared query SQL compilation](#prepared-query-sql-compilation) below for
-why).
+`PreparedQuery<R>` that can be executed with different bindings. The statement is compiled once into
+a cached template and reused by every `.execute()` call — see
+[Prepared query SQL compilation](#prepared-query-sql-compilation) below for how that stays fresh.
 
 ```typescript
 const findByName = store
