@@ -7,6 +7,7 @@ import { nowIso } from "../../row-mappers";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
+  ContributionMaterializationIdentity,
   CountEdgesByKindParams,
   CountEdgesFromParams,
   CountNodesByKindParams,
@@ -192,6 +193,9 @@ export type CommonOperationStrategy = Readonly<{
     graphId: string,
     version: number,
   ) => Readonly<{ activateVersion: SQL; deactivateAll: SQL }>;
+  buildDeleteContributionMaterialization: (
+    identity: ContributionMaterializationIdentity,
+  ) => SQL;
   buildTableExists: (tableName: string) => SQL;
   buildClearGraph: (graphId: string) => readonly ClearGraphStatement[];
 }>;
@@ -283,6 +287,7 @@ function createCommonOperationStrategy(
     COMMON_TABLE_OPERATION_BUILDERS,
   );
   const fulltextTable = tables.fulltextTableName;
+  const contributionMaterializations = tables.contributionMaterializations;
 
   // All fulltext write SQL is owned by the active strategy — so swapping
   // to pg_trgm / ParadeDB / pgroonga swaps the full CRUD pipeline, not
@@ -400,9 +405,22 @@ function createCommonOperationStrategy(
     },
   };
 
+  function buildDeleteContributionMaterialization(
+    identity: ContributionMaterializationIdentity,
+  ): SQL {
+    return sql`
+      DELETE FROM ${contributionMaterializations}
+      WHERE graph_id = ${identity.graphId}
+        AND logical_name = ${identity.logicalName}
+        AND owner = ${identity.owner}
+        AND table_name = ${identity.tableName}
+    `;
+  }
+
   return {
     ...tableOperations,
     ...fulltextBuilders,
+    buildDeleteContributionMaterialization,
     buildInsertUnique(params: InsertUniqueParams): SQL {
       return buildInsertUnique(tables, dialect, params);
     },

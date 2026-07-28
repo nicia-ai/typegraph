@@ -113,6 +113,7 @@ import {
   type RecordKindRemovalParams,
   type ReleaseIndexMaterializationClaimParams,
   type SchemaVersionRow,
+  type SchemaWriteTransactionBackend,
   type SetActiveVersionParams,
   type TransactionBackend,
   type TrustedImportSession,
@@ -160,7 +161,6 @@ import {
 } from "./kind-removals";
 import {
   assertAdoptedDialect,
-  type CommonOperationBackend,
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
@@ -647,11 +647,11 @@ export function createPostgresBackend(
    */
   function runSchemaWriteTransaction<T>(
     graphId: string,
-    fn: (tx: CommonOperationBackend) => Promise<T>,
+    fn: (tx: InternalOperationBackend) => Promise<T>,
   ): Promise<T> {
     if (!capabilities.transactions) {
       throw new ConfigurationError(
-        "commitSchemaVersion and setActiveVersion require atomic transactions, " +
+        "Schema writes and removal cleanup require atomic transactions, " +
           "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
           "driver communicates over HTTP and cannot hold a session across statements; " +
           "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
@@ -1099,6 +1099,13 @@ export function createPostgresBackend(
       await runSchemaWriteTransaction(params.graphId, (target) =>
         target.setActiveVersion(params),
       );
+    },
+
+    async schemaWriteTransaction<T>(
+      graphId: string,
+      fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
+    ): Promise<T> {
+      return runSchemaWriteTransaction(graphId, (target) => fn(target));
     },
 
     async transaction<T>(
@@ -1799,6 +1806,22 @@ function createPostgresOperationBackend(
     ...commonBackend,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
+    async deleteSchemaVectorSlotContribution(slot: VectorSlot): Promise<void> {
+      if (vectorStrategy === undefined) return;
+      for (const contribution of vectorStrategy.ownedTables(slot)) {
+        await execRun(
+          operationStrategy.buildDeleteContributionMaterialization({
+            graphId: slot.graphId,
+            logicalName: contribution.logicalName,
+            owner: contribution.owner,
+            tableName: contribution.tableName,
+          }),
+        );
+      }
+      // Eviction is conservative if the surrounding transaction later rolls
+      // back: the next access re-reads the still-durable marker.
+      contributionMaterializer.evictVectorSlot(slot);
+    },
     capabilities,
     fulltextStrategy,
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),

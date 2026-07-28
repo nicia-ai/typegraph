@@ -105,6 +105,7 @@ type UnsafeHistoryStoreBackendMember =
   | "executeDdl"
   | "executeRaw"
   | "executeStatement"
+  | "schemaWriteTransaction"
   | "transaction"
   | "trustedImport";
 

@@ -498,8 +498,10 @@ export type ContributionMaterializer = Readonly<{
    * physical table is dropped (vector-field reclaim) so a future
    * `ensureVectorSlot` re-creates the table instead of trusting an
    * orphaned marker. No-op when vector support is disabled.
-   */
+  */
   dropVectorSlot: (slot: VectorSlot) => Promise<void>;
+  /** Conservatively evict one slot from the process-local marker cache. */
+  evictVectorSlot: (slot: VectorSlot) => void;
   /**
    * Diagnostic: cross each currently declared runtime contribution and each
    * supplied vector slot's `ownedTables` contribution against its durable
@@ -554,6 +556,13 @@ export function createContributionMaterializer(
   // verdicts are never cached, so a concurrent boot that fixes the state is
   // picked up on the next call.
   const initializedSignatures = new Map<string, string>();
+  // A vector slot evicted during transactional cleanup cannot safely become a
+  // positive cache hit again on this materializer: another request may read
+  // the old marker before the cleanup commits, then finish after commit. Keep
+  // evicted keys permanently read-through for this backend instance so such a
+  // stale snapshot can never repopulate the positive cache. Re-added slots are
+  // rare; their gates pay one marker SELECT instead of risking a silent pass.
+  const uncacheableKeys = new Set<string>();
   // Computing the durable signature requires WebCrypto. Keep the canonical
   // DDL beside its digest so the hot path only compares the current DDL
   // strings. A same-instance shape change produces a mismatch and therefore
@@ -605,6 +614,12 @@ export function createContributionMaterializer(
 
   function runtimeContributions(): readonly StrategyTableContribution[] {
     return runtimeStrategyContributions(fulltextStrategy, fulltextTableName);
+  }
+
+  function cacheInitializedSignature(key: string, signature: string): void {
+    if (!uncacheableKeys.has(key)) {
+      initializedSignatures.set(key, signature);
+    }
   }
 
   async function materializeOne(
@@ -759,7 +774,9 @@ export function createContributionMaterializer(
     const pending =
       force ? entries : (
         entries.filter(
-          (entry) => initializedSignatures.get(entry.key) !== entry.signature,
+          (entry) =>
+            uncacheableKeys.has(entry.key) ||
+            initializedSignatures.get(entry.key) !== entry.signature,
         )
       );
     if (pending.length === 0) return;
@@ -777,7 +794,7 @@ export function createContributionMaterializer(
       )
     ) {
       for (const entry of pending) {
-        initializedSignatures.set(entry.key, entry.signature);
+        cacheInitializedSignature(entry.key, entry.signature);
       }
       return;
     }
@@ -807,7 +824,7 @@ export function createContributionMaterializer(
       // was materialized at this signature, and asserts must keep reading
       // it as stale until reembedVectorField restamps it.
       if (outcome === "materialized") {
-        initializedSignatures.set(entry.key, entry.signature);
+        cacheInitializedSignature(entry.key, entry.signature);
       }
     }
   }
@@ -836,7 +853,9 @@ export function createContributionMaterializer(
       }),
     );
     const pending = entries.filter(
-      (entry) => initializedSignatures.get(entry.key) !== entry.signature,
+      (entry) =>
+        uncacheableKeys.has(entry.key) ||
+        initializedSignatures.get(entry.key) !== entry.signature,
     );
     if (pending.length === 0) return;
 
@@ -858,7 +877,7 @@ export function createContributionMaterializer(
           details: { logicalName: contribution.logicalName },
         });
       }
-      initializedSignatures.set(key, signature);
+      cacheInitializedSignature(key, signature);
     }
   }
 
@@ -992,13 +1011,27 @@ export function createContributionMaterializer(
     return diagnostics;
   }
 
-  async function dropVectorSlot(slot: VectorSlot): Promise<void> {
+  function evictVectorSlot(slot: VectorSlot): void {
     if (deps.vectorStrategy === undefined) return;
     for (const contribution of deps.vectorStrategy.ownedTables(slot)) {
-      await deps.deleteMarker(identityOf(slot.graphId, contribution));
       const key = contributionKey(slot.graphId, contribution);
+      uncacheableKeys.add(key);
       initializedSignatures.delete(key);
       computedSignatures.delete(key);
+    }
+  }
+
+  async function dropVectorSlot(slot: VectorSlot): Promise<void> {
+    if (deps.vectorStrategy === undefined) return;
+    try {
+      for (const contribution of deps.vectorStrategy.ownedTables(slot)) {
+        await deps.deleteMarker(identityOf(slot.graphId, contribution));
+      }
+    } finally {
+      // Cache eviction is conservative even when marker deletion fails: a
+      // subsequent assertion re-reads durable state instead of trusting a
+      // positive entry for a marker that may already have been deleted.
+      evictVectorSlot(slot);
     }
   }
 
@@ -1010,6 +1043,7 @@ export function createContributionMaterializer(
     assertVectorSlot,
     assertVectorSlots,
     dropVectorSlot,
+    evictVectorSlot,
     verifyContributions,
   };
 }

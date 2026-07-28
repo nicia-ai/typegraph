@@ -83,6 +83,7 @@ import {
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
   type SchemaVersionRow,
+  type SchemaWriteTransactionBackend,
   type SetActiveVersionParams,
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
@@ -146,7 +147,6 @@ import {
 } from "./kind-removals";
 import {
   assertAdoptedDialect,
-  type CommonOperationBackend,
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
@@ -861,6 +861,20 @@ function createSqliteOperationBackend(
     ...commonBackend,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
+    async deleteSchemaVectorSlotContribution(slot: VectorSlot): Promise<void> {
+      if (vectorStrategy === undefined) return;
+      for (const contribution of vectorStrategy.ownedTables(slot)) {
+        await execRun(
+          operationStrategy.buildDeleteContributionMaterialization({
+            graphId: slot.graphId,
+            logicalName: contribution.logicalName,
+            owner: contribution.owner,
+            tableName: contribution.tableName,
+          }),
+        );
+      }
+      contributionMaterializer.evictVectorSlot(slot);
+    },
     capabilities,
     dialect: "sqlite",
     tableNames,
@@ -1211,9 +1225,9 @@ export function createSqliteBackend(
    * `db` (as the "sql" path binds the outer connection). Drizzle's own
    * `db.transaction()` here is `ctx.storage.transactionSync` and cannot
    * span an await, so it is deliberately not used. Shared by
-   * `transaction()` (business writes) and `runSchemaWriteTransaction()`
-   * (schema-version commits — data only, never DDL: the #135 invariant
-   * holds because `bootstrapTables` runs outside any transaction).
+   * `transaction()` (business writes) and `runSchemaWriteTransaction()`.
+   * Ordinary schema-version commits are data-only; administrative removal
+   * cleanup may execute transaction-scoped DDL.
    */
   function runDoSqliteStorageTransaction<T>(run: () => Promise<T>): Promise<T> {
     const storage = getDurableObjectStorageClient(db);
@@ -1256,11 +1270,11 @@ export function createSqliteBackend(
    * cannot be eliminated without atomicity.
    */
   function runSchemaWriteTransaction<T>(
-    fn: (tx: CommonOperationBackend) => Promise<T>,
+    fn: (tx: InternalOperationBackend) => Promise<T>,
   ): Promise<T> {
     if (transactionMode === "none") {
       throwSqliteTransactionsDisabled(
-        "commitSchemaVersion and setActiveVersion require atomic transactions, " +
+        "Schema writes and removal cleanup require atomic transactions, " +
           "but this SQLite backend has transactions disabled. Configure a " +
           "driver that supports transactions (better-sqlite3, libsql, " +
           "bun:sqlite) to use schema commits.",
@@ -1299,9 +1313,9 @@ export function createSqliteBackend(
       // serialized queue (always present — DO is sync) provides the
       // single-writer ordering that "immediate" gives the other paths.
       // Raw txBackend (no `gateFulltext`, unlike the business
-      // `transaction()` do-sqlite branch): schema-version commits are
-      // data-only and never touch fulltext (#135), matching the "sql"
-      // and "drizzle" schema-write branches.
+      // `transaction()` do-sqlite branch). Schema-version commits remain
+      // data-only; administrative removal cleanup may use the target's
+      // transaction-scoped DDL primitive.
       return runDoSqliteStorageTransaction(async () => {
         const txBackend = createTransactionBackend({
           capabilities,
@@ -1679,6 +1693,13 @@ export function createSqliteBackend(
       await runSchemaWriteTransaction((target) =>
         target.setActiveVersion(params),
       );
+    },
+
+    async schemaWriteTransaction<T>(
+      _graphId: string,
+      fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
+    ): Promise<T> {
+      return runSchemaWriteTransaction((target) => fn(target));
     },
 
     async transaction<T>(

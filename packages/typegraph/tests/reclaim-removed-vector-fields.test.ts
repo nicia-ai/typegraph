@@ -150,6 +150,61 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
     );
   });
 
+  it("rechecks field liveness after acquiring the schema-write lock", async () => {
+    const baseBackend = backend;
+    let beforeNextCleanup: (() => Promise<void>) | undefined;
+
+    async function runBeforeCleanup(): Promise<void> {
+      const callback = beforeNextCleanup;
+      beforeNextCleanup = undefined;
+      await callback?.();
+    }
+
+    backend = createBackendOverlay(baseBackend, {
+      async executeDdl(statement) {
+        await runBeforeCleanup();
+        await requireDefined(baseBackend.executeDdl)(statement);
+      },
+      async schemaWriteTransaction(graphId, fn) {
+        await runBeforeCleanup();
+        return requireDefined(baseBackend.schemaWriteTransaction)(graphId, fn);
+      },
+    });
+
+    const withField = await storeWithMaterializedEmbedding();
+    const withoutField = await withField.evolve(dropEmbeddingModifier);
+
+    // The candidate scan sees an orphaned field. Commit and write through a
+    // re-add immediately before cleanup acquires its schema lock. The outer
+    // executeDdl hook also makes this regression fail against the old,
+    // unfenced implementation.
+    beforeNextCleanup = async () => {
+      const readded = await withoutField.evolve(addDocumentWithEmbedding);
+      await writeDocument(readded, {
+        title: "re-added",
+        embedding: [0, 1, 0],
+      });
+    };
+
+    const result = await withoutField.materializeRemovals();
+
+    expect(result.reclaimedVectorFields).toEqual([]);
+    expect(await tableExists(perFieldTable("Document", "embedding"))).toBe(
+      true,
+    );
+    const vectors = await requireDefined(backend.vectorSearch)({
+      graphId: GRAPH_ID,
+      nodeKind: "Document",
+      fieldPath: "embedding",
+      queryEmbedding: [0, 1, 0],
+      metric: "cosine",
+      dimensions: 3,
+      indexType: "none",
+      limit: 10,
+    });
+    expect(vectors).toHaveLength(2);
+  });
+
   it("reports an empty result when no embedding field was ever removed", async () => {
     const withField = await storeWithMaterializedEmbedding();
 
@@ -162,7 +217,7 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
   });
 
   it("drops the per-field table when the whole KIND is removed (removed-kind path)", async () => {
-    // removeKinds cleanup goes through buildEmbeddingTableCleanup ->
+    // Removed-kind cleanup resolves the prior schema, then calls
     // buildDropStorage (not reclaimedVectorFields, which is for surviving
     // kinds). The kind's per-field storage must be fully dropped.
     const withField = await storeWithMaterializedEmbedding();
@@ -178,6 +233,67 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
       ),
     ).toBe(true);
     expect(await tableExists(table)).toBe(false);
+  });
+
+  it("rolls vector storage and its marker back together when cleanup fails", async () => {
+    const baseBackend = backend;
+    let injectFailure = true;
+    backend = createBackendOverlay(baseBackend, {
+      async schemaWriteTransaction(graphId, fn) {
+        return requireDefined(baseBackend.schemaWriteTransaction)(
+          graphId,
+          async (target) => {
+            const result = await fn(target);
+            if (injectFailure) {
+              injectFailure = false;
+              throw new Error("injected failure after vector cleanup");
+            }
+            return result;
+          },
+        );
+      },
+    });
+    const withField = await storeWithMaterializedEmbedding();
+    const table = perFieldTable("Document", "embedding");
+    const slot = {
+      graphId: GRAPH_ID,
+      nodeKind: "Document",
+      fieldPath: "embedding",
+      dimensions: 3,
+      metric: "cosine" as const,
+      indexType: "none" as const,
+    };
+    const contribution = requireDefined(backend.vectorStrategy).ownedTables(
+      slot,
+    )[0];
+    if (contribution === undefined)
+      throw new Error("missing vector contribution");
+    const identity = {
+      graphId: GRAPH_ID,
+      logicalName: contribution.logicalName,
+      owner: contribution.owner,
+      tableName: contribution.tableName,
+    };
+
+    const removed = await withField.removeKinds(["Document"]);
+    const failed = await removed.materializeRemovals();
+
+    expect(failed.results.some((entry) => entry.status === "failed")).toBe(
+      true,
+    );
+    expect(await tableExists(table)).toBe(true);
+    expect(
+      await requireDefined(backend.getContributionMaterialization)(identity),
+    ).toBeDefined();
+
+    const retried = await removed.materializeRemovals();
+    expect(retried.results.some((entry) => entry.status === "removed")).toBe(
+      true,
+    );
+    expect(await tableExists(table)).toBe(false);
+    expect(
+      await requireDefined(backend.getContributionMaterialization)(identity),
+    ).toBeUndefined();
   });
 
   it("store.clear() resets per-field vector storage — no leaked/stale vectors (#1)", async () => {

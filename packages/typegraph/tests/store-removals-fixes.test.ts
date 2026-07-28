@@ -36,9 +36,9 @@ import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 /**
- * Wraps a backend so its NEXT `transaction(...)` rejects, then passes through.
- * Recorded-time interval closes and live row cleanup for a removed kind share
- * one `backend.transaction(...)`, so this injects a single atomic cleanup
+ * Wraps a backend so its NEXT schema-write transaction rejects, then passes
+ * through. Recorded-time interval closes and live row cleanup for a removed
+ * kind share that fenced transaction, so this injects a single atomic cleanup
  * failure.
  */
 function withOneShotTransactionFailure(
@@ -47,11 +47,11 @@ function withOneShotTransactionFailure(
 ): GraphBackend {
   return {
     ...base,
-    async transaction(fn, options) {
+    async schemaWriteTransaction(graphId, fn) {
       if (shouldFailNow()) {
         throw new Error("injected recorded-close failure");
       }
-      return base.transaction(fn, options);
+      return requireDefined(base.schemaWriteTransaction)(graphId, fn);
     },
   };
 }

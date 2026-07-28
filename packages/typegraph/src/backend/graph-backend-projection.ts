@@ -51,6 +51,7 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "getSchemaVersion",
   "commitSchemaVersion",
   "setActiveVersion",
+  "schemaWriteTransaction",
   "upsertEmbedding",
   "upsertEmbeddingBatch",
   "deleteEmbedding",

@@ -714,6 +714,109 @@ describe("vector slot contributions ride the same durable-marker machinery", () 
     expect(markers.size).toBe(1);
   });
 
+  it("evicts every slot cache when a later marker deletion fails", async () => {
+    const multiTableStrategy = {
+      ...pgvectorStrategy,
+      ownedTables(slot: VectorSlot) {
+        const [primary] = pgvectorStrategy.ownedTables(slot);
+        if (primary === undefined) return [];
+        return [
+          primary,
+          {
+            ...primary,
+            logicalName: `${primary.logicalName}:aux`,
+            tableName: `${primary.tableName}_aux`,
+          },
+        ];
+      },
+    } satisfies VectorStrategy;
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      multiTableStrategy,
+    );
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+    expect(markers.size).toBe(2);
+
+    let deleteCount = 0;
+    spies.deleteMarker.mockImplementation(
+      (identity: ContributionMaterializationIdentity): Promise<void> => {
+        deleteCount += 1;
+        if (deleteCount === 2) {
+          return Promise.reject(new Error("second marker delete failed"));
+        }
+        markers.delete(markerKey(identity));
+        return Promise.resolve();
+      },
+    );
+
+    await expect(materializer.dropVectorSlot(VECTOR_SLOT)).rejects.toThrow(
+      "second marker delete failed",
+    );
+    expect(markers.size).toBe(1);
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "missing" },
+    });
+  });
+
+  it("does not recache a marker snapshot read while slot deletion commits", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    let delayMarkerRead = false;
+    let releaseMarkerRead: (() => void) | undefined;
+    let markReadStarted: (() => void) | undefined;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    const getMarkers = async (
+      graphId: string,
+    ): Promise<readonly ContributionMaterializationRow[]> => {
+      const snapshot = [...markers.values()].filter(
+        (row) => row.graphId === graphId,
+      );
+      if (!delayMarkerRead) return snapshot;
+      markReadStarted?.();
+      return new Promise((resolve) => {
+        releaseMarkerRead = () => {
+          resolve(snapshot);
+        };
+      });
+    };
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      getMarkers,
+      pgvectorStrategy,
+    );
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+
+    // Transactional cleanup evicts before commit. A concurrent request can
+    // still see the old marker snapshot, but it must not turn that snapshot
+    // back into a long-lived positive cache entry after deletion commits.
+    materializer.evictVectorSlot(VECTOR_SLOT);
+    delayMarkerRead = true;
+    spies.getMarkers.mockClear();
+    const racingAssert = materializer.assertVectorSlot(VECTOR_SLOT);
+    await readStarted;
+    markers.clear();
+    if (releaseMarkerRead === undefined) {
+      throw new Error("Expected a delayed marker read");
+    }
+    releaseMarkerRead();
+    await expect(racingAssert).resolves.toBeUndefined();
+
+    delayMarkerRead = false;
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "missing" },
+    });
+    expect(spies.getMarkers).toHaveBeenCalledTimes(2);
+  });
+
   it("ensureVectorSlot/assertVectorSlot are no-ops when vector support is disabled", async () => {
     // No vectorStrategy → the materializer can't address any slot; both
     // methods resolve without touching the marker store.

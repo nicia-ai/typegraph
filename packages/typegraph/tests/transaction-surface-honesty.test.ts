@@ -31,6 +31,7 @@ import {
   type RecordedCaptureGuardCode,
   type SqlAvailability,
   type Store,
+  type TransactionBackend,
   type TransactionContext,
   type TransactionReadBackend,
 } from "../src";
@@ -217,6 +218,7 @@ describe("portable runtime capability boundaries", () => {
       "executeDdl",
       "executeRaw",
       "executeStatement",
+      "schemaWriteTransaction",
       "transaction",
       "trustedImport",
     ]) {
@@ -224,6 +226,7 @@ describe("portable runtime capability boundaries", () => {
       expect(capability in store.backend).toBe(false);
       expect(Object.hasOwn(store.backend, capability)).toBe(false);
     }
+    expectTypeOf(store.backend).not.toHaveProperty("schemaWriteTransaction");
 
     const capturedId = "captured-backend-write";
     await store.backend.insertNode({
@@ -446,6 +449,27 @@ function portableFactoryTypeAssertions(backend: GraphBackend): void {
   });
 }
 void portableFactoryTypeAssertions;
+
+type SchemaWriteTransaction = NonNullable<
+  GraphBackend["schemaWriteTransaction"]
+>;
+type SchemaWriteTransactionTarget = Parameters<
+  Parameters<SchemaWriteTransaction>[1]
+>[0];
+
+function schemaWriteTransactionTypeAssertions(): void {
+  expectTypeOf<SchemaWriteTransactionTarget>().toHaveProperty(
+    "executeStatement",
+  );
+  expectTypeOf<
+    SchemaWriteTransactionTarget["executeStatement"]
+  >().toEqualTypeOf<NonNullable<TransactionBackend["executeStatement"]>>();
+  expectTypeOf<SchemaWriteTransactionTarget>().toHaveProperty("tableExists");
+  expectTypeOf<SchemaWriteTransactionTarget>().toHaveProperty(
+    "deleteSchemaVectorSlotContribution",
+  );
+}
+void schemaWriteTransactionTypeAssertions;
 
 type NativeTransactionProbe = Readonly<{
   executeNative: (statement: string) => void;

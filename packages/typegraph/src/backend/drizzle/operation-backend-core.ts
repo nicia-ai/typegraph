@@ -9,10 +9,13 @@ import {
   UniquenessError,
 } from "../../errors";
 import type { SqlDialect } from "../../query/dialect/types";
+import type { VectorSlot } from "../../query/dialect/vector-strategy";
+import { sql } from "../../query/sql-fragment";
 import type {
   CompiledStatementSql,
   CompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
+import { asCompiledStatementSql } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
 import { resolveEdgeEndpointIds } from "../edge-endpoint-sets";
 import { nowIso as defaultNowIso } from "../row-mappers";
@@ -74,8 +77,7 @@ export type CommonOperationBackend = Pick<
   | "deleteNode"
   | "deleteUnique"
   | "edgeExistsBetween"
-  | "executeStatement"
-  | "executeTemporaryStatement"
+    | "executeTemporaryStatement"
   | "findEdgesByKind"
   | "findEdgesByEndpointSet"
   | "findEdgesConnectedTo"
@@ -103,10 +105,13 @@ export type CommonOperationBackend = Pick<
   | "updateNode"
 > &
   Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
     commitSchemaVersion: (
       params: CommitSchemaVersionParams,
     ) => Promise<SchemaVersionRow>;
     setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
+    executeSchemaDdl: (ddl: string) => Promise<void>;
+    tableExists: (tableName: string) => Promise<boolean>;
   }>;
 
 /**
@@ -119,7 +124,12 @@ export type CommonOperationBackend = Pick<
  * `commitSchemaVersion` / `setActiveVersion` and bypass the lock.
  */
 export type InternalOperationBackend = TransactionBackend &
-  CommonOperationBackend;
+  CommonOperationBackend &
+  Readonly<{
+    deleteSchemaVectorSlotContribution: (
+      slot: VectorSlot,
+    ) => Promise<void>;
+  }>;
 
 const DRIZZLE_DIALECT_LABELS = {
   postgres: "Postgres",
@@ -200,12 +210,11 @@ export function createCommonOperationBackend(
   const { batchConfig, execution, operationStrategy, rowMappers } = options;
   const nowIso = options.nowIso ?? defaultNowIso;
 
-  // The clear() existence pre-check is the only thing that probes these tables.
   // Positive results are cached by default because on standard schemas the
   // recorded DDL is stable; Postgres disables that cache because visibility is
   // search_path-sensitive. Missing tables stay re-probable unless a caller opts
   // into negative caching.
-  const requiredClearTableExists = createCachedTableExistence(
+  const tableExists = createCachedTableExistence(
     (tableName) =>
       execution.execGet<Record<string, unknown>>(
         operationStrategy.buildTableExists(tableName),
@@ -227,7 +236,7 @@ export function createCommonOperationBackend(
     if (
       statement.ignoreMissingTable === true &&
       statement.requiredTableName !== undefined &&
-      !(await requiredClearTableExists(statement.requiredTableName))
+      !(await tableExists(statement.requiredTableName))
     ) {
       return;
     }
@@ -244,6 +253,12 @@ export function createCommonOperationBackend(
   }
 
   return {
+    tableExists,
+
+    async executeSchemaDdl(ddl: string): Promise<void> {
+      await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));
+    },
+
     async executeStatement(query: CompiledStatementSql): Promise<void> {
       await execution.execRun(query);
     },

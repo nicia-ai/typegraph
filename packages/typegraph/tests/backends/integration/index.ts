@@ -24,6 +24,7 @@ export { registerReconciledSchemaIntegrationTests } from "./reconciled-schema";
 export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-binding";
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
+export { registerRemovalMaterializationIntegrationTests } from "./removal-materialization";
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerSetOperationIntegrationTests } from "./set-operations";
 export { registerStoreViewIntegrationTests } from "./store-view";
