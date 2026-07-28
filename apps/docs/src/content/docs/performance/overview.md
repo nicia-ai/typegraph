@@ -236,10 +236,11 @@ statement. A pool of 10–20 connections handles most workloads. If you're runni
 parallel, size up accordingly.
 
 **Reducing pool pressure with `batch()`:** When loading multiple independent queries (e.g., a
-detail page with several relationship types), `Promise.all` acquires N connections simultaneously.
+detail page with several relationship types), `Promise.all` can acquire up to N connections
+simultaneously — fewer if the pool is undersized or saturated, in which case it queues instead.
 [`store.batch()`](/schemas-stores#batch-query-execution) runs all queries over a single connection
-within an implicit transaction, reducing peak connection use from N to 1. It does not reduce the
-statement count, and read-committed isolation means it is not a snapshot.
+within an implicit transaction, capping peak connection use at 1. It does not reduce the statement
+count, and read-committed isolation means it is not a snapshot.
 
 ### SQLite concurrency
 
@@ -393,8 +394,9 @@ See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
 ### Subgraph extraction
 
 For the "load entity with all relationships" pattern, [`store.subgraph()`](/schemas-stores#subgraph-extraction)
-is the fastest strategy. It compiles to a single recursive CTE that fans out across all specified
-edge types in one round trip — no matter how many relationship kinds are involved. See
+is the fastest strategy. It compiles to a recursive CTE that fans out across all specified edge
+types in a fixed 2 statements on SQLite and 3 on PostgreSQL — no matter how many relationship kinds
+are involved, or how much it returns. See
 [Choosing a query strategy](/schemas-stores#choosing-a-query-strategy) for guidance on when to use
 `subgraph()` vs the fluent query builder vs manual `findFrom` calls.
 

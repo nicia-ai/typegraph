@@ -3088,6 +3088,14 @@ should not need code changes.
   - **Single connection**: Acquires one connection via an implicit transaction, eliminating pool pressure from parallel `Promise.all` patterns (N connections → 1).
   - **Snapshot consistency**: All queries see the same database state — no interleaved writes between results.
   - **Typed tuple results**: Returns a mapped tuple preserving each query's independent result type, projection, filtering, sorting, and pagination.
+
+  > **Correction (see #325).** The "snapshot consistency" bullet above was never
+  > accurate and is retained only as the historical record. `batch()` opens its
+  > implicit transaction without an isolation option, so PostgreSQL runs it at the
+  > default read-committed isolation and a later query in the batch *can* observe a
+  > commit the earlier ones did not. The "single connection" bullet holds only where
+  > `capabilities.transactions` is true. `batch()` also never pipelined, despite the
+  > original issue specifying it.
   - **`BatchableQuery` interface**: Satisfied by both `ExecutableQuery` (from `.select()`) and `UnionableQuery` (from set operations like `.union()`, `.intersect()`). Exposes `executeOn()` for backend-delegated execution.
   - **Minimum 2 queries**: Enforced at the type level — single queries should use `.execute()` directly.
 

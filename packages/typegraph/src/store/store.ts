@@ -1688,35 +1688,42 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   // === Batch Query Execution ===
 
   /**
-   * Runs several queries in sequence, returning a typed tuple — N query
-   * executions, never one round trip.
+   * Runs several queries in sequence, returning a typed tuple. The portable
+   * guarantee is N serialized query executions — never one round trip.
    *
-   * **Cost.** With `backend.capabilities.transactions`, the queries run in
-   * one transaction on one connection; on a SQL backend that is `begin` + N +
-   * `commit`, so a networked one sees N+2 round trips. Without transactions
-   * there is no framing and no shared connection — whether each query costs a
-   * fresh pooled connection, an HTTP request, or a reuse of the same client
-   * is up to the adapter. Either way it is N executions, serialized.
+   * **Cost.** With `backend.capabilities.transactions` the queries share one
+   * transaction; how that reaches the wire is the adapter's business. A SQL
+   * backend frames them with `begin`/`commit`, so a networked one sees N+2
+   * round trips, while Durable Objects use an ambient storage transaction
+   * with no framing statements. Without transactions there is no framing, and
+   * the adapter may still reuse one client. Count on the N executions, not on
+   * a transport shape.
    *
-   * **Not a snapshot.** PostgreSQL defaults to read-committed isolation, so a
-   * later query can observe a commit the earlier ones did not. When you need
-   * a stable snapshot, use
-   * `store.transaction(fn, { isolationLevel: "repeatable_read" })`.
+   * **Not a snapshot — and there is no way to make it one.** PostgreSQL
+   * defaults to read-committed isolation, so a later query can observe a
+   * commit the earlier ones did not. `store.transaction()` takes an
+   * `isolationLevel`, but its context exposes only `nodes` / `edges`: there is
+   * no public way to run a fluent query or a batch inside a transaction, so a
+   * snapshot across fluent queries is not available today. Collection reads
+   * can have one — `store.transaction(fn, { isolationLevel: "repeatable_read" })`
+   * reading through `tx.nodes` / `tx.edges` (a history-enabled store on
+   * PostgreSQL additionally requires `accessMode: "read_only"`).
    *
    * **Will not fix an N+1.** Serializing N queries does not reduce their
-   * number. To make the cost independent of N, fold the work into one query:
-   * `.traverse()` compiles a whole chain to a single statement;
-   * `store.subgraph()` costs a fixed 2 statements on SQLite and 3 on
-   * PostgreSQL however large the result; `bulkFindByIndex()` costs one probe
-   * plus one hydration read; `getByIds()` costs one statement where the
-   * backend exposes a batch read, degrading to one per distinct id where it
-   * does not.
+   * number. The alternatives are set-oriented or chunked rather than
+   * fixed-cost: `.traverse()` compiles a whole chain to one statement;
+   * `store.subgraph()` costs 2 statements on SQLite and 3 on PostgreSQL
+   * however large the result; `getByIds()` issues one statement per
+   * bind-limit chunk, falling back to one per distinct id where the backend
+   * exposes no batch read; `bulkFindByIndex()` costs one probe plus that same
+   * chunked hydration.
    *
-   * **Versus `Promise.all`.** `batch()` never holds N connections at once.
-   * Which is faster depends on the workload: against a pool with idle
-   * capacity `Promise.all` overlaps its queries and wins on latency while
-   * `batch()` pays their sum; against a single client or a saturated pool
-   * both serialize.
+   * **Versus `Promise.all`.** Workload- and adapter-dependent in both
+   * directions. `Promise.all` overlaps its queries against a pool with idle
+   * capacity, but it does not necessarily hold N connections, and against a
+   * single client or a saturated pool it queues. `batch()` pays the sum of
+   * its query latencies but only one acquisition, which can make it the
+   * faster of the two where acquisition dominates.
    *
    * Read-only — use `bulkCreate`, `bulkInsert`, etc. for write batching.
    *

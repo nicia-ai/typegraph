@@ -247,16 +247,19 @@ async function exportAllUsers(): Promise<void> {
 When you need multiple independent queries with different result types, use `store.batch()` to run
 them in sequence against one target.
 
-`batch()` does not batch round trips. On a transactional backend it issues `begin`, one statement
-per query, then `commit` — N queries are N+2 round trips on one connection. Without transactions
-there is no framing and no shared connection; what each query costs there is up to the adapter.
-Either way it is N executions, serialized, so `batch()` collapses connection acquisition at best,
-never latency, and it will not fix an N+1. For that, fold the work into one query: a `.traverse()`
-chain, `store.subgraph()`, or `getByIds()` / `bulkFindByIndex()` for keyed fan-out.
+`batch()` does not batch round trips. The portable guarantee is N serialized query executions. On a
+SQL backend with transactions it frames them with `begin`/`commit`, so a networked one sees N+2
+round trips on one connection; Durable Objects use an ambient storage transaction with no framing,
+and without transactions there is no framing at all. Either way it collapses connection acquisition
+at best, never latency, and it will not fix an N+1. For that, fold the work into one query: a
+`.traverse()` chain (one statement), `store.subgraph()` (2 statements on SQLite, 3 on PostgreSQL),
+or `getByIds()` / `bulkFindByIndex()`, which are chunked rather than fixed-cost.
 
 It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can
-observe a commit the earlier ones did not. Use
-`store.transaction(fn, { isolationLevel: "repeatable_read" })` when you need one.
+observe a commit the earlier ones did not. There is no way to fix that for fluent queries today —
+`store.transaction()` accepts an `isolationLevel`, but its context exposes only `nodes` / `edges`,
+so a query builder cannot run inside it. Collection reads can get a snapshot via
+`store.transaction(fn, { isolationLevel: "repeatable_read" })` and `tx.nodes` / `tx.edges`.
 
 ```typescript
 const [people, companies] = await store.batch(
@@ -289,12 +292,12 @@ const [skills, employer] = await store.batch(
 );
 ```
 
-**vs `Promise.all`**: `batch()` never holds N connections at once, and on a transactional backend
-uses exactly 1. Which is faster depends on the workload — against a pool with idle capacity
-`Promise.all` overlaps its queries and wins on latency; against a single client or a saturated pool
-both serialize.
-**vs `transaction()`**: Same transaction, lighter API — no callback, typed tuple return. Use
-`transaction()` when you need an explicit `isolationLevel`.
+**vs `Promise.all`**: workload- and adapter-dependent in both directions. `Promise.all` overlaps its
+queries against a pool with idle capacity, but it does not necessarily hold N connections, and
+against a single client or a saturated pool it queues. `batch()` pays the sum of its query
+latencies but only one acquisition, which can make it faster where acquisition dominates.
+**vs `transaction()`**: same transaction, lighter API — no callback, typed tuple return. But
+`transaction()` is the only one that takes an `isolationLevel`, and it cannot run fluent queries.
 
 See [Batch Query Execution](/schemas-stores#batch-query-execution) for full API reference.
 

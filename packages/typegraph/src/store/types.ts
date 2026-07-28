@@ -1024,9 +1024,11 @@ export type EdgeCollection<
    * the same temporal `options` as {@link EdgeCollection.findFrom}.
    *
    * Batching these still issues one statement per call — it does not merge
-   * the reads, and it only shares a connection and a snapshot when the
-   * backend supports transactions. To read edges for many sources in one
-   * statement, traverse from them in a single query.
+   * the reads, and it shares a connection only when the backend supports
+   * transactions. It is not a snapshot: PostgreSQL's default read-committed
+   * isolation lets a later read observe a commit the earlier ones did not. To
+   * read edges for many sources in one statement, traverse from them in a
+   * single query.
    */
   batchFindFrom: (
     from: NodeRef<From>,
