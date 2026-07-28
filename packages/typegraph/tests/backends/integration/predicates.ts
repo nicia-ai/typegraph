@@ -31,6 +31,27 @@ async function seedNullShapeEdges(store: IntegrationStore): Promise<void> {
   await store.edges.knows.create(anna, numeric, { weight: 7 });
 }
 
+/**
+ * Runs the same membership test as a literal list and as a bound list
+ * parameter, and asserts they agree.
+ *
+ * String is the element type that needs this least — it is the one Postgres
+ * does not cast. Number, boolean, and date each ride an element cast that has
+ * to mirror the `jsonExtract*` cast the left operand was compiled with, so
+ * those are the pairs where a drift shows up as wrong rows rather than as an
+ * error.
+ */
+async function expectAgreement(
+  literal: () => Promise<readonly string[]>,
+  parameterized: () => Promise<readonly string[]>,
+  expected: readonly string[],
+): Promise<void> {
+  const fromLiteral = await literal();
+  const fromParameter = await parameterized();
+  expect(fromParameter.toSorted()).toEqual(fromLiteral.toSorted());
+  expect(fromLiteral.toSorted()).toEqual(expected);
+}
+
 export function registerPredicateIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -175,6 +196,358 @@ export function registerPredicateIntegrationTests(
 
       expect(results).toHaveLength(3);
       expect(results.toSorted()).toEqual(["Alice", "Bob", "Charlie"]);
+    });
+  });
+
+  describe("List-Valued Parameters", () => {
+    beforeEach(async () => {
+      const store = context.getStore();
+      await seedPeopleForComplexPredicates(store);
+    });
+
+    it("reuses one prepared statement across different list lengths", async () => {
+      const store = context.getStore();
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.in(parameter("names")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+
+      // The whole point of the packed binding: arity is not part of the SQL
+      // text, so the same compiled statement serves every list length.
+      const three = await prepared.execute({
+        names: ["Alice", "Charlie", "Eve"],
+      });
+      expect(three.toSorted()).toEqual(["Alice", "Charlie"]);
+
+      const one = await prepared.execute({ names: ["Bob"] });
+      expect(one.toSorted()).toEqual(["Bob"]);
+
+      const none = await prepared.execute({ names: [] });
+      expect(none).toEqual([]);
+
+      // ...and the third call still agrees with the first, proving nothing
+      // from an earlier arity was frozen into the cached template.
+      const threeAgain = await prepared.execute({
+        names: ["Alice", "Charlie", "Eve"],
+      });
+      expect(threeAgain.toSorted()).toEqual(["Alice", "Charlie"]);
+    });
+
+    it("agrees with the literal in() form for every element type", async () => {
+      const store = context.getStore();
+      const published = new Date("2024-03-01T00:00:00.000Z");
+      await store.nodes.Document.create({
+        title: "Dated",
+        publishedAt: published,
+      });
+      await store.nodes.Document.create({
+        title: "Other",
+        publishedAt: new Date("2024-09-09T00:00:00.000Z"),
+      });
+
+      const names = ["Alice", "Diana", "Nobody"];
+      await expectAgreement(
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.name.in(names))
+            .select((ctx) => ctx.p.name)
+            .execute(),
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.name.in(parameter("names")))
+            .select((ctx) => ctx.p.name)
+            .prepare()
+            .execute({ names }),
+        ["Alice", "Diana"],
+      );
+
+      const ages = [25, 35, 99];
+      await expectAgreement(
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.age.in(ages))
+            .select((ctx) => ctx.p.name)
+            .execute(),
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.age.in(parameter("ages")))
+            .select((ctx) => ctx.p.name)
+            .prepare()
+            .execute({ ages }),
+        ["Bob", "Charlie"],
+      );
+
+      const flags = [false];
+      await expectAgreement(
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.isActive.in(flags))
+            .select((ctx) => ctx.p.name)
+            .execute(),
+        () =>
+          store
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.isActive.in(parameter("flags")))
+            .select((ctx) => ctx.p.name)
+            .prepare()
+            .execute({ flags }),
+        ["Bob"],
+      );
+
+      const dates = [published];
+      await expectAgreement(
+        () =>
+          store
+            .query()
+            .from("Document", "d")
+            .whereNode("d", (d) => d.publishedAt.in(dates))
+            .select((ctx) => ctx.d.title)
+            .execute(),
+        () =>
+          store
+            .query()
+            .from("Document", "d")
+            .whereNode("d", (d) => d.publishedAt.in(parameter("dates")))
+            .select((ctx) => ctx.d.title)
+            .prepare()
+            .execute({ dates }),
+        ["Dated"],
+      );
+    });
+
+    it("binds a notIn list, including the empty list", async () => {
+      const store = context.getStore();
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.notIn(parameter("names")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+
+      const excluded = await prepared.execute({ names: ["Alice", "Bob"] });
+      expect(excluded.toSorted()).toEqual(["Charlie", "Diana"]);
+
+      // Excluding nothing must keep everyone — the mirror of `in([])`.
+      const excludeNothing = await prepared.execute({ names: [] });
+      expect(excludeNothing.toSorted()).toEqual([
+        "Alice",
+        "Bob",
+        "Charlie",
+        "Diana",
+      ]);
+    });
+
+    it("binds a list far larger than the smallest bind budget", async () => {
+      const store = context.getStore();
+      // SQLite's conservative ceiling is 999 bound parameters and Durable
+      // Objects' is lower still; a packed list costs exactly one regardless.
+      const names = [
+        ...Array.from({ length: 5000 }, (_, index) => `missing-${index}`),
+        "Alice",
+        "Charlie",
+      ];
+
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.in(parameter("names")))
+        .select((ctx) => ctx.p.name)
+        .prepare()
+        .execute({ names });
+
+      expect(results.toSorted()).toEqual(["Alice", "Charlie"]);
+    });
+
+    it("binds node ids — the canonical prepared id-set query", async () => {
+      const store = context.getStore();
+      const everyone = await store
+        .query()
+        .from("Person", "p")
+        .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
+        .execute();
+      const wanted = everyone.filter((person) =>
+        ["Alice", "Charlie"].includes(person.name),
+      );
+
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.in(parameter("ids")))
+        .select((ctx) => ctx.p.name)
+        .prepare()
+        .execute({ ids: wanted.map((person) => person.id) });
+
+      expect(results.toSorted()).toEqual(["Alice", "Charlie"]);
+    });
+
+    it("binds number and boolean lists with the field's declared type", async () => {
+      const store = context.getStore();
+
+      const ages = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.age.in(parameter("ages")))
+        .select((ctx) => ctx.p.name)
+        .prepare()
+        .execute({ ages: [25, 35] });
+      expect(ages.toSorted()).toEqual(["Bob", "Charlie"]);
+
+      const flags = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.isActive.in(parameter("flags")))
+        .select((ctx) => ctx.p.name)
+        .prepare()
+        .execute({ flags: [false] });
+      expect(flags.toSorted()).toEqual(["Bob"]);
+    });
+
+    it("composes with a scalar parameter in the same query", async () => {
+      const store = context.getStore();
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) =>
+          p.name.in(parameter("names")).and(p.age.gt(parameter("minAge"))),
+        )
+        .select((ctx) => ctx.p.name)
+        .prepare();
+
+      expect([...prepared.parameterNames].toSorted()).toEqual([
+        "minAge",
+        "names",
+      ]);
+
+      const older = await prepared.execute({
+        minAge: 29,
+        names: ["Alice", "Bob", "Charlie"],
+      });
+      expect(older.toSorted()).toEqual(["Alice", "Charlie"]);
+
+      const younger = await prepared.execute({
+        minAge: 20,
+        names: ["Bob"],
+      });
+      expect(younger.toSorted()).toEqual(["Bob"]);
+    });
+
+    it("rejects a param() among the elements of a literal list", () => {
+      const store = context.getStore();
+      expect(() =>
+        store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (p) => p.name.in(["Alice", parameter("other")])),
+      ).toThrow(/is not supported as an element of the in\(\) list/);
+    });
+
+    it("rejects a non-array binding for a list parameter", async () => {
+      const store = context.getStore();
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.in(parameter("names")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+
+      await expect(prepared.execute({ names: "Alice" })).rejects.toThrow(
+        /must be an array for in\(\)\/notIn\(\)/,
+      );
+      await expect(
+        // eslint-disable-next-line unicorn/no-null -- null bindings are rejected everywhere
+        prepared.execute({ names: ["Alice", null] }),
+      ).rejects.toThrow(/must not be null/);
+    });
+
+    it("rejects a list element that is not the field's type", async () => {
+      const store = context.getStore();
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.age.in(parameter("ages")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+
+      // Unchecked, this is the one input the two backends disagree about:
+      // PostgreSQL fails casting "a" to numeric, SQLite matches nothing for
+      // that element and returns the rest. Rejected on both instead.
+      await expect(prepared.execute({ ages: [30, "a"] })).rejects.toThrow(
+        /every element must be a number/,
+      );
+
+      // The literal form already refuses a mixed list when it compiles; the
+      // parameterized form, which has no literals to inspect at compile time,
+      // now reaches the same verdict from the binding.
+      await expect(
+        store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (p) => p.age.in([30, "a"]))
+          .select((ctx) => ctx.p.name)
+          .execute(),
+      ).rejects.toThrow(/Mixed literal value types/);
+    });
+
+    it("rejects non-finite numbers, which JSON would launder into NULL", async () => {
+      const store = context.getStore();
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.age.notIn(parameter("ages")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+
+      // JSON.stringify turns these into `null`, so the packed list would bind
+      // SQL NULL: `NOT IN (NULL)` is NULL for every row and silently returns
+      // nothing at all — the same laundering the null-element check closes.
+      for (const value of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+      ]) {
+        await expect(prepared.execute({ ages: [value] })).rejects.toThrow(
+          /must be a finite number/,
+        );
+      }
+
+      // Same hole on the scalar path: SQLite binds NaN as NULL, so `eq(NaN)`
+      // quietly matched no rows rather than failing.
+      const scalar = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.age.eq(parameter("age")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+      await expect(scalar.execute({ age: Number.NaN })).rejects.toThrow(
+        /must be a finite number/,
+      );
+    });
+
+    it("rejects one parameter used as both a list and a scalar", () => {
+      const store = context.getStore();
+      expect(() =>
+        store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (p) =>
+            p.name.in(parameter("value")).or(p.name.eq(parameter("value"))),
+          )
+          .select((ctx) => ctx.p.name)
+          .prepare(),
+      ).toThrow(/used both as an in\(\)\/notIn\(\) list and as a scalar value/);
     });
   });
 

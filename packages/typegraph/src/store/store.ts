@@ -26,6 +26,7 @@ import {
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type ContributionDiagnostic,
   createTransactionReadBackend,
   type GraphBackend,
   runOptionallyInTransaction,
@@ -93,6 +94,8 @@ import {
 import { getDialect } from "../query/dialect";
 import type { SqlDialect } from "../query/dialect/types";
 import { type VectorSlot } from "../query/dialect/vector-strategy";
+import { renderSql } from "../query/sql-fragment";
+import { type CompiledRowsSql } from "../query/sql-intent";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import {
   applyDeprecatedKinds,
@@ -230,6 +233,7 @@ import {
   type MeasurableTransactionContext,
   type Node,
   type OperationHookContext,
+  type QueryHookContext,
   type QueryOptions,
   type RecordedReadStoreOptions,
   type RecordedScanOptions,
@@ -490,6 +494,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     fieldPath: string,
     options?: ReembedVectorFieldOptions,
   ) => Promise<ReembedVectorFieldResult>;
+  verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
   materializeRemovals: (
     options?: MaterializeRemovalsOptions,
   ) => Promise<MaterializeRemovalsResult>;
@@ -1688,19 +1693,54 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   // === Batch Query Execution ===
 
   /**
-   * Executes multiple queries and returns a typed tuple of results.
+   * Runs several queries in sequence, returning a typed tuple. The portable
+   * guarantee is N serialized query executions — never one round trip.
    *
-   * Each query preserves its own result type, projection, filtering, sorting,
-   * and pagination.
+   * **Cost.** At least one statement per query, sometimes two: a query whose
+   * selective-field mapping falls back re-runs as a full fetch, and that
+   * fallback is detected *after* the selective statement has already
+   * executed. It clears the fast path, so a reused query instance pays the
+   * double only once — but the builder is immutable, so a query rebuilt per
+   * request pays it every request.
    *
-   * **Snapshot consistency is conditional.** When
-   * `backend.capabilities.transactions` is `true`, queries run sequentially
-   * on a single connection inside an implicit transaction and observe the
-   * same database snapshot. When transactions are unavailable
-   * (Cloudflare D1, `drizzle-orm/neon-http`), queries run sequentially over
-   * independent connections and may observe writes that landed between them.
-   * Branch on `backend.capabilities.transactions` if you need a guaranteed
-   * snapshot.
+   * With `backend.capabilities.transactions` the queries share one
+   * transaction; how that reaches the wire is the adapter's business. A SQL
+   * backend frames them with `begin`/`commit`, putting a networked one at
+   * N+2 round trips *at best*, while Durable Objects use an ambient storage
+   * transaction with no framing statements. Without transactions there is no
+   * framing. Connection reuse is a separate question from transaction
+   * support: the no-transaction path passes the same backend object, so an
+   * adapter may reuse one client there too. The portable guarantee is only
+   * that at most one query is in flight at a time.
+   *
+   * **Not a snapshot — and there is no way to make it one.** PostgreSQL
+   * defaults to read-committed isolation, so a later query can observe a
+   * commit the earlier ones did not. `store.transaction()` takes an
+   * `isolationLevel`, but its context exposes only `nodes` / `edges`: there is
+   * no public way to run a fluent query or a batch inside a transaction, so a
+   * snapshot across fluent queries is not available today. Collection reads
+   * can have one — `store.transaction(fn, { isolationLevel: "repeatable_read" })`
+   * reading through `tx.nodes` / `tx.edges` — but only where the backend has
+   * transactions (others ignore the option entirely), and a history-enabled
+   * store on PostgreSQL additionally requires `accessMode: "read_only"` or the
+   * call throws.
+   *
+   * **Will not fix an N+1.** Serializing N queries does not reduce their
+   * number. The alternatives are set-oriented or chunked rather than
+   * fixed-cost: `.traverse()` compiles a whole chain to one statement;
+   * `store.subgraph()` costs 2 statements on SQLite and 3 on PostgreSQL
+   * however large the result; `getByIds()` issues one statement per
+   * bind-limit chunk, falling back to one per distinct id where the backend
+   * exposes no batch read; `bulkFindByIndex()` costs one probe plus that same
+   * chunked hydration.
+   *
+   * **Versus `Promise.all`.** Workload- and adapter-dependent in both
+   * directions. `Promise.all` overlaps its queries against a pool with idle
+   * capacity, but it does not necessarily hold N connections, and against a
+   * single client or a saturated pool it queues. `batch()` keeps at most one
+   * query in flight, so it pays the sum of their latencies — but it can still
+   * come out ahead where connection acquisition dominates. Measure rather
+   * than assume.
    *
    * Read-only — use `bulkCreate`, `bulkInsert`, etc. for write batching.
    *
@@ -1735,9 +1775,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // scope — which demands executeStatement on the transaction target — for a
     // path that performs no writes and needs no capture.
     return runOptionallyInTransaction(this.#baseBackend, async (target) => {
+      const queryBackend = this.#createHookedQueryBackend(target);
       const results: unknown[] = [];
       for (const query of queries) {
-        const result = await query.executeOn(target);
+        const result = await query.executeOn(queryBackend);
         results.push(result);
       }
       return results as BatchResults<Queries>;
@@ -3199,6 +3240,70 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * Diagnostic: compare each contribution currently expected by this graph
+   * and the backend strategies with its durable marker and the physical
+   * catalog. Reports detected unusable contributions, including a recorded
+   * failed materialization whose absent table agrees with the marker.
+   * Contributions with neither marker nor table and retired marker rows are
+   * omitted, so an empty array is not proof that storage was initialized.
+   *
+   * Opening a store never probes the catalog — `ensureRuntimeContributions`
+   * and the runtime asserts short-circuit on a per-instance signature cache
+   * and then on the marker row alone, which is the right default for a hot
+   * path. The cost is that a database whose contribution tables were dropped
+   * out of band (a partial restore, a hand-run `DROP`, a schema-scoped
+   * restore that missed them) opens completely clean and then fails at the
+   * first read of the affected slot. This is the explicit, operator-invoked
+   * check for that state; it is not, and should not become, a boot step.
+   *
+   * Purely read-only: one existence query per distinct contribution table
+   * plus one marker read per graph, no DDL and no writes, so it is safe to
+   * run under a least-privilege runtime role and safe to run on a live
+   * store. Each entry carries identity resolved from the active contribution
+   * declaration and matching the marker contract, so callers can route to a
+   * repair without reconstructing any internal naming contract.
+   *
+   * Route on `state`, NOT on whether the entry is a vector slot: the
+   * repairs differ per state and the wrong one destroys data.
+   * {@link Store.reembedVectorField} drops and recreates storage, so
+   * applying it to a `missing-marker` — table intact, only the marker
+   * wrong — discards every embedding to fix bookkeeping. See
+   * {@link ContributionDiagnostic} and the per-state repair tables in the
+   * troubleshooting guide.
+   *
+   * Vector slots are enumerated from the graph's declared embedding fields
+   * and are considered only when the backend advertises vector support; a
+   * backend without it never materialized them, so there is nothing to
+   * compare. Current fulltext contributions are always considered. For a
+   * readiness check, first construct the Store through a verified attach so
+   * initialization is established independently.
+   *
+   * @throws {ConfigurationError} when the backend cannot probe its own
+   *   catalog. Reporting "no problems found" on a backend that never
+   *   looked would be the one answer this diagnostic must never give.
+   */
+  async verifyContributions(): Promise<readonly ContributionDiagnostic[]> {
+    const backend = this.#baseBackend;
+    const verify = backend.verifyContributions;
+    if (verify === undefined) {
+      throw new ConfigurationError(
+        "verifyContributions requires a backend that can probe its catalog " +
+          "for contribution tables.",
+        {
+          backend: backend.dialect,
+          capability: "contributions",
+          operation: "verify",
+        },
+      );
+    }
+    const vectorSlots =
+      backend.capabilities.vector?.supported === true ?
+        resolveGraphVectorSlots(this.#graph)
+      : [];
+    return verify(this.graphId, vectorSlots);
+  }
+
+  /**
    * Removes extension kinds from the schema with cascading edge and
    * ontology cleanup. Two-phase by design:
    *
@@ -3628,6 +3733,78 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   // === Internal: Hook Helpers ===
 
+  /**
+   * Decorates the query execution port so hooks observe each statement the
+   * query builder submits to the backend. A selective-projection retry
+   * therefore emits two independent start/end pairs with their actual SQL.
+   */
+  #createHookedQueryBackend(
+    backend: GraphBackend | TransactionBackend,
+  ): GraphBackend {
+    if (
+      this.#hooks.onQueryStart === undefined &&
+      this.#hooks.onQueryEnd === undefined &&
+      this.#hooks.onError === undefined
+    ) {
+      return backend as GraphBackend;
+    }
+
+    const executeRaw = backend.executeRaw;
+    const compileSql = backend.compileSql;
+    // Store backends may be frozen. Copy an allowlist projection so
+    // execute/executeRaw can be replaced without mutating the source.
+    const projected = createGraphBackendProjection(backend as GraphBackend);
+
+    return {
+      ...projected,
+      execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+        const compiled =
+          compileSql === undefined ?
+            renderSql(query, backend.dialect)
+          : compileSql(query);
+        return this.#withQueryHooks(compiled.sql, compiled.params, () =>
+          backend.execute<T>(query),
+        );
+      },
+      ...(executeRaw === undefined ?
+        {}
+      : {
+          executeRaw: <T>(
+            sqlText: string,
+            params: readonly unknown[],
+          ): Promise<readonly T[]> =>
+            this.#withQueryHooks(sqlText, params, () =>
+              executeRaw<T>(sqlText, params),
+            ),
+        }),
+    } satisfies GraphBackend;
+  }
+
+  async #withQueryHooks<T>(
+    sql: string,
+    params: readonly unknown[],
+    execute: () => Promise<readonly T[]>,
+  ): Promise<readonly T[]> {
+    const ctx: QueryHookContext = {
+      ...this.#createHookContext(),
+      sql,
+      params,
+    };
+    this.#hooks.onQueryStart?.(ctx);
+    const startTime = Date.now();
+    try {
+      const rows = await execute();
+      this.#hooks.onQueryEnd?.(ctx, {
+        rowCount: rows.length,
+        durationMs: Date.now() - startTime,
+      });
+      return rows;
+    } catch (error) {
+      this.#hooks.onError?.(ctx, asError(error));
+      throw error;
+    }
+  }
+
   #createHookContext(): HookContext {
     return {
       operationId: generateId(),
@@ -3744,13 +3921,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     backend: GraphBackend | TransactionBackend,
     sealedCoordinate?: ReadCoordinate,
   ): InitialQueryBuilder<G, CoordinateState> {
+    const queryBackend = this.#createHookedQueryBackend(backend);
     return createInternalQueryBuilder<G, CoordinateState>(
       this.graphId,
       this.#registry,
       {
         // TransactionBackend omits transaction/close, but query execution only needs
         // the read-path/query capabilities shared with GraphBackend.
-        backend: backend as GraphBackend,
+        backend: queryBackend,
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
         ...(this.#schema !== undefined && { schema: this.#schema }),

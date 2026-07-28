@@ -5,8 +5,8 @@
  * budget); the data deletion happens here, scoped per-deployment via
  * the `typegraph_kind_removals` status table. Splitting the verbs
  * mirrors how `materializeIndexes` complements `evolve`: schema
- * commits are atomic and fast, data work is bounded by row count and
- * deferrable / parallelizable.
+ * commits are atomic and fast, while data work is bounded by row count and
+ * deferrable. Candidates run sequentially because they share one graph lock.
  */
 import { type RawBackend } from "../backend/branded";
 import {
@@ -31,10 +31,7 @@ import type { SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
-import {
-  ensureFocusedStatusTable,
-  runMaterialization,
-} from "./materialize-shared";
+import { ensureFocusedStatusTable } from "./materialize-shared";
 import { closeRecordedHardDeletedKind } from "./recorded-capture";
 
 const ENTITY_KINDS: readonly KindEntity[] = ["node", "edge"];
@@ -160,13 +157,12 @@ export async function materializeRemovals(
   const { backend, graphId } = context;
 
   if (
-    backend.executeDdl === undefined ||
     backend.recordKindRemoval === undefined ||
     backend.getPendingKindRemovals === undefined
   ) {
     throw new ConfigurationError(
       "store.materializeRemovals() requires a backend with kind-removal " +
-        "primitives (executeDdl, recordKindRemoval, getPendingKindRemovals). " +
+        "primitives (recordKindRemoval, getPendingKindRemovals). " +
         "The bundled SQLite and Postgres backends provide them.",
       { code: "MATERIALIZE_REMOVALS_BACKEND_UNSUPPORTED" },
     );
@@ -280,16 +276,16 @@ export async function materializeRemovals(
       : undefined,
   } as const;
 
-  // Each kind targets a disjoint row set (DELETEs filtered by kindName),
-  // so the default best-effort path runs them concurrently — Postgres
-  // parallelizes round-trips across pool connections, SQLite serializes
-  // writes at the engine level either way. `stopOnError` honors strict
-  // sequential semantics; the first failure short-circuits the rest.
-  const materialized = await runMaterialization(
-    candidates,
-    options,
-    (removal) => materializeOne(removal, ctx),
-  );
+  // Every candidate takes the same per-graph schema-write lock. Running them
+  // concurrently only consumes pool connections while all but one wait, so
+  // process candidates sequentially. Best-effort mode continues after failed
+  // entries; `stopOnError` short-circuits after the first failure.
+  const materialized: MaterializeRemovalsEntry[] = [];
+  for (const candidate of candidates) {
+    const entry = await materializeOne(candidate, ctx);
+    materialized.push(entry);
+    if (options.stopOnError === true && entry.status === "failed") break;
+  }
   return { results: [...materialized, ...skipped], reclaimedVectorFields };
 }
 
@@ -542,8 +538,10 @@ async function materializeOne(
  * Tolerates absent recorded relations exactly as `clear()` and
  * `refreshStatistics()` do: a history-enabled store whose recorded tables
  * predate recorded-time history (bring-your-own-pool, no DDL re-run) skips only
- * the close, then still deletes the live rows. A no-op close when
- * recorded-removal capture is off.
+ * the close, then still deletes the live rows. A transaction-bound catalog
+ * preflight avoids issuing a statement that would abort PostgreSQL and avoids
+ * raw transaction framing, which Durable Object SQLite forbids. A no-op close
+ * when recorded-removal capture is off.
  */
 async function closeRecordedAndDeleteLiveRows(
   ctx: MaterializeOneContext,
@@ -557,40 +555,27 @@ async function closeRecordedAndDeleteLiveRows(
   }
 
   const recordedSchema = ctx.recordedSchema;
-  const executeStatement = requireDefined(target.executeStatement);
-  await executeStatement(
-    asCompiledStatementSql(
-      sql.raw("SAVEPOINT typegraph_removal_recorded_close"),
-    ),
+  const requiredRecordedTables = [
+    recordedSchema.tables.recordedClock,
+    recordedSchema.tables.recordedEdges,
+    ...(row.entity === "node" ? [recordedSchema.tables.recordedNodes] : []),
+  ];
+  const recordedTablesExist = await Promise.all(
+    requiredRecordedTables.map((tableName) => target.tableExists(tableName)),
   );
-  try {
-    await closeRecordedHardDeletedKind(
-      target,
-      recordedSchema,
-      ctx.graphId,
-      { entity: row.entity, kind: row.kindName },
-      false,
-    );
+  if (recordedTablesExist.some((exists) => !exists)) {
     await executeDeleteStatements(target, deleteStatements);
-    await executeStatement(
-      asCompiledStatementSql(
-        sql.raw("RELEASE SAVEPOINT typegraph_removal_recorded_close"),
-      ),
-    );
-  } catch (error) {
-    if (!isMissingTableError(error)) throw error;
-    await executeStatement(
-      asCompiledStatementSql(
-        sql.raw("ROLLBACK TO SAVEPOINT typegraph_removal_recorded_close"),
-      ),
-    );
-    await executeStatement(
-      asCompiledStatementSql(
-        sql.raw("RELEASE SAVEPOINT typegraph_removal_recorded_close"),
-      ),
-    );
-    await executeDeleteStatements(target, deleteStatements);
+    return;
   }
+
+  await closeRecordedHardDeletedKind(
+    target,
+    recordedSchema,
+    ctx.graphId,
+    { entity: row.entity, kind: row.kindName },
+    false,
+  );
+  await executeDeleteStatements(target, deleteStatements);
 }
 
 function buildRemovedKindLiveDeleteStatements(
@@ -613,29 +598,12 @@ function buildRemovedKindLiveDeleteStatements(
 }
 
 async function executeDeleteStatements(
-  target: GraphBackend | TransactionBackend,
+  target: SchemaWriteTransactionBackend,
   statements: readonly string[],
 ): Promise<void> {
-  if (target.executeStatement !== undefined) {
-    await Promise.all(
-      statements.map((statement) =>
-        requireDefined(target.executeStatement)(
-          asCompiledStatementSql(sql.raw(statement)),
-        ),
-      ),
-    );
-    return;
+  for (const statement of statements) {
+    await target.executeStatement(asCompiledStatementSql(sql.raw(statement)));
   }
-
-  if (target.executeDdl === undefined) {
-    throw new ConfigurationError(
-      "store.materializeRemovals() requires a backend that can execute cleanup statements.",
-      { code: "MATERIALIZE_REMOVALS_BACKEND_UNSUPPORTED" },
-    );
-  }
-  await Promise.all(
-    statements.map((statement) => requireDefined(target.executeDdl)(statement)),
-  );
 }
 
 /**
@@ -652,8 +620,6 @@ async function executeDeleteStatements(
  *
  * Backends without a vector strategy, or schema history that can't be
  * read, yield no cleanup — there is no embedding storage to reclaim.
- * Returned as a single combined promise so the caller can issue it
- * alongside the other disjoint DELETEs.
  */
 async function dropEmbeddingTableStorage(
   ctx: Readonly<{
@@ -667,9 +633,7 @@ async function dropEmbeddingTableStorage(
   if (vectorStrategy === undefined) return;
 
   const executeDdl = target.executeSchemaDdl;
-  const deleteContribution = requireDefined(
-    target.deleteSchemaVectorSlotContribution,
-  );
+  const deleteContribution = target.deleteSchemaVectorSlotContribution;
   const slots = await resolveRemovedKindEmbeddingSlots(target, row);
   for (const slot of slots) {
     await dropVectorSlotStorage(vectorStrategy, executeDdl, slot);
@@ -681,9 +645,10 @@ async function dropEmbeddingTableStorage(
  * Drops a per-field vector slot's storage via the strategy (table + any ANN
  * index it owns), tolerating an already-absent table — a declared field whose
  * per-field table was never materialized (no write, no index build) has nothing
- * to reclaim. Runs as autocommit statements, so swallowing a missing-table
- * failure can't poison a sibling drop. Shared by removed-kind cleanup and
- * removed-field reclamation so both reclaim storage the same way.
+ * to reclaim. The caller supplies the schema transaction's DDL executor so the
+ * storage drop and marker deletion commit or roll back together. Shared by
+ * removed-kind cleanup and removed-field reclamation so both reclaim storage
+ * the same way.
  */
 async function dropVectorSlotStorage(
   strategy: VectorStrategy,
@@ -885,9 +850,7 @@ async function reclaimRemovedVectorFieldTables(
             target.executeSchemaDdl,
             field.slot,
           );
-          await requireDefined(target.deleteSchemaVectorSlotContribution)(
-            field.slot,
-          );
+          await target.deleteSchemaVectorSlotContribution(field.slot);
           return true;
         },
       );
@@ -934,9 +897,9 @@ const reclaimCache = new WeakMap<
   Map<string, readonly ReclaimedVectorFieldEntry[]>
 >();
 
-// `executeDdl` accepts a raw SQL string. The DELETE statements built
-// here are dialect-neutral (no SQLite/Postgres-specific syntax) and
-// use single-quote string literals for graph_id / kind names. Both
+// The DELETE statements built here are dialect-neutral and use no
+// SQLite/Postgres-specific syntax. They use single-quote string literals for
+// graph_id / kind names. Both
 // values come from the schema — never untrusted user input — but we
 // still escape single quotes defensively to avoid surprises if a
 // future kind-name validator narrows beyond `[A-Za-z_][A-Za-z0-9_]*`.

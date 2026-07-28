@@ -10,18 +10,25 @@ your knowledge graph scales with your application.
 
 ## Performance Philosophy
 
-1. **One Query, One Statement**: Every query — including multi-hop traversals — compiles to a
-   single SQL statement. No N+1 queries by design.
+1. **One Fluent Query, One Statement**: Every fluent query — including multi-hop traversals —
+   compiles to a single SQL statement, so its statement count never grows with the size of the
+   graph. This prevents compiler-generated N+1 work inside that query; application code can still
+   create an N+1 by issuing separate reads in a loop. (Compilation, not execution: a query whose
+   selective-field mapping falls back re-runs as a full fetch, costing a second statement. See
+   [Batch reads](#batch-reads).)
 2. **Precomputed Ontology**: Transitive closures, subclass hierarchies, and edge implications are
    computed once at schema initialization, not during every query.
-3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes;
-   `store.batch()` does the same for reads.
+3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes. On the read
+   side that job belongs to the query compiler — `store.batch()` only caps concurrency at one query
+   in flight, it does not reduce round trips and it is not a snapshot.
 4. **Zero-Cost Abstractions**: Type safety and ontological reasoning add no measurable runtime overhead.
 
 ## N+1 Prevention
 
 A common performance problem in ORMs is the N+1 query: you fetch N entities, then issue one
-query per entity to load related data. TypeGraph eliminates this structurally.
+query per entity to load related data. TypeGraph's fluent query compiler eliminates that pattern
+inside one graph-shaped query; it cannot eliminate separate collection reads issued by application
+code.
 
 Every query — regardless of how many traversals it chains — compiles to a **single SQL statement**
 using Common Table Expressions (CTEs). Each traversal step becomes a CTE that joins against the
@@ -74,8 +81,10 @@ This holds for all query types:
 - Aggregations with traversals (CTEs + GROUP BY, 1 statement)
 - [Set operations](/queries/combine) (UNION/INTERSECT/EXCEPT of CTEs, 1 statement)
 
-There is no dataloader or batching layer because there is nothing to batch — the database handles
-the entire join graph in a single execution.
+The fluent query needs no dataloader for that joined read because the database handles its entire
+join graph in one execution. Separate reads can still form an N+1; use a traversal, `subgraph()`, or
+the chunked collection reads described below instead of looping them or wrapping them in
+`store.batch()`.
 
 ## Batch Write Patterns
 
@@ -103,8 +112,9 @@ maintain.
 
 ### PostgreSQL parameter limits
 
-PostgreSQL has a 65,535 bind parameter limit per statement. TypeGraph automatically chunks bulk
-operations to stay within this limit:
+PostgreSQL's protocol can encode 65,535 bind parameters, while TypeGraph uses a portable
+65,533-parameter budget across its bundled drivers. Bulk operations are automatically chunked to
+stay within that budget:
 
 - Node inserts: ~7,200 per chunk (9 params per node)
 - Edge inserts: ~5,400 per chunk (12 params per edge)
@@ -165,15 +175,20 @@ loop if per-call refreshes still dominate.
 
 ### Batch reads
 
-`getByIds()` on node and edge collections uses a single `SELECT ... WHERE id IN (...)` instead of N
-individual queries. Results are returned in input order with `undefined` for missing entries.
+`getByIds()` on node and edge collections uses `SELECT ... WHERE id IN (...)` — one statement per
+bind-limit chunk, so a single statement for id counts under the limit — instead of N individual
+queries. Results are returned in input order with `undefined` for missing entries.
 
 ```typescript
 const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 ```
 
 For multiple independent queries with different shapes and filters, use
-[`store.batch()`](/schemas-stores#batch-query-execution) to execute them over a single connection:
+[`store.batch()`](/schemas-stores#batch-query-execution) to run them in sequence against one target.
+Note the cost: on a transactional backend it still issues at least one statement per query plus
+`begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no
+framing. It buys a connection profile that never peaks at N — not lower latency, and not a snapshot
+(PostgreSQL's default read-committed isolation lets a later query see a newer commit):
 
 ```typescript
 const [activeUsers, recentOrders] = await store.batch(
@@ -188,8 +203,26 @@ const [activeUsers, recentOrders] = await store.batch(
 ```
 
 Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
-participate in `store.batch()`, replacing N individual `findFrom`/`findTo` calls with a single
-transactional round-trip.
+participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
+into one transaction — the statement count is unchanged either way. If the round trips are what
+hurt, replace the calls with a traversal (one statement) or `store.subgraph()` (a fixed 2 on
+SQLite, 3 on PostgreSQL, however large the result).
+
+To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
+[Edge Collections](/schemas-stores#edge-collections)).
+Where `store.batch()` runs N singleton reads over one connection, these widen the endpoint predicate
+itself to `from_id IN (...)` — one set-oriented statement per endpoint kind and bind-budget chunk,
+on the same index prefix seek the singleton read uses — and return the edges grouped per input:
+
+```typescript
+const people = await store.nodes.Person.find({ limit: 50 });
+const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
+// jobsPerPerson[i] holds the worksAt edges of people[i]
+```
+
+This is the fix for the "list view with relationship counts" N+1: statement count grows with
+endpoint kinds and bind-budget chunks instead of with every item on the page. Pass `limitPerInput`
+to bound each endpoint's fan-out.
 
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
@@ -206,8 +239,10 @@ for the ownership matrix and shutdown examples.
 
 ### PostgreSQL pooling
 
-Always use a connection pool in production. TypeGraph issues one SQL statement per query, so pool
-utilization is straightforward — no long-held connections or multi-statement conversations.
+Always use a connection pool in production. An individual query holds a connection only while each
+statement runs. Most queries issue a single statement; a query whose selective-field mapping falls
+back issues a second. `store.transaction()` holds one connection for the whole callback, and
+`store.batch()` does the same for its implicit transaction.
 
 ```typescript
 import { Pool } from "pg";
@@ -224,14 +259,18 @@ pool.on("error", (err) => {
 });
 ```
 
-**Sizing guidance:** Each concurrent query uses one connection for the duration of that single SQL
-statement. A pool of 10–20 connections handles most workloads. If you're running bulk imports in
-parallel, size up accordingly.
+**Sizing guidance:** Each concurrent query holds one connection for as long as its statement runs.
+A pool of 10–20 connections handles most workloads. If you're running bulk imports in parallel,
+size up accordingly.
 
 **Reducing pool pressure with `batch()`:** When loading multiple independent queries (e.g., a
-detail page with several relationship types), `Promise.all` acquires N connections simultaneously.
-[`store.batch()`](/schemas-stores#batch-query-execution) runs all queries over a single connection
-within an implicit transaction, reducing N connections to 1 while guaranteeing snapshot consistency.
+detail page with several relationship types), `Promise.all` can acquire up to N connections
+simultaneously — fewer if the pool is undersized or saturated, in which case it queues instead.
+[`store.batch()`](/schemas-stores#batch-query-execution) keeps at most one query in flight, so peak
+connection use is 1 — on a transactional backend that is literally one checked-out connection for
+the implicit transaction; elsewhere it is one at a time, and whether the adapter reuses the same
+client is its own business. It does not reduce the statement count, and read-committed isolation
+means it is not a snapshot.
 
 ### SQLite concurrency
 
@@ -318,6 +357,13 @@ a workaround.
 The optimization is transparent — if your callback can't be optimized, TypeGraph automatically
 falls back to fetching the full node data.
 
+For data-dependent callbacks, TypeGraph first plans with representative values, including a
+high-value pass that covers common numeric threshold branches. If an unobserved branch accesses an
+additional field at execution time, the first miss may require a second statement that fetches the
+full row. Prepared queries remember that missing-field failure and use the full-row plan directly on
+later executions. Comparisons against arbitrary string values can still take an unobserved branch;
+the high-value pass does not guarantee that every possible callback path is planned in advance.
+
 :::note[Select callback purity]
 Smart select applies to `.execute()`, `.paginate()`, and `.stream()`. The `select()` callback may be evaluated
 multiple times during planning/optimization, so it should be pure (no side effects).
@@ -341,15 +387,19 @@ For application-specific indexes on JSON properties, see [Indexes](/performance/
 ### SQL Compilation
 
 Each builder method (`.where()`, `.limit()`, `.orderBy()`, etc.) returns a new immutable instance.
-`.execute()`/`.toSQL()`/`.compile()` compile fresh SQL from the AST on every call — this applies to
-standard queries, aggregate queries, and set-operation queries (`union`, `intersect`, `except`).
-Compilation is pure, in-memory string-building with no I/O, so recompiling is cheap; the query's
-actual database round-trip dominates the cost either way.
 
-This is deliberate, not just unoptimized: a "current" (live) read binds its temporal-validity filter
-to the instant it's compiled at. Caching compiled SQL across calls would freeze that instant at
-whichever call first triggered compilation, silently hiding any row created afterward from every
-later call on the same query instance.
+A reused query instance compiles **once**. The first `.execute()` builds a cached template and every
+later call reuses it — for standard queries, aggregate queries, set-operation queries (`union`,
+`intersect`, `except`), and prepared queries alike. Explicit `.toSQL()` / `.compile()` calls are the
+exception: they compile on demand every time, because producing the statement is the thing the
+caller asked for.
+
+The subtlety a cache like that has to survive is freshness. A "current" (live) read filters on
+temporal validity as of the instant it runs, so a template with a concrete "now" baked into it would
+freeze that instant for the query instance's whole lifetime, hiding every row created afterward. The
+template therefore reserves the read instant as a **placeholder** rather than a value, and each
+execution fills it with a fresh instant alongside that call's bindings. Nothing in the statement's
+text depends on either, so reuse costs no freshness.
 
 ```typescript
 const activeUsers = store
@@ -358,35 +408,63 @@ const activeUsers = store
   .whereNode("u", (u) => u.status.eq("active"))
   .select((ctx) => ctx.u);
 
-// Each call compiles AST → SQL fresh, so a user created between these two
-// calls is visible to the second one.
+// One compilation, two executions. The read instant is bound per call, so a
+// user created between these two is visible to the second one.
 await activeUsers.execute();
 await activeUsers.execute();
 ```
+
+Two things fall back to compiling on every call:
+
+- **Backends that cannot execute pre-compiled SQL text** — a custom or async backend, i.e. one
+  without `executeRaw`.
+- **Statements whose execution semantics ride on the compiled SQL object rather than its text**,
+  even on PostgreSQL with `executeRaw` fully available. Two query shapes do: **approximate vector
+  search** (`similarTo(..., { approximate: true })`, which carries the pgvector / `sqlite-vec`
+  iterative-scan wrapper) and **`store.subgraph()` on PostgreSQL**, whose id-array fetches are
+  marked to force a custom plan so the planner sizes them against the actual array rather than
+  reusing a generic one. Flattening either to cacheable text would silently drop the behavior it
+  depends on, so they are excluded deliberately — the trade is a template hit against correct
+  execution, and correctness wins.
+
+Compilation is pure, in-memory string-building with no I/O, so both fallbacks are cheap; the query's
+database round-trip dominates either way. Worth knowing if you are profiling a vector query and
+expecting the compile-once behavior described above — that is the one shape where it does not apply.
 
 ### Prepared Queries
 
 For hot paths that execute the same query shape with different values, `.prepare()` builds and
 structurally validates the query AST once — a malformed query fails fast, before the first
-`.execute()`, instead of on first use. The AST itself carries no timestamp, so this validation is
-safe to do once and reuse. SQL text is still compiled fresh on every `.execute(bindings)` call, for
-the same reason as above: the compiled text is what carries the current-read instant, the bound
-parameter values, and the query's structure.
+`.execute()`, instead of on first use — and compiles the statement once into a cached template. Each
+`.execute(bindings)` fills that template's placeholders (a fresh read instant plus the call's own
+parameter values) and runs the cached text directly through `executeRaw`.
 
-When `executeRaw` is available (both SQLite and PostgreSQL backends), the freshly compiled SQL text
-is sent directly to the driver with the bindings substituted in.
+Because arity never reaches the SQL text, a list-valued parameter reuses the same template no matter
+how long the list is:
 
-Best for: validating a query shape once (fail fast on a malformed query) and reusing it with
-different parameter values — not for avoiding SQL compilation cost, which is negligible next to the
-database round-trip.
+```typescript
+const byIds = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.id.in(param("ids")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+await byIds.execute({ ids: ["a", "b", "c"] });
+await byIds.execute({ ids: ["d"] }); // same compiled statement
+```
+
+Best for: validating a query shape once, then reusing it with different parameter values. The saved
+compilation is real but small — the database round-trip still dominates.
 
 See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
 
 ### Subgraph extraction
 
 For the "load entity with all relationships" pattern, [`store.subgraph()`](/schemas-stores#subgraph-extraction)
-is the fastest strategy. It compiles to a single recursive CTE that fans out across all specified
-edge types in one round trip — no matter how many relationship kinds are involved. See
+is the fastest strategy. It compiles to a recursive CTE that fans out across all specified edge
+types in a fixed 2 statements on SQLite and 3 on PostgreSQL — no matter how many relationship kinds
+are involved, or how much it returns. See
 [Choosing a query strategy](/schemas-stores#choosing-a-query-strategy) for guidance on when to use
 `subgraph()` vs the fluent query builder vs manual `findFrom` calls.
 

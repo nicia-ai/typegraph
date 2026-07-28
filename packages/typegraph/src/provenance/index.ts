@@ -32,6 +32,11 @@ import { compareStrings } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { isPlainObject } from "../utils/object";
 
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../backend/types";
+
 const DEFAULT_RETRACTED_FIELD = "retracted";
 const KEY_SEPARATOR = "\u0000";
 

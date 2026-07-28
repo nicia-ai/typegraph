@@ -18,6 +18,7 @@ import type {
   DeleteNodeParams,
   DeleteUniqueParams,
   EdgeExistsBetweenParams,
+  FindEdgesByEndpointSetParams,
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
@@ -42,6 +43,7 @@ import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
   buildCountEdgesByKind,
   buildCountNodesByKind,
+  buildFindEdgesByEndpointSet,
   buildFindEdgesByKind,
   buildFindNodesByKind,
 } from "./collections";
@@ -167,6 +169,16 @@ export type CommonOperationStrategy = Readonly<{
   buildFindNodesByKind: (params: FindNodesByKindParams) => SQL;
   buildCountNodesByKind: (params: CountNodesByKindParams) => SQL;
   buildFindEdgesByKind: (params: FindEdgesByKindParams) => SQL;
+  /**
+   * Interface member rather than an optional one: every dialect must supply
+   * an endpoint-set read, so the operation can never be silently skipped by a
+   * dialect that forgot it. Both bundled dialects get it from the shared
+   * builder.
+   */
+  buildFindEdgesByEndpointSet: (
+    params: FindEdgesByEndpointSetParams,
+    endpointIds: readonly string[],
+  ) => SQL;
   buildCountEdgesByKind: (params: CountEdgesByKindParams) => SQL;
   buildInsertUnique: (params: InsertUniqueParams) => SQL;
   buildInsertUniqueBatch: (entries: readonly InsertUniqueParams[]) => SQL;
@@ -256,6 +268,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildFindNodesByKind,
   buildCountNodesByKind,
   buildFindEdgesByKind,
+  buildFindEdgesByEndpointSet,
   buildCountEdgesByKind,
   buildDeleteUnique,
   buildHardDeleteUniquesByNode,

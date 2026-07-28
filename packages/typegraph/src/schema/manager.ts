@@ -982,7 +982,11 @@ export async function rollbackSchema(
 }
 
 /**
- * Gets the current active schema for a graph.
+ * Gets the current active schema for a graph — the committed document itself,
+ * with the `nodes` / `edges` / `ontology` maps the database actually holds.
+ *
+ * This is the answer to "what kinds does this database already have?". Use
+ * {@link getCommittedSchemaVersion} when only the version number is needed.
  *
  * @param backend - The database backend
  * @param graphId - The graph ID
@@ -1081,6 +1085,9 @@ export async function requiresMigration<G extends GraphDef>(
  * version is used. A version-only backend query would shrink the payload
  * further; it is a backward-compatible follow-up, not required for the
  * round-trip win above.
+ *
+ * Returns only the version; for the document it names, see
+ * {@link getActiveSchema}.
  *
  * @param backend - The database backend
  * @param graphId - The graph ID

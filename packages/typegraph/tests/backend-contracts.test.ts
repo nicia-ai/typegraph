@@ -19,8 +19,12 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type HookContext,
+  type QueryHookContext,
   searchable,
 } from "../src";
+import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
+import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
 import { dumpObservableState } from "./state-snapshot";
 import { createTestBackend } from "./test-utils";
 import {
@@ -319,4 +323,73 @@ describe("hook contract: success is reported only after COMMIT", () => {
       expect(after).toEqual(before);
     });
   }
+});
+
+describe("query hook contract: each submitted statement is observable", () => {
+  it("observes statements executed through store.batch()", async () => {
+    const starts: QueryHookContext[] = [];
+    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
+      hooks: {
+        onQueryStart: (ctx) => {
+          starts.push(ctx);
+        },
+      },
+    });
+    await seedPair(store);
+
+    await store.batch(
+      store
+        .query()
+        .from("Person", "p")
+        .select((ctx) => ctx.p.id),
+      store
+        .query()
+        .from("Person", "p")
+        .select((ctx) => ctx.p.name),
+    );
+
+    expect(starts).toHaveLength(2);
+  });
+
+  it("reports statement failures through onError without firing onQueryEnd", async () => {
+    const backend = createTestBackend();
+    const projected = createGraphBackendProjection(backend);
+    const executeRaw = projected.executeRaw;
+    if (executeRaw === undefined)
+      throw new Error("SQLite must expose executeRaw");
+    const injectedFailure = new Error("injected query failure");
+    let failQueries = false;
+    const failingBackend: GraphBackend = createBackendOverlay(projected, {
+      executeRaw: <T>(sqlText: string, params: readonly unknown[]) =>
+        failQueries ?
+          Promise.reject(injectedFailure)
+        : executeRaw<T>(sqlText, params),
+    });
+    const errors: Readonly<{ ctx: HookContext; error: Error }>[] = [];
+    const ends: QueryHookContext[] = [];
+    const [store] = await createStoreWithSchema(graph, failingBackend, {
+      hooks: {
+        onQueryEnd: (ctx) => {
+          ends.push(ctx);
+        },
+        onError: (ctx, error) => {
+          errors.push({ ctx, error });
+        },
+      },
+    });
+    failQueries = true;
+
+    await expect(
+      store
+        .query()
+        .from("Person", "p")
+        .select((ctx) => ctx.p)
+        .execute(),
+    ).rejects.toBe(injectedFailure);
+
+    expect(ends).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.ctx.graphId).toBe(graph.id);
+    expect(errors[0]?.error).toBe(injectedFailure);
+  });
 });

@@ -26,7 +26,9 @@ import {
   registerAggregateIntegrationTests,
   registerAlgorithmIntegrationTests,
   registerBulkFindByIndexIntegrationTests,
+  registerBulkFindEndpointIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
+  registerContributionDiagnosticIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeOperationIntegrationTests,
@@ -39,10 +41,13 @@ import {
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
   registerProvenanceIntegrationTests,
+  registerQueryHookIntegrationTests,
   registerReconciledSchemaIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
+  registerRemovalMaterializationIntegrationTests,
+  registerSelectiveRetryIntegrationTests,
   registerSetOperationIntegrationTests,
   registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
@@ -156,9 +161,12 @@ export function createIntegrationTestSuite<TNativeTransaction>(
 
     registerAggregateIntegrationTests(context);
     registerBulkFindByIndexIntegrationTests(context);
+    registerBulkFindEndpointIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
+    registerContributionDiagnosticIntegrationTests(context);
     registerPredicateIntegrationTests(context);
     registerProvenanceIntegrationTests(context);
+    registerQueryHookIntegrationTests(context);
     registerOrderingIntegrationTests(context);
     registerLateMaterializationIntegrationTests(context);
     registerTemporalIntegrationTests(context);
@@ -166,8 +174,10 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerMigrateSchemaKindIntegrationTests(context);
     registerReconciledSchemaIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
+    registerRemovalMaterializationIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
+    registerSelectiveRetryIntegrationTests(context);
     registerEdgeOperationIntegrationTests(context);
     registerRecursiveIntegrationTests(context);
     registerPaginationIntegrationTests(context);

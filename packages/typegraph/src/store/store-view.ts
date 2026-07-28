@@ -310,8 +310,8 @@ function createCurrentOnlyRefusal(
 /**
  * Returns a function that refuses a deferred edge batch read
  * ({@link EDGE_BATCH_READ_NAMES}) on a read-only view. These reads are *reads*,
- * not writes, but they resolve through `store.batch(...)` — a DataLoader context
- * a view does not expose — so the view cannot honor them. The refusal is
+ * not writes, but they only resolve through `store.batch(...)`, which a view
+ * does not expose — so the view cannot honor them. The refusal is
  * synchronous because the live method returns a `BatchableQuery` synchronously
  * (it is invoked, not awaited), so a misuse fail-louds at the call site instead
  * of being routed through the write-refusal fallthrough and mislabeled a write.
@@ -325,7 +325,7 @@ function createBatchReadRefusal(
     throw new ConfigurationError(
       `'${method}' is not available on a read-only StoreView (${describeCoordinate(coordinate)}). ` +
         `Batch endpoint reads resolve through store.batch(...), which a view does not expose — ` +
-        `use the live Store's batch loader, or the view's findFrom / findTo / findByEndpoints for single reads.`,
+        `use the live Store's batch(...), or the view's findFrom / findTo / findByEndpoints for single reads.`,
       {
         code: "STORE_VIEW_BATCH_UNAVAILABLE",
         entity,
@@ -514,6 +514,10 @@ function pinnedEdgeCollection(
     count: (filter) => live.count(filter, temporal),
     findFrom: (from) => live.findFrom(from, temporal),
     findTo: (to) => live.findTo(to, temporal),
+    bulkFindFrom: (froms, options) =>
+      live.bulkFindFrom(froms, { ...options, ...temporal }),
+    bulkFindTo: (tos, options) =>
+      live.bulkFindTo(tos, { ...options, ...temporal }),
     findByEndpoints: (from, to, options) =>
       live.findByEndpoints(from, to, options, temporal),
   };

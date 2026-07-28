@@ -217,7 +217,7 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
   });
 
   it("drops the per-field table when the whole KIND is removed (removed-kind path)", async () => {
-    // removeKinds cleanup goes through buildEmbeddingTableCleanup ->
+    // Removed-kind cleanup resolves the prior schema, then calls
     // buildDropStorage (not reclaimedVectorFields, which is for surviving
     // kinds). The kind's per-field storage must be fully dropped.
     const withField = await storeWithMaterializedEmbedding();

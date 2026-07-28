@@ -54,11 +54,13 @@ import {
   isMissingTableError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
+import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   type AdapterBackend,
   type BackendCapabilities,
   type CommitSchemaVersionParams,
+  type ContributionDiagnostic,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
   type CreateVectorIndexParams,
@@ -149,7 +151,10 @@ import {
   type InternalOperationBackend,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
-import { createSqliteOperationStrategy } from "./operations/strategy";
+import {
+  createSqliteOperationStrategy,
+  tableExistsFromRow,
+} from "./operations/strategy";
 import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
 import {
   analyzeImportedTables,
@@ -242,6 +247,8 @@ export type SqliteBatchChunkSizes = Readonly<{
   fulltextUpsertBatchSize: number;
   /** Node ids per fulltext batch delete (2 fixed binds + one per id). */
   fulltextDeleteChunkSize: number;
+  /** Endpoint ids per `findEdgesByKind` `fromIds` / `toIds` statement. */
+  findEdgesEndpointChunkSize: number;
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
@@ -277,6 +284,10 @@ export function computeSqliteBatchChunkSizes(
     edgeInsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / EDGE_INSERT_PARAM_COUNT),
+    ),
+    findEdgesEndpointChunkSize: Math.max(
+      1,
+      maxBindParameters - FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT,
     ),
     getEdgesChunkSize: Math.max(
       1,
@@ -850,25 +861,20 @@ function createSqliteOperationBackend(
     ...commonBackend,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
-    ...(vectorStrategy === undefined ?
-      {}
-    : {
-        async deleteSchemaVectorSlotContribution(
-          slot: VectorSlot,
-        ): Promise<void> {
-          for (const contribution of vectorStrategy.ownedTables(slot)) {
-            await execRun(
-              operationStrategy.buildDeleteContributionMaterialization({
-                graphId: slot.graphId,
-                logicalName: contribution.logicalName,
-                owner: contribution.owner,
-                tableName: contribution.tableName,
-              }),
-            );
-          }
-          contributionMaterializer.evictVectorSlot(slot);
-        },
-      }),
+    async deleteSchemaVectorSlotContribution(slot: VectorSlot): Promise<void> {
+      if (vectorStrategy === undefined) return;
+      for (const contribution of vectorStrategy.ownedTables(slot)) {
+        await execRun(
+          operationStrategy.buildDeleteContributionMaterialization({
+            graphId: slot.graphId,
+            logicalName: contribution.logicalName,
+            owner: contribution.owner,
+            tableName: contribution.tableName,
+          }),
+        );
+      }
+      contributionMaterializer.evictVectorSlot(slot);
+    },
     capabilities,
     dialect: "sqlite",
     tableNames,
@@ -1169,6 +1175,19 @@ export function createSqliteBackend(
       );
   }
 
+  /**
+   * Uncached catalog probe backing `verifyContributions`. The shared
+   * `createCachedTableExistence` wrapper is deliberately NOT used: this
+   * diagnostic's whole job is to notice that a table confirmed present
+   * earlier has since been dropped.
+   */
+  async function contributionTableExists(tableName: string): Promise<boolean> {
+    const rows = await executionAdapter.execute<Record<string, unknown>>(
+      operationStrategy.buildTableExists(tableName),
+    );
+    return tableExistsFromRow(rows[0]);
+  }
+
   const contributionMaterializer = createContributionMaterializer({
     dialect: "sqlite",
     fulltextStrategy,
@@ -1181,6 +1200,7 @@ export function createSqliteBackend(
     getMarkers: getContributionMaterializationRows,
     recordMarker: recordContributionMaterializationRow,
     deleteMarker: deleteContributionMaterializationRow,
+    tableExists: contributionTableExists,
   });
 
   const operations = createSqliteOperationBackend({
@@ -1205,9 +1225,9 @@ export function createSqliteBackend(
    * `db` (as the "sql" path binds the outer connection). Drizzle's own
    * `db.transaction()` here is `ctx.storage.transactionSync` and cannot
    * span an await, so it is deliberately not used. Shared by
-   * `transaction()` (business writes) and `runSchemaWriteTransaction()`
-   * (schema-version commits — data only, never DDL: the #135 invariant
-   * holds because `bootstrapTables` runs outside any transaction).
+   * `transaction()` (business writes) and `runSchemaWriteTransaction()`.
+   * Ordinary schema-version commits are data-only; administrative removal
+   * cleanup may execute transaction-scoped DDL.
    */
   function runDoSqliteStorageTransaction<T>(run: () => Promise<T>): Promise<T> {
     const storage = getDurableObjectStorageClient(db);
@@ -1254,7 +1274,7 @@ export function createSqliteBackend(
   ): Promise<T> {
     if (transactionMode === "none") {
       throwSqliteTransactionsDisabled(
-        "commitSchemaVersion and setActiveVersion require atomic transactions, " +
+        "Schema writes and removal cleanup require atomic transactions, " +
           "but this SQLite backend has transactions disabled. Configure a " +
           "driver that supports transactions (better-sqlite3, libsql, " +
           "bun:sqlite) to use schema commits.",
@@ -1293,9 +1313,9 @@ export function createSqliteBackend(
       // serialized queue (always present — DO is sync) provides the
       // single-writer ordering that "immediate" gives the other paths.
       // Raw txBackend (no `gateFulltext`, unlike the business
-      // `transaction()` do-sqlite branch): schema-version commits are
-      // data-only and never touch fulltext (#135), matching the "sql"
-      // and "drizzle" schema-write branches.
+      // `transaction()` do-sqlite branch). Schema-version commits remain
+      // data-only; administrative removal cleanup may use the target's
+      // transaction-scoped DDL primitive.
       return runDoSqliteStorageTransaction(async () => {
         const txBackend = createTransactionBackend({
           capabilities,
@@ -1541,6 +1561,13 @@ export function createSqliteBackend(
      */
     async ensureFulltextTable(graphId: string): Promise<void> {
       await contributionMaterializer.ensureRuntimeContributions(graphId);
+    },
+
+    async verifyContributions(
+      graphId: string,
+      vectorSlots: readonly VectorSlot[],
+    ): Promise<readonly ContributionDiagnostic[]> {
+      return contributionMaterializer.verifyContributions(graphId, vectorSlots);
     },
 
     // Vector counterparts of the runtime-contribution methods. Present

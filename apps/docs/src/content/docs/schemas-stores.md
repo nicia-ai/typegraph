@@ -695,8 +695,10 @@ write surfaces that mint or claim ids.
 
 #### `getByIds(ids)`
 
-Retrieves multiple nodes by ID in a single query. Returns results in input order,
-with `undefined` for missing IDs.
+Retrieves multiple nodes by ID, returning results in input order with `undefined`
+for missing IDs. Costs one statement per bind-limit chunk where the backend
+exposes a batch read; where it does not, it falls back to one lookup per distinct
+id, issued concurrently.
 
 ```typescript
 store.nodes.Person.getByIds(
@@ -705,8 +707,10 @@ store.nodes.Person.getByIds(
 ): Promise<readonly (Node<Person> | undefined)[]>;
 ```
 
-When the backend supports batch lookups (`getNodes`), this executes a single
-`SELECT ... WHERE id IN (...)` query. Otherwise it falls back to sequential lookups.
+When the backend supports batch lookups (`getNodes`), this executes
+`SELECT ... WHERE id IN (...)` once per bind-limit chunk — a single statement for
+id counts under the limit. Otherwise it falls back to one lookup per distinct id,
+issued concurrently rather than sequentially.
 
 ```typescript
 const [alice, bob, unknown] = await store.nodes.Person.getByIds([
@@ -1126,8 +1130,10 @@ Edge write APIs that mint ids still accept plain strings.
 
 #### `getByIds(ids)`
 
-Retrieves multiple edges by ID in a single query. Returns results in input order,
-with `undefined` for missing IDs.
+Retrieves multiple edges by ID, returning results in input order with `undefined`
+for missing IDs. Costs one statement per bind-limit chunk where the backend
+exposes a batch read (`getEdges`); where it does not, it falls back to one lookup
+per distinct id, issued concurrently.
 
 ```typescript
 store.edges.worksAt.getByIds(
@@ -1178,12 +1184,53 @@ store.edges.worksAt.findTo(
 ): Promise<Edge<worksAt>[]>;
 ```
 
+#### `bulkFindFrom(froms, options?)` / `bulkFindTo(tos, options?)`
+
+Finds the edges of a **set** of endpoints in one read. This is `findFrom` /
+`findTo` with the endpoint predicate widened from `from_id = ?` to
+`from_id IN (...)` — the same index prefix seek, the same temporal model, the
+same per-endpoint ordering — so a page of N nodes costs one statement per
+endpoint kind and bind-budget chunk instead of N singleton statements.
+
+Results are grouped per input: index `i` of the returned array holds the edges
+of `froms[i]`, an endpoint with no edges gets an empty array, and repeated
+inputs each get their own copy. Pass `limitPerInput` to bound each endpoint's
+fan-out; it keeps the leading edges of that endpoint's `findFrom` order. Large
+inputs are transparently split across statements to respect the backend's
+bound-parameter budget.
+
+Requires a backend that implements the `findEdgesByEndpointSet` operation —
+both bundled Drizzle backends do. On a custom backend without it, these
+methods throw a `ConfigurationError` instead of falling back to one
+`findFrom` per input: a caller reaching for a bulk read is asking for a
+set-oriented read, so quietly issuing N singleton statements would be the cost
+surprise the method exists to remove. Loop over `findFrom` / `findTo` yourself
+if that trade is fine.
+
+```typescript
+store.edges.worksAt.bulkFindFrom(
+  froms: readonly NodeRef<Person>[],
+  options?: { temporalMode?: TemporalMode; asOf?: string; limitPerInput?: number }
+): Promise<readonly Edge<worksAt>[][]>;
+```
+
+```typescript
+const people = await store.nodes.Person.find({ limit: 50 });
+const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
+// jobsPerPerson[i] holds the worksAt edges of people[i]
+```
+
 #### `batchFindFrom(from, options?)` / `batchFindTo(to, options?)` / `batchFindByEndpoints(from, to, options?)`
 
 Deferred variants of `findFrom`, `findTo`, and `findByEndpoints` for use with
 [`store.batch()`](#batch-query-execution). These return a `BatchableQuery` instead of
 executing immediately. `batchFindFrom` / `batchFindTo` accept the same temporal
 `options` as `findFrom` / `findTo`.
+
+Batching them does not merge the reads — each still costs its own statement, and they share a
+connection only when the backend supports transactions. It is not a snapshot: PostgreSQL's default
+read-committed isolation lets a later read observe a commit the earlier ones did not. To read edges
+for many sources in one statement, traverse from them in a single query.
 
 ```typescript
 store.edges.worksAt.batchFindFrom(
@@ -1202,7 +1249,7 @@ store.edges.worksAt.batchFindByEndpoints(
 ```
 
 ```typescript
-// Execute multiple edge lookups over a single connection
+// Execute multiple edge lookups in sequence — one statement each
 const [skills, employer] = await store.batch(
   store.edges.hasSkill.batchFindFrom(alice),
   store.edges.worksAt.batchFindFrom(alice),
@@ -1610,13 +1657,46 @@ const person = await store.nodes.Person.create({ name: "Alice" });
 
 #### `store.batch(...queries)`
 
-Executes multiple independent queries over a single connection with snapshot consistency.
-Accepts two or more queries (from `.select()`, set operations, or edge collection `batchFind*` methods)
-and returns a typed tuple of results preserving input order.
+Runs several independent queries in sequence and returns a typed tuple of results preserving input
+order — N query executions, never one round trip. Accepts two or more queries (from `.select()`,
+set operations, or edge collection `batchFind*` methods), each keeping its own projection,
+filtering, sorting, and pagination.
 
-All queries run within an implicit transaction — they see the same database snapshot.
-This avoids connection pool pressure from `Promise.all` patterns (N connections → 1) while
-giving each query independent projection, filtering, sorting, and pagination.
+**Cost.** At least one statement per query, sometimes two: a query whose selective-field mapping
+falls back re-runs as a full fetch, and that fallback is detected *after* the selective statement
+has already executed. It clears the fast path, so a reused query instance pays the double only
+once — but the builder is immutable, so a query rebuilt per request pays it every request.
+
+With `backend.capabilities.transactions` the queries share one transaction; how that reaches the
+wire is the adapter's business. A SQL backend frames them with `begin`/`commit`, putting a networked
+one at N+2 round trips **at best**, while Durable Objects use an ambient storage transaction with no
+framing statements. Without transactions there is no framing. Connection reuse is a separate
+question from transaction support: the no-transaction path passes the same backend object, so an
+adapter may reuse one client there too (see [Limitations](/limitations)). The portable guarantee is
+only that at most one query is in flight at a time.
+
+**Not a snapshot — and there is no way to make it one.** PostgreSQL defaults to read-committed
+isolation, so a later query in the batch can observe a commit the earlier ones did not.
+`store.transaction()` takes an `isolationLevel`, but its context exposes only `nodes` / `edges`:
+there is no public way to run a fluent query or a batch inside a transaction, so a snapshot across
+fluent queries is **not available today**. Collection reads can have one —
+`store.transaction(fn, { isolationLevel: "repeatable_read" })` reading through `tx.nodes` /
+`tx.edges` — but only where the backend has transactions (others ignore the option entirely), and a
+history-enabled store on PostgreSQL additionally requires `accessMode: "read_only"` or the call
+throws.
+
+**Will not fix an N+1.** Serializing N queries does not reduce their number. The alternatives are
+set-oriented or chunked rather than fixed-cost: `.traverse()` compiles a whole chain to one
+statement; [`store.subgraph()`](#subgraph-extraction) costs 2 statements on SQLite and 3 on
+PostgreSQL however large the result; `getByIds()` issues one statement per bind-limit chunk,
+falling back to one per distinct id where the backend exposes no batch read; `bulkFindByIndex()`
+costs one probe plus that same chunked hydration.
+
+**Versus `Promise.all`.** Workload- and adapter-dependent in both directions. `Promise.all`
+overlaps its queries against a pool with idle capacity, but it does not necessarily hold N
+connections, and against a single client or a saturated pool it queues. `batch()` keeps at most one
+query in flight, so it pays the sum of their latencies — but it can still come out ahead where
+connection acquisition dominates. Measure rather than assume.
 
 ```typescript
 store.batch<R1, R2, ...Rn>(
@@ -1720,6 +1800,7 @@ const [skills, employer, colleague] = await store.batch(
 |---------|-----|
 | Multiple queries with different shapes/filters | `store.batch()` |
 | Load entity with all relationships (uniform) | `store.subgraph()` |
+| Fixing an N+1 / reducing round trips | `.traverse()` (one statement), `store.subgraph()` (2–3), `getByIds()` (chunked) — not `batch()` |
 | Single query | `.execute()` directly |
 | Writes interleaved with reads | `store.transaction()` |
 | Same-shape queries merged into one result | `.union()` / `.intersect()` / `.except()` |
@@ -1737,8 +1818,10 @@ Extracts a typed subgraph by performing a BFS traversal from a root node, follow
 the specified edge kinds. Returns an indexed result with adjacency maps for immediate
 traversal.
 
-Under the hood, this compiles to a single `WITH RECURSIVE` CTE — the traversal,
-filtering, and hydration all happen in the database.
+Under the hood the traversal is a `WITH RECURSIVE` CTE and all the filtering and
+hydration happen in the database. The cost is a fixed 2 statements on SQLite
+(nodes, edges — each embedding the CTE) and 3 on PostgreSQL (the closure ids
+once, then nodes and edges), independent of how much it returns.
 
 ```typescript
 store.subgraph<EK, NK>(
@@ -1923,23 +2006,24 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 
 | Pattern | Best strategy | Why |
 |---------|--------------|-----|
-| Load entity with all relationships | `subgraph(maxDepth: 1)` | Single SQL round trip — fans out across all edge types in one recursive CTE |
-| Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop in one query |
-| Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes |
-| Multiple independent queries with per-query control | `store.batch()` | Single connection, snapshot consistency, typed tuple results |
+| Load entity with all relationships | `subgraph(maxDepth: 1)` | Fixed 2 SQLite / 3 PostgreSQL statements — recursive traversal cost does not grow with edge count |
+| Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop without extra round trips per hop |
+| Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes, in one statement |
+| Multiple independent queries with per-query control | `store.batch()` | Typed tuple results, at most one query in flight — still at least a statement per query, and not a snapshot |
 | Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed; honors the graph's temporal mode by default |
 | Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit; pass `temporalMode` / `asOf` when reading history |
 | Shortest path, reachability, neighborhoods, degree | `store.algorithms.*` | Set-based BFS frontier or a single `COUNT` — see [Graph Algorithms](/graph-algorithms) |
 
-**Key insight:** `subgraph()` issues a single SQL statement regardless of how many edge types it
-traverses. Parallel `findFrom` calls scale linearly in round trips — one per edge type, plus
+**Key insight:** `subgraph()` costs a fixed number of statements — 2 on SQLite (nodes, edges) and 3
+on PostgreSQL (closure ids, then nodes and edges) — regardless of how many edge types it traverses
+or how much it returns. Parallel `findFrom` calls scale linearly instead: one per edge type, plus
 additional queries for node resolution. The gap widens as relationship count grows.
 
 For the common "load an entity and everything it touches" pattern (detail pages, config hydration,
 template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach. When you need
 per-query filtering, sorting, or pagination across multiple independent queries, use
-[`store.batch()`](#batch-query-execution) to run them over a single connection with snapshot
-consistency. Reserve individual fluent queries for one-off operations.
+[`store.batch()`](#batch-query-execution) — but note it still costs at least a statement per query, so it
+does not narrow this gap. Reserve individual fluent queries for one-off operations.
 
 ### Graph Algorithms
 
@@ -2015,7 +2099,8 @@ const results = await store
 
 #### `store.batch(...queries)`
 
-Execute multiple queries over a single connection. See [Batch Query Execution](#batch-query-execution).
+Run several queries in sequence — at least a statement each, never one round trip. See
+[Batch Query Execution](#batch-query-execution).
 
 ### Dynamic Collection Access
 
@@ -2245,7 +2330,7 @@ coordinate:
 | Surface | Behavior |
 | --- | --- |
 | `view.nodes` / `view.edges`: `getById`, `getByIds`, `find`, `count` | pinned |
-| `view.edges`: `findFrom`, `findTo`, `findByEndpoints` | pinned |
+| `view.edges`: `findFrom`, `findTo`, `bulkFindFrom`, `bulkFindTo`, `findByEndpoints` | pinned |
 | `view.query()` | a pinned query builder with a **sealed** temporal axis — `.temporal(...)` throws |
 | `view.subgraph(rootId, options)` | pinned |
 | `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree` | pinned |
@@ -2346,6 +2431,10 @@ handle. See
 ## Observability Hooks
 
 TypeGraph supports observability hooks for monitoring and logging store operations.
+Query hooks describe SQL statements submitted by the query builder, not logical
+query-builder calls or backend-internal setup statements. A logical query that retries
+with a different projection therefore fires the query hooks once for each statement it
+submits.
 
 ### `StoreHooks`
 
@@ -2418,11 +2507,13 @@ const hooks: StoreHooks = {
 
 const store = createStore(graph, backend, { hooks });
 
-// Operations now trigger hooks
+// CRUD operations trigger operation hooks; query-builder statements trigger
+// query hooks.
 await store.nodes.Person.create({ name: "Alice" });
-// Logs:
+await store.query().from("Person", "p").select((ctx) => ctx.p).execute();
+// Logs include:
 // [op-abc123] create node:Person
-// [op-abc123] SQL: INSERT INTO ...
-// [op-abc123] 1 rows in 2ms
 // [op-abc123] Completed in 5ms
+// [query-def456] SQL: WITH ... SELECT ...
+// [query-def456] 1 rows in 2ms
 ```

@@ -95,6 +95,20 @@ type CompiledStatementSql = IntentSql<"statement">;
 // @public (undocumented)
 type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
+// @public
+export type ContributionDiagnostic = Readonly<{
+    owner: string;
+    logicalName: string;
+    physicalName: string;
+    kind?: string;
+    fieldPath?: string;
+    state: ContributionDiagnosticState;
+    lastError?: string;
+}>;
+
+// @public
+export type ContributionDiagnosticState = "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
+
 // @public (undocumented)
 type ContributionMaterializationBackend = Pick<GraphBackend, "ensureContributionMaterializationsTable" | "getContributionMaterialization" | "recordContributionMaterialization" | "assertRuntimeContributionsInitialized" | "ensureRuntimeContributions" | "ensureFulltextTable">;
 
@@ -2272,8 +2286,11 @@ type DropVectorIndexParams = Readonly<{
     fieldPath: string;
 }>;
 
+// @public
+type EdgeEndpointSide = "from" | "to";
+
 // @public (undocumented)
-type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "countEdgesByKind">;
+type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -2724,6 +2741,19 @@ type FilteredApproximateSearch = Readonly<{
 type FilteredApproximateSearchMode = "filter-pushdown" | "iterative-scan" | "post-filter";
 
 // @public
+type FindEdgesByEndpointSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    side: EdgeEndpointSide;
+    endpointKind: string;
+    endpointIds: readonly string[];
+    limitPerEndpoint?: number;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
+}>;
+
+// @public
 type FindEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -2867,6 +2897,7 @@ type GraphBackend = Readonly<{
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
+    findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
     insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
@@ -2878,8 +2909,10 @@ type GraphBackend = Readonly<{
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
+        executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+        tableExists: (this: void, tableName: string) => Promise<boolean>;
         executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
-        deleteSchemaVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
+        deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
     }>) => Promise<T>) => Promise<T>;
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
@@ -2921,6 +2954,7 @@ type GraphBackend = Readonly<{
     assertVectorSlotInitialized?: (this: void, slot: VectorSlot) => Promise<void>;
     assertVectorSlotsInitialized?: (this: void, slots: readonly VectorSlot[]) => Promise<void>;
     deleteVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
+    verifyContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionDiagnostic[]>;
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;

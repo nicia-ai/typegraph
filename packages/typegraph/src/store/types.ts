@@ -222,11 +222,15 @@ export type HookContext = Readonly<{
 }>;
 
 /**
- * Query hook context with SQL information.
+ * Context for one SQL statement a query builder submits to the backend.
+ *
+ * A single logical query can emit more than one context, for example when a
+ * selective projection falls back to a full-row fetch. Backend-internal setup
+ * statements are not exposed as separate query-hook events.
  */
 export type QueryHookContext = HookContext &
   Readonly<{
-    /** The SQL query being executed */
+    /** The SQL statement being executed */
     sql: string;
     /** Query parameters */
     params: readonly unknown[];
@@ -272,9 +276,9 @@ export type OperationHookContext = HookContext &
  * ```
  */
 export type StoreHooks = Readonly<{
-  /** Called before a query is executed */
+  /** Called before each query-builder statement is submitted to the backend. */
   onQueryStart?: (ctx: QueryHookContext) => void;
-  /** Called after a query completes successfully */
+  /** Called after each submitted query-builder statement succeeds. */
   onQueryEnd?: (
     ctx: QueryHookContext,
     result: Readonly<{ rowCount: number; durationMs: number }>,
@@ -580,6 +584,28 @@ export type NodeBulkFindByIndexOptions = Readonly<{
    */
   limitPerInput?: number;
 }>;
+
+/**
+ * Per-endpoint fan-out cap shared by the live and view forms of the edge
+ * bulk endpoint reads.
+ */
+export type EdgeBulkFindOptions = Readonly<{
+  /**
+   * Maximum number of edges returned for each input endpoint. When omitted,
+   * every input's edge set is unbounded. Must be a positive integer.
+   *
+   * The cap keeps each input's leading edges under the same ordering
+   * `findFrom` / `findTo` return, so it bounds fan-out without reordering
+   * anything.
+   */
+  limitPerInput?: number;
+}>;
+
+/**
+ * Options for the edge bulk endpoint reads: the temporal coordinate every
+ * edge read accepts, plus the per-endpoint fan-out cap.
+ */
+export type EdgeBulkFindEndpointOptions = QueryOptions & EdgeBulkFindOptions;
 
 /**
  * Result of an edge getOrCreateByEndpoints operation.
@@ -1018,10 +1044,57 @@ export type EdgeCollection<
   ) => Promise<Edge<E, From, To>[]>;
 
   /**
+   * Find the edges from a SET of source nodes in one read.
+   *
+   * `findFrom` with a widened endpoint predicate and nothing else: the same
+   * temporal model, the same soft-delete filtering, and the same per-source
+   * ordering — but `from_id IN (...)` instead of `from_id = ?`, so a page of
+   * N sources costs one statement per distinct source kind and bind-budget
+   * chunk rather than N singleton statements.
+   *
+   * Results are grouped per input: the outer array is parallel to `froms`
+   * (index `i` holds the edges of `froms[i]`), and repeated inputs each get
+   * their own copy of the same edge set. Empty input returns `[]`; a source
+   * with no edges gets an empty array. Large inputs are split across
+   * statements to respect the backend's bound-parameter budget, which is
+   * invisible in the result.
+   *
+   * Requires a backend implementing `findEdgesByEndpointSet` — both bundled
+   * Drizzle backends do. On one that does not, this **refuses** with a
+   * `ConfigurationError` rather than looping `findFrom` per input: asking for
+   * a bulk read is asking for set-oriented statements, and silently issuing N
+   * singleton statements is the cost surprise the method exists to remove.
+   *
+   * @param froms - Source nodes to read the edges of
+   * @param options - Temporal coordinate plus optional `limitPerInput`
+   * @throws {ConfigurationError} when the backend cannot read an endpoint set
+   */
+  bulkFindFrom: (
+    froms: readonly NodeRef<From>[],
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly Edge<E, From, To>[][]>;
+
+  /**
+   * Find the edges into a SET of target nodes in one read.
+   *
+   * Mirrors {@link EdgeCollection.bulkFindFrom} on the `to` endpoint.
+   */
+  bulkFindTo: (
+    tos: readonly NodeRef<To>[],
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly Edge<E, From, To>[][]>;
+
+  /**
    * Deferred variant of `findFrom` for use with `store.batch()`.
    *
    * Returns a `BatchableQuery` instead of executing immediately. Accepts
    * the same temporal `options` as {@link EdgeCollection.findFrom}.
+   *
+   * Batching these still issues one statement per call — it does not merge
+   * the reads, and whether they share a connection is up to the adapter. It
+   * is not a snapshot: PostgreSQL's default read-committed isolation lets a
+   * later read observe a commit the earlier ones did not. To read edges for
+   * many sources in one statement, traverse from them in a single query.
    */
   batchFindFrom: (
     from: NodeRef<From>,
@@ -1032,7 +1105,8 @@ export type EdgeCollection<
    * Deferred variant of `findTo` for use with `store.batch()`.
    *
    * Returns a `BatchableQuery` instead of executing immediately. Accepts
-   * the same temporal `options` as {@link EdgeCollection.findTo}.
+   * the same temporal `options` as {@link EdgeCollection.findTo}. Costs one
+   * statement per call, like {@link EdgeCollection.batchFindFrom}.
    */
   batchFindTo: (
     to: NodeRef<To>,
@@ -1043,7 +1117,8 @@ export type EdgeCollection<
    * Deferred variant of `findByEndpoints` for use with `store.batch()`.
    *
    * Returns a `BatchableQuery` that yields a 0-or-1 element array
-   * (matching `findByEndpoints`' at-most-one semantics).
+   * (matching `findByEndpoints`' at-most-one semantics). Costs one statement
+   * per call, like {@link EdgeCollection.batchFindFrom}.
    */
   batchFindByEndpoints: (
     from: NodeRef<From>,
@@ -1408,6 +1483,18 @@ export type StoreViewEdgeCollection<
 
   /** Find edges to a specific node at the view's pinned coordinate. */
   findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
+
+  /** Find the edges from a set of source nodes at the view's pinned coordinate. */
+  bulkFindFrom: (
+    froms: readonly NodeRef<From>[],
+    options?: EdgeBulkFindOptions,
+  ) => Promise<readonly Edge<E, From, To>[][]>;
+
+  /** Find the edges into a set of target nodes at the view's pinned coordinate. */
+  bulkFindTo: (
+    tos: readonly NodeRef<To>[],
+    options?: EdgeBulkFindOptions,
+  ) => Promise<readonly Edge<E, From, To>[][]>;
 
   /** Find the edge between two endpoints at the view's pinned coordinate. */
   findByEndpoints: (

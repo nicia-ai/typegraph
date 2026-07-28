@@ -112,8 +112,8 @@ type BaseFieldAccessor = Readonly<{
     neq: (value: unknown) => Predicate;
     isNull: () => Predicate;
     isNotNull: () => Predicate;
-    in: (values: readonly unknown[]) => Predicate;
-    notIn: (values: readonly unknown[]) => Predicate;
+    in: (values: readonly unknown[] | ParameterRef) => Predicate;
+    notIn: (values: readonly unknown[] | ParameterRef) => Predicate;
 }>;
 
 // @public
@@ -254,14 +254,28 @@ export type ConflictStrategy = z.infer<typeof ConflictStrategySchema>;
 // @public
 export const ConflictStrategySchema: z.ZodEnum<{
     error: "error";
-    skip: "skip";
     update: "update";
+    skip: "skip";
 }>;
 
 // @public
 type ConstraintNames<R extends NodeRegistration> = "unique" extends keyof R ? R["unique"] extends readonly {
     readonly name: infer N;
 }[] ? N & string : string : never;
+
+// @public
+export type ContributionDiagnostic = Readonly<{
+    owner: string;
+    logicalName: string;
+    physicalName: string;
+    kind?: string;
+    fieldPath?: string;
+    state: ContributionDiagnosticState;
+    lastError?: string;
+}>;
+
+// @public
+export type ContributionDiagnosticState = "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
 
 // @public (undocumented)
 type ContributionMaterializationBackend = Pick<GraphBackend, "ensureContributionMaterializationsTable" | "getContributionMaterialization" | "recordContributionMaterialization" | "assertRuntimeContributionsInitialized" | "ensureRuntimeContributions" | "ensureFulltextTable">;
@@ -567,6 +581,14 @@ type EdgeAlias<E extends AnyEdgeType = EdgeType, Optional extends boolean = fals
 type EdgeAliasMap = Readonly<Record<string, EdgeAlias<EdgeType, boolean>>>;
 
 // @public
+type EdgeBulkFindEndpointOptions = QueryOptions & EdgeBulkFindOptions;
+
+// @public
+type EdgeBulkFindOptions = Readonly<{
+    limitPerInput?: number;
+}>;
+
+// @public
 type EdgeChange = Readonly<{
     type: ChangeType;
     kind: string;
@@ -586,6 +608,8 @@ type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To 
     }>) => Promise<Edge<E, From, To>>;
     findFrom: (from: NodeRef<From>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
+    bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
+    bulkFindTo: (tos: readonly NodeRef<To>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
     batchFindFrom: (from: NodeRef<From>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindTo: (to: NodeRef<To>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, options?: EdgeFindByEndpointsOptions<E>, temporal?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
@@ -650,8 +674,11 @@ type EdgeCreateOptions = Readonly<{
     validTo?: string;
 }>;
 
+// @public
+type EdgeEndpointSide = "from" | "to";
+
 // @public (undocumented)
-type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "countEdgesByKind">;
+type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -1097,6 +1124,19 @@ type FilteredApproximateSearch = Readonly<{
 type FilteredApproximateSearchMode = "filter-pushdown" | "iterative-scan" | "post-filter";
 
 // @public
+type FindEdgesByEndpointSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    side: EdgeEndpointSide;
+    endpointKind: string;
+    endpointIds: readonly string[];
+    limitPerEndpoint?: number;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
+}>;
+
+// @public
 type FindEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -1291,6 +1331,7 @@ type GraphBackend = Readonly<{
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
+    findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
     insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
@@ -1302,8 +1343,10 @@ type GraphBackend = Readonly<{
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
+        executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+        tableExists: (this: void, tableName: string) => Promise<boolean>;
         executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
-        deleteSchemaVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
+        deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
     }>) => Promise<T>) => Promise<T>;
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
@@ -1345,6 +1388,7 @@ type GraphBackend = Readonly<{
     assertVectorSlotInitialized?: (this: void, slot: VectorSlot) => Promise<void>;
     assertVectorSlotsInitialized?: (this: void, slots: readonly VectorSlot[]) => Promise<void>;
     deleteVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
+    verifyContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionDiagnostic[]>;
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
@@ -1686,12 +1730,12 @@ export type ImportOptions = z.input<typeof ImportOptionsSchema>;
 export const ImportOptionsSchema: z.ZodObject<{
     onConflict: z.ZodEnum<{
         error: "error";
-        skip: "skip";
         update: "update";
+        skip: "skip";
     }>;
     onUnknownProperty: z.ZodDefault<z.ZodEnum<{
-        error: "error";
         allow: "allow";
+        error: "error";
         strip: "strip";
     }>>;
     validateReferences: z.ZodDefault<z.ZodBoolean>;
@@ -3482,6 +3526,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     materializeIndexes: (options?: MaterializeIndexesOptions) => Promise<MaterializeIndexesResult>;
     materializeSystemIndexes: (options?: MaterializeSystemIndexesOptions) => Promise<MaterializeIndexesResult>;
     reembedVectorField: (kind: string, fieldPath: string, options?: ReembedVectorFieldOptions) => Promise<ReembedVectorFieldResult>;
+    verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
     materializeRemovals: (options?: MaterializeRemovalsOptions) => Promise<MaterializeRemovalsResult>;
     close: () => Promise<void>;
 }>;
@@ -3591,6 +3636,8 @@ type StoreViewEdgeCollection<E extends AnyEdgeType, From extends NodeType = Node
     }>) => Promise<number>;
     findFrom: (from: NodeRef<From>) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
+    bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindOptions) => Promise<readonly Edge<E, From, To>[][]>;
+    bulkFindTo: (tos: readonly NodeRef<To>[], options?: EdgeBulkFindOptions) => Promise<readonly Edge<E, From, To>[][]>;
     findByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, options?: EdgeFindByEndpointsOptions<E>) => Promise<Edge<E, From, To> | undefined>;
 }>;
 
@@ -4017,8 +4064,8 @@ export type UnknownPropertyStrategy = z.infer<typeof UnknownPropertyStrategySche
 
 // @public
 export const UnknownPropertyStrategySchema: z.ZodEnum<{
-    error: "error";
     allow: "allow";
+    error: "error";
     strip: "strip";
 }>;
 

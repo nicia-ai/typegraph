@@ -140,51 +140,6 @@ describe("removed-then-re-added kinds", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("rechecks liveness after acquiring the schema-write lock", async () => {
-    const base = createTestBackend();
-    let beforeNextSchemaWrite: (() => Promise<void>) | undefined;
-    const backend: GraphBackend = {
-      ...base,
-      async schemaWriteTransaction(graphId, fn) {
-        const beforeSchemaWrite = beforeNextSchemaWrite;
-        beforeNextSchemaWrite = undefined;
-        await beforeSchemaWrite?.();
-        return requireDefined(base.schemaWriteTransaction)(graphId, fn);
-      },
-    };
-    const [store] = await createStoreWithSchema(baseGraph, backend);
-    const evolved = await store.evolve(widgetExtension);
-    await evolved.getNodeCollectionOrThrow("Widget").create({ label: "old" });
-    const removed = await evolved.removeKinds(["Widget"]);
-
-    // Re-add immediately before materialization acquires its schema lock. The
-    // earlier candidate scan saw Widget as removed; only the in-lock read can
-    // prevent the unconditional kind-keyed DELETE from erasing this live
-    // incarnation.
-    beforeNextSchemaWrite = async () => {
-      const activeVersion = requireDefined(
-        await base.getActiveSchema(baseGraph.id),
-        "active schema",
-      ).version;
-      await commitWithoutQueueing(base, evolved.graph, activeVersion);
-    };
-
-    const result = await removed.materializeRemovals();
-    const widgetEntry = result.results.find((entry) => entry.kind === "Widget");
-    expect(widgetEntry).toMatchObject({
-      entity: "node",
-      status: "skipped",
-      reason: "kind-is-live",
-    });
-    expect(
-      await base.countNodesByKind({
-        graphId: baseGraph.id,
-        kind: "Widget",
-        excludeDeleted: false,
-      }),
-    ).toBe(1);
-  });
-
   it("still cleans up a kind that stays removed", async () => {
     // The guard must not disable legitimate cleanup.
     const backend = createTestBackend();

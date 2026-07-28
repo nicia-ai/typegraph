@@ -42,8 +42,9 @@ post rows with 4KB bodies.**
 
 - **Inverse-edge traversal** (`expand: "inverse"`): TypeGraph ontology
   feature without a direct Cypher analogue.
-- **Subgraph extraction** (`store.subgraph()`): TypeGraph's single-recursive-CTE
-  fan-out doesn't map cleanly to Cypher and would need a careful
+- **Subgraph extraction** (`store.subgraph()`): TypeGraph's recursive-CTE
+  fan-out uses two statements on this SQLite harness and doesn't map cleanly
+  to Cypher, so it would need a careful
   port; left out of the v1 harness.
 - **Write-path throughput**: seeding times are printed but the benchmark
   doesn't stress bulk writes under contention.

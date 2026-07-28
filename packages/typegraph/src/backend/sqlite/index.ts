@@ -32,6 +32,10 @@ export {
   type SqliteTransactionMode,
   tables,
 } from "../drizzle/sqlite";
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../types";
 
 // Schema: table definitions and factory options
 export {

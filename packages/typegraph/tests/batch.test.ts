@@ -1,9 +1,10 @@
 /**
- * Tests for store.batch() — pipelined query execution.
+ * Tests for store.batch() — several queries run in sequence against one
+ * target. Not pipelined: at least one statement per query, and two when a
+ * query's selective-field mapping falls back after its statement has run.
  *
- * Verifies that multiple queries execute over a single connection
- * with typed tuple results, snapshot consistency, and correct
- * handling of projections, ordering, limits, and errors.
+ * Verifies typed tuple results and correct handling of projections,
+ * ordering, limits, and errors.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";

@@ -72,6 +72,7 @@ import {
   isInsufficientResourcesError,
   isMissingTableError,
 } from "../../utils/sql-errors";
+import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   coerceNumericScore,
@@ -87,6 +88,7 @@ import {
   type BackendCapabilities,
   type ClaimIndexMaterializationParams,
   type CommitSchemaVersionParams,
+  type ContributionDiagnostic,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
   createBackendOverlay,
@@ -166,6 +168,7 @@ import { mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
+  tableExistsFromRow,
 } from "./operations/strategy";
 import {
   type PostgresTables,
@@ -279,6 +282,7 @@ type PostgresBatchChunkSizes = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
   embeddingUpsertBatchSize: number;
+  findEdgesEndpointChunkSize: number;
   fulltextDeleteChunkSize: number;
   fulltextUpsertBatchSize: number;
   getEdgesChunkSize: number;
@@ -302,6 +306,10 @@ function computePostgresBatchChunkSizes(
     embeddingUpsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / EMBEDDING_UPSERT_PARAM_COUNT),
+    ),
+    findEdgesEndpointChunkSize: Math.max(
+      1,
+      maxBindParameters - FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT,
     ),
     fulltextDeleteChunkSize: Math.max(
       1,
@@ -584,6 +592,19 @@ export function createPostgresBackend(
       );
   }
 
+  /**
+   * Uncached catalog probe backing `verifyContributions`. The shared
+   * `createCachedTableExistence` wrapper is deliberately NOT used: this
+   * diagnostic's whole job is to notice that a table confirmed present
+   * earlier has since been dropped.
+   */
+  async function contributionTableExists(tableName: string): Promise<boolean> {
+    const rows = await executionAdapter.execute<Record<string, unknown>>(
+      operationStrategy.buildTableExists(tableName),
+    );
+    return tableExistsFromRow(rows[0]);
+  }
+
   const contributionMaterializer = createContributionMaterializer({
     dialect: "postgres",
     fulltextStrategy,
@@ -596,6 +617,7 @@ export function createPostgresBackend(
     getMarkers: getContributionMaterializationRows,
     recordMarker: recordContributionMaterializationRow,
     deleteMarker: deleteContributionMaterializationRow,
+    tableExists: contributionTableExists,
   });
 
   const operations = createPostgresOperationBackend({
@@ -629,7 +651,7 @@ export function createPostgresBackend(
   ): Promise<T> {
     if (!capabilities.transactions) {
       throw new ConfigurationError(
-        "commitSchemaVersion and setActiveVersion require atomic transactions, " +
+        "Schema writes and removal cleanup require atomic transactions, " +
           "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
           "driver communicates over HTTP and cannot hold a session across statements; " +
           "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
@@ -965,6 +987,13 @@ export function createPostgresBackend(
      */
     async ensureFulltextTable(graphId: string): Promise<void> {
       await contributionMaterializer.ensureRuntimeContributions(graphId);
+    },
+
+    async verifyContributions(
+      graphId: string,
+      vectorSlots: readonly VectorSlot[],
+    ): Promise<readonly ContributionDiagnostic[]> {
+      return contributionMaterializer.verifyContributions(graphId, vectorSlots);
     },
 
     // Vector counterparts of the runtime-contribution methods. Present
@@ -1777,27 +1806,22 @@ function createPostgresOperationBackend(
     ...commonBackend,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
-    ...(vectorStrategy === undefined ?
-      {}
-    : {
-        async deleteSchemaVectorSlotContribution(
-          slot: VectorSlot,
-        ): Promise<void> {
-          for (const contribution of vectorStrategy.ownedTables(slot)) {
-            await execRun(
-              operationStrategy.buildDeleteContributionMaterialization({
-                graphId: slot.graphId,
-                logicalName: contribution.logicalName,
-                owner: contribution.owner,
-                tableName: contribution.tableName,
-              }),
-            );
-          }
-          // Eviction is conservative if the surrounding transaction later
-          // rolls back: the next access re-reads the still-durable marker.
-          contributionMaterializer.evictVectorSlot(slot);
-        },
-      }),
+    async deleteSchemaVectorSlotContribution(slot: VectorSlot): Promise<void> {
+      if (vectorStrategy === undefined) return;
+      for (const contribution of vectorStrategy.ownedTables(slot)) {
+        await execRun(
+          operationStrategy.buildDeleteContributionMaterialization({
+            graphId: slot.graphId,
+            logicalName: contribution.logicalName,
+            owner: contribution.owner,
+            tableName: contribution.tableName,
+          }),
+        );
+      }
+      // Eviction is conservative if the surrounding transaction later rolls
+      // back: the next access re-reads the still-durable marker.
+      contributionMaterializer.evictVectorSlot(slot);
+    },
     capabilities,
     fulltextStrategy,
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),

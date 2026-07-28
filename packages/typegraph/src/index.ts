@@ -122,6 +122,8 @@ export type {
   BackendTransactions,
   CommitSchemaVersionExpected,
   CommitSchemaVersionParams,
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
   ContributionMaterializationBackend,
   DeleteFulltextBatchParams,
   EdgeEntityReadBackend,
@@ -443,9 +445,15 @@ export {
   StoreSearch,
   StoreView,
 } from "./store";
-// The cross-isolate invalidation probe for a cached ReconciledSchema. Also
-// available from the "./schema" subpath alongside its schema-read siblings.
-export { getCommittedSchemaVersion } from "./schema";
+// Reads of the committed schema: the document, its version, and whether one
+// exists at all. Also available from the "./schema" subpath alongside the
+// migration machinery.
+export type { SerializedSchema } from "./schema";
+export {
+  getActiveSchema,
+  getCommittedSchemaVersion,
+  isSchemaInitialized,
+} from "./schema";
 export type {
   AlgorithmCyclePolicy,
   BaseTraversalOptions,
@@ -491,6 +499,8 @@ export type {
   DynamicEdgeCollection,
   DynamicNodeCollection,
   Edge,
+  EdgeBulkFindEndpointOptions,
+  EdgeBulkFindOptions,
   EdgeCollection,
   EdgeFindByEndpointsOptions,
   EdgeGetOrCreateByEndpointsOptions,

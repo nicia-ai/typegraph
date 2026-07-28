@@ -378,7 +378,9 @@ export class ExecutableQuery<
    * validates the AST once (a malformed query fails fast, here, instead of on
    * first use); the prepared query then compiles once into a reusable template
    * and fills a fresh read instant per execute() — see PreparedQuery's class
-   * doc comment.
+   * doc comment, which also covers the two cases that recompile per call
+   * instead (no `executeRaw`, or a statement whose semantics ride on the SQL
+   * object rather than its text).
    *
    * Use `param("name")` in predicates to create parameterized slots,
    * then pass values via `prepared.execute({ name: "value" })`.
@@ -583,9 +585,15 @@ export class ExecutableQuery<
   /**
    * Executes the query against a provided backend.
    *
-   * Used by `store.batch()` to run multiple queries over a single connection
-   * (e.g., within a transaction). The full compile → execute → transform
-   * pipeline runs identically to `execute()`, but against the given backend.
+   * Used by `store.batch()` to run several queries in sequence against one
+   * target — a transaction on backends that have them, the backend itself
+   * otherwise. The full compile → execute → transform pipeline runs
+   * identically to `execute()`, but against the given backend.
+   *
+   * Costs one statement, or two when the selective-field path runs and its
+   * mapping then falls back: `#tryOptimizedExecutionOn` detects that only
+   * after its statement has executed, and the caller re-runs the full fetch.
+   * The fallback clears the fast path for this instance.
    */
   async executeOn(
     backend: GraphBackend | TransactionBackend,
@@ -719,32 +727,18 @@ export class ExecutableQuery<
       (traversal) => traversal.optional,
     );
 
+    const presentTrackingRuns = [
+      { mode: "truthy", optionalTraversalAliases: "present" },
+      { mode: "max", optionalTraversalAliases: "present" },
+      { mode: "falsy", optionalTraversalAliases: "present" },
+    ] as const;
     const trackingRuns =
       hasOptionalTraversal ?
-        ([
-          {
-            mode: "truthy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-          {
-            mode: "falsy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-          {
-            mode: "falsy" as const,
-            optionalTraversalAliases: "absent" as const,
-          },
-        ] as const)
-      : ([
-          {
-            mode: "truthy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-          {
-            mode: "falsy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-        ] as const);
+        [
+          ...presentTrackingRuns,
+          { mode: "falsy", optionalTraversalAliases: "absent" } as const,
+        ]
+      : presentTrackingRuns;
 
     for (const run of trackingRuns) {
       const trackingContext = createTrackingContext(this.#state, tracker, {

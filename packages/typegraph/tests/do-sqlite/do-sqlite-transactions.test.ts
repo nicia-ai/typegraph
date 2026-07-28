@@ -17,7 +17,8 @@
  * Boot uses `createAdapterStoreWithSchema` (the real adapter path): `bootstrapTables`
  * DDL and the durable contribution marker run OUTSIDE any storage
  * transaction (the #135 invariant); the schema-version commit runs
- * through the `do-sqlite` storage runner (data only, never DDL).
+ * through the `do-sqlite` storage runner. Ordinary schema-version commits are
+ * data-only; administrative removal cleanup may execute transactional DDL.
  *
  * Each `it` runs in its OWN Durable Object instance (unique
  * `idFromName`) so storage is isolated. The graph node has no
@@ -43,6 +44,7 @@ import {
   createStore,
   defineEdge,
   defineGraph,
+  defineGraphExtension,
   defineNode,
 } from "../../src";
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
@@ -98,6 +100,10 @@ const HistoryGraph = defineGraph({
       cardinality: "many",
     },
   },
+});
+
+const removalExtension = defineGraphExtension({
+  nodes: { RemovalTag: { properties: { label: { type: "string" } } } },
 });
 
 // Exercise several chunks, with enough margin that a modest reduction in
@@ -345,6 +351,40 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
           ),
         );
         expect(recordedEdges.every((edge) => edge !== undefined)).toBe(true);
+      },
+    );
+  });
+
+  it("materializes history removals without forbidden SAVEPOINT statements", async () => {
+    const stub = env.SPIKE_DO.get(
+      env.SPIKE_DO.idFromName("history-materialize-removal"),
+    );
+    await runInDurableObject(
+      stub,
+      async (_instance: SpikeDO, state: DurableObjectState) => {
+        const store = await bootHistoryInsideDurableObject(state.storage);
+        const evolved = await store.evolve(removalExtension);
+        await evolved
+          .getNodeCollectionOrThrow("RemovalTag")
+          .create({ label: "remove me" });
+
+        const removed = await evolved.removeKinds(["RemovalTag"]);
+        await expect(removed.materializeRemovals()).resolves.toMatchObject({
+          results: [
+            {
+              entity: "node",
+              kind: "RemovalTag",
+              status: "removed",
+            },
+          ],
+        });
+        await expect(
+          removed.backend.countNodesByKind({
+            graphId: HistoryGraph.id,
+            kind: "RemovalTag",
+            excludeDeleted: false,
+          }),
+        ).resolves.toBe(0);
       },
     );
   });

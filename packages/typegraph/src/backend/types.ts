@@ -199,7 +199,9 @@ export type BackendCapabilities = Readonly<{
    * Maximum number of bound parameters the engine accepts in one statement.
    * SQLite defaults to 999 (raisable at compile time via
    * `SQLITE_MAX_VARIABLE_NUMBER`), while hosted SQLite runtimes may impose a
-   * lower platform ceiling; PostgreSQL's wire protocol caps it at 65535.
+   * lower platform ceiling. PostgreSQL's wire protocol encodes a 65535-count,
+   * but postgres.js accepts at most 65533 bound values, so the bundled
+   * PostgreSQL capability advertises that lower shared-driver ceiling.
    * Recorded-time capture and recorded point reads size their multi-row
    * statements to this ceiling — the same budget the backend's own batched
    * inserts use — instead of a conservative dialect-blind constant. Custom
@@ -994,6 +996,105 @@ export type RecordContributionMaterializationParams = Readonly<{
   error: string | undefined;
 }>;
 
+/**
+ * Why a contribution is not usable. Most members are a disagreement
+ * between the durable marker and the physical catalog; one
+ * (`failed-materialization`) is a state the two agree on and that is
+ * broken anyway. A contribution that is genuinely healthy — or that was
+ * simply never attempted — is not reported at all.
+ *
+ * - `orphaned-marker` — the marker records a successful materialization
+ *   but the physical table is gone (a partial restore, an out-of-band
+ *   `DROP`, a schema-scoped restore that missed the contribution
+ *   tables). The state {@link GraphBackend.verifyContributions} exists
+ *   to surface: nothing on the open path probes the catalog, so this
+ *   database opens clean and fails at the first read of the slot.
+ * - `missing-marker` — the physical table exists but no marker attests
+ *   it as initialized (no row, no recorded success, or a recorded
+ *   failure). Reads and writes are refused with
+ *   `StoreNotInitializedError` even though storage is present. These
+ *   three causes share one state because they share one repair; check
+ *   {@link ContributionDiagnostic.lastError} to tell them apart.
+ * - `failed-materialization` — the marker records a *failed* attempt
+ *   and no table was produced. Marker and catalog agree here, so this
+ *   is not a disagreement — but it is where a contribution lands when
+ *   provisioning genuinely broke (the `fts5` module is absent, the role
+ *   lacks `CREATE`, the extension was never loaded), and calling it
+ *   healthy on the grounds that both sides agree would be the one
+ *   answer this method must never give. Distinguished from a
+ *   contribution that was never attempted, which has no marker row and
+ *   is correctly silent. {@link ContributionDiagnostic.lastError}
+ *   carries the reason it failed.
+ * - `stale` — the table exists and the marker records a prior success
+ *   at a different signature (a strategy swap, or a declared embedding
+ *   dimension that has moved ahead of the provisioned table).
+ *
+ * **Do not re-frame this union as "how the marker disagrees with the
+ * catalog."** It was described that way once, and the description was
+ * load-bearing in the wrong direction: under it, a marker recording a
+ * failed attempt with no table looks like agreement, therefore not a
+ * disagreement, therefore correctly silent — and a contribution that
+ * had genuinely broken was reported as healthy. The gap read as
+ * principled rather than as an oversight precisely because the framing
+ * endorsed it. "Why the contribution is unusable" is the question that
+ * makes `failed-materialization` obviously belong, and any future
+ * tidy-up that narrows the framing back will re-open the same hole.
+ */
+export type ContributionDiagnosticState =
+  "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
+
+/**
+ * One contribution that is not usable, reported by
+ * {@link GraphBackend.verifyContributions}.
+ *
+ * The identity fields come from the active contribution declaration and
+ * match the durable-marker identity contract, so a caller can route an entry
+ * to its repair without reconstructing any internal naming contract. A
+ * `missing-marker` entry may have no marker row at all.
+ *
+ * **Route on {@link ContributionDiagnosticState}, not on whether the
+ * entry is a vector slot.** The repair differs per state and the wrong
+ * choice destroys data: `store.reembedVectorField` drops and recreates
+ * storage, so applying it to a `missing-marker` — where the table is
+ * intact and only the bookkeeping is wrong — discards every embedding
+ * to fix a marker, and without an `embed` callback it leaves the field
+ * empty. For `missing-marker` and `failed-materialization` prefer
+ * `ensureVectorSlotContribution(slot, { force: true })`, whose DDL is
+ * `CREATE ... IF NOT EXISTS` and never drops. Note also that
+ * `ensureRuntimeContributions` does NOT repair a fulltext
+ * `orphaned-marker`: it short-circuits on the marker, which still
+ * reads as initialized. See the per-state repair tables in the
+ * troubleshooting guide.
+ */
+export type ContributionDiagnostic = Readonly<{
+  /** Producing strategy, e.g. `"fts5"` / `"tsvector"` / `"pgvector"`. */
+  owner: string;
+  /** Stable logical slot, e.g. `"fulltext"`. Never the SQL name. */
+  logicalName: string;
+  /** Resolved physical table name that was probed. */
+  physicalName: string;
+  /** Node kind — vector slots only. */
+  kind?: string;
+  /** Embedding field path — vector slots only. */
+  fieldPath?: string;
+  state: ContributionDiagnosticState;
+  /**
+   * The error the marker recorded against its last attempt, when it
+   * recorded one. Absent otherwise.
+   *
+   * This is the part of the picture the catalog cannot supply. `state`
+   * says what to do — the states are chosen so that each maps to one
+   * repair — while this says *why it broke*, which is a different
+   * question and often a different investigation. A failed attempt with no
+   * table surfaces as `failed-materialization`; when the table exists but
+   * the marker does not attest a successful materialization, it surfaces as
+   * `missing-marker`. This field distinguishes only failures whose marker
+   * recorded a reason; a missing row has no `lastError`. Present on any state
+   * whose marker row carries an error, not just those two states.
+   */
+  lastError?: string;
+}>;
+
 // ============================================================
 // Kind Removals (data-cleanup status)
 // ============================================================
@@ -1202,6 +1303,25 @@ export type GraphBackend = Readonly<{
     this: void,
     params: FindEdgesByKindParams,
   ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Reads the edges of a SET of endpoints in one statement per bind-budget
+   * chunk — see {@link FindEdgesByEndpointSetParams}.
+   *
+   * **Optional, and its absence is the capability signal.** `store.edges.<kind>
+   * .bulkFindFrom` / `.bulkFindTo` check for this method before issuing any
+   * read and refuse with a typed `ConfigurationError` when it is missing,
+   * rather than degrading to a per-endpoint loop. A caller reaching for a bulk
+   * endpoint read is asking for set-oriented statements; quietly giving them N
+   * singleton statements is the surprise the method exists to prevent.
+   *
+   * Both bundled Drizzle backends implement it. A custom backend that does not
+   * simply omits it and the bulk reads refuse; the singleton `findEdgesByKind`
+   * path is unaffected.
+   */
+  findEdgesByEndpointSet?: (
+    this: void,
+    params: FindEdgesByEndpointSetParams,
+  ) => Promise<readonly EdgeRow[]>;
   countEdgesByKind: (
     this: void,
     params: CountEdgesByKindParams,
@@ -1294,8 +1414,10 @@ export type GraphBackend = Readonly<{
     fn: (
       tx: TransactionBackend &
         Readonly<{
+          executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+          tableExists: (this: void, tableName: string) => Promise<boolean>;
           executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
-          deleteSchemaVectorSlotContribution?: (
+          deleteSchemaVectorSlotContribution: (
             this: void,
             slot: VectorSlot,
           ) => Promise<void>;
@@ -1660,6 +1782,37 @@ export type GraphBackend = Readonly<{
   ) => Promise<void>;
 
   /**
+   * Diagnostic: compare each contribution currently expected for `graphId`
+   * against its durable marker and the physical catalog.
+   *
+   * Covers the strategy-owned `runtimeEnsure` contributions (fulltext)
+   * plus the `ownedTables` contribution(s) of each supplied vector slot.
+   * Returns one {@link ContributionDiagnostic} per detected unusable
+   * contribution. A recorded failed materialization is unusable even when
+   * marker and catalog agree that no table was produced. A contribution with
+   * neither a marker nor a table is treated as never attempted and omitted;
+   * marker rows outside the current declaration set are not audited. An empty
+   * array therefore is not proof that storage was initialized.
+   *
+   * Deliberately NOT part of the open path. `ensureRuntimeContributions`
+   * and `assertRuntimeContributionsInitialized` short-circuit on a
+   * per-instance signature cache and then on the marker row alone, which
+   * is the right default for a hot path but leaves a database whose
+   * contribution tables were dropped out of band opening clean and
+   * failing at the first read. This method is the explicit, operator-
+   * invoked catalog probe that fills that gap: it issues one uncached
+   * existence query per distinct physical table and performs ZERO DDL
+   * and ZERO writes, so it is safe under a least-privilege runtime role.
+   *
+   * Present only on backends that can probe their own catalog.
+   */
+  verifyContributions?: (
+    this: void,
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<readonly ContributionDiagnostic[]>;
+
+  /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`
    * owns. Same focused-bootstrap rationale as the other `ensure*Table`
    * methods: idempotent and concurrency-safe under replica startup.
@@ -1868,6 +2021,7 @@ export type EdgeEntityReadBackend = Pick<
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
+  | "findEdgesByEndpointSet"
   | "countEdgesByKind"
 >;
 
@@ -2037,8 +2191,10 @@ export type TransactionBackend = Readonly<
  */
 export type SchemaWriteTransactionBackend = TransactionBackend &
   Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+    tableExists: (this: void, tableName: string) => Promise<boolean>;
     executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
-    deleteSchemaVectorSlotContribution?: (
+    deleteSchemaVectorSlotContribution: (
       this: void,
       slot: VectorSlot,
     ) => Promise<void>;
@@ -2509,6 +2665,72 @@ export type FindEdgesByKindParams = Readonly<{
 }>;
 
 /**
+ * The endpoint side a {@link FindEdgesByEndpointSetParams} read fans out over.
+ */
+export type EdgeEndpointSide = "from" | "to";
+
+/**
+ * Parameters for reading the edges of a SET of endpoints in one statement per
+ * bind-budget chunk — the widened form of {@link FindEdgesByKindParams}'s
+ * scalar `fromId` / `toId`.
+ *
+ * Deliberately a SEPARATE parameter type on a separate operation rather than
+ * optional fields on `FindEdgesByKindParams`. A backend that did not implement
+ * set membership would still type-check while ignoring the id list, and would
+ * then return every edge of the kind — which the caller would rebucket into a
+ * correct-looking answer at unbounded cost. Splitting the operation makes that
+ * failure unreachable: support is detected by the method's presence, before any
+ * read is issued.
+ *
+ * The shape also makes the previously-validated illegal states
+ * unrepresentable. One `side` instead of two independent id lists means both
+ * endpoints can never fan out at once; no scalar `fromId` / `toId` field means
+ * a scalar and a set can never disagree; no `limit` / `offset` / `after` means
+ * a global slice can never be requested across a read the backend splits into
+ * bind-budget chunks.
+ */
+export type FindEdgesByEndpointSetParams = Readonly<{
+  graphId: string;
+  kind: string;
+  /** Which endpoint column the id set constrains. */
+  side: EdgeEndpointSide;
+  /**
+   * Kind of the fanned-out endpoint. Required: it is the index prefix that
+   * makes the set a seek rather than a scan, so a set is always scoped to one
+   * endpoint kind and a heterogeneous page costs one read per distinct kind.
+   */
+  endpointKind: string;
+  /**
+   * Endpoint NODE ids to match — deliberately not named `ids`, which in the
+   * backend params vocabulary means edge ids (see
+   * {@link DeleteEdgesBatchParams}); the write-surface assertion in
+   * `recorded-capture/write-surface.ts` classifies params structurally and a
+   * `{ graphId, ids }` read would be misread as a write.
+   *
+   * The backend deduplicates before splitting the list across bind-budget
+   * chunks — a repeated id spanning two chunks would return its edges twice.
+   * An empty list reads nothing and yields no rows.
+   */
+  endpointIds: readonly string[];
+  /**
+   * Maximum rows per distinct endpoint id, applied inside the statement (via
+   * `ROW_NUMBER()` over the read's own ordering) rather than by the caller.
+   * Only meaningful on a backend whose `capabilities.windowFunctions` is true;
+   * callers must still cap client-side, so a backend that ignores this returns
+   * a superset rather than a wrong answer. Unlike a global `limit`, a
+   * per-endpoint cap composes with chunking: each endpoint's rows fall
+   * entirely within one chunk.
+   */
+  limitPerEndpoint?: number;
+  /** If true, exclude deleted edges. Default true. */
+  excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
+}>;
+
+/**
  * Parameters for counting edges by kind.
  */
 export type CountEdgesByKindParams = Readonly<{
@@ -2561,11 +2783,11 @@ export const D1_MAX_BIND_PARAMETERS = 100;
 export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
 
 /**
- * PostgreSQL's wire-protocol bound-parameter ceiling (a 16-bit count). Single
- * source of truth for {@link POSTGRES_CAPABILITIES} and the Postgres backend's
- * batch math.
+ * Safe bound-parameter ceiling shared by every bundled PostgreSQL driver.
+ * The protocol count can represent 65535, but postgres.js rejects a statement
+ * with 65534 bound values, so backend batch math uses the lower portable limit.
  */
-export const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
+export const POSTGRES_MAX_BIND_PARAMETERS = 65_533;
 
 /**
  * Default capabilities for SQLite.

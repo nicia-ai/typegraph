@@ -3,8 +3,8 @@
  * and `materializeRemovals`) and `Store.removeKinds`. Each verb owns a
  * per-deployment status table (`typegraph_index_materializations`,
  * `typegraph_kind_removals`) and bootstraps it lazily; this module
- * centralizes the bootstrap dispatch + parallel orchestration shape so
- * the runners stay thin.
+ * centralizes focused bootstrap dispatch plus the bucketed orchestration used
+ * by index materialization.
  */
 import { type GraphBackend } from "../backend/types";
 
@@ -79,32 +79,4 @@ export async function runBucketedMaterialization<
     }),
   );
   return results;
-}
-
-/**
- * Best-effort vs strict orchestration for materialization runners.
- * `stopOnError === true` runs sequentially and short-circuits on the
- * first `failed` entry (mirrors typical schema-migration safety
- * semantics); the default best-effort path runs `runOne` over `items`
- * concurrently. Custom orchestrators bypass this helper and assemble
- * their own Promise topology.
- */
-export async function runMaterialization<
-  TInput,
-  TEntry extends { status: string },
->(
-  items: readonly TInput[],
-  options: Readonly<{ stopOnError?: boolean }>,
-  runOne: (item: TInput) => Promise<TEntry>,
-): Promise<readonly TEntry[]> {
-  if (options.stopOnError === true) {
-    const results: TEntry[] = [];
-    for (const item of items) {
-      const entry = await runOne(item);
-      results.push(entry);
-      if (entry.status === "failed") break;
-    }
-    return results;
-  }
-  return Promise.all(items.map((item) => runOne(item)));
 }

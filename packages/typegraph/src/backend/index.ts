@@ -23,6 +23,7 @@ export type {
   DialectRecursiveQueryStrategy,
   DialectStandardQueryStrategy,
   DialectVectorPredicateStrategy,
+  InListParameterOptions,
   SqlDialect,
 } from "../query/dialect/types";
 export type {
@@ -99,6 +100,8 @@ export type {
   ClaimIndexMaterializationParams,
   CommitSchemaVersionExpected,
   CommitSchemaVersionParams,
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
   ContributionMaterializationBackend,
   ContributionMaterializationIdentity,
   ContributionMaterializationRow,

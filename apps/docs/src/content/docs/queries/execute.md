@@ -244,8 +244,27 @@ async function exportAllUsers(): Promise<void> {
 
 ## Batch Execution
 
-When you need multiple independent queries with different result types, use `store.batch()` to
-execute them over a single connection with snapshot consistency.
+When you need multiple independent queries with different result types, use `store.batch()` to run
+them in sequence against one target.
+
+`batch()` does not batch round trips. The portable guarantee is that at most one query is in flight
+at a time — at least one statement each, and two for a query whose selective-field mapping falls
+back after its statement has already run. On a SQL backend with transactions it frames them with
+`begin`/`commit`, putting a networked one at N+2 round trips **at best**; Durable Objects use an
+ambient storage transaction with no framing, and without transactions there is no framing at all.
+Connection reuse is the adapter's business either way.
+
+It will not fix an N+1. For that, fold the work into one query: a `.traverse()` chain (one
+statement), `store.subgraph()` (2 statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
+`bulkFindByIndex()`, which are chunked rather than fixed-cost.
+
+It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can
+observe a commit the earlier ones did not. There is no way to fix that for fluent queries today —
+`store.transaction()` accepts an `isolationLevel`, but its context exposes only `nodes` / `edges`,
+so a query builder cannot run inside it. Collection reads can get a snapshot via
+`store.transaction(fn, { isolationLevel: "repeatable_read" })` and `tx.nodes` / `tx.edges` — but
+only where the backend has transactions (others ignore the option), and a history-enabled store on
+PostgreSQL additionally requires `accessMode: "read_only"` or the call throws.
 
 ```typescript
 const [people, companies] = await store.batch(
@@ -268,7 +287,8 @@ const [people, companies] = await store.batch(
 Each query preserves its own projection, filtering, sorting, and pagination. Results are returned
 as a typed tuple matching the input order.
 
-Edge collection `batchFind*` methods also return `BatchableQuery` and can be mixed freely with fluent queries:
+Edge collection `batchFind*` methods also return `BatchableQuery` and can be mixed freely with
+fluent queries — each still costs its own statement:
 
 ```typescript
 const [skills, employer] = await store.batch(
@@ -277,8 +297,13 @@ const [skills, employer] = await store.batch(
 );
 ```
 
-**vs `Promise.all`**: `batch()` uses 1 connection instead of N and guarantees snapshot consistency.
-**vs `transaction()`**: Same consistency, but cleaner API — no callback, typed tuple return.
+**vs `Promise.all`**: workload- and adapter-dependent in both directions. `Promise.all` overlaps its
+queries against a pool with idle capacity, but it does not necessarily hold N connections, and
+against a single client or a saturated pool it queues. `batch()` keeps at most one query in flight,
+so it pays the sum of their latencies — but it can still come out ahead where connection
+acquisition dominates. Measure rather than assume.
+**vs `transaction()`**: same transaction, lighter API — no callback, typed tuple return. But
+`transaction()` is the only one that takes an `isolationLevel`, and it cannot run fluent queries.
 
 See [Batch Query Execution](/schemas-stores#batch-query-execution) for full API reference.
 
@@ -299,9 +324,9 @@ import { param } from "@nicia-ai/typegraph";
 ### `prepare()`
 
 Call `.prepare()` on an executable query to build and validate the AST once. Returns a
-`PreparedQuery<R>` that can be executed with different bindings; SQL text is compiled fresh on each
-`.execute()` call (see [Prepared query SQL compilation](#prepared-query-sql-compilation) below for
-why).
+`PreparedQuery<R>` that can be executed with different bindings. The statement is compiled once into
+a cached template and reused by every `.execute()` call — see
+[Prepared query SQL compilation](#prepared-query-sql-compilation) below for how that stays fresh.
 
 ```typescript
 const findByName = store
@@ -348,24 +373,59 @@ provided, and unknown binding keys are rejected.
 | `startsWith` / `endsWith`   | `p.name.startsWith(param("prefix"))`      |
 | `like` / `ilike`            | `p.email.like(param("pattern"))`          |
 
+`in()` and `notIn()` take a list-valued parameter — the **whole** list, not individual elements:
+
+```typescript
+const byIds = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.id.in(param("ids")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+await byIds.execute({ ids: ["a", "b", "c"] });
+await byIds.execute({ ids: ["d"] });
+```
+
+The list is bound as a single parameter that the database unpacks, so the compiled SQL text does
+not depend on the list's length: one statement serves every arity, and a list of ten thousand ids
+still costs one bound parameter rather than blowing past the engine's bind limit. An empty list is
+valid — `in([])` matches nothing, `notIn([])` matches everything.
+
+Every element must be the field's type, and numbers must be finite. A mixed list — `[1, "a"]` bound
+against a number field — is rejected with a `ConfigurationError` before it reaches the database, on
+every backend, as is `NaN` or `Infinity`. This matches the literal form, which already refuses a
+mixed list, and it is what keeps the two backends in step: left unchecked, PostgreSQL would fail
+casting while SQLite silently matched nothing.
+
 :::caution
-`param()` is **not** supported in `in()` / `notIn()` — the array length must be known at compile time.
+A `param()` sitting among the **elements** of a literal list — `p.name.in(["Alice", param("other")])` —
+is rejected with an `UnsupportedPredicateError`. Bind the whole list instead.
 :::
 
 ### Prepared Query SQL Compilation
 
-`.prepare()` builds and validates the AST once, but does **not** cache compiled SQL text across
-`.execute()` calls — each call recompiles fresh. This is deliberate: a "current" (live) read binds
-its temporal-validity filter to the instant it's compiled at. Caching the compiled text from
-`.prepare()` time would freeze that instant for the prepared query's entire lifetime, silently
-hiding any row created after `.prepare()` ran from every subsequent `.execute()` call — exactly the
-bug this behavior was fixed to avoid. Recompiling is pure, in-memory string-building with no I/O, so
-the cost is negligible next to the query's actual database round-trip.
+`.prepare()` builds and validates the AST once. On a backend that can compile and run raw SQL text
+(both the SQLite and PostgreSQL backends can), the statement is then compiled **once** into a cached
+template and reused by every `.execute()` call.
 
-When the backend supports `executeRaw` (both SQLite and PostgreSQL backends do), the freshly
-compiled SQL text is sent directly to the database driver with substituted parameter values. When
-`executeRaw` is unavailable, the prepared query substitutes parameters into the AST and compiles
-through the standard path instead — same freshness guarantee, different code path.
+The subtlety a cache like that has to survive is freshness: a "current" (live) read filters on
+temporal validity as of the instant it runs, so caching a compiled statement that had a concrete
+"now" baked into it would freeze that instant for the prepared query's entire lifetime — hiding
+every row created after `.prepare()` from every subsequent call. The template therefore reserves the
+read instant as a **placeholder** rather than a value, and each `.execute()` fills it with a fresh
+instant alongside the call's own bindings. Nothing about the statement's text depends on either.
+
+Two cases fall back to substituting parameters into the AST and compiling through the standard path
+on every call — same results and the same freshness guarantee, without the cached-template fast
+path:
+
+- `executeRaw` is unavailable (a custom or async backend).
+- The statement's execution semantics ride on the compiled SQL object rather than its text, which no
+  amount of `executeRaw` support changes. **Approximate vector search**
+  (`similarTo(..., { approximate: true })`) carries the engine's iterative-scan wrapper, and
+  `store.subgraph()` on PostgreSQL forces a custom plan for its id-array fetches. Flattening either
+  to cacheable text would drop the behavior it depends on, so both are excluded deliberately.
 
 ## Query Debugging
 

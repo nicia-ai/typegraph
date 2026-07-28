@@ -224,8 +224,8 @@ type BaseFieldAccessor = Readonly<{
     neq: (value: unknown) => Predicate;
     isNull: () => Predicate;
     isNotNull: () => Predicate;
-    in: (values: readonly unknown[]) => Predicate;
-    notIn: (values: readonly unknown[]) => Predicate;
+    in: (values: readonly unknown[] | ParameterRef) => Predicate;
+    notIn: (values: readonly unknown[] | ParameterRef) => Predicate;
 }>;
 
 // @public (undocumented)
@@ -433,6 +433,20 @@ export class ConfigurationError extends TypeGraphError {
 export type ConstraintNames<R extends NodeRegistration> = "unique" extends keyof R ? R["unique"] extends readonly {
     readonly name: infer N;
 }[] ? N & string : string : never;
+
+// @public
+export type ContributionDiagnostic = Readonly<{
+    owner: string;
+    logicalName: string;
+    physicalName: string;
+    kind?: string;
+    fieldPath?: string;
+    state: ContributionDiagnosticState;
+    lastError?: string;
+}>;
+
+// @public
+export type ContributionDiagnosticState = "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
 
 // @public (undocumented)
 export type ContributionMaterializationBackend = Pick<GraphBackend, "ensureContributionMaterializationsTable" | "getContributionMaterialization" | "recordContributionMaterialization" | "assertRuntimeContributionsInitialized" | "ensureRuntimeContributions" | "ensureFulltextTable">;
@@ -1176,7 +1190,7 @@ export type Edge<E extends AnyEdgeType = EdgeType, From extends NodeType = NodeT
 const EDGE_BATCH_READ_NAMES: readonly ["batchFindFrom", "batchFindTo", "batchFindByEndpoints"];
 
 // @public
-const EDGE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findFrom", "findTo", "findByEndpoints"];
+const EDGE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findFrom", "findTo", "bulkFindFrom", "bulkFindTo", "findByEndpoints"];
 
 // @public
 const EDGE_TYPE_BRAND: "__edgeType";
@@ -1206,6 +1220,14 @@ type EdgeAliasMap = Readonly<Record<string, EdgeAlias<EdgeType, boolean>>>;
 export type EdgeBatchReads<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType> = Pick<EdgeCollection<E, From, To>, (typeof EDGE_BATCH_READ_NAMES)[number]>;
 
 // @public
+export type EdgeBulkFindEndpointOptions = QueryOptions & EdgeBulkFindOptions;
+
+// @public
+export type EdgeBulkFindOptions = Readonly<{
+    limitPerInput?: number;
+}>;
+
+// @public
 type EdgeChange = Readonly<{
     type: ChangeType;
     kind: string;
@@ -1225,6 +1247,8 @@ export type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeTy
     }>) => Promise<Edge<E, From, To>>;
     findFrom: (from: NodeRef<From>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
+    bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
+    bulkFindTo: (tos: readonly NodeRef<To>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
     batchFindFrom: (from: NodeRef<From>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindTo: (to: NodeRef<To>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, options?: EdgeFindByEndpointsOptions<E>, temporal?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
@@ -1289,8 +1313,11 @@ type EdgeCreateOptions = Readonly<{
     validTo?: string;
 }>;
 
+// @public
+type EdgeEndpointSide = "from" | "to";
+
 // @public (undocumented)
-export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "countEdgesByKind">;
+export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -1888,6 +1915,19 @@ export type FilteredApproximateSearch = Readonly<{
 export type FilteredApproximateSearchMode = "filter-pushdown" | "iterative-scan" | "post-filter";
 
 // @public
+type FindEdgesByEndpointSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    side: EdgeEndpointSide;
+    endpointKind: string;
+    endpointIds: readonly string[];
+    limitPerEndpoint?: number;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
+}>;
+
+// @public
 type FindEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -2030,6 +2070,9 @@ export type FulltextStrategy = Readonly<{
 export function generateId(): string;
 
 // @public
+export function getActiveSchema(backend: GraphBackend, graphId: string): Promise<SerializedSchema | undefined>;
+
+// @public
 export function getCommittedSchemaVersion(backend: GraphBackend, graphId: string): Promise<number | undefined>;
 
 // @public
@@ -2125,6 +2168,7 @@ export type GraphBackend = Readonly<{
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
+    findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
     insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
@@ -2136,8 +2180,10 @@ export type GraphBackend = Readonly<{
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
+        executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+        tableExists: (this: void, tableName: string) => Promise<boolean>;
         executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
-        deleteSchemaVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
+        deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
     }>) => Promise<T>) => Promise<T>;
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
@@ -2179,6 +2225,7 @@ export type GraphBackend = Readonly<{
     assertVectorSlotInitialized?: (this: void, slot: VectorSlot) => Promise<void>;
     assertVectorSlotsInitialized?: (this: void, slots: readonly VectorSlot[]) => Promise<void>;
     deleteVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
+    verifyContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionDiagnostic[]>;
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
@@ -2366,7 +2413,7 @@ export function havingLt(aggregate: AggregateExpr, value: number): AggregateComp
 export function havingLte(aggregate: AggregateExpr, value: number): AggregateComparisonPredicate;
 
 // @public
-const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "checkUnique", "checkUniqueBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hybridSearch", "insertEdge", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertNode", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "schemaWriteTransaction", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy"];
+const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "checkUnique", "checkUniqueBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hybridSearch", "insertEdge", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertNode", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
 
 // @public (undocumented)
 export type HistoryStore<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
@@ -2834,6 +2881,9 @@ export function isRecordedCaptureGuardError<C extends RecordedCaptureGuardCode>(
 
 // @public (undocumented)
 export function isRecordedCaptureGuardError(error: unknown): error is RecordedCaptureGuardError;
+
+// @public
+export function isSchemaInitialized(backend: GraphBackend, graphId: string): Promise<boolean>;
 
 // @public (undocumented)
 export function isSearchableSchema(value: unknown): value is SearchableSchema;
@@ -4728,7 +4778,7 @@ type SerializedOntologyRelation = Readonly<{
 }>;
 
 // @public
-type SerializedSchema = Readonly<{
+export type SerializedSchema = Readonly<{
     graphId: string;
     version: number;
     generatedAt: string;
@@ -4974,6 +5024,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     materializeIndexes: (options?: MaterializeIndexesOptions) => Promise<MaterializeIndexesResult>;
     materializeSystemIndexes: (options?: MaterializeSystemIndexesOptions) => Promise<MaterializeIndexesResult>;
     reembedVectorField: (kind: string, fieldPath: string, options?: ReembedVectorFieldOptions) => Promise<ReembedVectorFieldResult>;
+    verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
     materializeRemovals: (options?: MaterializeRemovalsOptions) => Promise<MaterializeRemovalsResult>;
     close: () => Promise<void>;
 }>;
@@ -5130,6 +5181,8 @@ export type StoreViewEdgeCollection<E extends AnyEdgeType, From extends NodeType
     }>) => Promise<number>;
     findFrom: (from: NodeRef<From>) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
+    bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindOptions) => Promise<readonly Edge<E, From, To>[][]>;
+    bulkFindTo: (tos: readonly NodeRef<To>[], options?: EdgeBulkFindOptions) => Promise<readonly Edge<E, From, To>[][]>;
     findByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, options?: EdgeFindByEndpointsOptions<E>) => Promise<Edge<E, From, To> | undefined>;
 }>;
 
@@ -5644,7 +5697,7 @@ type UniqueRow = Readonly<{
 }>;
 
 // @public (undocumented)
-type UnsafeHistoryStoreBackendMember = "clearGraph" | "executeDdl" | "executeRaw" | "executeStatement" | "transaction" | "trustedImport";
+type UnsafeHistoryStoreBackendMember = "clearGraph" | "executeDdl" | "executeRaw" | "executeStatement" | "schemaWriteTransaction" | "transaction" | "trustedImport";
 
 // @public
 export class UnsupportedBackendCapabilityError extends TypeGraphError {

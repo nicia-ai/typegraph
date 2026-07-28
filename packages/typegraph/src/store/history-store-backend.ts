@@ -48,6 +48,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "execute",
   "executeTemporaryStatement",
   "findEdgesByKind",
+  "findEdgesByEndpointSet",
   "findEdgesConnectedTo",
   "findNodesByKind",
   "fulltextSearch",
@@ -84,7 +85,6 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "refreshStatistics",
   "releaseIndexMaterializationClaim",
   "setActiveVersion",
-  "schemaWriteTransaction",
   "setReconciliationMarker",
   "tableNames",
   "updateEdge",
@@ -95,6 +95,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "upsertFulltextBatch",
   "vectorSearch",
   "vectorStrategy",
+  "verifyContributions",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 type HistoryStoreBackendMember = (typeof HISTORY_STORE_BACKEND_KEYS)[number];
@@ -104,6 +105,7 @@ type UnsafeHistoryStoreBackendMember =
   | "executeDdl"
   | "executeRaw"
   | "executeStatement"
+  | "schemaWriteTransaction"
   | "transaction"
   | "trustedImport";
 
