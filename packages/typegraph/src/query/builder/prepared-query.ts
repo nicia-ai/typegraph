@@ -299,6 +299,7 @@ export class PreparedQuery<R> {
   readonly #selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
   readonly #schemaIntrospector: SchemaIntrospector;
   readonly #parameterMetadata: ParameterMetadata;
+  #selectiveExecutionDisabled = false;
   /**
    * Per-AST cached placeholder template, keyed by AST reference so the
    * optimized (`#ast`) and unoptimized (`#unoptimizedAst`) variants cache
@@ -361,7 +362,10 @@ export class PreparedQuery<R> {
   ): Promise<readonly R[]> {
     validateBindings(bindings, this.#parameterMetadata);
 
-    if (this.#selectiveFields !== undefined) {
+    if (
+      this.#selectiveFields !== undefined &&
+      !this.#selectiveExecutionDisabled
+    ) {
       try {
         const rows = await this.#executeSelectiveRows(bindings);
         return mapSelectiveResults<AliasMap, EdgeAliasMap, R>(
@@ -372,14 +376,17 @@ export class PreparedQuery<R> {
           this.#selectFn,
         );
       } catch (error) {
-        if (
-          error instanceof MissingSelectiveFieldError ||
-          error instanceof UnsupportedPredicateError
-        ) {
-          // Fall back per-call without permanently disabling the optimized path,
-          // since different bindings may succeed on the optimized path.
-          // Note: this fallback is observable via query profiler hooks (onQueryStart
-          // fires twice — once for the optimized attempt, once for the fallback).
+        if (error instanceof MissingSelectiveFieldError) {
+          // The compiled projection lacks a field the select callback can read.
+          // That is a property of the callback/projection pair, not of this
+          // call's bindings, so retrying the same projection on every execute
+          // would permanently double the statement count.
+          this.#selectiveExecutionDisabled = true;
+          return this.#executeUnoptimized(bindings);
+        }
+        if (error instanceof UnsupportedPredicateError) {
+          // This failure can depend on the bound values. Keep the optimized
+          // path available for a later execution with different bindings.
           return this.#executeUnoptimized(bindings);
         }
         throw error;

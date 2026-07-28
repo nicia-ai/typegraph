@@ -335,6 +335,13 @@ a workaround.
 The optimization is transparent — if your callback can't be optimized, TypeGraph automatically
 falls back to fetching the full node data.
 
+For data-dependent callbacks, TypeGraph first plans with representative values, including a
+high-value pass that covers common numeric threshold branches. If an unobserved branch accesses an
+additional field at execution time, the first miss may require a second statement that fetches the
+full row. Prepared queries remember that missing-field failure and use the full-row plan directly on
+later executions. Comparisons against arbitrary string values can still take an unobserved branch;
+the high-value pass does not guarantee that every possible callback path is planned in advance.
+
 :::note[Select callback purity]
 Smart select applies to `.execute()`, `.paginate()`, and `.stream()`. The `select()` callback may be evaluated
 multiple times during planning/optimization, so it should be pure (no side effects).

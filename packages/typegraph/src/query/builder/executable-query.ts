@@ -721,32 +721,18 @@ export class ExecutableQuery<
       (traversal) => traversal.optional,
     );
 
+    const presentTrackingRuns = [
+      { mode: "truthy", optionalTraversalAliases: "present" },
+      { mode: "max", optionalTraversalAliases: "present" },
+      { mode: "falsy", optionalTraversalAliases: "present" },
+    ] as const;
     const trackingRuns =
       hasOptionalTraversal ?
-        ([
-          {
-            mode: "truthy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-          {
-            mode: "falsy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-          {
-            mode: "falsy" as const,
-            optionalTraversalAliases: "absent" as const,
-          },
-        ] as const)
-      : ([
-          {
-            mode: "truthy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-          {
-            mode: "falsy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-        ] as const);
+        [
+          ...presentTrackingRuns,
+          { mode: "falsy", optionalTraversalAliases: "absent" } as const,
+        ]
+      : presentTrackingRuns;
 
     for (const run of trackingRuns) {
       const trackingContext = createTrackingContext(this.#state, tracker, {
