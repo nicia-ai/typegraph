@@ -10,10 +10,12 @@ your knowledge graph scales with your application.
 
 ## Performance Philosophy
 
-1. **One Query, One Statement**: Every query — including multi-hop traversals — compiles to a
-   single SQL statement, so the statement count never grows with the size of the graph. No N+1
-   queries by design. (Compilation, not execution: a query whose selective-field mapping falls back
-   re-runs as a full fetch, costing a second statement. See [Batch reads](#batch-reads).)
+1. **One Fluent Query, One Statement**: Every fluent query — including multi-hop traversals —
+   compiles to a single SQL statement, so its statement count never grows with the size of the
+   graph. This prevents compiler-generated N+1 work inside that query; application code can still
+   create an N+1 by issuing separate reads in a loop. (Compilation, not execution: a query whose
+   selective-field mapping falls back re-runs as a full fetch, costing a second statement. See
+   [Batch reads](#batch-reads).)
 2. **Precomputed Ontology**: Transitive closures, subclass hierarchies, and edge implications are
    computed once at schema initialization, not during every query.
 3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes. On the read
@@ -24,7 +26,9 @@ your knowledge graph scales with your application.
 ## N+1 Prevention
 
 A common performance problem in ORMs is the N+1 query: you fetch N entities, then issue one
-query per entity to load related data. TypeGraph eliminates this structurally.
+query per entity to load related data. TypeGraph's fluent query compiler eliminates that pattern
+inside one graph-shaped query; it cannot eliminate separate collection reads issued by application
+code.
 
 Every query — regardless of how many traversals it chains — compiles to a **single SQL statement**
 using Common Table Expressions (CTEs). Each traversal step becomes a CTE that joins against the
@@ -77,8 +81,10 @@ This holds for all query types:
 - Aggregations with traversals (CTEs + GROUP BY, 1 statement)
 - [Set operations](/queries/combine) (UNION/INTERSECT/EXCEPT of CTEs, 1 statement)
 
-There is no dataloader or batching layer because there is nothing to batch — the database handles
-the entire join graph in a single execution.
+The fluent query needs no dataloader for that joined read because the database handles its entire
+join graph in one execution. Separate reads can still form an N+1; use a traversal, `subgraph()`, or
+the chunked collection reads described below instead of looping them or wrapping them in
+`store.batch()`.
 
 ## Batch Write Patterns
 
@@ -106,8 +112,9 @@ maintain.
 
 ### PostgreSQL parameter limits
 
-PostgreSQL has a 65,535 bind parameter limit per statement. TypeGraph automatically chunks bulk
-operations to stay within this limit:
+PostgreSQL's protocol can encode 65,535 bind parameters, while TypeGraph uses a portable
+65,533-parameter budget across its bundled drivers. Bulk operations are automatically chunked to
+stay within that budget:
 
 - Node inserts: ~7,200 per chunk (9 params per node)
 - Edge inserts: ~5,400 per chunk (12 params per edge)
@@ -216,10 +223,10 @@ for the ownership matrix and shutdown examples.
 
 ### PostgreSQL pooling
 
-Always use a connection pool in production. TypeGraph holds a connection only for as long as a
-statement runs, so pool utilization is straightforward — no long-held connections. Most queries
-issue a single statement; a query whose selective-field mapping falls back issues a second, and
-`store.transaction()` holds one connection for the whole callback.
+Always use a connection pool in production. An individual query holds a connection only while each
+statement runs. Most queries issue a single statement; a query whose selective-field mapping falls
+back issues a second. `store.transaction()` holds one connection for the whole callback, and
+`store.batch()` does the same for its implicit transaction.
 
 ```typescript
 import { Pool } from "pg";

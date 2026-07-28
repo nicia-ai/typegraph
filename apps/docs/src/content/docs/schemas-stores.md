@@ -1970,7 +1970,7 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 
 | Pattern | Best strategy | Why |
 |---------|--------------|-----|
-| Load entity with all relationships | `subgraph(maxDepth: 1)` | Fixed statement count — fans out across all edge types in one recursive CTE |
+| Load entity with all relationships | `subgraph(maxDepth: 1)` | Fixed 2 SQLite / 3 PostgreSQL statements — recursive traversal cost does not grow with edge count |
 | Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop without extra round trips per hop |
 | Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes, in one statement |
 | Multiple independent queries with per-query control | `store.batch()` | Typed tuple results, at most one query in flight — still at least a statement per query, and not a snapshot |
