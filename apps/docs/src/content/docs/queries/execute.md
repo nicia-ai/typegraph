@@ -299,9 +299,9 @@ import { param } from "@nicia-ai/typegraph";
 ### `prepare()`
 
 Call `.prepare()` on an executable query to build and validate the AST once. Returns a
-`PreparedQuery<R>` that can be executed with different bindings; SQL text is compiled fresh on each
-`.execute()` call (see [Prepared query SQL compilation](#prepared-query-sql-compilation) below for
-why).
+`PreparedQuery<R>` that can be executed with different bindings. The statement is compiled once into
+a cached template and reused by every `.execute()` call — see
+[Prepared query SQL compilation](#prepared-query-sql-compilation) below for how that stays fresh.
 
 ```typescript
 const findByName = store
@@ -348,24 +348,59 @@ provided, and unknown binding keys are rejected.
 | `startsWith` / `endsWith`   | `p.name.startsWith(param("prefix"))`      |
 | `like` / `ilike`            | `p.email.like(param("pattern"))`          |
 
+`in()` and `notIn()` take a list-valued parameter — the **whole** list, not individual elements:
+
+```typescript
+const byIds = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.id.in(param("ids")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+await byIds.execute({ ids: ["a", "b", "c"] });
+await byIds.execute({ ids: ["d"] });
+```
+
+The list is bound as a single parameter that the database unpacks, so the compiled SQL text does
+not depend on the list's length: one statement serves every arity, and a list of ten thousand ids
+still costs one bound parameter rather than blowing past the engine's bind limit. An empty list is
+valid — `in([])` matches nothing, `notIn([])` matches everything.
+
+Every element must be the field's type, and numbers must be finite. A mixed list — `[1, "a"]` bound
+against a number field — is rejected with a `ConfigurationError` before it reaches the database, on
+every backend, as is `NaN` or `Infinity`. This matches the literal form, which already refuses a
+mixed list, and it is what keeps the two backends in step: left unchecked, PostgreSQL would fail
+casting while SQLite silently matched nothing.
+
 :::caution
-`param()` is **not** supported in `in()` / `notIn()` — the array length must be known at compile time.
+A `param()` sitting among the **elements** of a literal list — `p.name.in(["Alice", param("other")])` —
+is rejected with an `UnsupportedPredicateError`. Bind the whole list instead.
 :::
 
 ### Prepared Query SQL Compilation
 
-`.prepare()` builds and validates the AST once, but does **not** cache compiled SQL text across
-`.execute()` calls — each call recompiles fresh. This is deliberate: a "current" (live) read binds
-its temporal-validity filter to the instant it's compiled at. Caching the compiled text from
-`.prepare()` time would freeze that instant for the prepared query's entire lifetime, silently
-hiding any row created after `.prepare()` ran from every subsequent `.execute()` call — exactly the
-bug this behavior was fixed to avoid. Recompiling is pure, in-memory string-building with no I/O, so
-the cost is negligible next to the query's actual database round-trip.
+`.prepare()` builds and validates the AST once. On a backend that can compile and run raw SQL text
+(both the SQLite and PostgreSQL backends can), the statement is then compiled **once** into a cached
+template and reused by every `.execute()` call.
 
-When the backend supports `executeRaw` (both SQLite and PostgreSQL backends do), the freshly
-compiled SQL text is sent directly to the database driver with substituted parameter values. When
-`executeRaw` is unavailable, the prepared query substitutes parameters into the AST and compiles
-through the standard path instead — same freshness guarantee, different code path.
+The subtlety a cache like that has to survive is freshness: a "current" (live) read filters on
+temporal validity as of the instant it runs, so caching a compiled statement that had a concrete
+"now" baked into it would freeze that instant for the prepared query's entire lifetime — hiding
+every row created after `.prepare()` from every subsequent call. The template therefore reserves the
+read instant as a **placeholder** rather than a value, and each `.execute()` fills it with a fresh
+instant alongside the call's own bindings. Nothing about the statement's text depends on either.
+
+Two cases fall back to substituting parameters into the AST and compiling through the standard path
+on every call — same results and the same freshness guarantee, without the cached-template fast
+path:
+
+- `executeRaw` is unavailable (a custom or async backend).
+- The statement's execution semantics ride on the compiled SQL object rather than its text, which no
+  amount of `executeRaw` support changes. **Approximate vector search**
+  (`similarTo(..., { approximate: true })`) carries the engine's iterative-scan wrapper, and
+  `store.subgraph()` on PostgreSQL forces a custom plan for its id-array fetches. Flattening either
+  to cacheable text would drop the behavior it depends on, so both are excluded deliberately.
 
 ## Query Debugging
 

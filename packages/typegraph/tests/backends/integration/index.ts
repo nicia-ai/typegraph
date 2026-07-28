@@ -1,6 +1,7 @@
 export { registerAggregateIntegrationTests } from "./aggregates";
 export { registerAlgorithmIntegrationTests } from "./algorithms";
 export { registerBulkFindByIndexIntegrationTests } from "./bulk-find-by-index";
+export { registerBulkFindEndpointIntegrationTests } from "./bulk-find-endpoints";
 export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
 export { registerContributionDiagnosticIntegrationTests } from "./contribution-diagnostics";
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
@@ -13,6 +14,7 @@ export { integrationTestGraph } from "./fixtures";
 export { registerFulltextIntegrationTests } from "./fulltext";
 export { registerImportUniquenessIntegrationTests } from "./import-uniqueness";
 export { registerLateMaterializationIntegrationTests } from "./late-materialization";
+export { registerMigrateSchemaKindIntegrationTests } from "./migrate-schema-kinds";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerPredicateIntegrationTests } from "./predicates";

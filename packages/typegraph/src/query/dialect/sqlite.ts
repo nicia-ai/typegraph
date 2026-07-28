@@ -8,7 +8,7 @@ import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql } from "../sql-fragment";
 import { fts5Strategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
-import { getSqlDialectProfile } from "./profile";
+import { getSqlDialectProfile, packSqlListValue } from "./profile";
 import { type DialectAdapter } from "./types";
 
 /**
@@ -216,6 +216,19 @@ export const sqliteDialect: DialectAdapter = {
     const operator = negated ? sql.raw("NOT IN") : sql.raw("IN");
     const packedValues = JSON.stringify(values);
     return sql`${left} ${operator} (SELECT value FROM json_each(${packedValues}))`;
+  },
+
+  inListParameter(left, packedValues, { negated }) {
+    const operator = negated ? sql.raw("NOT IN") : sql.raw("IN");
+    // Same packed shape as the literal `inList` above, with the JSON text
+    // supplied by the caller's binding instead of baked in. SQLite's dynamic
+    // typing makes `json_each.value` compare correctly against every extracted
+    // column type, so the element type needs no cast here.
+    return sql`${left} ${operator} (SELECT value FROM json_each(${packedValues}))`;
+  },
+
+  packListValue(values) {
+    return packSqlListValue(values, "sqlite");
   },
 
   // ============================================================

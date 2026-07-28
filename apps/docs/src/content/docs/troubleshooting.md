@@ -406,8 +406,9 @@ cache and then on the marker row alone, which keeps the hot path free
 of catalog round trips. The cost is that this database opens
 completely clean and fails at the first read of the affected slot.
 
-**Diagnosis:** `store.verifyContributions()` returns an empty array on
-a healthy database. Each entry carries `owner`, `logicalName`,
+**Diagnosis:** `store.verifyContributions()` reports detected drift or a
+recorded failed attempt among contributions currently expected by the active
+graph and backend strategies. Each entry carries `owner`, `logicalName`,
 `physicalName`, a `state`, and — for vector slots — `kind` and
 `fieldPath`. When the marker recorded an error against its last
 attempt, `lastError` carries it: `state` tells you which repair to run,
@@ -484,11 +485,12 @@ what:
 | `orphaned-marker` | Re-run the contribution's own `createDdl` (below) |
 | `stale` | No supported automated repair — see the warning below |
 
-For `missing-marker` and `failed-materialization` the marker does not
-attest the contribution, so the ensure falls through and runs the DDL.
-Use a new backend instance: on the warm one whose marker the diagnostic
-just flagged, the per-instance cache returns early and the repair
-silently never runs.
+For `missing-marker` and `failed-materialization` the marker does not attest
+the contribution, so the ensure normally falls through and runs the DDL. Use a
+new backend instance defensively: a warm backend that cached an earlier healthy
+signature before the marker changed out of band can still return early. The
+diagnostic itself does not populate that cache, and missing or failed marker
+states are not cached.
 
 For `orphaned-marker` the marker still says `initialized`, so the
 ensure returns before any DDL no matter how fresh the backend is.
@@ -522,17 +524,18 @@ moved. If you hit this, please open an issue with the reported
 marker table.
 :::
 
-**An empty result does not mean everything was checked.** A backend
-that cannot probe its own catalog throws `ConfigurationError` rather
-than reporting a clean bill of health, but vector slots on a backend
-without vector support are skipped silently and correctly — that
-backend never materialized them, so there is nothing to compare, and
-reporting them would be a false positive on every store it opens. The
-return type cannot distinguish "checked and healthy" from "did not
-check", so `(await store.verifyContributions()).length === 0` reads
-identically in both cases. If you are building a health check on this,
-assert `backend.capabilities.vector?.supported` separately rather than
-treating an empty array as proof that embedding storage is intact.
+**An empty result does not mean everything was checked.** The diagnostic
+enumerates only current declarations. It ignores retired marker rows and treats
+an expected contribution with neither marker nor table as never attempted, so
+`[]` is not proof of initialization. A backend that cannot probe its own catalog
+throws `ConfigurationError` rather than reporting a clean bill of health, but
+vector slots on a backend without vector support are skipped silently and
+correctly — that backend never materialized them, so reporting them would be a
+false positive on every store it opens. For a readiness check, first attach with
+`createVerifiedStore()` to establish schema and marker initialization, then run
+this diagnostic. Also assert `backend.capabilities.vector?.supported` when
+embedding storage is required rather than treating an empty array as proof that
+it is intact.
 
 ## Semantic Search Issues
 

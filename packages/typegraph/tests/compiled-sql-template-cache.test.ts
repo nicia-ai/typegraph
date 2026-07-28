@@ -118,6 +118,54 @@ describe("compiled SQL template cache", () => {
     expect(counts.executeRaw).toBe(3);
   });
 
+  it("compiles a list-valued in() parameter once across differing list lengths", async () => {
+    const { backend, counts } = countingBackend(real);
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+    await store.nodes.Person.create({ name: "Bob" });
+
+    const peopleByName = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.in(parameter("names")))
+      .select((ctx) => ctx.p.name)
+      .prepare();
+
+    counts.compileSql = 0;
+    counts.executeRaw = 0;
+
+    expect(await peopleByName.execute({ names: ["Alice"] })).toEqual(["Alice"]);
+    const both = await peopleByName.execute({ names: ["Alice", "Bob"] });
+    expect(both.toSorted()).toEqual(["Alice", "Bob"]);
+    expect(await peopleByName.execute({ names: [] })).toEqual([]);
+
+    // The list rides on a single placeholder, so arity never reaches the SQL
+    // text — three different list lengths share one compiled statement.
+    expect(counts.compileSql).toBe(1);
+    expect(counts.executeRaw).toBe(3);
+  });
+
+  it("binds a list-valued in() parameter without executeRaw", async () => {
+    const backend = backendWithoutRawExecution(real);
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+    await store.nodes.Person.create({ name: "Bob" });
+
+    // The fallback substitutes the binding into the AST as a literal list
+    // instead of packing it behind a placeholder; results must not differ.
+    const peopleByName = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.in(parameter("names")))
+      .select((ctx) => ctx.p.name)
+      .prepare();
+
+    const both = await peopleByName.execute({ names: ["Alice", "Bob"] });
+    expect(both.toSorted()).toEqual(["Alice", "Bob"]);
+    expect(await peopleByName.execute({ names: ["Bob"] })).toEqual(["Bob"]);
+    expect(await peopleByName.execute({ names: [] })).toEqual([]);
+  });
+
   it("compiles a reused ExecutableQuery instance once across executions", async () => {
     const { backend, counts } = countingBackend(real);
     const store = createStore(graph, backend);

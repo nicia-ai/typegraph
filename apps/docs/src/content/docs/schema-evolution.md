@@ -218,6 +218,23 @@ if (result.status === "breaking") {
 }
 ```
 
+Two things `migrateSchema()` will not let you do by accident:
+
+- **Drop a kind that still holds rows.** The commit is refused with a
+  `MigrationError` whose `details.reason` is `"kind-removal"`. Committing
+  would make those rows unreachable, and the next `materializeRemovals()`
+  would delete them — it re-derives removals by walking schema history, so
+  the drop is not reversible by putting the kind back. Export or delete the
+  rows first (see [Removing a Node Type](#removing-a-node-type)), or pass
+  `{ discardDroppedKindRows: true }` if losing them is the intent. Dropping
+  an *empty* kind needs no flag.
+- **Erase kinds added at runtime.** `migrateSchema()` folds the persisted
+  graph extension into the graph you hand it, the same way
+  `createStoreWithSchema()` does, so passing your compile-time graph never
+  drops a kind that `evolve()` committed. To remove one of those
+  deliberately, use `removeKinds()` — it queues the cleanup rows that make
+  the removal reconcilable.
+
 ### Removing a Node Type
 
 #### Deploy 1 — Stop creating new instances
@@ -240,7 +257,11 @@ for (const node of deprecated) {
 
 #### Deploy 3 — Remove from schema
 
-Remove the node type from `defineGraph()` and force migrate.
+Remove the node type from `defineGraph()` and force migrate. Deploy 2 is what
+makes this step legal: `migrateSchema()` refuses to drop a kind that still
+holds rows, so if any remain you will get a `MigrationError` with
+`details.reason === "kind-removal"` naming the kind and its row count rather
+than silent data loss.
 
 ### Changing a Property Type
 

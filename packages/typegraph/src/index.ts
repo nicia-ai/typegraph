@@ -499,6 +499,8 @@ export type {
   DynamicEdgeCollection,
   DynamicNodeCollection,
   Edge,
+  EdgeBulkFindEndpointOptions,
+  EdgeBulkFindOptions,
   EdgeCollection,
   EdgeFindByEndpointsOptions,
   EdgeGetOrCreateByEndpointsOptions,

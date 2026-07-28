@@ -95,8 +95,10 @@ function predicate(expr: PredicateExpression): Predicate {
  * Creates a named parameter reference for prepared queries.
  *
  * Use with `query.prepare()` to create reusable parameterized queries.
- * Only supported in scalar comparison positions (eq, neq, gt, etc.),
- * string operations, and between bounds. Not supported in `in()`/`notIn()`.
+ * Supported in scalar comparison positions (eq, neq, gt, etc.), string
+ * operations, between bounds, and as the WHOLE list of `in()`/`notIn()` —
+ * `field.in(param("ids"))` bound to an array at execute time. A `param()`
+ * among the individual elements of a literal list is rejected.
  *
  * @example
  * ```typescript
@@ -107,6 +109,18 @@ function predicate(expr: PredicateExpression): Predicate {
  *   .prepare();
  *
  * const results = await prepared.execute({ name: "Alice" });
+ * ```
+ *
+ * @example List-valued parameter — one compiled statement, any list length.
+ * ```typescript
+ * const byIds = store.query()
+ *   .from("Person", "p")
+ *   .whereNode("p", (p) => p.id.in(param("ids")))
+ *   .select((ctx) => ctx.p)
+ *   .prepare();
+ *
+ * await byIds.execute({ ids: ["a", "b"] });
+ * await byIds.execute({ ids: ["c"] });
  * ```
  */
 // eslint-disable-next-line unicorn/name-replacements -- concise public API
@@ -156,8 +170,8 @@ type BaseFieldBuilder = Readonly<{
   neq: (value: unknown) => Predicate;
   isNull: () => Predicate;
   isNotNull: () => Predicate;
-  in: (values: readonly unknown[]) => Predicate;
-  notIn: (values: readonly unknown[]) => Predicate;
+  in: (values: readonly unknown[] | ParameterRef) => Predicate;
+  notIn: (values: readonly unknown[] | ParameterRef) => Predicate;
 }>;
 
 /**
@@ -489,13 +503,39 @@ function comparison(
 
 /**
  * Creates an IN comparison predicate.
+ *
+ * The whole list may be a single `param()` — bound at
+ * `.prepare().execute({ ids: [...] })` and compiled to one placeholder, so
+ * varying list lengths reuse one cached statement. A `param()` sitting among
+ * literal *elements* has no such representation (a placeholder cannot be one
+ * item of a list the compiler already inlined), so it is rejected rather than
+ * silently bound as a literal.
  */
 function inComparison(
   op: "in" | "notIn",
   field: FieldRef,
-  values: readonly unknown[],
+  values: readonly unknown[] | ParameterRef,
 ): Predicate {
-  const literals = values.map((value) => literal(coerceLiteralValue(value)));
+  if (isParameterRef(values)) {
+    return predicate({
+      __type: "comparison",
+      op,
+      left: field,
+      right: values,
+    } satisfies ComparisonPredicate);
+  }
+  const literals = values.map((value) => {
+    if (isParameterRef(value)) {
+      throw new UnsupportedPredicateError(
+        `param("${value.name}") is not supported as an element of the ${op}() list`,
+        { parameterName: value.name },
+        {
+          suggestion: `Bind the whole list instead: .${op}(param("${value.name}")) and execute({ ${value.name}: [...] }).`,
+        },
+      );
+    }
+    return literal(coerceLiteralValue(value));
+  });
   const expr: ComparisonPredicate = {
     __type: "comparison",
     op,

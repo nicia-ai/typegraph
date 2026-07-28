@@ -23,6 +23,7 @@ export type {
   DialectRecursiveQueryStrategy,
   DialectStandardQueryStrategy,
   DialectVectorPredicateStrategy,
+  InListParameterOptions,
   SqlDialect,
 } from "../query/dialect/types";
 export type {

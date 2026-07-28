@@ -54,6 +54,7 @@ import {
   isMissingTableError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
+import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   type AdapterBackend,
@@ -246,6 +247,8 @@ export type SqliteBatchChunkSizes = Readonly<{
   fulltextUpsertBatchSize: number;
   /** Node ids per fulltext batch delete (2 fixed binds + one per id). */
   fulltextDeleteChunkSize: number;
+  /** Endpoint ids per `findEdgesByKind` `fromIds` / `toIds` statement. */
+  findEdgesEndpointChunkSize: number;
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
@@ -281,6 +284,10 @@ export function computeSqliteBatchChunkSizes(
     edgeInsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / EDGE_INSERT_PARAM_COUNT),
+    ),
+    findEdgesEndpointChunkSize: Math.max(
+      1,
+      maxBindParameters - FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT,
     ),
     getEdgesChunkSize: Math.max(
       1,

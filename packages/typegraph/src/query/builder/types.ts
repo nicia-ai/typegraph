@@ -254,8 +254,8 @@ export type BaseFieldAccessor = Readonly<{
   neq: (value: unknown) => Predicate;
   isNull: () => Predicate;
   isNotNull: () => Predicate;
-  in: (values: readonly unknown[]) => Predicate;
-  notIn: (values: readonly unknown[]) => Predicate;
+  in: (values: readonly unknown[] | ParameterRef) => Predicate;
+  notIn: (values: readonly unknown[] | ParameterRef) => Predicate;
 }>;
 
 export type StringFieldAccessor = BaseFieldAccessor &

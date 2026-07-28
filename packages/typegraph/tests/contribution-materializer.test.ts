@@ -730,13 +730,12 @@ describe("vector slot contributions ride the same durable-marker machinery", () 
 });
 
 /**
- * #324: the marker-vs-catalog diagnostic. Every verdict below is a
- * disagreement the ensure/assert paths cannot see, because both
- * short-circuit on the per-instance cache and then on the marker row
- * without ever probing the catalog.
+ * #324: the marker-vs-catalog diagnostic. These verdicts cover catalog drift
+ * the ensure/assert paths cannot see plus recorded failed materializations,
+ * which are unusable even when marker and catalog agree.
  */
-describe("verifyContributions crosses durable markers against the catalog", () => {
-  it("reports nothing when every marker matches a live table", async () => {
+describe("verifyContributions audits currently declared contributions", () => {
+  it("reports nothing when every current contribution is healthy", async () => {
     const markers = new Map<string, ContributionMaterializationRow>();
     await provision(markers);
 
@@ -749,6 +748,33 @@ describe("verifyContributions crosses durable markers against the catalog", () =
     await expect(
       materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
     ).resolves.toEqual([]);
+  });
+
+  it("ignores marker rows outside the current declaration set", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const retiredTable = "tg_retired_contribution";
+    recordMarkerInto(markers, {
+      graphId: GRAPH_ID,
+      logicalName: "retired",
+      owner: "retired-strategy",
+      tableName: retiredTable,
+      signature: "retired-signature",
+      attemptedAt: new Date().toISOString(),
+      materializedAt: new Date().toISOString(),
+      error: undefined,
+    });
+
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set([...runtimeTables(), vectorTableOf(VECTOR_SLOT), retiredTable]),
+    );
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toEqual([]);
+    expect(spies.tableExists).not.toHaveBeenCalledWith(retiredTable);
   });
 
   it("reports a dropped vector table with a live marker as orphaned-marker", async () => {
@@ -765,9 +791,10 @@ describe("verifyContributions crosses durable markers against the catalog", () =
       new Set(runtimeTables()),
     );
 
-    // The entry carries the marker's own identity — a caller routes it to
+    // The entry carries identity from the active declaration, matching the
+    // marker contract, so a caller routes it to
     // store.reembedVectorField(kind, fieldPath) without reconstructing any
-    // internal naming contract.
+    // internal naming contract even when the row itself is missing.
     const [owned] = pgvectorStrategy.ownedTables(VECTOR_SLOT);
     await expect(
       materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
@@ -811,10 +838,9 @@ describe("verifyContributions crosses durable markers against the catalog", () =
   });
 
   it("carries the marker's recorded error through the state fold", async () => {
-    // `missing` and `failed` deliberately collapse to one state because
-    // they share one repair. The recorded reason must NOT collapse with
-    // them: it is the only thing the catalog cannot supply, and it is what
-    // separates "sqlite-vec not loaded" from "no marker row at all".
+    // A failed attempt can surface as `missing-marker` when the physical
+    // table exists. The recorded reason is the part the catalog cannot
+    // supply; a missing row has no reason to carry through.
     const markers = new Map<string, ContributionMaterializationRow>();
     await provision(markers);
     const failure = "could not open shared library: sqlite-vec";

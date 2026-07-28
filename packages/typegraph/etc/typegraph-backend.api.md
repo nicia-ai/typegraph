@@ -294,6 +294,7 @@ export interface DialectAdapter {
     readonly ilike: (this: void, column: SqlFragment, pattern: SqlFragment | string) => SqlFragment;
     readonly initializePath: (this: void, nodeId: SqlFragment) => SqlFragment;
     readonly inList: (this: void, left: SqlFragment, values: readonly unknown[], negated: boolean) => SqlFragment;
+    readonly inListParameter: (this: void, left: SqlFragment, packedValues: SqlFragment, options: InListParameterOptions) => SqlFragment;
     readonly jsonArrayContains: (this: void, column: SqlFragment, value: unknown) => SqlFragment;
     readonly jsonArrayContainsAll: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
     readonly jsonArrayContainsAny: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
@@ -310,6 +311,7 @@ export interface DialectAdapter {
     readonly jsonPathIsNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
+    readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly quoteIdentifier: (this: void, name: string) => string;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
     readonly supportsVectors: boolean;
@@ -347,8 +349,11 @@ export type DropVectorIndexParams = Readonly<{
 // @public
 export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
 
+// @public
+type EdgeEndpointSide = "from" | "to";
+
 // @public (undocumented)
-export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "countEdgesByKind">;
+export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -543,6 +548,19 @@ export type FilteredApproximateSearch = Readonly<{
 export type FilteredApproximateSearchMode = "filter-pushdown" | "iterative-scan" | "post-filter";
 
 // @public
+type FindEdgesByEndpointSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    side: EdgeEndpointSide;
+    endpointKind: string;
+    endpointIds: readonly string[];
+    limitPerEndpoint?: number;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
+}>;
+
+// @public
 export type FindEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -686,6 +704,7 @@ export type GraphBackend = Readonly<{
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
+    findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
     insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
@@ -940,6 +959,12 @@ export type IndexWhereOperand = Readonly<{
 export type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
 // @public
+export type InListParameterOptions = Readonly<{
+    negated: boolean;
+    elementType: ValueType | undefined;
+}>;
+
+// @public
 export type InsertEdgeParams = Readonly<{
     graphId: string;
     id: string;
@@ -1138,7 +1163,7 @@ export class Placeholder {
 export const POSTGRES_CAPABILITIES: BackendCapabilities;
 
 // @public
-export const POSTGRES_MAX_BIND_PARAMETERS = 65535;
+export const POSTGRES_MAX_BIND_PARAMETERS = 65533;
 
 // @public (undocumented)
 export type QueryExecutionBackend = Pick<GraphBackend, "execute">;

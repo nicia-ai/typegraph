@@ -501,13 +501,13 @@ export type ContributionMaterializer = Readonly<{
    */
   dropVectorSlot: (slot: VectorSlot) => Promise<void>;
   /**
-   * Diagnostic: cross every durable marker for `graphId` — the runtime
-   * (fulltext) contributions plus each supplied vector slot's
-   * `ownedTables` — against the physical catalog and report every unusable
-   * contribution. This includes a recorded failed materialization even when
-   * marker and catalog agree that no table exists. Read-only: no DDL, no
-   * marker writes, and no effect on the per-instance caches the hot path
-   * relies on.
+   * Diagnostic: cross each currently declared runtime contribution and each
+   * supplied vector slot's `ownedTables` contribution against its durable
+   * marker and the physical catalog. This includes a recorded failed
+   * materialization even when marker and catalog agree that no table exists.
+   * Contributions with neither marker nor table and marker rows outside this
+   * declaration set are omitted. Read-only: no DDL, no marker writes, and no
+   * effect on the per-instance caches the hot path relies on.
    */
   verifyContributions: (
     graphId: string,

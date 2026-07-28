@@ -51,6 +51,7 @@ export {
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
   migrateSchema,
+  type MigrateSchemaOptions,
   type MigrationHookContext,
   parseSerializedSchema,
   requiresMigration,

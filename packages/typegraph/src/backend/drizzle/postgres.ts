@@ -72,6 +72,7 @@ import {
   isInsufficientResourcesError,
   isMissingTableError,
 } from "../../utils/sql-errors";
+import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   coerceNumericScore,
@@ -281,6 +282,7 @@ type PostgresBatchChunkSizes = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
   embeddingUpsertBatchSize: number;
+  findEdgesEndpointChunkSize: number;
   fulltextDeleteChunkSize: number;
   fulltextUpsertBatchSize: number;
   getEdgesChunkSize: number;
@@ -304,6 +306,10 @@ function computePostgresBatchChunkSizes(
     embeddingUpsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / EMBEDDING_UPSERT_PARAM_COUNT),
+    ),
+    findEdgesEndpointChunkSize: Math.max(
+      1,
+      maxBindParameters - FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT,
     ),
     fulltextDeleteChunkSize: Math.max(
       1,

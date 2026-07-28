@@ -25,6 +25,7 @@ import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
 } from "../../../src/backend/sqlite/local";
+import { AUTO_REFRESH_STATISTICS_ROW_THRESHOLD } from "../../../src/store/types";
 
 const Item = defineNode("Item", {
   schema: z.object({ name: z.string() }),
@@ -114,43 +115,38 @@ describe("SQLite refreshStatistics scope and cost bound", () => {
     }
   });
 
-  it("keeps repeated large-batch bulkInsert cheap as the table grows", async () => {
-    // The actual regression shape: a streaming loader batches bulkInsert
-    // calls, each already over AUTO_REFRESH_STATISTICS_ROW_THRESHOLD, so
-    // every batch re-triggers refreshStatistics(). Before the fix, each
-    // call's unbounded ANALYZE grew with cumulative table size, so batch
-    // time grew roughly linearly across the loop (observed ~5x from the
-    // first batch to the 30th at 58k cumulative rows). This asserts the
-    // last batch is not dramatically slower than the first — a loose
-    // bound (not a strict performance assertion, which would be flaky in
-    // CI) that would fail fast under the old unbounded-scan behavior.
+  it("re-applies bounded, scoped ANALYZE after every qualifying bulkInsert", async () => {
     const result = createLocalSqliteBackend();
     try {
       const store = createStore(
-        buildGraph("scope_batch_growth"),
+        buildGraph("scope_repeated_batches"),
         result.backend,
       );
-      const batchSize = 1500; // over AUTO_REFRESH_STATISTICS_ROW_THRESHOLD (1000)
-      const batchCount = 20;
-      const batchTimesMs: number[] = [];
+      const client = rawClient(result);
+      client.exec(
+        "CREATE TABLE app_unrelated_table (id INTEGER PRIMARY KEY, value TEXT)",
+      );
+      client.exec("INSERT INTO app_unrelated_table (value) VALUES ('x')");
+      const batchSize = AUTO_REFRESH_STATISTICS_ROW_THRESHOLD + 1;
 
-      for (let batch = 0; batch < batchCount; batch += 1) {
+      for (const batch of [0, 1]) {
+        if (batch > 0) {
+          client.pragma("analysis_limit = 0");
+          client.exec("DELETE FROM sqlite_stat1");
+        }
         const items = Array.from({ length: batchSize }, (_, index) => ({
           props: { name: `item-${batch}-${index}` },
         }));
-        const started = performance.now();
-        await store.nodes.Item.bulkInsert(items);
-        batchTimesMs.push(performance.now() - started);
-      }
 
-      const first5Avg =
-        batchTimesMs.slice(0, 5).reduce((sum, value) => sum + value, 0) / 5;
-      const last5Avg =
-        batchTimesMs.slice(-5).reduce((sum, value) => sum + value, 0) / 5;
-      // Some growth is expected (B-tree depth, WAL size) — this bounds it
-      // well under the ~5x-per-58k-rows trend the unscoped, unbounded
-      // ANALYZE produced.
-      expect(last5Avg).toBeLessThan(first5Avg * 3);
+        await store.nodes.Item.bulkInsert(items);
+
+        expect(client.pragma("analysis_limit", { simple: true })).toBe(
+          SQLITE_ANALYZE_ROW_LIMIT,
+        );
+        const analyzed = analyzedTableNames(result);
+        expect(analyzed).toContain("typegraph_nodes");
+        expect(analyzed).not.toContain("app_unrelated_table");
+      }
     } finally {
       await result.backend.close();
     }

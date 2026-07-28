@@ -86,7 +86,8 @@ These predicates are available on **all** field types:
 | `isNotNull()` | Is not null | `IS NOT NULL` |
 
 `eq` and `neq` accept `param()` references for [prepared queries](/queries/execute#prepared-queries).
-`in` and `notIn` do **not** support `param()` because the array length must be known at compile time.
+`in` and `notIn` accept one in place of the **whole** list — `p.id.in(param("ids"))`, bound with
+`execute({ ids: [...] })` — but not in place of an individual element.
 
 ---
 
@@ -588,7 +589,8 @@ const results = await prepared.execute({ name: "Alice" });
 | Scalar comparisons (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`) | Yes | `p.age.gt(param("minAge"))` |
 | `between` bounds | Yes | `p.age.between(param("lo"), param("hi"))` |
 | String operations (`contains`, `startsWith`, `endsWith`, `like`, `ilike`) | Yes | `p.name.contains(param("search"))` |
-| `in` / `notIn` | No | Array length must be known at compile time |
+| `in` / `notIn` (whole list) | Yes | `p.id.in(param("ids"))` with `execute({ ids: [...] })` |
+| `in` / `notIn` (one element) | No | Bind the whole list instead |
 | Array predicates | No | — |
 | Subquery predicates | No | — |
 

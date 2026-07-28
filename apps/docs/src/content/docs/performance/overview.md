@@ -103,8 +103,9 @@ maintain.
 
 ### PostgreSQL parameter limits
 
-PostgreSQL has a 65,535 bind parameter limit per statement. TypeGraph automatically chunks bulk
-operations to stay within this limit:
+PostgreSQL's protocol can encode 65,535 bind parameters, while TypeGraph uses a portable
+65,533-parameter budget across its bundled drivers. Bulk operations are automatically chunked to
+stay within that budget:
 
 - Node inserts: ~7,200 per chunk (9 params per node)
 - Edge inserts: ~5,400 per chunk (12 params per edge)
@@ -190,6 +191,22 @@ const [activeUsers, recentOrders] = await store.batch(
 Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
 participate in `store.batch()`, replacing N individual `findFrom`/`findTo` calls with a single
 transactional round-trip.
+
+To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
+[Edge Collections](/schemas-stores#edge-collections)).
+Where `store.batch()` runs N singleton reads over one connection, these widen the endpoint predicate
+itself to `from_id IN (...)` — one set-oriented statement per endpoint kind and bind-budget chunk,
+on the same index prefix seek the singleton read uses — and return the edges grouped per input:
+
+```typescript
+const people = await store.nodes.Person.find({ limit: 50 });
+const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
+// jobsPerPerson[i] holds the worksAt edges of people[i]
+```
+
+This is the fix for the "list view with relationship counts" N+1: statement count grows with
+endpoint kinds and bind-budget chunks instead of with every item on the page. Pass `limitPerInput`
+to bound each endpoint's fan-out.
 
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
@@ -341,15 +358,19 @@ For application-specific indexes on JSON properties, see [Indexes](/performance/
 ### SQL Compilation
 
 Each builder method (`.where()`, `.limit()`, `.orderBy()`, etc.) returns a new immutable instance.
-`.execute()`/`.toSQL()`/`.compile()` compile fresh SQL from the AST on every call — this applies to
-standard queries, aggregate queries, and set-operation queries (`union`, `intersect`, `except`).
-Compilation is pure, in-memory string-building with no I/O, so recompiling is cheap; the query's
-actual database round-trip dominates the cost either way.
 
-This is deliberate, not just unoptimized: a "current" (live) read binds its temporal-validity filter
-to the instant it's compiled at. Caching compiled SQL across calls would freeze that instant at
-whichever call first triggered compilation, silently hiding any row created afterward from every
-later call on the same query instance.
+A reused query instance compiles **once**. The first `.execute()` builds a cached template and every
+later call reuses it — for standard queries, aggregate queries, set-operation queries (`union`,
+`intersect`, `except`), and prepared queries alike. Explicit `.toSQL()` / `.compile()` calls are the
+exception: they compile on demand every time, because producing the statement is the thing the
+caller asked for.
+
+The subtlety a cache like that has to survive is freshness. A "current" (live) read filters on
+temporal validity as of the instant it runs, so a template with a concrete "now" baked into it would
+freeze that instant for the query instance's whole lifetime, hiding every row created afterward. The
+template therefore reserves the read instant as a **placeholder** rather than a value, and each
+execution fills it with a fresh instant alongside that call's bindings. Nothing in the statement's
+text depends on either, so reuse costs no freshness.
 
 ```typescript
 const activeUsers = store
@@ -358,27 +379,54 @@ const activeUsers = store
   .whereNode("u", (u) => u.status.eq("active"))
   .select((ctx) => ctx.u);
 
-// Each call compiles AST → SQL fresh, so a user created between these two
-// calls is visible to the second one.
+// One compilation, two executions. The read instant is bound per call, so a
+// user created between these two is visible to the second one.
 await activeUsers.execute();
 await activeUsers.execute();
 ```
+
+Two things fall back to compiling on every call:
+
+- **Backends that cannot execute pre-compiled SQL text** — a custom or async backend, i.e. one
+  without `executeRaw`.
+- **Statements whose execution semantics ride on the compiled SQL object rather than its text**,
+  even on PostgreSQL with `executeRaw` fully available. Two query shapes do: **approximate vector
+  search** (`similarTo(..., { approximate: true })`, which carries the pgvector / `sqlite-vec`
+  iterative-scan wrapper) and **`store.subgraph()` on PostgreSQL**, whose id-array fetches are
+  marked to force a custom plan so the planner sizes them against the actual array rather than
+  reusing a generic one. Flattening either to cacheable text would silently drop the behavior it
+  depends on, so they are excluded deliberately — the trade is a template hit against correct
+  execution, and correctness wins.
+
+Compilation is pure, in-memory string-building with no I/O, so both fallbacks are cheap; the query's
+database round-trip dominates either way. Worth knowing if you are profiling a vector query and
+expecting the compile-once behavior described above — that is the one shape where it does not apply.
 
 ### Prepared Queries
 
 For hot paths that execute the same query shape with different values, `.prepare()` builds and
 structurally validates the query AST once — a malformed query fails fast, before the first
-`.execute()`, instead of on first use. The AST itself carries no timestamp, so this validation is
-safe to do once and reuse. SQL text is still compiled fresh on every `.execute(bindings)` call, for
-the same reason as above: the compiled text is what carries the current-read instant, the bound
-parameter values, and the query's structure.
+`.execute()`, instead of on first use — and compiles the statement once into a cached template. Each
+`.execute(bindings)` fills that template's placeholders (a fresh read instant plus the call's own
+parameter values) and runs the cached text directly through `executeRaw`.
 
-When `executeRaw` is available (both SQLite and PostgreSQL backends), the freshly compiled SQL text
-is sent directly to the driver with the bindings substituted in.
+Because arity never reaches the SQL text, a list-valued parameter reuses the same template no matter
+how long the list is:
 
-Best for: validating a query shape once (fail fast on a malformed query) and reusing it with
-different parameter values — not for avoiding SQL compilation cost, which is negligible next to the
-database round-trip.
+```typescript
+const byIds = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.id.in(param("ids")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+await byIds.execute({ ids: ["a", "b", "c"] });
+await byIds.execute({ ids: ["d"] }); // same compiled statement
+```
+
+Best for: validating a query shape once, then reusing it with different parameter values. The saved
+compilation is real but small — the database round-trip still dominates.
 
 See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
 
