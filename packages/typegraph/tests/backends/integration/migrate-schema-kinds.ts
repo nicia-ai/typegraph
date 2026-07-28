@@ -150,28 +150,39 @@ export function registerMigrateSchemaKindIntegrationTests(
       ).toBe(0);
     });
 
-    it("never deletes rows of a kind that was dropped and re-added", async () => {
-      // History reconciliation re-derives the old removal forever; the cleanup
-      // is an unconditional kind-wide DELETE. Without the active-schema guard
-      // this destroys live data on both dialects.
+    it("refuses to re-add a kind whose cleanup is still pending", async () => {
+      // The old incarnation's rows are still in the base relations and reads
+      // filter only by (graph_id, kind), so re-adding would surface them
+      // alongside the new ones. Enforced identically on both dialects.
       const graph = graphFor("readd");
       const store = await context.createStore(graph);
       const evolved = await store.evolve(widgetExtension);
       await evolved.getNodeCollectionOrThrow("Widget").create({ label: "old" });
 
       const removed = await evolved.removeKinds(["Widget"]);
+      const error = await removed
+        .evolve(widgetExtension)
+        .catch((error_: unknown) => error_);
+
+      expect((error as Error).message).toContain("materializeRemovals");
+    });
+
+    it("carries no rows across a remove / cleanup / re-add cycle", async () => {
+      const graph = graphFor("readd_clean");
+      const store = await context.createStore(graph);
+      const evolved = await store.evolve(widgetExtension);
+      await evolved.getNodeCollectionOrThrow("Widget").create({ label: "old" });
+
+      const removed = await evolved.removeKinds(["Widget"]);
+      await removed.materializeRemovals();
+
       const readded = await removed.evolve(widgetExtension);
-      await readded
+      await readded.getNodeCollectionOrThrow("Widget").create({ label: "new" });
+
+      const rows = await readded
         .getNodeCollectionOrThrow("Widget")
-        .create({ label: "written after re-add" });
-
-      await readded.materializeRemovals();
-
-      expect(
-        await context
-          .getBackend()
-          .countNodesByKind({ graphId: graph.id, kind: "Widget" }),
-      ).toBeGreaterThan(0);
+        .find({ limit: 50 });
+      expect(rows.map((row) => row["label"])).toEqual(["new"]);
     });
   });
 }

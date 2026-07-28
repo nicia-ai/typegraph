@@ -2809,6 +2809,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // promote to incompatible only when the kind has rows; genuinely
     // incompatible changes (REMOVE_PROPERTY, TYPE_CHANGE) are
     // rejected unconditionally.
+    // A kind cannot be re-added while its cleanup is still queued. The rows
+    // of the previous incarnation are still in the base relations, and reads
+    // filter only by (graph_id, kind) — there is no schema-generation
+    // boundary — so re-adding makes them visible again alongside whatever the
+    // new incarnation writes. Worse, `materializeRemovals` then declines the
+    // queued row (the kind is live), so those rows are never reclaimed.
+    //
+    // The documented cycle is remove -> materializeRemovals -> re-add, which
+    // this leaves untouched. Blocking here rather than at cleanup time keeps
+    // the diagnosis where the caller can act on it.
+    await this.#assertNoPendingRemovalFor(merged, baseline);
+
     const baselineDocument = baseline.extension ?? Object.freeze({});
     const classification = classifyModifications(baselineDocument, extension);
     if (classification.incompatible.length > 0) {
@@ -3470,6 +3482,50 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * would require `SELECT FOR UPDATE` on the rows table, too
    * heavyweight for a millisecond-budget operation.
    */
+  /**
+   * Refuses an evolve that re-adds a kind whose data cleanup is still pending.
+   *
+   * Returns silently on backends without the removal queue: they cannot have
+   * a pending row, so there is nothing to conflict with.
+   */
+  async #assertNoPendingRemovalFor(merged: G, baseline: G): Promise<void> {
+    const getPendingKindRemovals = this.#backend.getPendingKindRemovals;
+    if (getPendingKindRemovals === undefined) return;
+
+    const addedNodes = Object.keys(merged.nodes).filter(
+      (kind) => !(kind in baseline.nodes),
+    );
+    const addedEdges = Object.keys(merged.edges).filter(
+      (kind) => !(kind in baseline.edges),
+    );
+    if (addedNodes.length === 0 && addedEdges.length === 0) return;
+
+    const pending = await getPendingKindRemovals(this.graphId);
+    if (pending.length === 0) return;
+
+    const blocked = pending.filter((row) =>
+      row.entity === "node" ?
+        addedNodes.includes(row.kindName)
+      : addedEdges.includes(row.kindName),
+    );
+    if (blocked.length === 0) return;
+
+    const named = blocked
+      .map((row) => `${row.entity} "${row.kindName}"`)
+      .join(", ");
+    throw new ConfigurationError(
+      `Cannot re-add ${named} for graph "${this.graphId}": the previous ` +
+        `removal's data cleanup has not run, so the old rows are still in ` +
+        `the database and would become visible again alongside the new ` +
+        `ones. Run store.materializeRemovals() first, then evolve.`,
+      {
+        code: "KIND_READD_BLOCKED_BY_PENDING_REMOVAL",
+        graphId: this.graphId,
+        kinds: blocked.map((row) => row.kindName),
+      },
+    );
+  }
+
   async #probeEmptyKinds(
     requireEmpty: readonly RequireEmptyEntry[],
   ): Promise<Set<RequireEmptyEntry>> {
