@@ -38,6 +38,7 @@ import {
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
   registerProvenanceIntegrationTests,
+  registerQueryHookIntegrationTests,
   registerReconciledSchemaIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
@@ -158,6 +159,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerCoalesceUpsertIntegrationTests(context);
     registerPredicateIntegrationTests(context);
     registerProvenanceIntegrationTests(context);
+    registerQueryHookIntegrationTests(context);
     registerOrderingIntegrationTests(context);
     registerLateMaterializationIntegrationTests(context);
     registerTemporalIntegrationTests(context);
