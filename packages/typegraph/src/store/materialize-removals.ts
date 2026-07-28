@@ -221,6 +221,15 @@ export async function materializeRemovals(
   // and leaving the row pending means a later removal of the same kind is
   // still reclaimed. Self-healing rather than sticky.
   //
+  // This is check-then-delete (#339): a re-add committing between this read
+  // and the DELETE below is not fenced. Closing it means re-reading and
+  // deleting while holding the schema-write lock — which a re-add contends
+  // for, unlike the plain data write in #336 — but the lock's transaction
+  // target cannot execute DDL, and cleanup drops per-kind vector tables.
+  // Deferring that DDL outside the lock would drop live storage for a kind
+  // that was re-added meanwhile, so the fix needs that target extended
+  // first.
+  //
   // The decline is REPORTED (`status: "skipped"`), not silent. Queue depth is
   // the health signal for this subsystem, and a silent skip gives it a
   // legitimate non-zero steady state that no output explains — an operator
