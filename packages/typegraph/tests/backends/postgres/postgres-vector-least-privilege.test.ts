@@ -116,8 +116,24 @@ beforeAll(async () => {
       `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${LEAST_PRIV_ROLE_IDENTIFIER}`,
   );
   // The crux: deny DDL. (Legacy databases grant CREATE to PUBLIC.)
-  await ownerPool.query(`REVOKE CREATE ON SCHEMA public FROM PUBLIC`);
-  publicCreateRevoked = true;
+  const publicSchemaPrivileges = await ownerPool.query<{
+    public_has_create: boolean;
+  }>(`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_namespace AS namespace
+      CROSS JOIN LATERAL aclexplode(
+        COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))
+      ) AS privilege
+      WHERE namespace.nspname = 'public'
+        AND privilege.grantee = 0
+        AND privilege.privilege_type = 'CREATE'
+    ) AS public_has_create
+  `);
+  if (publicSchemaPrivileges.rows[0]?.public_has_create === true) {
+    await ownerPool.query(`REVOKE CREATE ON SCHEMA public FROM PUBLIC`);
+    publicCreateRevoked = true;
+  }
   await ownerPool.query(
     `REVOKE CREATE ON SCHEMA public FROM ${LEAST_PRIV_ROLE_IDENTIFIER}`,
   );
