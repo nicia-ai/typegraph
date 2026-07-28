@@ -236,16 +236,18 @@ pool.on("error", (err) => {
 });
 ```
 
-**Sizing guidance:** Each concurrent query uses one connection for the duration of that single SQL
-statement. A pool of 10–20 connections handles most workloads. If you're running bulk imports in
-parallel, size up accordingly.
+**Sizing guidance:** Each concurrent query holds one connection for as long as its statement runs.
+A pool of 10–20 connections handles most workloads. If you're running bulk imports in parallel,
+size up accordingly.
 
 **Reducing pool pressure with `batch()`:** When loading multiple independent queries (e.g., a
 detail page with several relationship types), `Promise.all` can acquire up to N connections
 simultaneously — fewer if the pool is undersized or saturated, in which case it queues instead.
-[`store.batch()`](/schemas-stores#batch-query-execution) runs all queries over a single connection
-within an implicit transaction, capping peak connection use at 1. It does not reduce the statement
-count, and read-committed isolation means it is not a snapshot.
+[`store.batch()`](/schemas-stores#batch-query-execution) keeps at most one query in flight, so peak
+connection use is 1 — on a transactional backend that is literally one checked-out connection for
+the implicit transaction; elsewhere it is one at a time, and whether the adapter reuses the same
+client is its own business. It does not reduce the statement count, and read-committed isolation
+means it is not a snapshot.
 
 ### SQLite concurrency
 

@@ -1130,8 +1130,10 @@ Edge write APIs that mint ids still accept plain strings.
 
 #### `getByIds(ids)`
 
-Retrieves multiple edges by ID in a single query. Returns results in input order,
-with `undefined` for missing IDs.
+Retrieves multiple edges by ID, returning results in input order with `undefined`
+for missing IDs. Costs one statement per bind-limit chunk where the backend
+exposes a batch read (`getEdges`); where it does not, it falls back to one lookup
+per distinct id, issued concurrently.
 
 ```typescript
 store.edges.worksAt.getByIds(
@@ -1971,7 +1973,7 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 | Load entity with all relationships | `subgraph(maxDepth: 1)` | Fixed statement count — fans out across all edge types in one recursive CTE |
 | Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop without extra round trips per hop |
 | Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes, in one statement |
-| Multiple independent queries with per-query control | `store.batch()` | Typed tuple results, at most one query in flight — still a statement per query, and not a snapshot |
+| Multiple independent queries with per-query control | `store.batch()` | Typed tuple results, at most one query in flight — still at least a statement per query, and not a snapshot |
 | Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed; honors the graph's temporal mode by default |
 | Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit; pass `temporalMode` / `asOf` when reading history |
 | Shortest path, reachability, neighborhoods, degree | `store.algorithms.*` | Set-based BFS frontier or a single `COUNT` — see [Graph Algorithms](/graph-algorithms) |
@@ -1984,7 +1986,7 @@ additional queries for node resolution. The gap widens as relationship count gro
 For the common "load an entity and everything it touches" pattern (detail pages, config hydration,
 template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach. When you need
 per-query filtering, sorting, or pagination across multiple independent queries, use
-[`store.batch()`](#batch-query-execution) — but note it still costs a statement per query, so it
+[`store.batch()`](#batch-query-execution) — but note it still costs at least a statement per query, so it
 does not narrow this gap. Reserve individual fluent queries for one-off operations.
 
 ### Graph Algorithms
@@ -2061,7 +2063,7 @@ const results = await store
 
 #### `store.batch(...queries)`
 
-Run several queries in sequence — a statement each, never one round trip. See
+Run several queries in sequence — at least a statement each, never one round trip. See
 [Batch Query Execution](#batch-query-execution).
 
 ### Dynamic Collection Access
