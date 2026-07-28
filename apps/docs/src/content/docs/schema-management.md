@@ -258,6 +258,14 @@ try {
       case "breaking-change": {
         break;
       }
+      case "kind-removal": {
+        // The commit would drop a kind that still holds rows. Narrowing on
+        // `reason` makes `droppedKinds` non-optional — the details type is a
+        // discriminated union, so each reason carries exactly its own payload.
+        const { nodes, edges } = error.details.droppedKinds;
+        console.error("still populated:", [...nodes, ...edges]);
+        break;
+      }
       // "no-active-version" | "version-not-found"
     }
   }
@@ -319,7 +327,9 @@ import { initializeSchema, migrateSchema, rollbackSchema, ensureSchema } from "@
 const row = await initializeSchema(backend, graph);
 console.log("Created version:", row.version);
 
-// Migrate to new version
+// Migrate to new version. Folds the persisted graph extension into `graph`
+// first, and refuses (MigrationError, reason "kind-removal") if the commit
+// would drop a kind that still holds rows.
 const newVersion = await migrateSchema(backend, graph, currentVersion);
 console.log("Migrated to version:", newVersion);
 

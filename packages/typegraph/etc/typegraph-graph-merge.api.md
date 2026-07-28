@@ -2124,12 +2124,21 @@ type MaterializeIndexesResult = Readonly<{
     results: readonly MaterializeIndexesEntry[];
 }>;
 
-// @public (undocumented)
+// @public
 type MaterializeRemovalsEntry = Readonly<{
     kind: string;
     entity: KindEntity;
-    status: "removed" | "failed";
-    error?: Error;
+    status: "removed";
+}> | Readonly<{
+    kind: string;
+    entity: KindEntity;
+    status: "failed";
+    error: Error;
+}> | Readonly<{
+    kind: string;
+    entity: KindEntity;
+    status: "skipped";
+    reason: "kind-is-live";
 }>;
 
 // @public

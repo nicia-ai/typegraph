@@ -8,14 +8,21 @@
  * - Error reporting for breaking changes
  */
 import { type GraphBackend, type SchemaVersionRow } from "../backend/types";
-import { type GraphDef } from "../core/define-graph";
+import {
+  getEdgeKinds,
+  getNodeKinds,
+  type GraphDef,
+} from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
+import { type KindEntity } from "../core/types";
 import {
   ConfigurationError,
   DatabaseOperationError,
   MigrationError,
+  StaleVersionError,
 } from "../errors";
 import { mergeGraphExtension } from "../graph-extension/merge";
+import { stripGraphExtension } from "../graph-extension/remove";
 import { buildKindRegistry } from "../registry";
 import { freezeDeep } from "../utils/object";
 import { isMissingTableError } from "../utils/sql-errors";
@@ -172,16 +179,31 @@ export async function loadAndMergeGraphExtensionDocument<G extends GraphDef>(
  * persisted graph extension into the supplied graph without paying for a
  * second `getActiveSchema` round trip or going through the
  * bootstrap-capable loader.
+ *
+ * **The persisted document is the sole authority on extension kinds.** The
+ * supplied graph's own extension slice is stripped before the stored one is
+ * applied, so the result is a function of `activeRow` alone. Without this, a
+ * caller passing an already-merged graph — `store.graph` is public and
+ * returns one — resurrects extension kinds another writer has since removed:
+ * `unionDocuments` unions the local slice back in and the absent-from-stored
+ * kinds win. That silently undoes `Store.removeKinds` while its
+ * `typegraph_kind_removals` row stays queued, leaving a kind the schema calls
+ * live with a pending cleanup that later deletes its rows.
+ *
+ * A compile-time graph has no extension slice, so the strip is a no-op for
+ * the `createStoreWithSchema` / `assertSchemaCurrent` callers. Mirrors
+ * `Store.#catchUpToStored`, which has stripped for this exact reason.
  */
 function mergeStoredGraphExtension<G extends GraphDef>(
   graph: G,
   activeRow: SchemaVersionRow,
 ): Readonly<{ graph: G; storedSchema: SerializedSchema }> {
   const storedSchema = parseSerializedSchema(activeRow.schema_doc);
+  const compileTimeGraph = stripGraphExtension(graph);
   const merged =
     storedSchema.extension === undefined ?
-      graph
-    : mergeGraphExtension(graph, storedSchema.extension);
+      compileTimeGraph
+    : mergeGraphExtension(compileTimeGraph, storedSchema.extension);
   return {
     graph: applyDeprecatedKinds(merged, storedSchema.deprecatedKinds),
     storedSchema,
@@ -415,10 +437,27 @@ export async function ensureSchema<G extends GraphDef>(
   const actions = getMigrationActions(diff);
 
   if (throwOnBreaking) {
+    // The kind-removal pointer is noise on the dominant case (a property
+    // change), so it appears only when the diff actually removes a kind —
+    // which is exactly when `migrateSchema()` would refuse the commit.
+    //
+    // It must NOT point at `Store.removeKinds()`. A kind missing from the
+    // *code graph* is a compile-time kind, and `removeKinds` rejects those by
+    // design (`RemoveCompileTimeKindError`) — they are removed by recompiling
+    // and redeploying. `removeKinds` is for runtime extension kinds, which
+    // cannot be the cause of this diff.
+    const removesKind = [...diff.nodes, ...diff.edges].some(
+      (change) => change.type === "removed",
+    );
     throw new MigrationError(
       `Schema migration required: ${diff.summary}. ` +
         `${actions.length} migration action(s) needed. ` +
-        `Use getSchemaChanges() to review, then migrateSchema() to apply.`,
+        `Use getSchemaChanges() to review, then migrateSchema() to apply.` +
+        (removesKind ?
+          ` This diff removes a kind: migrateSchema() refuses to drop one ` +
+          `that still holds rows, so export or delete those rows first and ` +
+          `retry.`
+        : ""),
       {
         graphId: graph.id,
         fromVersion: activeSchema.version,
@@ -656,6 +695,29 @@ export async function initializeSchema<G extends GraphDef>(
   });
 }
 
+export type MigrateSchemaOptions = Readonly<{
+  /**
+   * Commit even when a dropped kind still holds rows.
+   *
+   * **This does not preserve those rows.** They are immediately unreachable —
+   * nothing references the kind any more — and they are not safe from
+   * deletion either: `materializeRemovals` re-derives removals by walking
+   * schema-version history, so the next reconcile finds the dropped kind and
+   * hard-deletes its rows, including soft-deleted ones. The flag buys a
+   * committed schema, not retained data.
+   *
+   * If you need the rows, copy them out **before** committing. If you want
+   * them removed, prefer `Store.removeKinds()`, which queues the cleanup
+   * explicitly instead of relying on history reconciliation.
+   *
+   * Dropping an *empty* kind needs no flag — it strands nothing, and it is
+   * the last step of the documented three-deploy kind-removal flow.
+   *
+   * @defaultValue false
+   */
+  discardDroppedKindRows?: boolean;
+}>;
+
 /**
  * Migrates the schema to match the current graph definition.
  *
@@ -666,22 +728,186 @@ export async function initializeSchema<G extends GraphDef>(
  * active version since `currentVersion` was read, this throws
  * `StaleVersionError`; the caller should refetch and retry.
  *
+ * Folds the persisted graph extension into `graph` first, like every other
+ * commit path — kinds committed at runtime by `Store.evolve()` live in
+ * `schema_doc.extension`, so committing the caller's graph verbatim would
+ * erase them while leaving their rows behind. Property-level breaking
+ * changes (the documented "force the contract deploy" use) are unaffected.
+ *
  * @param backend - The database backend
  * @param graph - The current graph definition
  * @param currentVersion - The current active schema version
+ * @param options - See {@link MigrateSchemaOptions}
  * @returns The new version number
+ * @throws MigrationError with `reason: "kind-removal"` when the commit would
+ *   drop a kind that still holds rows and `discardDroppedKindRows` is not set.
  */
 export async function migrateSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
   currentVersion: number,
+  options?: MigrateSchemaOptions,
 ): Promise<number> {
+  const {
+    graph: target,
+    storedSchema,
+    activeRow,
+  } = await loadAndMergeGraphExtensionDocument(backend, graph);
+
+  // Staleness first. The commit's CAS would catch this anyway, but only after
+  // the guard below has probed row counts against a baseline the caller never
+  // saw — so a stale caller dropping a populated kind would get a
+  // `kind-removal` MigrationError quoting versions that were never theirs,
+  // instead of the `StaleVersionError` the concurrency contract documents.
+  // Diagnose the caller's actual problem, and leave the CAS to catch writers
+  // that advance the version after this point.
+  if (activeRow !== undefined && activeRow.version !== currentVersion) {
+    throw new StaleVersionError({
+      graphId: graph.id,
+      expected: currentVersion,
+      actual: activeRow.version,
+    });
+  }
+
+  const dropped =
+    storedSchema === undefined ?
+      []
+    : [
+        ...droppedKinds(storedSchema.nodes, getNodeKinds(target), "node"),
+        ...droppedKinds(storedSchema.edges, getEdgeKinds(target), "edge"),
+      ];
+  if (dropped.length > 0 && options?.discardDroppedKindRows !== true) {
+    await assertNoPopulatedKindDropped(
+      backend,
+      dropped,
+      graph.id,
+      currentVersion,
+    );
+  }
+
+  // No cleanup is queued here, deliberately, and redundancy is the whole
+  // reason. `materializeRemovals` derives removals by walking schema-version
+  // history (`reconcilePendingRemovals` diffs consecutive documents' kind
+  // sets), so a kind dropped by this commit is discovered and reclaimed on
+  // the next reconcile whether or not a `typegraph_kind_removals` row exists
+  // — on every path, `discardDroppedKindRows` included. Writing one would
+  // change nothing except adding a second source of truth.
+  //
+  // The walk is only as good as retained history: `reconcilePendingRemovals`
+  // stops at the first absent prior version, so a drop below a pruned or
+  // gapped range becomes undiscoverable. Callers who prune schema versions
+  // should run `materializeRemovals` before pruning.
   const committed = await commitNewSchemaVersion(
     backend,
-    graph,
+    target,
     currentVersion,
   );
   return committed.version;
+}
+
+/**
+ * Refuses a schema commit that would destroy rows.
+ *
+ * The invariant is not "no kind is dropped" — it is "no *populated* kind is
+ * destroyed by accident". Dropping an empty kind loses nothing and is the
+ * last step of the documented three-deploy removal flow (stop writing →
+ * delete the rows → drop from `defineGraph`). Dropping a kind that still
+ * holds rows makes them unreachable immediately, and the next
+ * `materializeRemovals` — which re-derives removals from schema history —
+ * deletes them. The commit is the point of no return, which is why the
+ * refusal happens here rather than being left to the reconciler.
+ *
+ * The remedy is never `Store.removeKinds()`. The fold re-adds every
+ * extension kind before this runs, so a dropped kind is always a
+ * *compile-time* kind — exactly the class `removeKinds` rejects
+ * (`RemoveCompileTimeKindError`). Callers export or delete the rows and
+ * retry, or opt into the loss.
+ *
+ * Mirrors the probe `Store.evolve` already runs for tightening changes, and
+ * lives in the public `migrateSchema` rather than in
+ * `commitNewSchemaVersion` because `Store.removeKinds` commits through that
+ * primitive and drops populated kinds *by design*, having queued their
+ * cleanup rows first.
+ *
+ * **The probe and the commit are not atomic** (#336). The version CAS protects
+ * the schema row, not the row counts, so a concurrent insert can land after a
+ * kind reads as empty: it is written against a schema that still declares the
+ * kind, and is unreachable a moment later.
+ *
+ * Wrapping both in one transaction would not close this. Schema commits run
+ * under a dialect write-lock (`pg_advisory_xact_lock` on Postgres) that
+ * serializes schema writers against each other, but ordinary data writes do
+ * not take it, so the inserting session is neither holding nor blocked by the
+ * fence. Closing it properly means data writes participating in a shared lock
+ * keyed on the graph — a cost on every write, tracked separately.
+ *
+ * `Store.evolve`'s tightening probe has the identical window and predates
+ * this one.
+ */
+async function assertNoPopulatedKindDropped(
+  backend: GraphBackend,
+  dropped: readonly DroppedKind[],
+  graphId: string,
+  currentVersion: number,
+): Promise<void> {
+  const counted = await Promise.all(
+    dropped.map(async (entry) => {
+      const count =
+        entry.entity === "node" ?
+          await backend.countNodesByKind({ graphId, kind: entry.kind })
+        : await backend.countEdgesByKind({ graphId, kind: entry.kind });
+      return { ...entry, count };
+    }),
+  );
+  const populated = counted.filter((entry) => entry.count > 0);
+  if (populated.length === 0) return;
+
+  const named = populated
+    .map((entry) => `${entry.entity} "${entry.kind}" (${String(entry.count)})`)
+    .join(", ");
+  throw new MigrationError(
+    `Refusing to commit a schema for graph "${graphId}" that drops kinds ` +
+      `still holding rows: ${named}. Committing would make those rows ` +
+      `unreachable, and the next materializeRemovals() would delete them. ` +
+      `Export or delete those rows, then retry. Pass ` +
+      `{ discardDroppedKindRows: true } if losing them is the intent.`,
+    {
+      graphId,
+      fromVersion: currentVersion,
+      toVersion: currentVersion + 1,
+      reason: "kind-removal",
+      droppedKinds: {
+        nodes: populated
+          .filter((entry) => entry.entity === "node")
+          .map((entry) => entry.kind),
+        edges: populated
+          .filter((entry) => entry.entity === "edge")
+          .map((entry) => entry.kind),
+      },
+    },
+  );
+}
+
+type DroppedKind = Readonly<{
+  kind: string;
+  entity: KindEntity;
+}>;
+
+/**
+ * Kind names present in a committed schema slice but absent from the graph
+ * about to be committed. Sorted so the error message and
+ * `details.droppedKinds` are stable across object-key iteration order.
+ */
+function droppedKinds(
+  committed: Readonly<Record<string, unknown>>,
+  present: readonly string[],
+  entity: KindEntity,
+): readonly DroppedKind[] {
+  const kinds = new Set(present);
+  return Object.keys(committed)
+    .filter((name) => !kinds.has(name))
+    .toSorted()
+    .map((kind) => ({ kind, entity }));
 }
 
 /**

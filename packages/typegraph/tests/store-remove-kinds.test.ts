@@ -20,6 +20,7 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, KindNotFoundError } from "../src";
 import type { GraphBackend } from "../src/backend/types";
+import type { GraphDef } from "../src/core/define-graph";
 import { RECORDED_MAX_REVISION } from "../src/core/temporal";
 import {
   defineGraphExtension,
@@ -32,11 +33,37 @@ import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { migrateSchema } from "../src/schema/manager";
+import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 type CountRow = Readonly<{ count: unknown }>;
+
+/**
+ * Reproduce the `removeKinds()` crash window: the schema commit lands, the
+ * `typegraph_kind_removals` queue write does not.
+ *
+ * Goes through `backend.commitSchemaVersion` — the same primitive
+ * `removeKinds()` commits through — rather than `migrateSchema()`, which
+ * cannot express this state: it folds the persisted graph extension back
+ * into the supplied graph, so an extension kind can never be dropped through
+ * it, and refuses kind-dropping commits outright.
+ */
+async function commitCrashedRemoval<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  currentVersion: number,
+): Promise<void> {
+  const schema = serializeSchema(graph, currentVersion + 1);
+  await backend.commitSchemaVersion({
+    graphId: graph.id,
+    expected: { kind: "active", version: currentVersion },
+    version: currentVersion + 1,
+    schemaHash: await computeSchemaHash(schema),
+    schemaDoc: schema,
+  });
+}
 
 async function countOpenRecordedNodeRows(
   backend: GraphBackend,
@@ -459,15 +486,15 @@ describe("Store.materializeRemovals", () => {
     ).toBe(2);
 
     // Simulate the crash window: commit the schema diff (Tag removed)
-    // through `migrateSchema` directly, bypassing `removeKinds` and
-    // its queue write. baseGraph's compile-time slice has Person only;
+    // through the backend primitive, bypassing `removeKinds` and its
+    // queue write. baseGraph's compile-time slice has Person only;
     // committing it as the new active schema is structurally
     // equivalent to a successful Tag removal that crashed before the
     // queue insert.
     const evolvedVersion = requireDefined(
       await backend.getActiveSchema(baseGraph.id),
     ).version;
-    await migrateSchema(backend, baseGraph, evolvedVersion);
+    await commitCrashedRemoval(backend, baseGraph, evolvedVersion);
 
     // The queue is empty (the crash window). Tag rows are orphaned
     // because the schema doesn't reference Tag any more.
@@ -531,7 +558,7 @@ describe("Store.materializeRemovals", () => {
     const versionBeforeRemoveCrash = requireDefined(
       await backend.getActiveSchema(baseGraph.id),
     ).version;
-    await migrateSchema(backend, baseGraph, versionBeforeRemoveCrash);
+    await commitCrashedRemoval(backend, baseGraph, versionBeforeRemoveCrash);
 
     const pendingAfterCrash = await requireDefined(
       backend.getPendingKindRemovals,

@@ -3147,12 +3147,21 @@ export type MaterializeIndexesResult = Readonly<{
     results: readonly MaterializeIndexesEntry[];
 }>;
 
-// @public (undocumented)
+// @public
 export type MaterializeRemovalsEntry = Readonly<{
     kind: string;
     entity: KindEntity;
-    status: "removed" | "failed";
-    error?: Error;
+    status: "removed";
+}> | Readonly<{
+    kind: string;
+    entity: KindEntity;
+    status: "failed";
+    error: Error;
+}> | Readonly<{
+    kind: string;
+    entity: KindEntity;
+    status: "skipped";
+    reason: "kind-is-live";
 }>;
 
 // @public
@@ -3288,7 +3297,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 // @public
-export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found"];
+export const MIGRATION_FAILURE_REASONS: readonly ["schema-behind", "breaking-change", "no-active-version", "version-not-found", "kind-removal"];
 
 // @public
 export class MigrationError extends TypeGraphError {
@@ -3299,13 +3308,27 @@ export class MigrationError extends TypeGraphError {
     readonly details: MigrationErrorDetails;
 }
 
-// @public (undocumented)
+// @public
 export type MigrationErrorDetails = Readonly<{
     graphId: string;
     fromVersion: number;
     toVersion: number;
-    reason: MigrationFailureReason;
+    reason: "schema-behind" | "breaking-change";
     diff?: SchemaDiff;
+}> | Readonly<{
+    graphId: string;
+    fromVersion: number;
+    toVersion: number;
+    reason: "no-active-version" | "version-not-found";
+}> | Readonly<{
+    graphId: string;
+    fromVersion: number;
+    toVersion: number;
+    reason: "kind-removal";
+    droppedKinds: Readonly<{
+        nodes: readonly string[];
+        edges: readonly string[];
+    }>;
 }>;
 
 // @public (undocumented)
