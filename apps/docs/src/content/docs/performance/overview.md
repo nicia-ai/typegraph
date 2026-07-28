@@ -368,10 +368,22 @@ await activeUsers.execute();
 await activeUsers.execute();
 ```
 
-Backends that cannot execute pre-compiled SQL text (a custom or async backend, i.e. one without
-`executeRaw`) fall back to compiling on every call — same results, without the cached-template fast
-path. Compilation is pure, in-memory string-building with no I/O, so that fallback is cheap; the
-query's database round-trip dominates either way.
+Two things fall back to compiling on every call:
+
+- **Backends that cannot execute pre-compiled SQL text** — a custom or async backend, i.e. one
+  without `executeRaw`.
+- **Statements whose execution semantics ride on the compiled SQL object rather than its text**,
+  even on PostgreSQL with `executeRaw` fully available. Two query shapes do: **approximate vector
+  search** (`similarTo(..., { approximate: true })`, which carries the pgvector / `sqlite-vec`
+  iterative-scan wrapper) and **`store.subgraph()` on PostgreSQL**, whose id-array fetches are
+  marked to force a custom plan so the planner sizes them against the actual array rather than
+  reusing a generic one. Flattening either to cacheable text would silently drop the behavior it
+  depends on, so they are excluded deliberately — the trade is a template hit against correct
+  execution, and correctness wins.
+
+Compilation is pure, in-memory string-building with no I/O, so both fallbacks are cheap; the query's
+database round-trip dominates either way. Worth knowing if you are profiling a vector query and
+expecting the compile-once behavior described above — that is the one shape where it does not apply.
 
 ### Prepared Queries
 

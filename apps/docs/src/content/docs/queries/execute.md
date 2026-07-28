@@ -391,9 +391,16 @@ every row created after `.prepare()` from every subsequent call. The template th
 read instant as a **placeholder** rather than a value, and each `.execute()` fills it with a fresh
 instant alongside the call's own bindings. Nothing about the statement's text depends on either.
 
-When `executeRaw` is unavailable (a custom or async backend), the prepared query falls back to
-substituting parameters into the AST and compiling through the standard path on every call — same
-results and the same freshness guarantee, without the cached-template fast path.
+Two cases fall back to substituting parameters into the AST and compiling through the standard path
+on every call — same results and the same freshness guarantee, without the cached-template fast
+path:
+
+- `executeRaw` is unavailable (a custom or async backend).
+- The statement's execution semantics ride on the compiled SQL object rather than its text, which no
+  amount of `executeRaw` support changes. **Approximate vector search**
+  (`similarTo(..., { approximate: true })`) carries the engine's iterative-scan wrapper, and
+  `store.subgraph()` on PostgreSQL forces a custom plan for its id-array fetches. Flattening either
+  to cacheable text would drop the behavior it depends on, so both are excluded deliberately.
 
 ## Query Debugging
 

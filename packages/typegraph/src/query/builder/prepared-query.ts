@@ -6,7 +6,8 @@
  * the first `execute()`).
  *
  * Fast path: when the backend can compile and run raw SQL (`compileSql` +
- * `executeRaw`), the statement is compiled ONCE into a cached template whose
+ * `executeRaw`) AND the statement is raw-executable, it is compiled ONCE
+ * into a cached template whose
  * "current" read instant and user `param()` refs are reserved placeholders
  * (see {@link buildReadInstantTemplate}). Every `execute()` fills those
  * placeholders — a fresh instant plus the call's bindings — and runs the
@@ -14,9 +15,14 @@
  * never freezes "now" the way a cached literal instant would (the #246
  * regression).
  *
- * Fallback: on a backend without raw execution (custom/async), substitutes
- * parameter refs into the AST, compiles fresh per call, and executes via the
- * standard `backend.execute` path.
+ * Fallback: substitutes parameter refs into the AST, compiles fresh per call,
+ * and executes via the standard `backend.execute` path. Taken in two cases —
+ * a backend without raw execution (custom/async), and a statement that is not
+ * raw-executable because its execution semantics ride on the compiled SQL
+ * OBJECT rather than its text (approximate vector search's iterative-scan
+ * wrapper, `subgraph()`'s force-custom-plan fetches). The second applies even
+ * on PostgreSQL with `executeRaw` available; `isRawExecutable` in
+ * `sql-intent.ts` is the predicate that decides it.
  */
 import { type GraphBackend } from "../../backend/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
