@@ -1,5 +1,242 @@
 # @nicia-ai/typegraph
 
+## 0.44.0
+
+### Minor Changes
+
+- [#331](https://github.com/nicia-ai/typegraph/pull/331) [`a1f1fde`](https://github.com/nicia-ai/typegraph/commit/a1f1fdec1be98dcbf243db738fb43cf634cae278) Thanks [@pdlug](https://github.com/pdlug)! - Add batched multi-source edge reads: `bulkFindFrom` / `bulkFindTo`
+
+  `EdgeCollection` could only read the edges of ONE endpoint at a time, so
+  rendering a page of N nodes with their relationships cost N statements. The new
+  `store.edges.<kind>.bulkFindFrom(froms, options?)` and `bulkFindTo(tos,
+options?)` read a whole SET of endpoints in set-oriented statements per
+  endpoint kind and bind-budget chunk,
+  returning the edges grouped per input (index `i` holds the edges of input `i`,
+  empty array when an endpoint has none).
+
+  This widens the predicate rather than batching the calls: `from_id = ?` becomes
+  `from_id IN (...)`, the same prefix seek on the edge relation's system index.
+  Temporal semantics are identical to `findFrom` / `findTo` — same default mode,
+  same `temporalMode` / `asOf` options, same soft-delete filtering, same
+  per-endpoint ordering — and a `StoreView` exposes both methods pinned to its
+  coordinate. Pass `limitPerInput` to bound each endpoint's fan-out (applied in
+  SQL via `ROW_NUMBER()` where the backend supports window functions). Inputs
+  larger than the backend's bound-parameter budget are split across statements
+  transparently.
+
+  Backend authors: this adds a new **optional** `GraphBackend` operation,
+  `findEdgesByEndpointSet(params)`, with its own `FindEdgesByEndpointSetParams`.
+  `FindEdgesByKindParams` is unchanged.
+
+  It is a separate operation rather than optional fields on `findEdgesByKind` so
+  that a backend which does not implement it cannot degrade silently. Optional
+  params would have left an existing backend type-correct while it ignored the id
+  list and returned every edge of the kind — which the collection would rebucket
+  into a correct-looking answer at unbounded cost. Support is now detected by the
+  method's presence, before any read is issued, and `bulkFindFrom` / `bulkFindTo`
+  refuse with a typed `ConfigurationError` on a backend without it rather than
+  looping `findFrom` per input.
+
+  The parameter shape also makes the previously-validated illegal states
+  unrepresentable: one `side` instead of two id lists, no scalar `fromId` /
+  `toId` to disagree with a set, and no `limit` / `offset` / `after` to slice a
+  read the backend splits into bind-budget chunks.
+
+- [#334](https://github.com/nicia-ai/typegraph/pull/334) [`7a2e16b`](https://github.com/nicia-ai/typegraph/commit/7a2e16b70685609b19cda6683dc1d545d5aa5f9a) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.verifyContributions()`, an owner-agnostic diagnostic that crosses
+  each contribution currently expected by the active graph and backend strategies
+  against its durable marker and the physical catalog. Nothing on the open path
+  probes the catalog — boot and the runtime asserts short-circuit on a per-instance
+  signature cache and then on the marker row alone — so a database whose
+  strategy-owned tables were dropped out of band opened completely clean and
+  failed at the first fulltext or vector read. The diagnostic reports detected
+  problems as `orphaned-marker` (marker records a success, table absent),
+  `missing-marker` (table present, nothing attests it), `failed-materialization`
+  (the marker records a failed attempt and no table was produced — marker and
+  catalog agree, and it is broken anyway), or `stale` (marker recorded at a
+  different shape), with the `owner` / `logicalName` /
+  `physicalName` and, for vector slots, the `kind` and `fieldPath` needed to route
+  to the state-specific repair without reconstructing internal marker strings.
+  For vector slots, `missing-marker` and `failed-materialization` use the
+  non-destructive forced ensure; only `orphaned-marker` and `stale` rebuild vector
+  storage with `store.reembedVectorField`. `lastError` carries the reason the
+  marker recorded, when it recorded one: `state` says which repair to run,
+  `lastError` says why it broke. A contribution with neither a marker nor a table
+  was never attempted and is omitted, as are retired markers and unsupported
+  vector slots, so an empty result is not proof of initialization. It is read-only
+  (one existence query per contribution table, no DDL, no writes) and deliberately
+  not a boot step; the fast-path caching stays the default. Backends that cannot
+  probe their own catalog throw `ConfigurationError` rather than reporting a clean
+  bill of health.
+
+- [#335](https://github.com/nicia-ai/typegraph/pull/335) [`7950bb0`](https://github.com/nicia-ai/typegraph/commit/7950bb0de0b2cb93fd71c4cf6644df0b65126b6b) Thanks [@pdlug](https://github.com/pdlug)! - Support list-valued parameters in `in()` / `notIn()`
+
+  `field.in(param("ids"))` now binds the whole list at
+  `.prepare().execute({ ids: [...] })`, so the canonical "fetch these ids"
+  query can finally be prepared. The list rides on a single bound parameter
+  that the dialect unpacks (`json_each` on SQLite, `jsonb_array_elements_text`
+  on PostgreSQL), which keeps arity out of the SQL text: one compiled statement
+  serves every list length, and a list of any size costs one bound parameter
+  instead of one per element. An empty list is valid — `in([])` matches nothing,
+  `notIn([])` matches everything.
+
+  A `ParameterRef` passed among the _elements_ of a literal list
+  (`in(["a", param("b")])`) was previously coerced to a literal and silently
+  produced wrong results. It now throws `UnsupportedPredicateError` naming the
+  supported form. A name used both as a list and as a scalar in one query is
+  rejected at `prepare()`.
+
+  List elements are validated against the field's type before binding, so
+  `[1, "a"]` against a number field is rejected with a `ConfigurationError`
+  rather than failing on PostgreSQL and silently matching nothing on SQLite.
+  This matches the literal form, which already refuses a mixed list.
+
+  Non-finite numbers (`NaN`, `±Infinity`) are now rejected in any parameter
+  binding, list or scalar. `JSON.stringify` turns them into `null`, so a list
+  binding became SQL NULL — `notIn(param("x"))` with `[NaN]` filtered out every
+  row — and SQLite binds a scalar `NaN` as NULL, so `eq(param("x"))` with `NaN`
+  quietly matched nothing. Both now throw.
+
+  `DialectAdapter` gains two members, `inListParameter` and `packListValue`;
+  custom dialect adapters must implement them.
+
+- [#329](https://github.com/nicia-ai/typegraph/pull/329) [`03e87bd`](https://github.com/nicia-ai/typegraph/commit/03e87bd1d370408af7dcb640729e9579508db29f) Thanks [@pdlug](https://github.com/pdlug)! - Export the committed-schema reads from the package root. `getActiveSchema`,
+  `isSchemaInitialized`, and the `SerializedSchema` type now sit next to
+  `getCommittedSchemaVersion` in `@nicia-ai/typegraph`, so answering "what kinds
+  does this database already have?" no longer requires finding the
+  `@nicia-ai/typegraph/schema` subpath or querying `typegraph_schema_versions`
+  by hand. `getActiveSchema` and `getCommittedSchemaVersion` now cross-reference
+  each other in their docstrings.
+
+- [#332](https://github.com/nicia-ai/typegraph/pull/332) [`2fb8925`](https://github.com/nicia-ai/typegraph/commit/2fb89258b2047fe8ae6d2ce97cb7f219200285e5) Thanks [@pdlug](https://github.com/pdlug)! - Fix `migrateSchema()` silently dropping runtime-committed kinds
+
+  `migrateSchema(backend, graph, currentVersion)` committed `graph` verbatim. It
+  did not fold the persisted graph extension, so kinds committed at runtime by
+  `Store.evolve()` — which live in `schema_doc.extension`, not in the
+  compile-time graph — were erased from the active schema document while their
+  rows stayed in `typegraph_nodes` / `typegraph_edges`, reachable by nothing.
+  The persisted `deprecatedKinds` set was erased the same way.
+
+  This was reachable by following the library's own advice: the `MigrationError`
+  raised for a breaking change told callers to "use `getSchemaChanges()` to
+  review, then `migrateSchema()` to apply", and doing so with the graph they
+  passed to `createStoreWithSchema` destroyed every `evolve()`-committed kind.
+
+  Two changes:
+
+  - **The persisted graph extension (and deprecated-kind set) is now folded in**,
+    exactly as `createStoreWithSchema` and `getSchemaChanges` already did.
+    `migrateSchema` was the last commit path that did not. Callers pass the graph
+    they have; runtime-committed kinds survive.
+  - **A commit that would drop a kind still holding rows is refused** with a
+    `MigrationError` whose `details.reason` is the new `"kind-removal"`
+    discriminant and whose `details.droppedKinds` names them. Pass
+    `{ discardDroppedKindRows: true }` if losing those rows is the intent — the
+    name says what the flag does, because the next reconcile deletes them.
+
+  The guard fires on the actual harm — rows the next reconcile would delete —
+  not on kind removal as such. Dropping an _empty_ kind is unaffected, so the documented three-deploy
+  removal flow (stop writing → delete the rows → drop from `defineGraph()` and
+  migrate) still works exactly as written; Deploy 2 is now what makes Deploy 3
+  legal instead of being merely advisory. Live rows only, matching the
+  `excludeDeleted` default of the equivalent probe in `Store.evolve()`.
+
+  Breaking property changes — the documented reason to reach for
+  `migrateSchema()` — are unaffected.
+
+  `MaterializeRemovalsEntry` gains a `"skipped"` variant, carrying
+  `reason: "kind-is-live"`. `materializeRemovals()` returns it when a queued
+  removal names a kind the active schema declares again, so the decline is
+  reported rather than leaving the queue at a non-zero depth with nothing
+  explaining why. Consumers that switch exhaustively on `status` must handle it.
+  The type is now a discriminated union, so `"failed"` carries a required
+  `error` and `"skipped"` a required `reason`.
+
+  `Store.evolve()` refuses to re-add a kind whose data cleanup is still pending,
+  with a `ConfigurationError` naming the kind and pointing at
+  `materializeRemovals()`. Reads filter only by `(graph_id, kind)`, so re-adding
+  before cleanup made the previous incarnation's rows visible alongside the new
+  ones — and the cleanup was then declined because the kind was live, so they
+  were never reclaimed. The documented cycle (remove → `materializeRemovals` →
+  re-add) is unaffected.
+
+  Two further corrections found while reviewing the above:
+
+  - **A stale store can no longer resurrect a removed kind.** The fold now
+    strips the supplied graph's own extension slice before applying the
+    persisted one, so the committed document is a function of the database
+    alone. Previously `migrateSchema(backend, store.graph, v)` — `store.graph`
+    is public and returns the merged graph — unioned a stale slice back in and
+    silently undid `Store.removeKinds()`, leaving a kind the schema called live
+    while its `typegraph_kind_removals` row stayed queued for a later
+    hard-delete. `Store.#catchUpToStored` has stripped for this exact reason;
+    the schema layer now matches it.
+  - **`discardDroppedKindRows`'s documentation was wrong.** It claimed the dropped
+    kind's rows stay and that `materializeRemovals` "will never clean them up".
+    `materializeRemovals` re-derives removals by walking schema-version history,
+    so the next reconcile hard-deletes them regardless. The flag buys a
+    committed schema, not retained data; the docstring now says so and points
+    callers at copying the rows out first.
+
+### Patch Changes
+
+- [#328](https://github.com/nicia-ai/typegraph/pull/328) [`dc2a386`](https://github.com/nicia-ai/typegraph/commit/dc2a386fa2b6275b7d0f3d6d80e2959ea094365b) Thanks [@pdlug](https://github.com/pdlug)! - State `store.batch()`'s real cost where callers see it. `batch()` runs its
+  queries in sequence, keeping at most one in flight — at least one statement
+  each, and two for a query whose selective-field mapping falls back after its
+  statement has already executed. So it caps concurrency at best and will not fix
+  an N+1. It is also not a snapshot: PostgreSQL's default read-committed isolation
+  lets a later query in the batch observe a commit the earlier ones did not, and
+  there is no public way to get one across fluent queries, since a transaction
+  context exposes no query builder.
+
+  The docstrings for `batch()`, `BatchableQuery`, `executeOn`, and the edge
+  `batchFind*` methods now lead with that, and point at the set-oriented and
+  chunked alternatives, described by what they actually do: `.traverse()` compiles
+  a chain to one statement, `store.subgraph()` costs 2 statements on SQLite and 3
+  on PostgreSQL, `getByIds()` issues one statement per bind-limit chunk (falling
+  back to concurrent per-id lookups where the backend exposes no batch read), and
+  `bulkFindByIndex()` costs a probe plus that same chunked hydration.
+
+  The docs site is corrected to match, including claims that `batch()` "minimizes
+  round-trips for reads", that `batchFind*` collapses N reads into "a single
+  transactional round-trip", that `subgraph()` is a single statement, and that
+  `getByIds()` is a single query. Transaction support no longer implies a
+  transport shape anywhere: Durable Objects use an ambient transaction with no
+  framing statements, and the non-transactional path may still reuse one client.
+  The changelog entry that shipped `batch()` carries a correction note rather than
+  a silent rewrite.
+
+  Execution semantics are unchanged. One public diagnostic changes: the
+  `ConfigurationError` message for a batch endpoint read on a read-only
+  `StoreView` no longer calls `batch()` a "batch loader".
+
+- [#344](https://github.com/nicia-ai/typegraph/pull/344) [`ea05d0d`](https://github.com/nicia-ai/typegraph/commit/ea05d0da9f4956062b895138be03ad3b36fa289b) Thanks [@pdlug](https://github.com/pdlug)! - Fence deferred kind cleanup against concurrent schema re-adds. Removal now
+  rechecks the active schema and atomically deletes live rows, recorded-time
+  intervals, vector storage, and contribution markers under the schema lock.
+  Custom backends that implement the optional `schemaWriteTransaction` capability
+  must expose transaction-bound statement execution, table-existence probing,
+  schema DDL, and vector-contribution marker deletion on its callback target.
+
+- [#347](https://github.com/nicia-ai/typegraph/pull/347) [`1616e93`](https://github.com/nicia-ai/typegraph/commit/1616e9380de834afa4912c91b79e45ed8edcd122) Thanks [@pdlug](https://github.com/pdlug)! - Fence schema-version commits against concurrent schema-managed Store writes.
+  SQLite uses its immediate writer transaction; PostgreSQL locks the active schema
+  row in shared mode for managed writes and exclusive mode for schema commits.
+  Managed writes revalidate their Store schema version while holding the fence, so
+  stale queued writes fail instead of landing against a schema that no longer
+  accepts them. Snapshot-isolated PostgreSQL transactions may raise the database's
+  native serialization failure; callers retry the whole transaction, and graph
+  merge does so automatically. Schema-managed Stores on non-transactional or
+  custom backends without the fence now fail closed on writes. Raw `createStore()`
+  instances, direct backend writes, and Stores whose schema metadata was reset by
+  `clear()` remain outside the versioned guarantee.
+
+- [#342](https://github.com/nicia-ai/typegraph/pull/342) [`d481054`](https://github.com/nicia-ai/typegraph/commit/d481054ebbac7fd6ec06b8d0b5cfd28313efab89) Thanks [@pdlug](https://github.com/pdlug)! - Make the documented store query hooks fire for query-builder statements,
+  including prepared queries, batched queries, and selective-projection retries.
+  Each submitted statement now reports its SQL, parameters, row count, duration,
+  and failures through the existing `StoreHooks` callbacks.
+
+- [#343](https://github.com/nicia-ai/typegraph/pull/343) [`347d5e3`](https://github.com/nicia-ai/typegraph/commit/347d5e3ba1c634697b873044a9770436a119604b) Thanks [@pdlug](https://github.com/pdlug)! - Avoid repeated selective-projection fallback queries. Smart-select planning now
+  covers common high-value threshold branches, and prepared queries remember a
+  missing-field fallback so later executions fetch the full row directly.
+
 ## 0.43.0
 
 ### Minor Changes
@@ -3092,7 +3329,7 @@ should not need code changes.
   > **Correction (see #325).** The "snapshot consistency" bullet above was never
   > accurate and is retained only as the historical record. `batch()` opens its
   > implicit transaction without an isolation option, so PostgreSQL runs it at the
-  > default read-committed isolation and a later query in the batch *can* observe a
+  > default read-committed isolation and a later query in the batch _can_ observe a
   > commit the earlier ones did not. The "single connection" bullet describes the
   > transactional path; connection reuse is otherwise the adapter's business, not a
   > consequence of `capabilities.transactions`. `batch()` also never pipelined,
