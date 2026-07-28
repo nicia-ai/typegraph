@@ -57,8 +57,12 @@ describe("removed-then-re-added kinds", () => {
     // apart from "nothing was pending".
     const result = await readded.materializeRemovals();
     const widgetEntry = result.results.find((entry) => entry.kind === "Widget");
-    expect(widgetEntry?.status).toBe("skipped");
-    expect(widgetEntry?.reason).toBe("kind-is-live");
+    // Narrowing on `status` is what makes `reason` reachable — the entry type
+    // is a union, so each outcome carries exactly its own payload.
+    if (widgetEntry?.status !== "skipped") {
+      throw new Error(`expected a skipped entry, got ${widgetEntry?.status}`);
+    }
+    expect(widgetEntry.reason).toBe("kind-is-live");
 
     expect(
       await backend.countNodesByKind({ graphId: baseGraph.id, kind: "Widget" }),

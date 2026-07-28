@@ -65,24 +65,40 @@ export type MaterializeRemovalsOptions = Readonly<{
   stopOnError?: boolean;
 }>;
 
-export type MaterializeRemovalsEntry = Readonly<{
-  kind: string;
-  entity: KindEntity;
-  /**
-   * `"skipped"` means the queued removal was declined because the active
-   * schema declares the kind again — it was dropped, then re-added, and
-   * deleting its rows now would destroy live data. The row stays pending, so
-   * a later removal of the same kind still reclaims it.
-   *
-   * Reported rather than silent: an empty `results` array would otherwise be
-   * indistinguishable from "nothing was pending", leaving the queue at a
-   * non-zero depth with nothing explaining why.
-   */
-  status: "removed" | "failed" | "skipped";
-  error?: Error;
-  /** Why a `"skipped"` entry was declined. */
-  reason?: "kind-is-live";
-}>;
+/**
+ * Outcome of one queued kind removal, discriminated on `status`.
+ *
+ * A union rather than one shape with optional fields, so each outcome carries
+ * exactly its own payload: `"failed"` always has an `error`, `"skipped"`
+ * always has a `reason`, and `"removed"` has neither. The flat form permitted
+ * impossible states — a `"skipped"` with no reason, or a `"removed"` carrying
+ * `reason: "kind-is-live"` — and narrowing on `status` still left both fields
+ * optional at the use site.
+ */
+export type MaterializeRemovalsEntry =
+  | Readonly<{ kind: string; entity: KindEntity; status: "removed" }>
+  | Readonly<{
+      kind: string;
+      entity: KindEntity;
+      status: "failed";
+      error: Error;
+    }>
+  | Readonly<{
+      kind: string;
+      entity: KindEntity;
+      status: "skipped";
+      /**
+       * `"kind-is-live"`: the active schema declares this kind again — it was
+       * dropped, then re-added — so deleting its rows would destroy live
+       * data. The queue row stays pending, so a later removal of the same
+       * kind still reclaims it.
+       *
+       * Reported rather than silent: an empty `results` array would otherwise
+       * be indistinguishable from "nothing was pending", leaving the queue at
+       * a non-zero depth with nothing explaining why.
+       */
+      reason: "kind-is-live";
+    }>;
 
 /**
  * Outcome of reclaiming one per-`(graphId, kind, field)` vector table that
