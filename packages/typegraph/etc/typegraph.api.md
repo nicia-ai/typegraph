@@ -2044,6 +2044,9 @@ export type FulltextStrategy = Readonly<{
 export function generateId(): string;
 
 // @public
+export function getActiveSchema(backend: GraphBackend, graphId: string): Promise<SerializedSchema | undefined>;
+
+// @public
 export function getCommittedSchemaVersion(backend: GraphBackend, graphId: string): Promise<number | undefined>;
 
 // @public
@@ -2845,6 +2848,9 @@ export function isRecordedCaptureGuardError<C extends RecordedCaptureGuardCode>(
 
 // @public (undocumented)
 export function isRecordedCaptureGuardError(error: unknown): error is RecordedCaptureGuardError;
+
+// @public
+export function isSchemaInitialized(backend: GraphBackend, graphId: string): Promise<boolean>;
 
 // @public (undocumented)
 export function isSearchableSchema(value: unknown): value is SearchableSchema;
@@ -4716,7 +4722,7 @@ type SerializedOntologyRelation = Readonly<{
 }>;
 
 // @public
-type SerializedSchema = Readonly<{
+export type SerializedSchema = Readonly<{
     graphId: string;
     version: number;
     generatedAt: string;
