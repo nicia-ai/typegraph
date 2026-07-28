@@ -1055,6 +1055,22 @@ least-privilege, DML-only database role.
   least-privilege deployments. If you only need the gate without
   building a Store (e.g. a readiness probe), call `assertSchemaCurrent`.
 
+- **`store.verifyContributions()` is the catalog-checking diagnostic.**
+  Every gate above trusts the marker row without probing the catalog, so
+  a database whose strategy-owned tables were dropped out of band opens
+  clean and fails at the first read. This method compares each contribution
+  currently expected by the active graph and backend strategies with its
+  marker and the catalog. It does not audit retired marker rows, and a
+  never-attempted contribution with neither marker nor table is omitted, so
+  an empty result is not initialization proof. It is read-only (`SELECT`
+  only, no DDL) so the least-privilege role can run it, and it is deliberately
+  not part of any open path. For a readiness check, construct the Store with
+  `createVerifiedStore()` first and then run this diagnostic; otherwise use
+  it as an operator check. Repair is state-specific and one wrong choice
+  destroys embeddings, so follow the per-state tables in
+  [The store opens clean but a fulltext or vector read fails](/troubleshooting#the-store-opens-clean-but-a-fulltext-or-vector-read-fails)
+  rather than applying one repair to every entry.
+
 ### Recommended deployment shape
 
 Run schema/DDL changes as a **privileged, one-time migration step**, then

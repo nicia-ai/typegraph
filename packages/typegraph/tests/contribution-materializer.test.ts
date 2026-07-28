@@ -27,7 +27,10 @@ import type {
   ContributionMaterializationRow,
   RecordContributionMaterializationParams,
 } from "../src/backend/types";
-import { type VectorStrategy } from "../src/query/dialect/vector-strategy";
+import {
+  type VectorSlot,
+  type VectorStrategy,
+} from "../src/query/dialect/vector-strategy";
 
 const GRAPH_ID = "contrib-mat-unit";
 const FULLTEXT_TABLE = "typegraph_node_fulltext";
@@ -101,6 +104,10 @@ function createMockMaterializer(
     graphId: string,
   ) => Promise<readonly ContributionMaterializationRow[]>,
   vectorStrategy?: VectorStrategy,
+  // Physical tables the catalog reports for `verifyContributions`.
+  // `undefined` means "every table exists" — the healthy state every
+  // non-diagnostic test in this file assumes.
+  existingTables?: ReadonlySet<string>,
 ) {
   const ensureMarkerTable = vi.fn((): Promise<void> => Promise.resolve());
   const execDdl = vi.fn((_statement: string): Promise<void> =>
@@ -125,6 +132,11 @@ function createMockMaterializer(
       return Promise.resolve();
     },
   );
+  const tableExists = vi.fn((tableName: string): Promise<boolean> =>
+    Promise.resolve(
+      existingTables === undefined || existingTables.has(tableName),
+    ),
+  );
 
   const deps = {
     dialect: vectorStrategy === undefined ? "sqlite" : "postgres",
@@ -136,6 +148,7 @@ function createMockMaterializer(
     getMarkers,
     recordMarker,
     deleteMarker,
+    tableExists,
   } satisfies ContributionMaterializerDeps;
 
   return {
@@ -146,8 +159,42 @@ function createMockMaterializer(
       getMarkers,
       recordMarker,
       deleteMarker,
+      tableExists,
     },
   };
+}
+
+/** The physical table `pgvectorStrategy` owns for a slot. */
+function vectorTableOf(slot: VectorSlot): string {
+  return pgvectorStrategy.tableName(
+    slot.graphId,
+    slot.nodeKind,
+    slot.fieldPath,
+  );
+}
+
+/**
+ * Provision a graph at both a fulltext and a vector contribution — the
+ * healthy starting state every diagnostic case then corrupts one half of.
+ */
+async function provision(
+  markers: Map<string, ContributionMaterializationRow>,
+): Promise<void> {
+  const { materializer } = createMockMaterializer(
+    markers,
+    undefined,
+    pgvectorStrategy,
+  );
+  await materializer.ensureRuntimeContributions(GRAPH_ID);
+  await materializer.ensureVectorSlot(VECTOR_SLOT);
+}
+
+/** The physical tables the runtime (fulltext) contributions occupy. */
+function runtimeTables(): readonly string[] {
+  return fts5Strategy
+    .ownedTables(FULLTEXT_TABLE)
+    .filter((contribution) => contribution.runtimeEnsure)
+    .map((contribution) => contribution.tableName);
 }
 
 // A representative embedding slot for the vector-contribution tests. Its
@@ -242,6 +289,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
       getMarkers,
       recordMarker,
       deleteMarker: vi.fn((): Promise<void> => Promise.resolve()),
+      tableExists: vi.fn((): Promise<boolean> => Promise.resolve(true)),
     } satisfies ContributionMaterializerDeps;
 
     await createContributionMaterializer(deps).ensureRuntimeContributions(
@@ -294,6 +342,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
       getMarkers,
       recordMarker,
       deleteMarker: vi.fn((): Promise<void> => Promise.resolve()),
+      tableExists: vi.fn((): Promise<boolean> => Promise.resolve(true)),
     } satisfies ContributionMaterializerDeps;
 
     await expect(
@@ -677,5 +726,345 @@ describe("vector slot contributions ride the same durable-marker machinery", () 
     ).resolves.toBeUndefined();
     expect(spies.getMarkers).not.toHaveBeenCalled();
     expect(spies.execDdl).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * #324: the marker-vs-catalog diagnostic. These verdicts cover catalog drift
+ * the ensure/assert paths cannot see plus recorded failed materializations,
+ * which are unusable even when marker and catalog agree.
+ */
+describe("verifyContributions audits currently declared contributions", () => {
+  it("reports nothing when every current contribution is healthy", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set([...runtimeTables(), vectorTableOf(VECTOR_SLOT)]),
+    );
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toEqual([]);
+  });
+
+  it("ignores marker rows outside the current declaration set", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const retiredTable = "tg_retired_contribution";
+    recordMarkerInto(markers, {
+      graphId: GRAPH_ID,
+      logicalName: "retired",
+      owner: "retired-strategy",
+      tableName: retiredTable,
+      signature: "retired-signature",
+      attemptedAt: new Date().toISOString(),
+      materializedAt: new Date().toISOString(),
+      error: undefined,
+    });
+
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set([...runtimeTables(), vectorTableOf(VECTOR_SLOT), retiredTable]),
+    );
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toEqual([]);
+    expect(spies.tableExists).not.toHaveBeenCalledWith(retiredTable);
+  });
+
+  it("reports a dropped vector table with a live marker as orphaned-marker", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+
+    // The failure mode the issue describes: the tg_vec_* table was dropped
+    // out of band, the "initialized" marker survived, and the store opens
+    // completely clean.
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set(runtimeTables()),
+    );
+
+    // The entry carries identity from the active declaration, matching the
+    // marker contract, so a caller routes it to
+    // store.reembedVectorField(kind, fieldPath) without reconstructing any
+    // internal naming contract even when the row itself is missing.
+    const [owned] = pgvectorStrategy.ownedTables(VECTOR_SLOT);
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toEqual([
+      {
+        owner: owned?.owner,
+        logicalName: owned?.logicalName,
+        physicalName: vectorTableOf(VECTOR_SLOT),
+        kind: VECTOR_SLOT.nodeKind,
+        fieldPath: VECTOR_SLOT.fieldPath,
+        state: "orphaned-marker",
+      },
+    ]);
+  });
+
+  it("reports a live table whose marker was forgotten as missing-marker", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+
+    const existing = new Set([...runtimeTables(), vectorTableOf(VECTOR_SLOT)]);
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existing,
+    );
+    // Reclaim-style marker deletion WITHOUT the table drop that should
+    // accompany it.
+    await materializer.dropVectorSlot(VECTOR_SLOT);
+
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toMatchObject([
+      {
+        physicalName: vectorTableOf(VECTOR_SLOT),
+        kind: VECTOR_SLOT.nodeKind,
+        fieldPath: VECTOR_SLOT.fieldPath,
+        state: "missing-marker",
+      },
+    ]);
+  });
+
+  it("carries the marker's recorded error through the state fold", async () => {
+    // A failed attempt can surface as `missing-marker` when the physical
+    // table exists. The recorded reason is the part the catalog cannot
+    // supply; a missing row has no reason to carry through.
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const failure = "could not open shared library: sqlite-vec";
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set([...runtimeTables(), vectorTableOf(VECTOR_SLOT)]),
+    );
+    for (const contribution of pgvectorStrategy.ownedTables(VECTOR_SLOT)) {
+      recordMarkerInto(markers, {
+        graphId: GRAPH_ID,
+        logicalName: contribution.logicalName,
+        owner: contribution.owner,
+        tableName: contribution.tableName,
+        signature: "unused-signature",
+        attemptedAt: new Date().toISOString(),
+        materializedAt: undefined,
+        error: failure,
+      });
+    }
+
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toMatchObject([{ state: "missing-marker", lastError: failure }]);
+  });
+
+  it("omits lastError entirely when the marker recorded none", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set(runtimeTables()),
+    );
+
+    // `toStrictEqual` (not `toEqual`) so a present-but-undefined
+    // `lastError` key would fail: the field is absent, not blank.
+    const [owned] = pgvectorStrategy.ownedTables(VECTOR_SLOT);
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toStrictEqual([
+      {
+        owner: owned?.owner,
+        logicalName: owned?.logicalName,
+        physicalName: vectorTableOf(VECTOR_SLOT),
+        kind: VECTOR_SLOT.nodeKind,
+        fieldPath: VECTOR_SLOT.fieldPath,
+        state: "orphaned-marker",
+      },
+    ]);
+  });
+
+  it("reports signature drift against a live table as stale", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+
+    // The declared dimension moved ahead of the provisioned table — the
+    // shape `evaluateContributionState` already models, surfaced by name.
+    const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set([...runtimeTables(), vectorTableOf(changed)]),
+    );
+
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [changed]),
+    ).resolves.toMatchObject([{ state: "stale" }]);
+  });
+
+  it("reports a failed attempt that produced no table as failed-materialization", async () => {
+    // The state a contribution lands in when provisioning genuinely broke:
+    // `fts5` module absent, no CREATE privilege, extension never loaded.
+    // Marker and catalog AGREE (both say "nothing there") — reporting it
+    // clean on that basis would hide the exact case an operator is hunting.
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const failure = "no such module: fts5";
+    const contributions = fts5Strategy
+      .ownedTables(FULLTEXT_TABLE)
+      .filter((contribution) => contribution.runtimeEnsure);
+    for (const contribution of contributions) {
+      recordMarkerInto(markers, {
+        graphId: GRAPH_ID,
+        logicalName: contribution.logicalName,
+        owner: contribution.owner,
+        tableName: contribution.tableName,
+        signature: "unused-signature",
+        attemptedAt: new Date().toISOString(),
+        materializedAt: undefined,
+        error: failure,
+      });
+    }
+
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      undefined,
+      new Set(),
+    );
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, []),
+    ).resolves.toMatchObject([
+      { state: "failed-materialization", lastError: failure },
+    ]);
+  });
+
+  it("stays silent on a contribution that was never provisioned at all", async () => {
+    // No marker row AND no table means nothing was ever attempted — boot
+    // will provision it on the next privileged run. This is the ONLY silent
+    // table-absent case; the discriminating counterpart is the test above,
+    // where a marker row recording a failure makes the same missing table
+    // `failed-materialization` rather than silence.
+    const { materializer } = createMockMaterializer(
+      new Map(),
+      undefined,
+      pgvectorStrategy,
+      new Set(),
+    );
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toEqual([]);
+  });
+
+  it("reports every live table as missing-marker when the marker table is absent", async () => {
+    const { materializer } = createMockMaterializer(
+      new Map(),
+      () => Promise.reject(MISSING_MARKER_TABLE_ERROR),
+      pgvectorStrategy,
+    );
+
+    const diagnostics = await materializer.verifyContributions(GRAPH_ID, [
+      VECTOR_SLOT,
+    ]);
+    expect(diagnostics.length).toBe(runtimeTables().length + 1);
+    expect(diagnostics.every((entry) => entry.state === "missing-marker")).toBe(
+      true,
+    );
+  });
+
+  it("mutates nothing — no DDL, no marker writes, no marker-table bootstrap", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const markersBefore = [...markers.values()];
+
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set(),
+    );
+    await materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]);
+
+    expect(spies.execDdl).not.toHaveBeenCalled();
+    expect(spies.recordMarker).not.toHaveBeenCalled();
+    expect(spies.ensureMarkerTable).not.toHaveBeenCalled();
+    expect(spies.deleteMarker).not.toHaveBeenCalled();
+    expect([...markers.values()]).toEqual(markersBefore);
+  });
+
+  it("probes each distinct physical table exactly once per call", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set([...runtimeTables(), vectorTableOf(VECTOR_SLOT)]),
+    );
+    // The same slot twice must not cost two round trips.
+    await materializer.verifyContributions(GRAPH_ID, [
+      VECTOR_SLOT,
+      VECTOR_SLOT,
+    ]);
+
+    const probed = spies.tableExists.mock.calls.map(([tableName]) => tableName);
+    expect(new Set(probed).size).toBe(probed.length);
+  });
+
+  it("re-probes on every call — a table confirmed present can disappear", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+
+    const existing = new Set([...runtimeTables(), vectorTableOf(VECTOR_SLOT)]);
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existing,
+    );
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toEqual([]);
+
+    existing.delete(vectorTableOf(VECTOR_SLOT));
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toMatchObject([{ state: "orphaned-marker" }]);
+  });
+
+  it("skips vector slots when vector support is disabled, still checking fulltext", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const noVector = createMockMaterializer(markers);
+    await noVector.materializer.ensureRuntimeContributions(GRAPH_ID);
+
+    // Fulltext table dropped, vector slot unaddressable by this backend.
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      undefined,
+      new Set(),
+    );
+    const diagnostics = await materializer.verifyContributions(GRAPH_ID, [
+      VECTOR_SLOT,
+    ]);
+
+    expect(diagnostics).toMatchObject([{ state: "orphaned-marker" }]);
+    expect(
+      diagnostics.some(
+        (entry) => entry.physicalName === vectorTableOf(VECTOR_SLOT),
+      ),
+    ).toBe(false);
   });
 });

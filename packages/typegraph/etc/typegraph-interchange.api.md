@@ -254,14 +254,28 @@ export type ConflictStrategy = z.infer<typeof ConflictStrategySchema>;
 // @public
 export const ConflictStrategySchema: z.ZodEnum<{
     error: "error";
-    skip: "skip";
     update: "update";
+    skip: "skip";
 }>;
 
 // @public
 type ConstraintNames<R extends NodeRegistration> = "unique" extends keyof R ? R["unique"] extends readonly {
     readonly name: infer N;
 }[] ? N & string : string : never;
+
+// @public
+export type ContributionDiagnostic = Readonly<{
+    owner: string;
+    logicalName: string;
+    physicalName: string;
+    kind?: string;
+    fieldPath?: string;
+    state: ContributionDiagnosticState;
+    lastError?: string;
+}>;
+
+// @public
+export type ContributionDiagnosticState = "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
 
 // @public (undocumented)
 type ContributionMaterializationBackend = Pick<GraphBackend, "ensureContributionMaterializationsTable" | "getContributionMaterialization" | "recordContributionMaterialization" | "assertRuntimeContributionsInitialized" | "ensureRuntimeContributions" | "ensureFulltextTable">;
@@ -1368,6 +1382,7 @@ type GraphBackend = Readonly<{
     assertVectorSlotInitialized?: (this: void, slot: VectorSlot) => Promise<void>;
     assertVectorSlotsInitialized?: (this: void, slots: readonly VectorSlot[]) => Promise<void>;
     deleteVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
+    verifyContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionDiagnostic[]>;
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
@@ -1709,12 +1724,12 @@ export type ImportOptions = z.input<typeof ImportOptionsSchema>;
 export const ImportOptionsSchema: z.ZodObject<{
     onConflict: z.ZodEnum<{
         error: "error";
-        skip: "skip";
         update: "update";
+        skip: "skip";
     }>;
     onUnknownProperty: z.ZodDefault<z.ZodEnum<{
-        error: "error";
         allow: "allow";
+        error: "error";
         strip: "strip";
     }>>;
     validateReferences: z.ZodDefault<z.ZodBoolean>;
@@ -3505,6 +3520,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     materializeIndexes: (options?: MaterializeIndexesOptions) => Promise<MaterializeIndexesResult>;
     materializeSystemIndexes: (options?: MaterializeSystemIndexesOptions) => Promise<MaterializeIndexesResult>;
     reembedVectorField: (kind: string, fieldPath: string, options?: ReembedVectorFieldOptions) => Promise<ReembedVectorFieldResult>;
+    verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
     materializeRemovals: (options?: MaterializeRemovalsOptions) => Promise<MaterializeRemovalsResult>;
     close: () => Promise<void>;
 }>;
@@ -4042,8 +4058,8 @@ export type UnknownPropertyStrategy = z.infer<typeof UnknownPropertyStrategySche
 
 // @public
 export const UnknownPropertyStrategySchema: z.ZodEnum<{
-    error: "error";
     allow: "allow";
+    error: "error";
     strip: "strip";
 }>;
 

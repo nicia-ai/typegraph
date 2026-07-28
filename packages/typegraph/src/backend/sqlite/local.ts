@@ -58,6 +58,11 @@ import {
   wrapWithManagedClose,
 } from "../types";
 
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../types";
+
 const nodeRequire = createRequire(import.meta.url);
 
 // ============================================================

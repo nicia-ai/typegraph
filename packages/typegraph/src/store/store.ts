@@ -26,6 +26,7 @@ import {
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type ContributionDiagnostic,
   createTransactionReadBackend,
   type GraphBackend,
   runOptionallyInTransaction,
@@ -493,6 +494,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     fieldPath: string,
     options?: ReembedVectorFieldOptions,
   ) => Promise<ReembedVectorFieldResult>;
+  verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
   materializeRemovals: (
     options?: MaterializeRemovalsOptions,
   ) => Promise<MaterializeRemovalsResult>;
@@ -3235,6 +3237,70 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       if (batch.length < batchSize) break;
     }
     return { recreated: true, reembedded };
+  }
+
+  /**
+   * Diagnostic: compare each contribution currently expected by this graph
+   * and the backend strategies with its durable marker and the physical
+   * catalog. Reports detected unusable contributions, including a recorded
+   * failed materialization whose absent table agrees with the marker.
+   * Contributions with neither marker nor table and retired marker rows are
+   * omitted, so an empty array is not proof that storage was initialized.
+   *
+   * Opening a store never probes the catalog — `ensureRuntimeContributions`
+   * and the runtime asserts short-circuit on a per-instance signature cache
+   * and then on the marker row alone, which is the right default for a hot
+   * path. The cost is that a database whose contribution tables were dropped
+   * out of band (a partial restore, a hand-run `DROP`, a schema-scoped
+   * restore that missed them) opens completely clean and then fails at the
+   * first read of the affected slot. This is the explicit, operator-invoked
+   * check for that state; it is not, and should not become, a boot step.
+   *
+   * Purely read-only: one existence query per distinct contribution table
+   * plus one marker read per graph, no DDL and no writes, so it is safe to
+   * run under a least-privilege runtime role and safe to run on a live
+   * store. Each entry carries identity resolved from the active contribution
+   * declaration and matching the marker contract, so callers can route to a
+   * repair without reconstructing any internal naming contract.
+   *
+   * Route on `state`, NOT on whether the entry is a vector slot: the
+   * repairs differ per state and the wrong one destroys data.
+   * {@link Store.reembedVectorField} drops and recreates storage, so
+   * applying it to a `missing-marker` — table intact, only the marker
+   * wrong — discards every embedding to fix bookkeeping. See
+   * {@link ContributionDiagnostic} and the per-state repair tables in the
+   * troubleshooting guide.
+   *
+   * Vector slots are enumerated from the graph's declared embedding fields
+   * and are considered only when the backend advertises vector support; a
+   * backend without it never materialized them, so there is nothing to
+   * compare. Current fulltext contributions are always considered. For a
+   * readiness check, first construct the Store through a verified attach so
+   * initialization is established independently.
+   *
+   * @throws {ConfigurationError} when the backend cannot probe its own
+   *   catalog. Reporting "no problems found" on a backend that never
+   *   looked would be the one answer this diagnostic must never give.
+   */
+  async verifyContributions(): Promise<readonly ContributionDiagnostic[]> {
+    const backend = this.#baseBackend;
+    const verify = backend.verifyContributions;
+    if (verify === undefined) {
+      throw new ConfigurationError(
+        "verifyContributions requires a backend that can probe its catalog " +
+          "for contribution tables.",
+        {
+          backend: backend.dialect,
+          capability: "contributions",
+          operation: "verify",
+        },
+      );
+    }
+    const vectorSlots =
+      backend.capabilities.vector?.supported === true ?
+        resolveGraphVectorSlots(this.#graph)
+      : [];
+    return verify(this.graphId, vectorSlots);
   }
 
   /**

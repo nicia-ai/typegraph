@@ -95,6 +95,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "upsertFulltextBatch",
   "vectorSearch",
   "vectorStrategy",
+  "verifyContributions",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 type HistoryStoreBackendMember = (typeof HISTORY_STORE_BACKEND_KEYS)[number];

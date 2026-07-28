@@ -3,6 +3,7 @@ export { registerAlgorithmIntegrationTests } from "./algorithms";
 export { registerBulkFindByIndexIntegrationTests } from "./bulk-find-by-index";
 export { registerBulkFindEndpointIntegrationTests } from "./bulk-find-endpoints";
 export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
+export { registerContributionDiagnosticIntegrationTests } from "./contribution-diagnostics";
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerEdgeCaseIntegrationTests } from "./edge-cases";
 export { registerEdgeOperationIntegrationTests } from "./edge-operations";

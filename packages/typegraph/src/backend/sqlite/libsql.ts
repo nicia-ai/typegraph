@@ -39,6 +39,11 @@ import {
 } from "../drizzle/sqlite";
 import type { AdapterBackend } from "../types";
 
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../types";
+
 // ============================================================
 // Types
 // ============================================================

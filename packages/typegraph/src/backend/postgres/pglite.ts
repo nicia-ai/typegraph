@@ -57,6 +57,10 @@ import {
   closeAfterFailure,
   wrapWithManagedClose,
 } from "../types";
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../types";
 
 // ============================================================
 // Types

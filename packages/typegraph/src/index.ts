@@ -122,6 +122,8 @@ export type {
   BackendTransactions,
   CommitSchemaVersionExpected,
   CommitSchemaVersionParams,
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
   ContributionMaterializationBackend,
   DeleteFulltextBatchParams,
   EdgeEntityReadBackend,

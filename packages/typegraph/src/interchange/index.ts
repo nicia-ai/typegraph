@@ -23,6 +23,11 @@
  * ```
  */
 
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+} from "../backend/types";
+
 // ============================================================
 // Types & Schemas
 // ============================================================

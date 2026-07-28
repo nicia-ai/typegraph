@@ -395,6 +395,148 @@ check), and prefer `createVerifiedStore()` over bare `createStore()` so
 drift fails fast. See
 [Database roles & least privilege](/backend-setup#database-roles--least-privilege).
 
+### The store opens clean but a fulltext or vector read fails
+
+**Cause:** The durable contribution marker still says `initialized`
+while the physical table it names is gone — a partial restore, a
+hand-run `DROP`, or a schema-scoped restore that missed the
+strategy-owned tables. Nothing on the open path probes the catalog:
+boot and the runtime asserts short-circuit on a per-instance signature
+cache and then on the marker row alone, which keeps the hot path free
+of catalog round trips. The cost is that this database opens
+completely clean and fails at the first read of the affected slot.
+
+**Diagnosis:** `store.verifyContributions()` reports detected drift or a
+recorded failed attempt among contributions currently expected by the active
+graph and backend strategies. Each entry carries `owner`, `logicalName`,
+`physicalName`, a `state`, and — for vector slots — `kind` and
+`fieldPath`. When the marker recorded an error against its last
+attempt, `lastError` carries it: `state` tells you which repair to run,
+`lastError` tells you why it broke, which is often a different
+question. The call is read-only — one existence query per contribution
+table, no DDL and no writes — so it is safe on a live store under a
+least-privilege role. It is deliberately **not** a boot step; call it
+from a health check or an operator script.
+
+**Solution: the repair depends on the state, and picking the wrong one
+can destroy data.** There is no single loop that repairs every entry.
+
+### Repairing a vector slot
+
+Entries with `kind` and `fieldPath` set are embedding slots.
+
+| `state` | Repair | Embeddings |
+| --- | --- | --- |
+| `missing-marker` | `ensureVectorSlotContribution(slot, { force: true })` | **Preserved** |
+| `failed-materialization` | `ensureVectorSlotContribution(slot, { force: true })` | None existed |
+| `orphaned-marker` | `reembedVectorField(kind, fieldPath, { embed })` | Already lost with the table |
+| `stale` | `reembedVectorField(kind, fieldPath, { embed })` | **Destroyed — repopulation required** |
+
+The distinction matters. `reembedVectorField` drops and recreates
+storage; without an `embed` callback it returns with **zero
+embeddings**. For `missing-marker` the table is intact and only the
+marker is not, so reaching for `reembedVectorField` there would destroy
+perfectly good vectors to fix a bookkeeping problem. Use the
+force-ensure instead — its DDL is `CREATE ... IF NOT EXISTS` and never
+drops, so it re-stamps the marker and leaves every row in place:
+
+```typescript
+import { resolveGraphVectorSlots } from "@nicia-ai/typegraph";
+
+const slots = resolveGraphVectorSlots(store.graph);
+
+for (const entry of await store.verifyContributions()) {
+  if (entry.kind === undefined || entry.fieldPath === undefined) continue;
+
+  if (entry.state === "missing-marker" || entry.state === "failed-materialization") {
+    // Non-destructive: re-stamps the marker, leaves storage untouched.
+    const slot = slots.find(
+      (candidate) =>
+        candidate.nodeKind === entry.kind &&
+        candidate.fieldPath === entry.fieldPath,
+    );
+    if (slot) await adminBackend.ensureVectorSlotContribution?.(slot, { force: true });
+  } else {
+    // orphaned-marker / stale: storage must be rebuilt. Pass `embed` or
+    // the field comes back empty and every vector query silently
+    // returns nothing.
+    await store.reembedVectorField(entry.kind, entry.fieldPath, {
+      embed: async (nodes) => new Map(/* recompute vectors here */),
+    });
+  }
+}
+```
+
+For `stale` the destruction is unavoidable rather than accidental: the
+stored vectors were written at a different dimension and are invalid
+under the new one, so they must be recomputed, not converted.
+
+### Repairing fulltext
+
+`ensureRuntimeContributions` does **not** force, and a fresh backend is
+not sufficient on its own. It short-circuits twice — once on a
+per-instance signature cache, and again if the durable marker row alone
+looks healthy. A fresh instance clears only the first. What repairs
+what:
+
+| `state` | Repair |
+| --- | --- |
+| `missing-marker`, `failed-materialization` | `ensureRuntimeContributions(graphId)` from a **fresh** privileged backend |
+| `orphaned-marker` | Re-run the contribution's own `createDdl` (below) |
+| `stale` | No supported automated repair — see the warning below |
+
+For `missing-marker` and `failed-materialization` the marker does not attest
+the contribution, so the ensure normally falls through and runs the DDL. Use a
+new backend instance defensively: a warm backend that cached an earlier healthy
+signature before the marker changed out of band can still return early. The
+diagnostic itself does not populate that cache, and missing or failed marker
+states are not cached.
+
+For `orphaned-marker` the marker still says `initialized`, so the
+ensure returns before any DDL no matter how fresh the backend is.
+Recreate the table from the declaration instead — the statements are
+idempotent, so this is safe to run against a table that turns out to
+still exist:
+
+```typescript
+const fulltextTable = adminBackend.tableNames.fulltext;
+for (const contribution of adminBackend.fulltextStrategy.ownedTables(fulltextTable)) {
+  for (const ddl of contribution.createDdl) {
+    await adminBackend.executeDdl?.(ddl);
+  }
+}
+```
+
+:::caution[`stale` fulltext has no supported repair path today]
+A `stale` fulltext contribution — the marker records a prior success at
+a different signature, which a library upgrade that changes the
+fulltext DDL can produce — cannot currently be repaired through the
+public API. Recreating the table does not help: the marker still
+carries the old signature, and re-stamping it is not exposed.
+
+Do **not** reach for `ensureRuntimeContributions` here. It throws on
+the drift guard, and on its way out it records the failure against the
+marker — which changes what the diagnostic reports next time from
+`stale` to `missing-marker`, with the drift-guard message in
+`lastError`. The underlying problem is unchanged; only its description
+moved. If you hit this, please open an issue with the reported
+`owner` / `logicalName` / `signature` rather than hand-editing the
+marker table.
+:::
+
+**An empty result does not mean everything was checked.** The diagnostic
+enumerates only current declarations. It ignores retired marker rows and treats
+an expected contribution with neither marker nor table as never attempted, so
+`[]` is not proof of initialization. A backend that cannot probe its own catalog
+throws `ConfigurationError` rather than reporting a clean bill of health, but
+vector slots on a backend without vector support are skipped silently and
+correctly — that backend never materialized them, so reporting them would be a
+false positive on every store it opens. For a readiness check, first attach with
+`createVerifiedStore()` to establish schema and marker initialization, then run
+this diagnostic. Also assert `backend.capabilities.vector?.supported` when
+embedding storage is required rather than treating an empty array as proof that
+it is intact.
+
 ## Semantic Search Issues
 
 ### "Extension not found" / "vector type not available"
