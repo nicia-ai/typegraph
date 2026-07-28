@@ -817,6 +817,12 @@ export async function migrateSchema<G extends GraphDef>(
  * deletes them. The commit is the point of no return, which is why the
  * refusal happens here rather than being left to the reconciler.
  *
+ * The remedy is never `Store.removeKinds()`. The fold re-adds every
+ * extension kind before this runs, so a dropped kind is always a
+ * *compile-time* kind — exactly the class `removeKinds` rejects
+ * (`RemoveCompileTimeKindError`). Callers export or delete the rows and
+ * retry, or opt into the loss.
+ *
  * Mirrors the probe `Store.evolve` already runs for tightening changes, and
  * lives in the public `migrateSchema` rather than in
  * `commitNewSchemaVersion` because `Store.removeKinds` commits through that
@@ -863,10 +869,8 @@ async function assertNoPopulatedKindDropped(
     `Refusing to commit a schema for graph "${graphId}" that drops kinds ` +
       `still holding rows: ${named}. Committing would make those rows ` +
       `unreachable, and the next materializeRemovals() would delete them. ` +
-      `Export or delete them first — or, for a kind added at runtime by ` +
-      `evolve(), use Store.removeKinds(), which queues the cleanup ` +
-      `explicitly. Pass { discardDroppedKindRows: true } if losing them is ` +
-      `the intent.`,
+      `Export or delete those rows, then retry. Pass ` +
+      `{ discardDroppedKindRows: true } if losing them is the intent.`,
     {
       graphId,
       fromVersion: currentVersion,

@@ -38,6 +38,22 @@ legal instead of being merely advisory. Live rows only, matching the
 Breaking property changes — the documented reason to reach for
 `migrateSchema()` — are unaffected.
 
+`MaterializeRemovalsEntry` gains a `"skipped"` variant, carrying
+`reason: "kind-is-live"`. `materializeRemovals()` returns it when a queued
+removal names a kind the active schema declares again, so the decline is
+reported rather than leaving the queue at a non-zero depth with nothing
+explaining why. Consumers that switch exhaustively on `status` must handle it.
+The type is now a discriminated union, so `"failed"` carries a required
+`error` and `"skipped"` a required `reason`.
+
+`Store.evolve()` refuses to re-add a kind whose data cleanup is still pending,
+with a `ConfigurationError` naming the kind and pointing at
+`materializeRemovals()`. Reads filter only by `(graph_id, kind)`, so re-adding
+before cleanup made the previous incarnation's rows visible alongside the new
+ones — and the cleanup was then declined because the kind was live, so they
+were never reclaimed. The documented cycle (remove → `materializeRemovals` →
+re-add) is unaffected.
+
 Two further corrections found while reviewing the above:
 
 - **A stale store can no longer resurrect a removed kind.** The fold now
