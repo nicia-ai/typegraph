@@ -11,7 +11,9 @@ your knowledge graph scales with your application.
 ## Performance Philosophy
 
 1. **One Query, One Statement**: Every query — including multi-hop traversals — compiles to a
-   single SQL statement. No N+1 queries by design.
+   single SQL statement, so the statement count never grows with the size of the graph. No N+1
+   queries by design. (Compilation, not execution: a query whose selective-field mapping falls back
+   re-runs as a full fetch, costing a second statement. See [Batch reads](#batch-reads).)
 2. **Precomputed Ontology**: Transitive closures, subclass hierarchies, and edge implications are
    computed once at schema initialization, not during every query.
 3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes. On the read
@@ -214,8 +216,10 @@ for the ownership matrix and shutdown examples.
 
 ### PostgreSQL pooling
 
-Always use a connection pool in production. TypeGraph issues one SQL statement per query, so pool
-utilization is straightforward — no long-held connections or multi-statement conversations.
+Always use a connection pool in production. TypeGraph holds a connection only for as long as a
+statement runs, so pool utilization is straightforward — no long-held connections. Most queries
+issue a single statement; a query whose selective-field mapping falls back issues a second, and
+`store.transaction()` holds one connection for the whole callback.
 
 ```typescript
 import { Pool } from "pg";
