@@ -81,6 +81,7 @@ import {
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
   type SchemaVersionRow,
+  type SchemaWriteTransactionBackend,
   type SetActiveVersionParams,
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
@@ -144,7 +145,6 @@ import {
 } from "./kind-removals";
 import {
   assertAdoptedDialect,
-  type CommonOperationBackend,
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
@@ -850,6 +850,25 @@ function createSqliteOperationBackend(
     ...commonBackend,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
+    ...(vectorStrategy === undefined ?
+      {}
+    : {
+        async deleteSchemaVectorSlotContribution(
+          slot: VectorSlot,
+        ): Promise<void> {
+          for (const contribution of vectorStrategy.ownedTables(slot)) {
+            await execRun(
+              operationStrategy.buildDeleteContributionMaterialization({
+                graphId: slot.graphId,
+                logicalName: contribution.logicalName,
+                owner: contribution.owner,
+                tableName: contribution.tableName,
+              }),
+            );
+          }
+          contributionMaterializer.evictVectorSlot(slot);
+        },
+      }),
     capabilities,
     dialect: "sqlite",
     tableNames,
@@ -1231,7 +1250,7 @@ export function createSqliteBackend(
    * cannot be eliminated without atomicity.
    */
   function runSchemaWriteTransaction<T>(
-    fn: (tx: CommonOperationBackend) => Promise<T>,
+    fn: (tx: InternalOperationBackend) => Promise<T>,
   ): Promise<T> {
     if (transactionMode === "none") {
       throwSqliteTransactionsDisabled(
@@ -1647,6 +1666,13 @@ export function createSqliteBackend(
       await runSchemaWriteTransaction((target) =>
         target.setActiveVersion(params),
       );
+    },
+
+    async schemaWriteTransaction<T>(
+      _graphId: string,
+      fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
+    ): Promise<T> {
+      return runSchemaWriteTransaction((target) => fn(target));
     },
 
     async transaction<T>(

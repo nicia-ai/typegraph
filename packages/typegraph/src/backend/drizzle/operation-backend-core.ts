@@ -9,6 +9,8 @@ import {
   UniquenessError,
 } from "../../errors";
 import type { SqlDialect } from "../../query/dialect/types";
+import { sql } from "../../query/sql-fragment";
+import { asCompiledStatementSql } from "../../query/sql-intent";
 import type {
   CompiledStatementSql,
   CompiledTemporaryStatementSql,
@@ -104,6 +106,10 @@ export type CommonOperationBackend = Pick<
       params: CommitSchemaVersionParams,
     ) => Promise<SchemaVersionRow>;
     setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
+    executeSchemaDdl: (ddl: string) => Promise<void>;
+    deleteSchemaVectorSlotContribution?: (
+      slot: import("../../query/dialect/vector-strategy").VectorSlot,
+    ) => Promise<void>;
   }>;
 
 /**
@@ -240,6 +246,10 @@ export function createCommonOperationBackend(
   }
 
   return {
+    async executeSchemaDdl(ddl: string): Promise<void> {
+      await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));
+    },
+
     async executeStatement(query: CompiledStatementSql): Promise<void> {
       await execution.execRun(query);
     },

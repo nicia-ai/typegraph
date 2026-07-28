@@ -14,6 +14,7 @@ import {
   type KindRemovalRow,
   type RecordKindRemovalParams,
   type SchemaVersionRow,
+  type SchemaWriteTransactionBackend,
   type TransactionBackend,
 } from "../backend/types";
 import type { KindEntity } from "../core/types";
@@ -221,14 +222,11 @@ export async function materializeRemovals(
   // and leaving the row pending means a later removal of the same kind is
   // still reclaimed. Self-healing rather than sticky.
   //
-  // This is check-then-delete (#339): a re-add committing between this read
-  // and the DELETE below is not fenced. Closing it means re-reading and
-  // deleting while holding the schema-write lock — which a re-add contends
-  // for, unlike the plain data write in #336 — but the lock's transaction
-  // target cannot execute DDL, and cleanup drops per-kind vector tables.
-  // Deferring that DDL outside the lock would drop live storage for a kind
-  // that was re-added meanwhile, so the fix needs that target extended
-  // first.
+  // This first read is an optimization only. `materializeOne` repeats the
+  // liveness check while holding the schema-write lock and performs every row,
+  // vector-table, and marker deletion in that same transaction. A re-add must
+  // therefore commit either before the locked check (and be skipped) or after
+  // cleanup commits.
   //
   // The decline is REPORTED (`status: "skipped"`), not silent. Queue depth is
   // the health signal for this subsystem, and a silent skip gives it a
@@ -465,9 +463,41 @@ async function materializeOne(
   ctx: MaterializeOneContext,
 ): Promise<MaterializeRemovalsEntry> {
   const recordKindRemoval = requireDefined(ctx.backend.recordKindRemoval);
+  const schemaWriteTransaction = ctx.backend.schemaWriteTransaction;
+  if (schemaWriteTransaction === undefined) {
+    throw new ConfigurationError(
+      "store.materializeRemovals() requires a backend that can hold the " +
+        "schema-write lock across the live-kind check and cleanup.",
+      { code: "MATERIALIZE_REMOVALS_SCHEMA_FENCE_UNSUPPORTED" },
+    );
+  }
   try {
-    await closeRecordedAndDeleteLiveRows(ctx, row);
-    await Promise.all(buildEmbeddingTableCleanup(ctx, row));
+    const outcome = await schemaWriteTransaction(
+      ctx.graphId,
+      async (target): Promise<"removed" | "skipped"> => {
+        const activeRow = await target.getActiveSchema(ctx.graphId);
+        const activeSchema =
+          activeRow === undefined ? undefined : (
+            parseSerializedSchema(activeRow.schema_doc)
+          );
+        if (liveKindNamesFrom(activeSchema)[row.entity].has(row.kindName)) {
+          return "skipped";
+        }
+
+        await closeRecordedAndDeleteLiveRows(ctx, row, target);
+        await dropEmbeddingTableStorage(ctx, row, target);
+        return "removed";
+      },
+    );
+
+    if (outcome === "skipped") {
+      return {
+        kind: row.kindName,
+        entity: row.entity,
+        status: "skipped",
+        reason: "kind-is-live",
+      };
+    }
 
     const removedAt = nowIso();
     await recordKindRemoval({
@@ -519,28 +549,48 @@ async function materializeOne(
 async function closeRecordedAndDeleteLiveRows(
   ctx: MaterializeOneContext,
   row: KindRemovalRow,
+  target: SchemaWriteTransactionBackend,
 ): Promise<void> {
   const deleteStatements = buildRemovedKindLiveDeleteStatements(ctx, row);
   if (!ctx.captureRecordedRemovals || ctx.recordedSchema === undefined) {
-    await executeDeleteStatements(ctx.backend, deleteStatements);
+    await executeDeleteStatements(target, deleteStatements);
     return;
   }
 
   const recordedSchema = ctx.recordedSchema;
+  const executeStatement = requireDefined(target.executeStatement);
+  await executeStatement(
+    asCompiledStatementSql(
+      sql.raw("SAVEPOINT typegraph_removal_recorded_close"),
+    ),
+  );
   try {
-    await ctx.backend.transaction(async (target) => {
-      await closeRecordedHardDeletedKind(
-        target,
-        recordedSchema,
-        ctx.graphId,
-        { entity: row.entity, kind: row.kindName },
-        false,
-      );
-      await executeDeleteStatements(target, deleteStatements);
-    });
+    await closeRecordedHardDeletedKind(
+      target,
+      recordedSchema,
+      ctx.graphId,
+      { entity: row.entity, kind: row.kindName },
+      false,
+    );
+    await executeDeleteStatements(target, deleteStatements);
+    await executeStatement(
+      asCompiledStatementSql(
+        sql.raw("RELEASE SAVEPOINT typegraph_removal_recorded_close"),
+      ),
+    );
   } catch (error) {
     if (!isMissingTableError(error)) throw error;
-    await executeDeleteStatements(ctx.backend, deleteStatements);
+    await executeStatement(
+      asCompiledStatementSql(
+        sql.raw("ROLLBACK TO SAVEPOINT typegraph_removal_recorded_close"),
+      ),
+    );
+    await executeStatement(
+      asCompiledStatementSql(
+        sql.raw("RELEASE SAVEPOINT typegraph_removal_recorded_close"),
+      ),
+    );
+    await executeDeleteStatements(target, deleteStatements);
   }
 }
 
@@ -606,26 +656,26 @@ async function executeDeleteStatements(
  * Returned as a single combined promise so the caller can issue it
  * alongside the other disjoint DELETEs.
  */
-function buildEmbeddingTableCleanup(
+async function dropEmbeddingTableStorage(
   ctx: Readonly<{
     backend: GraphBackend;
     graphId: string;
   }>,
   row: KindRemovalRow,
-): readonly Promise<void>[] {
+  target: SchemaWriteTransactionBackend,
+): Promise<void> {
   const vectorStrategy = ctx.backend.vectorStrategy;
-  if (vectorStrategy === undefined) return [];
+  if (vectorStrategy === undefined) return;
 
-  const executeDdl = requireDefined(ctx.backend.executeDdl);
-  const cleanup = (async () => {
-    const slots = await resolveRemovedKindEmbeddingSlots(ctx.backend, row);
-    await Promise.all(
-      slots.map((slot) =>
-        dropVectorSlotStorage(ctx.backend, vectorStrategy, executeDdl, slot),
-      ),
-    );
-  })();
-  return [cleanup];
+  const executeDdl = target.executeSchemaDdl;
+  const deleteContribution = requireDefined(
+    target.deleteSchemaVectorSlotContribution,
+  );
+  const slots = await resolveRemovedKindEmbeddingSlots(target, row);
+  for (const slot of slots) {
+    await dropVectorSlotStorage(vectorStrategy, executeDdl, slot);
+    await deleteContribution(slot);
+  }
 }
 
 /**
@@ -637,7 +687,6 @@ function buildEmbeddingTableCleanup(
  * removed-field reclamation so both reclaim storage the same way.
  */
 async function dropVectorSlotStorage(
-  backend: GraphBackend,
   strategy: VectorStrategy,
   executeDdl: (statement: string) => Promise<void>,
   slot: VectorSlot,
@@ -649,12 +698,6 @@ async function dropVectorSlotStorage(
   } catch (error) {
     if (!isMissingTableError(error)) throw error;
   }
-  // Forget the slot's durable contribution marker(s) in lockstep with the
-  // table drop (#135), so a later re-add of the same `(kind, field)` field
-  // re-creates the table instead of trusting an orphaned "initialized"
-  // marker. Runs even when the table was already absent — the marker can
-  // outlive the table. No-op on backends without the vector marker method.
-  await backend.deleteVectorSlotContribution?.(slot);
 }
 
 /**
@@ -665,7 +708,7 @@ async function dropVectorSlotStorage(
  * kind.
  */
 async function resolveRemovedKindEmbeddingSlots(
-  backend: GraphBackend,
+  backend: GraphBackend | TransactionBackend,
   row: KindRemovalRow,
 ): Promise<readonly VectorSlot[]> {
   const priorVersion = row.schemaVersion - 1;
@@ -813,12 +856,8 @@ async function reclaimRemovedVectorFieldTables(
     // materialized field has nothing to reclaim), so reaching the catch means
     // a genuine failure.
     try {
-      await dropVectorSlotStorage(
-        backend,
-        vectorStrategy,
-        executeDdl,
-        field.slot,
-      );
+      await dropVectorSlotStorage(vectorStrategy, executeDdl, field.slot);
+      await backend.deleteVectorSlotContribution?.(field.slot);
       results.push({
         kind: field.kind,
         fieldPath: field.fieldPath,

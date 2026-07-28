@@ -180,6 +180,67 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
     expect(await tableExists(table)).toBe(false);
   });
 
+  it("rolls vector storage and its marker back together when cleanup fails", async () => {
+    const baseBackend = backend;
+    let injectFailure = true;
+    backend = createBackendOverlay(baseBackend, {
+      async schemaWriteTransaction(graphId, fn) {
+        return requireDefined(baseBackend.schemaWriteTransaction)(
+          graphId,
+          async (target) => {
+            const result = await fn(target);
+            if (injectFailure) {
+              injectFailure = false;
+              throw new Error("injected failure after vector cleanup");
+            }
+            return result;
+          },
+        );
+      },
+    });
+    const withField = await storeWithMaterializedEmbedding();
+    const table = perFieldTable("Document", "embedding");
+    const slot = {
+      graphId: GRAPH_ID,
+      nodeKind: "Document",
+      fieldPath: "embedding",
+      dimensions: 3,
+      metric: "cosine" as const,
+      indexType: "none" as const,
+    };
+    const contribution = requireDefined(backend.vectorStrategy).ownedTables(
+      slot,
+    )[0];
+    if (contribution === undefined)
+      throw new Error("missing vector contribution");
+    const identity = {
+      graphId: GRAPH_ID,
+      logicalName: contribution.logicalName,
+      owner: contribution.owner,
+      tableName: contribution.tableName,
+    };
+
+    const removed = await withField.removeKinds(["Document"]);
+    const failed = await removed.materializeRemovals();
+
+    expect(failed.results.some((entry) => entry.status === "failed")).toBe(
+      true,
+    );
+    expect(await tableExists(table)).toBe(true);
+    expect(
+      await requireDefined(backend.getContributionMaterialization)(identity),
+    ).toBeDefined();
+
+    const retried = await removed.materializeRemovals();
+    expect(retried.results.some((entry) => entry.status === "removed")).toBe(
+      true,
+    );
+    expect(await tableExists(table)).toBe(false);
+    expect(
+      await requireDefined(backend.getContributionMaterialization)(identity),
+    ).toBeUndefined();
+  });
+
   it("store.clear() resets per-field vector storage — no leaked/stale vectors (#1)", async () => {
     const withField = await storeWithMaterializedEmbedding(); // wrote "a" [1,0,0]
     // Raw backend vector rows are unfiltered by node existence, so they expose

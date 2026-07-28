@@ -84,6 +84,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "refreshStatistics",
   "releaseIndexMaterializationClaim",
   "setActiveVersion",
+  "schemaWriteTransaction",
   "setReconciliationMarker",
   "tableNames",
   "updateEdge",

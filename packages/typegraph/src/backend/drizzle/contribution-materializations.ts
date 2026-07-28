@@ -429,6 +429,8 @@ export type ContributionMaterializer = Readonly<{
    * orphaned marker. No-op when vector support is disabled.
    */
   dropVectorSlot: (slot: VectorSlot) => Promise<void>;
+  /** Conservatively evict one slot from the process-local marker cache. */
+  evictVectorSlot: (slot: VectorSlot) => void;
 }>;
 
 // NUL separator for the per-instance contribution cache key: collision-safe
@@ -828,14 +830,21 @@ export function createContributionMaterializer(
     }
   }
 
-  async function dropVectorSlot(slot: VectorSlot): Promise<void> {
+  function evictVectorSlot(slot: VectorSlot): void {
     if (deps.vectorStrategy === undefined) return;
     for (const contribution of deps.vectorStrategy.ownedTables(slot)) {
-      await deps.deleteMarker(identityOf(slot.graphId, contribution));
       const key = contributionKey(slot.graphId, contribution);
       initializedSignatures.delete(key);
       computedSignatures.delete(key);
     }
+  }
+
+  async function dropVectorSlot(slot: VectorSlot): Promise<void> {
+    if (deps.vectorStrategy === undefined) return;
+    for (const contribution of deps.vectorStrategy.ownedTables(slot)) {
+      await deps.deleteMarker(identityOf(slot.graphId, contribution));
+    }
+    evictVectorSlot(slot);
   }
 
   return {
@@ -846,5 +855,6 @@ export function createContributionMaterializer(
     assertVectorSlot,
     assertVectorSlots,
     dropVectorSlot,
+    evictVectorSlot,
   };
 }

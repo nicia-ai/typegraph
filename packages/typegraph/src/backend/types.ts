@@ -1277,6 +1277,32 @@ export type GraphBackend = Readonly<{
     params: SetActiveVersionParams,
   ) => Promise<void>;
 
+  /**
+   * Run an administrative callback while holding the same per-graph lock as
+   * schema commits. The callback receives the transaction-scoped backend, so
+   * its reads, DML, and DDL are committed atomically before another schema
+   * writer can proceed.
+   *
+   * This is intentionally absent from {@link TransactionBackend}: nesting a
+   * schema-write lock from an already-open transaction can deadlock. It is an
+   * optional backend capability so custom backends can decline operations
+   * that require a schema fence rather than silently running them unsafely.
+   */
+  schemaWriteTransaction?: <T>(
+    this: void,
+    graphId: string,
+    fn: (
+      tx: TransactionBackend &
+        Readonly<{
+          executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+          deleteSchemaVectorSlotContribution?: (
+            this: void,
+            slot: VectorSlot,
+          ) => Promise<void>;
+        }>,
+    ) => Promise<T>,
+  ) => Promise<T>;
+
   // === Embedding Operations (optional - depends on vector capabilities) ===
   upsertEmbedding?: (
     this: void,
@@ -2001,6 +2027,22 @@ export type TransactionBackend = Readonly<
     RawQueryExecutionBackend &
     RawStatementExecutionBackend
 >;
+
+/**
+ * Transaction backend exposed only while the backend's schema-write lock is
+ * held. Unlike the ordinary top-level `executeDdl` port, this DDL primitive is
+ * explicitly transaction-scoped and must use the callback's transaction.
+ *
+ * @internal
+ */
+export type SchemaWriteTransactionBackend = TransactionBackend &
+  Readonly<{
+    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+    deleteSchemaVectorSlotContribution?: (
+      this: void,
+      slot: VectorSlot,
+    ) => Promise<void>;
+  }>;
 
 /**
  * Builds the actual runtime projection exposed as `TransactionContext.backend`.
