@@ -378,7 +378,9 @@ export class ExecutableQuery<
    * validates the AST once (a malformed query fails fast, here, instead of on
    * first use); the prepared query then compiles once into a reusable template
    * and fills a fresh read instant per execute() — see PreparedQuery's class
-   * doc comment.
+   * doc comment, which also covers the two cases that recompile per call
+   * instead (no `executeRaw`, or a statement whose semantics ride on the SQL
+   * object rather than its text).
    *
    * Use `param("name")` in predicates to create parameterized slots,
    * then pass values via `prepared.execute({ name: "value" })`.

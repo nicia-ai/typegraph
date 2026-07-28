@@ -280,6 +280,7 @@ export interface DialectAdapter {
     readonly ilike: (this: void, column: SqlFragment, pattern: SqlFragment | string) => SqlFragment;
     readonly initializePath: (this: void, nodeId: SqlFragment) => SqlFragment;
     readonly inList: (this: void, left: SqlFragment, values: readonly unknown[], negated: boolean) => SqlFragment;
+    readonly inListParameter: (this: void, left: SqlFragment, packedValues: SqlFragment, options: InListParameterOptions) => SqlFragment;
     readonly jsonArrayContains: (this: void, column: SqlFragment, value: unknown) => SqlFragment;
     readonly jsonArrayContainsAll: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
     readonly jsonArrayContainsAny: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
@@ -296,6 +297,7 @@ export interface DialectAdapter {
     readonly jsonPathIsNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
+    readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly quoteIdentifier: (this: void, name: string) => string;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
     readonly supportsVectors: boolean;
@@ -923,6 +925,12 @@ export type IndexWhereOperand = Readonly<{
 
 // @public
 export type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
+
+// @public
+export type InListParameterOptions = Readonly<{
+    negated: boolean;
+    elementType: ValueType | undefined;
+}>;
 
 // @public
 export type InsertEdgeParams = Readonly<{

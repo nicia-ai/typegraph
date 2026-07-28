@@ -141,6 +141,24 @@ function normalizeValueType(
 }
 
 /**
+ * The value type a `param()` in a comparison binds as: the parameter's own
+ * declared type when it has one, else the field's.
+ *
+ * Shared so the two things that must agree about it cannot drift — the
+ * compiler picks the `jsonExtract*` variant (and, for a list parameter, the
+ * matching element cast) from this, and `PreparedQuery` validates the caller's
+ * bindings against the same answer.
+ */
+export function resolveParameterValueType(
+  left: FieldRef,
+  right: ParameterRef,
+): ValueType | undefined {
+  return (
+    normalizeValueType(right.valueType) ?? normalizeValueType(left.valueType)
+  );
+}
+
+/**
  * Compiles a field reference to SQL with appropriate type extraction.
  */
 export function compileFieldValue(
@@ -628,9 +646,7 @@ function compileComparisonPredicate(
 ): SqlFragment {
   // Handle ParameterRef on the right side
   if (isParameterRef(expr.right)) {
-    const parameterValueType =
-      normalizeValueType(expr.right.valueType) ??
-      normalizeValueType(expr.left.valueType);
+    const parameterValueType = resolveParameterValueType(expr.left, expr.right);
     const left = compileFieldValue(
       expr.left,
       dialect,
@@ -639,6 +655,15 @@ function compileComparisonPredicate(
       undefined,
       cteColumnPrefix,
     );
+    if (expr.op === "in" || expr.op === "notIn") {
+      return compileListParameterPredicate(
+        left,
+        expr.right.name,
+        parameterValueType,
+        expr.op === "notIn",
+        dialect,
+      );
+    }
     const opSql = COMPARISON_OP_SQL[expr.op];
     if (!opSql) {
       throw new UnsupportedPredicateError(
@@ -691,6 +716,43 @@ function compileComparisonPredicate(
     );
   }
   return sql`${left} ${sql.raw(opSql)} ${convertedRight}`;
+}
+
+/**
+ * Compiles `field.in(param("ids"))` / `field.notIn(param("ids"))`.
+ *
+ * The whole list rides on ONE placeholder — the dialect unpacks it — so the
+ * emitted SQL text is independent of how many elements the caller eventually
+ * binds. That is what lets a prepared query compile once and serve every
+ * arity from the same cached template, including the empty list (which yields
+ * an empty relation, hence `IN` false / `NOT IN` true, matching the literal
+ * form's short circuit).
+ */
+function compileListParameterPredicate(
+  left: SqlFragment,
+  parameterName: string,
+  elementType: ValueType | undefined,
+  negated: boolean,
+  dialect: DialectAdapter,
+): SqlFragment {
+  if (
+    elementType === "array" ||
+    elementType === "object" ||
+    elementType === "embedding"
+  ) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN is not supported for ${elementType} values`,
+      { valueType: elementType },
+      {
+        suggestion:
+          "Use scalar fields (string/number/boolean/date) in IN/NOT IN predicates.",
+      },
+    );
+  }
+  return dialect.inListParameter(left, sql.placeholder(parameterName), {
+    negated,
+    elementType,
+  });
 }
 
 /**
