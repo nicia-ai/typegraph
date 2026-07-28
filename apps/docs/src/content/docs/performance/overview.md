@@ -304,6 +304,26 @@ await store.transaction(
 
 Available levels: `read_uncommitted`, `read_committed` (default), `repeatable_read`, `serializable`.
 
+Schema-managed Stores fence writes against concurrent schema-version commits.
+That includes Stores opened by `createStoreWithSchema`,
+`createAdapterStoreWithSchema`, `createVerifiedStore`, or
+`createVerifiedAdapterStore`; an adapter Store constructed with a cached
+`{ reconciled }` snapshot; and Stores returned by `evolve()` or rebound from
+one of those Stores. `store.introspect().schemaVersion !== undefined` is the
+runtime test.
+
+PostgreSQL reacquires and validates the active-schema row lock at every managed
+write. The lock is normally reentrant and remains held to transaction end, but
+the repeated check is required because rolling back to a caller-created
+savepoint releases row locks acquired after that savepoint. At
+`repeatable_read` or `serializable`, a concurrent schema commit can raise
+PostgreSQL's normal serialization failure; retry the whole transaction.
+Graph-merge commits already retry those failures automatically. Raw
+`createStore` / `createAdapterStore` instances without a reconciled snapshot,
+and writes issued directly through a backend, do not carry schema metadata and
+remain outside this guarantee. `store.clear()` also resets the cleared Store to
+that raw state.
+
 SQLite always operates at `serializable` isolation.
 
 ## Query Optimization Features

@@ -68,7 +68,6 @@ import {
 import {
   buildIncompatibleChangeError,
   classifyModifications,
-  type RequireEmptyEntry,
 } from "../graph-extension/classify";
 import { IncompatibleChangeError } from "../graph-extension/errors";
 import { type GraphExtension } from "../graph-extension/extension-types";
@@ -100,6 +99,7 @@ import { buildKindRegistry, type KindRegistry } from "../registry";
 import {
   applyDeprecatedKinds,
   commitNewSchemaVersion,
+  commitNewSchemaVersionIfKindsEmpty,
   ensureSchema as ensureSchemaImpl,
   getSchemaChanges,
   loadActiveSchemaWithBootstrap,
@@ -173,6 +173,7 @@ import {
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpsertUpdate,
+  lockSchemaVersionForStoreWrite,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
 } from "./operations";
@@ -662,6 +663,48 @@ type AdapterStoreTransactions<
   ) => Promise<TransactionOutcome<T>>;
 }>;
 
+async function commitEvolvedSchemaWhenRequiredKindsAreEmpty<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  currentVersion: number,
+  classification: ReturnType<typeof classifyModifications>,
+): Promise<SchemaVersionRow> {
+  const result = await commitNewSchemaVersionIfKindsEmpty(
+    backend,
+    graph,
+    currentVersion,
+    classification.requireEmpty.map((entry) => ({
+      entity: entry.entity,
+      kind: entry.kindName,
+    })),
+  );
+  if (result.status === "committed") return result.row;
+
+  const populatedKeys = new Set(
+    result.kinds.map((entry) => `${entry.entity}:${entry.kind}`),
+  );
+  const nonEmpty = new Set(
+    classification.requireEmpty.filter((entry) =>
+      populatedKeys.has(`${entry.entity}:${entry.kindName}`),
+    ),
+  );
+  const error = buildIncompatibleChangeError(
+    classification,
+    nonEmpty,
+    graph.id,
+  );
+  if (error !== undefined) throw error;
+
+  throw new ConfigurationError(
+    "Schema emptiness guard reported populated kinds that were not part of " +
+      "the compatibility classification.",
+    {
+      graphId: graph.id,
+      populatedKinds: result.kinds.map((entry) => entry.kind),
+    },
+  );
+}
+
 class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   readonly [STORE_RUNTIME]: StoreRuntime<G>;
   readonly #graph: G;
@@ -680,7 +723,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   readonly #hooks: StoreHooks;
   readonly #schema: StoreOptions["schema"];
   readonly #recordedReads: RecordedReadService;
-  readonly #schemaMetadata: StoreSchemaMetadata;
+  #schemaMetadata: StoreSchemaMetadata;
   readonly #defaultTraversalExpansion: TraversalExpansion;
   // Stored verbatim so `evolve()` can construct the next Store with
   // identical options. Reconstructing from the individual private
@@ -1955,10 +1998,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * cannot drain a raw statement still in flight when the transaction commits.
    *
    * **Backends without transactions.** When `backend.capabilities.transactions`
-   * is `false` (Cloudflare D1, `drizzle-orm/neon-http`), this method runs the
+   * is `false` (Cloudflare D1, `drizzle-orm/neon-http`), a raw Store runs the
    * callback against the same backend used outside `transaction()` — writes
    * are applied as they happen and a thrown error does **not** roll back
-   * earlier writes inside the callback. Branch on
+   * earlier writes inside the callback. A schema-managed Store may run a
+   * read-only callback, but its first write fails closed because the backend
+   * cannot hold the schema-version fence. Branch on
    * `backend.capabilities.transactions` if you require atomicity:
    *
    * ```typescript
@@ -1972,10 +2017,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @param fn The callback run inside the transaction boundary.
    * @param options Optional {@link TransactionOptions} forwarded to the
    *   backend (e.g. `isolationLevel: "serializable"` on Postgres). Backends
-   *   without isolation-level support ignore it; the non-transactional
-   *   fallback ignores it entirely. Stores created with `{ history: true }`
-   *   require read-committed semantics for PostgreSQL recorded-clock capture and
-   *   reject stronger snapshot isolation levels.
+   *   without isolation-level support ignore it. On non-transactional
+   *   backends, raw Stores use the sequential fallback while schema-managed
+   *   Stores fail closed at their first write because no transaction-scoped
+   *   schema fence is available. A concurrent schema commit can make a
+   *   snapshot-isolated PostgreSQL write fail with the database's normal
+   *   serialization error; retry the whole transaction. Graph-merge commits
+   *   retry serialization failures automatically. Stores created with
+   *   `{ history: true }` require read-committed semantics for recorded-clock
+   *   capture.
    */
   transaction<T>(
     this: AdapterHistoryStore<G, TNativeTransaction>,
@@ -2021,10 +2071,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * {@link AdapterStore.withRecordedTransaction} also returns a
    * {@link TransactionOutcome}; only `withTransaction` (whose commit belongs
    * entirely to the caller with no flush point) produces no receipt. On
-   * non-transactional backends, the receipt is still returned, but it describes
-   * operations that individually committed rather than one atomic commit; if the
-   * callback rejects on such a backend, no receipt is returned even though
-   * earlier operations committed individually.
+   * non-transactional backends, a raw Store still returns a receipt, but it
+   * describes operations that individually committed rather than one atomic
+   * commit; if the callback rejects there, no receipt is returned even though
+   * earlier operations committed individually. A schema-managed Store fails
+   * closed on its first write instead.
    *
    * For stores created with `{ history: true }`, `receipt.recorded` is the
    * recorded commit instant this transaction allocated for the store's
@@ -2148,12 +2199,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // point of use (a cached SELECT, never DDL). A transaction that
     // never touches fulltext requires no fulltext initialization.
     //
-    // No per-graph write lock here either: under history capture the lock is
-    // taken at each write boundary (runInWriteTransaction before any row work;
-    // the recorded overlay before each row write), so a transaction whose
-    // callback only reads never serializes against writers. Callers that need
-    // read-before-write serialization across the whole callback (provenance
-    // transitions) acquire the lock explicitly at callback start.
+    // A schema-version fence is acquired and validated at every managed write
+    // when this Store came from schema reconciliation. Rechecking is required
+    // because adapter-native SQL can roll back a savepoint and release a
+    // PostgreSQL row lock acquired after it. Snapshot-isolated transactions
+    // retain their normal serialization-failure semantics rather than
+    // validating a stale version after a concurrent commit. The separate
+    // recorded graph lock is still taken at each write boundary; callers that
+    // need read-before-write serialization for graph data acquire that lock
+    // explicitly.
     //
     // Operation hooks inside the callback run BUFFERED: an operation nested
     // in this transaction completes only when the transaction commits, so its
@@ -2400,6 +2454,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const txBackend = adopt(externalTx);
     if (this.#captureEnabled) {
       await assertRecordedCaptureTransactionIsolation(txBackend);
+      await lockSchemaVersionForStoreWrite(
+        {
+          graphId: this.graphId,
+          schemaVersion: this.#schemaMetadata.schemaVersion,
+        },
+        txBackend,
+      );
     }
     // A uniform `flush → RecordedFlushInstants` shape on both branches keeps the
     // outcome-building path identical; the non-history branch has no recorded
@@ -2648,6 +2709,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // embeddings leak and a reused node id would resurface a stale vector.
     await this.#clearVectorStorage();
 
+    // The committed schema rows were deleted with the graph. This Store now
+    // has the same raw, unversioned lifecycle semantics as `createStore(...)`;
+    // retaining the old version would make its documented post-clear writes
+    // fail as stale against active version 0.
+    this.#schemaMetadata = UNKNOWN_SCHEMA_METADATA;
+
     // Reset lazy-initialized collection caches
     this.#nodeCollections = undefined;
     this.#edgeCollections = undefined;
@@ -2870,27 +2937,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.graphId,
       );
     }
-    if (classification.requireEmpty.length > 0) {
-      const nonEmpty = await this.#probeEmptyKinds(classification.requireEmpty);
-      const error = buildIncompatibleChangeError(
-        classification,
-        nonEmpty,
-        this.graphId,
-      );
-      if (error !== undefined) throw error;
-    }
-
-    // Commit via `commitNewSchemaVersion` directly (the row-returning
-    // sibling of `migrateSchema`). The classification step above is the
-    // authoritative compatibility gate — `ensureSchema`'s
-    // `isBackwardsCompatible` check would over-restrict ADD-required-
-    // on-empty / TIGHTEN-on-empty modifications that the classifier
-    // already approved.
-    const committed = await commitNewSchemaVersion(
-      this.#backend,
-      merged,
-      activeRow.version,
-    );
+    // Commit through the row-returning schema-manager sibling. Tightening
+    // changes use the atomic empty-kind primitive so their probes and CAS
+    // share the backend's ordinary-write fence.
+    const committed =
+      classification.requireEmpty.length > 0 ?
+        await commitEvolvedSchemaWhenRequiredKindsAreEmpty(
+          this.#backend,
+          merged,
+          activeRow.version,
+          classification,
+        )
+      : await commitNewSchemaVersion(this.#backend, merged, activeRow.version);
     // Provision per-field vector tables + durable markers for any embedding
     // fields this evolution introduced (idempotent for fields that already
     // existed). `evolve()` is a privileged migrator path — it commits schema
@@ -3570,24 +3628,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Probes each `requireEmpty` entry for any rows. Returns the set of
-   * composite keys (`${entity}:${kindName}`) that have at least one
-   * row — those entries need to be promoted from "allowed-on-empty"
-   * to incompatible. Dispatches to `countNodesByKind` for `node`
-   * entries and `countEdgesByKind` for `edge` entries (a single-
-   * primitive probe would always return 0 for the wrong-entity case
-   * and silently bypass the gate).
-   *
-   * Probes run in parallel; each entry is independent. Race window
-   * (probe → CAS commit): another writer can insert a row into a
-   * previously-empty kind. The schema commit still succeeds (CAS
-   * guards on schema version, not row count); the new schema rejects
-   * the inserted row at next read, which the operator inspects and
-   * either deletes or reverts. Rare in practice; tighter elimination
-   * would require `SELECT FOR UPDATE` on the rows table, too
-   * heavyweight for a millisecond-budget operation.
-   */
-  /**
    * Refuses an evolve that re-adds a kind whose data cleanup is still pending.
    *
    * Returns silently on backends without the removal queue: they cannot have
@@ -3629,32 +3669,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         kinds: blocked.map((row) => row.kindName),
       },
     );
-  }
-
-  async #probeEmptyKinds(
-    requireEmpty: readonly RequireEmptyEntry[],
-  ): Promise<Set<RequireEmptyEntry>> {
-    const probes = requireEmpty.map(
-      async (entry): Promise<readonly [RequireEmptyEntry, number]> => {
-        const count =
-          entry.entity === "node" ?
-            await this.#backend.countNodesByKind({
-              graphId: this.graphId,
-              kind: entry.kindName,
-            })
-          : await this.#backend.countEdgesByKind({
-              graphId: this.graphId,
-              kind: entry.kindName,
-            });
-        return [entry, count];
-      },
-    );
-    const results = await Promise.all(probes);
-    const nonEmpty = new Set<RequireEmptyEntry>();
-    for (const [entry, count] of results) {
-      if (count > 0) nonEmpty.add(entry);
-    }
-    return nonEmpty;
   }
 
   #cloneWithGraph<TRefStore extends StoreCore<G>>(
@@ -3705,6 +3719,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return {
       graph: this.#graph,
       graphId: this.graphId,
+      schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
       revisionSchema: this.#sqlSchema(),
@@ -3721,6 +3736,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return {
       graph: this.#graph,
       graphId: this.graphId,
+      schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
       revisionSchema: this.#sqlSchema(),
@@ -4497,6 +4513,10 @@ export type {
  * - Initializes the schema on first run (version 1)
  * - Auto-migrates safe changes (additive changes)
  * - Throws MigrationError for breaking changes
+ * - Fences managed writes against concurrent schema-version commits; a stale Store
+ *   fails before writing instead of landing rows against a replaced schema
+ *   (official transactional backends only; unsupported custom backends fail
+ *   closed on their first managed write)
  *
  * @param graph - The graph definition
  * @param backend - The database backend
@@ -4790,6 +4810,11 @@ async function materializeSystemIndexesOnBoot(
  *   initialized, or `StoreNotInitializedError` when the schema is
  *   current but the runtime-contribution markers are missing/stale.
  *   The runtime can use a least-privilege, DML-only database role.
+ *   Managed writes are fenced against concurrent schema-version commits just like
+ *   `createStoreWithSchema`; a stale verified Store fails before writing.
+ *   Runtime backends must support transactions and the schema-write fence;
+ *   unsupported custom or HTTP backends attach for reads but fail closed on a
+ *   managed write.
  * - **`createStore(graph, backend)`** is the same zero-DDL attach
  *   *without* the verification gate — fastest, but schema drift goes
  *   undetected until a hot-path operation trips.

@@ -20,6 +20,7 @@ import {
   createVerifiedStore,
   defineGraph,
   defineNode,
+  type GraphBackend,
   MigrationError,
   searchable,
   StoreNotInitializedError,
@@ -27,6 +28,7 @@ import {
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
 import { assertSchemaCurrent } from "../src/schema";
+import { disableTransactions } from "./test-utils";
 
 const PersonV1 = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -101,6 +103,53 @@ describe("createVerifiedStore", () => {
 
     expect(result.status).toBe("unchanged");
     expect(store.graphId).toBe(GRAPH_ID);
+  });
+
+  it("fails managed writes closed when a custom transaction omits the schema fence", async () => {
+    const bootBackend = freshBackend(sqlite);
+    await createStoreWithSchema(graphV1(), bootBackend);
+    const baseRuntimeBackend = freshBackend(sqlite);
+    const runtimeBackend: GraphBackend = {
+      ...baseRuntimeBackend,
+      async transaction(fn, options) {
+        return baseRuntimeBackend.transaction((tx) => {
+          const {
+            lockSchemaVersionForWrite: unsupportedFence,
+            ...withoutFence
+          } = tx;
+          void unsupportedFence;
+          return fn(withoutFence);
+        }, options);
+      },
+    };
+    const [store] = await createVerifiedStore(graphV1(), runtimeBackend);
+
+    const error = await store.nodes.Person.create({ name: "Alice" }).catch(
+      (error_: unknown) => error_,
+    );
+
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as ConfigurationError).details).toMatchObject({
+      code: "SCHEMA_WRITE_FENCE_UNSUPPORTED",
+      graphId: GRAPH_ID,
+    });
+  });
+
+  it("fails managed writes closed on a verified non-transactional backend", async () => {
+    const bootBackend = freshBackend(sqlite);
+    await createStoreWithSchema(graphV1(), bootBackend);
+    const runtimeBackend = disableTransactions(freshBackend(sqlite));
+    const [store] = await createVerifiedStore(graphV1(), runtimeBackend);
+
+    const error = await store.nodes.Person.create({ name: "Alice" }).catch(
+      (error_: unknown) => error_,
+    );
+
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as ConfigurationError).details).toMatchObject({
+      code: "SCHEMA_WRITE_FENCE_UNSUPPORTED",
+      graphId: GRAPH_ID,
+    });
   });
 
   it("throws ConfigurationError on a fresh database without bootstrapping tables", async () => {

@@ -23,6 +23,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   defineGraph,
   defineNode,
   type GraphBackend,
@@ -210,6 +211,19 @@ describe("commitSchemaVersion: successor commit (CAS guard)", () => {
     expect(requireDefined(active).version).toBe(2);
   });
 
+  it("refuses direct top-level use of the transaction-scoped write fence", async () => {
+    const error = await requireDefined(backend.lockSchemaVersionForWrite)({
+      graphId: "g",
+      expectedVersion: 1,
+    }).catch((error_: unknown) => error_);
+
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as ConfigurationError).details).toMatchObject({
+      code: "SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED",
+      graphId: "g",
+    });
+  });
+
   it("throws StaleVersionError with correct actual when expected is stale", async () => {
     // Simulate another writer having already advanced to v2.
     const next = await buildCommitArguments("g", 2, makeDivergentGraph("g"));
@@ -243,6 +257,65 @@ describe("commitSchemaVersion: successor commit (CAS guard)", () => {
     expect(error.details.expected).toBe(1);
     expect(error.details.actual).toBe(2);
     expect(error.details.graphId).toBe("g");
+  });
+
+  it("the empty-kind primitive refuses populated kinds without committing", async () => {
+    await backend.insertNode({
+      graphId: "g",
+      kind: "Person",
+      id: "person-1",
+      props: { name: "Alice" },
+    });
+    const next = await buildCommitArguments("g", 2, makeDivergentGraph("g"));
+    const result = await requireDefined(
+      backend.commitSchemaVersionIfKindsEmpty,
+    )(
+      {
+        graphId: "g",
+        expected: { kind: "active", version: 1 },
+        version: 2,
+        schemaHash: next.schemaHash,
+        schemaDoc: next.schemaDoc,
+      },
+      [{ entity: "node", kind: "Person" }],
+    );
+
+    expect(result).toEqual({
+      status: "populated",
+      kinds: [{ entity: "node", kind: "Person", count: 1 }],
+    });
+    expect(requireDefined(await backend.getActiveSchema("g")).version).toBe(1);
+  });
+
+  it("the empty-kind primitive preserves stale-version precedence", async () => {
+    await backend.insertNode({
+      graphId: "g",
+      kind: "Person",
+      id: "person-1",
+      props: { name: "Alice" },
+    });
+    const v2 = await buildCommitArguments("g", 2, makeDivergentGraph("g"));
+    await backend.commitSchemaVersion({
+      graphId: "g",
+      expected: { kind: "active", version: 1 },
+      version: 2,
+      schemaHash: v2.schemaHash,
+      schemaDoc: v2.schemaDoc,
+    });
+    const stale = await buildCommitArguments("g", 3);
+
+    await expect(
+      requireDefined(backend.commitSchemaVersionIfKindsEmpty)(
+        {
+          graphId: "g",
+          expected: { kind: "active", version: 1 },
+          version: 3,
+          schemaHash: stale.schemaHash,
+          schemaDoc: stale.schemaDoc,
+        },
+        [{ entity: "node", kind: "Person" }],
+      ),
+    ).rejects.toThrow(StaleVersionError);
   });
 
   it("reactivates an orphan inactive row left by a crashed prior commit", async () => {

@@ -50,6 +50,7 @@ import {
 } from "../../query/sql-fragment";
 import { type CompiledRowsSql } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
+import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
   isSqliteNotAuthorizedError,
@@ -59,6 +60,7 @@ import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type CommitSchemaVersionIfKindsEmptyResult,
   type CommitSchemaVersionParams,
   type ContributionDiagnostic,
   type ContributionMaterializationIdentity,
@@ -78,16 +80,19 @@ import {
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type KindRemovalRow,
+  type LockSchemaVersionForWriteParams,
   normalizeGraphAnalyticsCapabilities,
   type RecordContributionMaterializationParams,
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
+  type SchemaKindEmptinessProbe,
   type SchemaVersionRow,
   type SchemaWriteTransactionBackend,
   type SetActiveVersionParams,
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
   type TransactionBackend,
+  type TrustedImportOptions,
   type TrustedImportSession,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
@@ -146,7 +151,9 @@ import {
   SQLITE_KIND_REMOVAL_TIMESTAMPS,
 } from "./kind-removals";
 import {
+  assertActiveSchemaVersion,
   assertAdoptedDialect,
+  commitSchemaVersionIfKindsEmpty,
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
@@ -552,6 +559,8 @@ type CreateSqliteOperationBackendOptions = Readonly<{
    * so a slot's marker is resolved at most once per process.
    */
   contributionMaterializer: ContributionMaterializer;
+  /** Whether this operation backend is bound to an explicit transaction. */
+  transactionScoped: boolean;
 }>;
 
 type CreateSqliteTransactionBackendOptions = Readonly<{
@@ -581,6 +590,7 @@ function createSqliteOperationBackend(
     fulltextStrategy,
     vectorStrategy,
     contributionMaterializer,
+    transactionScoped,
   } = options;
 
   // CRUD statements route through the execution adapter's compiled path on
@@ -880,6 +890,26 @@ function createSqliteOperationBackend(
     tableNames,
     fulltextStrategy,
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
+
+    async lockSchemaVersionForWrite(
+      params: LockSchemaVersionForWriteParams,
+    ): Promise<void> {
+      if (!transactionScoped) {
+        throw new ConfigurationError(
+          "The schema write fence requires an explicit SQLite transaction.",
+          {
+            code: "SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED",
+            graphId: params.graphId,
+          },
+        );
+      }
+      const active = await commonBackend.getActiveSchema(params.graphId);
+      assertActiveSchemaVersion(
+        params.graphId,
+        params.expectedVersion,
+        active?.version ?? 0,
+      );
+    },
 
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
       if (vectorStrategy === undefined) return;
@@ -1212,6 +1242,7 @@ export function createSqliteBackend(
     fulltextStrategy,
     vectorStrategy,
     contributionMaterializer,
+    transactionScoped: false,
     ...(serializedQueue === undefined ? {} : { serializedQueue }),
   });
 
@@ -1386,8 +1417,14 @@ export function createSqliteBackend(
       {
         async trustedImport<T>(
           fn: (session: TrustedImportSession) => Promise<T>,
+          options_?: TrustedImportOptions,
         ): Promise<T> {
           return backend.transaction(async (tx) => {
+            if (options_?.schemaWrite !== undefined) {
+              await requireDefined(tx.lockSchemaVersionForWrite)({
+                ...options_.schemaWrite,
+              });
+            }
             await assertTrustedImportDatabaseEmpty(tx, tableNames);
             const indexDefinitions = await suspendSqliteSecondaryIndexes(
               tx,
@@ -1689,6 +1726,17 @@ export function createSqliteBackend(
       );
     },
 
+    async commitSchemaVersionIfKindsEmpty(
+      params: CommitSchemaVersionParams,
+      probes: readonly SchemaKindEmptinessProbe[],
+    ): Promise<CommitSchemaVersionIfKindsEmptyResult> {
+      // BEGIN IMMEDIATE already owns SQLite's serialized writer slot, so the
+      // counts and schema CAS below share the same ordinary-write fence.
+      return runSchemaWriteTransaction((target) =>
+        commitSchemaVersionIfKindsEmpty(target, params, probes),
+      );
+    },
+
     async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
       await runSchemaWriteTransaction((target) =>
         target.setActiveVersion(params),
@@ -1862,6 +1910,7 @@ function createTransactionBackend(
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
     contributionMaterializer: options.contributionMaterializer,
+    transactionScoped: true,
   });
 }
 

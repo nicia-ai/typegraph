@@ -234,13 +234,16 @@ Both Neon drivers work with TypeGraph. They have different tradeoffs:
 - **`drizzle-orm/neon-http`** uses HTTP per statement. Lowest cold-start cost; survives Workers'
   per-request isolation. **Cannot hold a session across statements**, so multi-statement transactions
   are unavailable — TypeGraph auto-detects this driver and sets `capabilities.transactions = false`,
-  so `store.transaction(...)` falls through to non-transactional sequential execution.
+  so `store.transaction(...)` on a raw Store falls through to non-transactional sequential execution.
+  A schema-managed Store may attach for reads, but its first write fails closed because the driver
+  cannot hold the schema-version fence.
 - **`drizzle-orm/neon-serverless`** uses a WebSocket Pool. Holds a session, supports full transactional
   semantics, but the WebSocket connection lifecycle needs care in serverless / per-request contexts
   (you typically want a fresh Pool per request).
 
-Pick HTTP for stateless reads, single upserts, and migrations. Pick WebSockets if you need atomic
-multi-statement writes.
+Pick HTTP for stateless reads and explicitly raw, unfenced single writes after a
+transactional migrator has initialized the database. Pick WebSockets for schema
+migrations, schema-managed Store writes, or any atomic multi-statement write.
 :::
 
 ### node-postgres (pg)
@@ -342,16 +345,20 @@ Edge runtimes expose `WebSocket` globally and need no extra setup.
 For stateless edge workloads where you don't need transactional writes. The HTTP
 driver issues one request per query — lowest cold-start cost, no session lifecycle
 to manage. TypeGraph auto-detects this driver and sets `capabilities.transactions`
-to `false`, so `store.transaction(...)` falls through to sequential execution
-rather than throwing.
+to `false`. On a raw Store, `store.transaction(...)` falls through to sequential
+execution rather than throwing; on a schema-managed Store, read-only callbacks
+still run but the first write fails closed.
 
 Schema commits are the one exception: `commitSchemaVersion` and
 `setActiveVersion` require atomicity to eliminate the orphan-row crash window
 they exist to fix, so they refuse with a typed `ConfigurationError` on
 non-transactional backends. Run schema migrations from a process with a
 transactional driver (`drizzle-orm/neon-serverless`, regular `pg`, etc.); the
-edge worker can keep using neon-http for reads and writes once the schema is
-established.
+edge worker can keep using neon-http for reads. It can also use a raw
+`createStore()` for single writes when the application explicitly accepts that
+those writes are not fenced against schema changes. A managed or verified Store
+can attach for reads, but its first write fails closed because neon-http cannot
+hold the schema fence.
 
 ```bash
 npm install @neondatabase/serverless drizzle-orm
@@ -370,8 +377,9 @@ const store = createStore(graph, backend);
 // backend.capabilities.transactions === false (auto-detected)
 ```
 
-Use `neon-http` for reads, single upserts, and migrations. Use `neon-serverless`
-when you need atomic multi-statement writes.
+Use `neon-http` for reads and explicitly raw, unfenced single upserts. Run
+migrations and schema-managed Store writes through `neon-serverless`, regular
+`pg`, or another transactional driver.
 
 ### PGlite (Postgres-in-WASM)
 
@@ -755,27 +763,30 @@ import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/p
 
 TypeGraph supports Cloudflare D1 for edge deployments, with some limitations.
 
-Use `createStoreWithSchema()` to automatically create tables on a fresh D1
-database and manage schema versions across deployments:
+Cloudflare D1 has no interactive transaction primitive, so it cannot commit
+TypeGraph schema versions or run schema-managed Store writes. Apply the base DDL
+with Wrangler / drizzle-kit, then use a raw `createStore()` only when the
+application accepts unfenced writes:
 
 ```typescript
 import { drizzle } from "drizzle-orm/d1";
-import { createStoreWithSchema } from "@nicia-ai/typegraph";
+import { createStore } from "@nicia-ai/typegraph";
 import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 export default {
   async fetch(request: Request, env: Env) {
     const db = drizzle(env.DB);
     const backend = createSqliteBackend(db);
-    const [store] = await createStoreWithSchema(graph, backend);
+    const store = createStore(graph, backend);
 
     // Use store...
   },
 };
 ```
 
-If you prefer to manage DDL yourself, use `createStore()` with manual migrations
-instead.
+This raw Store does not validate or fence a committed TypeGraph schema version.
+For schema-managed writes on Cloudflare, use **Durable Objects** (below), whose
+SQLite storage exposes an interactive transaction runner.
 
 **Important:** D1 has no interactive transaction primitive
 (`D1Database.batch(...)` is transactional, but batch-only — not an
@@ -953,7 +964,8 @@ SQLite those run as `json_each()` scans — correct results, just not index-acce
 Both backends report `transactions: true` by default. The exception is symmetric and lives in specific drivers:
 Cloudflare D1 (SQLite) and `drizzle-orm/neon-http` (Postgres) are non-transactional, so they downgrade to
 `transactions: false`. Operations that require atomicity (`commitSchemaVersion`, `setActiveVersion`) throw on those
-drivers regardless of backend.
+drivers regardless of backend. Schema-managed Store writes also fail closed because they cannot hold the
+transaction-scoped schema fence; only raw Store or direct-backend writes retain the sequential, non-atomic fallback.
 :::
 
 :::note[Aggregate set operations are a builder limitation, not a parity gap]
@@ -1043,6 +1055,9 @@ least-privilege, DML-only database role.
   This is what lets a least-privilege role run vector ops: the table
   already exists. Graphs with no `searchable()` or `embedding()` fields
   are unaffected.
+  The Store is also raw and unversioned: its writes do not participate in
+  the schema-version fence. Direct backend writes have the same semantics.
+  Quiesce those writers yourself before changing schemas.
 
 - **`createVerifiedStore(graph, backend)` is the same zero-DDL attach
   with a verification gate.** It reads the active schema row, folds the
@@ -1054,6 +1069,17 @@ least-privilege, DML-only database role.
   missing. The runtime-side counterpart of `createStoreWithSchema` for
   least-privilege deployments. If you only need the gate without
   building a Store (e.g. a readiness probe), call `assertSchemaCurrent`.
+  Its managed writes require a transactional backend with the schema-write
+  fence; non-transactional and unsupported custom backends can attach for
+  reads but fail closed on the first write.
+
+The adapter equivalents (`createAdapterStoreWithSchema` and
+`createVerifiedAdapterStore`) carry the same managed metadata. So does
+`createAdapterStore(..., { reconciled })` with a cached reconciliation snapshot,
+and Stores returned by `evolve()` or rebound from an already-managed Store.
+Check `store.introspect().schemaVersion !== undefined` at runtime. Calling
+`store.clear()` deletes the schema rows and resets that Store to raw semantics;
+reopen it through a managed factory before resuming version-fenced writes.
 
 - **`store.verifyContributions()` is the catalog-checking diagnostic.**
   Every gate above trusts the marker row without probing the catalog, so

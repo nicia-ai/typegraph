@@ -104,6 +104,7 @@ import {
 export type NodeOperationContext<G extends GraphDef> = Readonly<{
   graph: G;
   graphId: string;
+  schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;

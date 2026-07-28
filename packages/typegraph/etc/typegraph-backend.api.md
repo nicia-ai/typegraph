@@ -104,6 +104,15 @@ export type CommitSchemaVersionExpected = Readonly<{
     version: number;
 }>;
 
+// @public (undocumented)
+export type CommitSchemaVersionIfKindsEmptyResult = Readonly<{
+    status: "committed";
+    row: SchemaVersionRow;
+}> | Readonly<{
+    status: "populated";
+    kinds: readonly PopulatedSchemaKind[];
+}>;
+
 // @public
 export type CommitSchemaVersionParams = Readonly<{
     graphId: string;
@@ -714,6 +723,24 @@ export type GraphBackend = Readonly<{
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
+    commitSchemaVersionIfKindsEmpty?: (this: void, params: CommitSchemaVersionParams, probes: readonly Readonly<{
+        entity: "node" | "edge";
+        kind: string;
+    }>[]) => Promise<Readonly<{
+        status: "committed";
+        row: SchemaVersionRow;
+    }> | Readonly<{
+        status: "populated";
+        kinds: readonly Readonly<{
+            entity: "node" | "edge";
+            kind: string;
+            count: number;
+        }>[];
+    }>>;
+    lockSchemaVersionForWrite?: (this: void, params: Readonly<{
+        graphId: string;
+        expectedVersion: number;
+    }>) => Promise<void>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
@@ -768,7 +795,12 @@ export type GraphBackend = Readonly<{
     clearGraph: (this: void, graphId: string) => Promise<void>;
     bootstrapTables?: (this: void) => Promise<void>;
     refreshStatistics: (this: void) => Promise<void>;
-    trustedImport?: <T>(this: void, fn: (session: TrustedImportSession) => Promise<T>) => Promise<T>;
+    trustedImport?: <T>(this: void, fn: (session: TrustedImportSession) => Promise<T>, options?: Readonly<{
+        schemaWrite?: Readonly<{
+            graphId: string;
+            expectedVersion: number;
+        }>;
+    }>) => Promise<T>;
     execute: <T>(this: void, query: CompiledRowsSql) => Promise<readonly T[]>;
     executeStatement?: (this: void, query: CompiledStatementSql) => Promise<void>;
     executeTemporaryStatement?: (this: void, query: CompiledTemporaryStatementSql) => Promise<void>;
@@ -1088,6 +1120,12 @@ export type LiveNodeRow = NodeRow & Readonly<{
 }>;
 
 // @public (undocumented)
+export type LockSchemaVersionForWriteParams = Readonly<{
+    graphId: string;
+    expectedVersion: number;
+}>;
+
+// @public (undocumented)
 export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
@@ -1164,6 +1202,11 @@ export class Placeholder {
     // (undocumented)
     readonly name: string;
 }
+
+// @public (undocumented)
+export type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
+    count: number;
+}>;
 
 // @public
 export const POSTGRES_CAPABILITIES: BackendCapabilities;
@@ -1282,7 +1325,13 @@ export function rowPropsToJsonText(props: RowProps): string;
 export function rowPropsToObject(props: RowProps): Record<string, unknown>;
 
 // @public (undocumented)
-export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "setActiveVersion">;
+export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;
+
+// @public (undocumented)
+export type SchemaKindEmptinessProbe = Readonly<{
+    entity: "node" | "edge";
+    kind: string;
+}>;
 
 // @public (undocumented)
 export type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
@@ -1296,6 +1345,9 @@ export type SchemaVersionRow = Readonly<{
     created_at: string;
     is_active: boolean;
 }>;
+
+// @public (undocumented)
+export type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWrite">;
 
 // @public
 export type SerializedClosures = Readonly<{
@@ -1502,7 +1554,7 @@ export type TombstonedNodeRow = NodeRow & Readonly<{
 }>;
 
 // @public
-export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & SchemaReadBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & SchemaReadBackend & Pick<GraphBackend, "lockSchemaVersionForWrite"> & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 export type TransactionOptions = Readonly<{
@@ -1512,6 +1564,14 @@ export type TransactionOptions = Readonly<{
 
 // @public
 export type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend>;
+
+// @public
+export type TrustedImportOptions = Readonly<{
+    schemaWrite?: Readonly<{
+        graphId: string;
+        expectedVersion: number;
+    }>;
+}>;
 
 // @public
 export type TrustedImportSession = Readonly<{

@@ -761,7 +761,7 @@ await store.transaction(async (tx) => {
       break;
     }
     case "unavailable":
-      // Non-transactional fallback: no tx.sql property and no atomicity.
+      // Raw Store only: no tx.sql, atomicity, or schema-version fence.
       await writeWithoutAtomicity();
       break;
     case "history":

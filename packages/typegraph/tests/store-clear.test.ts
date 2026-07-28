@@ -154,6 +154,24 @@ describe("store.clear()", () => {
     expect(await store.nodes.Person.count()).toBe(1);
   });
 
+  it("resets schema metadata so an initialized store is usable after clear", async () => {
+    const [store] = await createStoreWithSchema(graph, backend);
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+
+    await store.clear();
+
+    expect(store.introspect().schemaVersion).toBeUndefined();
+    await expect(
+      store.nodes.Person.create({
+        email: "bob@example.com",
+        name: "Bob",
+      }),
+    ).resolves.toMatchObject({ name: "Bob" });
+  });
+
   it("does not affect other graphs", async () => {
     const graph2 = defineGraph({
       id: "store_clear_test_other",

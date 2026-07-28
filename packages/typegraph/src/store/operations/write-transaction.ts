@@ -21,6 +21,7 @@ import {
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
+import { ConfigurationError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import {
   advanceRevisionClock,
@@ -39,10 +40,54 @@ import { type OperationHookContext } from "../types";
  */
 export type WriteTransactionContext = Readonly<{
   graphId: string;
+  schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;
 }>;
+
+/**
+ * Acquires and validates the transaction-scoped schema fence for one managed
+ * Store write. This intentionally runs for every write: PostgreSQL releases
+ * row locks acquired after a savepoint when the caller rolls back to that
+ * savepoint, so caching an earlier acquisition could let a later write proceed
+ * without a live fence.
+ */
+export async function lockSchemaVersionForStoreWrite(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  const expectedVersion = ctx.schemaVersion;
+  if (expectedVersion === undefined) return;
+
+  if ("transaction" in backend && !backend.capabilities.transactions) {
+    throw new ConfigurationError(
+      "Schema-managed Store writes require a transactional backend so schema " +
+        "changes and entity writes can share one fence.",
+      {
+        code: "SCHEMA_WRITE_FENCE_UNSUPPORTED",
+        graphId: ctx.graphId,
+      },
+    );
+  }
+
+  const lockSchemaVersionForWrite = backend.lockSchemaVersionForWrite;
+  if (lockSchemaVersionForWrite === undefined) {
+    throw new ConfigurationError(
+      "This backend cannot fence schema-managed Store writes against a " +
+        "concurrent schema change.",
+      {
+        code: "SCHEMA_WRITE_FENCE_UNSUPPORTED",
+        graphId: ctx.graphId,
+      },
+    );
+  }
+
+  await lockSchemaVersionForWrite({
+    graphId: ctx.graphId,
+    expectedVersion,
+  });
+}
 
 /**
  * Runs a graph-entity mutation cascade inside a single top-level transaction.
@@ -51,9 +96,10 @@ export type WriteTransactionContext = Readonly<{
  * or rolls back atomically. A nested {@link TransactionBackend} (already inside
  * `store.transaction(...)`) omits `.transaction`, so
  * {@link runOptionallyInTransaction} runs `fn` directly against it rather than
- * opening a nested transaction. Non-transactional backends (Cloudflare D1,
- * `drizzle-orm/neon-http`) also run `fn` directly — they cannot offer
- * atomicity, which is documented on the store's write surface.
+ * opening a nested transaction. A raw Store on a non-transactional backend
+ * (Cloudflare D1, `drizzle-orm/neon-http`) also runs `fn` directly and cannot
+ * offer atomicity. A schema-managed Store fails closed before `fn` because the
+ * backend cannot hold the schema-version fence.
  *
  * Under history capture the per-graph write lock is taken inside the
  * transaction before any row work, matching the acquire order the recorded
@@ -70,6 +116,7 @@ export function runInWriteTransaction<T>(
   const ownsWriteLock =
     "transaction" in backend && backend.capabilities.transactions;
   return runOptionallyInTransaction(backend, async (target) => {
+    await lockSchemaVersionForStoreWrite(ctx, target);
     const lock =
       ctx.historyEnabled || ctx.revisionTrackingEnabled ?
         await lockRecordedGraphWrite(target, ctx.graphId)

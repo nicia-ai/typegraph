@@ -218,6 +218,9 @@ The contract is deliberately narrow:
 - The complete stream is one transaction. Data insertion, temporary secondary
   index removal, index rebuilding, and planner statistics either all commit or
   all roll back.
+- A schema-managed Store acquires and validates its schema-write fence inside
+  that transaction before loading rows. A stale managed import fails before
+  row DML; a raw Store remains explicitly outside the schema-fencing guarantee.
 
 Supported native paths are synchronous prepared-statement SQLite
 (`better-sqlite3` and Bun SQLite) and transaction-capable PostgreSQL adapters
@@ -438,9 +441,13 @@ await importGraph(store, result.data, options);
 
 ### Use Transactions for Consistency
 
-Import operations use transactions when the backend supports them. For backends
-without transaction support, consider smaller batch sizes to minimize partial
-failure impact.
+Import operations use transactions when the backend supports them. When the
+Store carries a reconciled schema version, every import batch acquires and
+validates the same schema-write fence as collection writes; a stale managed
+Store fails before row DML. A raw Store remains outside that guarantee. On a raw
+Store without transaction support, consider smaller batch sizes to minimize
+partial-failure impact; a managed Store on that backend fails closed on its
+first write.
 
 ### Test with `onConflict: "error"` First
 

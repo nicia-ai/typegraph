@@ -8,6 +8,7 @@
  *
  * These tests are automatically skipped if PostgreSQL is not available.
  */
+import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -18,7 +19,9 @@ import {
   defineGraph,
   defineNode,
   embedding,
+  MigrationError,
   NodeConstraintNotFoundError,
+  StaleVersionError,
   subClassOf,
 } from "../../../src";
 import {
@@ -35,9 +38,20 @@ import type {
   TransactionOptions,
 } from "../../../src/backend/types";
 import { rowPropsToObject } from "../../../src/backend/types";
+import { isRetryableTxConflict } from "../../../src/graph-merge/tx-retry";
 import type { CompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
-import { createStore, createStoreWithSchema } from "../../../src/store";
+import { migrateSchema } from "../../../src/schema";
+import {
+  createAdapterStoreWithSchema,
+  createStore,
+  createStoreWithSchema,
+} from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import {
+  createGate,
+  raceTimeout,
+  TIMEOUT_SENTINEL,
+} from "../../concurrency-utils";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 
@@ -302,6 +316,22 @@ const testGraph = defineGraph({
   ontology: [subClassOf(Company, Organization)],
 });
 
+const testGraphWithoutCompany = defineGraph({
+  id: testGraph.id,
+  nodes: {
+    Person: { type: Person },
+    Organization: { type: Organization },
+  },
+  edges: {
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+});
+
 function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
   backend: GraphBackend;
   statements: string[];
@@ -536,6 +566,153 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
 
       const fetched = await backend.getNode("test_graph", "Person", "person-1");
       expect(fetched).toBeDefined();
+    });
+
+    it("supports strong-isolation reads and schema-managed writes", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      const [store] = await createStoreWithSchema(testGraph, backend);
+
+      await expect(
+        store.transaction((tx) => tx.nodes.Person.count(), {
+          isolationLevel: "repeatable_read",
+        }),
+      ).resolves.toBe(0);
+
+      await expect(
+        store.transaction(
+          (tx) =>
+            tx.nodes.Person.create({
+              name: "Alice",
+              email: "alice@example.com",
+            }),
+          { isolationLevel: "serializable" },
+        ),
+      ).resolves.toMatchObject({ name: "Alice" });
+      expect(await store.nodes.Person.count()).toBe(1);
+    });
+
+    it("makes an empty-kind schema commit wait for an in-flight managed write", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      const insertReached = createGate();
+      const releaseInsert = createGate();
+      let pauseCompanyInsert = false;
+      const observedBackend: GraphBackend = {
+        ...backend,
+        async transaction(fn, options) {
+          return backend.transaction(
+            (tx) =>
+              fn({
+                ...tx,
+                async insertNode(params) {
+                  if (pauseCompanyInsert && params.kind === "Company") {
+                    insertReached.open();
+                    await releaseInsert.opened;
+                  }
+                  return tx.insertNode(params);
+                },
+              }),
+            options,
+          );
+        },
+      };
+      const [store] = await createStoreWithSchema(testGraph, observedBackend);
+
+      pauseCompanyInsert = true;
+      const insert = store.nodes.Company.create({ name: "Initech" });
+      await insertReached.opened;
+      const migration = migrateSchema(backend, testGraphWithoutCompany, 1);
+
+      const blockedMigration = await raceTimeout(migration, 200);
+      releaseInsert.open();
+      expect(blockedMigration).toBe(TIMEOUT_SENTINEL);
+      await expect(insert).resolves.toMatchObject({ name: "Initech" });
+      await expect(migration).rejects.toThrow(MigrationError);
+      expect(
+        requireDefined(await backend.getActiveSchema(testGraph.id)).version,
+      ).toBe(1);
+    });
+
+    it("aborts a stale serializable writer after a schema commit", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      const [store] = await createStoreWithSchema(testGraph, backend);
+      const snapshotRead = createGate();
+      const releaseWrite = createGate();
+
+      const staleWrite = store.transaction(
+        async (tx) => {
+          await tx.nodes.Person.count();
+          snapshotRead.open();
+          await releaseWrite.opened;
+          return tx.nodes.Company.create({ name: "Too late" });
+        },
+        { isolationLevel: "serializable" },
+      );
+      await snapshotRead.opened;
+      await migrateSchema(backend, testGraphWithoutCompany, 1);
+      releaseWrite.open();
+
+      await expect(staleWrite).rejects.toSatisfy((error: unknown) =>
+        isRetryableTxConflict(error),
+      );
+      expect(
+        requireDefined(await backend.getActiveSchema(testGraph.id)).version,
+      ).toBe(2);
+      expect(
+        await backend.countNodesByKind({
+          graphId: testGraph.id,
+          kind: "Company",
+          excludeDeleted: false,
+        }),
+      ).toBe(0);
+    });
+
+    it("reacquires the schema fence after rolling back its first write to a savepoint", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      const [store] = await createAdapterStoreWithSchema(testGraph, backend);
+
+      await expect(
+        store.transaction(async (tx) => {
+          if (tx.sqlAvailability !== "available") {
+            throw new Error(
+              "PostgreSQL adapter transaction did not expose native SQL",
+            );
+          }
+
+          await tx.sql.execute(sql.raw("SAVEPOINT schema_fence_regression"));
+          await tx.nodes.Person.create({
+            name: "Rolled back",
+            email: "rolled-back@example.com",
+          });
+          await tx.sql.execute(
+            sql.raw("ROLLBACK TO SAVEPOINT schema_fence_regression"),
+          );
+
+          await migrateSchema(backend, testGraphWithoutCompany, 1);
+          return tx.nodes.Company.create({ name: "Too late" });
+        }),
+      ).rejects.toThrow(StaleVersionError);
+
+      expect(
+        requireDefined(await backend.getActiveSchema(testGraph.id)).version,
+      ).toBe(2);
+      expect(
+        await backend.countNodesByKind({
+          graphId: testGraph.id,
+          kind: "Person",
+          excludeDeleted: false,
+        }),
+      ).toBe(0);
+      expect(
+        await backend.countNodesByKind({
+          graphId: testGraph.id,
+          kind: "Company",
+          excludeDeleted: false,
+        }),
+      ).toBe(0);
     });
   });
 

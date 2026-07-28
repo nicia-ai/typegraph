@@ -28,6 +28,7 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import {
   createInitializedStore,
+  createRawInitializedStore,
   createTestBackend,
   disableTransactions,
 } from "./test-utils";
@@ -84,6 +85,17 @@ describe("backends with transactions: false fall through to sequential execution
     expect(backend.capabilities.transactions).toBe(false);
   });
 
+  it("schema-managed Store writes fail closed before the sequential fallback", async () => {
+    const store = await createInitializedStore(graph, backend);
+
+    await expect(
+      store.nodes.Person.create({ name: "Blocked" }),
+    ).rejects.toMatchObject({
+      details: { code: "SCHEMA_WRITE_FENCE_UNSUPPORTED", graphId: graph.id },
+    });
+    await expect(store.nodes.Person.find()).resolves.toEqual([]);
+  });
+
   // Note: schema commits are NOT a fall-through path — they refuse on
   // non-transactional backends. That contract is exercised below with a
   // genuinely-non-transactional backend, since the synthetic disable
@@ -92,7 +104,7 @@ describe("backends with transactions: false fall through to sequential execution
   // config.
 
   it("store.transaction(fn) executes fn against the main backend", async () => {
-    const store = await createInitializedStore(graph, backend);
+    const store = await createRawInitializedStore(graph, backend);
 
     const result = await store.transaction(async (tx) => {
       const person = await tx.nodes.Person.create({ name: "Alice" });
@@ -111,7 +123,7 @@ describe("backends with transactions: false fall through to sequential execution
   });
 
   it("store.transaction errors propagate without rollback", async () => {
-    const store = await createInitializedStore(graph, backend);
+    const store = await createRawInitializedStore(graph, backend);
     const persisted = await store.nodes.Person.create({ name: "Persisted" });
 
     await expect(
@@ -132,7 +144,7 @@ describe("backends with transactions: false fall through to sequential execution
   });
 
   it("store.batch returns per-query results without throwing", async () => {
-    const store = await createInitializedStore(graph, backend);
+    const store = await createRawInitializedStore(graph, backend);
 
     await store.nodes.Person.create({ name: "Alice" });
     await store.nodes.Person.create({ name: "Bob" });
@@ -168,7 +180,7 @@ describe("backends with transactions: false fall through to sequential execution
       nodes: { Document: { type: Document } },
       edges: {},
     });
-    const store = await createInitializedStore(documentGraph, backend);
+    const store = await createRawInitializedStore(documentGraph, backend);
 
     await store.nodes.Document.create({
       title: "First",

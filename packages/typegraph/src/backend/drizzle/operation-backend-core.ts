@@ -22,6 +22,7 @@ import { nowIso as defaultNowIso } from "../row-mappers";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
+  CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
   CountEdgesByKindParams,
   CountEdgesFromParams,
@@ -42,6 +43,8 @@ import type {
   InsertNodeParams,
   InsertUniqueParams,
   NodeRow,
+  PopulatedSchemaKind,
+  SchemaKindEmptinessProbe,
   SchemaVersionRow,
   SetActiveVersionParams,
   TransactionBackend,
@@ -195,6 +198,14 @@ function verifyExpectedActiveVersion(
   actualActiveVersion: number,
 ): void {
   const expectedVersion = expected.kind === "active" ? expected.version : 0;
+  assertActiveSchemaVersion(graphId, expectedVersion, actualActiveVersion);
+}
+
+export function assertActiveSchemaVersion(
+  graphId: string,
+  expectedVersion: number,
+  actualActiveVersion: number,
+): void {
   if (actualActiveVersion !== expectedVersion) {
     throw new StaleVersionError({
       graphId,
@@ -202,6 +213,66 @@ function verifyExpectedActiveVersion(
       actual: actualActiveVersion,
     });
   }
+}
+
+/**
+ * Runs the populated-kind guard and schema commit on one transaction-scoped
+ * backend. The dialect wrapper is responsible for fencing ordinary entity
+ * writes before calling this helper.
+ */
+export async function commitSchemaVersionIfKindsEmpty(
+  backend: CommonOperationBackend,
+  params: CommitSchemaVersionParams,
+  probes: readonly SchemaKindEmptinessProbe[],
+): Promise<CommitSchemaVersionIfKindsEmptyResult> {
+  const [existing, active] = await Promise.all([
+    backend.getSchemaVersion(params.graphId, params.version),
+    backend.getActiveSchema(params.graphId),
+  ]);
+
+  // Preserve commitSchemaVersion's conflict and idempotency precedence. A
+  // retry of an already-active identical version is success regardless of
+  // current row counts; a conflicting same-version document remains a
+  // content conflict rather than being masked as a populated-kind refusal.
+  if (
+    existing !== undefined &&
+    (existing.is_active || existing.schema_hash !== params.schemaHash)
+  ) {
+    return {
+      status: "committed",
+      row: await backend.commitSchemaVersion(params),
+    };
+  }
+
+  verifyExpectedActiveVersion(
+    params.graphId,
+    params.expected,
+    active?.version ?? 0,
+  );
+
+  const populated: PopulatedSchemaKind[] = [];
+  for (const probe of probes) {
+    const count =
+      probe.entity === "node" ?
+        await backend.countNodesByKind({
+          graphId: params.graphId,
+          kind: probe.kind,
+        })
+      : await backend.countEdgesByKind({
+          graphId: params.graphId,
+          kind: probe.kind,
+        });
+    if (count > 0) populated.push({ ...probe, count });
+  }
+
+  if (populated.length > 0) {
+    return { status: "populated", kinds: populated };
+  }
+
+  return {
+    status: "committed",
+    row: await backend.commitSchemaVersion(params),
+  };
 }
 
 export function createCommonOperationBackend(

@@ -68,6 +68,7 @@ import {
 export type EdgeOperationContext<G extends GraphDef> = Readonly<{
   graph: G;
   graphId: string;
+  schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;

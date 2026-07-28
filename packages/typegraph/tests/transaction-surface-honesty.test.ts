@@ -44,6 +44,7 @@ import { STORE_RUNTIME } from "../src/store/runtime-port";
 import { TRANSACTION_RUNTIME } from "../src/store/types";
 import {
   createInitializedStore,
+  createRawInitializedStore,
   createTestBackend,
   disableTransactions,
 } from "./test-utils";
@@ -97,7 +98,7 @@ describe("#254 tx.sqlAvailability discriminant", () => {
   });
 
   it("reports 'unavailable' with tx.sql === undefined on a non-transactional backend", async () => {
-    const store = await createInitializedStore(
+    const store = await createRawInitializedStore(
       graph,
       disableTransactions(createTestBackend()),
     );

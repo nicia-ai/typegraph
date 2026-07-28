@@ -10,6 +10,7 @@ import {
 import { createTransactionReceiptRecorder } from "../src/store/transaction-receipt";
 import {
   createInitializedStore,
+  createRawInitializedStore,
   createTestBackend,
   disableTransactions,
 } from "./test-utils";
@@ -128,7 +129,7 @@ async function writeFixture(
 describe("transaction receipts", () => {
   it("returns counts on non-transactional backends", async () => {
     const backend = disableTransactions(createTestBackend());
-    const store = await createInitializedStore(receiptGraph, backend);
+    const store = await createRawInitializedStore(receiptGraph, backend);
 
     const outcome = await store.transactionWithReceipt(async (tx) => {
       const person = await tx.nodes.Person.create({ name: "Alice" });

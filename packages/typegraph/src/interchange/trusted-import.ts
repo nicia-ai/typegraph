@@ -1,6 +1,7 @@
 import type {
   InsertEdgeParams,
   InsertNodeParams,
+  TrustedImportOptions,
   TrustedImportSession,
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
@@ -223,8 +224,19 @@ export async function trustedImportGraphStream<G extends GraphDef>(
       { dialect: backend.dialect },
     );
   }
-  return trustedImport((session) =>
-    consumeTrustedChunks(store, session, chunks),
+  const schemaVersion = store.introspect().schemaVersion;
+  const options: TrustedImportOptions | undefined =
+    schemaVersion === undefined ? undefined : (
+      {
+        schemaWrite: {
+          graphId: store.graphId,
+          expectedVersion: schemaVersion,
+        },
+      }
+    );
+  return trustedImport(
+    (session) => consumeTrustedChunks(store, session, chunks),
+    options,
   );
 }
 

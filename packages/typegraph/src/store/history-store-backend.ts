@@ -20,6 +20,8 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "claimIndexMaterialization",
   "close",
   "commitSchemaVersion",
+  "commitSchemaVersionIfKindsEmpty",
+  "lockSchemaVersionForWrite",
   "compileSql",
   "countEdgesByKind",
   "countEdgesFrom",

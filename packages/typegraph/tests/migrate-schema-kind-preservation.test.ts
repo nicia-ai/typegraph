@@ -24,7 +24,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { MigrationError } from "../src";
+import { ConfigurationError, MigrationError, StaleVersionError } from "../src";
 import { defineGraph } from "../src/core/define-graph";
 import { defineEdge } from "../src/core/edge";
 import { defineNode } from "../src/core/node";
@@ -205,6 +205,12 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
     edges: {},
   });
 
+  const graphWithoutWorksAt = defineGraph({
+    id: baseGraph.id,
+    nodes: { Person: { type: Person }, Company: { type: Company } },
+    edges: {},
+  });
+
   /** Give `Company` a row so dropping it would strand data. */
   async function seedCompany(
     backend: ReturnType<typeof createTestBackend>,
@@ -243,13 +249,7 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
     const initech = await store.nodes.Company.create({ name: "Initech" });
     await store.edges.worksAt.create(alice, initech, { since: "2024" });
 
-    const graphWithoutEdge = defineGraph({
-      id: baseGraph.id,
-      nodes: { Person: { type: Person }, Company: { type: Company } },
-      edges: {},
-    });
-
-    const error = await migrateSchema(backend, graphWithoutEdge, 1).catch(
+    const error = await migrateSchema(backend, graphWithoutWorksAt, 1).catch(
       (error_: unknown) => error_,
     );
     const edgeDetails = (error as MigrationError).details;
@@ -268,6 +268,69 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
     expect(version).toBe(2);
     const kinds = await activeKindNames(backend);
     expect(kinds).toEqual({ nodes: ["Person"], edges: [] });
+  });
+
+  it("rejects a queued write from a Store whose schema was replaced", async () => {
+    const backend = createTestBackend();
+    const [staleStore] = await createStoreWithSchema(baseGraph, backend);
+
+    await migrateSchema(backend, graphWithoutCompany, 1);
+
+    await expect(
+      staleStore.nodes.Company.create({ name: "Too late" }),
+    ).rejects.toThrow(StaleVersionError);
+    expect(
+      await backend.countNodesByKind({
+        graphId: baseGraph.id,
+        kind: "Company",
+        excludeDeleted: false,
+      }),
+    ).toBe(0);
+  });
+
+  it("rejects a queued edge write from a Store whose schema was replaced", async () => {
+    const backend = createTestBackend();
+    const [staleStore] = await createStoreWithSchema(baseGraph, backend);
+    const alice = await staleStore.nodes.Person.create({ name: "Alice" });
+    const initech = await staleStore.nodes.Company.create({ name: "Initech" });
+
+    await migrateSchema(backend, graphWithoutWorksAt, 1);
+
+    await expect(
+      staleStore.edges.worksAt.create(alice, initech, { since: "too late" }),
+    ).rejects.toThrow(StaleVersionError);
+    expect(
+      await backend.countEdgesByKind({
+        graphId: baseGraph.id,
+        kind: "worksAt",
+        excludeDeleted: false,
+      }),
+    ).toBe(0);
+  });
+
+  it("refuses an emptiness-guarded migration when a custom backend lacks the atomic fence", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+    const {
+      commitSchemaVersionIfKindsEmpty: unsupportedCapability,
+      ...customBackend
+    } = backend;
+    void unsupportedCapability;
+
+    const error = await migrateSchema(
+      customBackend,
+      graphWithoutCompany,
+      1,
+    ).catch((error_: unknown) => error_);
+
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as ConfigurationError).details).toMatchObject({
+      code: "SCHEMA_KIND_EMPTINESS_FENCE_UNSUPPORTED",
+      graphId: baseGraph.id,
+    });
+    expect(
+      requireDefined(await backend.getActiveSchema(baseGraph.id)).version,
+    ).toBe(1);
   });
 
   it("allows dropping a kind whose rows were deleted first, and the reconciler reclaims the tombstones", async () => {

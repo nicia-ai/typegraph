@@ -36,3 +36,4 @@ export {
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
 } from "./node-operations";
+export { lockSchemaVersionForStoreWrite } from "./write-transaction";

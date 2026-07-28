@@ -7,7 +7,14 @@
  * - Auto-migration for safe changes
  * - Error reporting for breaking changes
  */
-import { type GraphBackend, type SchemaVersionRow } from "../backend/types";
+import {
+  type CommitSchemaVersionIfKindsEmptyResult,
+  type CommitSchemaVersionParams,
+  type GraphBackend,
+  type PopulatedSchemaKind,
+  type SchemaKindEmptinessProbe,
+  type SchemaVersionRow,
+} from "../backend/types";
 import {
   getEdgeKinds,
   getNodeKinds,
@@ -776,15 +783,6 @@ export async function migrateSchema<G extends GraphDef>(
         ...droppedKinds(storedSchema.nodes, getNodeKinds(target), "node"),
         ...droppedKinds(storedSchema.edges, getEdgeKinds(target), "edge"),
       ];
-  if (dropped.length > 0 && options?.discardDroppedKindRows !== true) {
-    await assertNoPopulatedKindDropped(
-      backend,
-      dropped,
-      graph.id,
-      currentVersion,
-    );
-  }
-
   // No cleanup is queued here, deliberately, and redundancy is the whole
   // reason. `materializeRemovals` derives removals by walking schema-version
   // history (`reconcilePendingRemovals` diffs consecutive documents' kind
@@ -797,11 +795,15 @@ export async function migrateSchema<G extends GraphDef>(
   // stops at the first absent prior version, so a drop below a pruned or
   // gapped range becomes undiscoverable. Callers who prune schema versions
   // should run `materializeRemovals` before pruning.
-  const committed = await commitNewSchemaVersion(
-    backend,
-    target,
-    currentVersion,
-  );
+  const committed =
+    dropped.length > 0 && options?.discardDroppedKindRows !== true ?
+      await commitDroppedKindsOnlyWhenEmpty(
+        backend,
+        target,
+        currentVersion,
+        dropped,
+      )
+    : await commitNewSchemaVersion(backend, target, currentVersion);
   return committed.version;
 }
 
@@ -829,39 +831,37 @@ export async function migrateSchema<G extends GraphDef>(
  * primitive and drops populated kinds *by design*, having queued their
  * cleanup rows first.
  *
- * **The probe and the commit are not atomic** (#336). The version CAS protects
- * the schema row, not the row counts, so a concurrent insert can land after a
- * kind reads as empty: it is written against a schema that still declares the
- * kind, and is unreachable a moment later.
- *
- * Wrapping both in one transaction would not close this. Schema commits run
- * under a dialect write-lock (`pg_advisory_xact_lock` on Postgres) that
- * serializes schema writers against each other, but ordinary data writes do
- * not take it, so the inserting session is neither holding nor blocked by the
- * fence. Closing it properly means data writes participating in a shared lock
- * keyed on the graph — a cost on every write, tracked separately.
- *
- * `Store.evolve`'s tightening probe has the identical window and predates
- * this one.
+ * The populated-kind probes and schema CAS run through the backend's atomic
+ * `commitSchemaVersionIfKindsEmpty` primitive. PostgreSQL schema changes lock
+ * the active schema row FOR UPDATE while managed Store writes lock it FOR SHARE
+ * and revalidate its version; SQLite serializes both with its existing BEGIN
+ * IMMEDIATE writer slot. This prevents a participating schema-managed Store
+ * write from landing between the final count and schema CAS, and rejects a
+ * stale Store after the schema change releases the fence. Raw Stores and direct
+ * backend writes remain outside this guarantee.
  */
-async function assertNoPopulatedKindDropped(
+async function commitDroppedKindsOnlyWhenEmpty<G extends GraphDef>(
   backend: GraphBackend,
+  graph: G,
+  currentVersion: number,
   dropped: readonly DroppedKind[],
+): Promise<SchemaVersionRow> {
+  const result = await commitNewSchemaVersionIfKindsEmpty(
+    backend,
+    graph,
+    currentVersion,
+    dropped,
+  );
+  if (result.status === "committed") return result.row;
+
+  throwPopulatedKindRemovalError(graph.id, currentVersion, result.kinds);
+}
+
+function throwPopulatedKindRemovalError(
   graphId: string,
   currentVersion: number,
-): Promise<void> {
-  const counted = await Promise.all(
-    dropped.map(async (entry) => {
-      const count =
-        entry.entity === "node" ?
-          await backend.countNodesByKind({ graphId, kind: entry.kind })
-        : await backend.countEdgesByKind({ graphId, kind: entry.kind });
-      return { ...entry, count };
-    }),
-  );
-  const populated = counted.filter((entry) => entry.count > 0);
-  if (populated.length === 0) return;
-
+  populated: readonly PopulatedSchemaKind[],
+): never {
   const named = populated
     .map((entry) => `${entry.entity} "${entry.kind}" (${String(entry.count)})`)
     .join(", ");
@@ -922,6 +922,39 @@ export async function commitNewSchemaVersion<G extends GraphDef>(
   graph: G,
   currentVersion: number,
 ): Promise<SchemaVersionRow> {
+  const params = await buildNewSchemaVersionCommit(graph, currentVersion);
+  return backend.commitSchemaVersion(params);
+}
+
+/**
+ * Atomic sibling used by compatibility guards that require selected kinds to
+ * remain empty through the schema CAS.
+ */
+export async function commitNewSchemaVersionIfKindsEmpty<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  currentVersion: number,
+  probes: readonly SchemaKindEmptinessProbe[],
+): Promise<CommitSchemaVersionIfKindsEmptyResult> {
+  const params = await buildNewSchemaVersionCommit(graph, currentVersion);
+  const commitIfKindsEmpty = backend.commitSchemaVersionIfKindsEmpty;
+  if (commitIfKindsEmpty === undefined) {
+    throw new ConfigurationError(
+      "This backend cannot atomically fence entity writes while checking " +
+        "schema kind emptiness.",
+      {
+        code: "SCHEMA_KIND_EMPTINESS_FENCE_UNSUPPORTED",
+        graphId: graph.id,
+      },
+    );
+  }
+  return commitIfKindsEmpty(params, probes);
+}
+
+async function buildNewSchemaVersionCommit<G extends GraphDef>(
+  graph: G,
+  currentVersion: number,
+): Promise<CommitSchemaVersionParams> {
   // See initializeSchema: reject structurally invalid graphs (e.g.
   // endpoint-incompatible implies() relations) before committing, not
   // only when a Store is later built against the committed version.
@@ -931,13 +964,13 @@ export async function commitNewSchemaVersion<G extends GraphDef>(
   const schema = serializeSchema(graph, newVersion);
   const hash = await computeSchemaHash(schema);
 
-  return backend.commitSchemaVersion({
+  return {
     graphId: graph.id,
     expected: { kind: "active", version: currentVersion },
     version: newVersion,
     schemaHash: hash,
     schemaDoc: schema,
-  });
+  };
 }
 
 /**
