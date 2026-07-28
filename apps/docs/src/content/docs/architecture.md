@@ -205,6 +205,10 @@ SELECT schema_doc FROM typegraph_schema_versions
 WHERE graph_id = 'my_graph' AND is_active = TRUE;
 ```
 
+From TypeScript,
+[`getActiveSchema`](/schema-management#what-does-this-database-already-have)
+runs this query and parses the result into a typed `SerializedSchema`.
+
 The stored schema includes everything needed to understand the graph:
 
 ```typescript
