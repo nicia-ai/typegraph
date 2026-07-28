@@ -10,18 +10,25 @@ your knowledge graph scales with your application.
 
 ## Performance Philosophy
 
-1. **One Query, One Statement**: Every query — including multi-hop traversals — compiles to a
-   single SQL statement. No N+1 queries by design.
+1. **One Fluent Query, One Statement**: Every fluent query — including multi-hop traversals —
+   compiles to a single SQL statement, so its statement count never grows with the size of the
+   graph. This prevents compiler-generated N+1 work inside that query; application code can still
+   create an N+1 by issuing separate reads in a loop. (Compilation, not execution: a query whose
+   selective-field mapping falls back re-runs as a full fetch, costing a second statement. See
+   [Batch reads](#batch-reads).)
 2. **Precomputed Ontology**: Transitive closures, subclass hierarchies, and edge implications are
    computed once at schema initialization, not during every query.
-3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes;
-   `store.batch()` does the same for reads.
+3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes. On the read
+   side that job belongs to the query compiler — `store.batch()` only caps concurrency at one query
+   in flight, it does not reduce round trips and it is not a snapshot.
 4. **Zero-Cost Abstractions**: Type safety and ontological reasoning add no measurable runtime overhead.
 
 ## N+1 Prevention
 
 A common performance problem in ORMs is the N+1 query: you fetch N entities, then issue one
-query per entity to load related data. TypeGraph eliminates this structurally.
+query per entity to load related data. TypeGraph's fluent query compiler eliminates that pattern
+inside one graph-shaped query; it cannot eliminate separate collection reads issued by application
+code.
 
 Every query — regardless of how many traversals it chains — compiles to a **single SQL statement**
 using Common Table Expressions (CTEs). Each traversal step becomes a CTE that joins against the
@@ -74,8 +81,10 @@ This holds for all query types:
 - Aggregations with traversals (CTEs + GROUP BY, 1 statement)
 - [Set operations](/queries/combine) (UNION/INTERSECT/EXCEPT of CTEs, 1 statement)
 
-There is no dataloader or batching layer because there is nothing to batch — the database handles
-the entire join graph in a single execution.
+The fluent query needs no dataloader for that joined read because the database handles its entire
+join graph in one execution. Separate reads can still form an N+1; use a traversal, `subgraph()`, or
+the chunked collection reads described below instead of looping them or wrapping them in
+`store.batch()`.
 
 ## Batch Write Patterns
 
@@ -166,15 +175,20 @@ loop if per-call refreshes still dominate.
 
 ### Batch reads
 
-`getByIds()` on node and edge collections uses a single `SELECT ... WHERE id IN (...)` instead of N
-individual queries. Results are returned in input order with `undefined` for missing entries.
+`getByIds()` on node and edge collections uses `SELECT ... WHERE id IN (...)` — one statement per
+bind-limit chunk, so a single statement for id counts under the limit — instead of N individual
+queries. Results are returned in input order with `undefined` for missing entries.
 
 ```typescript
 const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 ```
 
 For multiple independent queries with different shapes and filters, use
-[`store.batch()`](/schemas-stores#batch-query-execution) to execute them over a single connection:
+[`store.batch()`](/schemas-stores#batch-query-execution) to run them in sequence against one target.
+Note the cost: on a transactional backend it still issues at least one statement per query plus
+`begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no
+framing. It buys a connection profile that never peaks at N — not lower latency, and not a snapshot
+(PostgreSQL's default read-committed isolation lets a later query see a newer commit):
 
 ```typescript
 const [activeUsers, recentOrders] = await store.batch(
@@ -189,8 +203,10 @@ const [activeUsers, recentOrders] = await store.batch(
 ```
 
 Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
-participate in `store.batch()`, replacing N individual `findFrom`/`findTo` calls with a single
-transactional round-trip.
+participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
+into one transaction — the statement count is unchanged either way. If the round trips are what
+hurt, replace the calls with a traversal (one statement) or `store.subgraph()` (a fixed 2 on
+SQLite, 3 on PostgreSQL, however large the result).
 
 To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
 [Edge Collections](/schemas-stores#edge-collections)).
@@ -223,8 +239,10 @@ for the ownership matrix and shutdown examples.
 
 ### PostgreSQL pooling
 
-Always use a connection pool in production. TypeGraph issues one SQL statement per query, so pool
-utilization is straightforward — no long-held connections or multi-statement conversations.
+Always use a connection pool in production. An individual query holds a connection only while each
+statement runs. Most queries issue a single statement; a query whose selective-field mapping falls
+back issues a second. `store.transaction()` holds one connection for the whole callback, and
+`store.batch()` does the same for its implicit transaction.
 
 ```typescript
 import { Pool } from "pg";
@@ -241,14 +259,18 @@ pool.on("error", (err) => {
 });
 ```
 
-**Sizing guidance:** Each concurrent query uses one connection for the duration of that single SQL
-statement. A pool of 10–20 connections handles most workloads. If you're running bulk imports in
-parallel, size up accordingly.
+**Sizing guidance:** Each concurrent query holds one connection for as long as its statement runs.
+A pool of 10–20 connections handles most workloads. If you're running bulk imports in parallel,
+size up accordingly.
 
 **Reducing pool pressure with `batch()`:** When loading multiple independent queries (e.g., a
-detail page with several relationship types), `Promise.all` acquires N connections simultaneously.
-[`store.batch()`](/schemas-stores#batch-query-execution) runs all queries over a single connection
-within an implicit transaction, reducing N connections to 1 while guaranteeing snapshot consistency.
+detail page with several relationship types), `Promise.all` can acquire up to N connections
+simultaneously — fewer if the pool is undersized or saturated, in which case it queues instead.
+[`store.batch()`](/schemas-stores#batch-query-execution) keeps at most one query in flight, so peak
+connection use is 1 — on a transactional backend that is literally one checked-out connection for
+the implicit transaction; elsewhere it is one at a time, and whether the adapter reuses the same
+client is its own business. It does not reduce the statement count, and read-committed isolation
+means it is not a snapshot.
 
 ### SQLite concurrency
 
@@ -440,8 +462,9 @@ See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
 ### Subgraph extraction
 
 For the "load entity with all relationships" pattern, [`store.subgraph()`](/schemas-stores#subgraph-extraction)
-is the fastest strategy. It compiles to a single recursive CTE that fans out across all specified
-edge types in one round trip — no matter how many relationship kinds are involved. See
+is the fastest strategy. It compiles to a recursive CTE that fans out across all specified edge
+types in a fixed 2 statements on SQLite and 3 on PostgreSQL — no matter how many relationship kinds
+are involved, or how much it returns. See
 [Choosing a query strategy](/schemas-stores#choosing-a-query-strategy) for guidance on when to use
 `subgraph()` vs the fluent query builder vs manual `findFrom` calls.
 

@@ -585,9 +585,15 @@ export class ExecutableQuery<
   /**
    * Executes the query against a provided backend.
    *
-   * Used by `store.batch()` to run multiple queries over a single connection
-   * (e.g., within a transaction). The full compile → execute → transform
-   * pipeline runs identically to `execute()`, but against the given backend.
+   * Used by `store.batch()` to run several queries in sequence against one
+   * target — a transaction on backends that have them, the backend itself
+   * otherwise. The full compile → execute → transform pipeline runs
+   * identically to `execute()`, but against the given backend.
+   *
+   * Costs one statement, or two when the selective-field path runs and its
+   * mapping then falls back: `#tryOptimizedExecutionOn` detects that only
+   * after its statement has executed, and the caller re-runs the full fetch.
+   * The fallback clears the fast path for this instance.
    */
   async executeOn(
     backend: GraphBackend | TransactionBackend,

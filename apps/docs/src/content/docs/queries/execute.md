@@ -244,8 +244,27 @@ async function exportAllUsers(): Promise<void> {
 
 ## Batch Execution
 
-When you need multiple independent queries with different result types, use `store.batch()` to
-execute them over a single connection with snapshot consistency.
+When you need multiple independent queries with different result types, use `store.batch()` to run
+them in sequence against one target.
+
+`batch()` does not batch round trips. The portable guarantee is that at most one query is in flight
+at a time — at least one statement each, and two for a query whose selective-field mapping falls
+back after its statement has already run. On a SQL backend with transactions it frames them with
+`begin`/`commit`, putting a networked one at N+2 round trips **at best**; Durable Objects use an
+ambient storage transaction with no framing, and without transactions there is no framing at all.
+Connection reuse is the adapter's business either way.
+
+It will not fix an N+1. For that, fold the work into one query: a `.traverse()` chain (one
+statement), `store.subgraph()` (2 statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
+`bulkFindByIndex()`, which are chunked rather than fixed-cost.
+
+It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can
+observe a commit the earlier ones did not. There is no way to fix that for fluent queries today —
+`store.transaction()` accepts an `isolationLevel`, but its context exposes only `nodes` / `edges`,
+so a query builder cannot run inside it. Collection reads can get a snapshot via
+`store.transaction(fn, { isolationLevel: "repeatable_read" })` and `tx.nodes` / `tx.edges` — but
+only where the backend has transactions (others ignore the option), and a history-enabled store on
+PostgreSQL additionally requires `accessMode: "read_only"` or the call throws.
 
 ```typescript
 const [people, companies] = await store.batch(
@@ -268,7 +287,8 @@ const [people, companies] = await store.batch(
 Each query preserves its own projection, filtering, sorting, and pagination. Results are returned
 as a typed tuple matching the input order.
 
-Edge collection `batchFind*` methods also return `BatchableQuery` and can be mixed freely with fluent queries:
+Edge collection `batchFind*` methods also return `BatchableQuery` and can be mixed freely with
+fluent queries — each still costs its own statement:
 
 ```typescript
 const [skills, employer] = await store.batch(
@@ -277,8 +297,13 @@ const [skills, employer] = await store.batch(
 );
 ```
 
-**vs `Promise.all`**: `batch()` uses 1 connection instead of N and guarantees snapshot consistency.
-**vs `transaction()`**: Same consistency, but cleaner API — no callback, typed tuple return.
+**vs `Promise.all`**: workload- and adapter-dependent in both directions. `Promise.all` overlaps its
+queries against a pool with idle capacity, but it does not necessarily hold N connections, and
+against a single client or a saturated pool it queues. `batch()` keeps at most one query in flight,
+so it pays the sum of their latencies — but it can still come out ahead where connection
+acquisition dominates. Measure rather than assume.
+**vs `transaction()`**: same transaction, lighter API — no callback, typed tuple return. But
+`transaction()` is the only one that takes an `isolationLevel`, and it cannot run fluent queries.
 
 See [Batch Query Execution](/schemas-stores#batch-query-execution) for full API reference.
 
