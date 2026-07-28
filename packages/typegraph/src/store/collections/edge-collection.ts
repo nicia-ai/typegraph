@@ -372,8 +372,8 @@ export function createEdgeCollection<
    * The edge relation's system index is keyed
    * `(graph_id, from_kind, from_id, kind, ...)`, so the id set is issued per
    * endpoint KIND — a set within one kind is a prefix seek, while mixing kinds
-   * would force a scan. Inputs of a single kind (the overwhelmingly common
-   * case) therefore cost exactly one statement.
+   * would force a scan. Inputs of a single kind therefore cost one statement
+   * per bind-budget chunk rather than one statement per endpoint.
    */
   async function findEdgesByEndpointSet(
     side: EdgeEndpointSide,
@@ -387,7 +387,7 @@ export function createEdgeCollection<
     if (readEndpointSet === undefined) {
       throw new ConfigurationError(
         `store.edges.${kind}.${method}() requires a backend that can read a set of ` +
-          `endpoints in one statement, and this backend does not implement ` +
+          `endpoints with set-oriented statements, and this backend does not implement ` +
           `findEdgesByEndpointSet.`,
         {
           backend: backend.dialect,
@@ -398,8 +398,9 @@ export function createEdgeCollection<
         {
           suggestion:
             `Falling back to one findFrom/findTo per endpoint is deliberately NOT done here: ` +
-            `a caller reaching for a bulk endpoint read is asking for one statement, and ` +
-            `silently issuing N is the cost surprise this method exists to avoid. Loop over ` +
+            `a caller reaching for a bulk endpoint read is asking for a set-oriented read, and ` +
+            `silently issuing N singleton statements is the cost surprise this method exists ` +
+            `to avoid. Loop over ` +
             `findFrom/findTo explicitly if that trade is acceptable.`,
         },
       );

@@ -199,7 +199,9 @@ export type BackendCapabilities = Readonly<{
    * Maximum number of bound parameters the engine accepts in one statement.
    * SQLite defaults to 999 (raisable at compile time via
    * `SQLITE_MAX_VARIABLE_NUMBER`), while hosted SQLite runtimes may impose a
-   * lower platform ceiling; PostgreSQL's wire protocol caps it at 65535.
+   * lower platform ceiling. PostgreSQL's wire protocol encodes a 65535-count,
+   * but postgres.js accepts at most 65533 bound values, so the bundled
+   * PostgreSQL capability advertises that lower shared-driver ceiling.
    * Recorded-time capture and recorded point reads size their multi-row
    * statements to this ceiling — the same budget the backend's own batched
    * inserts use — instead of a conservative dialect-blind constant. Custom
@@ -1210,8 +1212,8 @@ export type GraphBackend = Readonly<{
    * .bulkFindFrom` / `.bulkFindTo` check for this method before issuing any
    * read and refuse with a typed `ConfigurationError` when it is missing,
    * rather than degrading to a per-endpoint loop. A caller reaching for a bulk
-   * endpoint read is asking for one statement; quietly giving them N is the
-   * surprise the method exists to prevent.
+   * endpoint read is asking for set-oriented statements; quietly giving them N
+   * singleton statements is the surprise the method exists to prevent.
    *
    * Both bundled Drizzle backends implement it. A custom backend that does not
    * simply omits it and the bulk reads refuse; the singleton `findEdgesByKind`
@@ -2492,8 +2494,9 @@ export type FindEdgesByKindParams = Readonly<{
 export type EdgeEndpointSide = "from" | "to";
 
 /**
- * Parameters for reading the edges of a SET of endpoints in one statement —
- * the widened form of {@link FindEdgesByKindParams}'s scalar `fromId` / `toId`.
+ * Parameters for reading the edges of a SET of endpoints in one statement per
+ * bind-budget chunk — the widened form of {@link FindEdgesByKindParams}'s
+ * scalar `fromId` / `toId`.
  *
  * Deliberately a SEPARATE parameter type on a separate operation rather than
  * optional fields on `FindEdgesByKindParams`. A backend that did not implement
@@ -2604,11 +2607,11 @@ export const D1_MAX_BIND_PARAMETERS = 100;
 export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
 
 /**
- * PostgreSQL's wire-protocol bound-parameter ceiling (a 16-bit count). Single
- * source of truth for {@link POSTGRES_CAPABILITIES} and the Postgres backend's
- * batch math.
+ * Safe bound-parameter ceiling shared by every bundled PostgreSQL driver.
+ * The protocol count can represent 65535, but postgres.js rejects a statement
+ * with 65534 bound values, so backend batch math uses the lower portable limit.
  */
-export const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
+export const POSTGRES_MAX_BIND_PARAMETERS = 65_533;
 
 /**
  * Default capabilities for SQLite.

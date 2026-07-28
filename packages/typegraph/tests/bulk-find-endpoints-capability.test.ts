@@ -10,8 +10,9 @@
  * detected by the method's presence, before any statement is issued.
  *
  * Degrading to one `findFrom` per endpoint is deliberately not offered: a
- * caller reaching for a bulk read is asking for one statement, and quietly
- * issuing N is the same class of cost surprise, just smaller.
+ * caller reaching for a bulk read is asking for set-oriented statements, and
+ * quietly issuing N singleton statements is the same class of cost surprise,
+ * just smaller.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";

@@ -15,9 +15,9 @@ import { type IntegrationTestContext } from "./test-context";
  * Cross-backend coverage for `bulkFindFrom` / `bulkFindTo` — the set-valued
  * form of `findFrom` / `findTo`.
  *
- * The contract these tests defend is "the same read, one statement": every
- * case that asserts a result also asserts it against the singleton method it
- * widens, so a dialect that filtered, ordered, or grouped the set form
+ * The contract these tests defend is "the same read, set-oriented": every case
+ * that asserts a result also asserts it against the singleton method it widens,
+ * so a dialect that filtered, ordered, grouped, or chunked the set form
  * differently would fail here rather than in one backend's private suite.
  */
 export function registerBulkFindEndpointIntegrationTests(

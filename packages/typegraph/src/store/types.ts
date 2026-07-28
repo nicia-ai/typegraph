@@ -1045,7 +1045,8 @@ export type EdgeCollection<
    * `findFrom` with a widened endpoint predicate and nothing else: the same
    * temporal model, the same soft-delete filtering, and the same per-source
    * ordering — but `from_id IN (...)` instead of `from_id = ?`, so a page of
-   * N sources costs one statement per distinct source kind rather than N.
+   * N sources costs one statement per distinct source kind and bind-budget
+   * chunk rather than N singleton statements.
    *
    * Results are grouped per input: the outer array is parallel to `froms`
    * (index `i` holds the edges of `froms[i]`), and repeated inputs each get
@@ -1057,8 +1058,8 @@ export type EdgeCollection<
    * Requires a backend implementing `findEdgesByEndpointSet` — both bundled
    * Drizzle backends do. On one that does not, this **refuses** with a
    * `ConfigurationError` rather than looping `findFrom` per input: asking for
-   * a bulk read is asking for one statement, and silently issuing N is the
-   * cost surprise the method exists to remove.
+   * a bulk read is asking for set-oriented statements, and silently issuing N
+   * singleton statements is the cost surprise the method exists to remove.
    *
    * @param froms - Source nodes to read the edges of
    * @param options - Temporal coordinate plus optional `limitPerInput`

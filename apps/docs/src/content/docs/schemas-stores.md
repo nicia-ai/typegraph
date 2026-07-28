@@ -1184,7 +1184,7 @@ Finds the edges of a **set** of endpoints in one read. This is `findFrom` /
 `findTo` with the endpoint predicate widened from `from_id = ?` to
 `from_id IN (...)` — the same index prefix seek, the same temporal model, the
 same per-endpoint ordering — so a page of N nodes costs one statement per
-endpoint kind instead of N.
+endpoint kind and bind-budget chunk instead of N singleton statements.
 
 Results are grouped per input: index `i` of the returned array holds the edges
 of `froms[i]`, an endpoint with no edges gets an empty array, and repeated
@@ -1196,9 +1196,10 @@ bound-parameter budget.
 Requires a backend that implements the `findEdgesByEndpointSet` operation —
 both bundled Drizzle backends do. On a custom backend without it, these
 methods throw a `ConfigurationError` instead of falling back to one
-`findFrom` per input: a caller reaching for a bulk read is asking for one
-statement, so quietly issuing N would be the cost surprise the method exists
-to remove. Loop over `findFrom` / `findTo` yourself if that trade is fine.
+`findFrom` per input: a caller reaching for a bulk read is asking for a
+set-oriented read, so quietly issuing N singleton statements would be the cost
+surprise the method exists to remove. Loop over `findFrom` / `findTo` yourself
+if that trade is fine.
 
 ```typescript
 store.edges.worksAt.bulkFindFrom(

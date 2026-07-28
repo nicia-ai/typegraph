@@ -7,7 +7,8 @@ Add batched multi-source edge reads: `bulkFindFrom` / `bulkFindTo`
 `EdgeCollection` could only read the edges of ONE endpoint at a time, so
 rendering a page of N nodes with their relationships cost N statements. The new
 `store.edges.<kind>.bulkFindFrom(froms, options?)` and `bulkFindTo(tos,
-options?)` read a whole SET of endpoints in one statement per endpoint kind,
+options?)` read a whole SET of endpoints in set-oriented statements per
+endpoint kind and bind-budget chunk,
 returning the edges grouped per input (index `i` holds the edges of input `i`,
 empty array when an endpoint has none).
 

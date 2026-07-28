@@ -1140,7 +1140,7 @@ export class Placeholder {
 export const POSTGRES_CAPABILITIES: BackendCapabilities;
 
 // @public
-export const POSTGRES_MAX_BIND_PARAMETERS = 65535;
+export const POSTGRES_MAX_BIND_PARAMETERS = 65533;
 
 // @public (undocumented)
 export type QueryExecutionBackend = Pick<GraphBackend, "execute">;
