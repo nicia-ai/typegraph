@@ -14,6 +14,8 @@
  *
  * Skipped unless `POSTGRES_URL` is set (or `scripts/test-postgres.sh`).
  */
+import { randomUUID } from "node:crypto";
+
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import {
@@ -45,7 +47,8 @@ const TEST_DATABASE_URL =
   process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
-const LEAST_PRIV_ROLE = "tg_vec_lp_runtime";
+const LEAST_PRIV_ROLE = `tg_vec_lp_runtime_${randomUUID().replaceAll("-", "")}`;
+const LEAST_PRIV_ROLE_IDENTIFIER = `"${LEAST_PRIV_ROLE}"`;
 const LEAST_PRIV_PASSWORD = "lp_runtime_pw";
 
 const Document = defineNode("Doc", {
@@ -71,7 +74,8 @@ const CONTRIB_MAT_TABLE = "typegraph_contribution_materializations";
 
 let ownerPool: Pool | undefined;
 let leastPrivPool: Pool | undefined;
-let postgresAvailable = false;
+let leastPrivRoleCreated = false;
+let publicCreateRevoked = false;
 
 /** A Pool authenticating as the USAGE-only role against the same database. */
 function leastPrivConnection(): Pool {
@@ -87,56 +91,71 @@ function leastPrivConnection(): Pool {
 
 beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
-  try {
-    ownerPool = new Pool({ connectionString: TEST_DATABASE_URL });
-    await ownerPool.query("SELECT 1");
-    // Base typegraph_* tables for the shared test database.
-    await ownerPool.query(generatePostgresMigrationSQL());
+  ownerPool = new Pool({ connectionString: TEST_DATABASE_URL });
+  await ownerPool.query("SELECT 1");
+  // Base typegraph_* tables for the shared test database.
+  await ownerPool.query(generatePostgresMigrationSQL());
 
-    // (Re)create the least-privilege runtime role: USAGE + full DML, but no
-    // CREATE on schema public — the exact prod `nicia_app` shape.
-    await ownerPool.query(`DROP OWNED BY ${LEAST_PRIV_ROLE}`).catch(() => {
-      // The role may not exist yet (first run) — nothing to drop.
-    });
-    await ownerPool.query(`DROP ROLE IF EXISTS ${LEAST_PRIV_ROLE}`);
-    await ownerPool.query(
-      `CREATE ROLE ${LEAST_PRIV_ROLE} LOGIN PASSWORD '${LEAST_PRIV_PASSWORD}'`,
-    );
-    await ownerPool.query(`GRANT USAGE ON SCHEMA public TO ${LEAST_PRIV_ROLE}`);
-    await ownerPool.query(
-      `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${LEAST_PRIV_ROLE}`,
-    );
-    // DML on tables the owner creates later (the per-field vector table).
-    await ownerPool.query(
-      `ALTER DEFAULT PRIVILEGES IN SCHEMA public ` +
-        `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${LEAST_PRIV_ROLE}`,
-    );
-    // The crux: deny DDL. (Legacy databases grant CREATE to PUBLIC.)
+  // The role name is unique per test process because PostgreSQL roles are
+  // cluster-global while grants and DROP OWNED are database-local. A fixed
+  // name cannot be cleaned up safely when another database still grants it
+  // privileges, and collides when worktrees run this suite concurrently.
+  await ownerPool.query(
+    `CREATE ROLE ${LEAST_PRIV_ROLE_IDENTIFIER} LOGIN PASSWORD '${LEAST_PRIV_PASSWORD}'`,
+  );
+  leastPrivRoleCreated = true;
+  await ownerPool.query(
+    `GRANT USAGE ON SCHEMA public TO ${LEAST_PRIV_ROLE_IDENTIFIER}`,
+  );
+  await ownerPool.query(
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${LEAST_PRIV_ROLE_IDENTIFIER}`,
+  );
+  // DML on tables the owner creates later (the per-field vector table).
+  await ownerPool.query(
+    `ALTER DEFAULT PRIVILEGES IN SCHEMA public ` +
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${LEAST_PRIV_ROLE_IDENTIFIER}`,
+  );
+  // The crux: deny DDL. (Legacy databases grant CREATE to PUBLIC.)
+  const publicSchemaPrivileges = await ownerPool.query<{
+    public_has_create: boolean;
+  }>(`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_namespace AS namespace
+      CROSS JOIN LATERAL aclexplode(
+        COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))
+      ) AS privilege
+      WHERE namespace.nspname = 'public'
+        AND privilege.grantee = 0
+        AND privilege.privilege_type = 'CREATE'
+    ) AS public_has_create
+  `);
+  if (publicSchemaPrivileges.rows[0]?.public_has_create === true) {
     await ownerPool.query(`REVOKE CREATE ON SCHEMA public FROM PUBLIC`);
-    await ownerPool.query(
-      `REVOKE CREATE ON SCHEMA public FROM ${LEAST_PRIV_ROLE}`,
-    );
-
-    leastPrivPool = leastPrivConnection();
-    await leastPrivPool.query("SELECT 1");
-    postgresAvailable = true;
-  } catch {
-    postgresAvailable = false;
+    publicCreateRevoked = true;
   }
+  await ownerPool.query(
+    `REVOKE CREATE ON SCHEMA public FROM ${LEAST_PRIV_ROLE_IDENTIFIER}`,
+  );
+
+  leastPrivPool = leastPrivConnection();
+  await leastPrivPool.query("SELECT 1");
 });
 
 afterAll(async () => {
   if (leastPrivPool) await leastPrivPool.end();
-  if (ownerPool && postgresAvailable) {
-    // Restore PUBLIC's CREATE so we don't leave the shared test database
-    // more restrictive than other suites expect, then drop the role.
-    await ownerPool.query(`GRANT CREATE ON SCHEMA public TO PUBLIC`);
-    await ownerPool.query(`DROP OWNED BY ${LEAST_PRIV_ROLE}`).catch(() => {
-      // The role may not exist yet (first run) — nothing to drop.
-    });
-    await ownerPool.query(`DROP ROLE IF EXISTS ${LEAST_PRIV_ROLE}`);
+  if (ownerPool) {
+    if (publicCreateRevoked) {
+      // Restore PUBLIC's CREATE so we don't leave the shared test database
+      // more restrictive than other suites expect.
+      await ownerPool.query(`GRANT CREATE ON SCHEMA public TO PUBLIC`);
+    }
+    if (leastPrivRoleCreated) {
+      await ownerPool.query(`DROP OWNED BY ${LEAST_PRIV_ROLE_IDENTIFIER}`);
+      await ownerPool.query(`DROP ROLE ${LEAST_PRIV_ROLE_IDENTIFIER}`);
+    }
+    await ownerPool.end();
   }
-  if (ownerPool) await ownerPool.end();
 });
 
 describe.runIf(process.env["POSTGRES_URL"])(
@@ -157,14 +176,13 @@ describe.runIf(process.env["POSTGRES_URL"])(
     }
 
     beforeEach(async () => {
-      if (!postgresAvailable || !ownerPool) return;
+      const pool = requireDefined(ownerPool);
       // Start each test genuinely un-provisioned for this graph.
-      await ownerPool.query(`DROP TABLE IF EXISTS "${PER_FIELD_TABLE}"`);
-      await ownerPool.query(
-        `DELETE FROM ${CONTRIB_MAT_TABLE} WHERE graph_id = $1`,
-        [VecGraph.id],
-      );
-      await ownerPool.query(`DELETE FROM typegraph_nodes WHERE graph_id = $1`, [
+      await pool.query(`DROP TABLE IF EXISTS "${PER_FIELD_TABLE}"`);
+      await pool.query(`DELETE FROM ${CONTRIB_MAT_TABLE} WHERE graph_id = $1`, [
+        VecGraph.id,
+      ]);
+      await pool.query(`DELETE FROM typegraph_nodes WHERE graph_id = $1`, [
         VecGraph.id,
       ]);
     });
