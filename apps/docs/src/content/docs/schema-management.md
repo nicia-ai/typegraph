@@ -80,8 +80,13 @@ Use `createStore()` when you manage schema versions yourself:
 import { createStore } from "@nicia-ai/typegraph";
 
 const store = createStore(graph, backend);
-// No schema versioning - you handle migrations manually
+// No schema versioning or write fence - you handle migrations manually
 ```
+
+Because a basic Store has no committed schema-version metadata, its writes do
+not participate in the schema-version fence. Direct backend writes have the
+same raw semantics. Use this mode only when the application accepts
+responsibility for quiescing writers around schema changes.
 
 :::caution[Fulltext requires the managed store]
 `createStore()` is attach-only. If the graph has `searchable()` fields,
@@ -136,6 +141,11 @@ It throws:
 - `StoreNotInitializedError` if the schema is current but the
   runtime-contribution markers (e.g. fulltext) are missing/stale.
 
+The attach itself can succeed on a non-transactional or custom backend, but the
+first managed write throws `ConfigurationError` with
+`details.code === "SCHEMA_WRITE_FENCE_UNSUPPORTED"` unless the backend can run
+transactions and provides the schema-write fence. Reads remain available.
+
 If you only need the check without building a Store (e.g. a readiness
 probe), call `assertSchemaCurrent(backend, graph)` directly — it returns
 the same `SchemaValidationResult` or throws the same errors.
@@ -151,6 +161,29 @@ DML-only role, do the privileged migration step once with
 [Database roles & least privilege](/backend-setup#database-roles--least-privilege)
 for the canonical breakdown.
 :::
+
+### Which Stores are schema-managed?
+
+A Store is schema-managed when it carries committed schema metadata:
+`store.introspect().schemaVersion !== undefined`. The following paths create or
+preserve that state:
+
+- `createStoreWithSchema()` and `createAdapterStoreWithSchema()`
+- `createVerifiedStore()` and `createVerifiedAdapterStore()`
+- `createAdapterStore(..., { reconciled })` with a cached reconciled snapshot
+- Stores returned by `evolve()` and Stores rebound from an already-managed Store
+
+Managed writes acquire a transaction-scoped fence and revalidate that version
+before changing graph data. On the official SQLite and PostgreSQL backends this
+prevents a stale Store write from landing across a schema commit. A custom or
+non-transactional backend that cannot provide the fence fails closed on its
+first managed write.
+
+`createStore()` and `createAdapterStore()` without `{ reconciled }` are raw,
+unversioned attaches. Their writes—and calls made directly through a backend—do
+not participate in the fence. `store.clear()` deletes the graph's schema rows
+and resets that Store to the same raw state; reopen it through a managed factory
+before resuming writes when the versioned guarantee is required.
 
 ## Schema Validation Results
 

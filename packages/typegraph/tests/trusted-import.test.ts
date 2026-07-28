@@ -5,14 +5,17 @@ import {
   asEdgeId,
   asNodeId,
   createStore,
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
+  defineGraphExtension,
   defineNode,
   embedding,
   searchable,
+  StaleVersionError,
   TrustedImportError,
 } from "../src";
-import type { GraphBackend } from "../src/backend/types";
+import type { GraphBackend, TrustedImportOptions } from "../src/backend/types";
 import {
   FORMAT_VERSION,
   type GraphData,
@@ -20,6 +23,7 @@ import {
   trustedImportGraph,
   trustedImportGraphStream,
 } from "../src/interchange";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("TrustedPerson", {
@@ -69,6 +73,77 @@ function expectReason(reason: string): unknown {
 }
 
 describe("trusted import", () => {
+  it("forwards the managed schema identity through both import entrypoints", async () => {
+    const backend = createTestBackend();
+    const trustedImport = requireDefined(backend.trustedImport);
+    const observedOptions: (TrustedImportOptions | undefined)[] = [];
+    const observedBackend: GraphBackend = {
+      ...backend,
+      async trustedImport(fn, options) {
+        observedOptions.push(options);
+        return trustedImport(fn, options);
+      },
+    };
+    const [store] = await createStoreWithSchema(trustedGraph, observedBackend);
+    const empty = graphData([]);
+    const { nodes, edges, ...header } = empty;
+
+    await trustedImportGraph(store, empty);
+    await trustedImportGraphStream(
+      store,
+      chunkStream([
+        { type: "header", header },
+        { type: "nodes", nodes },
+        { type: "edges", edges },
+      ]),
+    );
+
+    expect(observedOptions).toEqual([
+      {
+        schemaWrite: {
+          graphId: trustedGraph.id,
+          expectedVersion: 1,
+        },
+      },
+      {
+        schemaWrite: {
+          graphId: trustedGraph.id,
+          expectedVersion: 1,
+        },
+      },
+    ]);
+  });
+
+  it("uses the managed schema identity to reject both stale import entrypoints", async () => {
+    const backend = createTestBackend();
+    const [staleStore] = await createStoreWithSchema(trustedGraph, backend);
+    await staleStore.evolve(
+      defineGraphExtension({
+        nodes: {
+          TrustedImportExtra: {
+            properties: { label: { type: "string" } },
+          },
+        },
+      }),
+    );
+    const empty = graphData([]);
+    const { nodes, edges, ...header } = empty;
+
+    await expect(trustedImportGraph(staleStore, empty)).rejects.toThrow(
+      StaleVersionError,
+    );
+    await expect(
+      trustedImportGraphStream(
+        staleStore,
+        chunkStream([
+          { type: "header", header },
+          { type: "nodes", nodes },
+          { type: "edges", edges },
+        ]),
+      ),
+    ).rejects.toThrow(StaleVersionError);
+  });
+
   it("loads trusted nodes and edges without property validation", async () => {
     const backend = createTestBackend();
     const store = createStore(trustedGraph, backend);

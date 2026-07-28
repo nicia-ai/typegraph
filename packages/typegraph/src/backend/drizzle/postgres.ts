@@ -87,6 +87,7 @@ import {
   type AdapterBackend,
   type BackendCapabilities,
   type ClaimIndexMaterializationParams,
+  type CommitSchemaVersionIfKindsEmptyResult,
   type CommitSchemaVersionParams,
   type ContributionDiagnostic,
   type ContributionMaterializationIdentity,
@@ -105,6 +106,7 @@ import {
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type KindRemovalRow,
+  type LockSchemaVersionForWriteParams,
   normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
@@ -112,10 +114,12 @@ import {
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
   type ReleaseIndexMaterializationClaimParams,
+  type SchemaKindEmptinessProbe,
   type SchemaVersionRow,
   type SchemaWriteTransactionBackend,
   type SetActiveVersionParams,
   type TransactionBackend,
+  type TrustedImportOptions,
   type TrustedImportSession,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
@@ -160,7 +164,9 @@ import {
   POSTGRES_KIND_REMOVAL_TIMESTAMPS,
 } from "./kind-removals";
 import {
+  assertActiveSchemaVersion,
   assertAdoptedDialect,
+  commitSchemaVersionIfKindsEmpty,
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
@@ -631,6 +637,8 @@ export function createPostgresBackend(
     vectorStrategy,
     contributionMaterializer,
     iterativeScanProbe,
+    schemaVersionsTable: tables.schemaVersions,
+    transactionScoped: false,
   });
 
   /**
@@ -668,6 +676,17 @@ export function createPostgresBackend(
       // size of an active graph set; collisions just serialize unrelated
       // graphs which is harmless. Held until the transaction commits.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
+      // Managed entity writers lock this row FOR SHARE. Locking it FOR UPDATE
+      // before any emptiness probe makes a writer-first commit wait; a
+      // schema-first snapshot-isolated writer gets PostgreSQL's native
+      // serialization failure instead of validating a stale row version.
+      await tx.execute(sql`
+        SELECT ${tables.schemaVersions.version}
+        FROM ${tables.schemaVersions}
+        WHERE ${tables.schemaVersions.graphId} = ${graphId}
+          AND ${tables.schemaVersions.isActive} = TRUE
+        FOR UPDATE
+      `);
       // Advisory lock is held here, so the schema-write-capable
       // InternalOperationBackend is used intentionally (see its type).
       const { backend: txBackend, drainAndClose } = createTransactionBackend({
@@ -680,6 +699,7 @@ export function createPostgresBackend(
         vectorStrategy,
         contributionMaterializer,
         iterativeScanProbe,
+        schemaVersionsTable: tables.schemaVersions,
       });
       try {
         return await fn(txBackend);
@@ -707,6 +727,7 @@ export function createPostgresBackend(
       vectorStrategy,
       contributionMaterializer,
       iterativeScanProbe,
+      schemaVersionsTable: tables.schemaVersions,
     });
     return {
       backend: gateFulltext(
@@ -727,8 +748,14 @@ export function createPostgresBackend(
       {
         async trustedImport<T>(
           fn: (session: TrustedImportSession) => Promise<T>,
+          options_?: TrustedImportOptions,
         ): Promise<T> {
           return backend.transactionWithNative(async (tx, rawSql) => {
+            if (options_?.schemaWrite !== undefined) {
+              await requireDefined(tx.lockSchemaVersionForWrite)({
+                ...options_.schemaWrite,
+              });
+            }
             const trustedExecutionAdapter = createPostgresExecutionAdapter(
               rawSql,
               { ...adapterOptions, useTransactionClient: true },
@@ -1095,6 +1122,17 @@ export function createPostgresBackend(
       );
     },
 
+    async commitSchemaVersionIfKindsEmpty(
+      params: CommitSchemaVersionParams,
+      probes: readonly SchemaKindEmptinessProbe[],
+    ): Promise<CommitSchemaVersionIfKindsEmptyResult> {
+      return runSchemaWriteTransaction(
+        params.graphId,
+        (target) =>
+          commitSchemaVersionIfKindsEmpty(target, params, probes),
+      );
+    },
+
     async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
       await runSchemaWriteTransaction(params.graphId, (target) =>
         target.setActiveVersion(params),
@@ -1322,6 +1360,9 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    * transaction backend so the warning fires once per backend instance.
    */
   iterativeScanProbe: IterativeScanProbe;
+  schemaVersionsTable: PostgresTables["schemaVersions"];
+  /** Whether this operation backend is bound to an explicit transaction. */
+  transactionScoped: boolean;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -1337,6 +1378,7 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   contributionMaterializer: ContributionMaterializer;
   /** Shared iterative-scan probe. See {@link CreatePostgresOperationBackendOptions}. */
   iterativeScanProbe: IterativeScanProbe;
+  schemaVersionsTable: PostgresTables["schemaVersions"];
 }>;
 
 function createPostgresOperationBackend(
@@ -1353,6 +1395,8 @@ function createPostgresOperationBackend(
     vectorStrategy,
     contributionMaterializer,
     iterativeScanProbe,
+    schemaVersionsTable,
+    transactionScoped,
   } = options;
 
   // Route through the execution adapter so driver-specific result shapes
@@ -1828,6 +1872,32 @@ function createPostgresOperationBackend(
     dialect: "postgres",
     tableNames,
 
+    async lockSchemaVersionForWrite(
+      params: LockSchemaVersionForWriteParams,
+    ): Promise<void> {
+      if (!transactionScoped) {
+        throw new ConfigurationError(
+          "The schema write fence requires an explicit PostgreSQL transaction.",
+          {
+            code: "SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED",
+            graphId: params.graphId,
+          },
+        );
+      }
+      const active = await execGet<{ version: number }>(sql`
+        SELECT ${schemaVersionsTable.version} AS version
+        FROM ${schemaVersionsTable}
+        WHERE ${schemaVersionsTable.graphId} = ${params.graphId}
+          AND ${schemaVersionsTable.isActive} = TRUE
+        FOR SHARE
+      `);
+      assertActiveSchemaVersion(
+        params.graphId,
+        params.expectedVersion,
+        active?.version ?? 0,
+      );
+    },
+
     // === Vector Index Operations ===
 
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
@@ -2053,6 +2123,8 @@ function createTransactionBackend(
     // The probe is process-wide truth, so the outer instance's is reused
     // rather than a fresh one per transaction.
     iterativeScanProbe: options.iterativeScanProbe,
+    schemaVersionsTable: options.schemaVersionsTable,
+    transactionScoped: true,
   });
 
   return { backend, drainAndClose: txExecutionAdapter.drainAndClose };

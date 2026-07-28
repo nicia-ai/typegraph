@@ -22,24 +22,28 @@ reports `capabilities.transactions: true`, and is fully atomic. An
 `store.withTransaction` and `tx.sql` surfaces. See
 [Backend Setup](/backend-setup#cloudflare-durable-objects-sqlite).
 
-These backends report `capabilities.transactions: false`. On such backends,
-`store.transaction(fn)` and `store.batch(...)` still run — `fn` executes
-against the same backend used outside `transaction()`, sequentially —
-**but writes are applied as they happen and a thrown error inside the
-callback does not roll back earlier writes**. Likewise, `store.batch(...)`
-runs each query with no enclosing transaction, so two queries in the same batch
-may observe different database states. (Whether they nonetheless reuse one
-connection is up to the adapter — the no-transaction path hands each query the
-same backend object.) Note this is a difference of degree, not of kind: on
-PostgreSQL, `batch()`'s implicit transaction runs at the default read-committed
-isolation, so queries there can also observe interleaved commits.
+These backends report `capabilities.transactions: false`. Read-only
+`store.batch(...)` still runs, but each query may use an independent connection
+and observe a different database snapshot. (Whether the queries nonetheless
+reuse one connection is up to the adapter — the no-transaction path hands each
+query the same backend object.) Note this is a difference of degree, not of
+kind: on PostgreSQL, `batch()`'s implicit transaction runs at the default
+read-committed isolation, so queries there can also observe interleaved commits.
+
+Write behavior depends on how the Store was constructed. A schema-managed Store
+fails closed before its first write because it cannot hold the
+transaction-scoped schema fence. A raw `createStore()` / `createAdapterStore()`
+without a reconciled snapshot still uses the older sequential fallback:
+`store.transaction(fn)` invokes `fn` against the same backend, writes are applied
+as they happen, and a thrown error does not roll back earlier writes. Direct
+backend writes are raw as well.
 
 These backends also ignore the `isolationLevel` option on
 `store.transaction(...)`, so the collection-read snapshot recipe documented
 elsewhere does nothing here.
 
 ```typescript
-// On D1 / neon-http: every successful create is persisted immediately.
+// On a raw D1 / neon-http Store: every successful create persists immediately.
 // If the throw fires after Alice is created, Alice stays in the database.
 await store.transaction(async (tx) => {
   await tx.nodes.Person.create({ name: "Alice" });
@@ -47,7 +51,7 @@ await store.transaction(async (tx) => {
 });
 ```
 
-**If you require atomicity, branch on the capability:**
+**If you require atomicity or schema-version fencing, branch on the capability:**
 
 ```typescript
 if (store.capabilities.transactions) {
@@ -55,7 +59,7 @@ if (store.capabilities.transactions) {
     /* atomic */
   });
 } else {
-  // Sequential, non-atomic — handle partial-failure recovery yourself.
+  // Raw Store only: sequential, non-atomic, and not schema-fenced.
   const person = await store.nodes.Person.create({ name: "Alice" });
   const company = await store.nodes.Company.create({ name: "Acme" });
   await store.edges.worksAt.create(person, company, { role: "Engineer" });

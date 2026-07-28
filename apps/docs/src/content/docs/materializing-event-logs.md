@@ -185,6 +185,11 @@ pattern is at-least-once plus idempotence: a crash after the graph writes but
 before the cursor write replays the batch, which is safe precisely because the
 projector converges.
 
+This fallback requires a raw Store. A schema-managed Store refuses writes on a
+non-transactional backend because it cannot hold the schema-version fence. Use a
+transactional driver, or deliberately construct a raw Store and own schema/write
+coordination yourself.
+
 ```typescript
 await store.transaction(async (tx) => {
   for (const change of batch.changes) {

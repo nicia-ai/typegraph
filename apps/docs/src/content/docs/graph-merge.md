@@ -74,6 +74,11 @@ The mental model is a three-act lifecycle:
                → commit transactionally + build the report
    ```
 
+   If the target Store carries a reconciled schema version, its commit acquires
+   and validates the normal schema-write fence before row DML. A raw target
+   remains outside that guarantee. PostgreSQL serialization failures are retried
+   automatically around the complete merge commit.
+
 The pipeline is **deterministic by construction**: candidate sets are sorted,
 clusters resolve by stable keys, and every conflict is decided on an explicit
 `branchOrder` (or lexicographic branch id) — *never* wall-clock arrival. Merging
@@ -481,7 +486,10 @@ value can never overwrite a newer committed value during new-vs-base recall.
 If both the branch and the live target changed the same inherited row, the target
 value/deletion wins and the conflict is reported. Both `merge()` and
 `mergeIncremental()` commit **transactionally** and require a
-transaction-capable target backend.
+transaction-capable target backend. Managed targets also acquire the
+schema-version write fence; raw targets remain outside schema fencing. On
+PostgreSQL, serialization failures from either the target-content guard or the
+schema fence are retried automatically around the complete commit.
 
 ## Working copies
 

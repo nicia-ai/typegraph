@@ -104,32 +104,42 @@ export async function importGraph<G extends GraphDef>(
   // the per-graph write lock taken before any row work — see
   // runInWriteTransaction for the shared lock-before-rows contract every
   // writer follows.
-  await runInWriteTransaction(store, backend, async (target, lock) => {
-    await processNodes(
-      target,
+  await runInWriteTransaction(
+    {
       graphId,
-      registry,
-      data.nodes,
-      nodeSchemas,
-      options,
-      result,
-      errors,
-      importedNodeIds,
-      lock,
-    );
-    await processEdges(
-      target,
-      graphId,
-      registry,
-      data.edges,
-      edgeSchemas,
-      nodeSchemas,
-      options,
-      result,
-      errors,
-      importedNodeIds,
-    );
-  });
+      schemaVersion: store.introspect().schemaVersion,
+      historyEnabled: store.historyEnabled,
+      revisionTrackingEnabled: store.revisionTrackingEnabled,
+      revisionSchema: store.revisionSchema,
+    },
+    backend,
+    async (target, lock) => {
+      await processNodes(
+        target,
+        graphId,
+        registry,
+        data.nodes,
+        nodeSchemas,
+        options,
+        result,
+        errors,
+        importedNodeIds,
+        lock,
+      );
+      await processEdges(
+        target,
+        graphId,
+        registry,
+        data.edges,
+        edgeSchemas,
+        nodeSchemas,
+        options,
+        result,
+        errors,
+        importedNodeIds,
+      );
+    },
+  );
 
   // A bulk load runs against stale planner statistics until ANALYZE runs
   // (documented regressions: 0.5ms → 5ms traversals on Postgres, 0.9ms →

@@ -1384,6 +1384,44 @@ export type GraphBackend = Readonly<{
     params: CommitSchemaVersionParams,
   ) => Promise<SchemaVersionRow>;
   /**
+   * Commit a schema version only if every requested kind is empty. The probes
+   * and schema CAS run under one backend-owned write fence, preventing a
+   * participating schema-managed Store write from landing between the final
+   * count and commit. Raw Stores and direct backend writes are not fenced.
+   */
+  commitSchemaVersionIfKindsEmpty?: (
+    this: void,
+    params: CommitSchemaVersionParams,
+    probes: readonly Readonly<{
+      entity: "node" | "edge";
+      kind: string;
+    }>[],
+  ) => Promise<
+    | Readonly<{ status: "committed"; row: SchemaVersionRow }>
+    | Readonly<{
+        status: "populated";
+        kinds: readonly Readonly<{
+          entity: "node" | "edge";
+          kind: string;
+          count: number;
+        }>[];
+      }>
+  >;
+  /**
+   * Acquire the transaction-scoped shared fence for a schema-managed graph
+   * write, then verify that the active schema still matches the Store that is
+   * issuing it. Official transactional backends provide this method; custom
+   * backends may omit it, in which case schema-managed Store writes fail
+   * closed rather than racing a schema change. This method must be called on a
+   * transaction-scoped backend. PostgreSQL locks the active schema row, so a
+   * concurrent change either becomes visible at read committed or raises the
+   * database's native serialization failure at stronger isolation.
+   */
+  lockSchemaVersionForWrite?: (
+    this: void,
+    params: Readonly<{ graphId: string; expectedVersion: number }>,
+  ) => Promise<void>;
+  /**
    * Atomically flips the active schema pointer to an existing version,
    * with optimistic compare-and-swap on the currently active version.
    * Used by `rollbackSchema` and any other "promote/demote existing
@@ -1896,11 +1934,17 @@ export type GraphBackend = Readonly<{
    * entire operation back.
    *
    * This is a top-level-only lifecycle operation and is deliberately absent
-   * from {@link TransactionBackend}.
+   * from {@link TransactionBackend}. When `schemaWrite` is supplied, the
+   * import acquires and validates that Store version's managed-write fence
+   * before checking emptiness or writing. Omitting it retains the raw,
+   * unversioned import behavior.
    */
   trustedImport?: <T>(
     this: void,
     fn: (session: TrustedImportSession) => Promise<T>,
+    options?: Readonly<{
+      schemaWrite?: Readonly<{ graphId: string; expectedVersion: number }>;
+    }>,
   ) => Promise<T>;
 
   // === Query Execution ===
@@ -2060,7 +2104,12 @@ export type SchemaReadBackend = Pick<
 
 export type SchemaCommitBackend = Pick<
   GraphBackend,
-  "commitSchemaVersion" | "setActiveVersion"
+  "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion"
+>;
+
+export type SchemaWriteFenceBackend = Pick<
+  GraphBackend,
+  "lockSchemaVersionForWrite"
 >;
 
 export type VectorOperationBackend = Pick<
@@ -2171,6 +2220,7 @@ export type TransactionBackend = Readonly<
     GraphEntityWriteBackend &
     UniqueConstraintBackend &
     SchemaReadBackend &
+    Pick<GraphBackend, "lockSchemaVersionForWrite"> &
     VectorOperationBackend &
     FulltextOperationBackend &
     IndexMaterializationBackend &
@@ -2537,6 +2587,35 @@ export type CommitSchemaVersionParams = Readonly<{
   version: number;
   schemaHash: string;
   schemaDoc: SerializedSchema;
+}>;
+
+export type SchemaKindEmptinessProbe = Readonly<{
+  entity: "node" | "edge";
+  kind: string;
+}>;
+
+export type PopulatedSchemaKind = SchemaKindEmptinessProbe &
+  Readonly<{ count: number }>;
+
+export type CommitSchemaVersionIfKindsEmptyResult =
+  | Readonly<{ status: "committed"; row: SchemaVersionRow }>
+  | Readonly<{
+      status: "populated";
+      kinds: readonly PopulatedSchemaKind[];
+    }>;
+
+export type LockSchemaVersionForWriteParams = Readonly<{
+  graphId: string;
+  expectedVersion: number;
+}>;
+
+/**
+ * Optional schema-managed write identity for a trusted import. Supplying it
+ * acquires and validates the Store version's transaction-scoped schema fence;
+ * omitting it leaves the import outside the versioned guarantee.
+ */
+export type TrustedImportOptions = Readonly<{
+  schemaWrite?: Readonly<{ graphId: string; expectedVersion: number }>;
 }>;
 
 /**

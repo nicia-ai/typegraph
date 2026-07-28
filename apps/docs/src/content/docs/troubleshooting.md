@@ -395,6 +395,21 @@ check), and prefer `createVerifiedStore()` over bare `createStore()` so
 drift fails fast. See
 [Database roles & least privilege](/backend-setup#database-roles--least-privilege).
 
+### `SCHEMA_WRITE_FENCE_UNSUPPORTED` on the first managed write
+
+**Cause:** The Store carries committed schema metadata (for example, it came
+from `createStoreWithSchema`, `createVerifiedStore`, an adapter equivalent, or a
+cached `{ reconciled }` snapshot), but its backend cannot run transactions or
+does not implement the schema-write fence. Common examples are Cloudflare D1,
+`drizzle-orm/neon-http`, and incomplete custom backends. The attach can still
+succeed for reads; writes fail closed rather than racing a schema change.
+
+**Solution:** Use a transactional backend (`neon-serverless`, regular
+PostgreSQL, SQLite with transactions, or Durable Objects SQLite). If raw,
+unfenced writes are an explicit application decision, construct the Store with
+`createStore()` / `createAdapterStore()` without `{ reconciled }` and quiesce
+writers yourself around schema changes.
+
 ### The store opens clean but a fulltext or vector read fails
 
 **Cause:** The durable contribution marker still says `initialized`

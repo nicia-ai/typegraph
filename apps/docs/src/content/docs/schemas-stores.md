@@ -500,6 +500,8 @@ complete TypeGraph API and graph-owned transactions, but deliberately omits
 adapter-native handles, caller-owned transaction adoption, and mutable backend
 internals. This synchronous factory performs no database I/O, including schema
 shape checks. Use an async factory below when startup must verify storage.
+Because it carries no committed schema-version metadata, its writes are raw and
+are not fenced against concurrent schema changes.
 
 ```typescript
 import { createStore } from "@nicia-ai/typegraph";
@@ -534,6 +536,10 @@ with TypeGraph, use `createAdapterStore(graph, adapterBackend)` instead. It
 returns `AdapterStore<G, TNativeTransaction>`, which adds precisely typed
 `tx.sql`, `withTransaction`, `withRecordedTransaction`, and the adapter backend
 surface. A plain `GraphBackend` cannot be passed to this factory.
+
+`createAdapterStore` is likewise raw unless passed a cached `{ reconciled }`
+snapshot. Writes issued directly through a backend are always outside the Store
+schema fence.
 
 Override the default traversal expansion:
 
@@ -605,6 +611,22 @@ Use `createAdapterStoreWithSchema` for the same provisioning behavior with an
 `AdapterStore` result. This explicit factory is required for native transaction
 adoption or `tx.sql`; schema provisioning alone does not expose adapter
 capabilities on the portable `Store`.
+
+#### Schema-managed write fence
+
+A Store is schema-managed when
+`store.introspect().schemaVersion !== undefined`. This includes Stores opened by
+`createStoreWithSchema`, `createAdapterStoreWithSchema`, `createVerifiedStore`,
+or `createVerifiedAdapterStore`; `createAdapterStore(..., { reconciled })`;
+Stores returned by `evolve()`; and Stores rebound from an already-managed Store.
+
+The official transactional backends fence and revalidate every managed write
+against schema commits. Rechecking matters when adapter-native SQL rolls back to
+a savepoint, because PostgreSQL releases row locks acquired after that
+savepoint. A custom or non-transactional backend without fence support fails
+closed when a managed write is attempted rather than racing. Raw Stores and
+direct backend writes remain available when the application deliberately owns
+schema/write coordination.
 
 ## Store Projection
 
@@ -1551,9 +1573,11 @@ adopted-commit path for history stores — returns the same `TransactionOutcome`
 so the exactly-once cursor pattern gets a receipt too (see
 [Recorded time](/queries/temporal/#raw-sql-under-history-capture)); only
 `withTransaction`, whose commit belongs entirely to the caller with no flush
-point, produces no receipt. On non-transactional backends a receipt describes
-operations that individually committed; if the callback rejects there, no
-receipt is returned even though earlier operations committed.
+point, produces no receipt. On a raw Store backed by a non-transactional driver,
+a receipt describes operations that individually committed; if the callback
+rejects there, no receipt is returned even though earlier operations committed.
+A schema-managed Store instead fails closed on its first write because it cannot
+hold the schema-version fence.
 
 ##### Scoped receipts: `tx.measure()`
 
@@ -1615,17 +1639,19 @@ context through your call chain.
 
 Not all backends support atomic transactions. Cloudflare D1 and
 `drizzle-orm/neon-http` cannot hold a multi-statement session and report
-`capabilities.transactions: false`. On these backends `store.transaction(fn)`
-still runs — `fn` executes against the same backend used outside
-`transaction()`, sequentially — **but writes are applied as they happen and
-a thrown error does not roll back earlier writes inside the callback**. If
-you require atomicity, branch on the capability:
+`capabilities.transactions: false`. A schema-managed Store fails closed before
+writing on these backends because it cannot hold the schema fence. On a raw
+Store, `store.transaction(fn)` still runs — `fn` executes against the same
+backend used outside `transaction()`, sequentially — **but writes are applied
+as they happen and a thrown error does not roll back earlier writes inside the
+callback**. If you require atomicity or version fencing, branch on the
+capability:
 
 ```typescript
 if (store.capabilities.transactions) {
   await store.transaction(async (tx) => { /* atomic */ });
 } else {
-  // Sequential, non-atomic — handle partial-failure recovery yourself.
+  // Raw Store only: sequential, non-atomic, and not schema-fenced.
 }
 ```
 
@@ -1637,7 +1663,8 @@ the full list of affected backends and edge-runtime alternatives.
 #### `store.clear()`
 
 Hard-deletes all data for the current graph: nodes, edges, uniqueness entries,
-embeddings, and schema versions. Resets collection caches so the store is immediately reusable.
+embeddings, and schema versions. Resets collection caches so the store is
+immediately reusable.
 
 ```typescript
 store.clear(): Promise<void>;
@@ -1649,9 +1676,14 @@ Wrapped in a transaction when the backend supports it. Does not affect other gra
 // Wipe all data and start fresh
 await store.clear();
 
-// Store is immediately reusable
+// Store is immediately reusable, now with raw/unversioned semantics.
 const person = await store.nodes.Person.create({ name: "Alice" });
 ```
+
+Because `clear()` deletes the committed schema rows, it also resets a formerly
+managed Store to `introspect().schemaVersion === undefined`. Subsequent writes
+are raw and unfenced. Reopen the graph through a managed factory before writing
+when the schema-version guarantee is required.
 
 ### Batch Query Execution
 

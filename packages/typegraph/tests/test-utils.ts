@@ -10,7 +10,9 @@ import { afterEach } from "vitest";
 import type { GraphDef, Store } from "../src";
 import {
   type AdapterStore,
+  createAdapterStore,
   createAdapterStoreWithSchema,
+  createStore,
   createStoreWithSchema,
 } from "../src";
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
@@ -122,6 +124,32 @@ export async function createInitializedStore<G extends GraphDef>(
   }
   const [store] = await createStoreWithSchema(graph, backend);
   return store;
+}
+
+/**
+ * Initializes storage through the managed factory, then returns a fresh raw
+ * Store. Use this only in tests that deliberately exercise unversioned Store
+ * behavior against already-provisioned tables.
+ */
+export function createRawInitializedStore<
+  G extends GraphDef,
+  TNativeTransaction,
+>(
+  graph: G,
+  backend: AdapterBackend<TNativeTransaction>,
+): Promise<AdapterStore<G, TNativeTransaction>>;
+export function createRawInitializedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+): Promise<Store<G>>;
+export async function createRawInitializedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+): Promise<Store<G>> {
+  await createInitializedStore(graph, backend);
+  return isAdapterBackend(backend) ?
+      createAdapterStore(graph, backend)
+    : createStore(graph, backend);
 }
 
 function isAdapterBackend(

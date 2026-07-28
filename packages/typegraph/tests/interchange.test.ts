@@ -6,7 +6,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineGraphExtension,
+  defineNode,
+  StaleVersionError,
+} from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import { UniquenessError } from "../src/errors";
 import {
@@ -20,7 +26,7 @@ import {
   InterchangeEdgeSchema,
   InterchangeNodeSchema,
 } from "../src/interchange";
-import { createStore } from "../src/store";
+import { createStore, createStoreWithSchema } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -141,6 +147,32 @@ describe("Interchange Round-Trip", () => {
     expect(result.success).toBe(true);
     expect(result.nodes.created).toBe(0);
     expect(result.edges.created).toBe(0);
+  });
+
+  it("rejects importGraph writes from a stale managed Store", async () => {
+    const backend = createTestBackend();
+    const [staleStore] = await createStoreWithSchema(testGraph, backend);
+    await staleStore.evolve(
+      defineGraphExtension({
+        nodes: {
+          ImportExtra: { properties: { label: { type: "string" } } },
+        },
+      }),
+    );
+    const data: GraphData = {
+      formatVersion: "1.0",
+      exportedAt: new Date().toISOString(),
+      source: { type: "external", description: "stale import regression" },
+      nodes: [
+        { kind: "Person", id: "too-late", properties: { name: "Alice" } },
+      ],
+      edges: [],
+    };
+
+    await expect(
+      importGraph(staleStore, data, importOptions({ onConflict: "error" })),
+    ).rejects.toThrow(StaleVersionError);
+    await expect(staleStore.nodes.Person.count()).resolves.toBe(0);
   });
 
   it("streams bounded header, node, and edge chunks before importing them", async () => {
