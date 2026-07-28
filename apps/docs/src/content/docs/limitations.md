@@ -27,11 +27,16 @@ These backends report `capabilities.transactions: false`. On such backends,
 against the same backend used outside `transaction()`, sequentially —
 **but writes are applied as they happen and a thrown error inside the
 callback does not roll back earlier writes**. Likewise, `store.batch(...)`
-runs each query without a shared connection, so two queries in the same batch
-may observe different database states. Note this is a difference of degree,
-not of kind: on PostgreSQL, `batch()`'s implicit transaction runs at the
-default read-committed isolation, so queries there can also observe
-interleaved commits.
+runs each query with no enclosing transaction, so two queries in the same batch
+may observe different database states. (Whether they nonetheless reuse one
+connection is up to the adapter — the no-transaction path hands each query the
+same backend object.) Note this is a difference of degree, not of kind: on
+PostgreSQL, `batch()`'s implicit transaction runs at the default read-committed
+isolation, so queries there can also observe interleaved commits.
+
+These backends also ignore the `isolationLevel` option on
+`store.transaction(...)`, so the collection-read snapshot recipe documented
+elsewhere does nothing here.
 
 ```typescript
 // On D1 / neon-http: every successful create is persisted immediately.

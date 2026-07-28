@@ -1,6 +1,7 @@
 /**
  * Tests for store.batch() — several queries run in sequence against one
- * target. Not pipelined: one statement per query, always.
+ * target. Not pipelined: at least one statement per query, and two when a
+ * query's selective-field mapping falls back after its statement has run.
  *
  * Verifies typed tuple results and correct handling of projections,
  * ordering, limits, and errors.

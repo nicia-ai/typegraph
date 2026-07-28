@@ -347,7 +347,9 @@ export class UnionableQuery<G extends GraphDef, R> {
    *
    * Used by `store.batch()` to run several queries in sequence against one
    * target — a transaction on backends that have them, the backend itself
-   * otherwise. Still one statement per query either way.
+   * otherwise. A set operation compiles to one statement; whether that target
+   * is a shared connection is the adapter's business, not a function of
+   * transaction support.
    */
   async executeOn(
     backend: GraphBackend | TransactionBackend,

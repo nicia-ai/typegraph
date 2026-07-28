@@ -3093,9 +3093,10 @@ should not need code changes.
   > accurate and is retained only as the historical record. `batch()` opens its
   > implicit transaction without an isolation option, so PostgreSQL runs it at the
   > default read-committed isolation and a later query in the batch *can* observe a
-  > commit the earlier ones did not. The "single connection" bullet holds only where
-  > `capabilities.transactions` is true. `batch()` also never pipelined, despite the
-  > original issue specifying it.
+  > commit the earlier ones did not. The "single connection" bullet describes the
+  > transactional path; connection reuse is otherwise the adapter's business, not a
+  > consequence of `capabilities.transactions`. `batch()` also never pipelined,
+  > despite the original issue specifying it.
   - **`BatchableQuery` interface**: Satisfied by both `ExecutableQuery` (from `.select()`) and `UnionableQuery` (from set operations like `.union()`, `.intersect()`). Exposes `executeOn()` for backend-delegated execution.
   - **Minimum 2 queries**: Enforced at the type level — single queries should use `.execute()` directly.
 

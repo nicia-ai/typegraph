@@ -1691,13 +1691,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Runs several queries in sequence, returning a typed tuple. The portable
    * guarantee is N serialized query executions — never one round trip.
    *
-   * **Cost.** With `backend.capabilities.transactions` the queries share one
+   * **Cost.** At least one statement per query, sometimes two: a query whose
+   * selective-field mapping falls back re-runs as a full fetch, and that
+   * fallback is detected *after* the selective statement has already
+   * executed. It clears the fast path, so a reused query instance pays the
+   * double only once — but the builder is immutable, so a query rebuilt per
+   * request pays it every request.
+   *
+   * With `backend.capabilities.transactions` the queries share one
    * transaction; how that reaches the wire is the adapter's business. A SQL
-   * backend frames them with `begin`/`commit`, so a networked one sees N+2
-   * round trips, while Durable Objects use an ambient storage transaction
-   * with no framing statements. Without transactions there is no framing, and
-   * the adapter may still reuse one client. Count on the N executions, not on
-   * a transport shape.
+   * backend frames them with `begin`/`commit`, putting a networked one at
+   * N+2 round trips *at best*, while Durable Objects use an ambient storage
+   * transaction with no framing statements. Without transactions there is no
+   * framing. Connection reuse is a separate question from transaction
+   * support: the no-transaction path passes the same backend object, so an
+   * adapter may reuse one client there too. The portable guarantee is only
+   * that at most one query is in flight at a time.
    *
    * **Not a snapshot — and there is no way to make it one.** PostgreSQL
    * defaults to read-committed isolation, so a later query can observe a
@@ -1706,8 +1715,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * no public way to run a fluent query or a batch inside a transaction, so a
    * snapshot across fluent queries is not available today. Collection reads
    * can have one — `store.transaction(fn, { isolationLevel: "repeatable_read" })`
-   * reading through `tx.nodes` / `tx.edges` (a history-enabled store on
-   * PostgreSQL additionally requires `accessMode: "read_only"`).
+   * reading through `tx.nodes` / `tx.edges` — but only where the backend has
+   * transactions (others ignore the option entirely), and a history-enabled
+   * store on PostgreSQL additionally requires `accessMode: "read_only"` or the
+   * call throws.
    *
    * **Will not fix an N+1.** Serializing N queries does not reduce their
    * number. The alternatives are set-oriented or chunked rather than
@@ -1721,9 +1732,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * **Versus `Promise.all`.** Workload- and adapter-dependent in both
    * directions. `Promise.all` overlaps its queries against a pool with idle
    * capacity, but it does not necessarily hold N connections, and against a
-   * single client or a saturated pool it queues. `batch()` pays the sum of
-   * its query latencies but only one acquisition, which can make it the
-   * faster of the two where acquisition dominates.
+   * single client or a saturated pool it queues. `batch()` keeps at most one
+   * query in flight, so it pays the sum of their latencies — but it can still
+   * come out ahead where connection acquisition dominates. Measure rather
+   * than assume.
    *
    * Read-only — use `bulkCreate`, `bulkInsert`, etc. for write batching.
    *

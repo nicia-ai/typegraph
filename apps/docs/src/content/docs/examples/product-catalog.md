@@ -380,7 +380,7 @@ async function getProductDetails(sku: string): Promise<ProductDetails | undefine
   );
   if (!product) return undefined;
 
-  // `store.batch()` runs all three queries in sequence on one connection —
+  // `store.batch()` runs all three queries in sequence, one at a time —
   // still three statements, and read-committed isolation means a write can
   // land between them. It is the pool-pressure win, not a snapshot.
   const [categories, variants, related] = await store.batch(

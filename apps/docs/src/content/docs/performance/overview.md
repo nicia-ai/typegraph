@@ -15,8 +15,8 @@ your knowledge graph scales with your application.
 2. **Precomputed Ontology**: Transitive closures, subclass hierarchies, and edge implications are
    computed once at schema initialization, not during every query.
 3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes. On the read
-   side that job belongs to the query compiler — `store.batch()` only shares a connection, it does
-   not reduce round trips and it is not a snapshot.
+   side that job belongs to the query compiler — `store.batch()` only caps concurrency at one query
+   in flight, it does not reduce round trips and it is not a snapshot.
 4. **Zero-Cost Abstractions**: Type safety and ontological reasoning add no measurable runtime overhead.
 
 ## N+1 Prevention
@@ -166,8 +166,9 @@ loop if per-call refreshes still dominate.
 
 ### Batch reads
 
-`getByIds()` on node and edge collections uses a single `SELECT ... WHERE id IN (...)` instead of N
-individual queries. Results are returned in input order with `undefined` for missing entries.
+`getByIds()` on node and edge collections uses `SELECT ... WHERE id IN (...)` — one statement per
+bind-limit chunk, so a single statement for id counts under the limit — instead of N individual
+queries. Results are returned in input order with `undefined` for missing entries.
 
 ```typescript
 const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
@@ -175,10 +176,10 @@ const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 
 For multiple independent queries with different shapes and filters, use
 [`store.batch()`](/schemas-stores#batch-query-execution) to run them in sequence against one target.
-Note the cost: on a transactional backend it still issues one statement per query plus
-`begin`/`commit`, so N queries are N+2 round trips; without transactions there is no framing and no
-shared connection. It buys a connection profile that never peaks at N — not lower latency, and not
-a snapshot (PostgreSQL's default read-committed isolation lets a later query see a newer commit):
+Note the cost: on a transactional backend it still issues at least one statement per query plus
+`begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no
+framing. It buys a connection profile that never peaks at N — not lower latency, and not a snapshot
+(PostgreSQL's default read-committed isolation lets a later query see a newer commit):
 
 ```typescript
 const [activeUsers, recentOrders] = await store.batch(
@@ -194,7 +195,7 @@ const [activeUsers, recentOrders] = await store.batch(
 
 Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
 participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
-onto one connection — the statement count is unchanged either way. If the round trips are what
+into one transaction — the statement count is unchanged either way. If the round trips are what
 hurt, replace the calls with a traversal (one statement) or `store.subgraph()` (a fixed 2 on
 SQLite, 3 on PostgreSQL, however large the result).
 
