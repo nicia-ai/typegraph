@@ -93,6 +93,8 @@ import {
 import { getDialect } from "../query/dialect";
 import type { SqlDialect } from "../query/dialect/types";
 import { type VectorSlot } from "../query/dialect/vector-strategy";
+import { renderSql } from "../query/sql-fragment";
+import { type CompiledRowsSql } from "../query/sql-intent";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import {
   applyDeprecatedKinds,
@@ -230,6 +232,7 @@ import {
   type MeasurableTransactionContext,
   type Node,
   type OperationHookContext,
+  type QueryHookContext,
   type QueryOptions,
   type RecordedReadStoreOptions,
   type RecordedScanOptions,
@@ -1735,9 +1738,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // scope — which demands executeStatement on the transaction target — for a
     // path that performs no writes and needs no capture.
     return runOptionallyInTransaction(this.#baseBackend, async (target) => {
+      const queryBackend = this.#createHookedQueryBackend(target);
       const results: unknown[] = [];
       for (const query of queries) {
-        const result = await query.executeOn(target);
+        const result = await query.executeOn(queryBackend);
         results.push(result);
       }
       return results as BatchResults<Queries>;
@@ -3628,6 +3632,78 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   // === Internal: Hook Helpers ===
 
+  /**
+   * Decorates the query execution port so hooks observe each statement the
+   * query builder submits to the backend. A selective-projection retry
+   * therefore emits two independent start/end pairs with their actual SQL.
+   */
+  #createHookedQueryBackend(
+    backend: GraphBackend | TransactionBackend,
+  ): GraphBackend {
+    if (
+      this.#hooks.onQueryStart === undefined &&
+      this.#hooks.onQueryEnd === undefined &&
+      this.#hooks.onError === undefined
+    ) {
+      return backend as GraphBackend;
+    }
+
+    const executeRaw = backend.executeRaw;
+    const compileSql = backend.compileSql;
+    // Store backends may be frozen. Copy an allowlist projection so
+    // execute/executeRaw can be replaced without mutating the source.
+    const projected = createGraphBackendProjection(backend as GraphBackend);
+
+    return {
+      ...projected,
+      execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+        const compiled =
+          compileSql === undefined ?
+            renderSql(query, backend.dialect)
+          : compileSql(query);
+        return this.#withQueryHooks(compiled.sql, compiled.params, () =>
+          backend.execute<T>(query),
+        );
+      },
+      ...(executeRaw === undefined ?
+        {}
+      : {
+          executeRaw: <T>(
+            sqlText: string,
+            params: readonly unknown[],
+          ): Promise<readonly T[]> =>
+            this.#withQueryHooks(sqlText, params, () =>
+              executeRaw<T>(sqlText, params),
+            ),
+        }),
+    } satisfies GraphBackend;
+  }
+
+  async #withQueryHooks<T>(
+    sql: string,
+    params: readonly unknown[],
+    execute: () => Promise<readonly T[]>,
+  ): Promise<readonly T[]> {
+    const ctx: QueryHookContext = {
+      ...this.#createHookContext(),
+      sql,
+      params,
+    };
+    this.#hooks.onQueryStart?.(ctx);
+    const startTime = Date.now();
+    try {
+      const rows = await execute();
+      this.#hooks.onQueryEnd?.(ctx, {
+        rowCount: rows.length,
+        durationMs: Date.now() - startTime,
+      });
+      return rows;
+    } catch (error) {
+      this.#hooks.onError?.(ctx, asError(error));
+      throw error;
+    }
+  }
+
   #createHookContext(): HookContext {
     return {
       operationId: generateId(),
@@ -3744,13 +3820,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     backend: GraphBackend | TransactionBackend,
     sealedCoordinate?: ReadCoordinate,
   ): InitialQueryBuilder<G, CoordinateState> {
+    const queryBackend = this.#createHookedQueryBackend(backend);
     return createInternalQueryBuilder<G, CoordinateState>(
       this.graphId,
       this.#registry,
       {
         // TransactionBackend omits transaction/close, but query execution only needs
         // the read-path/query capabilities shared with GraphBackend.
-        backend: backend as GraphBackend,
+        backend: queryBackend,
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
         ...(this.#schema !== undefined && { schema: this.#schema }),

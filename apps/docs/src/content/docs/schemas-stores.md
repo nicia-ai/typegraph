@@ -2382,6 +2382,10 @@ handle. See
 ## Observability Hooks
 
 TypeGraph supports observability hooks for monitoring and logging store operations.
+Query hooks describe SQL statements submitted by the query builder, not logical
+query-builder calls or backend-internal setup statements. A logical query that retries
+with a different projection therefore fires the query hooks once for each statement it
+submits.
 
 ### `StoreHooks`
 
@@ -2454,11 +2458,13 @@ const hooks: StoreHooks = {
 
 const store = createStore(graph, backend, { hooks });
 
-// Operations now trigger hooks
+// CRUD operations trigger operation hooks; query-builder statements trigger
+// query hooks.
 await store.nodes.Person.create({ name: "Alice" });
-// Logs:
+await store.query().from("Person", "p").select((ctx) => ctx.p).execute();
+// Logs include:
 // [op-abc123] create node:Person
-// [op-abc123] SQL: INSERT INTO ...
-// [op-abc123] 1 rows in 2ms
 // [op-abc123] Completed in 5ms
+// [query-def456] SQL: WITH ... SELECT ...
+// [query-def456] 1 rows in 2ms
 ```

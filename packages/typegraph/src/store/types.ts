@@ -222,11 +222,15 @@ export type HookContext = Readonly<{
 }>;
 
 /**
- * Query hook context with SQL information.
+ * Context for one SQL statement a query builder submits to the backend.
+ *
+ * A single logical query can emit more than one context, for example when a
+ * selective projection falls back to a full-row fetch. Backend-internal setup
+ * statements are not exposed as separate query-hook events.
  */
 export type QueryHookContext = HookContext &
   Readonly<{
-    /** The SQL query being executed */
+    /** The SQL statement being executed */
     sql: string;
     /** Query parameters */
     params: readonly unknown[];
@@ -272,9 +276,9 @@ export type OperationHookContext = HookContext &
  * ```
  */
 export type StoreHooks = Readonly<{
-  /** Called before a query is executed */
+  /** Called before each query-builder statement is submitted to the backend. */
   onQueryStart?: (ctx: QueryHookContext) => void;
-  /** Called after a query completes successfully */
+  /** Called after each submitted query-builder statement succeeds. */
   onQueryEnd?: (
     ctx: QueryHookContext,
     result: Readonly<{ rowCount: number; durationMs: number }>,
