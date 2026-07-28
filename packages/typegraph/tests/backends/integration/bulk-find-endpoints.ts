@@ -290,24 +290,31 @@ export function registerBulkFindEndpointIntegrationTests(
       await store.edges.produced.create(author, work, { year: "1843" });
       await store.edges.produced.create(studio, work, { year: "1925" });
 
-      // `nowIso()` has millisecond resolution and two in-memory reads land in
-      // the same millisecond, so a bare spy cannot tell the two shapes apart.
-      // Delay each read past that resolution: with the coordinate resolved per
-      // statement the second `asOf` would advance, with it resolved once it
-      // cannot.
       const backend = context.getBackend();
       // Declared `this: void`, so the reference stands alone — no bind needed.
       const readEndpointSet = requireDefined(
         backend.findEdgesByEndpointSet,
         "bundled backends implement findEdgesByEndpointSet",
       );
+
+      // `nowIso()` has millisecond resolution, so two in-memory reads resolve
+      // the same instant and a bare spy cannot tell the two shapes apart.
+      // Rather than sleep past that resolution — which would make the test's
+      // discriminating power depend on wall-clock timing, and look like a
+      // removable delay — jump the clock a full minute between statements.
+      // Only `Date` is faked, so driver timers keep working. Under a
+      // per-statement coordinate the second `asOf` lands a minute later;
+      // under one resolved coordinate it cannot move at all.
       const spy = vi
         .spyOn(backend, "findEdgesByEndpointSet")
         .mockImplementation(async (params) => {
-          await new Promise((resolve) => setTimeout(resolve, 5));
+          vi.advanceTimersByTime(60_000);
           return readEndpointSet(params);
         });
       try {
+        // Inside the try so the `finally` always restores real timers — a
+        // leaked fake clock would corrupt every later test in this suite.
+        vi.useFakeTimers({ toFake: ["Date"] });
         await store.edges.produced.bulkFindFrom([author, studio]);
 
         // Two endpoint kinds -> two statements, and they must agree on `asOf`.
@@ -317,6 +324,7 @@ export function registerBulkFindEndpointIntegrationTests(
         expect(instants.size).toBe(1);
       } finally {
         spy.mockRestore();
+        vi.useRealTimers();
       }
     });
 
