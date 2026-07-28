@@ -43,6 +43,7 @@ import {
   registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
   registerSetOperationIntegrationTests,
+  registerSelectiveRetryIntegrationTests,
   registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
   registerTemporalIntegrationTests,
@@ -166,6 +167,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerRecordedTimeIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
+    registerSelectiveRetryIntegrationTests(context);
     registerEdgeOperationIntegrationTests(context);
     registerRecursiveIntegrationTests(context);
     registerPaginationIntegrationTests(context);

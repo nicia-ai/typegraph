@@ -21,6 +21,7 @@ export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-bin
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
 export { registerSetOperationIntegrationTests } from "./set-operations";
+export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerStoreViewIntegrationTests } from "./store-view";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerTemporalIntegrationTests } from "./temporal";
