@@ -192,9 +192,9 @@ export async function materializeRemovals(
   // The add-only `materializeIndexes` path never reclaims it and the
   // candidate loop below only handles whole kinds, so reclaim here before
   // the no-candidates short-circuit.
-  // One read of the active schema, shared by the vector-reclaim pass and the
-  // live-kind guard below. Both need the same document and both key on the
-  // ACTIVE version — see `liveKindNamesFrom`.
+  // One read of the active schema, shared by the vector-reclaim candidate scan
+  // and the live-kind candidate scan below. Both are optimizations only: each
+  // destructive path repeats its liveness check under the schema-write lock.
   const activeRow = await backend.getActiveSchema(graphId);
   const activeSchema =
     activeRow === undefined ? undefined : (
@@ -233,10 +233,9 @@ export async function materializeRemovals(
   // legitimate non-zero steady state that no output explains — an operator
   // could not tell "nothing pending" from "declined on purpose".
   //
-  // `reclaimRemovedVectorFieldTables` above independently keys its orphan test
-  // on the same active schema, for the same reason. The two filters are
-  // written separately but must keep agreeing on that authority — see the
-  // note there.
+  // `reclaimRemovedVectorFieldTables` above independently keys its candidate
+  // scan on the same active schema and repeats the field check under the same
+  // lock before dropping storage — see the note there.
   const liveKinds = liveKindNamesFrom(activeSchema);
 
   const kindFilter =
@@ -738,6 +737,16 @@ function vectorFieldKey(kind: string, fieldPath: string): string {
   return `${kind}\u0000${fieldPath}`;
 }
 
+function vectorFieldKeysFrom(schema: SerializedSchema): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const declaration of schema.indexes ?? []) {
+    if (declaration.entity === "vector") {
+      keys.add(vectorFieldKey(declaration.kind, declaration.fieldPath));
+    }
+  }
+  return keys;
+}
+
 /**
  * The historical declaration of a vector field, carrying everything
  * {@link VectorStrategy.buildDropStorage} needs to tear the storage down —
@@ -764,14 +773,16 @@ type HistoricalVectorField = Readonly<{
  * The orphan set is derived from schema history: every vector field ever
  * declared, minus the ones still declared in the *active* schema, restricted
  * to kinds that still exist (removed-kind fields are the kind path's job).
- * Using the active schema as the "still declared" source of truth makes
- * remove-then-re-add safe — a re-added field is current, so it is never
- * dropped. `buildDropStorage` emits `DROP ... IF EXISTS`, so the pass is
- * idempotent and a never-materialized field is a clean no-op; deriving from
- * full history each call also reclaims tables orphaned before this shipped.
+ * The initial active-schema read only finds candidates. Each candidate is
+ * rechecked while holding the schema-write lock, and its DDL plus durable
+ * marker deletion run in that same transaction. A re-add therefore commits
+ * either before the locked check (and is skipped) or after cleanup commits.
+ * `buildDropStorage` emits `DROP ... IF EXISTS`, so the pass is idempotent and
+ * a never-materialized field is a clean no-op; deriving from full history each
+ * call also reclaims tables orphaned before this shipped.
  *
- * Backends without a vector strategy or `executeDdl` have no per-field tables
- * to reclaim and yield an empty result.
+ * Backends without a vector strategy have no per-field tables to reclaim and
+ * yield an empty result.
  */
 async function reclaimRemovedVectorFieldTables(
   context: MaterializeRemovalsContext,
@@ -779,8 +790,7 @@ async function reclaimRemovedVectorFieldTables(
 ): Promise<readonly ReclaimedVectorFieldEntry[]> {
   const { backend, graphId } = context;
   const vectorStrategy = backend.vectorStrategy;
-  const executeDdl = backend.executeDdl;
-  if (vectorStrategy === undefined || executeDdl === undefined) return [];
+  if (vectorStrategy === undefined) return [];
   if (activeRow === undefined) return [];
 
   // The orphan set is a pure function of (graphId, active version) over
@@ -796,14 +806,7 @@ async function reclaimRemovedVectorFieldTables(
 
   const activeSchema = parseSerializedSchema(activeRow.schema_doc);
 
-  const activeVectorFields = new Set<string>();
-  for (const declaration of activeSchema.indexes ?? []) {
-    if (declaration.entity === "vector") {
-      activeVectorFields.add(
-        vectorFieldKey(declaration.kind, declaration.fieldPath),
-      );
-    }
-  }
+  const activeVectorFields = vectorFieldKeysFrom(activeSchema);
   const survivingKinds = new Set(Object.keys(activeSchema.nodes));
 
   // Walk history backward, keeping the most-recent declaration of each
@@ -833,17 +836,14 @@ async function reclaimRemovedVectorFieldTables(
     }
   }
 
-  // Both clauses key on the ACTIVE schema, which is what keeps this pass from
-  // dropping storage for a kind that was removed and later re-added:
+  // Both clauses key on the ACTIVE schema to keep the candidate set narrow:
   // `survivingKinds` requires the kind to be live now, so a re-added kind with
   // its field re-declared is not an orphan, and a still-removed kind is left
   // to the candidate loop in `materializeRemovals` instead.
   //
-  // That is the same authority the live-kind guard there uses — two
-  // independently written filters agreeing on one source. Keep them agreeing:
-  // weakening either (e.g. keying this on schema *history* rather than the
-  // active document) reopens the re-add data-loss path from the other side,
-  // and no test spans both.
+  // This scan is not the safety boundary: a schema commit can land after it.
+  // The per-field transaction below re-reads the same authority under the
+  // schema-write lock before issuing DDL.
   const orphans = [...historical.values()].filter(
     (field) =>
       !activeVectorFields.has(vectorFieldKey(field.kind, field.fieldPath)) &&
@@ -851,13 +851,50 @@ async function reclaimRemovedVectorFieldTables(
   );
 
   const results: ReclaimedVectorFieldEntry[] = [];
+  let skippedAfterLockedRecheck = false;
+  const schemaWriteTransaction = backend.schemaWriteTransaction;
+  if (orphans.length > 0 && schemaWriteTransaction === undefined) {
+    throw new ConfigurationError(
+      "store.materializeRemovals() requires a backend that can hold the " +
+        "schema-write lock across the vector-field liveness check and cleanup.",
+      { code: "MATERIALIZE_REMOVALS_SCHEMA_FENCE_UNSUPPORTED" },
+    );
+  }
   for (const field of orphans) {
-    // dropVectorSlotStorage swallows the missing-table case (a never-
-    // materialized field has nothing to reclaim), so reaching the catch means
-    // a genuine failure.
     try {
-      await dropVectorSlotStorage(vectorStrategy, executeDdl, field.slot);
-      await backend.deleteVectorSlotContribution?.(field.slot);
+      const reclaimed = await requireDefined(schemaWriteTransaction)(
+        graphId,
+        async (target): Promise<boolean> => {
+          const lockedActiveRow = await target.getActiveSchema(graphId);
+          if (lockedActiveRow === undefined) return false;
+          const lockedActiveSchema = parseSerializedSchema(
+            lockedActiveRow.schema_doc,
+          );
+          const lockedVectorFields = vectorFieldKeysFrom(lockedActiveSchema);
+          if (
+            lockedVectorFields.has(
+              vectorFieldKey(field.kind, field.fieldPath),
+            ) ||
+            !Object.hasOwn(lockedActiveSchema.nodes, field.kind)
+          ) {
+            return false;
+          }
+
+          await dropVectorSlotStorage(
+            vectorStrategy,
+            target.executeSchemaDdl,
+            field.slot,
+          );
+          await requireDefined(target.deleteSchemaVectorSlotContribution)(
+            field.slot,
+          );
+          return true;
+        },
+      );
+      if (!reclaimed) {
+        skippedAfterLockedRecheck = true;
+        continue;
+      }
       results.push({
         kind: field.kind,
         fieldPath: field.fieldPath,
@@ -874,7 +911,10 @@ async function reclaimRemovedVectorFieldTables(
   }
 
   // Cache only a fully-successful pass — a failed drop must be retried.
-  if (results.every((entry) => entry.status === "reclaimed")) {
+  if (
+    !skippedAfterLockedRecheck &&
+    results.every((entry) => entry.status === "reclaimed")
+  ) {
     if (perBackend === undefined) {
       perBackend = new Map();
       reclaimCache.set(backend, perBackend);

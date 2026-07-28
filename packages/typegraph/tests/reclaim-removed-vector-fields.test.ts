@@ -150,6 +150,61 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
     );
   });
 
+  it("rechecks field liveness after acquiring the schema-write lock", async () => {
+    const baseBackend = backend;
+    let beforeNextCleanup: (() => Promise<void>) | undefined;
+
+    async function runBeforeCleanup(): Promise<void> {
+      const callback = beforeNextCleanup;
+      beforeNextCleanup = undefined;
+      await callback?.();
+    }
+
+    backend = createBackendOverlay(baseBackend, {
+      async executeDdl(statement) {
+        await runBeforeCleanup();
+        await requireDefined(baseBackend.executeDdl)(statement);
+      },
+      async schemaWriteTransaction(graphId, fn) {
+        await runBeforeCleanup();
+        return requireDefined(baseBackend.schemaWriteTransaction)(graphId, fn);
+      },
+    });
+
+    const withField = await storeWithMaterializedEmbedding();
+    const withoutField = await withField.evolve(dropEmbeddingModifier);
+
+    // The candidate scan sees an orphaned field. Commit and write through a
+    // re-add immediately before cleanup acquires its schema lock. The outer
+    // executeDdl hook also makes this regression fail against the old,
+    // unfenced implementation.
+    beforeNextCleanup = async () => {
+      const readded = await withoutField.evolve(addDocumentWithEmbedding);
+      await writeDocument(readded, {
+        title: "re-added",
+        embedding: [0, 1, 0],
+      });
+    };
+
+    const result = await withoutField.materializeRemovals();
+
+    expect(result.reclaimedVectorFields).toEqual([]);
+    expect(await tableExists(perFieldTable("Document", "embedding"))).toBe(
+      true,
+    );
+    const vectors = await requireDefined(backend.vectorSearch)({
+      graphId: GRAPH_ID,
+      nodeKind: "Document",
+      fieldPath: "embedding",
+      queryEmbedding: [0, 1, 0],
+      metric: "cosine",
+      dimensions: 3,
+      indexType: "none",
+      limit: 10,
+    });
+    expect(vectors).toHaveLength(2);
+  });
+
   it("reports an empty result when no embedding field was ever removed", async () => {
     const withField = await storeWithMaterializedEmbedding();
 

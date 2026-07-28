@@ -9,12 +9,13 @@ import {
   UniquenessError,
 } from "../../errors";
 import type { SqlDialect } from "../../query/dialect/types";
+import type { VectorSlot } from "../../query/dialect/vector-strategy";
 import { sql } from "../../query/sql-fragment";
-import { asCompiledStatementSql } from "../../query/sql-intent";
 import type {
   CompiledStatementSql,
   CompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
+import { asCompiledStatementSql } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
 import { nowIso as defaultNowIso } from "../row-mappers";
 import type {
@@ -108,7 +109,7 @@ export type CommonOperationBackend = Pick<
     setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
     executeSchemaDdl: (ddl: string) => Promise<void>;
     deleteSchemaVectorSlotContribution?: (
-      slot: import("../../query/dialect/vector-strategy").VectorSlot,
+      slot: VectorSlot,
     ) => Promise<void>;
   }>;
 
