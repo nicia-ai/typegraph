@@ -271,24 +271,36 @@ to decide.
 
 ## Schema Introspection
 
-Query the stored schema at runtime:
+### What Does This Database Already Have?
+
+`getActiveSchema` returns the committed schema document — the same JSON stored
+in `typegraph_schema_versions.schema_doc`, parsed into a `SerializedSchema`.
+Read it instead of querying that table by hand:
 
 ```typescript
-import { getActiveSchema, isSchemaInitialized, getSchemaChanges } from "@nicia-ai/typegraph/schema";
+import { getActiveSchema, isSchemaInitialized, type SerializedSchema } from "@nicia-ai/typegraph";
 
-// Check if schema exists
+// Check whether this graph has been committed at all
 const initialized = await isSchemaInitialized(backend, "my_graph");
 
-// Get the current schema
-const schema = await getActiveSchema(backend, "my_graph");
+const schema: SerializedSchema | undefined = await getActiveSchema(backend, "my_graph");
 if (schema) {
-  console.log("Graph ID:", schema.graphId);
   console.log("Version:", schema.version);
-  console.log("Nodes:", Object.keys(schema.nodes));
-  console.log("Edges:", Object.keys(schema.edges));
+  console.log("Nodes:", Object.keys(schema.nodes)); // ["Person", "Company"]
+  console.log("Edges:", Object.keys(schema.edges)); // ["worksAt"]
 }
+```
 
-// Preview changes without applying
+These are exported from both the package root and the
+`@nicia-ai/typegraph/schema` subpath. Reach for `getCommittedSchemaVersion`
+instead when you only need the version number — for example, to invalidate a
+cached schema across isolates.
+
+### Previewing Pending Changes
+
+```typescript
+import { getSchemaChanges } from "@nicia-ai/typegraph/schema";
+
 const diff = await getSchemaChanges(backend, graph);
 if (diff?.hasChanges) {
   console.log("Pending changes:", diff.summary);

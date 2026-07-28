@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   createAdapterStore,
   createVerifiedAdapterStore,
+  getActiveSchema,
   getCommittedSchemaVersion,
+  isSchemaInitialized,
+  type SerializedSchema,
 } from "../../../src";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { requireDefined } from "../../../src/utils/presence";
@@ -15,8 +18,9 @@ import { type IntegrationTestContext } from "./test-context";
  * Cross-backend parity for the cacheable adapter-store path: a store built
  * from a cached {@link createVerifiedAdapterStore} snapshot must read and,
  * crucially, *validate writes against runtime-committed kinds* identically on
- * every backend — with no verify round-trip — and {@link getCommittedSchemaVersion}
- * must report the same committed version the snapshot recorded. These are the
+ * every backend — with no verify round-trip — and the root-exported committed
+ * schema reads ({@link getCommittedSchemaVersion}, {@link getActiveSchema},
+ * {@link isSchemaInitialized}) must agree with the snapshot. These are the
  * guarantees the §7 serverless per-request cache leans on, so they belong in
  * the shared suite rather than a per-dialect test.
  */
@@ -101,6 +105,39 @@ export function registerReconciledSchemaIntegrationTests(
       expect(
         await getCommittedSchemaVersion(backend, "never_committed_graph"),
       ).toBeUndefined();
+    });
+
+    it("getActiveSchema returns the committed document the version names", async () => {
+      const backend = context.getBackend();
+      const active: SerializedSchema = requireDefined(
+        await getActiveSchema(backend, integrationTestGraph.id),
+      );
+      const version = await getCommittedSchemaVersion(
+        backend,
+        integrationTestGraph.id,
+      );
+
+      expect(active.graphId).toBe(integrationTestGraph.id);
+      expect(active.version).toBe(version);
+      expect(Object.keys(active.nodes).toSorted()).toEqual(
+        Object.keys(integrationTestGraph.nodes).toSorted(),
+      );
+      expect(Object.keys(active.edges).toSorted()).toEqual(
+        Object.keys(integrationTestGraph.edges).toSorted(),
+      );
+    });
+
+    it("getActiveSchema and isSchemaInitialized agree on committed and uncommitted graphs", async () => {
+      const backend = context.getBackend();
+      expect(
+        await getActiveSchema(backend, "never_committed_graph"),
+      ).toBeUndefined();
+      expect(await isSchemaInitialized(backend, "never_committed_graph")).toBe(
+        false,
+      );
+      expect(await isSchemaInitialized(backend, integrationTestGraph.id)).toBe(
+        true,
+      );
     });
 
     it("createAdapterStore({ reconciled }) reads and writes an existing kind", async () => {
