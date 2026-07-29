@@ -15,9 +15,9 @@ import { type GraphBackend } from "../backend/types";
  * INDEX IF NOT EXISTS` statements covering every base table. Two
  * concurrent callers (e.g. two replicas of the same `schema_doc` both
  * starting up) deadlock on Postgres SHARE locks. Restricting the
- * ensure-step to a single table eliminates the cross-table race —
- * concurrent `CREATE TABLE IF NOT EXISTS` for one specific table is
- * well-behaved on Postgres.
+ * ensure-step to a single table eliminates the cross-table lock cycle.
+ * Backends still own any dialect-specific same-table race handling; the
+ * PostgreSQL focused ensures retry their catalog uniqueness race.
  */
 export async function ensureFocusedStatusTable(
   backend: GraphBackend,

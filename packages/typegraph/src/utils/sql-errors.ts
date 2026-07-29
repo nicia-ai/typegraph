@@ -36,6 +36,7 @@ const POSTGRES_UNDEFINED_RELATION_PATTERN =
  * `.message` with the query text.
  */
 const POSTGRES_UNDEFINED_TABLE_CODE = "42P01";
+const POSTGRES_UNIQUE_VIOLATION_CODE = "23505";
 
 /**
  * Yields an error and each error reachable by following `.cause`,
@@ -179,6 +180,25 @@ export function isMissingTableError(error: unknown): boolean {
       }
     }
     if (!(link instanceof Error)) everyPriorLinkWasError = false;
+  }
+  return false;
+}
+
+/**
+ * Whether PostgreSQL reported a uniqueness violation anywhere in a driver's
+ * error-cause chain. `CREATE TABLE IF NOT EXISTS` can surface this code when
+ * two sessions concurrently insert the same internal catalog rows; callers
+ * handling that specific idempotent DDL race can retry once after the winner
+ * commits.
+ */
+export function isPostgresUniqueViolationError(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (
+      canReadProperty(link) &&
+      Reflect.get(link, "code") === POSTGRES_UNIQUE_VIOLATION_CODE
+    ) {
+      return true;
+    }
   }
   return false;
 }

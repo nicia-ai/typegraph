@@ -79,6 +79,24 @@ export function registerMigrateSchemaKindIntegrationTests(
       ).toEqual([]);
     });
 
+    it("keeps concurrent focused kind-removal bootstraps idempotent", async () => {
+      const backend = context.getBackend();
+      await requireDefined(backend.executeDdl)(
+        'DROP TABLE IF EXISTS "typegraph_kind_removals"',
+      );
+      const ensureKindRemovalsTable = requireDefined(
+        backend.ensureKindRemovalsTable,
+      );
+
+      await Promise.all([ensureKindRemovalsTable(), ensureKindRemovalsTable()]);
+
+      await expect(
+        requireDefined(backend.getPendingKindRemovals)(
+          graphFor("concurrent_removal_queue").id,
+        ),
+      ).resolves.toEqual([]);
+    });
+
     it("folds the persisted extension, preserving runtime kinds and their rows", async () => {
       const graph = graphFor("fold");
       const store = await context.createStore(graph);
