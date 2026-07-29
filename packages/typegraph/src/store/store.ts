@@ -2792,12 +2792,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * Evolves the graph at runtime by merging a graph extension into the
    * current schema, atomically committing a new schema version, and
-   * returning a fresh `Store` constructed against the merged graph.
+   * returning the `Store` for the merged graph.
    *
    * The `Store` is immutable — its registry, collections, and operation
-   * contexts close over the graph at construction time — so callers
-   * must use the returned store (or pass a `ref` to be re-pointed) for
-   * any work involving the new kinds.
+   * contexts close over the graph at construction time. After `evolve()`
+   * resolves, callers must use the returned Store (or the re-pointed
+   * `ref.current`) for every subsequent operation in the same request. A
+   * Store captured before the schema commit remains pinned to the old version,
+   * and its next managed write is rejected by the schema fence.
    *
    * **Cost for purely additive extensions is proportional to schema
    * document size, not row count.** The commit is a single CAS write.
@@ -2816,9 +2818,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @param extension - Graph extension produced by
    *   `defineGraphExtension(...)`.
    * @param options.ref - Optional handle whose `current` is overwritten
-   *   atomically with the schema commit. Long-lived consumers
-   *   (request handlers, background workers) that dereference through
-   *   the ref see the new kinds on the *next* call.
+   *   atomically with the schema commit. Code awaiting this call can use the
+   *   returned Store or `ref.current` immediately. A previously captured Store
+   *   is not mutated.
    *
    * @throws {GraphExtensionValidationError} when the extension is
    *   structurally invalid.

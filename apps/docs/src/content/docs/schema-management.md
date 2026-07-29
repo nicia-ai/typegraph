@@ -185,6 +185,40 @@ not participate in the fence. `store.clear()` deletes the graph's schema rows
 and resets that Store to the same raw state; reopen it through a managed factory
 before resuming writes when the versioned guarantee is required.
 
+### Store lifetime after a schema commit
+
+Managed Stores are immutable schema snapshots. A schema-changing operation such
+as `evolve()` returns the Store for the resulting schema; it does not update the
+instance on which it was called. Switch immediately to the returned Store for
+all subsequent work in the same request:
+
+```typescript
+const evolved = await store.evolve(extension);
+await evolved.getNodeCollectionOrThrow("Paper").create({ title: "..." });
+```
+
+For a long-lived local handle, pass a `StoreRef` and use either the return value
+or the updated `ref.current` after the call:
+
+```typescript
+import type { StoreRef } from "@nicia-ai/typegraph";
+
+const ref: StoreRef<typeof store> = { current: store };
+const evolved = await ref.current.evolve(extension, { ref });
+
+// `ref.current === evolved`; do not resume through the pre-evolve Store.
+await ref.current.getNodeCollectionOrThrow("Paper").create({ title: "..." });
+```
+
+Capturing `ref.current` once at request entry is safe only for requests that do
+not change the schema. The ref also cannot observe commits made by another
+process or isolate. Before reusing a cross-request cache, compare the cached
+Store's `introspect().schemaVersion` (or its reconciled snapshot version) with
+`getCommittedSchemaVersion()`, then run `createVerifiedStore()` or
+`createVerifiedAdapterStore()` when the version changes. The
+[per-request connection recipe](/integration#per-request-connections-cache-the-verified-store)
+shows the complete single-flight cache pattern.
+
 ## Schema Validation Results
 
 The validation result indicates what happened during store initialization:

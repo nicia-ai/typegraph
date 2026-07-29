@@ -792,8 +792,10 @@ returns an equivalent store bound to the new connection with no re-verify.
 The `getCommittedSchemaVersion` probe is your read-your-writes seam: one
 round-trip, far cheaper than the full verified open (which also reconciles the
 schema and checks index materialization), and re-verify only fires when the
-version actually moves. Skip the probe entirely (and accept bounded
-cross-isolate staleness) if your schema only changes on deploy.
+version actually moves. Skip the probe only if your schema changes exclusively
+during a deployment that also clears the cache. Otherwise reads may use the
+stale schema snapshot, and the write fence rejects managed writes until the
+cache is refreshed.
 
 ### Read Replica Separation
 

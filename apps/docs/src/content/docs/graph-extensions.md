@@ -257,26 +257,47 @@ const evolved = await store.evolve(extension, { eager: {} });
    `IncompatibleChangeError` (code `INCOMPATIBLE_CHANGE`).
 3. **Atomically commits** a new schema version via `commitSchemaVersion`
    (CAS on the active version).
-4. **Returns a new `Store<G>`** carrying the extended graph. The type
+4. **Returns the resulting `Store<G>`** carrying the extended graph. The type
    parameter `G` does NOT widen — see [Reaching extension
    kinds](#reaching-extension-kinds-from-the-type-system) below.
 
+:::caution[Use the returned Store]
+`Store` instances are immutable schema snapshots. After `evolve()` resolves,
+use its returned Store for **every subsequent Store operation in the same
+request**, not just operations involving newly added kinds. A Store captured
+before the commit remains pinned to the previous schema version, so its next
+managed write fails the schema-version fence.
+:::
+
 ### The `ref` pattern
 
-`Store<G>` is immutable by construction — `evolve()` returns a fresh
-instance. Long-lived consumer code that holds the store in a singleton
-needs a way to re-bind it atomically with the schema commit. Pass
-`options.ref: { current: store }` (a `StoreRef<Store<G>>`):
+`Store<G>` is immutable by construction — `evolve()` returns the Store for the
+resulting schema, using a fresh instance when the schema advances. Long-lived
+consumer code that holds the Store in a singleton needs a way to re-bind it
+atomically with the schema commit. Pass `options.ref: { current: store }` (a
+`StoreRef<Store<G>>`):
 
 ```ts
 const ref: StoreRef<Store<G>> = { current: store };
-await ref.current.evolve(extension, { ref });
-// `ref.current` now points to the new store.
+const evolved = await ref.current.evolve(extension, { ref });
+
+// `ref.current === evolved`; use either reference from here on.
+const papers = ref.current.getNodeCollectionOrThrow("Paper");
+await papers.create({ title: "...", doi: "...", year: 2024 });
 ```
 
-`StoreRef<T>` is just a type alias for `{ current: T }` — the library
-doesn't provide a factory because the consumer composes the handle
-themselves (could be a Vue ref, MobX observable, Zustand atom, etc.).
+Capture `ref.current` once at request entry only when that request will not
+change the schema. If it does call `evolve()`, switch to the returned Store or
+dereference `ref.current` again after the call. `StoreRef<T>` is structurally
+just `{ current: T }`; the library doesn't provide a factory because the
+consumer composes the handle themselves (it could be a Vue ref, MobX
+observable, Zustand atom, etc.).
+
+The ref covers schema changes made by calls that receive it. If another process
+or isolate can advance the schema, probe the committed version before reusing a
+cached Store and perform a verified open when it changes. See
+[Per-request connections: cache the verified Store](/integration#per-request-connections-cache-the-verified-store)
+for the complete `getCommittedSchemaVersion()` recipe.
 
 ### Eager materialization
 
