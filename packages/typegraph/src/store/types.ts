@@ -478,21 +478,30 @@ export type StoreOptions = LiveStoreOptions | HistoryStoreOptions;
 /**
  * A mutable handle to the current `Store`, used by `store.evolve(...)`
  * so long-lived consumers can dereference through the ref and pick up
- * the new store after each evolve call. `current` is overwritten by
- * `evolve()` atomically with the schema commit when the ref is passed
- * via `evolve(extension, { ref })`.
+ * the new Store after each evolve call. When the ref is passed via
+ * `evolve(extension, { ref })`, `current` is overwritten with the replacement
+ * before a successful call resolves.
  *
- * **Mid-request semantics.** `ref.current` flips on the *next* call
- * after evolve, not mid-handler. Dereference once at request entry and
- * reuse the captured `Store` for the duration:
+ * **Request semantics.** Dereference once at request entry only when that
+ * request will not change the schema. A schema-changing call such as
+ * `evolve()` returns the Store for the resulting schema and updates
+ * `ref.current`; a Store captured before that call remains pinned to the old
+ * schema. Use the returned Store (or dereference `ref.current` again) for every
+ * subsequent operation in the same request:
  *
  * ```ts
  * async function handleRequest(): Promise<void> {
- *   const store = ref.current; // capture once
- *   const tag = await store.nodes.Tag?.create({ label: "..." });
- *   // ...further work on the same `store`...
+ *   const store = ref.current;
+ *   const evolved = await store.evolve(extension, { ref });
+ *   await evolved.materializeIndexes();
+ *   // ref.current === evolved
  * }
  * ```
+ *
+ * A `StoreRef` tracks only schema changes made by calls that receive that ref.
+ * When another process or isolate can commit a schema version, compare
+ * `getCommittedSchemaVersion()` with the cached version before reuse and call
+ * `createVerifiedStore()` or `createVerifiedAdapterStore()` when it changes.
  *
  * Pure dereferenceable handle — no event/subscription machinery. If
  * consumers need eventing, they wrap the ref themselves.

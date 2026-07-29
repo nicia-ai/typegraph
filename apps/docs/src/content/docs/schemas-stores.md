@@ -628,6 +628,13 @@ closed when a managed write is attempted rather than racing. Raw Stores and
 direct backend writes remain available when the application deliberately owns
 schema/write coordination.
 
+Because a managed Store is pinned to the schema version it opened, use the
+Store returned by `evolve()` for every subsequent operation in that request. A
+Store captured before the commit is not updated, and its next managed write is
+rejected by this fence. See
+[Store lifetime after a schema commit](/schema-management#store-lifetime-after-a-schema-commit)
+for the `StoreRef` and cross-process cache patterns.
+
 ## Store Projection
 
 ### `StoreProjection<G, N, E>`

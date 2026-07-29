@@ -540,9 +540,9 @@ describe("StoreRef pattern (consumer-composed)", () => {
   // The ref is a consumer pattern, not a library factory. Apps that need
   // many callers to share a stable handle (request handlers, background
   // workers, repeated schema-evolution loops) compose their own ref and
-  // pass it to evolve, which re-points it atomically with the schema
-  // commit. Apps with a single caller can skip the ref entirely and
-  // reassign the store from evolve's return value.
+  // pass it to evolve, which re-points it before the call completes. Apps with
+  // a single caller can skip the ref entirely and reassign the store from
+  // evolve's return value.
   it("evolve(ext, { ref }) re-points the consumer-composed ref", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
