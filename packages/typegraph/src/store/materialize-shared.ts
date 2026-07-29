@@ -1,10 +1,8 @@
 /**
- * Shared building blocks for the materialize-* verbs (`materializeIndexes`
- * and `materializeRemovals`) and `Store.removeKinds`. Each verb owns a
- * per-deployment status table (`typegraph_index_materializations`,
- * `typegraph_kind_removals`) and bootstraps it lazily; this module
- * centralizes focused bootstrap dispatch plus the bucketed orchestration used
- * by index materialization.
+ * Shared building blocks for schema-management and materialization verbs.
+ * Each status-backed operation lazily bootstraps its per-deployment table;
+ * this module centralizes focused bootstrap dispatch plus the bucketed
+ * orchestration used by index materialization.
  */
 import { type GraphBackend } from "../backend/types";
 

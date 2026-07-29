@@ -57,6 +57,28 @@ export function registerMigrateSchemaKindIntegrationTests(
       nodes: { Widget: { properties: { label: { type: "string" } } } },
     });
 
+    it("bootstraps the kind-removal queue before evolve preflight", async () => {
+      const graph = graphFor("legacy_removal_queue");
+      const store = await context.createStore(graph);
+      const backend = context.getBackend();
+
+      // A pre-0.44 database has all established schema tables but not the
+      // newly-added removal queue. Evolve must initialize its own preflight
+      // dependency rather than requiring an out-of-band backend bootstrap.
+      await requireDefined(backend.executeDdl)(
+        'DROP TABLE IF EXISTS "typegraph_kind_removals"',
+      );
+
+      const evolved = await store.evolve(widgetExtension);
+
+      expect(evolved.introspect().kinds.map((kind) => kind.name)).toContain(
+        "Widget",
+      );
+      expect(
+        await requireDefined(backend.getPendingKindRemovals)(graph.id),
+      ).toEqual([]);
+    });
+
     it("folds the persisted extension, preserving runtime kinds and their rows", async () => {
       const graph = graphFor("fold");
       const store = await context.createStore(graph);
