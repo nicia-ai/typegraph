@@ -83,6 +83,9 @@ import {
   type SubgraphResult,
 } from "./subgraph";
 import {
+  type BulkFindEdgesFromParams,
+  type BulkFindEdgesFromResult,
+  type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
   type NodeCollection,
   type NodeCurrentReads,
@@ -1070,6 +1073,17 @@ export class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
       ) => pinnedEdgeCollection(live, coordinate),
     ) as unknown as StoreViewEdgeCollections<G>;
     return this.#edges;
+  }
+
+  /** Heterogeneous multi-kind edge read pinned to this view's coordinate. */
+  bulkFindEdgesFrom<const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesFromParams<G, K>,
+    options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">,
+  ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
+    return this.store.bulkFindEdgesFrom(params, {
+      ...options,
+      ...withValidCoordinate(this.coordinate),
+    });
   }
 
   /**

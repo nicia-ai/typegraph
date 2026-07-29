@@ -381,7 +381,7 @@ export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "countEdgesByKind">;
+export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -576,12 +576,27 @@ export type FilteredApproximateSearch = Readonly<{
 export type FilteredApproximateSearchMode = "filter-pushdown" | "iterative-scan" | "post-filter";
 
 // @public
-type FindEdgesByEndpointSetParams = Readonly<{
+export type FindEdgesByEndpointSetParams = Readonly<{
     graphId: string;
     kind: string;
     side: EdgeEndpointSide;
     endpointKind: string;
     endpointIds: readonly string[];
+    limitPerEndpoint?: number;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
+}>;
+
+// @public
+export type FindEdgesByHeterogeneousEndpointSetParams = Readonly<{
+    graphId: string;
+    side: EdgeEndpointSide;
+    endpoints: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[];
+    edgeKinds: readonly string[];
     limitPerEndpoint?: number;
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
@@ -733,6 +748,7 @@ export type GraphBackend = Readonly<{
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
     findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
+    findEdgesByHeterogeneousEndpointSet?: (this: void, params: FindEdgesByHeterogeneousEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
     insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;

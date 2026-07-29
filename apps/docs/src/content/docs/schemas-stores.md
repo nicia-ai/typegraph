@@ -1242,6 +1242,38 @@ const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
 // jobsPerPerson[i] holds the worksAt edges of people[i]
 ```
 
+#### `store.bulkFindEdgesFrom(params, options?)`
+
+Reads multiple edge kinds from heterogeneous source kinds through one set-oriented backend
+operation. The result preserves source-group and ID order, includes an empty `edges` array for a
+source with no matches, and preserves repeated source references as separate result entries.
+
+The bundled SQLite and PostgreSQL backends issue one statement per bind-budget chunk, independent
+of the number of licensed `(source kind, edge kind)` combinations. `limitPerInput` bounds each
+source's fan-out. Temporal options have the same meaning as edge-collection reads, and
+`StoreView.bulkFindEdgesFrom` supplies its pinned coordinate automatically.
+
+```typescript
+const results = await store.bulkFindEdgesFrom(
+  {
+    sources: [
+      { kind: "Company", ids: companyIds },
+      { kind: "Person", ids: personIds },
+    ],
+    edgeKinds: ["employs", "owns", "dependsOn"],
+  },
+  { limitPerInput: 20 },
+);
+
+for (const { source, edges } of results) {
+  console.log(source.kind, source.id, edges.length);
+}
+```
+
+The operation validates every dynamic kind against the Store's graph. It requires a backend that
+implements `findEdgesByHeterogeneousEndpointSet`; a custom backend without that capability gets a
+`ConfigurationError` instead of an implicit loop of singleton reads.
+
 #### `batchFindFrom(from, options?)` / `batchFindTo(to, options?)` / `batchFindByEndpoints(from, to, options?)`
 
 Deferred variants of `findFrom`, `findTo`, and `findByEndpoints` for use with
@@ -2363,6 +2395,7 @@ coordinate:
 | --- | --- |
 | `view.nodes` / `view.edges`: `getById`, `getByIds`, `find`, `count` | pinned |
 | `view.edges`: `findFrom`, `findTo`, `bulkFindFrom`, `bulkFindTo`, `findByEndpoints` | pinned |
+| `view.bulkFindEdgesFrom(params, options?)` | pinned |
 | `view.query()` | a pinned query builder with a **sealed** temporal axis — `.temporal(...)` throws |
 | `view.subgraph(rootId, options)` | pinned |
 | `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree` | pinned |

@@ -60,6 +60,22 @@ function withoutEndpointSetReads(backend: GraphBackend): GraphBackend {
   });
 }
 
+function withoutHeterogeneousEndpointSetReads(
+  backend: GraphBackend,
+): GraphBackend {
+  return new Proxy(backend, {
+    get(target, property, receiver) {
+      // eslint-disable-next-line unicorn/no-useless-undefined -- the proxy must answer "absent"
+      if (property === "findEdgesByHeterogeneousEndpointSet") return undefined;
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+    has(target, property) {
+      if (property === "findEdgesByHeterogeneousEndpointSet") return false;
+      return Reflect.has(target, property);
+    },
+  });
+}
+
 describe("bulk endpoint reads on a backend without the capability", () => {
   it("refuses with a typed error naming the missing capability", async () => {
     const [store] = await createStoreWithSchema(
@@ -142,5 +158,38 @@ describe("bulk endpoint reads on a backend without the capability", () => {
     // Empty input short-circuits ahead of the capability check: there is no
     // read to refuse, so an empty page must not become an error.
     await expect(store.edges.knows.bulkFindFrom([])).resolves.toEqual([]);
+  });
+});
+
+describe("heterogeneous bulk endpoint reads without the capability", () => {
+  it("refuses rather than expanding to collection reads", async () => {
+    const [store] = await createStoreWithSchema(
+      graph,
+      withoutHeterogeneousEndpointSetReads(createTestBackend()),
+    );
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+
+    await expect(
+      store.bulkFindEdgesFrom({
+        sources: [{ kind: "Person", ids: [alice.id] }],
+        edgeKinds: ["knows"],
+      }),
+    ).rejects.toMatchObject({
+      details: {
+        capability: "findEdgesByHeterogeneousEndpointSet",
+        operation: "bulkFindEdgesFrom",
+      },
+    });
+  });
+
+  it("keeps empty inputs harmless", async () => {
+    const [store] = await createStoreWithSchema(
+      graph,
+      withoutHeterogeneousEndpointSetReads(createTestBackend()),
+    );
+
+    await expect(
+      store.bulkFindEdgesFrom({ sources: [], edgeKinds: ["knows"] }),
+    ).resolves.toEqual([]);
   });
 });

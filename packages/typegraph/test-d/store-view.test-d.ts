@@ -11,6 +11,7 @@ import { z } from "zod";
 
 import {
   asRecordedInstant,
+  type BulkFindEdgesFromResult,
   createFragment,
   defineEdge,
   defineGraph,
@@ -134,6 +135,23 @@ expectAssignable<Promise<Node<typeof Person>[]>>(
 expectType<Promise<number>>(view.nodes.Person.count());
 expectAssignable<Promise<Edge<typeof worksAt>[]>>(
   view.edges.worksAt.findFrom(personRef),
+);
+expectType<
+  Promise<readonly BulkFindEdgesFromResult<typeof graph, "worksAt">[]>
+>(
+  view.bulkFindEdgesFrom({
+    sources: [{ kind: "Person", ids: [personId] }],
+    edgeKinds: ["worksAt"],
+  }),
+);
+expectError(
+  view.bulkFindEdgesFrom(
+    {
+      sources: [{ kind: "Person", ids: [personId] }],
+      edgeKinds: ["worksAt"],
+    },
+    { temporalMode: "current" },
+  ),
 );
 expectType<InitialQueryBuilder<typeof graph, "sealed">>(view.query());
 expectType<StoreSearch<typeof graph>>(view.search);

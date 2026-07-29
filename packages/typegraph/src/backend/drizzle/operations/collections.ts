@@ -5,6 +5,7 @@ import type {
   CountEdgesByKindParams,
   CountNodesByKindParams,
   FindEdgesByEndpointSetParams,
+  FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
   FindNodesByKindParams,
 } from "../../types";
@@ -288,6 +289,74 @@ export function buildFindEdgesByEndpointSet(
     WHERE ${whereClause}
   `;
   return sql`
+    SELECT * FROM (${ranked}) AS ranked_edges
+    WHERE endpoint_rank <= ${params.limitPerEndpoint}
+    ORDER BY ${derivedOrderByClause}
+  `;
+}
+
+/**
+ * Builds a multi-kind edge read from a heterogeneous endpoint relation.
+ *
+ * Joining a `VALUES` relation lets both engines seek the composite endpoint
+ * index without generating one SQL branch for every licensed edge/source-kind
+ * combination.
+ */
+export function buildFindEdgesByHeterogeneousEndpointSet(
+  tables: Tables,
+  params: FindEdgesByHeterogeneousEndpointSetParams,
+  endpoints: readonly Readonly<{ kind: string; id: string }>[],
+  edgeKinds: readonly string[],
+): SQL {
+  const { edges } = tables;
+  const fromSide = params.side === "from";
+  const kindColumn = fromSide ? edges.fromKind : edges.toKind;
+  const idColumn = fromSide ? edges.fromId : edges.toId;
+  const requestedKind = sql.raw(`requested_endpoints."endpoint_kind"`);
+  const requestedId = sql.raw(`requested_endpoints."endpoint_id"`);
+  const requestedRows = sql.join(
+    endpoints.map((endpoint) => sql`(${endpoint.kind}, ${endpoint.id})`),
+    sql`, `,
+  );
+  const whereClause = sql.join(
+    [
+      sql`${edges.graphId} = ${params.graphId}`,
+      buildIdSetCondition(edges.kind, edgeKinds),
+      ...buildTemporalConditions(edges, params),
+    ],
+    sql` AND `,
+  );
+  const joinClause = sql`
+    FROM ${edges}
+    INNER JOIN requested_endpoints
+      ON ${kindColumn} = ${requestedKind}
+     AND ${idColumn} = ${requestedId}
+    WHERE ${whereClause}
+  `;
+  const { qualified: orderByClause, bare: derivedOrderByClause } =
+    buildEdgeOrdering(tables, undefined);
+
+  if (params.limitPerEndpoint === undefined) {
+    return sql`
+      WITH requested_endpoints(endpoint_kind, endpoint_id) AS (
+        VALUES ${requestedRows}
+      )
+      SELECT ${edges}.*
+      ${joinClause}
+      ORDER BY ${orderByClause}
+    `;
+  }
+
+  const ranked = sql`
+    SELECT ${edges}.*, ROW_NUMBER() OVER (
+      PARTITION BY ${kindColumn}, ${idColumn} ORDER BY ${orderByClause}
+    ) AS endpoint_rank
+    ${joinClause}
+  `;
+  return sql`
+    WITH requested_endpoints(endpoint_kind, endpoint_id) AS (
+      VALUES ${requestedRows}
+    )
     SELECT * FROM (${ranked}) AS ranked_edges
     WHERE endpoint_rank <= ${params.limitPerEndpoint}
     ORDER BY ${derivedOrderByClause}

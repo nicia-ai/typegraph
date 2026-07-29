@@ -17,7 +17,10 @@ import type {
 } from "../../query/sql-intent";
 import { asCompiledStatementSql } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
-import { resolveEdgeEndpointIds } from "../edge-endpoint-sets";
+import {
+  resolveEdgeEndpointIds,
+  resolveHeterogeneousEdgeRead,
+} from "../edge-endpoint-sets";
 import { nowIso as defaultNowIso } from "../row-mappers";
 import type {
   CheckUniqueBatchParams,
@@ -34,6 +37,7 @@ import type {
   EdgeExistsBetweenParams,
   EdgeRow,
   FindEdgesByEndpointSetParams,
+  FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
@@ -83,6 +87,7 @@ export type CommonOperationBackend = Pick<
     | "executeTemporaryStatement"
   | "findEdgesByKind"
   | "findEdgesByEndpointSet"
+  | "findEdgesByHeterogeneousEndpointSet"
   | "findEdgesConnectedTo"
   | "findNodesByKind"
   | "getActiveSchema"
@@ -186,6 +191,7 @@ type OperationBackendRowMappers = Readonly<{
 type CreateCommonOperationBackendOptions = Readonly<{
   batchConfig: OperationBackendBatchConfig;
   execution: OperationBackendExecution;
+  maxBindParameters: number;
   nowIso?: (() => string) | undefined;
   operationStrategy: CommonOperationStrategy;
   rowMappers: OperationBackendRowMappers;
@@ -278,7 +284,13 @@ export async function commitSchemaVersionIfKindsEmpty(
 export function createCommonOperationBackend(
   options: CreateCommonOperationBackendOptions,
 ): CommonOperationBackend {
-  const { batchConfig, execution, operationStrategy, rowMappers } = options;
+  const {
+    batchConfig,
+    execution,
+    maxBindParameters,
+    operationStrategy,
+    rowMappers,
+  } = options;
   const nowIso = options.nowIso ?? defaultNowIso;
 
   // Positive results are cached by default because on standard schemas the
@@ -660,6 +672,27 @@ export function createCommonOperationBackend(
           params,
           idChunk,
         );
+        const rows = await execution.execAll<Record<string, unknown>>(query);
+        for (const row of rows) edgeRows.push(rowMappers.toEdgeRow(row));
+      }
+      return edgeRows;
+    },
+
+    async findEdgesByHeterogeneousEndpointSet(
+      params: FindEdgesByHeterogeneousEndpointSetParams,
+    ): Promise<readonly EdgeRow[]> {
+      const { edgeKinds, endpoints, endpointChunkSize } =
+        resolveHeterogeneousEdgeRead(params, maxBindParameters);
+      if (edgeKinds.length === 0 || endpoints.length === 0) return [];
+
+      const edgeRows: EdgeRow[] = [];
+      for (const endpointChunk of chunkArray(endpoints, endpointChunkSize)) {
+        const query =
+          operationStrategy.buildFindEdgesByHeterogeneousEndpointSet(
+            params,
+            endpointChunk,
+            edgeKinds,
+          );
         const rows = await execution.execAll<Record<string, unknown>>(query);
         for (const row of rows) edgeRows.push(rowMappers.toEdgeRow(row));
       }

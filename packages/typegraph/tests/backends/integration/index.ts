@@ -2,6 +2,7 @@ export { registerAggregateIntegrationTests } from "./aggregates";
 export { registerAlgorithmIntegrationTests } from "./algorithms";
 export { registerBulkFindByIndexIntegrationTests } from "./bulk-find-by-index";
 export { registerBulkFindEndpointIntegrationTests } from "./bulk-find-endpoints";
+export { registerBulkFindHeterogeneousIntegrationTests } from "./bulk-find-heterogeneous";
 export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
 export { registerContributionDiagnosticIntegrationTests } from "./contribution-diagnostics";
 export { registerCrossBackendConsistencyTests } from "./cross-backend";

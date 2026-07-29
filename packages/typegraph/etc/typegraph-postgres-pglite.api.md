@@ -163,6 +163,26 @@ false
 ]) ? {} : Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth">>) & ([PC] extends [false] ? {} : Record<ResolvePathAlias<PC, A>, RecursiveAlias<"path">>);
 
 // @public
+type BulkEdgeSourceGroup<G extends GraphDef> = {
+    [K in NodeKinds<G>]: Readonly<{
+        kind: K;
+        ids: readonly NodeId<G["nodes"][K]["type"]>[];
+    }>;
+}[NodeKinds<G>];
+
+// @public
+type BulkFindEdgesFromParams<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
+    sources: readonly BulkEdgeSourceGroup<G>[];
+    edgeKinds: readonly K[];
+}>;
+
+// @public
+type BulkFindEdgesFromResult<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
+    source: GraphNodeReference<G>;
+    edges: readonly GraphEdgeForKinds<G, K>[];
+}>;
+
+// @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
 
 // @public
@@ -718,7 +738,7 @@ type EdgeCreateOptions = Readonly<{
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "countEdgesByKind">;
+type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -1140,6 +1160,21 @@ type FindEdgesByEndpointSetParams = Readonly<{
 }>;
 
 // @public
+type FindEdgesByHeterogeneousEndpointSetParams = Readonly<{
+    graphId: string;
+    side: EdgeEndpointSide;
+    endpoints: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[];
+    edgeKinds: readonly string[];
+    limitPerEndpoint?: number;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
+}>;
+
+// @public
 type FindEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -1332,6 +1367,7 @@ type GraphBackend = Readonly<{
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
     findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
+    findEdgesByHeterogeneousEndpointSet?: (this: void, params: FindEdgesByHeterogeneousEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
     insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
@@ -1454,6 +1490,11 @@ type GraphEdgeCollections<G extends GraphDef> = {
     [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
 };
 
+// @public
+type GraphEdgeForKinds<G extends GraphDef, K extends EdgeKinds<G>> = {
+    [P in K]: Edge<G["edges"][P]["type"], G["edges"][P]["from"][number], G["edges"][P]["to"][number]>;
+}[K];
+
 // @public (undocumented)
 type GraphEntityReadBackend = NodeEntityReadBackend & EdgeEntityReadBackend;
 
@@ -1479,6 +1520,14 @@ type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables"
 type GraphNodeCollections<G extends GraphDef> = {
     [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"], ConstraintNames<G["nodes"][K]>>;
 };
+
+// @public
+type GraphNodeReference<G extends GraphDef> = {
+    [K in NodeKinds<G>]: Readonly<{
+        kind: K;
+        id: NodeId<G["nodes"][K]["type"]>;
+    }>;
+}[NodeKinds<G>];
 
 // @public
 type GroupBySpec = Readonly<{
@@ -3373,6 +3422,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     BatchableQuery<unknown>,
     ...BatchableQuery<unknown>[]
     ]>(...queries: Queries) => Promise<BatchResults<Queries>>;
+    bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
     clear: () => Promise<void>;
     refreshStatistics: () => Promise<void>;
@@ -3471,6 +3521,7 @@ type StoreTransactions<G extends GraphDef> = Readonly<{
 class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: StoreViewCoordinate | ReadCoordinate);
     asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
+    bulkFindEdgesFrom<const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">): Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
     get edges(): StoreViewEdgeCollections<G>;
     get nodes(): StoreViewNodeCollections<G>;
     get search(): StoreSearch<G>;

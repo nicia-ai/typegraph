@@ -29,6 +29,7 @@ import {
   type ContributionDiagnostic,
   type ContributionRepairResult,
   createTransactionReadBackend,
+  type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
   runOptionallyInTransaction,
   type SchemaVersionRow,
@@ -65,6 +66,7 @@ import {
   ConfigurationError,
   EagerMaterializationError,
   KindNotFoundError,
+  ValidationError,
 } from "../errors";
 import {
   buildIncompatibleChangeError,
@@ -224,11 +226,16 @@ import {
 import {
   type AdapterTransactionContext,
   AUTO_REFRESH_STATISTICS_ROW_THRESHOLD,
+  type BulkFindEdgesFromParams,
+  type BulkFindEdgesFromResult,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
   type Edge,
+  type EdgeBulkFindEndpointOptions,
   type GraphEdgeCollections,
+  type GraphEdgeForKinds,
   type GraphNodeCollections,
+  type GraphNodeReference,
   type HistoryStoreOptions,
   type HookContext,
   type LiveStoreOptions,
@@ -486,6 +493,10 @@ type StoreCore<G extends GraphDef> = Readonly<{
   >(
     ...queries: Queries
   ) => Promise<BatchResults<Queries>>;
+  bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesFromParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
   subgraph: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
@@ -1838,6 +1849,116 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         results.push(result);
       }
       return results as BatchResults<Queries>;
+    });
+  }
+
+  /**
+   * Reads several edge kinds from heterogeneous source nodes with round trips
+   * independent of the number of licensed edge/source-kind combinations.
+   *
+   * Results are flattened in source-group/id order. Repeated sources receive
+   * independent edge arrays, and sources with no matching edges remain present
+   * with an empty array. Inputs that exceed the backend bind budget are split
+   * into source chunks without splitting one source across statements.
+   */
+  async bulkFindEdgesFrom<const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesFromParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
+    const sources: readonly GraphNodeReference<G>[] = params.sources.flatMap(
+      (group) => {
+        if (!Object.hasOwn(this.#graph.nodes, group.kind)) {
+          throw new KindNotFoundError(group.kind, "node", {
+            graphId: this.graphId,
+          });
+        }
+        return group.ids.map((id) => ({ kind: group.kind, id }));
+      },
+    );
+    for (const edgeKind of params.edgeKinds) {
+      if (!Object.hasOwn(this.#graph.edges, edgeKind)) {
+        throw new KindNotFoundError(edgeKind, "edge", {
+          graphId: this.graphId,
+        });
+      }
+    }
+
+    if (sources.length === 0 || params.edgeKinds.length === 0) {
+      return sources.map((source) => ({ source, edges: [] }));
+    }
+
+    const readEndpointSet =
+      this.#baseBackend.findEdgesByHeterogeneousEndpointSet;
+    if (readEndpointSet === undefined) {
+      throw new ConfigurationError(
+        "store.bulkFindEdgesFrom() requires a backend that can read heterogeneous endpoint and edge-kind sets in set-oriented statements.",
+        {
+          backend: this.#baseBackend.dialect,
+          capability: "findEdgesByHeterogeneousEndpointSet",
+          operation: "bulkFindEdgesFrom",
+        },
+        {
+          suggestion:
+            "Use per-edge-kind bulkFindFrom calls explicitly if that round-trip tradeoff is acceptable.",
+        },
+      );
+    }
+
+    const limitPerInput = options?.limitPerInput;
+    if (
+      limitPerInput !== undefined &&
+      (!Number.isInteger(limitPerInput) || limitPerInput <= 0)
+    ) {
+      throw new ValidationError(
+        "bulk endpoint reads require limitPerInput to be a positive integer",
+        {
+          entityType: "edge",
+          kind: params.edgeKinds.join(","),
+          issues: [
+            {
+              path: "limitPerInput",
+              message: `Expected a positive integer, received ${String(limitPerInput)}`,
+              code: "invalid_value",
+            },
+          ],
+        },
+      );
+    }
+
+    const temporal = resolveTemporalReadParams(
+      options,
+      this.#graph.defaults.temporalMode,
+    );
+    const endpoints: FindEdgesByHeterogeneousEndpointSetParams["endpoints"] =
+      sources;
+    const rows = await readEndpointSet({
+      graphId: this.graphId,
+      side: "from",
+      endpoints,
+      edgeKinds: params.edgeKinds,
+      ...(limitPerInput !== undefined &&
+        this.#baseBackend.capabilities.windowFunctions && {
+          limitPerEndpoint: limitPerInput,
+        }),
+      ...temporal,
+    });
+
+    const edgesBySource = new Map<string, GraphEdgeForKinds<G, K>[]>();
+    for (const row of rows) {
+      const edge = rowToEdge(row) as GraphEdgeForKinds<G, K>;
+      const key = `${edge.fromKind}\0${edge.fromId}`;
+      const bucket = edgesBySource.get(key);
+      if (bucket === undefined) edgesBySource.set(key, [edge]);
+      else bucket.push(edge);
+    }
+
+    return sources.map((source) => {
+      const bucket = edgesBySource.get(`${source.kind}\0${source.id}`) ?? [];
+      const edges =
+        limitPerInput === undefined ?
+          [...bucket]
+        : bucket.slice(0, limitPerInput);
+      return { source, edges };
     });
   }
 
