@@ -3589,7 +3589,7 @@ export type NodeCollection<N extends NodeType, CN extends string = string> = Rea
     }>) => Promise<Node<N>>;
     updateWhere: (params: Readonly<{
         patch: Partial<z.input<N["schema"]>>;
-        where?: (accessor: NodeAccessor<N>) => Predicate;
+        where?: (accessor: string extends N["kind"] ? DynamicNodeAccessor : NodeAccessor<N>) => Predicate;
         exists?: readonly Readonly<{
             edgeKind: string;
             direction: "out" | "in";

@@ -1323,8 +1323,7 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
             { code: "SET_UPDATE_UNSUPPORTED", kind },
           );
         }
-        const hardDeleteUniquesByNodeIds =
-          target.hardDeleteUniquesByNodeIds;
+        const hardDeleteUniquesByNodeIds = target.hardDeleteUniquesByNodeIds;
         if (
           uniqueConstraints.length > 0 &&
           (hardDeleteUniquesByNodeIds === undefined ||

@@ -66,21 +66,52 @@ function narrowNodes<N extends NodeType>(nodes: readonly Node[]): Node<N>[] {
 }
 
 /** Adapts a schema-shaped typed callback to the runtime dynamic accessor. */
-function evaluateTypedNodePredicate<N extends NodeType>(
+type NodeCollectionPredicateAccessor<N extends NodeType> =
+  string extends N["kind"] ? DynamicNodeAccessor : NodeAccessor<N>;
+
+/** Supports both dynamic `.field(name)` and a typed property named `field`. */
+function createFieldMember(
   accessor: DynamicNodeAccessor,
-  predicate: (accessor: NodeAccessor<N>) => Predicate,
-): Predicate {
-  const typedAccessor = new Proxy(accessor, {
-    get(target, property) {
-      if (typeof property === "string" && !Reflect.has(target, property)) {
-        return target.field(property);
+): DynamicNodeAccessor["field"] {
+  const selectField = (name: string) => accessor.field(name);
+  return new Proxy(selectField, {
+    get(target, property, receiver) {
+      if (Reflect.has(target, property)) {
+        const ownProperty: unknown = Reflect.get(target, property, receiver);
+        return ownProperty;
       }
-      return (target as unknown as Readonly<Record<PropertyKey, unknown>>)[
-        property
-      ];
+      return (
+        accessor.field("field") as unknown as Readonly<
+          Record<PropertyKey, unknown>
+        >
+      )[property];
     },
   });
-  return predicate(typedAccessor as unknown as NodeAccessor<N>);
+}
+
+function evaluateNodePredicate<N extends NodeType>(
+  accessor: DynamicNodeAccessor,
+  predicate: (accessor: NodeCollectionPredicateAccessor<N>) => Predicate,
+): Predicate {
+  const collectionAccessor = new Proxy(
+    {} as NodeCollectionPredicateAccessor<N>,
+    {
+      get(_target, property) {
+        if (typeof property === "symbol") return;
+        if (property === "then" || property === "toJSON") return;
+        if (
+          property === "id" ||
+          property === "kind" ||
+          property === "$fulltext"
+        ) {
+          return accessor[property];
+        }
+        if (property === "field") return createFieldMember(accessor);
+        return accessor.field(property);
+      },
+    },
+  );
+  return predicate(collectionAccessor);
 }
 
 /**
@@ -332,7 +363,7 @@ export function createNodeCollection<
       const where = params.where;
       if (where !== undefined) {
         base = base.whereNode(rootAlias, (accessor) =>
-          evaluateTypedNodePredicate<N>(accessor, where),
+          evaluateNodePredicate<N>(accessor, where),
         );
       }
       const candidateIdColumn = `${rootAlias}_id`;

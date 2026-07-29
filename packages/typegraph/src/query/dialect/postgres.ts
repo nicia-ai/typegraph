@@ -247,7 +247,7 @@ export const postgresDialect: DialectAdapter = {
       : sql`${column} || ${JSON.stringify(patch)}::jsonb`;
     if (unsetProperties.length === 0) return withReplacements;
     const properties = unsetProperties.map((property) => sql`${property}`);
-    return sql`${withReplacements} - ARRAY[${sql.join(properties, sql`, `)}]::text[]`;
+    return sql`(${withReplacements}) - ARRAY[${sql.join(properties, sql`, `)}]::text[]`;
   },
 
   // ============================================================

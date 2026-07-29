@@ -183,6 +183,14 @@ describe("hook contract: success is reported only after COMMIT", () => {
         onOperationEnd: (ctx) => {
           events.push(`end:${ctx.operation}:${ctx.entity}`);
         },
+        onBulkOperationStart: (ctx) => {
+          events.push(`bulk-start:${ctx.operation}:${ctx.entity}`);
+        },
+        onBulkOperationEnd: (ctx, result) => {
+          events.push(
+            `bulk-end:${ctx.operation}:${ctx.entity}:${result.affectedCount}`,
+          );
+        },
         onError: (ctx, error) => {
           events.push(`error:${error.name}`);
         },
@@ -302,6 +310,46 @@ describe("hook contract: success is reported only after COMMIT", () => {
       expect(events.some((event) => event.startsWith("end:"))).toBe(false);
     });
     expect(events).toContain("end:create:node");
+  });
+
+  it("set updates inside store.transaction defer success hooks to COMMIT", async () => {
+    const { store, failing, events } = await buildStore();
+    events.length = 0;
+
+    failing.arm();
+    await expect(
+      store.transaction(async (tx) => {
+        await tx.nodes.Person.updateWhere({
+          patch: { name: "Changed" },
+          all: true,
+        });
+        expect(events.some((event) => event.startsWith("bulk-end:"))).toBe(
+          false,
+        );
+      }),
+    ).rejects.toThrow(InjectedCommitFailure);
+    failing.disarm();
+
+    expect(events).toContain("bulk-start:updateWhere:node");
+    expect(events.some((event) => event.startsWith("bulk-end:"))).toBe(false);
+    expect(events).toContain("error:InjectedCommitFailure");
+    const rolledBackPerson = await store.nodes.Person.getById(
+      "person-a" as never,
+    );
+    expect(rolledBackPerson?.name).toBe("A");
+
+    events.length = 0;
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.updateWhere({
+        patch: { name: "Changed" },
+        all: true,
+      });
+      expect(events).toEqual(["bulk-start:updateWhere:node"]);
+    });
+    expect(events).toEqual([
+      "bulk-start:updateWhere:node",
+      "bulk-end:updateWhere:node:2",
+    ]);
   });
 
   for (const operation of operations) {

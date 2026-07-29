@@ -253,6 +253,48 @@ describe("Node Collections (SQLite)", () => {
       );
     });
 
+    it("supports a schema property named field in the typed predicate", async () => {
+      const Entry = defineNode("Entry", {
+        schema: z.object({ field: z.string(), selected: z.boolean() }),
+      });
+      const fieldGraph = defineGraph({
+        id: "update_where_field_property",
+        nodes: { Entry: { type: Entry } },
+        edges: {},
+      });
+      const fieldStore = createStore(fieldGraph, createTestBackend());
+      const matching = await fieldStore.nodes.Entry.create({
+        field: "match",
+        selected: false,
+      });
+      const other = await fieldStore.nodes.Entry.create({
+        field: "other",
+        selected: false,
+      });
+
+      const result = await fieldStore.nodes.Entry.updateWhere({
+        patch: { selected: true },
+        where: (entry) => entry.field.eq("match"),
+      });
+
+      expect(result).toEqual({ affectedCount: 1 });
+      expect(
+        requireDefined(await fieldStore.nodes.Entry.getById(matching.id))
+          .selected,
+      ).toBe(true);
+      expect(
+        requireDefined(await fieldStore.nodes.Entry.getById(other.id)).selected,
+      ).toBe(false);
+
+      await fieldStore.getNodeCollectionOrThrow("Entry").updateWhere({
+        patch: { selected: true },
+        where: (entry) => entry.field("field").string().eq("other"),
+      });
+      expect(
+        requireDefined(await fieldStore.nodes.Entry.getById(other.id)).selected,
+      ).toBe(true);
+    });
+
     it("requires explicit all and removes optional properties with undefined", async () => {
       const alice = await store.nodes.Person.create({ name: "Alice", age: 35 });
       await expect(
