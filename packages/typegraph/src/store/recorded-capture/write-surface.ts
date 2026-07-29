@@ -10,6 +10,7 @@ import {
   type TransactionBackend,
   type UpdateEdgeParams,
   type UpdateNodeParams,
+  type UpdateNodeSetParams,
 } from "../../backend/types";
 import { type Assert, type Equal } from "../../utils/type-assert";
 
@@ -43,6 +44,7 @@ export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
+  "updateNodeSet",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -74,6 +76,7 @@ type FunctionKeys<T> = {
 type GraphEntityWriteParam =
   | InsertNodeParams
   | UpdateNodeParams
+  | UpdateNodeSetParams
   | DeleteNodeParams
   | HardDeleteNodeParams
   | InsertEdgeParams

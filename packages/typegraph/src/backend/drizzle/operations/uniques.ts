@@ -4,6 +4,7 @@ import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
   DeleteUniqueParams,
+  HardDeleteUniquesByNodeIdsParams,
   InsertUniqueParams,
   SqlDialect,
 } from "../../types";
@@ -247,14 +248,33 @@ export function buildDeleteUnique(
 export function buildHardDeleteUniquesByNode(
   tables: Tables,
   graphId: string,
+  concreteKind: string,
   nodeId: string,
+): SQL {
+  return buildHardDeleteUniquesByNodeIds(tables, {
+    graphId,
+    concreteKind,
+    nodeIds: [nodeId],
+  });
+}
+
+/**
+ * Builds a hard DELETE for every uniqueness entry owned by concrete nodes.
+ */
+export function buildHardDeleteUniquesByNodeIds(
+  tables: Tables,
+  params: HardDeleteUniquesByNodeIdsParams,
 ): SQL {
   const { uniques } = tables;
 
   return sql`
     DELETE FROM ${uniques}
-    WHERE ${uniques.graphId} = ${graphId}
-      AND ${uniques.nodeId} = ${nodeId}
+    WHERE ${uniques.graphId} = ${params.graphId}
+      AND ${uniques.concreteKind} = ${params.concreteKind}
+      AND ${uniques.nodeId} IN (${sql.join(
+        params.nodeIds.map((nodeId) => sql`${nodeId}`),
+        sql`, `,
+      )})
   `;
 }
 

@@ -6,6 +6,7 @@
  * implementing this interface.
  */
 import { type VectorMetric } from "../../backend/types";
+import { type JsonValue } from "../../core/types";
 import { type ValueType } from "../ast";
 import { type JsonPointer } from "../json-pointer";
 import { type SqlFragment } from "../sql-fragment";
@@ -358,6 +359,18 @@ export interface DialectAdapter {
     this: void,
     column: SqlFragment,
     pointer: JsonPointer,
+  ) => SqlFragment;
+
+  /**
+   * Replaces top-level JSON object properties while preserving explicit JSON
+   * null values. This is the token-level dialect seam used by set-based node
+   * mutation; callers validate the patch against the node schema before SQL
+   * compilation.
+   */
+  readonly jsonSetProperties: (
+    this: void,
+    column: SqlFragment,
+    patch: Readonly<Record<string, JsonValue>>,
   ) => SqlFragment;
 
   // ============================================================

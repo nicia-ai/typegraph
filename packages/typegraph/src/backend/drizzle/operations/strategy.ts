@@ -26,6 +26,7 @@ import type {
   FulltextSearchParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteUniquesByNodeIdsParams,
   HybridSearchParams,
   InsertEdgeParams,
   InsertNodeParams,
@@ -34,6 +35,7 @@ import type {
   SqlDialect,
   UpdateEdgeParams,
   UpdateNodeParams,
+  UpdateNodeSetParams,
   UpsertFulltextBatchParams,
   UpsertFulltextParams,
 } from "../../types";
@@ -78,6 +80,7 @@ import {
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
   buildUpdateNode,
+  buildUpdateNodeSet,
 } from "./nodes";
 import {
   buildGetActiveSchema,
@@ -91,6 +94,7 @@ import {
   buildCheckUniqueBatch,
   buildDeleteUnique,
   buildHardDeleteUniquesByNode,
+  buildHardDeleteUniquesByNodeIds,
   buildInsertUnique,
   buildInsertUniqueBatch,
 } from "./uniques";
@@ -138,6 +142,7 @@ export type CommonOperationStrategy = Readonly<{
   buildGetNode: (graphId: string, kind: string, id: string) => SQL;
   buildGetNodes: (graphId: string, kind: string, ids: readonly string[]) => SQL;
   buildUpdateNode: (params: UpdateNodeParams, timestamp: string) => SQL;
+  buildUpdateNodeSet: (params: UpdateNodeSetParams, timestamp: string) => SQL;
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
   buildHardDeleteNode: (params: HardDeleteNodeParams) => SQL;
   buildInsertEdge: (params: InsertEdgeParams, timestamp: string) => SQL;
@@ -190,7 +195,14 @@ export type CommonOperationStrategy = Readonly<{
   buildInsertUnique: (params: InsertUniqueParams) => SQL;
   buildInsertUniqueBatch: (entries: readonly InsertUniqueParams[]) => SQL;
   buildDeleteUnique: (params: DeleteUniqueParams, timestamp: string) => SQL;
-  buildHardDeleteUniquesByNode: (graphId: string, nodeId: string) => SQL;
+  buildHardDeleteUniquesByNode: (
+    graphId: string,
+    concreteKind: string,
+    nodeId: string,
+  ) => SQL;
+  buildHardDeleteUniquesByNodeIds: (
+    params: HardDeleteUniquesByNodeIdsParams,
+  ) => SQL;
   buildCheckUnique: (params: CheckUniqueParams) => SQL;
   buildCheckUniqueBatch: (params: CheckUniqueBatchParams) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
@@ -280,6 +292,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildCountEdgesByKind,
   buildDeleteUnique,
   buildHardDeleteUniquesByNode,
+  buildHardDeleteUniquesByNodeIds,
   buildCheckUnique,
   buildCheckUniqueBatch,
   buildGetSchemaVersion,
@@ -428,6 +441,9 @@ function createCommonOperationStrategy(
   return {
     ...tableOperations,
     ...fulltextBuilders,
+    buildUpdateNodeSet(params: UpdateNodeSetParams, timestamp: string): SQL {
+      return buildUpdateNodeSet(tables, dialect, params, timestamp);
+    },
     buildDeleteContributionMaterialization,
     buildInsertUnique(params: InsertUniqueParams): SQL {
       return buildInsertUnique(tables, dialect, params);

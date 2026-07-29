@@ -395,6 +395,20 @@ function createRecordedTransactionBackend(
       return row;
     },
 
+    ...(target.updateNodeSet === undefined ?
+      {}
+    : {
+        async updateNodeSet(params) {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const result = await requireDefined(target.updateNodeSet)(params);
+          for (const row of result.rows) {
+            session.touchNode(row.graph_id, row.kind, row.id, row);
+          }
+          return result;
+        },
+      }),
+
     async deleteNode(params) {
       session.assertOpen();
       await lockGraph(params.graphId);
@@ -632,6 +646,23 @@ export function createRecordedBackend(
     async updateNode(params) {
       return capture((target) => target.updateNode(params));
     },
+
+    ...(backend.updateNodeSet === undefined ?
+      {}
+    : {
+        async updateNodeSet(params) {
+          return capture((target) => {
+            const updateNodeSet = target.updateNodeSet;
+            if (updateNodeSet === undefined) {
+              throw new ConfigurationError(
+                "Recorded updateNodeSet capability disappeared inside a transaction",
+                { operation: "updateNodeSet" },
+              );
+            }
+            return updateNodeSet(params);
+          });
+        },
+      }),
 
     async deleteNode(params) {
       await capture((target) => target.deleteNode(params));

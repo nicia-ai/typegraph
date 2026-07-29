@@ -43,6 +43,7 @@ import type {
   FindNodesByKindParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteUniquesByNodeIdsParams,
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
@@ -55,6 +56,8 @@ import type {
   UniqueRow,
   UpdateEdgeParams,
   UpdateNodeParams,
+  UpdateNodeSetParams,
+  UpdateNodeSetResult,
 } from "../types";
 import { type ExecutableSql } from "./execution/types";
 import {
@@ -99,6 +102,7 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteEdge"
   | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
+  | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
@@ -111,6 +115,7 @@ export type CommonOperationBackend = Pick<
   | "insertUniqueBatch"
   | "updateEdge"
   | "updateNode"
+  | "updateNodeSet"
 > &
   Readonly<{
     executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
@@ -178,6 +183,7 @@ type OperationBackendBatchConfig = Readonly<{
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
+  uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
 }>;
 
@@ -440,6 +446,28 @@ export function createCommonOperationBackend(
       return rowMappers.toNodeRow(row);
     },
 
+    async updateNodeSet(
+      params: UpdateNodeSetParams,
+    ): Promise<UpdateNodeSetResult> {
+      if (Object.keys(params.patch).length === 0) {
+        throw new ConfigurationError(
+          "Set-based node update requires at least one property",
+          { operation: "updateNodeSet", kind: params.kind },
+        );
+      }
+      if (params.candidateIdColumn.length === 0) {
+        throw new ConfigurationError(
+          "Set-based node update requires a candidate id column",
+          { operation: "updateNodeSet", kind: params.kind },
+        );
+      }
+      const timestamp = nowIso();
+      const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
+      return { affectedCount: updatedRows.length, rows: updatedRows };
+    },
+
     async deleteNode(params: DeleteNodeParams): Promise<void> {
       const timestamp = nowIso();
       const query = operationStrategy.buildDeleteNode(params, timestamp);
@@ -458,6 +486,7 @@ export function createCommonOperationBackend(
     async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
       const deleteUniquesQuery = operationStrategy.buildHardDeleteUniquesByNode(
         params.graphId,
+        params.kind,
         params.id,
       );
       await execution.execRun(deleteUniquesQuery);
@@ -786,6 +815,22 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       const query = operationStrategy.buildDeleteUnique(params, timestamp);
       await execution.execRun(query);
+    },
+
+    async hardDeleteUniquesByNodeIds(
+      params: HardDeleteUniquesByNodeIdsParams,
+    ): Promise<void> {
+      const nodeIds = [...new Set(params.nodeIds)];
+      for (const chunk of chunkArray(
+        nodeIds,
+        batchConfig.uniqueDeleteChunkSize,
+      )) {
+        const query = operationStrategy.buildHardDeleteUniquesByNodeIds({
+          ...params,
+          nodeIds: chunk,
+        });
+        await execution.execRun(query);
+      }
     },
 
     async checkUnique(

@@ -92,6 +92,9 @@ type CommitSchemaVersionParams = Readonly<{
 type CompiledRowsSql = IntentSql<"rows">;
 
 // @public (undocumented)
+type CompiledSelectSql = CompiledRowsSql;
+
+// @public (undocumented)
 type CompiledStatementSql = IntentSql<"statement">;
 
 // @public (undocumented)
@@ -2650,6 +2653,7 @@ type GraphBackend = Readonly<{
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
+    updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
@@ -2677,6 +2681,7 @@ type GraphBackend = Readonly<{
     insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
     deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
+    hardDeleteUniquesByNodeIds?: (this: void, params: HardDeleteUniquesByNodeIdsParams) => Promise<void>;
     checkUnique: (this: void, params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
     checkUniqueBatch?: (this: void, params: CheckUniqueBatchParams) => Promise<readonly UniqueRow[]>;
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
@@ -2806,6 +2811,13 @@ type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+}>;
+
+// @public
+type HardDeleteUniquesByNodeIdsParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
+    nodeIds: readonly string[];
 }>;
 
 // @public
@@ -3062,7 +3074,7 @@ type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "deleteNode" | "hardDeleteNode">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -3384,7 +3396,7 @@ type TrustedImportSession = Readonly<{
 }>;
 
 // @public (undocumented)
-type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "checkUnique" | "checkUniqueBatch">;
+type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "checkUnique" | "checkUniqueBatch">;
 
 // @public
 type UniquenessScope = "kind" | "kindWithSubClasses";
@@ -3418,6 +3430,21 @@ type UpdateNodeParams = Readonly<{
     validTo?: string;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
+}>;
+
+// @public
+type UpdateNodeSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    candidateIds: CompiledSelectSql;
+    candidateIdColumn: string;
+}>;
+
+// @public
+type UpdateNodeSetResult = Readonly<{
+    affectedCount: number;
+    rows: readonly NodeRow[];
 }>;
 
 // @public

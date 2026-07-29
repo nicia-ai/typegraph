@@ -225,6 +225,7 @@ const GET_EDGES_FIXED_PARAM_COUNT = 1;
 const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
 const FULLTEXT_UPSERT_PARAM_COUNT = 6;
 const FULLTEXT_DELETE_FIXED_PARAM_COUNT = 2;
+const UNIQUE_DELETE_FIXED_PARAM_COUNT = 2;
 const UNIQUE_INSERT_PARAM_COUNT = 6;
 
 /**
@@ -260,6 +261,8 @@ export type SqliteBatchChunkSizes = Readonly<{
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
+  /** Node ids per uniqueness-sidecar hard delete. */
+  uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
 }>;
 
@@ -308,6 +311,10 @@ export function computeSqliteBatchChunkSizes(
     nodeInsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / NODE_INSERT_PARAM_COUNT),
+    ),
+    uniqueDeleteChunkSize: Math.max(
+      1,
+      maxBindParameters - UNIQUE_DELETE_FIXED_PARAM_COUNT,
     ),
     uniqueInsertBatchSize: Math.max(
       1,

@@ -48,6 +48,22 @@ function toSqlitePath(pointer: JsonPointer): string {
 }
 
 /**
+ * Returns a JSON path for an object property, even when the property name is a
+ * numeric string. `toSqlitePath()` interprets numeric pointer segments as
+ * array indexes, which is correct for query pointers but not for the
+ * top-level object keys accepted by set-based patches.
+ */
+function toSqliteObjectPropertyPath(property: string): string {
+  return `$.${JSON.stringify(property)}`;
+}
+
+// SQLite builds before 3.48 default to 127 function arguments. Each json_set
+// replacement consumes a path/value pair in addition to the input document, so
+// compose bounded calls instead of making schema breadth an engine-version
+// dependency.
+const JSON_SET_REPLACEMENTS_PER_CALL = 50;
+
+/**
  * Checks if a JSON pointer segment is an array index.
  */
 function isArrayIndex(segment: string): boolean {
@@ -200,6 +216,25 @@ export const sqliteDialect: DialectAdapter = {
     const path = toSqlitePath(pointer);
     const pathSql = sql.raw(escapeSqliteLiteral(path));
     return sql`COALESCE(json_type(${column}, ${pathSql}) <> 'null', 0)`;
+  },
+
+  jsonSetProperties(column, patch) {
+    const entries = Object.entries(patch);
+    let patchedColumn = column;
+    for (
+      let offset = 0;
+      offset < entries.length;
+      offset += JSON_SET_REPLACEMENTS_PER_CALL
+    ) {
+      const replacements = entries
+        .slice(offset, offset + JSON_SET_REPLACEMENTS_PER_CALL)
+        .flatMap(([property, value]) => [
+          sql.raw(escapeSqliteLiteral(toSqliteObjectPropertyPath(property))),
+          sql`json(${JSON.stringify(value)})`,
+        ]);
+      patchedColumn = sql`json_set(${patchedColumn}, ${sql.join(replacements, sql`, `)})`;
+    }
+    return patchedColumn;
   },
 
   // ============================================================

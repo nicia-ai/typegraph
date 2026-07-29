@@ -240,6 +240,10 @@ export const postgresDialect: DialectAdapter = {
     return sql`COALESCE(jsonb_typeof(${column} #> ${path}) <> 'null', FALSE)`;
   },
 
+  jsonSetProperties(column, patch) {
+    return sql`${column} || ${JSON.stringify(patch)}::jsonb`;
+  },
+
   // ============================================================
   // Comparison Operations
   // ============================================================

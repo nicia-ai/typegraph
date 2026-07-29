@@ -27,6 +27,7 @@ export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
 export { registerRemovalMaterializationIntegrationTests } from "./removal-materialization";
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
+export { registerSetNodeMutationIntegrationTests } from "./set-node-mutation";
 export { registerSetOperationIntegrationTests } from "./set-operations";
 export { registerStoreViewIntegrationTests } from "./store-view";
 export { registerSubgraphIntegrationTests } from "./subgraph";

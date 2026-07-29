@@ -6,6 +6,7 @@
  */
 import {
   type IndexEntity,
+  type JsonValue,
   type KindEntity,
   type TemporalMode,
 } from "../core/types";
@@ -18,6 +19,7 @@ import {
 import { type SqlFragment } from "../query/sql-fragment";
 import {
   type CompiledRowsSql,
+  type CompiledSelectSql,
   type CompiledStatementSql,
   type CompiledTemporaryStatementSql,
 } from "../query/sql-intent";
@@ -397,6 +399,38 @@ export type UpdateNodeParams = Readonly<{
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
   clearDeleted?: boolean;
+}>;
+
+/**
+ * Parameters for updating a set of live nodes selected by a compiled
+ * TypeGraph query.
+ *
+ * The candidate query must expose the named node-id column from the same graph
+ * and kind. The backend independently fences the rows it writes to
+ * `graphId` and `kind`; constructing the matching candidate query remains the
+ * caller's responsibility.
+ * Property values replace top-level keys, including preserving an explicit
+ * JSON `null` value.
+ *
+ * This is a storage primitive: callers that expose it as a graph mutation are
+ * responsible for schema validation and for synchronizing uniqueness,
+ * fulltext, and vector sidecars. The result contains after-images only; callers
+ * that need previous property values must freeze the candidate set and retain
+ * its before-images in the same transaction before invoking this method.
+ */
+export type UpdateNodeSetParams = Readonly<{
+  graphId: string;
+  kind: string;
+  patch: Readonly<Record<string, JsonValue>>;
+  candidateIds: CompiledSelectSql;
+  /** Projected SQL column holding the candidate node id (for example `n_id`). */
+  candidateIdColumn: string;
+}>;
+
+/** The after-images changed by {@link GraphBackend.updateNodeSet}. */
+export type UpdateNodeSetResult = Readonly<{
+  affectedCount: number;
+  rows: readonly NodeRow[];
 }>;
 
 /**
@@ -1249,6 +1283,10 @@ export type GraphBackend = Readonly<{
     params: readonly InsertNodeParams[],
   ) => Promise<readonly NodeRow[]>;
   updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
+  updateNodeSet?: (
+    this: void,
+    params: UpdateNodeSetParams,
+  ) => Promise<UpdateNodeSetResult>;
   deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
   getNode: (
@@ -1378,6 +1416,15 @@ export type GraphBackend = Readonly<{
     entries: readonly InsertUniqueParams[],
   ) => Promise<void>;
   deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
+  /**
+   * Permanently removes every uniqueness sidecar owned by the specified
+   * concrete nodes. Optional capability used by set-based updates before they
+   * rebuild reservations from the returned node after-images.
+   */
+  hardDeleteUniquesByNodeIds?: (
+    this: void,
+    params: HardDeleteUniquesByNodeIdsParams,
+  ) => Promise<void>;
   checkUnique: (
     this: void,
     params: CheckUniqueParams,
@@ -2108,6 +2155,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "updateNode"
+  | "updateNodeSet"
   | "deleteNode"
   | "hardDeleteNode"
 >;
@@ -2149,6 +2197,7 @@ export type UniqueConstraintBackend = Pick<
   | "insertUnique"
   | "insertUniqueBatch"
   | "deleteUnique"
+  | "hardDeleteUniquesByNodeIds"
   | "checkUnique"
   | "checkUniqueBatch"
 >;
@@ -2572,6 +2621,13 @@ export type DeleteUniqueParams = Readonly<{
   nodeKind: string;
   constraintName: string;
   key: string;
+}>;
+
+/** Parameters for permanently clearing uniqueness sidecars by node identity. */
+export type HardDeleteUniquesByNodeIdsParams = Readonly<{
+  graphId: string;
+  concreteKind: string;
+  nodeIds: readonly string[];
 }>;
 
 /**
