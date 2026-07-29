@@ -47,6 +47,7 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "insertUnique",
   "insertUniqueBatch",
   "deleteUnique",
+  "hardDeleteUniquesByNodeIds",
   "checkUnique",
   "checkUniqueBatch",
   "getActiveSchema",

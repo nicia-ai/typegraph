@@ -43,6 +43,7 @@ import type {
   FindNodesByKindParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteUniquesByNodeIdsParams,
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
@@ -101,6 +102,7 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteEdge"
   | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
+  | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
@@ -181,6 +183,7 @@ type OperationBackendBatchConfig = Readonly<{
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
+  uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
 }>;
 
@@ -483,6 +486,7 @@ export function createCommonOperationBackend(
     async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
       const deleteUniquesQuery = operationStrategy.buildHardDeleteUniquesByNode(
         params.graphId,
+        params.kind,
         params.id,
       );
       await execution.execRun(deleteUniquesQuery);
@@ -811,6 +815,22 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       const query = operationStrategy.buildDeleteUnique(params, timestamp);
       await execution.execRun(query);
+    },
+
+    async hardDeleteUniquesByNodeIds(
+      params: HardDeleteUniquesByNodeIdsParams,
+    ): Promise<void> {
+      const nodeIds = [...new Set(params.nodeIds)];
+      for (const chunk of chunkArray(
+        nodeIds,
+        batchConfig.uniqueDeleteChunkSize,
+      )) {
+        const query = operationStrategy.buildHardDeleteUniquesByNodeIds({
+          ...params,
+          nodeIds: chunk,
+        });
+        await execution.execRun(query);
+      }
     },
 
     async checkUnique(

@@ -118,6 +118,158 @@ export function registerSetNodeMutationIntegrationTests(
       ).not.toHaveProperty("isActive");
     });
 
+    it("fences colliding candidate ids to the requested graph and kind", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const sharedId = "shared-set-update-id";
+      await store.nodes.Person.create({ name: "Target" }, { id: sharedId });
+      await store.nodes.Company.create(
+        { name: "Same graph" },
+        { id: sharedId },
+      );
+      await backend.insertNode({
+        graphId: "other_graph",
+        kind: "Person",
+        id: sharedId,
+        props: { name: "Other graph" },
+      });
+      const candidateIds = compileCandidateIds(
+        store.graphId,
+        backend,
+        store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (person) => person.id.eq(sharedId))
+          .select((ctx) => ctx.person.id)
+          .toAst(),
+      );
+
+      const result = await updateNodeSet(backend, {
+        graphId: store.graphId,
+        kind: "Person",
+        patch: { isActive: true },
+        candidateIds,
+        candidateIdColumn: "person_id",
+      });
+
+      expect(result.affectedCount).toBe(1);
+      expect(
+        rowPropsToObject(
+          requireDefined(
+            await backend.getNode(store.graphId, "Person", sharedId),
+          ).props,
+        ),
+      ).toHaveProperty("isActive", true);
+      expect(
+        rowPropsToObject(
+          requireDefined(
+            await backend.getNode(store.graphId, "Company", sharedId),
+          ).props,
+        ),
+      ).not.toHaveProperty("isActive");
+      expect(
+        rowPropsToObject(
+          requireDefined(
+            await backend.getNode("other_graph", "Person", sharedId),
+          ).props,
+        ),
+      ).not.toHaveProperty("isActive");
+    });
+
+    it("keeps hard-delete uniqueness cleanup scoped to concrete node kind", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const sharedId = "shared-unique-owner-id";
+      const personKey = "person@example.test";
+      const companyKey = "company@example.test";
+      const person = await store.nodes.Person.create(
+        { name: "Person" },
+        { id: sharedId },
+      );
+      await store.nodes.Company.create({ name: "Company" }, { id: sharedId });
+      await backend.insertUnique({
+        graphId: store.graphId,
+        nodeKind: "Person",
+        constraintName: "identity",
+        key: personKey,
+        nodeId: sharedId,
+        concreteKind: "Person",
+      });
+      await backend.insertUnique({
+        graphId: store.graphId,
+        nodeKind: "Company",
+        constraintName: "identity",
+        key: companyKey,
+        nodeId: sharedId,
+        concreteKind: "Company",
+      });
+
+      await store.nodes.Person.hardDelete(person.id);
+
+      await expect(
+        backend.checkUnique({
+          graphId: store.graphId,
+          nodeKind: "Person",
+          constraintName: "identity",
+          key: personKey,
+          includeDeleted: true,
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        backend.checkUnique({
+          graphId: store.graphId,
+          nodeKind: "Company",
+          constraintName: "identity",
+          key: companyKey,
+          includeDeleted: true,
+        }),
+      ).resolves.toMatchObject({
+        concrete_kind: "Company",
+        node_id: sharedId,
+      });
+    });
+
+    it("hard-deletes uniqueness sidecars for a set of concrete nodes", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const nodeIds = ["unique-owner-a", "unique-owner-b"];
+      for (const nodeId of nodeIds) {
+        await backend.insertUnique({
+          graphId: store.graphId,
+          nodeKind: "Person",
+          constraintName: "identity",
+          key: `${nodeId}@example.test`,
+          nodeId,
+          concreteKind: "Person",
+        });
+      }
+
+      await requireDefined(backend.hardDeleteUniquesByNodeIds)({
+        graphId: store.graphId,
+        concreteKind: "Person",
+        nodeIds: [...nodeIds, "unique-owner-a"],
+      });
+
+      for (const nodeId of nodeIds) {
+        await expect(
+          backend.checkUnique({
+            graphId: store.graphId,
+            nodeKind: "Person",
+            constraintName: "identity",
+            key: `${nodeId}@example.test`,
+            includeDeleted: true,
+          }),
+        ).resolves.toBeUndefined();
+      }
+      await expect(
+        requireDefined(backend.hardDeleteUniquesByNodeIds)({
+          graphId: store.graphId,
+          concreteKind: "Person",
+          nodeIds: [],
+        }),
+      ).resolves.toBeUndefined();
+    });
+
     it("replaces top-level values without deleting explicit JSON null", async () => {
       const store = context.getStore();
       const backend = context.getBackend();
@@ -160,6 +312,68 @@ export function registerSetNodeMutationIntegrationTests(
           reviewer: null,
           flags: { archived: true },
         },
+      });
+    });
+
+    it("treats numeric property names as object keys on every backend", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const document = await store.nodes.Document.create({ title: "Draft" });
+      const candidateIds = compileCandidateIds(
+        store.graphId,
+        backend,
+        store
+          .query()
+          .from("Document", "document")
+          .whereNode("document", (item) => item.id.eq(document.id))
+          .select((ctx) => ctx.document.id)
+          .toAst(),
+      );
+
+      const result = await updateNodeSet(backend, {
+        graphId: store.graphId,
+        kind: "Document",
+        patch: { "0": "zero", "01": "zero-one" },
+        candidateIds,
+        candidateIdColumn: "document_id",
+      });
+
+      expect(rowPropsToObject(requireDefined(result.rows[0]).props)).toEqual({
+        title: "Draft",
+        "0": "zero",
+        "01": "zero-one",
+      });
+    });
+
+    it("applies patches wider than SQLite's legacy function-argument limit", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const document = await store.nodes.Document.create({ title: "Draft" });
+      const candidateIds = compileCandidateIds(
+        store.graphId,
+        backend,
+        store
+          .query()
+          .from("Document", "document")
+          .whereNode("document", (item) => item.id.eq(document.id))
+          .select((ctx) => ctx.document.id)
+          .toAst(),
+      );
+      const patch = Object.fromEntries(
+        Array.from({ length: 70 }, (_, index) => [`field${index}`, index]),
+      );
+
+      const result = await updateNodeSet(backend, {
+        graphId: store.graphId,
+        kind: "Document",
+        patch,
+        candidateIds,
+        candidateIdColumn: "document_id",
+      });
+
+      expect(rowPropsToObject(requireDefined(result.rows[0]).props)).toEqual({
+        title: "Draft",
+        ...patch,
       });
     });
 

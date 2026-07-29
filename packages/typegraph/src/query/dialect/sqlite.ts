@@ -4,11 +4,7 @@
  * Implements dialect-specific SQL generation for SQLite databases.
  * Uses SQLite's JSON1 extension for JSON operations.
  */
-import {
-  type JsonPointer,
-  jsonPointer,
-  parseJsonPointer,
-} from "../json-pointer";
+import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql } from "../sql-fragment";
 import { fts5Strategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
@@ -50,6 +46,22 @@ function toSqlitePath(pointer: JsonPointer): string {
 
   return parts.join("");
 }
+
+/**
+ * Returns a JSON path for an object property, even when the property name is a
+ * numeric string. `toSqlitePath()` interprets numeric pointer segments as
+ * array indexes, which is correct for query pointers but not for the
+ * top-level object keys accepted by set-based patches.
+ */
+function toSqliteObjectPropertyPath(property: string): string {
+  return `$.${JSON.stringify(property)}`;
+}
+
+// SQLite builds before 3.48 default to 127 function arguments. Each json_set
+// replacement consumes a path/value pair in addition to the input document, so
+// compose bounded calls instead of making schema breadth an engine-version
+// dependency.
+const JSON_SET_REPLACEMENTS_PER_CALL = 50;
 
 /**
  * Checks if a JSON pointer segment is an array index.
@@ -207,11 +219,22 @@ export const sqliteDialect: DialectAdapter = {
   },
 
   jsonSetProperties(column, patch) {
-    const replacements = Object.entries(patch).flatMap(([property, value]) => [
-      sql.raw(escapeSqliteLiteral(toSqlitePath(jsonPointer([property])))),
-      sql`json(${JSON.stringify(value)})`,
-    ]);
-    return sql`json_set(${column}, ${sql.join(replacements, sql`, `)})`;
+    const entries = Object.entries(patch);
+    let patchedColumn = column;
+    for (
+      let offset = 0;
+      offset < entries.length;
+      offset += JSON_SET_REPLACEMENTS_PER_CALL
+    ) {
+      const replacements = entries
+        .slice(offset, offset + JSON_SET_REPLACEMENTS_PER_CALL)
+        .flatMap(([property, value]) => [
+          sql.raw(escapeSqliteLiteral(toSqliteObjectPropertyPath(property))),
+          sql`json(${JSON.stringify(value)})`,
+        ]);
+      patchedColumn = sql`json_set(${patchedColumn}, ${sql.join(replacements, sql`, `)})`;
+    }
+    return patchedColumn;
   },
 
   // ============================================================

@@ -71,6 +71,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "hardDeleteEdge",
   "hardDeleteEdgesBatch",
   "hardDeleteNode",
+  "hardDeleteUniquesByNodeIds",
   "hybridSearch",
   "insertEdge",
   "insertEdgeNoReturn",

@@ -26,6 +26,7 @@ import type {
   FulltextSearchParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteUniquesByNodeIdsParams,
   HybridSearchParams,
   InsertEdgeParams,
   InsertNodeParams,
@@ -93,6 +94,7 @@ import {
   buildCheckUniqueBatch,
   buildDeleteUnique,
   buildHardDeleteUniquesByNode,
+  buildHardDeleteUniquesByNodeIds,
   buildInsertUnique,
   buildInsertUniqueBatch,
 } from "./uniques";
@@ -193,7 +195,14 @@ export type CommonOperationStrategy = Readonly<{
   buildInsertUnique: (params: InsertUniqueParams) => SQL;
   buildInsertUniqueBatch: (entries: readonly InsertUniqueParams[]) => SQL;
   buildDeleteUnique: (params: DeleteUniqueParams, timestamp: string) => SQL;
-  buildHardDeleteUniquesByNode: (graphId: string, nodeId: string) => SQL;
+  buildHardDeleteUniquesByNode: (
+    graphId: string,
+    concreteKind: string,
+    nodeId: string,
+  ) => SQL;
+  buildHardDeleteUniquesByNodeIds: (
+    params: HardDeleteUniquesByNodeIdsParams,
+  ) => SQL;
   buildCheckUnique: (params: CheckUniqueParams) => SQL;
   buildCheckUniqueBatch: (params: CheckUniqueBatchParams) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
@@ -283,6 +292,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildCountEdgesByKind,
   buildDeleteUnique,
   buildHardDeleteUniquesByNode,
+  buildHardDeleteUniquesByNodeIds,
   buildCheckUnique,
   buildCheckUniqueBatch,
   buildGetSchemaVersion,

@@ -414,7 +414,9 @@ export type UpdateNodeParams = Readonly<{
  *
  * This is a storage primitive: callers that expose it as a graph mutation are
  * responsible for schema validation and for synchronizing uniqueness,
- * fulltext, and vector sidecars around the returned rows.
+ * fulltext, and vector sidecars. The result contains after-images only; callers
+ * that need previous property values must freeze the candidate set and retain
+ * its before-images in the same transaction before invoking this method.
  */
 export type UpdateNodeSetParams = Readonly<{
   graphId: string;
@@ -425,7 +427,7 @@ export type UpdateNodeSetParams = Readonly<{
   candidateIdColumn: string;
 }>;
 
-/** The rows changed by {@link GraphBackend.updateNodeSet}. */
+/** The after-images changed by {@link GraphBackend.updateNodeSet}. */
 export type UpdateNodeSetResult = Readonly<{
   affectedCount: number;
   rows: readonly NodeRow[];
@@ -1414,6 +1416,15 @@ export type GraphBackend = Readonly<{
     entries: readonly InsertUniqueParams[],
   ) => Promise<void>;
   deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
+  /**
+   * Permanently removes every uniqueness sidecar owned by the specified
+   * concrete nodes. Optional capability used by set-based updates before they
+   * rebuild reservations from the returned node after-images.
+   */
+  hardDeleteUniquesByNodeIds?: (
+    this: void,
+    params: HardDeleteUniquesByNodeIdsParams,
+  ) => Promise<void>;
   checkUnique: (
     this: void,
     params: CheckUniqueParams,
@@ -2186,6 +2197,7 @@ export type UniqueConstraintBackend = Pick<
   | "insertUnique"
   | "insertUniqueBatch"
   | "deleteUnique"
+  | "hardDeleteUniquesByNodeIds"
   | "checkUnique"
   | "checkUniqueBatch"
 >;
@@ -2609,6 +2621,13 @@ export type DeleteUniqueParams = Readonly<{
   nodeKind: string;
   constraintName: string;
   key: string;
+}>;
+
+/** Parameters for permanently clearing uniqueness sidecars by node identity. */
+export type HardDeleteUniquesByNodeIdsParams = Readonly<{
+  graphId: string;
+  concreteKind: string;
+  nodeIds: readonly string[];
 }>;
 
 /**
