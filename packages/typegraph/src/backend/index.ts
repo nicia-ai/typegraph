@@ -106,6 +106,8 @@ export type {
   ContributionMaterializationBackend,
   ContributionMaterializationIdentity,
   ContributionMaterializationRow,
+  ContributionRepairEntry,
+  ContributionRepairResult,
   CountEdgesByKindParams,
   CountEdgesFromParams,
   CountNodesByKindParams,

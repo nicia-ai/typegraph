@@ -108,10 +108,12 @@ function createMockMaterializer(
   // `undefined` means "every table exists" — the healthy state every
   // non-diagnostic test in this file assumes.
   existingTables?: ReadonlySet<string>,
+  execDdlOverride?: (statement: string) => Promise<void>,
 ) {
   const ensureMarkerTable = vi.fn((): Promise<void> => Promise.resolve());
-  const execDdl = vi.fn((_statement: string): Promise<void> =>
-    Promise.resolve(),
+  const execDdl = vi.fn(
+    execDdlOverride ??
+      ((_statement: string): Promise<void> => Promise.resolve()),
   );
   const getMarkers = vi.fn(
     getMarkersOverride ??
@@ -211,6 +213,11 @@ const VECTOR_SLOT = {
 const SECOND_VECTOR_SLOT = {
   ...VECTOR_SLOT,
   fieldPath: "summaryEmbedding",
+} as const;
+
+const OTHER_GRAPH_VECTOR_SLOT = {
+  ...VECTOR_SLOT,
+  graphId: "other-contrib-mat-unit",
 } as const;
 
 describe("#149 ensureRuntimeContributions is read-only when already materialized", () => {
@@ -954,12 +961,17 @@ describe("verifyContributions audits currently declared contributions", () => {
       new Set([...runtimeTables(), vectorTableOf(VECTOR_SLOT)]),
     );
     for (const contribution of pgvectorStrategy.ownedTables(VECTOR_SLOT)) {
+      const existing = markers.get(
+        markerKey({ graphId: GRAPH_ID, ...contribution }),
+      );
+      if (existing === undefined)
+        throw new Error("expected provisioned marker");
       recordMarkerInto(markers, {
         graphId: GRAPH_ID,
         logicalName: contribution.logicalName,
         owner: contribution.owner,
         tableName: contribution.tableName,
-        signature: "unused-signature",
+        signature: existing.signature,
         attemptedAt: new Date().toISOString(),
         materializedAt: undefined,
         error: failure,
@@ -1015,6 +1027,43 @@ describe("verifyContributions audits currently declared contributions", () => {
     await expect(
       materializer.verifyContributions(GRAPH_ID, [changed]),
     ).resolves.toMatchObject([{ state: "stale" }]);
+  });
+
+  it("keeps prior successful shape drift stale after a failed retry", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const contribution = pgvectorStrategy.ownedTables(VECTOR_SLOT)[0];
+    if (contribution === undefined)
+      throw new Error("expected vector contribution");
+    const identity = { graphId: GRAPH_ID, ...contribution };
+    const existing = markers.get(markerKey(identity));
+    if (existing === undefined) throw new Error("expected provisioned marker");
+    recordMarkerInto(markers, {
+      ...identity,
+      signature: existing.signature,
+      attemptedAt: new Date().toISOString(),
+      materializedAt: undefined,
+      error: "new shape could not be provisioned",
+    });
+
+    const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      new Set([...runtimeTables(), vectorTableOf(changed)]),
+    );
+
+    const first = await materializer.repairContributions(GRAPH_ID, [changed]);
+    const second = await materializer.repairContributions(GRAPH_ID, [changed]);
+    expect(first.results).toMatchObject([
+      { diagnostic: { state: "stale" }, status: "requires-rebuild" },
+    ]);
+    expect(second.results).toMatchObject([
+      { diagnostic: { state: "stale" }, status: "requires-rebuild" },
+    ]);
+    expect(spies.execDdl).not.toHaveBeenCalled();
+    expect(spies.recordMarker).not.toHaveBeenCalled();
   });
 
   it("reports a failed attempt that produced no table as failed-materialization", async () => {
@@ -1169,5 +1218,256 @@ describe("verifyContributions audits currently declared contributions", () => {
         (entry) => entry.physicalName === vectorTableOf(VECTOR_SLOT),
       ),
     ).toBe(false);
+  });
+});
+
+describe("repairContributions safely restores repairable declarations", () => {
+  it("repairs a missing vector marker even after the signature was cached", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const existingTables = new Set([
+      ...runtimeTables(),
+      vectorTableOf(VECTOR_SLOT),
+    ]);
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existingTables,
+    );
+    await materializer.ensureRuntimeContributions(GRAPH_ID);
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+
+    const contribution = pgvectorStrategy.ownedTables(VECTOR_SLOT)[0];
+    if (contribution === undefined)
+      throw new Error("expected vector contribution");
+    markers.delete(markerKey({ graphId: GRAPH_ID, ...contribution }));
+    spies.execDdl.mockClear();
+
+    const result = await materializer.repairContributions(GRAPH_ID, [
+      VECTOR_SLOT,
+    ]);
+
+    expect(result.results).toMatchObject([
+      {
+        diagnostic: {
+          kind: VECTOR_SLOT.nodeKind,
+          fieldPath: VECTOR_SLOT.fieldPath,
+          state: "missing-marker",
+        },
+        status: "repaired",
+      },
+    ]);
+    expect(result.remaining).toEqual([]);
+    expect(spies.execDdl).toHaveBeenCalled();
+  });
+
+  it("retries a failed materialization and is idempotent after success", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const contribution = pgvectorStrategy.ownedTables(VECTOR_SLOT)[0];
+    if (contribution === undefined)
+      throw new Error("expected vector contribution");
+    const identity = { graphId: GRAPH_ID, ...contribution };
+    const prior = markers.get(markerKey(identity));
+    if (prior === undefined) throw new Error("expected provisioned marker");
+    markers.delete(markerKey(identity));
+    recordMarkerInto(markers, {
+      ...identity,
+      signature: prior.signature,
+      attemptedAt: new Date().toISOString(),
+      materializedAt: undefined,
+      error: "simulated provisioning failure",
+    });
+    const existingTables = new Set(runtimeTables());
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existingTables,
+      () => {
+        existingTables.add(contribution.tableName);
+        return Promise.resolve();
+      },
+    );
+
+    const first = await materializer.repairContributions(GRAPH_ID, [
+      VECTOR_SLOT,
+    ]);
+    expect(first.results).toMatchObject([
+      {
+        diagnostic: { state: "failed-materialization" },
+        status: "repaired",
+      },
+    ]);
+    expect(first.remaining).toEqual([]);
+
+    await expect(
+      materializer.repairContributions(GRAPH_ID, [VECTOR_SLOT]),
+    ).resolves.toEqual({ results: [], remaining: [] });
+  });
+
+  it("repairs vector slots using each slot's graph id", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const existingTables = new Set([
+      ...runtimeTables(),
+      vectorTableOf(OTHER_GRAPH_VECTOR_SLOT),
+    ]);
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existingTables,
+    );
+    await materializer.ensureRuntimeContributions(GRAPH_ID);
+    await materializer.ensureVectorSlot(OTHER_GRAPH_VECTOR_SLOT);
+
+    const contribution = pgvectorStrategy.ownedTables(
+      OTHER_GRAPH_VECTOR_SLOT,
+    )[0];
+    if (contribution === undefined)
+      throw new Error("expected vector contribution");
+    markers.delete(
+      markerKey({
+        graphId: OTHER_GRAPH_VECTOR_SLOT.graphId,
+        ...contribution,
+      }),
+    );
+
+    const result = await materializer.repairContributions(GRAPH_ID, [
+      OTHER_GRAPH_VECTOR_SLOT,
+    ]);
+
+    expect(result.results).toMatchObject([
+      {
+        diagnostic: { state: "missing-marker" },
+        status: "repaired",
+      },
+    ]);
+    expect(result.remaining).toEqual([]);
+  });
+
+  it("repairs safe findings without re-stamping a stale sibling", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const existingTables = new Set([
+      ...runtimeTables(),
+      vectorTableOf(VECTOR_SLOT),
+      vectorTableOf(SECOND_VECTOR_SLOT),
+    ]);
+    await provision(markers);
+    const setup = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existingTables,
+    );
+    await setup.materializer.ensureVectorSlot(SECOND_VECTOR_SLOT);
+
+    const missing = pgvectorStrategy.ownedTables(VECTOR_SLOT)[0];
+    const stale = pgvectorStrategy.ownedTables(SECOND_VECTOR_SLOT)[0];
+    if (missing === undefined || stale === undefined) {
+      throw new Error("expected vector contributions");
+    }
+    markers.delete(markerKey({ graphId: GRAPH_ID, ...missing }));
+    const staleIdentity = { graphId: GRAPH_ID, ...stale };
+    const staleRow = markers.get(markerKey(staleIdentity));
+    if (staleRow === undefined) throw new Error("expected provisioned marker");
+    markers.set(markerKey(staleIdentity), {
+      ...staleRow,
+      signature: "stale-signature",
+    });
+    setup.spies.execDdl.mockClear();
+
+    const result = await setup.materializer.repairContributions(GRAPH_ID, [
+      VECTOR_SLOT,
+      SECOND_VECTOR_SLOT,
+    ]);
+
+    expect(
+      result.results.find(
+        (entry) => entry.diagnostic.fieldPath === VECTOR_SLOT.fieldPath,
+      ),
+    ).toMatchObject({ status: "repaired" });
+    expect(
+      result.results.find(
+        (entry) => entry.diagnostic.fieldPath === SECOND_VECTOR_SLOT.fieldPath,
+      ),
+    ).toMatchObject({
+      diagnostic: { state: "stale" },
+      status: "requires-rebuild",
+    });
+    expect(result.remaining).toMatchObject([
+      { fieldPath: SECOND_VECTOR_SLOT.fieldPath, state: "stale" },
+    ]);
+    expect(setup.spies.execDdl).toHaveBeenCalledTimes(missing.createDdl.length);
+  });
+
+  it("reports a failed repair and preserves the diagnostic for retry", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const contribution = pgvectorStrategy.ownedTables(VECTOR_SLOT)[0];
+    if (contribution === undefined)
+      throw new Error("expected vector contribution");
+    markers.delete(markerKey({ graphId: GRAPH_ID, ...contribution }));
+    const existingTables = new Set([
+      ...runtimeTables(),
+      contribution.tableName,
+    ]);
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existingTables,
+      () => Promise.reject(new Error("permission denied")),
+    );
+
+    const result = await materializer.repairContributions(GRAPH_ID, [
+      VECTOR_SLOT,
+    ]);
+    expect(result.results).toMatchObject([
+      { status: "failed", error: "permission denied" },
+    ]);
+    expect(result.remaining).toMatchObject([
+      { state: "missing-marker", lastError: "permission denied" },
+    ]);
+  });
+
+  it("invalidates a warm positive cache when repair fails", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const contribution = pgvectorStrategy.ownedTables(VECTOR_SLOT)[0];
+    if (contribution === undefined)
+      throw new Error("expected vector contribution");
+    const existingTables = new Set([
+      ...runtimeTables(),
+      contribution.tableName,
+    ]);
+    let failDdl = false;
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existingTables,
+      () =>
+        failDdl ?
+          Promise.reject(new Error("permission denied"))
+        : Promise.resolve(),
+    );
+    await materializer.ensureRuntimeContributions(GRAPH_ID);
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+
+    markers.delete(markerKey({ graphId: GRAPH_ID, ...contribution }));
+    failDdl = true;
+    const result = await materializer.repairContributions(GRAPH_ID, [
+      VECTOR_SLOT,
+    ]);
+
+    expect(result.results).toMatchObject([
+      { status: "failed", error: "permission denied" },
+    ]);
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "failed" },
+    });
   });
 });

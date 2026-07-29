@@ -93,6 +93,7 @@ import {
   type ContributionDiagnostic,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
+  type ContributionRepairResult,
   createBackendOverlay,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
@@ -1033,6 +1034,13 @@ export function createPostgresBackend(
       vectorSlots: readonly VectorSlot[],
     ): Promise<readonly ContributionDiagnostic[]> {
       return contributionMaterializer.verifyContributions(graphId, vectorSlots);
+    },
+
+    async repairContributions(
+      graphId: string,
+      vectorSlots: readonly VectorSlot[],
+    ): Promise<ContributionRepairResult> {
+      return contributionMaterializer.repairContributions(graphId, vectorSlots);
     },
 
     // Vector counterparts of the runtime-contribution methods. Present

@@ -27,6 +27,8 @@ import { type LocalSqlitePragmaOptions } from "./local-options";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../types";
 export {
   DEFAULT_LOCAL_SQLITE_PRAGMAS,

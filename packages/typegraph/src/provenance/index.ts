@@ -35,6 +35,8 @@ import { isPlainObject } from "../utils/object";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../backend/types";
 
 const DEFAULT_RETRACTED_FIELD = "retracted";

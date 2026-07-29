@@ -36,6 +36,8 @@ import {
   type ContributionDiagnosticState,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
+  type ContributionRepairEntry,
+  type ContributionRepairResult,
   createBackendOverlay,
   type RecordContributionMaterializationParams,
   type TransactionBackend,
@@ -244,10 +246,11 @@ function evaluateContributionState(
  * - no marker row at all is genuinely silent: nothing has been
  *   attempted, and boot will provision it on the next privileged run.
  *
- * With the table PRESENT, `missing` and `failed` collapse to
- * `missing-marker`: both mean "storage exists but no marker attests
- * it", and both are repaired by re-running the ensure. `stale` stays
- * distinct because its repair is a shape change, not a re-stamp.
+ * With the table PRESENT, `missing` and same-signature `failed` collapse to
+ * `missing-marker`: both mean "storage exists but no marker attests it", and
+ * both are repaired by re-running the ensure. A prior success at another
+ * signature stays `stale` even when the latest attempt failed, because its
+ * repair is a shape change, not a re-stamp.
  */
 function diagnoseContribution(
   row: ContributionMaterializationRow | undefined,
@@ -258,6 +261,13 @@ function diagnoseContribution(
     if (row === undefined) return undefined;
     if (row.materializedAt !== undefined) return "orphaned-marker";
     return row.lastError === undefined ? undefined : "failed-materialization";
+  }
+  // A prior success at another signature means the existing table has the old
+  // physical shape. That remains `stale` even when a later failed attempt also
+  // recorded an error: classifying it as `missing-marker` would invite an
+  // idempotent CREATE + marker re-stamp to bless the unchanged stale table.
+  if (row?.materializedAt !== undefined && row.signature !== signature) {
+    return "stale";
   }
   const state = evaluateContributionState(row, signature);
   switch (state) {
@@ -286,6 +296,12 @@ type VerificationTarget = Readonly<{
   contribution: StrategyTableContribution;
   kind?: string;
   fieldPath?: string;
+}>;
+
+type DiagnosedContribution = Readonly<{
+  graphId: string;
+  contribution: StrategyTableContribution;
+  diagnostic: ContributionDiagnostic;
 }>;
 
 function identityOf(
@@ -515,6 +531,14 @@ export type ContributionMaterializer = Readonly<{
     graphId: string,
     vectorSlots: readonly VectorSlot[],
   ) => Promise<readonly ContributionDiagnostic[]>;
+  /**
+   * Privileged repair pass over declarations resolved inside this
+   * materializer. Only non-destructive states are repaired automatically.
+   */
+  repairContributions: (
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<ContributionRepairResult>;
 }>;
 
 // NUL separator for the per-instance contribution cache key: collision-safe
@@ -756,9 +780,14 @@ export function createContributionMaterializer(
   async function ensureContributions(
     graphId: string,
     contributions: readonly StrategyTableContribution[],
-    options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+    options?: Readonly<{
+      force?: boolean;
+      onDrift?: "throw" | "skip";
+      bypassCache?: boolean;
+    }>,
   ): Promise<void> {
     const force = options?.force === true;
+    const bypassCache = options?.bypassCache === true;
     const entries = await Promise.all(
       contributions.map(async (contribution) => {
         const key = contributionKey(graphId, contribution);
@@ -769,10 +798,21 @@ export function createContributionMaterializer(
         };
       }),
     );
+    if (bypassCache) {
+      // Repair is invoked precisely when durable state may have changed behind
+      // this materializer's positive cache. Keep every touched key read-through
+      // from now on: deleting only the current entry would still let an assert
+      // that started before the repair repopulate stale success after a failed
+      // repair recorded the contribution as unusable.
+      for (const entry of entries) {
+        uncacheableKeys.add(entry.key);
+        initializedSignatures.delete(entry.key);
+      }
+    }
     // A cache hit requires the signature to match — a contribution whose
     // shape changed on this instance falls through to the drift-guard.
     const pending =
-      force ? entries : (
+      force || bypassCache ? entries : (
         entries.filter(
           (entry) =>
             uncacheableKeys.has(entry.key) ||
@@ -931,16 +971,14 @@ export function createContributionMaterializer(
     }
   }
 
-  async function verifyContributions(
+  function verificationTargetsByGraph(
     graphId: string,
     vectorSlots: readonly VectorSlot[],
-  ): Promise<readonly ContributionDiagnostic[]> {
-    // Vector slots carry their own graph id, exactly as `ensureVectorSlots`
-    // reads them, so the marker read stays one query per distinct graph.
-    const targetsByGraph = new Map<string, VerificationTarget[]>();
+  ): ReadonlyMap<string, readonly VerificationTarget[]> {
+    const targets = new Map<string, VerificationTarget[]>();
     function addTarget(id: string, target: VerificationTarget): void {
-      const existing = targetsByGraph.get(id);
-      if (existing === undefined) targetsByGraph.set(id, [target]);
+      const existing = targets.get(id);
+      if (existing === undefined) targets.set(id, [target]);
       else existing.push(target);
     }
 
@@ -959,6 +997,16 @@ export function createContributionMaterializer(
         }
       }
     }
+    return targets;
+  }
+
+  async function diagnoseContributions(
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ): Promise<readonly DiagnosedContribution[]> {
+    // Vector slots carry their own graph id, exactly as `ensureVectorSlots`
+    // reads them, so the marker read stays one query per distinct graph.
+    const targetsByGraph = verificationTargetsByGraph(graphId, vectorSlots);
 
     // One probe per distinct physical table, scoped to THIS call: a
     // strategy may own several contributions over one table, and paying a
@@ -975,7 +1023,7 @@ export function createContributionMaterializer(
       return probe;
     }
 
-    const diagnostics: ContributionDiagnostic[] = [];
+    const diagnosed: DiagnosedContribution[] = [];
     for (const [id, targets] of targetsByGraph) {
       // A never-bootstrapped marker table means no contribution is marked,
       // which the per-target verdict already models as an empty row set.
@@ -993,22 +1041,76 @@ export function createContributionMaterializer(
           await tableExists(contribution.tableName),
         );
         if (state === undefined) continue;
-        diagnostics.push({
-          owner: contribution.owner,
-          logicalName: contribution.logicalName,
-          physicalName: contribution.tableName,
-          ...(kind === undefined ? {} : { kind }),
-          ...(fieldPath === undefined ? {} : { fieldPath }),
-          state,
-          // The recorded reason, carried through verbatim. `state` folds
-          // several marker verdicts together because they share a repair;
-          // this is what keeps the fold from also discarding the one thing
-          // the catalog can never tell the operator.
-          ...(row?.lastError === undefined ? {} : { lastError: row.lastError }),
+        diagnosed.push({
+          graphId: id,
+          contribution,
+          diagnostic: {
+            owner: contribution.owner,
+            logicalName: contribution.logicalName,
+            physicalName: contribution.tableName,
+            ...(kind === undefined ? {} : { kind }),
+            ...(fieldPath === undefined ? {} : { fieldPath }),
+            state,
+            // The recorded reason, carried through verbatim. `state` folds
+            // several marker verdicts together because they share a repair;
+            // this is what keeps the fold from also discarding the one thing
+            // the catalog can never tell the operator.
+            ...(row?.lastError === undefined ?
+              {}
+            : { lastError: row.lastError }),
+          },
         });
       }
     }
-    return diagnostics;
+    return diagnosed;
+  }
+
+  async function verifyContributions(
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ): Promise<readonly ContributionDiagnostic[]> {
+    const diagnosed = await diagnoseContributions(graphId, vectorSlots);
+    return diagnosed.map((entry) => entry.diagnostic);
+  }
+
+  async function repairContributions(
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ): Promise<ContributionRepairResult> {
+    const diagnosed = await diagnoseContributions(graphId, vectorSlots);
+    const results: ContributionRepairEntry[] = [];
+    for (const { graphId: targetGraphId, contribution, diagnostic } of
+      diagnosed) {
+      if (
+        diagnostic.state === "stale" ||
+        diagnostic.state === "orphaned-marker"
+      ) {
+        results.push({ diagnostic, status: "requires-rebuild" });
+        continue;
+      }
+
+      try {
+        // A repair must bypass the positive process-local cache because the
+        // marker may have been removed or failed after this backend cached a
+        // healthy signature. This is intentionally NOT `force`: the normal
+        // drift guard must still refuse to re-stamp stale physical storage.
+        await ensureContributions(targetGraphId, [contribution], {
+          bypassCache: true,
+        });
+        results.push({ diagnostic, status: "repaired" });
+      } catch (error) {
+        results.push({
+          diagnostic,
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return {
+      results,
+      remaining: await verifyContributions(graphId, vectorSlots),
+    };
   }
 
   function evictVectorSlot(slot: VectorSlot): void {
@@ -1045,5 +1147,6 @@ export function createContributionMaterializer(
     dropVectorSlot,
     evictVectorSlot,
     verifyContributions,
+    repairContributions,
   };
 }

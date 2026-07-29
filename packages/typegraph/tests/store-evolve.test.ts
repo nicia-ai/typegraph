@@ -18,9 +18,13 @@
  *   `SchemaContentConflictError` depending on which CAS check fired
  *   first.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import {
+  type ContributionRepairResult,
+  createBackendOverlay,
+} from "../src/backend/types";
 import { defineGraph } from "../src/core/define-graph";
 import { embedding } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
@@ -35,6 +39,7 @@ import {
   GraphExtensionValidationError,
   IncompatibleChangeError,
 } from "../src/graph-extension";
+import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
 import {
   createAdapterStoreWithSchema,
   createStore,
@@ -693,6 +698,52 @@ describe("Store.evolve — runtime vector index derivation", () => {
     expect(personIndex?.origin).toBeUndefined();
     expect(paperIndex).toBeDefined();
     expect(paperIndex?.origin).toBe("runtime");
+  });
+
+  it("repairs contributions from the committed graph when called on a stale Store", async () => {
+    const baseBackend = createTestBackend();
+    const repairResult: ContributionRepairResult = {
+      results: [],
+      remaining: [],
+    };
+    const repairContributions = vi.fn(() => Promise.resolve(repairResult));
+    const backend = createBackendOverlay(baseBackend, {
+      capabilities: {
+        ...baseBackend.capabilities,
+        vector: pgvectorStrategy.capabilities,
+      },
+      vectorStrategy: pgvectorStrategy,
+      repairContributions,
+    });
+    const [staleStore] = await createStoreWithSchema(baseGraph, backend);
+
+    await staleStore.evolve(
+      defineGraphExtension({
+        nodes: {
+          Paper: {
+            properties: {
+              embedding: {
+                type: "array",
+                items: { type: "number" },
+                embedding: { dimensions: 384 },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    await expect(staleStore.repairContributions()).resolves.toBe(repairResult);
+    expect(repairContributions).toHaveBeenCalledWith(
+      baseGraph.id,
+      expect.arrayContaining([
+        expect.objectContaining({
+          nodeKind: "Paper",
+          fieldPath: "embedding",
+          dimensions: 384,
+        }),
+      ]),
+    );
   });
 });
 

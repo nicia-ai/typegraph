@@ -27,6 +27,7 @@ import {
   type AdapterBackend,
   type BackendCapabilities,
   type ContributionDiagnostic,
+  type ContributionRepairResult,
   createTransactionReadBackend,
   type GraphBackend,
   runOptionallyInTransaction,
@@ -261,7 +262,13 @@ const UNKNOWN_SCHEMA_METADATA: StoreSchemaMetadata = Object.freeze({
 });
 
 type CaughtUpVerb =
-  "evolve" | "materialize" | "deprecate" | "undeprecate" | "remove" | "reembed";
+  | "evolve"
+  | "materialize"
+  | "deprecate"
+  | "undeprecate"
+  | "remove"
+  | "reembed"
+  | "repair";
 
 /** Default page size for the {@link Store.reembedVectorField} re-embed loop. */
 const DEFAULT_REEMBED_BATCH_SIZE = 200;
@@ -286,6 +293,10 @@ const CAUGHT_UP_VERB_DETAILS: Readonly<
   reembed: {
     phrase: "re-embed a vector field on",
     code: "REEMBED_BEFORE_INITIALIZE",
+  },
+  repair: {
+    phrase: "repair contributions for",
+    code: "REPAIR_CONTRIBUTIONS_BEFORE_INITIALIZE",
   },
 };
 
@@ -497,6 +508,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     options?: ReembedVectorFieldOptions,
   ) => Promise<ReembedVectorFieldResult>;
   verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
+  repairContributions: () => Promise<ContributionRepairResult>;
   materializeRemovals: (
     options?: MaterializeRemovalsOptions,
   ) => Promise<MaterializeRemovalsResult>;
@@ -3360,6 +3372,45 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         resolveGraphVectorSlots(this.#graph)
       : [];
     return verify(this.graphId, vectorSlots);
+  }
+
+  /**
+   * Non-destructively repairs contribution states whose physical storage can
+   * be preserved: `missing-marker` and `failed-materialization`.
+   * `orphaned-marker` and `stale` findings are returned as
+   * `requires-rebuild`; this method never drops contribution tables or
+   * fabricates the data needed to rebuild them.
+   *
+   * The repair re-audits inside the backend and resolves every declaration
+   * from the committed schema. Callers do not supply diagnostics, physical
+   * names, or DDL. A stale Store is caught up to the active persisted graph
+   * before its vector slots are enumerated, so repair does not use declarations
+   * from the Store's stale in-memory graph snapshot.
+   *
+   * @throws {ConfigurationError} when no schema has been initialized or the
+   *   backend cannot probe and repair strategy-owned contributions.
+   */
+  async repairContributions(): Promise<ContributionRepairResult> {
+    const backend = this.#baseBackend;
+    const repair = backend.repairContributions;
+    if (repair === undefined) {
+      throw new ConfigurationError(
+        "repairContributions requires a backend that can probe and repair " +
+          "strategy-owned contribution tables.",
+        {
+          backend: backend.dialect,
+          capability: "contributions",
+          operation: "repair",
+        },
+      );
+    }
+
+    const { baseline } = await this.#loadCaughtUp("repair");
+    const vectorSlots =
+      backend.capabilities.vector?.supported === true ?
+        resolveGraphVectorSlots(baseline)
+      : [];
+    return repair(this.graphId, vectorSlots);
   }
 
   /**

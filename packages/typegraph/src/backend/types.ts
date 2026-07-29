@@ -1058,13 +1058,11 @@ export type ContributionDiagnosticState =
  * storage, so applying it to a `missing-marker` — where the table is
  * intact and only the bookkeeping is wrong — discards every embedding
  * to fix a marker, and without an `embed` callback it leaves the field
- * empty. For `missing-marker` and `failed-materialization` prefer
- * `ensureVectorSlotContribution(slot, { force: true })`, whose DDL is
- * `CREATE ... IF NOT EXISTS` and never drops. Note also that
- * `ensureRuntimeContributions` does NOT repair a fulltext
- * `orphaned-marker`: it short-circuits on the marker, which still
- * reads as initialized. See the per-state repair tables in the
- * troubleshooting guide.
+ * empty. Prefer `store.repairContributions()` for `missing-marker` and
+ * `failed-materialization`; it resolves the current strategy declarations
+ * internally and keeps the normal signature-drift guard enabled. It reports
+ * `stale` and `orphaned-marker` as `requires-rebuild`. See the per-state
+ * repair table in the troubleshooting guide.
  */
 export type ContributionDiagnostic = Readonly<{
   /** Producing strategy, e.g. `"fts5"` / `"tsvector"` / `"pgvector"`. */
@@ -1093,6 +1091,35 @@ export type ContributionDiagnostic = Readonly<{
    * whose marker row carries an error, not just those two states.
    */
   lastError?: string;
+}>;
+
+/**
+ * Outcome of one contribution considered by
+ * {@link GraphBackend.repairContributions}.
+ *
+ * Repair targets are always resolved from the backend's current strategy
+ * declarations. The diagnostic is returned for operator context only; callers
+ * never pass diagnostics or physical DDL back into the repair API.
+ */
+export type ContributionRepairEntry =
+  | Readonly<{
+      diagnostic: ContributionDiagnostic;
+      status: "repaired";
+    }>
+  | Readonly<{
+      diagnostic: ContributionDiagnostic;
+      status: "requires-rebuild";
+    }>
+  | Readonly<{
+      diagnostic: ContributionDiagnostic;
+      status: "failed";
+      error: string;
+    }>;
+
+/** Result of a contribution repair pass followed by a fresh verification. */
+export type ContributionRepairResult = Readonly<{
+  results: readonly ContributionRepairEntry[];
+  remaining: readonly ContributionDiagnostic[];
 }>;
 
 // ============================================================
@@ -1849,6 +1876,23 @@ export type GraphBackend = Readonly<{
     graphId: string,
     vectorSlots: readonly VectorSlot[],
   ) => Promise<readonly ContributionDiagnostic[]>;
+
+  /**
+   * Re-audit current contribution declarations and non-destructively repair
+   * `missing-marker` and `failed-materialization` findings. The backend must
+   * resolve every target itself; it must not accept caller-provided physical
+   * identities or DDL. `stale` and `orphaned-marker` findings are returned as
+   * `requires-rebuild` because repairing either can require destructive data
+   * reconstruction.
+   *
+   * Present only on backends that can both probe their catalog and run the
+   * strategy-owned contribution DDL.
+   */
+  repairContributions?: (
+    this: void,
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<ContributionRepairResult>;
 
   /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`

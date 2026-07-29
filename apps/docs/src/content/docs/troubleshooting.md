@@ -433,111 +433,48 @@ table, no DDL and no writes — so it is safe on a live store under a
 least-privilege role. It is deliberately **not** a boot step; call it
 from a health check or an operator script.
 
-**Solution: the repair depends on the state, and picking the wrong one
-can destroy data.** There is no single loop that repairs every entry.
+**Solution:** Run `repairContributions()` on a Store backed by the privileged
+DDL-capable connection:
 
-### Repairing a vector slot
+```typescript
+const result = await adminStore.repairContributions();
 
-Entries with `kind` and `fieldPath` set are embedding slots.
+for (const entry of result.results) {
+  if (entry.status === "failed") {
+    console.error(entry.diagnostic, entry.error);
+  }
+  if (entry.status === "requires-rebuild") {
+    console.warn("manual rebuild required", entry.diagnostic);
+  }
+}
+```
 
-| `state` | Repair | Embeddings |
+The method performs its own fresh audit and resolves contribution declarations
+from the committed graph and the active backend strategies. It never accepts a
+diagnostic, physical table name, or DDL from the caller. A Store opened before
+another writer evolved the graph catches up before enumerating vector slots
+instead of repairing from its stale in-memory graph snapshot.
+
+| `state` | Result | Data behavior |
 | --- | --- | --- |
-| `missing-marker` | `ensureVectorSlotContribution(slot, { force: true })` | **Preserved** |
-| `failed-materialization` | `ensureVectorSlotContribution(slot, { force: true })` | None existed |
-| `orphaned-marker` | `reembedVectorField(kind, fieldPath, { embed })` | Already lost with the table |
-| `stale` | `reembedVectorField(kind, fieldPath, { embed })` | **Destroyed — repopulation required** |
+| `missing-marker` | `repaired` or `failed` | Runs idempotent DDL and re-stamps the marker; existing rows are preserved |
+| `failed-materialization` | `repaired` or `failed` | Retries the current idempotent contribution DDL |
+| `orphaned-marker` | `requires-rebuild` | The table and its data are already gone |
+| `stale` | `requires-rebuild` | The stored physical shape does not match the current declaration |
 
-The distinction matters. `reembedVectorField` drops and recreates
-storage; without an `embed` callback it returns with **zero
-embeddings**. For `missing-marker` the table is intact and only the
-marker is not, so reaching for `reembedVectorField` there would destroy
-perfectly good vectors to fix a bookkeeping problem. Use the
-force-ensure instead — its DDL is `CREATE ... IF NOT EXISTS` and never
-drops, so it re-stamps the marker and leaves every row in place:
+`remaining` is a fresh post-repair diagnostic pass. An empty `remaining` array
+means no current declaration remains unhealthy after the pass. Once it is
+empty, a second call is idempotent and returns no results.
 
-```typescript
-import { resolveGraphVectorSlots } from "@nicia-ai/typegraph";
+For a vector `requires-rebuild` entry, use
+`reembedVectorField(kind, fieldPath, { embed })`. It drops and recreates the
+slot, so pass an `embed` callback or the field comes back with zero embeddings.
+A stale fulltext contribution requires an operator-planned rebuild; do not
+hand-edit the marker or run backend-owned DDL directly.
 
-const slots = resolveGraphVectorSlots(store.graph);
-
-for (const entry of await store.verifyContributions()) {
-  if (entry.kind === undefined || entry.fieldPath === undefined) continue;
-
-  if (entry.state === "missing-marker" || entry.state === "failed-materialization") {
-    // Non-destructive: re-stamps the marker, leaves storage untouched.
-    const slot = slots.find(
-      (candidate) =>
-        candidate.nodeKind === entry.kind &&
-        candidate.fieldPath === entry.fieldPath,
-    );
-    if (slot) await adminBackend.ensureVectorSlotContribution?.(slot, { force: true });
-  } else {
-    // orphaned-marker / stale: storage must be rebuilt. Pass `embed` or
-    // the field comes back empty and every vector query silently
-    // returns nothing.
-    await store.reembedVectorField(entry.kind, entry.fieldPath, {
-      embed: async (nodes) => new Map(/* recompute vectors here */),
-    });
-  }
-}
-```
-
-For `stale` the destruction is unavoidable rather than accidental: the
-stored vectors were written at a different dimension and are invalid
-under the new one, so they must be recomputed, not converted.
-
-### Repairing fulltext
-
-`ensureRuntimeContributions` does **not** force, and a fresh backend is
-not sufficient on its own. It short-circuits twice — once on a
-per-instance signature cache, and again if the durable marker row alone
-looks healthy. A fresh instance clears only the first. What repairs
-what:
-
-| `state` | Repair |
-| --- | --- |
-| `missing-marker`, `failed-materialization` | `ensureRuntimeContributions(graphId)` from a **fresh** privileged backend |
-| `orphaned-marker` | Re-run the contribution's own `createDdl` (below) |
-| `stale` | No supported automated repair — see the warning below |
-
-For `missing-marker` and `failed-materialization` the marker does not attest
-the contribution, so the ensure normally falls through and runs the DDL. Use a
-new backend instance defensively: a warm backend that cached an earlier healthy
-signature before the marker changed out of band can still return early. The
-diagnostic itself does not populate that cache, and missing or failed marker
-states are not cached.
-
-For `orphaned-marker` the marker still says `initialized`, so the
-ensure returns before any DDL no matter how fresh the backend is.
-Recreate the table from the declaration instead — the statements are
-idempotent, so this is safe to run against a table that turns out to
-still exist:
-
-```typescript
-const fulltextTable = adminBackend.tableNames.fulltext;
-for (const contribution of adminBackend.fulltextStrategy.ownedTables(fulltextTable)) {
-  for (const ddl of contribution.createDdl) {
-    await adminBackend.executeDdl?.(ddl);
-  }
-}
-```
-
-:::caution[`stale` fulltext has no supported repair path today]
-A `stale` fulltext contribution — the marker records a prior success at
-a different signature, which a library upgrade that changes the
-fulltext DDL can produce — cannot currently be repaired through the
-public API. Recreating the table does not help: the marker still
-carries the old signature, and re-stamping it is not exposed.
-
-Do **not** reach for `ensureRuntimeContributions` here. It throws on
-the drift guard, and on its way out it records the failure against the
-marker — which changes what the diagnostic reports next time from
-`stale` to `missing-marker`, with the drift-guard message in
-`lastError`. The underlying problem is unchanged; only its description
-moved. If you hit this, please open an issue with the reported
-`owner` / `logicalName` / `signature` rather than hand-editing the
-marker table.
-:::
+`repairContributions()` intentionally does not use the public diagnostic as an
+instruction list and does not force marker writes. A warm backend re-reads the
+marker, and the normal signature guard still refuses to bless stale storage.
 
 **An empty result does not mean everything was checked.** The diagnostic
 enumerates only current declarations. It ignores retired marker rows and treats
