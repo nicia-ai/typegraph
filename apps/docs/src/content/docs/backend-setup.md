@@ -1081,7 +1081,9 @@ Check `store.introspect().schemaVersion !== undefined` at runtime. Calling
 `store.clear()` deletes the schema rows and resets that Store to raw semantics;
 reopen it through a managed factory before resuming version-fenced writes.
 
-- **`store.verifyContributions()` is the catalog-checking diagnostic.**
+- **`store.verifyContributions()` diagnoses contribution storage;
+  `store.repairContributions()` repairs safe findings under a privileged
+  role.**
   Every gate above trusts the marker row without probing the catalog, so
   a database whose strategy-owned tables were dropped out of band opens
   clean and fails at the first read. This method compares each contribution
@@ -1092,8 +1094,11 @@ reopen it through a managed factory before resuming version-fenced writes.
   only, no DDL) so the least-privilege role can run it, and it is deliberately
   not part of any open path. For a readiness check, construct the Store with
   `createVerifiedStore()` first and then run this diagnostic; otherwise use
-  it as an operator check. Repair is state-specific and one wrong choice
-  destroys embeddings, so follow the per-state tables in
+  it as an operator check. The repair method re-audits current declarations,
+  preserves data while repairing `missing-marker` and
+  `failed-materialization`, and reports `stale` or `orphaned-marker` as
+  `requires-rebuild`. Run repair through the DDL-capable migration role, not
+  the least-privilege runtime role. Follow the per-state table in
   [The store opens clean but a fulltext or vector read fails](/troubleshooting#the-store-opens-clean-but-a-fulltext-or-vector-read-fails)
   rather than applying one repair to every entry.
 

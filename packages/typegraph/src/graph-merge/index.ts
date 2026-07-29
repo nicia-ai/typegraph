@@ -7,6 +7,8 @@
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../backend/types";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";

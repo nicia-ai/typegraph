@@ -61,6 +61,8 @@ import {
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../types";
 
 const nodeRequire = createRequire(import.meta.url);

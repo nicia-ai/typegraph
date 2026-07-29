@@ -481,6 +481,25 @@ type ContributionMaterializationRow = Readonly<{
 }>;
 
 // @public
+export type ContributionRepairEntry = Readonly<{
+    diagnostic: ContributionDiagnostic;
+    status: "repaired";
+}> | Readonly<{
+    diagnostic: ContributionDiagnostic;
+    status: "requires-rebuild";
+}> | Readonly<{
+    diagnostic: ContributionDiagnostic;
+    status: "failed";
+    error: string;
+}>;
+
+// @public
+export type ContributionRepairResult = Readonly<{
+    results: readonly ContributionRepairEntry[];
+    remaining: readonly ContributionDiagnostic[];
+}>;
+
+// @public
 abstract class CoordinatePinnedView<G extends GraphDef> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
     get algorithms(): StoreViewGraphAlgorithms<G>;
@@ -2253,6 +2272,7 @@ export type GraphBackend = Readonly<{
     assertVectorSlotsInitialized?: (this: void, slots: readonly VectorSlot[]) => Promise<void>;
     deleteVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
     verifyContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionDiagnostic[]>;
+    repairContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<ContributionRepairResult>;
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
@@ -5077,6 +5097,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     materializeSystemIndexes: (options?: MaterializeSystemIndexesOptions) => Promise<MaterializeIndexesResult>;
     reembedVectorField: (kind: string, fieldPath: string, options?: ReembedVectorFieldOptions) => Promise<ReembedVectorFieldResult>;
     verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
+    repairContributions: () => Promise<ContributionRepairResult>;
     materializeRemovals: (options?: MaterializeRemovalsOptions) => Promise<MaterializeRemovalsResult>;
     close: () => Promise<void>;
 }>;
@@ -5757,7 +5778,7 @@ type UniqueRow = Readonly<{
 }>;
 
 // @public (undocumented)
-type UnsafeHistoryStoreBackendMember = "clearGraph" | "executeDdl" | "executeRaw" | "executeStatement" | "schemaWriteTransaction" | "transaction" | "trustedImport";
+type UnsafeHistoryStoreBackendMember = "clearGraph" | "executeDdl" | "executeRaw" | "executeStatement" | "repairContributions" | "schemaWriteTransaction" | "transaction" | "trustedImport";
 
 // @public
 export class UnsupportedBackendCapabilityError extends TypeGraphError {

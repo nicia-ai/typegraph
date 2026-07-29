@@ -126,6 +126,8 @@ export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
   ContributionMaterializationBackend,
+  ContributionRepairEntry,
+  ContributionRepairResult,
   DeleteFulltextBatchParams,
   EdgeEntityReadBackend,
   EdgeEntityWriteBackend,

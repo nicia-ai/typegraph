@@ -22,6 +22,8 @@
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../backend/types";
 
 // ============================================================

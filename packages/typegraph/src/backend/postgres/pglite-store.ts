@@ -26,6 +26,8 @@ import { createLocalPgliteBackend } from "./pglite";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../types";
 
 export type LocalPgliteStoreOptions<

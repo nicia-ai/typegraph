@@ -227,11 +227,76 @@ export function registerContributionDiagnosticIntegrationTests(
       expect(entryFor(diagnostics, contribution.tableName)?.state).toBe(
         "stale",
       );
+
+      const repair = await store.repairContributions();
+      expect(repair.results).toMatchObject([
+        {
+          diagnostic: { physicalName: contribution.tableName, state: "stale" },
+          status: "requires-rebuild",
+        },
+      ]);
+      expect(entryFor(repair.remaining, contribution.tableName)?.state).toBe(
+        "stale",
+      );
+    });
+
+    it("repairs a missing marker on a warm Store without replacing its table", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const contribution = fulltextContribution();
+      const snapshot = requireDefined(
+        snapshots[0],
+        "boot must record the fulltext contribution marker",
+      );
+
+      // Warm the backend's positive signature cache before corrupting durable
+      // state. Repair must re-read the marker instead of trusting this cache.
+      expect(await store.verifyContributions()).toEqual([]);
+      await requireDefined(
+        backend.recordContributionMaterialization,
+        "backend must record contribution markers",
+      )({
+        graphId: snapshot.graphId,
+        logicalName: snapshot.logicalName,
+        owner: snapshot.owner,
+        tableName: snapshot.tableName,
+        signature: snapshot.signature,
+        attemptedAt: new Date().toISOString(),
+        materializedAt: undefined,
+        error: "simulated marker failure",
+      });
+
+      const result = await store.repairContributions();
+      expect(result.results).toMatchObject([
+        {
+          diagnostic: {
+            physicalName: contribution.tableName,
+            state: "missing-marker",
+            lastError: "simulated marker failure",
+          },
+          status: "repaired",
+        },
+      ]);
+      expect(result.remaining).toEqual([]);
+
+      // The same table remains usable and a second pass is a true no-op.
+      const created = await store.nodes.Person.create({ name: "Repaired" });
+      expect(await store.nodes.Person.getById(created.id)).toMatchObject({
+        name: "Repaired",
+      });
+      await expect(store.repairContributions()).resolves.toEqual({
+        results: [],
+        remaining: [],
+      });
     });
 
     it("reports a live table whose marker records no success as missing-marker", async () => {
       const store = context.getStore();
       const contribution = fulltextContribution();
+      const snapshot = requireDefined(
+        snapshots[0],
+        "boot must record the fulltext contribution marker",
+      );
 
       // Record a failed attempt: storage is present but the marker no
       // longer attests it, so every read is refused as uninitialized.
@@ -245,7 +310,7 @@ export function registerContributionDiagnosticIntegrationTests(
         logicalName: contribution.logicalName,
         owner: contribution.owner,
         tableName: contribution.tableName,
-        signature: IMPOSSIBLE_SIGNATURE,
+        signature: snapshot.signature,
         attemptedAt: new Date().toISOString(),
         materializedAt: undefined,
         error: "simulated materialization failure",

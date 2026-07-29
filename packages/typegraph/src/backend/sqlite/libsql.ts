@@ -42,6 +42,8 @@ import type { AdapterBackend } from "../types";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../types";
 
 // ============================================================

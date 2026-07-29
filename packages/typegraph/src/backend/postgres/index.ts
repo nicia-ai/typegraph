@@ -64,6 +64,8 @@ export {
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../types";
 
 // Schema: table definitions and factory options

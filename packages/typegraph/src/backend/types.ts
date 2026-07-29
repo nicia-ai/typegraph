@@ -1095,6 +1095,35 @@ export type ContributionDiagnostic = Readonly<{
   lastError?: string;
 }>;
 
+/**
+ * Outcome of one contribution considered by
+ * {@link GraphBackend.repairContributions}.
+ *
+ * Repair targets are always resolved from the backend's current strategy
+ * declarations. The diagnostic is returned for operator context only; callers
+ * never pass diagnostics or physical DDL back into the repair API.
+ */
+export type ContributionRepairEntry =
+  | Readonly<{
+      diagnostic: ContributionDiagnostic;
+      status: "repaired";
+    }>
+  | Readonly<{
+      diagnostic: ContributionDiagnostic;
+      status: "requires-rebuild";
+    }>
+  | Readonly<{
+      diagnostic: ContributionDiagnostic;
+      status: "failed";
+      error: string;
+    }>;
+
+/** Result of a contribution repair pass followed by a fresh verification. */
+export type ContributionRepairResult = Readonly<{
+  results: readonly ContributionRepairEntry[];
+  remaining: readonly ContributionDiagnostic[];
+}>;
+
 // ============================================================
 // Kind Removals (data-cleanup status)
 // ============================================================
@@ -1849,6 +1878,23 @@ export type GraphBackend = Readonly<{
     graphId: string,
     vectorSlots: readonly VectorSlot[],
   ) => Promise<readonly ContributionDiagnostic[]>;
+
+  /**
+   * Re-audit current contribution declarations and non-destructively repair
+   * `missing-marker` and `failed-materialization` findings. The backend must
+   * resolve every target itself; it must not accept caller-provided physical
+   * identities or DDL. `stale` and `orphaned-marker` findings are returned as
+   * `requires-rebuild` because repairing either can require destructive data
+   * reconstruction.
+   *
+   * Present only on backends that can both probe their catalog and run the
+   * strategy-owned contribution DDL.
+   */
+  repairContributions?: (
+    this: void,
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<ContributionRepairResult>;
 
   /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`
