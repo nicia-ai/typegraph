@@ -280,6 +280,23 @@ export const pgvectorStrategy: VectorStrategy = {
     ];
   },
 
+  buildDeleteBatch(
+    slot,
+    params: Omit<DeleteEmbeddingParams, "nodeId"> &
+      Readonly<{ nodeIds: readonly string[] }>,
+  ): readonly SqlFragment[] {
+    if (params.nodeIds.length === 0) return [];
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+    );
+    return [
+      sql`DELETE FROM ${table} WHERE "graph_id" = ${params.graphId} AND "node_id" IN (${sql.join(
+        params.nodeIds.map((nodeId) => sql`${nodeId}`),
+        sql`, `,
+      )})`,
+    ];
+  },
+
   buildSearch(
     slot,
     params: VectorSearchParams,

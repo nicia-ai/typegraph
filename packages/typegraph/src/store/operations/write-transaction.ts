@@ -112,6 +112,7 @@ export function runInWriteTransaction<T>(
     target: GraphBackend | TransactionBackend,
     lock: GraphWriteLock,
   ) => Promise<T>,
+  options?: Readonly<{ didWrite?: (result: T) => boolean }>,
 ): Promise<T> {
   const ownsWriteLock =
     "transaction" in backend && backend.capabilities.transactions;
@@ -125,7 +126,11 @@ export function runInWriteTransaction<T>(
     // History capture advances the same clock when it flushes its recorded
     // after-images. Live stores opt into revisions independently, so advance
     // only there and only after every row/sidecar write succeeded.
-    if (ctx.revisionTrackingEnabled && !ctx.historyEnabled) {
+    if (
+      ctx.revisionTrackingEnabled &&
+      !ctx.historyEnabled &&
+      (options?.didWrite?.(result) ?? true)
+    ) {
       await advanceRevisionClock(
         target,
         ctx.revisionSchema,

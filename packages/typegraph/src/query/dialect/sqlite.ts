@@ -218,7 +218,7 @@ export const sqliteDialect: DialectAdapter = {
     return sql`COALESCE(json_type(${column}, ${pathSql}) <> 'null', 0)`;
   },
 
-  jsonSetProperties(column, patch) {
+  jsonSetProperties(column, patch, unsetProperties = []) {
     const entries = Object.entries(patch);
     let patchedColumn = column;
     for (
@@ -234,7 +234,11 @@ export const sqliteDialect: DialectAdapter = {
         ]);
       patchedColumn = sql`json_set(${patchedColumn}, ${sql.join(replacements, sql`, `)})`;
     }
-    return patchedColumn;
+    if (unsetProperties.length === 0) return patchedColumn;
+    const removalPaths = unsetProperties.map((property) =>
+      sql.raw(escapeSqliteLiteral(toSqliteObjectPropertyPath(property))),
+    );
+    return sql`json_remove(${patchedColumn}, ${sql.join(removalPaths, sql`, `)})`;
   },
 
   // ============================================================

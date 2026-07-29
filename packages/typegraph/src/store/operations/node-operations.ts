@@ -19,7 +19,9 @@ import {
   getKindsForUniquenessCheck,
 } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
+import { assertJsonValue } from "../../core/json-value";
 import {
+  type JsonValue,
   type KindEntity,
   type NodeType,
   type UniqueConstraint,
@@ -51,6 +53,7 @@ import { getDialect } from "../../query/dialect";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { type JsonPointer, resolveJsonPointer } from "../../query/json-pointer";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
+import type { CompiledSelectSql } from "../../query/sql-intent";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
@@ -62,6 +65,8 @@ import {
   checkDisjointnessConstraint,
   type ConstraintContext,
 } from "../constraints";
+import { getEmbeddingFields } from "../embedding-sync";
+import { getSearchableFields } from "../fulltext-sync";
 import {
   nodeInsertDispatch,
   runInsertBatch,
@@ -72,6 +77,7 @@ import { getNodeRowsByIds } from "../node-fetch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type NodeRow, rowToNode } from "../row-mappers";
 import {
+  type BulkOperationHookContext,
   type CreateNodeInput,
   type GetOrCreateAction,
   type Node,
@@ -117,6 +123,14 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   ) => OperationHookContext;
   withOperationHooks: <T>(
     ctx: OperationHookContext,
+    fn: () => Promise<T>,
+  ) => Promise<T>;
+  createBulkOperationContext: (
+    operation: "updateWhere",
+    kind: string,
+  ) => BulkOperationHookContext;
+  withBulkOperationHooks: <T extends Readonly<{ affectedCount: number }>>(
+    ctx: BulkOperationHookContext,
     fn: () => Promise<T>,
   ) => Promise<T>;
 }>;
@@ -1172,6 +1186,292 @@ export async function executeNodeUpdate<G extends GraphDef>(
   );
   return runHookedWriteOperation(ctx, opContext, backend, (target, lock) =>
     performNodeUpdate(ctx, input, target, lock, options),
+  );
+}
+
+/**
+ * Executes an atomic, set-based update of current nodes. The backend returns
+ * every after-image so the Store can validate the complete rows before
+ * rebuilding all derived sidecars inside the same transaction.
+ */
+export async function executeNodeUpdateWhere<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  inputPatch: Record<string, unknown>,
+  candidateIds: CompiledSelectSql,
+  candidateIdColumn: string,
+  backend: GraphBackend | TransactionBackend,
+): Promise<Readonly<{ affectedCount: number }>> {
+  const registration = getNodeRegistration(ctx.graph, kind);
+  const schema = registration.type.schema;
+  const uniqueConstraints = registration.unique ?? [];
+
+  if (!backend.capabilities.transactions) {
+    throw new ConfigurationError(
+      "updateWhere() requires a transactional backend so validation and sidecars are atomic",
+      { code: "SET_UPDATE_TRANSACTIONS_REQUIRED", kind },
+    );
+  }
+  if (backend.updateNodeSet === undefined) {
+    throw new ConfigurationError(
+      "This backend does not support set-based node updates",
+      { code: "SET_UPDATE_UNSUPPORTED", kind },
+    );
+  }
+  if (Object.keys(inputPatch).length === 0) {
+    throw new ValidationError("updateWhere() patch must not be empty", {
+      entityType: "node",
+      kind,
+      operation: "update",
+      issues: [{ path: "patch", message: "Provide at least one property" }],
+    });
+  }
+  const unknownProperty = Object.keys(inputPatch).find(
+    (property) => !Object.hasOwn(schema.shape, property),
+  );
+  if (unknownProperty !== undefined) {
+    throw new ValidationError(
+      `Unknown ${kind} property in updateWhere() patch: ${unknownProperty}`,
+      {
+        entityType: "node",
+        kind,
+        operation: "update",
+        issues: [
+          {
+            path: unknownProperty,
+            message: "Property is not declared by the node schema",
+          },
+        ],
+      },
+    );
+  }
+
+  const parsedPatch = validateNodeProps(schema.partial(), inputPatch, {
+    kind,
+    operation: "update",
+  });
+  const patch: Record<string, JsonValue> = {};
+  const unsetProperties: string[] = [];
+  for (const [property, value] of Object.entries(parsedPatch)) {
+    if (value === undefined) {
+      unsetProperties.push(property);
+      continue;
+    }
+    assertJsonValue(value, property, `Node "${kind}" updateWhere patch`);
+    patch[property] = value as JsonValue;
+  }
+  if (Object.keys(patch).length === 0 && unsetProperties.length === 0) {
+    throw new ValidationError(
+      "updateWhere() patch has no recognized properties",
+      {
+        entityType: "node",
+        kind,
+        operation: "update",
+        issues: [
+          { path: "patch", message: "Provide a declared node property" },
+        ],
+      },
+    );
+  }
+
+  if (
+    uniqueConstraints.length > 0 &&
+    (backend.hardDeleteUniquesByNodeIds === undefined ||
+      backend.insertUniqueBatch === undefined ||
+      backend.checkUniqueBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "updateWhere() requires batched uniqueness sidecar operations for constrained nodes",
+      { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
+    );
+  }
+  if (
+    getSearchableFields(schema).length > 0 &&
+    (backend.upsertFulltext === undefined ||
+      backend.deleteFulltext === undefined ||
+      backend.upsertFulltextBatch === undefined ||
+      backend.deleteFulltextBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "updateWhere() requires batched fulltext sidecar operations for searchable nodes",
+      { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
+    );
+  }
+  if (
+    getEmbeddingFields(schema).length > 0 &&
+    (backend.upsertEmbedding === undefined ||
+      backend.deleteEmbedding === undefined ||
+      backend.upsertEmbeddingBatch === undefined ||
+      backend.deleteEmbeddingBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "updateWhere() requires batched vector sidecar operations for embedded nodes",
+      { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
+    );
+  }
+
+  const hookContext = ctx.createBulkOperationContext("updateWhere", kind);
+  return ctx.withBulkOperationHooks(hookContext, () =>
+    runInWriteTransaction(
+      ctx,
+      backend,
+      async (target, lock) => {
+        const updateNodeSet = target.updateNodeSet;
+        if (updateNodeSet === undefined) {
+          throw new ConfigurationError(
+            "The transaction backend does not support set-based node updates",
+            { code: "SET_UPDATE_UNSUPPORTED", kind },
+          );
+        }
+        const hardDeleteUniquesByNodeIds = target.hardDeleteUniquesByNodeIds;
+        if (
+          uniqueConstraints.length > 0 &&
+          (hardDeleteUniquesByNodeIds === undefined ||
+            target.insertUniqueBatch === undefined ||
+            target.checkUniqueBatch === undefined)
+        ) {
+          throw new ConfigurationError(
+            "The transaction backend lacks batched uniqueness operations",
+            { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
+          );
+        }
+        if (
+          getSearchableFields(schema).length > 0 &&
+          (target.upsertFulltext === undefined ||
+            target.deleteFulltext === undefined ||
+            target.upsertFulltextBatch === undefined ||
+            target.deleteFulltextBatch === undefined)
+        ) {
+          throw new ConfigurationError(
+            "The transaction backend lacks batched fulltext operations",
+            { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
+          );
+        }
+        if (
+          getEmbeddingFields(schema).length > 0 &&
+          (target.upsertEmbedding === undefined ||
+            target.deleteEmbedding === undefined ||
+            target.upsertEmbeddingBatch === undefined ||
+            target.deleteEmbeddingBatch === undefined)
+        ) {
+          throw new ConfigurationError(
+            "The transaction backend lacks batched vector operations",
+            { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
+          );
+        }
+        const result = await updateNodeSet({
+          graphId: ctx.graphId,
+          kind,
+          patch,
+          unsetProperties,
+          candidateIds,
+          candidateIdColumn,
+        });
+        if (result.affectedCount === 0) return { affectedCount: 0 };
+
+        const sidecarItems = result.rows.map((row) => {
+          const props = rowPropsToObject(row.props);
+          const validatedProps = validateNodeProps(schema, props, {
+            kind,
+            operation: "update",
+            id: row.id,
+          });
+          if (!canonicalEqual(validatedProps, props)) {
+            throw new ValidationError(
+              `Set update would persist a non-canonical ${kind} row`,
+              {
+                entityType: "node",
+                kind,
+                operation: "update",
+                id: row.id,
+                issues: [
+                  {
+                    path: "props",
+                    message: "The complete row requires schema normalization",
+                  },
+                ],
+              },
+            );
+          }
+          return {
+            kind,
+            id: row.id,
+            schema,
+            props: validatedProps,
+            uniqueConstraints,
+          };
+        });
+
+        if (uniqueConstraints.length > 0) {
+          const affectedIds = new Set(result.rows.map((row) => row.id));
+          for (const constraint of uniqueConstraints) {
+            const keyToId = new Map<string, string>();
+            for (const item of sidecarItems) {
+              if (!checkWherePredicate(constraint, item.props)) continue;
+              const key = computeUniqueKey(
+                item.props,
+                constraint.fields,
+                constraint.collation,
+              );
+              const priorId = keyToId.get(key);
+              if (priorId !== undefined && priorId !== item.id) {
+                throw new UniquenessError({
+                  constraintName: constraint.name,
+                  kind,
+                  existingId: priorId,
+                  newId: item.id,
+                  fields: constraint.fields,
+                });
+              }
+              keyToId.set(key, item.id);
+            }
+            const keys = [...keyToId.keys()];
+            if (keys.length === 0) continue;
+            for (const kindToCheck of getKindsForUniquenessCheck(
+              kind,
+              constraint.scope,
+              ctx.registry,
+            )) {
+              const existingRows = await requireDefined(
+                target.checkUniqueBatch,
+              )({
+                graphId: ctx.graphId,
+                nodeKind: kindToCheck,
+                constraintName: constraint.name,
+                keys,
+              });
+              for (const existing of existingRows) {
+                if (
+                  existing.concrete_kind === kind &&
+                  affectedIds.has(existing.node_id)
+                ) {
+                  continue;
+                }
+                throw new UniquenessError({
+                  constraintName: constraint.name,
+                  kind: kindToCheck,
+                  existingId: existing.node_id,
+                  newId: requireDefined(keyToId.get(existing.key)),
+                  fields: constraint.fields,
+                });
+              }
+            }
+          }
+          await requireDefined(hardDeleteUniquesByNodeIds)({
+            graphId: ctx.graphId,
+            concreteKind: kind,
+            nodeIds: result.rows.map((row) => row.id),
+          });
+        }
+        await applyNodeInsertSideEffectsBatch(
+          createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+          sidecarItems,
+          target,
+        );
+        return { affectedCount: result.affectedCount };
+      },
+      { didWrite: (result) => result.affectedCount > 0 },
+    ),
   );
 }
 

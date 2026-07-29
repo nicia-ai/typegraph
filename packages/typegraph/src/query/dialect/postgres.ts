@@ -240,8 +240,14 @@ export const postgresDialect: DialectAdapter = {
     return sql`COALESCE(jsonb_typeof(${column} #> ${path}) <> 'null', FALSE)`;
   },
 
-  jsonSetProperties(column, patch) {
-    return sql`${column} || ${JSON.stringify(patch)}::jsonb`;
+  jsonSetProperties(column, patch, unsetProperties = []) {
+    const withReplacements =
+      Object.keys(patch).length === 0 ?
+        column
+      : sql`${column} || ${JSON.stringify(patch)}::jsonb`;
+    if (unsetProperties.length === 0) return withReplacements;
+    const properties = unsetProperties.map((property) => sql`${property}`);
+    return sql`(${withReplacements}) - ARRAY[${sql.join(properties, sql`, `)}]::text[]`;
   },
 
   // ============================================================

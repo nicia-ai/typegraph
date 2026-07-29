@@ -208,6 +208,192 @@ describe("Node Collections (SQLite)", () => {
     });
   });
 
+  describe("store.nodes.*.updateWhere()", () => {
+    it("ANDs property filters with independent relationship predicates", async () => {
+      const acme = await store.nodes.Company.create({
+        name: "Acme",
+        industry: "technology",
+      });
+      const bank = await store.nodes.Company.create({
+        name: "Bank",
+        industry: "finance",
+      });
+      const alice = await store.nodes.Person.create({ name: "Alice", age: 35 });
+      const bob = await store.nodes.Person.create({ name: "Bob", age: 35 });
+      await store.edges.worksAt.create(alice, acme, { role: "engineer" });
+      await store.edges.worksAt.create(alice, bank, { role: "analyst" });
+      await store.edges.worksAt.create(bob, bank, { role: "engineer" });
+
+      const result = await store.nodes.Person.updateWhere({
+        patch: { age: 36 },
+        where: (person) => person.age.gte(30),
+        exists: [
+          {
+            edgeKind: "worksAt",
+            direction: "out",
+            relatedKind: "Company",
+            whereRelated: (company) =>
+              company.field("industry").string().eq("technology"),
+          },
+          {
+            edgeKind: "worksAt",
+            direction: "out",
+            relatedKind: "Company",
+            whereEdge: (edge) => edge.field("role").string().eq("analyst"),
+          },
+        ],
+      });
+
+      expect(result).toEqual({ affectedCount: 1 });
+      expect(
+        requireDefined(await store.nodes.Person.getById(alice.id)).age,
+      ).toBe(36);
+      expect(requireDefined(await store.nodes.Person.getById(bob.id)).age).toBe(
+        35,
+      );
+    });
+
+    it("supports a schema property named field in the typed predicate", async () => {
+      const Entry = defineNode("Entry", {
+        schema: z.object({ field: z.string(), selected: z.boolean() }),
+      });
+      const fieldGraph = defineGraph({
+        id: "update_where_field_property",
+        nodes: { Entry: { type: Entry } },
+        edges: {},
+      });
+      const fieldStore = createStore(fieldGraph, createTestBackend());
+      const matching = await fieldStore.nodes.Entry.create({
+        field: "match",
+        selected: false,
+      });
+      const other = await fieldStore.nodes.Entry.create({
+        field: "other",
+        selected: false,
+      });
+
+      const result = await fieldStore.nodes.Entry.updateWhere({
+        patch: { selected: true },
+        where: (entry) => entry.field.eq("match"),
+      });
+
+      expect(result).toEqual({ affectedCount: 1 });
+      expect(
+        requireDefined(await fieldStore.nodes.Entry.getById(matching.id))
+          .selected,
+      ).toBe(true);
+      expect(
+        requireDefined(await fieldStore.nodes.Entry.getById(other.id)).selected,
+      ).toBe(false);
+
+      await fieldStore.getNodeCollectionOrThrow("Entry").updateWhere({
+        patch: { selected: true },
+        where: (entry) => entry.field("field").string().eq("other"),
+      });
+      expect(
+        requireDefined(await fieldStore.nodes.Entry.getById(other.id)).selected,
+      ).toBe(true);
+    });
+
+    it("requires explicit all and removes optional properties with undefined", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice", age: 35 });
+      await expect(
+        store.nodes.Person.updateWhere({ patch: { age: 36 } }),
+      ).rejects.toThrow("explicit all: true");
+
+      await store.nodes.Person.updateWhere({
+        patch: { age: undefined },
+        all: true,
+      });
+      expect(
+        requireDefined(await store.nodes.Person.getById(alice.id)).age,
+      ).toBeUndefined();
+    });
+
+    it("rolls back every row when a complete after-image fails validation", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      await expect(
+        store
+          .getNodeCollectionOrThrow("Person")
+          .updateWhere({ patch: { name: undefined }, all: true }),
+      ).rejects.toThrow(ValidationError);
+
+      expect(
+        requireDefined(await store.nodes.Person.getById(alice.id)).name,
+      ).toBe("Alice");
+      expect(
+        requireDefined(await store.nodes.Person.getById(bob.id)).name,
+      ).toBe("Bob");
+    });
+
+    it("replaces uniqueness sidecars without leaking the old key", async () => {
+      const Account = defineNode("Account", {
+        schema: z.object({ email: z.email(), active: z.boolean() }),
+      });
+      const uniqueGraph = defineGraph({
+        id: "update_where_unique",
+        nodes: {
+          Account: {
+            type: Account,
+            unique: [
+              {
+                name: "account_email",
+                fields: ["email"],
+                scope: "kind",
+                collation: "binary",
+              },
+            ],
+          },
+        },
+        edges: {},
+      });
+      const uniqueStore = createStore(uniqueGraph, createTestBackend());
+      await uniqueStore.nodes.Account.create({
+        email: "old@example.com",
+        active: true,
+      });
+
+      await uniqueStore.nodes.Account.updateWhere({
+        patch: { email: "new@example.com" },
+        where: (account) => account.active.eq(true),
+      });
+
+      await expect(
+        uniqueStore.nodes.Account.create({
+          email: "old@example.com",
+          active: false,
+        }),
+      ).resolves.toBeDefined();
+      await expect(
+        uniqueStore.nodes.Account.create({
+          email: "new@example.com",
+          active: false,
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("fires one dedicated bulk hook with the affected row count", async () => {
+      const starts: string[] = [];
+      const counts: number[] = [];
+      const hooked = createStore(testGraph, backend, {
+        hooks: {
+          onBulkOperationStart: (context) => starts.push(context.operation),
+          onBulkOperationEnd: (_context, result) =>
+            counts.push(result.affectedCount),
+        },
+      });
+      await hooked.nodes.Person.create({ name: "Alice" });
+      await hooked.nodes.Person.create({ name: "Bob" });
+
+      await hooked.nodes.Person.updateWhere({ patch: { age: 30 }, all: true });
+
+      expect(starts).toEqual(["updateWhere"]);
+      expect(counts).toEqual([2]);
+    });
+  });
+
   describe("store.nodes.*.delete()", () => {
     it("soft-deletes a node", async () => {
       const person = await store.nodes.Person.create({ name: "Alice" });

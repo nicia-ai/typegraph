@@ -510,6 +510,7 @@ export { defineSubgraphProject } from "./store/subgraph";
 export type {
   AdapterTransactionContext,
   BaseStoreOptions,
+  BulkOperationHookContext,
   ConstraintNames,
   CreateEdgeInput,
   CreateNodeInput,

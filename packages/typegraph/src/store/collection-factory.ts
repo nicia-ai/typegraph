@@ -9,6 +9,7 @@ import { type GraphDef } from "../core/define-graph";
 import { type TemporalMode } from "../core/types";
 import { KindNotFoundError } from "../errors";
 import { type QueryBuilder } from "../query/builder";
+import type { CompiledSelectSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
 import { type UpsertDirtyCheckFunction } from "./collections/coalesce";
@@ -58,6 +59,13 @@ export type NodeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
+  executeUpdateWhere: (
+    kind: string,
+    patch: Record<string, unknown>,
+    candidateIds: CompiledSelectSql,
+    candidateIdColumn: string,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdate: (
     input: UpdateNodeInput,
     backend: GraphBackend | TransactionBackend,

@@ -49,6 +49,55 @@ export function registerSetNodeMutationIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("set-based node mutation substrate", () => {
+    it("exposes cross-backend property and relationship updates through the Store", async () => {
+      const store = context.getStore();
+      const acme = await store.nodes.Company.create({
+        name: "Acme",
+        industry: "technology",
+      });
+      const bank = await store.nodes.Company.create({
+        name: "Bank",
+        industry: "finance",
+      });
+      const alice = await store.nodes.Person.create({
+        name: "Alice",
+        age: 35,
+        email: "alice@example.com",
+      });
+      const bob = await store.nodes.Person.create({
+        name: "Bob",
+        age: 35,
+        email: "bob@example.com",
+      });
+      await store.edges.worksAt.create(alice, acme, { role: "engineer" });
+      await store.edges.worksAt.create(bob, bank, { role: "engineer" });
+
+      const result = await store.nodes.Person.updateWhere({
+        patch: { age: 36, email: undefined },
+        where: (person) => person.age.gte(30),
+        exists: [
+          {
+            edgeKind: "worksAt",
+            direction: "out",
+            relatedKind: "Company",
+            whereRelated: (company) =>
+              company.field("industry").string().eq("technology"),
+          },
+        ],
+      });
+
+      expect(result).toEqual({ affectedCount: 1 });
+      const updatedAlice = requireDefined(
+        await store.nodes.Person.getById(alice.id),
+      );
+      expect(updatedAlice.age).toBe(36);
+      expect(updatedAlice).not.toHaveProperty("email");
+      expect(await store.nodes.Person.getById(bob.id)).toMatchObject({
+        age: 35,
+        email: "bob@example.com",
+      });
+    });
+
     it("updates nodes selected by property and relationship predicates", async () => {
       const store = context.getStore();
       const backend = context.getBackend();

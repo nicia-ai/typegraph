@@ -2,8 +2,10 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Add a cross-backend set-based node mutation primitive that applies top-level
-JSON property replacements to query-selected live rows and returns every
-updated after-image for history and secondary-index orchestration. Add batched,
-kind-scoped uniqueness cleanup so callers can rebuild reservations safely and
-prevent a hard delete from clearing same-id nodes of another kind.
+Add `store.nodes.<Kind>.updateWhere()` for typed, transactional set-based node
+updates selected by property and independent relationship predicates. The
+operation validates complete after-images and atomically maintains uniqueness,
+fulltext, vector, history, and revision state on SQLite and PostgreSQL. Its
+cross-backend storage primitive returns every updated after-image and provides
+bind-budgeted, graph- and concrete-kind-scoped uniqueness cleanup so rebuilding
+reservations cannot clear same-id nodes of another kind.

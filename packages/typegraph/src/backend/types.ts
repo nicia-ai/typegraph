@@ -422,6 +422,8 @@ export type UpdateNodeSetParams = Readonly<{
   graphId: string;
   kind: string;
   patch: Readonly<Record<string, JsonValue>>;
+  /** Top-level properties to remove (the storage form of an `undefined` patch value). */
+  unsetProperties?: readonly string[];
   candidateIds: CompiledSelectSql;
   /** Projected SQL column holding the candidate node id (for example `n_id`). */
   candidateIdColumn: string;
@@ -1565,6 +1567,11 @@ export type GraphBackend = Readonly<{
     this: void,
     params: DeleteEmbeddingParams,
   ) => Promise<void>;
+  deleteEmbeddingBatch?: (
+    this: void,
+    params: Omit<DeleteEmbeddingParams, "nodeId"> &
+      Readonly<{ nodeIds: readonly string[] }>,
+  ) => Promise<void>;
   /**
    * KNN search over one `(nodeKind, fieldPath)` slot. Top-k is computed
    * over CURRENT nodes only — non-tombstoned AND inside their validity
@@ -2222,6 +2229,7 @@ export type VectorOperationBackend = Pick<
   | "upsertEmbedding"
   | "upsertEmbeddingBatch"
   | "deleteEmbedding"
+  | "deleteEmbeddingBatch"
   | "vectorSearch"
   | "createVectorIndex"
   | "dropVectorIndex"

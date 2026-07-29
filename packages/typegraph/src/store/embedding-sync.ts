@@ -195,16 +195,28 @@ export async function syncEmbeddingsBatchForKind(
       }
     }
 
-    for (const nodeId of deletionIds) {
-      await backend.deleteEmbedding({
+    if (deletionIds.length > 0 && backend.deleteEmbeddingBatch !== undefined) {
+      await backend.deleteEmbeddingBatch({
         graphId,
         nodeKind,
-        nodeId,
+        nodeIds: deletionIds,
         fieldPath: field.fieldPath,
         dimensions: field.dimensions,
         metric: field.metric,
         indexType: field.indexType,
       });
+    } else {
+      for (const nodeId of deletionIds) {
+        await backend.deleteEmbedding({
+          graphId,
+          nodeKind,
+          nodeId,
+          fieldPath: field.fieldPath,
+          dimensions: field.dimensions,
+          metric: field.metric,
+          indexType: field.indexType,
+        });
+      }
     }
   }
 }

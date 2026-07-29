@@ -176,6 +176,7 @@ import {
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
   executeNodeUpdate,
+  executeNodeUpdateWhere,
   executeNodeUpsertUpdate,
   lockSchemaVersionForStoreWrite,
   type NodeOperationContext,
@@ -228,6 +229,7 @@ import {
   AUTO_REFRESH_STATISTICS_ROW_THRESHOLD,
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type BulkOperationHookContext,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
   type Edge,
@@ -398,11 +400,24 @@ type OperationHookRunner = <T>(
   fn: () => Promise<T>,
 ) => Promise<T>;
 
+type BulkOperationHookRunner = <T extends Readonly<{ affectedCount: number }>>(
+  ctx: BulkOperationHookContext,
+  fn: () => Promise<T>,
+) => Promise<T>;
+
 /** A committed-inside-the-transaction operation awaiting the outer COMMIT. */
-type PendingOperationOutcome = Readonly<{
-  ctx: OperationHookContext;
-  durationMs: number;
-}>;
+type PendingOperationOutcome =
+  | Readonly<{
+      type: "operation";
+      ctx: OperationHookContext;
+      durationMs: number;
+    }>
+  | Readonly<{
+      type: "bulkOperation";
+      ctx: BulkOperationHookContext;
+      affectedCount: number;
+      durationMs: number;
+    }>;
 
 type TransactionRunResult<T> = Readonly<{
   result: T;
@@ -1268,6 +1283,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         executeNodeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend, options) =>
         executeNodeUpdate(ctx, { ...input, id: input.id }, backend, options),
+      executeUpdateWhere: (
+        kind,
+        patch,
+        candidateIds,
+        candidateIdColumn,
+        backend,
+      ) =>
+        executeNodeUpdateWhere(
+          ctx,
+          kind,
+          patch,
+          candidateIds,
+          candidateIdColumn,
+          backend,
+        ),
       executeUpsertUpdate: (input, backend, options) =>
         executeNodeUpsertUpdate(
           ctx,
@@ -2350,6 +2380,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // "durable" even for tx-scoped collection operations.
     const pending: PendingOperationOutcome[] = [];
     const runHooks = this.#createBufferedHookRunner(pending);
+    const runBulkHooks = this.#createBufferedBulkHookRunner(pending);
     let recordedByGraph: RecordedFlushInstants | undefined;
     const transactionOptions =
       receiptRecorder !== undefined && this.#captureEnabled ?
@@ -2368,6 +2399,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             nativeTransaction,
             runHooks,
             receiptRecorder,
+            runBulkHooks,
           ),
         );
       const result =
@@ -2381,9 +2413,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             transactionOptions,
           );
       for (const outcome of pending) {
-        this.#hooks.onOperationEnd?.(outcome.ctx, {
-          durationMs: outcome.durationMs,
-        });
+        if (outcome.type === "bulkOperation") {
+          this.#hooks.onBulkOperationEnd?.(outcome.ctx, {
+            affectedCount: outcome.affectedCount,
+            durationMs: outcome.durationMs,
+          });
+        } else {
+          this.#hooks.onOperationEnd?.(outcome.ctx, {
+            durationMs: outcome.durationMs,
+          });
+        }
       }
       return { result, recordedByGraph };
     } catch (error) {
@@ -2695,12 +2734,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     sql?: TNativeTransaction,
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
     receiptRecorder?: TransactionReceiptRecorder,
+    runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
   ): AdapterTransactionContext<G, TNativeTransaction> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
     const txNodeOperations: NodeOperations = {
-      ...this.#buildNodeOperations(this.#createNodeOperationContext(runHooks)),
+      ...this.#buildNodeOperations(
+        this.#createNodeOperationContext(runHooks, runBulkHooks),
+      ),
       createQuery: () => this.#createQueryForBackend(txBackend),
       maybeRefreshStatisticsAfterBulk: undefined,
     };
@@ -3891,8 +3933,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#withOperationHooks(ctx, fn);
   }
 
+  #immediateBulkHookRunner(): BulkOperationHookRunner {
+    return <T extends Readonly<{ affectedCount: number }>>(
+      ctx: BulkOperationHookContext,
+      fn: () => Promise<T>,
+    ) => this.#withBulkOperationHooks(ctx, fn);
+  }
+
   #createNodeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
+    runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
   ): NodeOperationContext<G> {
     return {
       graph: this.#graph,
@@ -3905,6 +3955,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
       withOperationHooks: runHooks,
+      createBulkOperationContext: (operation, kind) => ({
+        ...this.#createHookContext(),
+        operation,
+        entity: "node",
+        kind,
+      }),
+      withBulkOperationHooks: runBulkHooks,
     };
   }
 
@@ -4040,6 +4097,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
   }
 
+  async #withBulkOperationHooks<T extends Readonly<{ affectedCount: number }>>(
+    ctx: BulkOperationHookContext,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    this.#hooks.onBulkOperationStart?.(ctx);
+    const startTime = Date.now();
+    try {
+      const result = await fn();
+      this.#hooks.onBulkOperationEnd?.(ctx, {
+        affectedCount: result.affectedCount,
+        durationMs: Date.now() - startTime,
+      });
+      return result;
+    } catch (error) {
+      this.#hooks.onError?.(ctx, asError(error));
+      throw error;
+    }
+  }
+
   /**
    * A hook runner for operations that execute INSIDE an explicit
    * `store.transaction`: `onOperationStart` (and a failed operation's
@@ -4061,7 +4137,37 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const startTime = Date.now();
       try {
         const result = await fn();
-        pending.push({ ctx, durationMs: Date.now() - startTime });
+        pending.push({
+          type: "operation",
+          ctx,
+          durationMs: Date.now() - startTime,
+        });
+        return result;
+      } catch (error) {
+        this.#hooks.onError?.(ctx, asError(error));
+        throw error;
+      }
+    };
+  }
+
+  /** Buffered counterpart for set-based operations inside `transaction()`. */
+  #createBufferedBulkHookRunner(
+    pending: PendingOperationOutcome[],
+  ): BulkOperationHookRunner {
+    return async <T extends Readonly<{ affectedCount: number }>>(
+      ctx: BulkOperationHookContext,
+      fn: () => Promise<T>,
+    ): Promise<T> => {
+      this.#hooks.onBulkOperationStart?.(ctx);
+      const startTime = Date.now();
+      try {
+        const result = await fn();
+        pending.push({
+          type: "bulkOperation",
+          ctx,
+          affectedCount: result.affectedCount,
+          durationMs: Date.now() - startTime,
+        });
         return result;
       } catch (error) {
         this.#hooks.onError?.(ctx, asError(error));
