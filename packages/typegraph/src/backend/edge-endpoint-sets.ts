@@ -36,7 +36,7 @@ export const FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT = 6;
  * two `asOf` comparisons, and `limitPerEndpoint`. Edge-kind binds are accounted
  * for separately because their count is supplied by the caller.
  */
-export const FIND_EDGES_HETEROGENEOUS_FIXED_PARAM_COUNT = 4;
+const FIND_EDGES_HETEROGENEOUS_FIXED_PARAM_COUNT = 4;
 
 function assertLimitPerEndpoint(
   operation: string,
