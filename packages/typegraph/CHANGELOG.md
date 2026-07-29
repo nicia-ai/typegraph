@@ -1,5 +1,45 @@
 # @nicia-ai/typegraph
 
+## 0.45.0
+
+### Minor Changes
+
+- [#355](https://github.com/nicia-ai/typegraph/pull/355) [`2882b23`](https://github.com/nicia-ai/typegraph/commit/2882b23ef6daed20041ccea56e3cfa76a8435c7a) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.nodes.<Kind>.updateWhere()` for typed, transactional set-based node
+  updates selected by property and independent relationship predicates. The
+  operation validates complete after-images and atomically maintains uniqueness,
+  fulltext, vector, history, and revision state on SQLite and PostgreSQL. Its
+  cross-backend storage primitive returns every updated after-image and provides
+  bind-budgeted, graph- and concrete-kind-scoped uniqueness cleanup so rebuilding
+  reservations cannot clear same-id nodes of another kind.
+
+- [#352](https://github.com/nicia-ai/typegraph/pull/352) [`872d196`](https://github.com/nicia-ai/typegraph/commit/872d1960b470352cdcf5412a1303e59b776ce1ed) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.repairContributions()`, a privileged, idempotent repair pass for
+  strategy-owned contribution storage. It re-audits declarations from the active
+  persisted graph, non-destructively retries `missing-marker` and
+  `failed-materialization` findings, reports `stale` and `orphaned-marker` as
+  `requires-rebuild`, and returns a fresh post-repair diagnostic result. Repair
+  targets remain backend-owned so callers do not need access to TypeGraph-managed
+  tables, physical names, or DDL.
+
+- [#353](https://github.com/nicia-ai/typegraph/pull/353) [`c225605`](https://github.com/nicia-ai/typegraph/commit/c22560576e2e22f5808ead72e552ead4b7f8743c) Thanks [@pdlug](https://github.com/pdlug)! - Add Store-level heterogeneous bulk edge reads that keep database round trips independent of schema breadth.
+
+### Patch Changes
+
+- [#351](https://github.com/nicia-ai/typegraph/pull/351) [`ff8e428`](https://github.com/nicia-ai/typegraph/commit/ff8e4280456b21985033977ec9be553bad06d63c) Thanks [@pdlug](https://github.com/pdlug)! - Ensure the kind-removal status table before `evolve()` checks it, so databases
+  created before TypeGraph 0.44 can evolve without manual backend initialization.
+  Concurrent PostgreSQL focused-table ensures also retry the catalog uniqueness
+  race that `CREATE TABLE IF NOT EXISTS` can surface during replica startup.
+
+- [#350](https://github.com/nicia-ai/typegraph/pull/350) [`f752543`](https://github.com/nicia-ai/typegraph/commit/f752543749ac6914592e5f765f6e153b69e72518) Thanks [@pdlug](https://github.com/pdlug)! - Clarify that schema-managed Stores are immutable schema snapshots. After
+  `evolve()` changes the schema, callers must use the returned Store or the
+  updated `StoreRef.current` for subsequent work; a previously captured Store is
+  not mutated and its managed writes are rejected by the schema-version fence.
+  Document how long-lived caches detect schema commits from other processes with
+  `getCommittedSchemaVersion()` and refresh through a verified Store open.
+
+  Correct the `StoreRef` contract to say that the replacement is installed before
+  a successful schema-changing call resolves, rather than claiming that the
+  in-memory ref update is atomic with the persisted schema commit.
+
 ## 0.44.0
 
 ### Minor Changes
