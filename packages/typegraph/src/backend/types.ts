@@ -1349,6 +1349,17 @@ export type GraphBackend = Readonly<{
     this: void,
     params: FindEdgesByEndpointSetParams,
   ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Reads several edge kinds from a heterogeneous set of endpoints without
+   * issuing one statement per licensed `(edge kind, endpoint kind)` pair.
+   *
+   * Optional for custom backends. Store-level heterogeneous bulk reads refuse
+   * when it is absent rather than hiding a per-kind/per-endpoint fallback.
+   */
+  findEdgesByHeterogeneousEndpointSet?: (
+    this: void,
+    params: FindEdgesByHeterogeneousEndpointSetParams,
+  ) => Promise<readonly EdgeRow[]>;
   countEdgesByKind: (
     this: void,
     params: CountEdgesByKindParams,
@@ -2110,6 +2121,7 @@ export type EdgeEntityReadBackend = Pick<
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
   | "findEdgesByEndpointSet"
+  | "findEdgesByHeterogeneousEndpointSet"
   | "countEdgesByKind"
 >;
 
@@ -2844,6 +2856,27 @@ export type FindEdgesByEndpointSetParams = Readonly<{
    * per-endpoint cap composes with chunking: each endpoint's rows fall
    * entirely within one chunk.
    */
+  limitPerEndpoint?: number;
+  /** If true, exclude deleted edges. Default true. */
+  excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
+}>;
+
+/**
+ * Parameters for reading several edge kinds from several endpoint kinds.
+ *
+ * The endpoint pairs are joined as a relation, so round trips are independent
+ * of the number of licensed edge-kind/endpoint-kind combinations. Large source
+ * sets may still be split to respect the backend's bind-parameter budget.
+ */
+export type FindEdgesByHeterogeneousEndpointSetParams = Readonly<{
+  graphId: string;
+  side: EdgeEndpointSide;
+  endpoints: readonly Readonly<{ kind: string; id: string }>[];
+  edgeKinds: readonly string[];
   limitPerEndpoint?: number;
   /** If true, exclude deleted edges. Default true. */
   excludeDeleted?: boolean;

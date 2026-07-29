@@ -126,6 +126,8 @@ export type {
   EdgeRow,
   FilteredApproximateSearch,
   FilteredApproximateSearchMode,
+  FindEdgesByEndpointSetParams,
+  FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,

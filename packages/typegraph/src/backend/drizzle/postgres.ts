@@ -1627,6 +1627,8 @@ function createPostgresOperationBackend(
       execRun,
     },
     nowIso,
+    maxBindParameters:
+      capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
     operationStrategy,
     rowMappers: {
       toEdgeRow,

@@ -652,6 +652,8 @@ function createSqliteOperationBackend(
       execRun,
     },
     nowIso,
+    maxBindParameters:
+      capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
     operationStrategy,
     rowMappers: {
       toEdgeRow,

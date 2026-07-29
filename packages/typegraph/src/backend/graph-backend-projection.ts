@@ -41,6 +41,7 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "countNodesByKind",
   "findEdgesByKind",
   "findEdgesByEndpointSet",
+  "findEdgesByHeterogeneousEndpointSet",
   "countEdgesByKind",
   "insertUnique",
   "insertUniqueBatch",

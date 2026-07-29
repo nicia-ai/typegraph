@@ -9,7 +9,11 @@ import {
   type TransactionBackend,
   type TransactionReadBackend,
 } from "../backend/types";
-import { type GraphDef } from "../core/define-graph";
+import {
+  type EdgeKinds,
+  type GraphDef,
+  type NodeKinds,
+} from "../core/define-graph";
 import { type RecordedInstant } from "../core/temporal";
 import {
   type AnyEdgeType,
@@ -606,6 +610,49 @@ export type EdgeBulkFindOptions = Readonly<{
  * edge read accepts, plus the per-endpoint fan-out cap.
  */
 export type EdgeBulkFindEndpointOptions = QueryOptions & EdgeBulkFindOptions;
+
+/** A kind-grouped source list for a heterogeneous bulk edge read. */
+export type BulkEdgeSourceGroup<G extends GraphDef> = {
+  [K in NodeKinds<G>]: Readonly<{
+    kind: K;
+    ids: readonly NodeId<G["nodes"][K]["type"]>[];
+  }>;
+}[NodeKinds<G>];
+
+/** A node reference whose kind and branded id remain correlated. */
+export type GraphNodeReference<G extends GraphDef> = {
+  [K in NodeKinds<G>]: Readonly<{
+    kind: K;
+    id: NodeId<G["nodes"][K]["type"]>;
+  }>;
+}[NodeKinds<G>];
+
+/** Runtime edge union narrowed to the selected graph edge kinds. */
+export type GraphEdgeForKinds<G extends GraphDef, K extends EdgeKinds<G>> = {
+  [P in K]: Edge<
+    G["edges"][P]["type"],
+    G["edges"][P]["from"][number],
+    G["edges"][P]["to"][number]
+  >;
+}[K];
+
+/** Input for {@link Store.bulkFindEdgesFrom}. */
+export type BulkFindEdgesFromParams<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = Readonly<{
+  sources: readonly BulkEdgeSourceGroup<G>[];
+  edgeKinds: readonly K[];
+}>;
+
+/** One source bucket returned by {@link Store.bulkFindEdgesFrom}. */
+export type BulkFindEdgesFromResult<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = Readonly<{
+  source: GraphNodeReference<G>;
+  edges: readonly GraphEdgeForKinds<G, K>[];
+}>;
 
 /**
  * Result of an edge getOrCreateByEndpoints operation.

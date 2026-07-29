@@ -224,6 +224,23 @@ This is the fix for the "list view with relationship counts" N+1: statement coun
 endpoint kinds and bind-budget chunks instead of with every item on the page. Pass `limitPerInput`
 to bound each endpoint's fan-out.
 
+If a view spans several source kinds and edge kinds, use the Store-level
+`bulkFindEdgesFrom` operation instead of calling each licensed edge collection separately. It
+accepts heterogeneous source groups and edge kinds, then executes one set-oriented statement per
+bind-budget chunk. Round trips therefore grow with input size, not with the number of licensed
+`(source kind, edge kind)` combinations:
+
+```typescript
+const edgesBySource = await store.bulkFindEdgesFrom({
+  sources: [
+    { kind: "Company", ids: companyIds },
+    { kind: "Person", ids: personIds },
+  ],
+  edgeKinds: ["employs", "owns", "dependsOn"],
+});
+// edgesBySource[i] identifies its source and contains that source's matching edges
+```
+
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
 throughput. Query hooks still fire normally. See

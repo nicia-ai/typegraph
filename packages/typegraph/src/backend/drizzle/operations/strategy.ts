@@ -19,6 +19,7 @@ import type {
   DeleteUniqueParams,
   EdgeExistsBetweenParams,
   FindEdgesByEndpointSetParams,
+  FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
@@ -44,6 +45,7 @@ import {
   buildCountEdgesByKind,
   buildCountNodesByKind,
   buildFindEdgesByEndpointSet,
+  buildFindEdgesByHeterogeneousEndpointSet,
   buildFindEdgesByKind,
   buildFindNodesByKind,
 } from "./collections";
@@ -179,6 +181,11 @@ export type CommonOperationStrategy = Readonly<{
     params: FindEdgesByEndpointSetParams,
     endpointIds: readonly string[],
   ) => SQL;
+  buildFindEdgesByHeterogeneousEndpointSet: (
+    params: FindEdgesByHeterogeneousEndpointSetParams,
+    endpoints: readonly Readonly<{ kind: string; id: string }>[],
+    edgeKinds: readonly string[],
+  ) => SQL;
   buildCountEdgesByKind: (params: CountEdgesByKindParams) => SQL;
   buildInsertUnique: (params: InsertUniqueParams) => SQL;
   buildInsertUniqueBatch: (entries: readonly InsertUniqueParams[]) => SQL;
@@ -269,6 +276,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildCountNodesByKind,
   buildFindEdgesByKind,
   buildFindEdgesByEndpointSet,
+  buildFindEdgesByHeterogeneousEndpointSet,
   buildCountEdgesByKind,
   buildDeleteUnique,
   buildHardDeleteUniquesByNode,

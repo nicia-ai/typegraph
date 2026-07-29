@@ -2,6 +2,9 @@
 export {
   type AdapterTransactionContext,
   type BaseStoreOptions,
+  type BulkEdgeSourceGroup,
+  type BulkFindEdgesFromParams,
+  type BulkFindEdgesFromResult,
   type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,
@@ -16,6 +19,8 @@ export {
   type EdgeTemporalReads,
   type EdgeWrites,
   type GetOrCreateAction,
+  type GraphEdgeForKinds,
+  type GraphNodeReference,
   type HistoryStoreOptions,
   type HookContext,
   type IfExistsMode,

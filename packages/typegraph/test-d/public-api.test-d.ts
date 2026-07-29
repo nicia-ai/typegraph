@@ -10,6 +10,7 @@ import {
   type AdapterBackend,
   type BackendCapabilities,
   type BatchableQuery,
+  type BulkFindEdgesFromResult,
   createAdapterStore,
   createAdapterStoreWithSchema,
   createStore,
@@ -610,6 +611,38 @@ expectError(
 
 declare const personRef: NodeRef<typeof Person>;
 declare const companyRef: NodeRef<typeof Company>;
+declare const personId: NodeId<typeof Person>;
+declare const companyId: NodeId<typeof Company>;
+
+expectType<
+  Promise<readonly BulkFindEdgesFromResult<typeof graph, "worksAt" | "knows">[]>
+>(
+  store.bulkFindEdgesFrom({
+    sources: [
+      { kind: "Person", ids: [personId] },
+      { kind: "Company", ids: [companyId] },
+    ],
+    edgeKinds: ["worksAt", "knows"],
+  }),
+);
+expectError(
+  store.bulkFindEdgesFrom({
+    sources: [{ kind: "Missing", ids: [personId] }],
+    edgeKinds: ["worksAt"],
+  }),
+);
+expectError(
+  store.bulkFindEdgesFrom({
+    sources: [{ kind: "Company", ids: [personId] }],
+    edgeKinds: ["worksAt"],
+  }),
+);
+expectError(
+  store.bulkFindEdgesFrom({
+    sources: [{ kind: "Person", ids: [personId] }],
+    edgeKinds: ["missing"],
+  }),
+);
 
 // batchFindFrom / batchFindTo return BatchableQuery with correct edge type
 type WorksAtEdge = Edge<typeof worksAt, typeof Person, typeof Company>;
