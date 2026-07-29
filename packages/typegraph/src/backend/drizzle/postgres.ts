@@ -71,6 +71,7 @@ import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
   isMissingTableError,
+  isPostgresUniqueViolationError,
 } from "../../utils/sql-errors";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -517,8 +518,25 @@ export function createPostgresBackend(
   // ensure through it instead of issuing DDL on the hot path.
   const matTable = tables.contributionMaterializations;
 
+  async function ensureTableWithConcurrentCreateRetry(
+    table: Parameters<typeof generatePgCreateTableSQL>[0],
+  ): Promise<void> {
+    const statement = sql.raw(generatePgCreateTableSQL(table));
+    try {
+      await db.execute(statement);
+    } catch (error) {
+      // PostgreSQL's IF NOT EXISTS check cannot see another session's
+      // uncommitted catalog row. The loser waits for the winner and may then
+      // receive 23505 from pg_type/pg_class instead of a harmless notice.
+      // Retrying after that wait observes the committed table. Any unrelated
+      // uniqueness failure remains loud if the retry cannot confirm it.
+      if (!isPostgresUniqueViolationError(error)) throw error;
+      await db.execute(statement);
+    }
+  }
+
   async function ensureContributionMaterializationsTableImpl(): Promise<void> {
-    await db.execute(sql.raw(generatePgCreateTableSQL(matTable)));
+    await ensureTableWithConcurrentCreateRetry(matTable);
   }
 
   async function getContributionMaterializationRow(
@@ -800,9 +818,7 @@ export function createPostgresBackend(
     },
 
     async ensureRevisionOriginsTable(): Promise<void> {
-      await db.execute(
-        sql.raw(generatePgCreateTableSQL(tables.revisionOrigins)),
-      );
+      await ensureTableWithConcurrentCreateRetry(tables.revisionOrigins);
     },
 
     // Every fulltext-touching method asserts the durable marker instead
@@ -820,9 +836,7 @@ export function createPostgresBackend(
     },
 
     async ensureIndexMaterializationsTable(): Promise<void> {
-      await db.execute(
-        sql.raw(generatePgCreateTableSQL(tables.indexMaterializations)),
-      );
+      await ensureTableWithConcurrentCreateRetry(tables.indexMaterializations);
       // Deployments created before the build-claim columns existed get
       // them additively; fresh installs already have them from the
       // CREATE TABLE above.
@@ -955,7 +969,7 @@ export function createPostgresBackend(
     },
 
     async ensureKindRemovalsTable(): Promise<void> {
-      await db.execute(sql.raw(generatePgCreateTableSQL(tables.kindRemovals)));
+      await ensureTableWithConcurrentCreateRetry(tables.kindRemovals);
     },
 
     async getPendingKindRemovals(
@@ -998,9 +1012,7 @@ export function createPostgresBackend(
     },
 
     async ensureReconciliationMarkersTable(): Promise<void> {
-      await db.execute(
-        sql.raw(generatePgCreateTableSQL(tables.reconciliationMarkers)),
-      );
+      await ensureTableWithConcurrentCreateRetry(tables.reconciliationMarkers);
     },
 
     async ensureRuntimeContributions(graphId: string): Promise<void> {
@@ -1126,10 +1138,8 @@ export function createPostgresBackend(
       params: CommitSchemaVersionParams,
       probes: readonly SchemaKindEmptinessProbe[],
     ): Promise<CommitSchemaVersionIfKindsEmptyResult> {
-      return runSchemaWriteTransaction(
-        params.graphId,
-        (target) =>
-          commitSchemaVersionIfKindsEmpty(target, params, probes),
+      return runSchemaWriteTransaction(params.graphId, (target) =>
+        commitSchemaVersionIfKindsEmpty(target, params, probes),
       );
     },
 

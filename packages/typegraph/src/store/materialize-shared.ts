@@ -1,10 +1,8 @@
 /**
- * Shared building blocks for the materialize-* verbs (`materializeIndexes`
- * and `materializeRemovals`) and `Store.removeKinds`. Each verb owns a
- * per-deployment status table (`typegraph_index_materializations`,
- * `typegraph_kind_removals`) and bootstraps it lazily; this module
- * centralizes focused bootstrap dispatch plus the bucketed orchestration used
- * by index materialization.
+ * Shared building blocks for schema-management and materialization verbs.
+ * Each status-backed operation lazily bootstraps its per-deployment table;
+ * this module centralizes focused bootstrap dispatch plus the bucketed
+ * orchestration used by index materialization.
  */
 import { type GraphBackend } from "../backend/types";
 
@@ -17,9 +15,9 @@ import { type GraphBackend } from "../backend/types";
  * INDEX IF NOT EXISTS` statements covering every base table. Two
  * concurrent callers (e.g. two replicas of the same `schema_doc` both
  * starting up) deadlock on Postgres SHARE locks. Restricting the
- * ensure-step to a single table eliminates the cross-table race —
- * concurrent `CREATE TABLE IF NOT EXISTS` for one specific table is
- * well-behaved on Postgres.
+ * ensure-step to a single table eliminates the cross-table lock cycle.
+ * Backends still own any dialect-specific same-table race handling; the
+ * PostgreSQL focused ensures retry their catalog uniqueness race.
  */
 export async function ensureFocusedStatusTable(
   backend: GraphBackend,

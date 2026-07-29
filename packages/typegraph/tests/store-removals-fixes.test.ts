@@ -70,6 +70,81 @@ type GraphExtensionIndexInput = NonNullable<
   Parameters<typeof defineGraphExtension>[0]["indexes"]
 >[number];
 
+const tagExtension = defineGraphExtension({
+  nodes: { Tag: { properties: { label: { type: "string" } } } },
+});
+
+// ============================================================
+// 0. Evolve initializes kind-removal preflight dependencies
+// ============================================================
+
+describe("evolve against a DB missing typegraph_kind_removals", () => {
+  it("falls back to full bootstrap for custom backends", async () => {
+    const baseBackend = createTestBackend();
+    const {
+      ensureKindRemovalsTable: focusedEnsure,
+      ...backendWithoutFocusedEnsure
+    } = baseBackend;
+    expect(focusedEnsure).toBeDefined();
+    let bootstrapCalls = 0;
+    const backend: GraphBackend = {
+      ...backendWithoutFocusedEnsure,
+      async bootstrapTables() {
+        bootstrapCalls += 1;
+        await requireDefined(baseBackend.bootstrapTables)();
+      },
+    };
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    bootstrapCalls = 0;
+    await requireDefined(backend.executeDdl)(
+      "DROP TABLE IF EXISTS typegraph_kind_removals",
+    );
+
+    const evolved = await store.evolve(tagExtension);
+
+    expect(evolved.introspect().kinds.map((kind) => kind.name)).toContain(
+      "Tag",
+    );
+    expect(bootstrapCalls).toBe(1);
+
+    bootstrapCalls = 0;
+    await requireDefined(backend.executeDdl)(
+      "DROP TABLE IF EXISTS typegraph_kind_removals",
+    );
+    const removed = await evolved.removeKinds(["Tag"]);
+
+    expect(bootstrapCalls).toBe(1);
+    expect(
+      await requireDefined(backend.getPendingKindRemovals)(baseGraph.id),
+    ).toEqual([expect.objectContaining({ entity: "node", kindName: "Tag" })]);
+    expect(removed.introspect().kinds.map((kind) => kind.name)).not.toContain(
+      "Tag",
+    );
+  });
+
+  it("does not bootstrap the queue for a no-op evolve", async () => {
+    const baseBackend = createTestBackend();
+    let ensureCalls = 0;
+    const backend: GraphBackend = {
+      ...baseBackend,
+      async ensureKindRemovalsTable() {
+        ensureCalls += 1;
+        await requireDefined(baseBackend.ensureKindRemovalsTable)();
+      },
+    };
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(tagExtension);
+    ensureCalls = 0;
+
+    const repeated = await evolved.evolve(tagExtension);
+
+    expect(repeated.introspect().kinds.map((kind) => kind.name)).toContain(
+      "Tag",
+    );
+    expect(ensureCalls).toBe(0);
+  });
+});
+
 // ============================================================
 // 1. Legacy DB missing reconciliation_markers
 // ============================================================

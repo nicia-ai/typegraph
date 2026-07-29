@@ -1678,11 +1678,11 @@ export type GraphBackend = Readonly<{
 
   /**
    * Bootstraps the per-deployment `typegraph_kind_removals` table so
-   * `store.removeKinds()` and `store.materializeRemovals()` can persist
-   * removal status. Mirrors the focused-bootstrap rationale documented
-   * on `ensureIndexMaterializationsTable` — the full `bootstrapTables`
-   * touches every base table and risks Postgres SHARE-lock deadlock
-   * under concurrent replica startup.
+   * `store.evolve()` can check pending removals and the removal verbs can
+   * persist and materialize removal status. Mirrors the focused-bootstrap
+   * rationale documented on `ensureIndexMaterializationsTable` — the full
+   * `bootstrapTables` touches every base table and risks Postgres SHARE-lock
+   * deadlock under concurrent replica startup.
    */
   ensureKindRemovalsTable?: (this: void) => Promise<void>;
 

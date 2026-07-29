@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isMissingTableError,
+  isPostgresUniqueViolationError,
   isSqliteNotAuthorizedError,
 } from "../src/utils/sql-errors";
 
@@ -254,6 +255,33 @@ describe("isMissingTableError", () => {
     (a as { cause?: unknown }).cause = b;
     (b as { cause?: unknown }).cause = a;
     expect(isMissingTableError(a)).toBe(false);
+  });
+});
+
+describe("isPostgresUniqueViolationError", () => {
+  it("detects direct and Drizzle-wrapped SQLSTATE 23505 errors", () => {
+    const direct = pgError("duplicate catalog row", "23505");
+    expect(isPostgresUniqueViolationError(direct)).toBe(true);
+    expect(
+      isPostgresUniqueViolationError(
+        drizzleQueryError(
+          "CREATE TABLE IF NOT EXISTS typegraph_kind_removals",
+          {
+            code: "23505",
+            message: "duplicate catalog row",
+          },
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not classify unrelated database failures", () => {
+    expect(
+      isPostgresUniqueViolationError(pgError("permission denied", "42501")),
+    ).toBe(false);
+    expect(
+      isPostgresUniqueViolationError(new Error("SQLITE_CONSTRAINT_UNIQUE")),
+    ).toBe(false);
   });
 });
 

@@ -148,6 +148,7 @@ import {
   type MaterializeRemovalsOptions,
   type MaterializeRemovalsResult,
 } from "./materialize-removals";
+import { ensureFocusedStatusTable } from "./materialize-shared";
 import {
   type EdgeOperationContext,
   edgeUpsertDirtyCheck,
@@ -3449,9 +3450,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // store). Operators reconcile via materializeRemovals later.
     const recordKindRemoval = this.#backend.recordKindRemoval;
     if (recordKindRemoval !== undefined) {
-      if (this.#backend.ensureKindRemovalsTable !== undefined) {
-        await this.#backend.ensureKindRemovalsTable();
-      }
+      await ensureFocusedStatusTable(
+        this.#backend,
+        this.#backend.ensureKindRemovalsTable,
+      );
       const attemptedAt = nowIso();
       const newSchemaVersion = committedRow.version;
       const queue = (kindName: string, entity: KindEntity): Promise<void> =>
@@ -3645,6 +3647,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
     if (addedNodes.length === 0 && addedEdges.length === 0) return;
 
+    await ensureFocusedStatusTable(
+      this.#backend,
+      this.#backend.ensureKindRemovalsTable,
+    );
     const pending = await getPendingKindRemovals(this.graphId);
     if (pending.length === 0) return;
 
