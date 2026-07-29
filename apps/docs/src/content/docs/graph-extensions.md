@@ -274,7 +274,7 @@ managed write fails the schema-version fence.
 `Store<G>` is immutable by construction — `evolve()` returns the Store for the
 resulting schema, using a fresh instance when the schema advances. Long-lived
 consumer code that holds the Store in a singleton needs a way to re-bind it
-atomically with the schema commit. Pass `options.ref: { current: store }` (a
+before the operation completes. Pass `options.ref: { current: store }` (a
 `StoreRef<Store<G>>`):
 
 ```ts

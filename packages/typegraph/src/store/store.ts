@@ -1060,8 +1060,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * `KindNotFoundError` when the kind is not registered.
    *
    * The dominant graph-extension-kind access pattern: `await store.evolve(...)`
-   * returns a new store, the caller immediately operates on the new
-   * kind, and the null-check the optional variant requires is busywork.
+   * returns the Store for the resulting schema, the caller immediately
+   * operates on the new kind, and the null-check the optional variant requires
+   * is busywork.
    */
   getNodeCollectionOrThrow(kind: string): DynamicNodeCollection {
     const collection = this.getNodeCollection(kind);
@@ -2817,10 +2818,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * @param extension - Graph extension produced by
    *   `defineGraphExtension(...)`.
-   * @param options.ref - Optional handle whose `current` is overwritten
-   *   atomically with the schema commit. Code awaiting this call can use the
-   *   returned Store or `ref.current` immediately. A previously captured Store
-   *   is not mutated.
+   * @param options.ref - Optional handle whose `current` is overwritten with
+   *   the replacement before a successful call resolves. Code awaiting this
+   *   call can use the returned Store or `ref.current` immediately. A
+   *   previously captured Store is not mutated.
    *
    * @throws {GraphExtensionValidationError} when the extension is
    *   structurally invalid.
@@ -2994,8 +2995,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * kind that's already marked is a no-op (no version bump).
    *
    * @param names - Node or edge kind names to mark as deprecated.
-   * @param options.ref - Optional handle to be re-pointed atomically
-   *   with the schema commit, mirroring `evolve()`.
+   * @param options.ref - Optional handle to be re-pointed to the replacement
+   *   Store before a successful call resolves, mirroring `evolve()`.
    *
    * @throws {ConfigurationError} on `DEPRECATE_BEFORE_INITIALIZE` (no
    *   schema yet) or `DEPRECATE_UNKNOWN_KIND` (name not on the graph).
@@ -3020,8 +3021,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * @param names - Node or edge kind names to remove from the
    *   deprecated set.
-   * @param options.ref - Optional handle to be re-pointed atomically
-   *   with the schema commit.
+   * @param options.ref - Optional handle to be re-pointed to the replacement
+   *   Store before a successful call resolves.
    *
    * @throws {ConfigurationError} on `DEPRECATE_BEFORE_INITIALIZE`.
    * @throws {StaleVersionError} on a CAS race with another writer.

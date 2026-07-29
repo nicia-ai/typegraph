@@ -452,9 +452,9 @@ export type StoreOptions = LiveStoreOptions | HistoryStoreOptions;
 /**
  * A mutable handle to the current `Store`, used by `store.evolve(...)`
  * so long-lived consumers can dereference through the ref and pick up
- * the new store after each evolve call. `current` is overwritten by
- * `evolve()` atomically with the schema commit when the ref is passed
- * via `evolve(extension, { ref })`.
+ * the new Store after each evolve call. When the ref is passed via
+ * `evolve(extension, { ref })`, `current` is overwritten with the replacement
+ * before a successful call resolves.
  *
  * **Request semantics.** Dereference once at request entry only when that
  * request will not change the schema. A schema-changing call such as
