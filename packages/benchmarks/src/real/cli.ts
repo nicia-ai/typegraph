@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { SNB_QUERY_IDS, type SnbQueryId } from "./engines/types";
 import {
   isSnbEngineName,
   SNB_ENGINE_NAMES,
@@ -11,6 +12,8 @@ import { type SnbProfile } from "./dataset/resolve";
 export type SnbCliOptions = Readonly<{
   profile: SnbProfile;
   engines: readonly SnbEngineName[];
+  /** Queries to measure (default: all). Lets a targeted run isolate one lane. */
+  queries: readonly SnbQueryId[];
   dataDir: string | undefined;
   requestsPerQuery: number;
   warmupRequests: number;
@@ -19,6 +22,10 @@ export type SnbCliOptions = Readonly<{
   /** Exit non-zero on a genuine parity mismatch (row count or value digest) between 2+ engines that ran. */
   runChecks: boolean;
 }>;
+
+function isSnbQueryId(value: string): value is SnbQueryId {
+  return (SNB_QUERY_IDS as readonly string[]).includes(value);
+}
 
 const PROFILE_DEFAULTS: Readonly<
   Record<SnbProfile, { warmup: number; samples: number }>
@@ -61,6 +68,19 @@ function parseEngines(raw: string | undefined): readonly SnbEngineName[] {
   return names as SnbEngineName[];
 }
 
+function parseQueries(raw: string | undefined): readonly SnbQueryId[] {
+  if (raw === undefined) return SNB_QUERY_IDS;
+  const ids = raw.split(",").map((entry) => entry.trim());
+  for (const id of ids) {
+    if (!isSnbQueryId(id)) {
+      throw new Error(
+        `Unsupported query "${id}" in --queries. Expected one of: ${SNB_QUERY_IDS.join(", ")}.`,
+      );
+    }
+  }
+  return ids as SnbQueryId[];
+}
+
 function parsePositiveInt(
   raw: string | undefined,
   name: string,
@@ -96,6 +116,7 @@ export function parseSnbCliOptions(argv: readonly string[]): SnbCliOptions {
   return {
     profile,
     engines: parseEngines(parseArgValue(argv, "engines")),
+    queries: parseQueries(parseArgValue(argv, "queries")),
     dataDir: parseArgValue(argv, "data-dir"),
     requestsPerQuery: parsePositiveInt(
       parseArgValue(argv, "requests-per-query"),

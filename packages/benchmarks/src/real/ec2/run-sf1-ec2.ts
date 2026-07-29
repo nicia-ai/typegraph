@@ -33,11 +33,13 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 
 import { resolveGitSha } from "../../git";
 import { resolveHistoryPath } from "../../history";
+import { SNB_QUERY_IDS } from "../engines/types";
 import { SNB_ENGINE_NAMES } from "../harness/doctor";
-import { stringifyError, writeJsonFile } from "../harness/process";
+import { stringifyError } from "../harness/process";
 import {
   type AwsCliOptions,
   describeInstanceState,
@@ -71,7 +73,18 @@ const DEFAULT_INSTANCE_TYPE_BY_PROFILE: Readonly<
   sf1: "c7i.4xlarge",
   sf10: "r7i.4xlarge",
 };
-const DEFAULT_VOLUME_SIZE_GIB = 150;
+// SF1 fits comfortably in 150 GiB; SF10 does not — tg-sqlite's database alone is
+// ~90 GB (plus load-time WAL, the ~15 GB dataset, and OS/repo), and the
+// server engines' data layers add more, so 150 GiB overflows mid-run
+// ("database or disk is full"). Provision generously for SF10 — gp3 storage is
+// cheap for a run lasting hours.
+const DEFAULT_VOLUME_SIZE_GIB_BY_PROFILE: Readonly<
+  Record<"smoke" | "sf1" | "sf10", number>
+> = {
+  smoke: 150,
+  sf1: 150,
+  sf10: 500,
+};
 // gp3 decouples IOPS/throughput from volume size — an unprovisioned volume
 // silently gets the account's gp3 *baseline* (3,000 IOPS / 125 MB/s)
 // regardless of size. An EBS root-cause investigation (see
@@ -126,6 +139,31 @@ function parseArgValue(
   const prefix = `--${name}=`;
   const found = argv.find((argument) => argument.startsWith(prefix));
   return found?.slice(prefix.length);
+}
+
+/**
+ * Validates a comma-separated `--engines`/`--queries` selector against its
+ * canonical set and returns the normalized list (or `undefined` when the flag
+ * is absent, meaning "all"). Validating here fails fast — before an EC2
+ * instance is even launched — and, because the value is later interpolated
+ * into a remote shell command, restricting it to known-good tokens keeps that
+ * interpolation injection-free.
+ */
+function validateSelector(
+  raw: string | undefined,
+  flag: string,
+  allowed: readonly string[],
+): string | undefined {
+  if (raw === undefined) return undefined;
+  const values = raw.split(",").map((value) => value.trim());
+  for (const value of values) {
+    if (!allowed.includes(value)) {
+      throw new Error(
+        `Unsupported value "${value}" in ${flag}. Expected one of: ${allowed.join(", ")}.`,
+      );
+    }
+  }
+  return values.join(",");
 }
 
 function requireArgValue(argv: readonly string[], name: string): string {
@@ -237,13 +275,16 @@ function remoteBenchDir(): string {
  * its own 24,000-character budget, so no single artifact's growth can crowd
  * out another's.
  */
-function renderBenchmarkRunScript(profile: string): string {
+function renderBenchmarkRunScript(
+  profile: string,
+  selectorArgs: string,
+): string {
   const benchDir = remoteBenchDir();
   return `#!/bin/bash
 set +e
 cd ${benchDir}
 wc -l < reports/history.jsonl 2>/dev/null > ${HISTORY_LINES_BEFORE_SENTINEL} || echo 0 > ${HISTORY_LINES_BEFORE_SENTINEL}
-pnpm bench:snb:${profile} --check > /var/log/typegraph-bench.log 2>&1
+pnpm bench:snb:${profile} --check${selectorArgs} > /var/log/typegraph-bench.log 2>&1
 EXIT_CODE=$?
 echo "${EXIT_CODE_MARKER.start}"
 echo $EXIT_CODE
@@ -252,9 +293,32 @@ exit $EXIT_CODE
 `;
 }
 
-/** Renders the SSM command that `cat`s one remote file, defaulting to `{}` if it's missing. */
-function renderCatJsonScript(remotePath: string): string {
-  return `cat ${remotePath} 2>/dev/null || echo '{}'`;
+/**
+ * Renders the SSM command that emits one remote file as gzip+base64 on a
+ * single line (empty if missing). `cat`ing the raw file truncates at SSM's
+ * 24,000-character `StandardOutputContent` cap — fine for the old 4-engine ×
+ * IS1-7 results.json, but the 5-engine × 16-query results.json exceeds it and
+ * was silently cut mid-JSON, crashing collect before it saved anything.
+ * gzip compresses JSON ~5-10×, so the encoded artifact stays well under the
+ * cap; `decodeGzArtifact` reverses it locally.
+ */
+function renderGzArtifactScript(remotePath: string): string {
+  return `if [ -f "${remotePath}" ]; then gzip -c "${remotePath}" | base64 | tr -d '\\n'; fi`;
+}
+
+/** Decodes `renderGzArtifactScript` output back to text (`{}` when absent). */
+function decodeGzArtifact(encoded: string): string {
+  if (encoded.length === 0) return "{}";
+  return gunzipSync(Buffer.from(encoded, "base64")).toString("utf8");
+}
+
+/** Best-effort JSON parse — never throws, so one truncated artifact can't abort collect. */
+function safeParseJson<T>(text: string): T | undefined {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Renders the SSM command that tails only the history.jsonl lines this run appended. */
@@ -288,11 +352,30 @@ async function launch(argv: readonly string[]): Promise<void> {
       `Unsupported --profile "${benchProfile}". Expected "smoke", "sf1", or "sf10".`,
     );
   }
+  // Optional targeted-run selectors: run only some engines/queries (e.g. the
+  // BFS/SSSP growth-path validation on typegraph-postgres + pggraph) instead
+  // of the whole suite over the full engine set. Validated + normalized here,
+  // then forwarded to the remote `pnpm bench:snb:*` command; `collect` must be
+  // given the same `--engines` so its "expected engines ran" gate matches.
+  const engines = validateSelector(
+    parseArgValue(argv, "engines"),
+    "--engines",
+    SNB_ENGINE_NAMES,
+  );
+  const queries = validateSelector(
+    parseArgValue(argv, "queries"),
+    "--queries",
+    SNB_QUERY_IDS,
+  );
+  const selectorArgs = `${engines === undefined ? "" : ` --engines=${engines}`}${
+    queries === undefined ? "" : ` --queries=${queries}`
+  }`;
   const instanceType =
     parseArgValue(argv, "instance-type") ??
     DEFAULT_INSTANCE_TYPE_BY_PROFILE[benchProfile];
   const volumeSizeGib = Number(
-    parseArgValue(argv, "volume-size-gib") ?? DEFAULT_VOLUME_SIZE_GIB,
+    parseArgValue(argv, "volume-size-gib") ??
+      DEFAULT_VOLUME_SIZE_GIB_BY_PROFILE[benchProfile],
   );
   const volumeIops = Number(
     parseArgValue(argv, "volume-iops") ?? DEFAULT_VOLUME_IOPS,
@@ -409,12 +492,12 @@ async function launch(argv: readonly string[]): Promise<void> {
   console.log("Bootstrap complete.");
 
   console.log(
-    `Starting benchmark (--profile=${benchProfile}) in the background...`,
+    `Starting benchmark (--profile=${benchProfile}${selectorArgs}) in the background...`,
   );
   const benchmarkCommandId = await sendShellCommand(
     awsOptions,
     instanceId,
-    renderBenchmarkRunScript(benchProfile),
+    renderBenchmarkRunScript(benchProfile, selectorArgs),
     { timeoutSeconds: benchmarkTimeoutSeconds },
   );
 
@@ -427,6 +510,9 @@ async function launch(argv: readonly string[]): Promise<void> {
     `--instance-id=${instanceId}`,
     `--command-id=${benchmarkCommandId}`,
     `--profile=${benchProfile}`,
+    // `collect` must expect exactly the engines this run selected, or its
+    // "all engines ran" gate would flag the intentionally-absent ones.
+    engines !== undefined ? `--engines=${engines}` : undefined,
     `--run-id=${runId}`,
   ].filter((flag): flag is string => flag !== undefined);
   console.log(
@@ -491,6 +577,15 @@ async function collect(argv: readonly string[]): Promise<void> {
   const benchProfile = parseArgValue(argv, "profile") ?? "sf1";
   const runId = parseArgValue(argv, "run-id") ?? "unknown-run";
   const keep = argv.includes("--keep");
+  // The set of engines this run was expected to complete — the selected
+  // subset for a targeted run, or the full canonical set by default. `launch`
+  // prints the matching `--engines` on the collect command.
+  const expectedEngines =
+    validateSelector(
+      parseArgValue(argv, "engines"),
+      "--engines",
+      SNB_ENGINE_NAMES,
+    )?.split(",") ?? SNB_ENGINE_NAMES;
   const pollIntervalSeconds = Number(
     parseArgValue(argv, "poll-interval-seconds") ??
       DEFAULT_POLL_INTERVAL_SECONDS,
@@ -525,18 +620,22 @@ async function collect(argv: readonly string[]): Promise<void> {
     // StandardOutputContent budget — see renderBenchmarkRunScript's doc
     // comment for why that matters.
     const benchDir = remoteBenchDir();
-    const resultsText = await fetchRemoteText(
-      awsOptions,
-      instanceId,
-      renderCatJsonScript(
-        `${benchDir}/bench-results/current/snb-${benchProfile}/results.json`,
+    const resultsText = decodeGzArtifact(
+      await fetchRemoteText(
+        awsOptions,
+        instanceId,
+        renderGzArtifactScript(
+          `${benchDir}/bench-results/current/snb-${benchProfile}/results.json`,
+        ),
       ),
     );
-    const summaryText = await fetchRemoteText(
-      awsOptions,
-      instanceId,
-      renderCatJsonScript(
-        `${benchDir}/bench-results/current/snb-${benchProfile}/summary.json`,
+    const summaryText = decodeGzArtifact(
+      await fetchRemoteText(
+        awsOptions,
+        instanceId,
+        renderGzArtifactScript(
+          `${benchDir}/bench-results/current/snb-${benchProfile}/summary.json`,
+        ),
       ),
     );
     const historyText = await fetchRemoteText(
@@ -544,11 +643,13 @@ async function collect(argv: readonly string[]): Promise<void> {
       instanceId,
       renderHistoryTailScript(),
     );
-    const doctorText = await fetchRemoteText(
-      awsOptions,
-      instanceId,
-      renderCatJsonScript(
-        `${benchDir}/bench-results/current/snb-${benchProfile}/competitor-doctor.json`,
+    const doctorText = decodeGzArtifact(
+      await fetchRemoteText(
+        awsOptions,
+        instanceId,
+        renderGzArtifactScript(
+          `${benchDir}/bench-results/current/snb-${benchProfile}/competitor-doctor.json`,
+        ),
       ),
     );
 
@@ -557,22 +658,24 @@ async function collect(argv: readonly string[]): Promise<void> {
     // A doctor-runnable-engine filter (see snb-short-reads.ts) is the right
     // behavior for a local/CI run — a no-Docker environment should still
     // exit 0 on the two embedded engines. It's the wrong behavior for a
-    // paid, multi-hour EC2 run, whose entire point is a complete four-engine
-    // comparison: if a container failed to start on the instance, the run
-    // would otherwise silently proceed on the remaining engines, still write
-    // valid (just incomplete) results.json/summary.json/history lines, and
+    // paid, multi-hour EC2 run, whose entire point is a complete comparison
+    // across the expected engine set (`expectedEngines` — all four by default,
+    // or the `--engines` subset for a targeted run): if a container failed to
+    // start on the instance, the run would otherwise silently proceed on the
+    // remaining engines, still write valid (just incomplete) results.json/
+    // summary.json/history lines, and
     // exit 0. `results.json.engines` lists only engines that actually ran
     // (`snb-short-reads.ts`'s `runs.map(...)`), so comparing it against the
-    // full canonical engine set is how this EC2-only strictness is enforced,
+    // expected engine set is how this EC2-only strictness is enforced,
     // without changing `--check`'s intentionally lenient local/CI semantics.
-    const parsedResults: { engines?: readonly { name: string }[] } | undefined =
+    const parsedResults =
       hasParseableResults ?
-        (JSON.parse(resultsText) as { engines?: readonly { name: string }[] })
+        safeParseJson<{ engines?: readonly { name: string }[] }>(resultsText)
       : undefined;
     const ranEngineNames = new Set(
       (parsedResults?.engines ?? []).map((engine) => engine.name),
     );
-    const missingEngines = SNB_ENGINE_NAMES.filter(
+    const missingEngines = expectedEngines.filter(
       (name) => !ranEngineNames.has(name),
     );
     const hasAllEngines = hasParseableResults && missingEngines.length === 0;
@@ -593,16 +696,22 @@ async function collect(argv: readonly string[]): Promise<void> {
     const hasHistoryLines = historyText.length > 0;
     const hasParseableDoctor = doctorText.length > 0 && doctorText !== "{}";
 
+    // Write the decoded JSON text as-is (it came straight from the on-instance
+    // file, now un-truncated via gzip) rather than re-parsing — so a
+    // malformed/partial artifact is still preserved for post-mortem instead of
+    // crashing the save.
     if (hasParseableResults) {
-      await writeJsonFile(
+      await writeFile(
         path.join(localDir, "results.json"),
-        JSON.parse(resultsText),
+        resultsText,
+        "utf-8",
       );
     }
     if (hasParseableSummary) {
-      await writeJsonFile(
+      await writeFile(
         path.join(localDir, "summary.json"),
-        JSON.parse(summaryText),
+        summaryText,
+        "utf-8",
       );
     }
     // Preserved whenever present (success or failure) — it's the diagnostic
@@ -610,9 +719,10 @@ async function collect(argv: readonly string[]): Promise<void> {
     // needed to tell "an engine failed mid-run" apart from "an engine was
     // never attempted" when missingEngines is non-empty below.
     if (hasParseableDoctor) {
-      await writeJsonFile(
+      await writeFile(
         path.join(localDir, "competitor-doctor.json"),
-        JSON.parse(doctorText),
+        doctorText,
+        "utf-8",
       );
     }
     // Raw history lines are always preserved locally (run-scoped, not the

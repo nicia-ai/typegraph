@@ -111,13 +111,39 @@ import {
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
 import {
+  BFS3_HOPS,
+  bfsReachResult,
   canonicalDigest,
   compareIdsAscending,
+  compareMessageRecencyDesc,
+  componentSizesResult,
+  degreeResult,
+  IC13_MAX_HOPS,
+  IC9_MAX_DATE,
+  IC_MESSAGE_LIMIT,
   type MessageRef,
+  type PersonPair,
+  reachableSetResult,
+  shortestPathDistanceResult,
+  type SnbCapabilityGaps,
   type SnbEngineFactory,
   type SnbEngineHandle,
   type SnbQueries,
+  ssspResult,
+  unsupportedQuery,
 } from "./types";
+
+/**
+ * Neo4j's one remaining gap: IC14 weighted shortest path. GDS *does* offer
+ * `gds.shortestPath.dijkstra` with a relationship weight, but the SNB `knows`
+ * graph has no stored weight to project (TypeGraph's IC14 uses a synthetic
+ * per-edge weight materialized only in its own loader), so there is nothing to
+ * project weights from here. The whole-graph algorithms (GA_WCC/BFS/SSSP) now
+ * run through GDS (see `projectGdsGraph`) — Neo4j's native answer.
+ */
+const NEO4J_UNSUPPORTED: SnbCapabilityGaps = {
+  IC14: "no stored knows weight to project for gds.shortestPath.dijkstra",
+};
 
 // The published `neo4j-driver` .d.ts hand-rolls a subset of the driver
 // surface (e.g. its `auth` export omits `auth.none()`, which the underlying
@@ -291,6 +317,16 @@ async function runNeo4jContainer(
     "/tmp:rw,exec,size=256m",
     "-e",
     "NEO4J_AUTH=none",
+    // Auto-download the Graph Data Science library. GDS is Neo4j's native
+    // answer to graph algorithms (WCC/BFS/SSSP); without it plain Cypher has
+    // no connected-components and unbounded variable-length paths enumerate
+    // (explode). Loading it makes the GA lane a fair fight rather than testing
+    // the absence of a plugin. The image resolves a GDS build for its version
+    // and auto-configures the procedure allowlist.
+    "-e",
+    'NEO4J_PLUGINS=["graph-data-science"]',
+    "-e",
+    "NEO4J_dbms_security_procedures_unrestricted=gds.*",
     "-e",
     `NEO4J_server_memory_heap_initial__size=${memorySettings.heapSize}`,
     "-e",
@@ -393,6 +429,32 @@ async function ensureSchema(session: Session): Promise<void> {
     "CREATE CONSTRAINT snb_forum_id IF NOT EXISTS FOR (f:Forum) REQUIRE f.id IS UNIQUE",
   );
   await session.run("CALL db.awaitIndexes(600)");
+}
+
+/** Name of the in-memory GDS projection the GA_* algorithms run against. */
+const GDS_GRAPH = "knowsGraph";
+
+/**
+ * Project the Person + undirected-KNOWS graph into GDS once, after load — the
+ * same subgraph TypeGraph scopes its GA_WCC/GA_BFS/GA_SSSP to (Person nodes,
+ * undirected `knows`, isolated persons as singletons). GA queries then run the
+ * `gds.*` algorithm on this projection, so the measured latency is the
+ * algorithm, not a per-call projection (mirroring how TypeGraph runs against
+ * its already-loaded store).
+ */
+async function projectGdsGraph(session: Session): Promise<void> {
+  await session
+    .run(
+      `CALL gds.graph.exists($name) YIELD exists
+       WHERE exists
+       CALL gds.graph.drop($name) YIELD graphName RETURN graphName`,
+      { name: GDS_GRAPH },
+    )
+    .catch(() => undefined);
+  await session.run(
+    `CALL gds.graph.project($name, 'Person', {KNOWS: {orientation: 'UNDIRECTED'}})`,
+    { name: GDS_GRAPH },
+  );
 }
 
 // ---- Offline bulk load: neo4j-admin database import ----
@@ -952,7 +1014,264 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
     };
   }
 
-  return { IS1, IS2, IS3, IS4, IS5, IS6, IS7 };
+  // IC13 (traversal): shortest-path hop distance between two persons over
+  // `knows`, via Neo4j's native `shortestPath`. KNOWS is imported in both
+  // directions (see dataset/ldbc-csv.ts), so the directed pattern reaches the
+  // same set an undirected one would. `length(path)` is the hop count; no
+  // path within the cap yields zero rows -> undefined distance. `CYPHER 5`
+  // pins the same planner the id-seek IS queries rely on (see IS2/IS3).
+  async function IC13(pair: PersonPair) {
+    const rows = await runRows<{ distance: unknown }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (source:Person {id: $sourceId}), (target:Person {id: $targetId})
+       MATCH path = shortestPath((source)-[:KNOWS*..${IC13_MAX_HOPS}]->(target))
+       RETURN length(path) AS distance`,
+      { sourceId: pair.sourceId, targetId: pair.targetId },
+    );
+    // `length(path)` comes back as a neo4j Integer ({low, high}), not a JS
+    // number — coerce so the digest is a plain integer like every other
+    // engine's (otherwise it stringifies as {"low":1,"high":0}).
+    const raw = rows[0]?.distance;
+    const distance =
+      raw === undefined ? undefined
+      : neo4j.isInt(raw) ? raw.toNumber()
+      : Number(raw);
+    return shortestPathDistanceResult(distance);
+  }
+
+  // BFS3 (traversal): distinct persons within BFS3_HOPS hops of a seed over
+  // `knows`, seed excluded (`friend.id <> $id`) to match every engine's
+  // source-excluding neighborhood contract. Directed `*1..N` over the
+  // bidirectionally-loaded KNOWS graph is the undirected reachable set.
+  async function BFS3(personId: string) {
+    const rows = await runRows<{ id: string }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS*1..${BFS3_HOPS}]->(friend:Person)
+       WHERE friend.id <> $id
+       RETURN DISTINCT friend.id AS id`,
+      { id: personId },
+    );
+    return reachableSetResult(rows.map((row) => row.id));
+  }
+
+  // IC2 (complex read): the given person's friends' most recent messages.
+  // Neo4j's dual `:Message` label covers Post ∪ Comment in one match, so no
+  // per-type split is needed (unlike TypeGraph/Ladybug's separate node tables).
+  async function IC2(personId: string) {
+    const rows = await runRows<{
+      friendId: string;
+      friendFirstName: string;
+      friendLastName: string;
+      messageId: string;
+      messageContent: string;
+      messageCreationDate: string;
+    }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS]->(friend:Person)<-[:HAS_CREATOR]-(message:Message)
+       RETURN friend.id AS friendId, friend.firstName AS friendFirstName,
+              friend.lastName AS friendLastName, message.id AS messageId,
+              message.content AS messageContent, message.creationDate AS messageCreationDate
+       ORDER BY message.creationDate DESC, message.id DESC
+       LIMIT ${IC_MESSAGE_LIMIT}`,
+      { id: personId },
+    );
+    const canonicalRows = rows
+      .map((row) => ({
+        friendId: row.friendId,
+        friendFirstName: row.friendFirstName,
+        friendLastName: row.friendLastName,
+        messageId: row.messageId,
+        messageContent: row.messageContent,
+        messageCreationDate: row.messageCreationDate,
+      }))
+      .toSorted((left, right) =>
+        compareMessageRecencyDesc(
+          { creationDate: left.messageCreationDate, id: left.messageId },
+          { creationDate: right.messageCreationDate, id: right.messageId },
+        ),
+      )
+      .slice(0, IC_MESSAGE_LIMIT);
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // IC8 (complex read): the most recent replies to the person's own messages.
+  async function IC8(personId: string) {
+    const rows = await runRows<{
+      replyAuthorId: string;
+      replyAuthorFirstName: string;
+      replyAuthorLastName: string;
+      commentId: string;
+      commentContent: string;
+      commentCreationDate: string;
+    }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})<-[:HAS_CREATOR]-(message:Message)<-[:REPLY_OF]-(reply:Comment)-[:HAS_CREATOR]->(author:Person)
+       RETURN author.id AS replyAuthorId, author.firstName AS replyAuthorFirstName,
+              author.lastName AS replyAuthorLastName, reply.id AS commentId,
+              reply.content AS commentContent, reply.creationDate AS commentCreationDate
+       ORDER BY reply.creationDate DESC, reply.id DESC
+       LIMIT ${IC_MESSAGE_LIMIT}`,
+      { id: personId },
+    );
+    const canonicalRows = rows
+      .map((row) => ({
+        replyAuthorId: row.replyAuthorId,
+        replyAuthorFirstName: row.replyAuthorFirstName,
+        replyAuthorLastName: row.replyAuthorLastName,
+        commentId: row.commentId,
+        commentContent: row.commentContent,
+        commentCreationDate: row.commentCreationDate,
+      }))
+      .toSorted((left, right) =>
+        compareMessageRecencyDesc(
+          { creationDate: left.commentCreationDate, id: left.commentId },
+          { creationDate: right.commentCreationDate, id: right.commentId },
+        ),
+      )
+      .slice(0, IC_MESSAGE_LIMIT);
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // IC9 (complex read): the most recent messages by the person's friends and
+  // friends-of-friends (2-hop KNOWS, self excluded) before the cutoff. DISTINCT
+  // collapses the duplicate (fof, message) rows the variable-length match
+  // produces; ORDER BY uses the projected aliases (post-DISTINCT scope).
+  async function IC9(personId: string) {
+    const rows = await runRows<{
+      personId: string;
+      personFirstName: string;
+      personLastName: string;
+      messageId: string;
+      messageContent: string;
+      messageCreationDate: string;
+    }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS*1..2]->(fof:Person)
+       WHERE fof.id <> $id
+       MATCH (fof)<-[:HAS_CREATOR]-(message:Message)
+       WHERE message.creationDate < $maxDate
+       RETURN DISTINCT fof.id AS personId, fof.firstName AS personFirstName,
+              fof.lastName AS personLastName, message.id AS messageId,
+              message.content AS messageContent, message.creationDate AS messageCreationDate
+       ORDER BY messageCreationDate DESC, messageId DESC
+       LIMIT ${IC_MESSAGE_LIMIT}`,
+      { id: personId, maxDate: IC9_MAX_DATE },
+    );
+    const canonicalRows = rows
+      .map((row) => ({
+        personId: row.personId,
+        personFirstName: row.personFirstName,
+        personLastName: row.personLastName,
+        messageId: row.messageId,
+        messageContent: row.messageContent,
+        messageCreationDate: row.messageCreationDate,
+      }))
+      .toSorted((left, right) =>
+        compareMessageRecencyDesc(
+          { creationDate: left.messageCreationDate, id: left.messageId },
+          { creationDate: right.messageCreationDate, id: right.messageId },
+        ),
+      )
+      .slice(0, IC_MESSAGE_LIMIT);
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // GA_DEGREE (algorithm): the seed's KNOWS degree. `count(*)` returns a neo4j
+  // Integer — coerce so the digest is a plain number (see IC13).
+  async function GA_DEGREE(seedPersonId: string) {
+    const rows = await runRows<{ degree: unknown }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS]->(:Person)
+       RETURN count(*) AS degree`,
+      { id: seedPersonId },
+    );
+    const raw = rows[0]?.degree;
+    const degree = neo4j.isInt(raw) ? raw.toNumber() : Number(raw);
+    return degreeResult(degree);
+  }
+
+  const toNumber = (raw: unknown): number =>
+    neo4j.isInt(raw) ? raw.toNumber() : Number(raw);
+
+  // GA_WCC (algorithm): weakly connected components of the Person `knows`
+  // subgraph via GDS. `gds.wcc.stream` over the undirected projection yields a
+  // componentId per Person (isolated persons form singletons — the projection
+  // carries every Person node), grouped into the same size multiset TypeGraph's
+  // native WCC produces.
+  async function GA_WCC(_seedPersonId: string) {
+    const rows = await runRows<{ size: unknown }>(
+      getSession(),
+      `CALL gds.wcc.stream($graph) YIELD componentId
+       RETURN componentId, count(*) AS size`,
+      { graph: GDS_GRAPH },
+    );
+    return componentSizesResult(rows.map((row) => toNumber(row.size)));
+  }
+
+  // GA_BFS / GA_SSSP (algorithms): whole-component reachability / min-depth sums
+  // from the seed. `gds.allShortestPaths.dijkstra` from the seed over the
+  // undirected, unit-weight projection is BFS distance to every reachable node;
+  // the source (cost 0) is excluded. BFS is the reached count; SSSP adds the
+  // depth sum — matching TypeGraph's `reachable`-based results.
+  async function GA_BFS(seedPersonId: string) {
+    const rows = await runRows<{ reached: unknown }>(
+      getSession(),
+      `MATCH (source:Person {id: $id})
+       CALL gds.allShortestPaths.dijkstra.stream($graph, {sourceNode: id(source)})
+       YIELD targetNode, totalCost
+       WITH source, targetNode WHERE targetNode <> id(source)
+       RETURN count(*) AS reached`,
+      { id: seedPersonId, graph: GDS_GRAPH },
+    );
+    return bfsReachResult(toNumber(rows[0]?.reached));
+  }
+  async function GA_SSSP(seedPersonId: string) {
+    const rows = await runRows<{ reached: unknown; depthSum: unknown }>(
+      getSession(),
+      `MATCH (source:Person {id: $id})
+       CALL gds.allShortestPaths.dijkstra.stream($graph, {sourceNode: id(source)})
+       YIELD targetNode, totalCost
+       WITH source, targetNode, totalCost WHERE targetNode <> id(source)
+       RETURN count(*) AS reached, sum(totalCost) AS depthSum`,
+      { id: seedPersonId, graph: GDS_GRAPH },
+    );
+    return ssspResult(toNumber(rows[0]?.reached), toNumber(rows[0]?.depthSum));
+  }
+
+  return {
+    IS1,
+    IS2,
+    IS3,
+    IS4,
+    IS5,
+    IS6,
+    IS7,
+    IC13,
+    BFS3,
+    IC2,
+    IC8,
+    IC9,
+    GA_DEGREE,
+    GA_WCC,
+    GA_BFS,
+    GA_SSSP,
+    IC14: unsupportedQuery("IC14"),
+  };
 }
 
 // ---- Factory ----
@@ -1010,6 +1329,7 @@ export const createNeo4jEngine: SnbEngineFactory = async (
       "IS1-IS7, using native multi-label (:Message:Post/:Message:Comment) " +
       "polymorphism instead of TypeGraph's ontological supertype " +
       "workaround.",
+    unsupported: NEO4J_UNSUPPORTED,
     async load() {
       try {
         const memorySettings = await resolveNeo4jMemorySettings(options.log);
@@ -1049,6 +1369,7 @@ export const createNeo4jEngine: SnbEngineFactory = async (
         await waitForNeo4jBolt(containerName, driver);
         session = driver.session({ database: NEO4J_DATABASE });
         await ensureSchema(session);
+        await projectGdsGraph(session);
         return pools;
       } catch (error) {
         await cleanup();

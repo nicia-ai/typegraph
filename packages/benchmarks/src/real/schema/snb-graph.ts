@@ -71,6 +71,10 @@ const Message = defineNode("Message", {
 const knows = defineEdge("knows", {
   schema: z.object({
     since: z.string(),
+    // Synthetic deterministic weight for IC14 weighted shortest path — see
+    // `synthesizeKnowsWeight`. Materialized at load so `weightedShortestPath`
+    // has a numeric edge property to sum.
+    weight: z.number(),
   }),
 });
 
