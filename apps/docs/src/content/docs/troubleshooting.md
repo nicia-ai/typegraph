@@ -451,8 +451,9 @@ for (const entry of result.results) {
 
 The method performs its own fresh audit and resolves contribution declarations
 from the committed graph and the active backend strategies. It never accepts a
-diagnostic, physical table name, or DDL from the caller. This keeps repair safe
-when the Store was opened before another writer evolved the graph.
+diagnostic, physical table name, or DDL from the caller. A Store opened before
+another writer evolved the graph catches up before enumerating vector slots
+instead of repairing from its stale in-memory graph snapshot.
 
 | `state` | Result | Data behavior |
 | --- | --- | --- |
@@ -462,8 +463,8 @@ when the Store was opened before another writer evolved the graph.
 | `stale` | `requires-rebuild` | The stored physical shape does not match the current declaration |
 
 `remaining` is a fresh post-repair diagnostic pass. An empty `remaining` array
-means every finding from this audit was repaired, while a second successful
-call is idempotent and returns no results.
+means no current declaration remains unhealthy after the pass. Once it is
+empty, a second call is idempotent and returns no results.
 
 For a vector `requires-rebuild` entry, use
 `reembedVectorField(kind, fieldPath, { embed })`. It drops and recreates the

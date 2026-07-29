@@ -1058,13 +1058,11 @@ export type ContributionDiagnosticState =
  * storage, so applying it to a `missing-marker` — where the table is
  * intact and only the bookkeeping is wrong — discards every embedding
  * to fix a marker, and without an `embed` callback it leaves the field
- * empty. For `missing-marker` and `failed-materialization` prefer
- * `ensureVectorSlotContribution(slot, { force: true })`, whose DDL is
- * `CREATE ... IF NOT EXISTS` and never drops. Note also that
- * `ensureRuntimeContributions` does NOT repair a fulltext
- * `orphaned-marker`: it short-circuits on the marker, which still
- * reads as initialized. See the per-state repair tables in the
- * troubleshooting guide.
+ * empty. Prefer `store.repairContributions()` for `missing-marker` and
+ * `failed-materialization`; it resolves the current strategy declarations
+ * internally and keeps the normal signature-drift guard enabled. It reports
+ * `stale` and `orphaned-marker` as `requires-rebuild`. See the per-state
+ * repair table in the troubleshooting guide.
  */
 export type ContributionDiagnostic = Readonly<{
   /** Producing strategy, e.g. `"fts5"` / `"tsvector"` / `"pgvector"`. */

@@ -3383,8 +3383,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * The repair re-audits inside the backend and resolves every declaration
    * from the committed schema. Callers do not supply diagnostics, physical
    * names, or DDL. A stale Store is caught up to the active persisted graph
-   * before its vector slots are enumerated, so repair cannot re-stamp a
-   * contribution retired or changed by another writer.
+   * before its vector slots are enumerated, so repair does not use declarations
+   * from the Store's stale in-memory graph snapshot.
    *
    * @throws {ConfigurationError} when no schema has been initialized or the
    *   backend cannot probe and repair strategy-owned contributions.

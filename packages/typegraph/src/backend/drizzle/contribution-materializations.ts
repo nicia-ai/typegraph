@@ -298,6 +298,12 @@ type VerificationTarget = Readonly<{
   fieldPath?: string;
 }>;
 
+type DiagnosedContribution = Readonly<{
+  graphId: string;
+  contribution: StrategyTableContribution;
+  diagnostic: ContributionDiagnostic;
+}>;
+
 function identityOf(
   graphId: string,
   contribution: StrategyTableContribution,
@@ -792,6 +798,17 @@ export function createContributionMaterializer(
         };
       }),
     );
+    if (bypassCache) {
+      // Repair is invoked precisely when durable state may have changed behind
+      // this materializer's positive cache. Keep every touched key read-through
+      // from now on: deleting only the current entry would still let an assert
+      // that started before the repair repopulate stale success after a failed
+      // repair recorded the contribution as unusable.
+      for (const entry of entries) {
+        uncacheableKeys.add(entry.key);
+        initializedSignatures.delete(entry.key);
+      }
+    }
     // A cache hit requires the signature to match — a contribution whose
     // shape changed on this instance falls through to the drift-guard.
     const pending =
@@ -983,10 +1000,10 @@ export function createContributionMaterializer(
     return targets;
   }
 
-  async function verifyContributions(
+  async function diagnoseContributions(
     graphId: string,
     vectorSlots: readonly VectorSlot[],
-  ): Promise<readonly ContributionDiagnostic[]> {
+  ): Promise<readonly DiagnosedContribution[]> {
     // Vector slots carry their own graph id, exactly as `ensureVectorSlots`
     // reads them, so the marker read stays one query per distinct graph.
     const targetsByGraph = verificationTargetsByGraph(graphId, vectorSlots);
@@ -1006,7 +1023,7 @@ export function createContributionMaterializer(
       return probe;
     }
 
-    const diagnostics: ContributionDiagnostic[] = [];
+    const diagnosed: DiagnosedContribution[] = [];
     for (const [id, targets] of targetsByGraph) {
       // A never-bootstrapped marker table means no contribution is marked,
       // which the per-target verdict already models as an empty row set.
@@ -1024,44 +1041,46 @@ export function createContributionMaterializer(
           await tableExists(contribution.tableName),
         );
         if (state === undefined) continue;
-        diagnostics.push({
-          owner: contribution.owner,
-          logicalName: contribution.logicalName,
-          physicalName: contribution.tableName,
-          ...(kind === undefined ? {} : { kind }),
-          ...(fieldPath === undefined ? {} : { fieldPath }),
-          state,
-          // The recorded reason, carried through verbatim. `state` folds
-          // several marker verdicts together because they share a repair;
-          // this is what keeps the fold from also discarding the one thing
-          // the catalog can never tell the operator.
-          ...(row?.lastError === undefined ? {} : { lastError: row.lastError }),
+        diagnosed.push({
+          graphId: id,
+          contribution,
+          diagnostic: {
+            owner: contribution.owner,
+            logicalName: contribution.logicalName,
+            physicalName: contribution.tableName,
+            ...(kind === undefined ? {} : { kind }),
+            ...(fieldPath === undefined ? {} : { fieldPath }),
+            state,
+            // The recorded reason, carried through verbatim. `state` folds
+            // several marker verdicts together because they share a repair;
+            // this is what keeps the fold from also discarding the one thing
+            // the catalog can never tell the operator.
+            ...(row?.lastError === undefined ?
+              {}
+            : { lastError: row.lastError }),
+          },
         });
       }
     }
-    return diagnostics;
+    return diagnosed;
+  }
+
+  async function verifyContributions(
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ): Promise<readonly ContributionDiagnostic[]> {
+    const diagnosed = await diagnoseContributions(graphId, vectorSlots);
+    return diagnosed.map((entry) => entry.diagnostic);
   }
 
   async function repairContributions(
     graphId: string,
     vectorSlots: readonly VectorSlot[],
   ): Promise<ContributionRepairResult> {
-    const targets = new Map<string, StrategyTableContribution>();
-    for (const [id, graphTargets] of verificationTargetsByGraph(
-      graphId,
-      vectorSlots,
-    )) {
-      for (const target of graphTargets) {
-        targets.set(
-          contributionKey(id, target.contribution),
-          target.contribution,
-        );
-      }
-    }
-
-    const diagnostics = await verifyContributions(graphId, vectorSlots);
+    const diagnosed = await diagnoseContributions(graphId, vectorSlots);
     const results: ContributionRepairEntry[] = [];
-    for (const diagnostic of diagnostics) {
+    for (const { graphId: targetGraphId, contribution, diagnostic } of
+      diagnosed) {
       if (
         diagnostic.state === "stale" ||
         diagnostic.state === "orphaned-marker"
@@ -1070,28 +1089,12 @@ export function createContributionMaterializer(
         continue;
       }
 
-      const identity = {
-        graphId,
-        logicalName: diagnostic.logicalName,
-        owner: diagnostic.owner,
-        tableName: diagnostic.physicalName,
-      };
-      const contribution = targets.get(contributionKey(graphId, identity));
-      if (contribution === undefined) {
-        results.push({
-          diagnostic,
-          status: "failed",
-          error: "The contribution is no longer declared by the active backend strategy.",
-        });
-        continue;
-      }
-
       try {
         // A repair must bypass the positive process-local cache because the
         // marker may have been removed or failed after this backend cached a
         // healthy signature. This is intentionally NOT `force`: the normal
         // drift guard must still refuse to re-stamp stale physical storage.
-        await ensureContributions(graphId, [contribution], {
+        await ensureContributions(targetGraphId, [contribution], {
           bypassCache: true,
         });
         results.push({ diagnostic, status: "repaired" });

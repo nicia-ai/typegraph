@@ -215,6 +215,11 @@ const SECOND_VECTOR_SLOT = {
   fieldPath: "summaryEmbedding",
 } as const;
 
+const OTHER_GRAPH_VECTOR_SLOT = {
+  ...VECTOR_SLOT,
+  graphId: "other-contrib-mat-unit",
+} as const;
+
 describe("#149 ensureRuntimeContributions is read-only when already materialized", () => {
   it("a fresh materializer over an already-materialized graph runs zero DDL", async () => {
     const markers = new Map<string, ContributionMaterializationRow>();
@@ -1301,6 +1306,46 @@ describe("repairContributions safely restores repairable declarations", () => {
     ).resolves.toEqual({ results: [], remaining: [] });
   });
 
+  it("repairs vector slots using each slot's graph id", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const existingTables = new Set([
+      ...runtimeTables(),
+      vectorTableOf(OTHER_GRAPH_VECTOR_SLOT),
+    ]);
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existingTables,
+    );
+    await materializer.ensureRuntimeContributions(GRAPH_ID);
+    await materializer.ensureVectorSlot(OTHER_GRAPH_VECTOR_SLOT);
+
+    const contribution = pgvectorStrategy.ownedTables(
+      OTHER_GRAPH_VECTOR_SLOT,
+    )[0];
+    if (contribution === undefined)
+      throw new Error("expected vector contribution");
+    markers.delete(
+      markerKey({
+        graphId: OTHER_GRAPH_VECTOR_SLOT.graphId,
+        ...contribution,
+      }),
+    );
+
+    const result = await materializer.repairContributions(GRAPH_ID, [
+      OTHER_GRAPH_VECTOR_SLOT,
+    ]);
+
+    expect(result.results).toMatchObject([
+      {
+        diagnostic: { state: "missing-marker" },
+        status: "repaired",
+      },
+    ]);
+    expect(result.remaining).toEqual([]);
+  });
+
   it("repairs safe findings without re-stamping a stale sibling", async () => {
     const markers = new Map<string, ContributionMaterializationRow>();
     const existingTables = new Set([
@@ -1384,5 +1429,45 @@ describe("repairContributions safely restores repairable declarations", () => {
     expect(result.remaining).toMatchObject([
       { state: "missing-marker", lastError: "permission denied" },
     ]);
+  });
+
+  it("invalidates a warm positive cache when repair fails", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const contribution = pgvectorStrategy.ownedTables(VECTOR_SLOT)[0];
+    if (contribution === undefined)
+      throw new Error("expected vector contribution");
+    const existingTables = new Set([
+      ...runtimeTables(),
+      contribution.tableName,
+    ]);
+    let failDdl = false;
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      existingTables,
+      () =>
+        failDdl ?
+          Promise.reject(new Error("permission denied"))
+        : Promise.resolve(),
+    );
+    await materializer.ensureRuntimeContributions(GRAPH_ID);
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+
+    markers.delete(markerKey({ graphId: GRAPH_ID, ...contribution }));
+    failDdl = true;
+    const result = await materializer.repairContributions(GRAPH_ID, [
+      VECTOR_SLOT,
+    ]);
+
+    expect(result.results).toMatchObject([
+      { status: "failed", error: "permission denied" },
+    ]);
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "failed" },
+    });
   });
 });
