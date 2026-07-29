@@ -32,6 +32,7 @@ export {
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
   executeNodeUpdate,
+  executeNodeUpdateWhere,
   executeNodeUpsertUpdate,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,

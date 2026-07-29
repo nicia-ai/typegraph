@@ -449,7 +449,10 @@ export function createCommonOperationBackend(
     async updateNodeSet(
       params: UpdateNodeSetParams,
     ): Promise<UpdateNodeSetResult> {
-      if (Object.keys(params.patch).length === 0) {
+      if (
+        Object.keys(params.patch).length === 0 &&
+        (params.unsetProperties?.length ?? 0) === 0
+      ) {
         throw new ConfigurationError(
           "Set-based node update requires at least one property",
           { operation: "updateNodeSet", kind: params.kind },

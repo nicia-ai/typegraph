@@ -181,6 +181,13 @@ export type VectorStrategy = Readonly<{
     slot: VectorSlot,
     params: DeleteEmbeddingParams,
   ) => readonly SqlFragment[];
+  /** Emits one set-based delete for many node ids in a vector slot. */
+  buildDeleteBatch: (
+    this: void,
+    slot: VectorSlot,
+    params: Omit<DeleteEmbeddingParams, "nodeId"> &
+      Readonly<{ nodeIds: readonly string[] }>,
+  ) => readonly SqlFragment[];
 
   /**
    * Raw DDL statement(s) that drop the slot's entire physical storage

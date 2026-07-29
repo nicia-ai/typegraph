@@ -756,6 +756,48 @@ store.nodes.Person.update(
 ): Promise<Node<Person>>;
 ```
 
+#### `updateWhere(params)`
+
+Updates a set of current, live nodes in one transactional operation and returns
+the number of rows changed. A selector is mandatory: provide `where`, one or
+more independent `exists` relationship predicates, or the explicit
+`all: true` acknowledgement.
+
+```typescript
+const result = await store.nodes.Person.updateWhere({
+  patch: { active: false },
+  where: (person) => person.lastSeen.lt(cutoff),
+  exists: [
+    {
+      edgeKind: "worksAt",
+      direction: "out",
+      relatedKind: "Company",
+      whereRelated: (company) =>
+        company.field("status").string().eq("closed"),
+    },
+  ],
+});
+// { affectedCount: number }
+```
+
+Each `exists` entry is evaluated independently and ANDed with the other
+selectors. The patch is shallow: values replace top-level properties, explicit
+`null` is preserved, and `undefined` removes an optional property. TypeGraph
+validates every complete after-image and updates uniqueness, fulltext, vector,
+history, and revision state in the same transaction. If any row or sidecar is
+invalid, the whole update rolls back. Backends without transactional set-write
+and batched sidecar support reject the operation before writing.
+
+`updateWhere()` is current-state only and is intentionally unavailable on a
+`StoreView`. Use `all: true` for an intentional whole-kind update:
+
+```typescript
+await store.nodes.Person.updateWhere({
+  patch: { needsBackfill: false },
+  all: true,
+});
+```
+
 #### `delete(id)`
 
 Soft-deletes a node.

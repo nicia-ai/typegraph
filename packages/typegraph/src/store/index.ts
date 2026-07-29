@@ -5,6 +5,7 @@ export {
   type BulkEdgeSourceGroup,
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type BulkOperationHookContext,
   type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,

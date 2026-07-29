@@ -279,6 +279,23 @@ export const sqliteVecStrategy: VectorStrategy = {
     ];
   },
 
+  buildDeleteBatch(
+    slot,
+    params: Omit<DeleteEmbeddingParams, "nodeId"> &
+      Readonly<{ nodeIds: readonly string[] }>,
+  ): readonly SqlFragment[] {
+    if (params.nodeIds.length === 0) return [];
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+    );
+    return [
+      sql`DELETE FROM ${table} WHERE "graph_id" = ${params.graphId} AND "node_id" IN (${sql.join(
+        params.nodeIds.map((nodeId) => sql`${nodeId}`),
+        sql`, `,
+      )})`,
+    ];
+  },
+
   // vec0's KNN is brute force in C — exact by construction (the
   // "index" is a partitioned scan, not a graph) — and the non-indexed
   // fallback below is a plain SQL scan. The compiler may therefore

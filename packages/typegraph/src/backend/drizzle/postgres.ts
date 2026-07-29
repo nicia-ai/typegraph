@@ -1749,6 +1749,24 @@ function createPostgresOperationBackend(
             await execRun(statement);
           }
         },
+        async deleteEmbeddingBatch(
+          params: Omit<DeleteEmbeddingParams, "nodeId"> &
+            Readonly<{ nodeIds: readonly string[] }>,
+        ): Promise<void> {
+          if (params.nodeIds.length === 0) return;
+          const slot = vectorSlotFromParams(params);
+          await contributionMaterializer.assertVectorSlot(slot);
+          for (const nodeIds of chunkArray(
+            [...new Set(params.nodeIds)],
+            batchConfig.embeddingUpsertBatchSize,
+          )) {
+            const statements = vectorStrategy.buildDeleteBatch(slot, {
+              ...params,
+              nodeIds,
+            });
+            for (const statement of statements) await execRun(statement);
+          }
+        },
 
         async vectorSearch(
           params: VectorSearchParams,

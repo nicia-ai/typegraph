@@ -96,8 +96,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "47b78b73bd8c197321ffdd801936c10ca78b722bfe69c590778ed1ec02b77cd5",
   },
   "./postgres/pglite": {
-    count: 544,
-    sha256: "6dcfc23e0f48103916a0f62b5d5265cb4cf9ce75714bd79d7f40ca0137e94801",
+    count: 545,
+    sha256: "a22d169d76bd7adb151a54902609c12258562045b38a35bcbe5269493f6bec85",
   },
   "./profiler": {
     count: 532,
@@ -112,8 +112,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "9a5430988c8e53a4217c19b71b618d0a5fe4f2ddd33bf72fa527b2ffeaa055a1",
   },
   "./sqlite/local": {
-    count: 544,
-    sha256: "6dcfc23e0f48103916a0f62b5d5265cb4cf9ce75714bd79d7f40ca0137e94801",
+    count: 545,
+    sha256: "a22d169d76bd7adb151a54902609c12258562045b38a35bcbe5269493f6bec85",
   },
 };
 

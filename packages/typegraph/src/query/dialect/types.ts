@@ -371,6 +371,7 @@ export interface DialectAdapter {
     this: void,
     column: SqlFragment,
     patch: Readonly<Record<string, JsonValue>>,
+    unsetProperties?: readonly string[],
   ) => SqlFragment;
 
   // ============================================================

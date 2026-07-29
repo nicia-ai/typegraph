@@ -27,6 +27,10 @@ import {
   type TemporalMode,
 } from "../core/types";
 import type { TraversalExpansion } from "../query/ast";
+import type {
+  DynamicEdgeAccessor,
+  DynamicNodeAccessor,
+} from "../query/builder";
 import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
 import {
   type ExternalRecordedReadSource,
@@ -255,6 +259,14 @@ export type OperationHookContext = HookContext &
     id: string;
   }>;
 
+/** Context for one set-based collection mutation. */
+export type BulkOperationHookContext = HookContext &
+  Readonly<{
+    operation: "updateWhere";
+    entity: "node";
+    kind: string;
+  }>;
+
 /**
  * Observability hooks for monitoring store operations.
  *
@@ -289,6 +301,8 @@ export type StoreHooks = Readonly<{
   ) => void;
   /** Called before a CRUD operation starts */
   onOperationStart?: (ctx: OperationHookContext) => void;
+  /** Called before a set-based collection mutation starts. */
+  onBulkOperationStart?: (ctx: BulkOperationHookContext) => void;
   /**
    * Called after a CRUD operation completes AND is durably committed. For a
    * top-level operation that is when its own transaction commits; for an
@@ -302,6 +316,11 @@ export type StoreHooks = Readonly<{
   onOperationEnd?: (
     ctx: OperationHookContext,
     result: Readonly<{ durationMs: number }>,
+  ) => void;
+  /** Called after a set-based mutation succeeds. */
+  onBulkOperationEnd?: (
+    ctx: BulkOperationHookContext,
+    result: Readonly<{ affectedCount: number; durationMs: number }>,
   ) => void;
   /**
    * Called when an operation fails — including an operation that completed
@@ -744,6 +763,26 @@ export type NodeCollection<
     props: Partial<z.input<N["schema"]>>,
     options?: Readonly<{ validTo?: string }>,
   ) => Promise<Node<N>>;
+
+  /**
+   * Updates every current node selected by the supplied predicates in one
+   * set-based write. Relationship clauses are independent EXISTS predicates
+   * and are ANDed with each other and with `where`.
+   */
+  updateWhere: (
+    params: Readonly<{
+      patch: Partial<z.input<N["schema"]>>;
+      where?: (accessor: NodeAccessor<N>) => Predicate;
+      exists?: readonly Readonly<{
+        edgeKind: string;
+        direction: "out" | "in";
+        relatedKind: string;
+        whereEdge?: (accessor: DynamicEdgeAccessor) => Predicate;
+        whereRelated?: (accessor: DynamicNodeAccessor) => Predicate;
+      }>[];
+      all?: true;
+    }>,
+  ) => Promise<Readonly<{ affectedCount: number }>>;
 
   /** Delete a node (soft delete - sets deletedAt timestamp) */
   delete: (id: NodeId<N>) => Promise<void>;

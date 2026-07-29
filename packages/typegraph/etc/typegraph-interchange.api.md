@@ -1426,6 +1426,9 @@ type GraphBackend = Readonly<{
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
     deleteEmbedding?: (this: void, params: DeleteEmbeddingParams) => Promise<void>;
+    deleteEmbeddingBatch?: (this: void, params: Omit<DeleteEmbeddingParams, "nodeId"> & Readonly<{
+        nodeIds: readonly string[];
+    }>) => Promise<void>;
     vectorSearch?: (this: void, params: VectorSearchParams) => Promise<readonly VectorSearchResult[]>;
     createVectorIndex?: (this: void, params: CreateVectorIndexParams) => Promise<void>;
     dropVectorIndex?: (this: void, params: DropVectorIndexParams) => Promise<void>;
@@ -2471,6 +2474,20 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
     update: (id: NodeId<N>, props: Partial<z.input<N["schema"]>>, options?: Readonly<{
         validTo?: string;
     }>) => Promise<Node<N>>;
+    updateWhere: (params: Readonly<{
+        patch: Partial<z.input<N["schema"]>>;
+        where?: (accessor: NodeAccessor<N>) => Predicate;
+        exists?: readonly Readonly<{
+            edgeKind: string;
+            direction: "out" | "in";
+            relatedKind: string;
+            whereEdge?: (accessor: DynamicEdgeAccessor) => Predicate;
+            whereRelated?: (accessor: DynamicNodeAccessor) => Predicate;
+        }>[];
+        all?: true;
+    }>) => Promise<Readonly<{
+        affectedCount: number;
+    }>>;
     delete: (id: NodeId<N>) => Promise<void>;
     hardDelete: (id: NodeId<N>) => Promise<void>;
     find: (filter?: Readonly<{
@@ -4198,6 +4215,7 @@ type UpdateNodeSetParams = Readonly<{
     graphId: string;
     kind: string;
     patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
     candidateIds: CompiledSelectSql;
     candidateIdColumn: string;
 }>;
@@ -4333,7 +4351,7 @@ type VectorMetric = "cosine" | "l2" | "inner_product";
 type VectorMetricType = "cosine" | "l2" | "inner_product";
 
 // @public (undocumented)
-type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
+type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "deleteEmbeddingBatch" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
 
 // @public (undocumented)
 type VectorSearchHit<N = Node> = Readonly<{
@@ -4419,6 +4437,9 @@ type VectorStrategy = Readonly<{
     buildUpsert: (this: void, slot: VectorSlot, params: UpsertEmbeddingParams, timestamp: string) => readonly SqlFragment[];
     buildUpsertBatch?: (this: void, slot: VectorSlot, params: UpsertEmbeddingBatchParams, timestamp: string) => readonly SqlFragment[];
     buildDelete: (this: void, slot: VectorSlot, params: DeleteEmbeddingParams) => readonly SqlFragment[];
+    buildDeleteBatch: (this: void, slot: VectorSlot, params: Omit<DeleteEmbeddingParams, "nodeId"> & Readonly<{
+        nodeIds: readonly string[];
+    }>) => readonly SqlFragment[];
     buildDropStorage: (this: void, slot: VectorSlot) => readonly string[];
     buildSearch: (this: void, slot: VectorSlot, params: VectorSearchParams, candidates?: SqlFragment) => SqlFragment;
     searchIsExact?: boolean;

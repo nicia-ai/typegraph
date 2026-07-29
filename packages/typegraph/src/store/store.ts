@@ -176,6 +176,7 @@ import {
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
   executeNodeUpdate,
+  executeNodeUpdateWhere,
   executeNodeUpsertUpdate,
   lockSchemaVersionForStoreWrite,
   type NodeOperationContext,
@@ -228,6 +229,7 @@ import {
   AUTO_REFRESH_STATISTICS_ROW_THRESHOLD,
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type BulkOperationHookContext,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
   type Edge,
@@ -395,6 +397,11 @@ function asError(error: unknown): Error {
 /** The `(hook context, operation body)` wrapper shape operation contexts carry. */
 type OperationHookRunner = <T>(
   ctx: OperationHookContext,
+  fn: () => Promise<T>,
+) => Promise<T>;
+
+type BulkOperationHookRunner = <T extends Readonly<{ affectedCount: number }>>(
+  ctx: BulkOperationHookContext,
   fn: () => Promise<T>,
 ) => Promise<T>;
 
@@ -1268,6 +1275,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         executeNodeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend, options) =>
         executeNodeUpdate(ctx, { ...input, id: input.id }, backend, options),
+      executeUpdateWhere: (
+        kind,
+        patch,
+        candidateIds,
+        candidateIdColumn,
+        backend,
+      ) =>
+        executeNodeUpdateWhere(
+          ctx,
+          kind,
+          patch,
+          candidateIds,
+          candidateIdColumn,
+          backend,
+        ),
       executeUpsertUpdate: (input, backend, options) =>
         executeNodeUpsertUpdate(
           ctx,
@@ -3891,6 +3913,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#withOperationHooks(ctx, fn);
   }
 
+  #immediateBulkHookRunner(): BulkOperationHookRunner {
+    return <T extends Readonly<{ affectedCount: number }>>(
+      ctx: BulkOperationHookContext,
+      fn: () => Promise<T>,
+    ) => this.#withBulkOperationHooks(ctx, fn);
+  }
+
   #createNodeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
   ): NodeOperationContext<G> {
@@ -3905,6 +3934,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
       withOperationHooks: runHooks,
+      createBulkOperationContext: (operation, kind) => ({
+        ...this.#createHookContext(),
+        operation,
+        entity: "node",
+        kind,
+      }),
+      withBulkOperationHooks: this.#immediateBulkHookRunner(),
     };
   }
 
@@ -4031,6 +4067,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     try {
       const result = await fn();
       this.#hooks.onOperationEnd?.(ctx, {
+        durationMs: Date.now() - startTime,
+      });
+      return result;
+    } catch (error) {
+      this.#hooks.onError?.(ctx, asError(error));
+      throw error;
+    }
+  }
+
+  async #withBulkOperationHooks<T extends Readonly<{ affectedCount: number }>>(
+    ctx: BulkOperationHookContext,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    this.#hooks.onBulkOperationStart?.(ctx);
+    const startTime = Date.now();
+    try {
+      const result = await fn();
+      this.#hooks.onBulkOperationEnd?.(ctx, {
+        affectedCount: result.affectedCount,
         durationMs: Date.now() - startTime,
       });
       return result;

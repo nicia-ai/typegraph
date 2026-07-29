@@ -60,6 +60,7 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "upsertEmbedding",
   "upsertEmbeddingBatch",
   "deleteEmbedding",
+  "deleteEmbeddingBatch",
   "vectorSearch",
   "createVectorIndex",
   "dropVectorIndex",

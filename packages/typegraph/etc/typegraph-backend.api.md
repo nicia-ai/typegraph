@@ -337,7 +337,7 @@ export interface DialectAdapter {
     readonly jsonPathIsNotNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
-    readonly jsonSetProperties: (this: void, column: SqlFragment, patch: Readonly<Record<string, JsonValue>>) => SqlFragment;
+    readonly jsonSetProperties: (this: void, column: SqlFragment, patch: Readonly<Record<string, JsonValue>>, unsetProperties?: readonly string[]) => SqlFragment;
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
@@ -789,6 +789,9 @@ export type GraphBackend = Readonly<{
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
     deleteEmbedding?: (this: void, params: DeleteEmbeddingParams) => Promise<void>;
+    deleteEmbeddingBatch?: (this: void, params: Omit<DeleteEmbeddingParams, "nodeId"> & Readonly<{
+        nodeIds: readonly string[];
+    }>) => Promise<void>;
     vectorSearch?: (this: void, params: VectorSearchParams) => Promise<readonly VectorSearchResult[]>;
     createVectorIndex?: (this: void, params: CreateVectorIndexParams) => Promise<void>;
     dropVectorIndex?: (this: void, params: DropVectorIndexParams) => Promise<void>;
@@ -1670,6 +1673,7 @@ export type UpdateNodeSetParams = Readonly<{
     graphId: string;
     kind: string;
     patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
     candidateIds: CompiledSelectSql;
     candidateIdColumn: string;
 }>;
@@ -1776,7 +1780,7 @@ export type VectorMetric = "cosine" | "l2" | "inner_product";
 export function vectorMinScoreCondition(distanceExpression: SqlFragment, metric: VectorMetric, minScore: number): SqlFragment;
 
 // @public (undocumented)
-export type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
+export type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "deleteEmbeddingBatch" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
 
 // @public
 export function vectorPhysicalName(prefix: string, graphId: string, nodeKind: string, fieldPath: string): string;
@@ -1830,6 +1834,9 @@ export type VectorStrategy = Readonly<{
     buildUpsert: (this: void, slot: VectorSlot, params: UpsertEmbeddingParams, timestamp: string) => readonly SqlFragment[];
     buildUpsertBatch?: (this: void, slot: VectorSlot, params: UpsertEmbeddingBatchParams, timestamp: string) => readonly SqlFragment[];
     buildDelete: (this: void, slot: VectorSlot, params: DeleteEmbeddingParams) => readonly SqlFragment[];
+    buildDeleteBatch: (this: void, slot: VectorSlot, params: Omit<DeleteEmbeddingParams, "nodeId"> & Readonly<{
+        nodeIds: readonly string[];
+    }>) => readonly SqlFragment[];
     buildDropStorage: (this: void, slot: VectorSlot) => readonly string[];
     buildSearch: (this: void, slot: VectorSlot, params: VectorSearchParams, candidates?: SqlFragment) => SqlFragment;
     searchIsExact?: boolean;

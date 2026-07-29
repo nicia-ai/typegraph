@@ -222,6 +222,7 @@ export function buildUpdateNodeSet(
     adapter.jsonSetProperties(
       portableSql.identifier(nodes.props.name),
       params.patch,
+      params.unsetProperties ?? [],
     ),
     dialect,
   );

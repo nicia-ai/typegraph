@@ -17,7 +17,15 @@ import {
   type TemporalMode,
 } from "../../core/types";
 import { ConfigurationError } from "../../errors";
+import type { DynamicNodeAccessor, NodeAccessor } from "../../query/builder";
 import { type QueryBuilder } from "../../query/builder";
+import { type Predicate } from "../../query/predicates";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
+import {
+  asCompiledSelectSql,
+  type CompiledSelectSql,
+} from "../../query/sql-intent";
+import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type NodeRow } from "../row-mappers";
@@ -57,6 +65,24 @@ function narrowNodes<N extends NodeType>(nodes: readonly Node[]): Node<N>[] {
   return nodes as Node<N>[];
 }
 
+/** Adapts a schema-shaped typed callback to the runtime dynamic accessor. */
+function evaluateTypedNodePredicate<N extends NodeType>(
+  accessor: DynamicNodeAccessor,
+  predicate: (accessor: NodeAccessor<N>) => Predicate,
+): Predicate {
+  const typedAccessor = new Proxy(accessor, {
+    get(target, property) {
+      if (typeof property === "string" && !Reflect.has(target, property)) {
+        return target.field(property);
+      }
+      return (target as unknown as Readonly<Record<PropertyKey, unknown>>)[
+        property
+      ];
+    },
+  });
+  return predicate(typedAccessor as unknown as NodeAccessor<N>);
+}
+
 /**
  * Config for creating a NodeCollection.
  */
@@ -86,6 +112,13 @@ export type NodeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
+  executeUpdateWhere: (
+    kind: string,
+    patch: Record<string, unknown>,
+    candidateIds: CompiledSelectSql,
+    candidateIdColumn: string,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdate: (
     input: UpdateNodeInput,
     backend: GraphBackend | TransactionBackend,
@@ -205,6 +238,7 @@ export function createNodeCollection<
     executeCreateNoReturnBatch: executeNodeCreateNoReturnBatch,
     executeCreateBatch: executeNodeCreateBatch,
     executeUpdate: executeNodeUpdate,
+    executeUpdateWhere: executeNodeUpdateWhere,
     executeUpsertUpdate: executeNodeUpsertUpdate,
     executeDelete: executeNodeDelete,
     executeHardDelete: executeNodeHardDelete,
@@ -273,6 +307,98 @@ export function createNodeCollection<
         backend,
       );
       return narrowNode<N>(result);
+    },
+
+    async updateWhere(params): Promise<Readonly<{ affectedCount: number }>> {
+      if (createQuery === undefined) {
+        throw new ConfigurationError(
+          `store.nodes.${kind}.updateWhere() requires a query-capable store`,
+          { kind, operation: "updateWhere" },
+        );
+      }
+      const exists = params.exists ?? [];
+      if (params.where === undefined && exists.length === 0 && !params.all) {
+        throw new ConfigurationError(
+          `store.nodes.${kind}.updateWhere() requires where, exists, or explicit all: true`,
+          { kind, operation: "updateWhere" },
+        );
+      }
+
+      const rootAlias = "update_candidate";
+      const readInstant = nowIso();
+      let base = createQuery()
+        .fromDynamic(kind, rootAlias)
+        .temporal("asOf", readInstant);
+      const where = params.where;
+      if (where !== undefined) {
+        base = base.whereNode(rootAlias, (accessor) =>
+          evaluateTypedNodePredicate<N>(accessor, where),
+        );
+      }
+      const candidateIdColumn = `${rootAlias}_id`;
+      const compiledBranches: CompiledSelectSql[] = [];
+      for (const [index, relation] of exists.entries()) {
+        const edgeAlias = `update_edge_${index}`;
+        const relatedAlias = `update_related_${index}`;
+        const relationRoot = createQuery()
+          .fromDynamic(kind, rootAlias)
+          .temporal("asOf", readInstant);
+        let traversal = relationRoot.traverseDynamic(
+          relation.edgeKind,
+          edgeAlias,
+          {
+            direction: relation.direction,
+            expand: "none",
+          },
+        );
+        if (relation.whereEdge !== undefined) {
+          traversal = traversal.whereEdge(edgeAlias, relation.whereEdge);
+        }
+        let related = traversal.toDynamic(relation.relatedKind, relatedAlias);
+        if (relation.whereRelated !== undefined) {
+          related = related.whereNode(relatedAlias, relation.whereRelated);
+        }
+        compiledBranches.push(
+          related
+            .select(
+              (ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id,
+            )
+            .compile(),
+        );
+      }
+      compiledBranches.unshift(
+        base
+          .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
+          .compile(),
+      );
+      const projectCandidateId = (
+        branch: CompiledSelectSql,
+        index: number,
+      ): SqlFragment => sql`
+        SELECT ${sql.identifier(candidateIdColumn)}
+        FROM (${branch}) AS ${sql.identifier(`update_branch_${index}`)}
+      `;
+      let combinedCandidates = projectCandidateId(
+        requireDefined(compiledBranches[0]),
+        0,
+      );
+      for (let index = 1; index < compiledBranches.length; index++) {
+        combinedCandidates = sql`${combinedCandidates} INTERSECT ${projectCandidateId(
+          requireDefined(compiledBranches[index]),
+          index,
+        )}`;
+      }
+      const compiledCandidates = asCompiledSelectSql(combinedCandidates);
+
+      const result = await executeNodeUpdateWhere(
+        kind,
+        params.patch,
+        compiledCandidates,
+        candidateIdColumn,
+        backend,
+      );
+      await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
+      return result;
     },
 
     async delete(id: NodeId<N>): Promise<void> {
