@@ -34,6 +34,7 @@ import type {
   SqlDialect,
   UpdateEdgeParams,
   UpdateNodeParams,
+  UpdateNodeSetParams,
   UpsertFulltextBatchParams,
   UpsertFulltextParams,
 } from "../../types";
@@ -78,6 +79,7 @@ import {
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
   buildUpdateNode,
+  buildUpdateNodeSet,
 } from "./nodes";
 import {
   buildGetActiveSchema,
@@ -138,6 +140,7 @@ export type CommonOperationStrategy = Readonly<{
   buildGetNode: (graphId: string, kind: string, id: string) => SQL;
   buildGetNodes: (graphId: string, kind: string, ids: readonly string[]) => SQL;
   buildUpdateNode: (params: UpdateNodeParams, timestamp: string) => SQL;
+  buildUpdateNodeSet: (params: UpdateNodeSetParams, timestamp: string) => SQL;
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
   buildHardDeleteNode: (params: HardDeleteNodeParams) => SQL;
   buildInsertEdge: (params: InsertEdgeParams, timestamp: string) => SQL;
@@ -428,6 +431,9 @@ function createCommonOperationStrategy(
   return {
     ...tableOperations,
     ...fulltextBuilders,
+    buildUpdateNodeSet(params: UpdateNodeSetParams, timestamp: string): SQL {
+      return buildUpdateNodeSet(tables, dialect, params, timestamp);
+    },
     buildDeleteContributionMaterialization,
     buildInsertUnique(params: InsertUniqueParams): SQL {
       return buildInsertUnique(tables, dialect, params);

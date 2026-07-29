@@ -4,7 +4,11 @@
  * Implements dialect-specific SQL generation for SQLite databases.
  * Uses SQLite's JSON1 extension for JSON operations.
  */
-import { type JsonPointer, parseJsonPointer } from "../json-pointer";
+import {
+  type JsonPointer,
+  jsonPointer,
+  parseJsonPointer,
+} from "../json-pointer";
 import { sql } from "../sql-fragment";
 import { fts5Strategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
@@ -200,6 +204,14 @@ export const sqliteDialect: DialectAdapter = {
     const path = toSqlitePath(pointer);
     const pathSql = sql.raw(escapeSqliteLiteral(path));
     return sql`COALESCE(json_type(${column}, ${pathSql}) <> 'null', 0)`;
+  },
+
+  jsonSetProperties(column, patch) {
+    const replacements = Object.entries(patch).flatMap(([property, value]) => [
+      sql.raw(escapeSqliteLiteral(toSqlitePath(jsonPointer([property])))),
+      sql`json(${JSON.stringify(value)})`,
+    ]);
+    return sql`json_set(${column}, ${sql.join(replacements, sql`, `)})`;
   },
 
   // ============================================================

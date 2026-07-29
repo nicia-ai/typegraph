@@ -337,6 +337,7 @@ export interface DialectAdapter {
     readonly jsonPathIsNotNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
+    readonly jsonSetProperties: (this: void, column: SqlFragment, patch: Readonly<Record<string, JsonValue>>) => SqlFragment;
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
@@ -726,6 +727,7 @@ export type GraphBackend = Readonly<{
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
+    updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
@@ -1201,7 +1203,7 @@ export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -1653,6 +1655,21 @@ export type UpdateNodeParams = Readonly<{
     validTo?: string;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
+}>;
+
+// @public
+export type UpdateNodeSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    candidateIds: CompiledSelectSql;
+    candidateIdColumn: string;
+}>;
+
+// @public
+export type UpdateNodeSetResult = Readonly<{
+    affectedCount: number;
+    rows: readonly NodeRow[];
 }>;
 
 // @public

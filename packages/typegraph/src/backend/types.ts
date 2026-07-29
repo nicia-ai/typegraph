@@ -6,6 +6,7 @@
  */
 import {
   type IndexEntity,
+  type JsonValue,
   type KindEntity,
   type TemporalMode,
 } from "../core/types";
@@ -18,6 +19,7 @@ import {
 import { type SqlFragment } from "../query/sql-fragment";
 import {
   type CompiledRowsSql,
+  type CompiledSelectSql,
   type CompiledStatementSql,
   type CompiledTemporaryStatementSql,
 } from "../query/sql-intent";
@@ -397,6 +399,36 @@ export type UpdateNodeParams = Readonly<{
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
   clearDeleted?: boolean;
+}>;
+
+/**
+ * Parameters for updating a set of live nodes selected by a compiled
+ * TypeGraph query.
+ *
+ * The candidate query must expose the named node-id column from the same graph
+ * and kind. The backend independently fences the rows it writes to
+ * `graphId` and `kind`; constructing the matching candidate query remains the
+ * caller's responsibility.
+ * Property values replace top-level keys, including preserving an explicit
+ * JSON `null` value.
+ *
+ * This is a storage primitive: callers that expose it as a graph mutation are
+ * responsible for schema validation and for synchronizing uniqueness,
+ * fulltext, and vector sidecars around the returned rows.
+ */
+export type UpdateNodeSetParams = Readonly<{
+  graphId: string;
+  kind: string;
+  patch: Readonly<Record<string, JsonValue>>;
+  candidateIds: CompiledSelectSql;
+  /** Projected SQL column holding the candidate node id (for example `n_id`). */
+  candidateIdColumn: string;
+}>;
+
+/** The rows changed by {@link GraphBackend.updateNodeSet}. */
+export type UpdateNodeSetResult = Readonly<{
+  affectedCount: number;
+  rows: readonly NodeRow[];
 }>;
 
 /**
@@ -1249,6 +1281,10 @@ export type GraphBackend = Readonly<{
     params: readonly InsertNodeParams[],
   ) => Promise<readonly NodeRow[]>;
   updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
+  updateNodeSet?: (
+    this: void,
+    params: UpdateNodeSetParams,
+  ) => Promise<UpdateNodeSetResult>;
   deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
   getNode: (
@@ -2108,6 +2144,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "updateNode"
+  | "updateNodeSet"
   | "deleteNode"
   | "hardDeleteNode"
 >;

@@ -1,11 +1,15 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import { getDialect } from "../../../query/dialect";
+import { sql as portableSql } from "../../../query/sql-fragment";
 import type {
   DeleteNodeParams,
   HardDeleteNodeParams,
   InsertNodeParams,
   UpdateNodeParams,
+  UpdateNodeSetParams,
 } from "../../types";
+import { toDrizzleSql } from "../execution/types";
 import {
   nodeColumnList,
   quotedColumn,
@@ -197,6 +201,48 @@ export function buildUpdateNode(
       AND ${nodes.kind} = ${params.kind}
       AND ${nodes.id} = ${params.id}
       AND ${nodes.deletedAt} IS NULL
+    RETURNING *
+  `;
+}
+
+/**
+ * Builds one set-based update over candidate ids selected by the shared query
+ * compiler. The outer graph/kind/live-row predicates are deliberate write
+ * fences and must not be delegated solely to the candidate subquery.
+ */
+export function buildUpdateNodeSet(
+  tables: Tables,
+  dialect: "sqlite" | "postgres",
+  params: UpdateNodeSetParams,
+  timestamp: string,
+): SQL {
+  const { nodes } = tables;
+  const adapter = getDialect(dialect);
+  const patchedProps = toDrizzleSql(
+    adapter.jsonSetProperties(
+      portableSql.identifier(nodes.props.name),
+      params.patch,
+    ),
+    dialect,
+  );
+  const candidateIds = toDrizzleSql(params.candidateIds, dialect);
+  const candidateIdColumn = toDrizzleSql(
+    portableSql.identifier(params.candidateIdColumn),
+    dialect,
+  );
+
+  return sql`
+    UPDATE ${nodes}
+    SET ${quotedColumn(nodes.props)} = ${patchedProps},
+        ${quotedColumn(nodes.updatedAt)} = ${timestamp},
+        ${quotedColumn(nodes.version)} = ${quotedColumn(nodes.version)} + 1
+    WHERE ${nodes.graphId} = ${params.graphId}
+      AND ${nodes.kind} = ${params.kind}
+      AND ${nodes.deletedAt} IS NULL
+      AND ${nodes.id} IN (
+        SELECT ${candidateIdColumn}
+        FROM (${candidateIds}) AS tg_set_candidates
+      )
     RETURNING *
   `;
 }

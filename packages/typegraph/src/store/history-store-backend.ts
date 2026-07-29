@@ -92,6 +92,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "tableNames",
   "updateEdge",
   "updateNode",
+  "updateNodeSet",
   "upsertEmbedding",
   "upsertEmbeddingBatch",
   "upsertFulltext",

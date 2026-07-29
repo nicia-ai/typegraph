@@ -166,6 +166,8 @@ export type {
   TrustedImportOptions,
   TrustedImportSession,
   UniqueConstraintBackend,
+  UpdateNodeSetParams,
+  UpdateNodeSetResult,
   UpsertFulltextBatchParams,
   VectorCapabilities,
   VectorOperationBackend,

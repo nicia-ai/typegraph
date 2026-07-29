@@ -55,6 +55,8 @@ import type {
   UniqueRow,
   UpdateEdgeParams,
   UpdateNodeParams,
+  UpdateNodeSetParams,
+  UpdateNodeSetResult,
 } from "../types";
 import { type ExecutableSql } from "./execution/types";
 import {
@@ -111,6 +113,7 @@ export type CommonOperationBackend = Pick<
   | "insertUniqueBatch"
   | "updateEdge"
   | "updateNode"
+  | "updateNodeSet"
 > &
   Readonly<{
     executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
@@ -438,6 +441,28 @@ export function createCommonOperationBackend(
           { operation: "update", entity: "node" },
         );
       return rowMappers.toNodeRow(row);
+    },
+
+    async updateNodeSet(
+      params: UpdateNodeSetParams,
+    ): Promise<UpdateNodeSetResult> {
+      if (Object.keys(params.patch).length === 0) {
+        throw new ConfigurationError(
+          "Set-based node update requires at least one property",
+          { operation: "updateNodeSet", kind: params.kind },
+        );
+      }
+      if (params.candidateIdColumn.length === 0) {
+        throw new ConfigurationError(
+          "Set-based node update requires a candidate id column",
+          { operation: "updateNodeSet", kind: params.kind },
+        );
+      }
+      const timestamp = nowIso();
+      const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
+      return { affectedCount: updatedRows.length, rows: updatedRows };
     },
 
     async deleteNode(params: DeleteNodeParams): Promise<void> {

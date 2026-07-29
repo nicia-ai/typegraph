@@ -186,6 +186,8 @@ export type {
   UniqueRow,
   UpdateEdgeParams,
   UpdateNodeParams,
+  UpdateNodeSetParams,
+  UpdateNodeSetResult,
   UpsertEmbeddingBatchParams,
   UpsertEmbeddingBatchRow,
   UpsertEmbeddingParams,
