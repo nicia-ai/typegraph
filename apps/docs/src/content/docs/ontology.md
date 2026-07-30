@@ -49,11 +49,12 @@ properties between types, or automatically expand every query.
 | `disjointWith` | Same-ID collision enforcement, propagated through interleaved `subClassOf` and `equivalentTo` closure (`sameAs` remains a deprecated equivalence alias) |
 | `implies` | Transitive registry closure and opt-in traversal expansion with `expand: "implying"`; endpoints are validated |
 | `inverseOf` | Single inverse partner, endpoint reversal validation, and traversal expansion with `expand: "inverse"` (the default store setting) |
-| `equivalentTo` | Registry lookups and graph-merge type reconciliation; no automatic query or property behavior |
+| `equivalentTo` | Registry lookups and graph-merge type reconciliation; no automatic query or property behavior. `sameAs` is folded in as a full alias — the merge type reconciler and the registry treat a `sameAs` declaration identically to `equivalentTo` |
 | `broader` / `narrower` | Transitive registry introspection only |
 | `partOf` / `hasPart` | Transitive registry introspection only |
 | `relatedTo` | Symmetric direct registry introspection through `getRelatedKinds` only |
-| Type-level `sameAs` / `differentFrom` | Deprecated; migrate to the graph-level TypeGraph Identity Profile |
+| Type-level `sameAs` | Deprecated name for `equivalentTo` (see above); prefer calling `equivalentTo` directly |
+| Type-level `differentFrom` | Deprecated and decorative — never enforced instance identity; migrate to the graph-level TypeGraph Identity Profile |
 | Custom `metaEdge()` properties | Serialized introspection metadata only; custom transitivity, symmetry, inverse, and inference settings are not executed |
 
 ## Core Meta-Edges
@@ -471,13 +472,14 @@ function equivalentTo(
 ): OntologyRelation;
 ```
 
-#### `sameAs(a, b)`
+#### `sameAs(kindA, kindBOrIri)`
 
-Deprecated type-level alias of `equivalentTo`. Migrate to the graph-level
-TypeGraph Identity Profile for individual identity.
+Deprecated type-level alias of `equivalentTo`, including the equivalence with
+external IRIs. Migrate to the graph-level TypeGraph Identity Profile for
+individual identity.
 
 ```typescript
-function sameAs(a: NodeType, b: NodeType): OntologyRelation;
+function sameAs(kindA: NodeType, kindBOrIri: NodeType | string): OntologyRelation;
 ```
 
 #### `differentFrom(a, b)`

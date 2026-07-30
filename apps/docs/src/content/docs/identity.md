@@ -23,12 +23,19 @@ const graph = defineGraph({
 
 The option is serialized with the schema. Enabled graph types expose
 `store.identity`, `tx.identity`, read-only `StoreView.identity`, and the
-identity traversal option, and disabled graphs run no identity locks, probes,
-closure work, or identity SQL. The surfaces are guarded at two levels: on a
-disabled graph type `tx.identity` is absent at compile time, while the
-`store.identity` and `StoreView.identity` getters are guarded at runtime and
-throw `ConfigurationError` with details code `IDENTITY_NOT_ENABLED` if reached
-(for example through a widened or `any`-typed store handle).
+identity traversal option. All three use the same conditional-**presence**
+encoding: on an identity-disabled graph type, `identity` does not exist on
+`Store`, `TransactionContext`, or the read-only views at all — reaching for it
+is a compile error, not a `never`-typed property. A runtime `ConfigurationError`
+with details code `IDENTITY_NOT_ENABLED` backs every one of those getters too,
+for the widened or `any`-typed handles TypeScript can't check (a JavaScript
+caller, or a store handle that lost its precise graph type).
+
+At runtime, a disabled graph does no identity work: no identity locks, probes,
+closure computation, or identity SQL run. That guarantee is scoped to runtime
+behavior — a bundled backend still provisions the identity tables' schema (not
+work) when it bootstraps a fresh database, independent of whether the specific
+graph passed to `createStore`/`createStoreWithSchema` declares `identity`.
 
 `sameIdAcrossKinds: "fold"` preserves TypeGraph's structural ID rule: live
 nodes of different kinds with the same ID belong to one identity class. No
@@ -72,11 +79,17 @@ The complete write surface is:
 - `retractSameAssertion(a, b)` and `retractDifferentAssertion(a, b)`
 - `bulkRetractAssertions(ids)`
 
-Bulk methods are eager, preserve input order, and run under one graph identity
-lock. Reasserting a current semantic pair is idempotent; assertion results
-distinguish `action: "created"` from `action: "existing"`. Retraction methods
-return the ended assertion (or `undefined` for a missing current assertion),
-and bulk retraction returns all ended assertions. Self-assertions are rejected.
+Bulk methods are eager and, on PostgreSQL, run under one graph identity lock
+(see [Operational notes](#operational-notes) — SQLite serializes through its
+single-writer lock instead). `bulkAssertSame` and `bulkAssertDifferent`
+preserve input order and return exactly one result per input pair. Reasserting
+a current semantic pair is idempotent; assertion results distinguish
+`action: "created"` from `action: "existing"`. Retraction methods return the
+ended assertion (or `undefined` for a missing current assertion).
+`bulkRetractAssertions` does **not** share that one-result-per-input shape: it
+dedupes the input ids and returns only the assertions that were actually open,
+in dense, first-occurrence input order — so the result does not align
+index-by-index with the input array. Self-assertions are rejected.
 Assertion IDs use the exported private-symbol-branded
 `IdentityAssertionId` type so unrelated strings cannot be passed accidentally.
 When you hold a plain assertion-ID string that came from persistence or an
@@ -144,6 +157,23 @@ const historical = store.asOfRecorded(before!);
 await historical.identity.membersOf(alice);
 ```
 
+### Folds and time
+
+Implicit same-id folds (`sameIdAcrossKinds: "fold"`) conduct based on a node's
+**lifecycle** — whether it currently exists and is not soft-deleted — not its
+valid-time window. A node created today with a backdated `validFrom` is
+valid-time visible in the past (an ordinary node read at that past coordinate
+returns it), but it does not conduct a fold there: the fold only takes effect
+once the node actually exists. Symmetrically, a node with a future `validFrom`
+does not suppress its folds today — it already exists and is live, so it
+folds now even though it is not yet valid-time visible. Explicit `same` and
+`different` assertions are unaffected by this: they carry their own validity
+windows and conduct exactly when they are current. This keeps the fold
+computation tied to write events rather than to valid-time windows, so the
+materialized closure used by current reads and by `asOf(now)` reads is
+identical — a fixed-point reconstruction of "current" never needs to special-
+case valid-time skew on the folding edge itself.
+
 ## Identity-expanded traversal
 
 Traversal expansion is per hop and defaults off:
@@ -160,7 +190,12 @@ const results = await store
 
 The hop considers coordinate-visible members of the source class, returns the
 physical edge and target rows, preserves their provenance, and deduplicates a
-physical edge within the step. Recursive traversal supports the same option.
+physical edge within the step — with one legitimate exception: a self-inverse
+edge (`inverseOf(edgeKind, edgeKind)`) traversed with `expand` between two
+identity-folded peers can yield the same physical edge twice, once per
+direction/target it matches through the fold. That is not a dedup bug; the
+edge genuinely satisfies the traversal from both of its endpoints. Recursive
+traversal supports the same option.
 TypeGraph does not perform automatic graph-wide expansion and collection reads
 such as `getById` have no identity option.
 
@@ -200,16 +235,30 @@ const archive = await exportGraph(store, {
 
 Archival mode also includes ended assertions. Those rows are restored after
 shape validation and do not affect current closure. Ended assertions can
-reference soft-deleted nodes, so pair `identityMode: "archival"` with
-`includeDeleted: true` to keep the archive self-contained — otherwise the
-export can carry assertions whose endpoints are absent from the same document.
-Recorded side tables are not part of interchange.
+reference soft-deleted nodes, and by default (`includeDeleted: false`) export
+joins every assertion against its endpoints' live rows — an assertion with a
+soft-deleted endpoint is silently **dropped from the export entirely**, not
+carried with a dangling reference. Pair `identityMode: "archival"` with
+`includeDeleted: true` to keep those assertions in the archive. Interchange
+documents carry no `deletedAt` field, so a node exported only because of
+`includeDeleted: true` re-imports as **live** — an `includeDeleted` archive
+resurrects its soft-deleted nodes on import rather than restoring them as
+deleted. Weigh that trade-off deliberately for a backup: without
+`includeDeleted`, soft-deleted endpoints and the assertions that reference them
+are silently absent; with it, those nodes come back alive. Recorded side
+tables are not part of interchange.
 
 Graph merge includes identity truth in staleness fingerprints and diffs.
 Duplicate current assertions use the earliest `validFrom`, then the
-code-point-smallest assertion ID. Opposing relations and retract/reassert races
-are typed `IdentityMergeConflictError`s. This is mechanical truth propagation,
-not semantic entity reconciliation.
+code-point-smallest assertion ID. `merge()` detects identity conflicts at plan
+time and returns them as a typed `IdentityMergeConflictError` — direct
+opposing relations on one endpoint pair, transitive contradictions reached
+through a chain of `same` assertions no single branch wrote, retract/reassert
+races, and an assertion over a node another branch deleted. A branch that
+retracts a pair and also reasserts it itself (convergent, not racing) merges
+cleanly. This is mechanical truth propagation, not semantic entity
+reconciliation. See [`IdentityMergeConflictError`](/errors/#identitymergeconflicterror)
+for the exact `merge()` signature and how to catch it.
 
 ## Operational notes
 
@@ -227,11 +276,23 @@ Plan enablement for a quiet window on large databases. `evolve()` on an
 identity-enabled graph re-runs the same closure rebuild, so schema evolution
 carries a comparable one-time cost proportional to graph size.
 
-Changing `sameIdAcrossKinds` or identity-relevant ontology (`disjointWith`,
-`equivalentTo`/deprecated `sameAs`, or `subClassOf`) is a persisted semantic
-migration, not a local runtime toggle. `createStoreWithSchema` rebuilds and
-validates the closure atomically with that migration; with `autoMigrate: false`,
-it refuses to return a Store while the semantic change is pending.
+Changing `sameIdAcrossKinds` is a **breaking** schema change — a `fold`↔`ignore`
+flip rewrites the materialized identity closure and changes every
+`areSame`/`membersOf`/`includeIdentityMembers` answer against existing data —
+so it requires the same explicit `migrateSchema()` opt-in as any other
+breaking change; it never auto-migrates silently. Identity-relevant ontology
+changes (`disjointWith`, `equivalentTo`/deprecated `sameAs`, or `subClassOf`)
+are likewise persisted semantic migrations, not a local runtime toggle.
+`createStoreWithSchema` and explicit `migrateSchema()` both rebuild and
+validate the closure atomically with the schema commit that carries the
+change. While the flip is unapplied, store construction refuses with
+`ConfigurationError` details code `IDENTITY_PROFILE_MIGRATION_PENDING`
+whenever the identity change is the only breaking one in the diff; a
+migration that also breaks other schema surfaces raises the generic
+`MigrationError` enumerating everything. First-time identity *enablement* (`autoMigrate: false` on a graph
+newly declaring `identity: { ... }`) is a safe, additive change, and
+`createStoreWithSchema` refuses to return a Store while it is pending with
+`ConfigurationError` details code `IDENTITY_ENABLEMENT_PENDING`.
 
 ## Migrating from type-level factories
 

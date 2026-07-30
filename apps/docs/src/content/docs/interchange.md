@@ -160,11 +160,20 @@ const selfContainedArchive = await exportGraph(store, {
 
 **Archival identity and soft-deleted endpoints:** `identityMode: "archival"`
 also exports *ended* assertions, and an ended assertion can reference an
-endpoint that was later soft-deleted. A default export omits soft-deleted rows,
-so such an archive is not self-contained on its own — import tolerates the
-missing endpoints for ended rows, but the archived nodes are gone. When the
-archive must stand alone (backup, cold storage), pair it with
-`includeDeleted: true` so those endpoints travel with it.
+endpoint that was later soft-deleted. A default export (`includeDeleted:
+false`) joins every assertion against its endpoints' live rows, so an
+assertion touching a soft-deleted endpoint is silently **dropped from the
+export** — not carried with a dangling reference. This is silent archive
+loss, not a dangling-endpoint problem. When the archive must stand alone
+(backup, cold storage), pair it with `includeDeleted: true` so those
+assertions and their endpoints travel with it.
+
+That pairing has its own honest trade-off: the interchange format has no
+`deletedAt` field, so a node included only because of `includeDeleted: true`
+carries no record that it was deleted. Re-importing that archive resurrects
+the node as **live**. Choose deliberately: without `includeDeleted`, a
+backup silently loses soft-deleted endpoints and the assertions referencing
+them; with it, those nodes come back alive on restore.
 
 ### Export Options
 
@@ -204,10 +213,30 @@ if (result.success) {
   console.log(`Created: ${result.nodes.created} nodes, ${result.edges.created} edges`);
   console.log(`Updated: ${result.nodes.updated} nodes, ${result.edges.updated} edges`);
   console.log(`Skipped: ${result.nodes.skipped} nodes, ${result.edges.skipped} edges`);
+  console.log(`Identity: ${result.identity.created} created, ${result.identity.skipped} skipped`);
 } else {
   console.error("Import had errors:", result.errors);
 }
 ```
+
+When the document carries an `identity` section, `result.identity` reports
+`{ created, skipped }` counts for imported assertions (skipped covers an
+exact re-import of an assertion that already exists under the same id).
+A rejected assertion — an unknown endpoint, a contradiction against the
+target's existing identity truth, or a reused assertion id that names
+different truth — is recorded in `result.errors` with `entityType:
+"identity"`, `kind` set to the assertion's relation (`"same"` or
+`"different"`), and `id` set to the assertion id, mirroring how node/edge
+errors carry `kind`/`id`.
+
+**Partial-commit caveat:** identity assertions are applied one at a time, and
+a mid-batch failure (a contradiction or id conflict partway through the
+`identity.assertions` array) stops the identity import but does not roll back
+the assertions already applied before it — they remain committed. They are
+**not** reflected in `result.identity.created`, since that count is only
+reported on success; the count under-reports rather than invents a number for
+committed-but-unaccounted work. The failure that stopped the batch is the one
+error entry you see in `result.errors`.
 
 ### Import Options
 
@@ -526,6 +555,8 @@ logger.info("Import completed", {
   edgesCreated: result.edges.created,
   edgesUpdated: result.edges.updated,
   edgesSkipped: result.edges.skipped,
+  identityCreated: result.identity.created,
+  identitySkipped: result.identity.skipped,
   errorCount: result.errors.length,
 });
 ```
