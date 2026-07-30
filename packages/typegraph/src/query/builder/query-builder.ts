@@ -70,7 +70,27 @@ import {
   validateSqlIdentifier,
 } from "./validation";
 
-/** Identity-aware traversal option for a graph's configured identity mode. */
+/**
+ * Identity-aware traversal option, available only on a graph that declares an
+ * identity configuration. On any other graph the property is typed `never`, so
+ * setting it is a compile error (and a runtime guard rejects it as well).
+ *
+ * When `includeIdentityMembers` is true, the traversal's source hop matches an
+ * edge attached to *any* coordinate-visible member of the source node's
+ * identity class, not just the source node itself. Semantics:
+ *
+ * - Results are physical rows: the nodes and edges returned are the ones
+ *   actually stored, never a synthesized merge of the class.
+ * - Identity-class membership is resolved at the query's own coordinate, so a
+ *   traversal under `asOf`/`asOfRecorded` follows only the assertions that were
+ *   in force at that instant; a retracted assertion stops conducting.
+ * - Within a step, physical edge ids are deduplicated. The one exception is a
+ *   self-inverse edge between two folded peers (same id, different kind), which
+ *   legitimately matches in both directions and is kept.
+ * - Under recursion, cycle detection keys on (kind, id) rather than id alone,
+ *   so passing through two folded peers is not mistaken for a revisit. Path
+ *   output is unaffected: it remains an array of bare node ids.
+ */
 export type IdentityTraversalOption<G extends GraphDef> =
   G["identity"] extends GraphIdentityConfig ?
     Readonly<{ includeIdentityMembers?: boolean }>
@@ -563,6 +583,8 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       false,
+      undefined, // variableLength — default
+      undefined, // pendingEdgePredicates — default
       options?.includeIdentityMembers ?? false,
     );
   }
@@ -714,6 +736,8 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       true,
+      undefined, // variableLength — default
+      undefined, // pendingEdgePredicates — default
       options?.includeIdentityMembers ?? false,
     );
   }
@@ -831,6 +855,8 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       optional,
+      undefined, // variableLength — default
+      undefined, // pendingEdgePredicates — default
       options?.includeIdentityMembers ?? false,
     );
   }

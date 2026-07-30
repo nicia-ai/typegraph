@@ -23,7 +23,19 @@ import { createPostgresTables } from "../drizzle/schema/postgres";
 import { closeAfterFailure } from "../types";
 import { createLocalPgliteBackend } from "./pglite";
 
-export type * from "../../identity";
+export type { GraphIdentityConfig } from "../../core/define-graph";
+export type {
+  IdentityAssertion,
+  IdentityAssertionId,
+  IdentityAssertionResult,
+  IdentityFacade,
+  IdentityNode,
+  IdentityNodeRefInput,
+  IdentityPair,
+  IdentityReadFacade,
+  IdentityRelation,
+  IdentityWriteSummary,
+} from "../../identity";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,

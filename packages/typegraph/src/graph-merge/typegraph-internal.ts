@@ -19,6 +19,10 @@ export type { IdentityTransferAssertion } from "../identity/service";
 export { exportGraphStream } from "../interchange/export";
 export { importGraphStream } from "../interchange/import";
 export { computeTransitiveClosure, isReachable } from "../ontology/closures";
+export {
+  META_EDGE_EQUIVALENT_TO,
+  META_EDGE_SAME_AS,
+} from "../ontology/constants";
 export { sortedReplacer } from "../schema/canonical";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
 export {

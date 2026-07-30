@@ -4,6 +4,7 @@ import {
   defineGraph,
   defineNode,
   equivalentTo,
+  sameAs,
   subClassOf,
 } from "@nicia-ai/typegraph";
 import { describe, expect, it } from "vitest";
@@ -238,5 +239,71 @@ describe("equivalentTo folding", () => {
       isReachable(b, "SpecialistDoctor", "Physician"),
     );
     expect(isReachable(a, "Physician", "Person")).toBe(true);
+  });
+});
+
+describe("sameAs folding", () => {
+  /**
+   * `sameAs` is the deprecated alias of `equivalentTo`. `store.introspect()`
+   * reports the declared meta-edge name verbatim, so a closure that recognized
+   * only `equivalentTo` would silently give these two graphs — identical up to
+   * that one keyword — different type-reconciliation outcomes.
+   */
+  function equivalenceGraphUsing(
+    relation: typeof equivalentTo,
+    id: string,
+  ): ReturnType<typeof defineGraph> {
+    return defineGraph({
+      id,
+      nodes: {
+        Person: { type: Person },
+        Doctor: { type: Doctor },
+        Physician: { type: Physician },
+        SpecialistDoctor: { type: SpecialistDoctor },
+      },
+      edges: {},
+      ontology: [
+        subClassOf(SpecialistDoctor, Doctor),
+        subClassOf(Doctor, Person),
+        relation(Physician, Doctor),
+      ],
+    });
+  }
+
+  it("makes sameAs types mutually reachable", async () => {
+    const closure = await closureFromGraph(
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- pins the migration-period alias behavior
+      equivalenceGraphUsing(sameAs, "closures-same-as"),
+    );
+    expect(isReachable(closure, "Physician", "Doctor")).toBe(true);
+    expect(isReachable(closure, "Doctor", "Physician")).toBe(true);
+    expect(isReachable(closure, "Physician", "Person")).toBe(true);
+    expect(isReachable(closure, "SpecialistDoctor", "Physician")).toBe(true);
+  });
+
+  it("reconciles a sameAs ontology exactly like an equivalentTo one", async () => {
+    const normalize = (
+      closure: ReturnType<typeof buildSubClassClosure>,
+    ): Readonly<{
+      closure: Record<string, string[]>;
+      canonicalOf: Record<string, string>;
+    }> => ({
+      closure: Object.fromEntries(
+        [...closure.closure].map(([child, ancestors]) => [
+          child,
+          [...ancestors].sort(),
+        ]),
+      ),
+      canonicalOf: Object.fromEntries(closure.canonicalOf),
+    });
+
+    const viaSameAs = await closureFromGraph(
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- pins the migration-period alias behavior
+      equivalenceGraphUsing(sameAs, "closures-same-as-parity"),
+    );
+    const viaEquivalentTo = await closureFromGraph(
+      equivalenceGraphUsing(equivalentTo, "closures-equivalent-to-parity"),
+    );
+    expect(normalize(viaSameAs)).toEqual(normalize(viaEquivalentTo));
   });
 });

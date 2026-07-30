@@ -150,6 +150,7 @@ import type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  MergedCounts,
   MergeIncrementalArgs as MergeIncrementalArguments,
   MergeOptions,
   MergeReport,
@@ -161,6 +162,7 @@ import type {
   TypeReconciliation,
 } from "./types";
 import { asBranchId } from "./types";
+import { UnionFind } from "./union-find";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
@@ -748,6 +750,66 @@ function compareIdentitySurvivors(
   return byValidity === 0 ? compareCodePoints(left.id, right.id) : byValidity;
 }
 
+/**
+ * Reason recorded when two branches asserted the SAME semantic pair and the
+ * survivor rule kept only one of the two assertion ids.
+ */
+export const DUPLICATE_IDENTITY_ASSERTION_DROP_REASON =
+  "identity:duplicate-assertion";
+
+/**
+ * Reason recorded when node reconciliation collapsed both endpoints of a `same`
+ * assertion onto one survivor, making the assertion vacuous.
+ */
+export const REDUNDANT_IDENTITY_ASSERTION_DROP_REASON =
+  "identity:endpoints-collapsed";
+
+/** The report entry for an identity assertion the merge did not apply. */
+function droppedIdentityAssertion(
+  assertion: IdentityTransferAssertion,
+  reason: string,
+): DroppedItem {
+  return { kind: "identity", id: assertion.id, reason };
+}
+
+/**
+ * Keeps ONE assertion per semantic pair — the {@link compareIdentitySurvivors}
+ * minimum — and reports every loser as a {@link DroppedItem}, so a duplicate
+ * assertion silently discarded from a losing branch is still enumerable in the
+ * merge report. Survivors come back in semantic-key order.
+ */
+function dedupeIdentityAssertions(
+  assertions: readonly IdentityTransferAssertion[],
+): Readonly<{
+  survivors: readonly IdentityTransferAssertion[];
+  dropped: readonly DroppedItem[];
+}> {
+  const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
+  const dropped: DroppedItem[] = [];
+  for (const assertion of assertions) {
+    const key = identitySemanticKey(assertion);
+    const previous = survivorBySemantic.get(key);
+    if (previous === undefined) {
+      survivorBySemantic.set(key, assertion);
+      continue;
+    }
+    const [survivor, loser] =
+      compareIdentitySurvivors(assertion, previous) < 0 ?
+        [assertion, previous]
+      : [previous, assertion];
+    survivorBySemantic.set(key, survivor);
+    dropped.push(
+      droppedIdentityAssertion(loser, DUPLICATE_IDENTITY_ASSERTION_DROP_REASON),
+    );
+  }
+  return {
+    survivors: [...survivorBySemantic.values()].toSorted((left, right) =>
+      compareCodePoints(identitySemanticKey(left), identitySemanticKey(right)),
+    ),
+    dropped,
+  };
+}
+
 function assertNoOpposingIdentityRelations(
   assertions: readonly IdentityTransferAssertion[],
 ): void {
@@ -769,23 +831,26 @@ function assertNoOpposingIdentityRelations(
   }
 }
 
-/** @internal Exported for deterministic phase-level verification. */
-export function planIdentityChanges(staging: StagingSet): Readonly<{
-  assertions: readonly IdentityTransferAssertion[];
-  retractions: readonly string[];
-}> {
-  assertNoOpposingIdentityRelations(
-    staging.newIdentityAssertions.map((staged) => staged.assertion),
-  );
-
-  // A retract/reassert race is only a conflict ACROSS branches: one branch
-  // retracts an assertion for a semantic pair while a DIFFERENT branch re-asserts
-  // it under a new id. A single fork that retracts then re-asserts the same pair
-  // (a normal linear edit) is not a race — its final state is simply "old id
-  // retracted, new id asserted" — so the retraction and the reassertion sharing a
-  // branch must NOT conflict. Grouping by semantic key alone drops the branch
-  // provenance that distinguishes the two, so we keep the staged (branch-tagged)
-  // retractions and consult their branchId here.
+/**
+ * Refuses the retract/reassert RACE: one branch retracts the assertion for a
+ * semantic pair while a DIFFERENT branch re-asserts that pair under a new id
+ * WITHOUT retracting it — the branches disagree about whether the old truth still
+ * holds, and no rule can pick between "the pair is not asserted" and "the pair is
+ * asserted under a new id".
+ *
+ * Two nearby shapes are NOT races and must merge cleanly:
+ *
+ *   - A single fork that retracts then re-asserts the same pair (a normal linear
+ *     edit): its final state is simply "old id retracted, new id asserted".
+ *   - CONVERGENT edits, where the re-asserting branch ALSO retracted the pair:
+ *     every branch agrees the old assertion dies, and one went further by
+ *     re-asserting. The merge applies both effects.
+ *
+ * Both hinge on which branch produced which change, so this consults the staged
+ * (branch-tagged) retractions — grouping by semantic key alone would drop exactly
+ * the provenance that separates a race from agreement.
+ */
+function assertNoRetractReassertRace(staging: StagingSet): void {
   const retractedBySemantic = new Map<string, StagedIdentityAssertion[]>();
   for (const staged of staging.retractedIdentityAssertions) {
     const key = identitySemanticKey(staged.assertion);
@@ -796,10 +861,14 @@ export function planIdentityChanges(staging: StagingSet): Readonly<{
   for (const staged of staging.newIdentityAssertions) {
     const retractions =
       retractedBySemantic.get(identitySemanticKey(staged.assertion)) ?? [];
+    const selfRetracted = retractions.some(
+      (retraction) => retraction.branchId === staged.branchId,
+    );
+    if (selfRetracted) {
+      continue;
+    }
     const crossBranchRetraction = retractions.find(
-      (retraction) =>
-        retraction.assertion.id !== staged.assertion.id &&
-        retraction.branchId !== staged.branchId,
+      (retraction) => retraction.assertion.id !== staged.assertion.id,
     );
     if (crossBranchRetraction !== undefined) {
       throw new IdentityMergeConflictError(
@@ -807,28 +876,32 @@ export function planIdentityChanges(staging: StagingSet): Readonly<{
         {
           details: {
             retractedAssertion: crossBranchRetraction.assertion,
+            retractedBy: crossBranchRetraction.branchId,
             reassertedAssertion: staged.assertion,
+            reassertedBy: staged.branchId,
           },
         },
       );
     }
   }
+}
 
-  const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
-  for (const staged of staging.newIdentityAssertions) {
-    const key = identitySemanticKey(staged.assertion);
-    const previous = survivorBySemantic.get(key);
-    if (
-      previous === undefined ||
-      compareIdentitySurvivors(staged.assertion, previous) < 0
-    ) {
-      survivorBySemantic.set(key, staged.assertion);
-    }
-  }
+/** @internal Exported for deterministic phase-level verification. */
+export function planIdentityChanges(staging: StagingSet): Readonly<{
+  assertions: readonly IdentityTransferAssertion[];
+  retractions: readonly string[];
+  dropped: readonly DroppedItem[];
+}> {
+  assertNoOpposingIdentityRelations(
+    staging.newIdentityAssertions.map((staged) => staged.assertion),
+  );
+  assertNoRetractReassertRace(staging);
+
+  const deduped = dedupeIdentityAssertions(
+    staging.newIdentityAssertions.map((staged) => staged.assertion),
+  );
   return {
-    assertions: [...survivorBySemantic.values()].toSorted((left, right) =>
-      compareCodePoints(identitySemanticKey(left), identitySemanticKey(right)),
-    ),
+    assertions: deduped.survivors,
     retractions: [
       ...new Set(
         staging.retractedIdentityAssertions.map(
@@ -836,6 +909,7 @@ export function planIdentityChanges(staging: StagingSet): Readonly<{
         ),
       ),
     ].toSorted((left, right) => compareCodePoints(left, right)),
+    dropped: deduped.dropped,
   };
 }
 
@@ -856,39 +930,68 @@ function compareIdentityEndpoints(
   return byKind === 0 ? compareCodePoints(left.id, right.id) : byKind;
 }
 
-/** Maps an endpoint through the cluster canonical map, defaulting to itself. */
-function canonicalEndpoint(
+/**
+ * Maps an endpoint onto the `(kind, id)` it will actually carry in the committed
+ * target: first through the cluster canonical map (the SAME map edge repoint
+ * uses), then through the ontology retype cascade, keyed EXACTLY as
+ * {@link applyMergePlan} keys an edge endpoint — `mergeKey(kind, id)` of the
+ * post-canonical endpoint, whose retype value is the survivor's reconciled kind.
+ *
+ * Both hops are required. Under `reconcileTypes: "ontology"` a cluster survivor
+ * is written under its most-specific kind, so an assertion that still named the
+ * pre-retype kind would reference a `(kind, id)` no live row carries and the
+ * commit-time endpoint guard would reject it (or, worse, bind to a stale row of
+ * the old kind).
+ */
+function resolveIdentityEndpoint(
   endpoint: IdentityEndpoint,
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+  retypeMap: ReadonlyMap<MergeKey, string>,
 ): IdentityEndpoint {
   const key = mergeKeyOf(endpoint);
   const canonical = canonicalOf.get(key) ?? key;
-  return { kind: kindOf(canonical), id: idOf(canonical) };
+  return {
+    kind: retypeMap.get(canonical) ?? kindOf(canonical),
+    id: idOf(canonical),
+  };
 }
 
 /**
- * Repoints every planned identity assertion's endpoints onto their cluster
- * canonical survivors — the SAME `(kind, id) -> survivor` map edge repoint uses —
- * so an assertion naming a branch node that similarity reconciliation folded away
- * references the surviving node instead of a dangling id (which the commit-time
+ * Repoints every planned identity assertion's endpoints onto the identity they
+ * will hold after the commit ({@link resolveIdentityEndpoint}), so an assertion
+ * naming a branch node that reconciliation folded away — or retyped — references
+ * the surviving row instead of a dangling `(kind, id)` (which the commit-time
  * `requireLiveEndpoints` guard would reject with a NodeNotFoundError, rolling back
  * the whole merge). After remapping it re-establishes the identity-pair invariants:
  * a `same` assertion whose endpoints collapse onto one survivor is redundant
- * and dropped, while a collapsed `different` assertion is a typed conflict;
- * surviving endpoints are re-normalized into code-point order (the import path
- * rejects a non-normalized pair), and assertions that now share a semantic key
- * are re-deduped by the same survivor rule
+ * and dropped (reported), while a collapsed `different` assertion is a typed
+ * conflict; surviving endpoints are re-normalized into code-point order (the
+ * import path rejects a non-normalized pair), and assertions that now share a
+ * semantic key are re-deduped by the same survivor rule
  * ({@link compareIdentitySurvivors}) that {@link planIdentityChanges} applied
  * before the remap.
  */
 function remapIdentityAssertionEndpoints(
   assertions: readonly IdentityTransferAssertion[],
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
-): readonly IdentityTransferAssertion[] {
-  const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
+  retypeMap: ReadonlyMap<MergeKey, string>,
+): Readonly<{
+  assertions: readonly IdentityTransferAssertion[];
+  dropped: readonly DroppedItem[];
+}> {
+  const remapped: IdentityTransferAssertion[] = [];
+  const dropped: DroppedItem[] = [];
   for (const assertion of assertions) {
-    const remappedA = canonicalEndpoint(assertion.a, canonicalOf);
-    const remappedB = canonicalEndpoint(assertion.b, canonicalOf);
+    const remappedA = resolveIdentityEndpoint(
+      assertion.a,
+      canonicalOf,
+      retypeMap,
+    );
+    const remappedB = resolveIdentityEndpoint(
+      assertion.b,
+      canonicalOf,
+      retypeMap,
+    );
     if (mergeKeyOf(remappedA) === mergeKeyOf(remappedB)) {
       if (assertion.relation === "different") {
         throw new IdentityMergeConflictError(
@@ -896,30 +999,146 @@ function remapIdentityAssertionEndpoints(
           { details: { assertion, survivor: remappedA } },
         );
       }
+      dropped.push(
+        droppedIdentityAssertion(
+          assertion,
+          REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
+        ),
+      );
       continue;
     }
     const [a, b] =
       compareIdentityEndpoints(remappedA, remappedB) <= 0 ?
         [remappedA, remappedB]
       : [remappedB, remappedA];
-    const remapped: IdentityTransferAssertion = { ...assertion, a, b };
-    const key = identitySemanticKey(remapped);
-    const previous = survivorBySemantic.get(key);
-    if (
-      previous === undefined ||
-      compareIdentitySurvivors(remapped, previous) < 0
-    ) {
-      survivorBySemantic.set(key, remapped);
-    }
+    remapped.push({ ...assertion, a, b });
   }
-  const survivors = [...survivorBySemantic.values()];
+  const deduped = dedupeIdentityAssertions(remapped);
   // Node reconciliation can collapse previously distinct endpoint pairs onto
   // the same canonical pair, so the pre-reconciliation check above is not
   // sufficient on its own.
-  assertNoOpposingIdentityRelations(survivors);
-  return survivors.toSorted((left, right) =>
-    compareCodePoints(identitySemanticKey(left), identitySemanticKey(right)),
+  assertNoOpposingIdentityRelations(deduped.survivors);
+  return {
+    assertions: deduped.survivors,
+    dropped: [...dropped, ...deduped.dropped],
+  };
+}
+
+/**
+ * Refuses an assertion that names a node the merge is about to DELETE.
+ *
+ * The commit soft-deletes nodes before applying the identity changes, which
+ * detaches every assertion touching them, so an assertion naming a deleted
+ * endpoint could only ever fail at commit time — rolling the whole merge back
+ * behind a generic error. Detecting it here turns it into a deterministic,
+ * plan-time {@link IdentityMergeConflictError}: one branch says the entity exists
+ * and is (not) the same as another, a second says it is gone, and unlike the
+ * delete/modify case there is no policy the caller can set to arbitrate.
+ *
+ * `nodeDeletions` is keyed by the deleted node's own kind, while the assertions
+ * arrive post-retype, so a retyped identity is checked in BOTH forms.
+ */
+function assertIdentityEndpointsNotDeleted(
+  assertions: readonly IdentityTransferAssertion[],
+  nodeDeletions: ReadonlyMap<MergeKey, string>,
+  retypeMap: ReadonlyMap<MergeKey, string>,
+): void {
+  const deletedIdentities = new Set<MergeKey>();
+  for (const key of nodeDeletions.keys()) {
+    deletedIdentities.add(key);
+    const retyped = retypeMap.get(key);
+    if (retyped !== undefined) {
+      deletedIdentities.add(mergeKey(retyped, idOf(key)));
+    }
+  }
+  for (const assertion of assertions) {
+    for (const endpoint of [assertion.a, assertion.b]) {
+      if (!deletedIdentities.has(mergeKeyOf(endpoint))) {
+        continue;
+      }
+      throw new IdentityMergeConflictError(
+        "A branch asserted an identity relation over a node another branch deleted.",
+        { details: { assertion, deletedEndpoint: endpoint } },
+      );
+    }
+  }
+}
+
+/**
+ * Refuses a merge whose committed ledger would claim two nodes are BOTH the same
+ * and different — including through a chain of `same` assertions no single branch
+ * ever wrote.
+ *
+ * {@link assertNoOpposingIdentityRelations} only sees a DIRECT collision (one
+ * endpoint pair carrying both relations). The common shape is transitive: base
+ * holds `same(p2, p3)`, one branch asserts `same(p1, p2)` and another asserts
+ * `different(p1, p3)`. Nothing collides pairwise, so planning used to pass and the
+ * identity import raised its own contradiction error inside the commit
+ * transaction, where the orchestrator's catch-all rewrote it as a generic
+ * `MergeError` — the documented `GRAPH_MERGE_IDENTITY_CONFLICT` code never fired.
+ *
+ * The check evaluates the ledger the merge would actually leave behind: the base's
+ * CURRENT assertions minus the staged retractions, plus the already remapped and
+ * deduped staged assertions. Base endpoints are put through the same
+ * {@link resolveIdentityEndpoint} mapping, so an inherited assertion whose node
+ * was folded or retyped is judged at its post-merge identity. The `same`
+ * assertions are folded into equivalence classes and every `different` pair —
+ * staged or inherited — is rejected when both of its endpoints land in one class.
+ *
+ * Only the `(kind, id)` dimension is considered. Cross-kind identity folding is a
+ * same-id relation, so it can never introduce a `different` pair.
+ */
+function assertNoContradictoryIdentityClosure(
+  plannedAssertions: readonly IdentityTransferAssertion[],
+  retractions: readonly string[],
+  baseAssertions: readonly IdentityTransferAssertion[],
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+  retypeMap: ReadonlyMap<MergeKey, string>,
+): void {
+  const retracted = new Set(retractions);
+  const mergedLedger = [
+    ...plannedAssertions,
+    ...baseAssertions
+      .filter((assertion) => !retracted.has(assertion.id))
+      .map((assertion) => ({
+        ...assertion,
+        a: resolveIdentityEndpoint(assertion.a, canonicalOf, retypeMap),
+        b: resolveIdentityEndpoint(assertion.b, canonicalOf, retypeMap),
+      })),
+  ];
+
+  const sameClasses = new UnionFind<MergeKey>((left, right) =>
+    compareMergeKeys(left, right),
   );
+  for (const assertion of mergedLedger) {
+    if (assertion.relation === "same") {
+      sameClasses.union(mergeKeyOf(assertion.a), mergeKeyOf(assertion.b));
+    }
+  }
+  for (const assertion of mergedLedger) {
+    if (assertion.relation !== "different") {
+      continue;
+    }
+    const root = sameClasses.find(mergeKeyOf(assertion.a));
+    if (root !== sameClasses.find(mergeKeyOf(assertion.b))) {
+      continue;
+    }
+    throw new IdentityMergeConflictError(
+      "The merged identity ledger would assert one pair of nodes is both the same and different.",
+      {
+        details: {
+          assertion,
+          sameClass: sameClasses
+            .members()
+            .filter((member) => sameClasses.find(member) === root)
+            .map((member) => ({ kind: kindOf(member), id: idOf(member) }))
+            .toSorted((left, right) =>
+              compareMergeKeys(mergeKeyOf(left), mergeKeyOf(right)),
+            ),
+        },
+      },
+    );
+  }
 }
 
 /**
@@ -1193,12 +1412,27 @@ function planMerge<G extends GraphDef>(
   const canonicalOf = buildCanonicalMap(clusters, (cluster) =>
     pickClusterCanonical(cluster, entityByIdentity),
   );
-  // Repoint identity-assertion endpoints through the same canonical map the edges
-  // use, so an assertion naming a folded branch node references its survivor
-  // instead of a dangling id the commit-time endpoint guard would reject.
-  const identityAssertions = remapIdentityAssertionEndpoints(
+  // Repoint identity-assertion endpoints through the same canonical + retype maps
+  // the edges use, so an assertion naming a folded or retyped branch node
+  // references its survivor instead of a dangling `(kind, id)` the commit-time
+  // endpoint guard would reject. The two guards that follow turn the remaining
+  // commit-time identity failures into deterministic plan-time conflicts.
+  const identityRemap = remapIdentityAssertionEndpoints(
     identity.assertions,
     canonicalOf,
+    reconciliation.retypeMap,
+  );
+  assertIdentityEndpointsNotDeleted(
+    identityRemap.assertions,
+    nodeDeletions,
+    reconciliation.retypeMap,
+  );
+  assertNoContradictoryIdentityClosure(
+    identityRemap.assertions,
+    identity.retractions,
+    staging.baseIdentityAssertions,
+    canonicalOf,
+    reconciliation.retypeMap,
   );
   const stagedEdges = buildStagedEdges(
     staging,
@@ -1239,6 +1473,8 @@ function planMerge<G extends GraphDef>(
     ...edgeDeleteModify.dropped,
     ...repoint.dropped,
     ...reconciliation.dropped,
+    ...identity.dropped,
+    ...identityRemap.dropped,
   ].sort((left, right) =>
     compareStrings(`${left.kind}|${left.id}`, `${right.kind}|${right.id}`),
   );
@@ -1304,7 +1540,7 @@ function planMerge<G extends GraphDef>(
     ),
     provenanceRecords,
     warnings: candidateWarnings,
-    identityAssertions,
+    identityAssertions: identityRemap.assertions,
     identityRetractions: identity.retractions,
   };
 }
@@ -1373,7 +1609,7 @@ async function applyMergePlan<G extends GraphDef>(
   edgesApi: TxEdges,
   target: Store<G>,
   txBackend: TransactionBackend,
-): Promise<Readonly<{ nodes: number; edges: number }>> {
+): Promise<MergedCounts> {
   // Counted by composite `(kind, id)` identity, so two different-kind nodes that
   // share an id string each count once (and never collide in the dedupe set).
   const committedNodeIds = new Set<MergeKey>();
@@ -1504,7 +1740,18 @@ async function applyMergePlan<G extends GraphDef>(
     plan.identityAssertions,
   );
 
-  return { nodes: committedNodeIds.size, edges: committedEdges };
+  return {
+    nodes: committedNodeIds.size,
+    edges: committedEdges,
+    // The plan's identity arrays ARE what was applied: both are already deduped
+    // (survivor rule + endpoint remap) and the apply runs inside this
+    // transaction, so any failure aborts the whole merge rather than reporting a
+    // partial count. Same basis as the edge count above.
+    identity: {
+      asserted: plan.identityAssertions.length,
+      retracted: plan.identityRetractions.length,
+    },
+  };
 }
 
 /**
@@ -1535,7 +1782,7 @@ export async function commitPlan<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
   expectedBaseVersion?: BaseVersion,
-): Promise<Readonly<{ nodes: number; edges: number }>> {
+): Promise<MergedCounts> {
   if (!storeBackend(target).capabilities.transactions) {
     throw new MergeError(
       "merge() requires a transaction-capable target backend. The merged plan (canonical upserts, soft-deletes, edge upserts) must commit atomically; a non-transactional fallback would leave a partially-merged graph on a mid-commit failure. (mergeIncremental() enforces the same requirement.)",
@@ -2896,7 +3143,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
   guard: IncrementalCommitGuard<G>,
-): Promise<Readonly<{ nodes: number; edges: number }>> {
+): Promise<MergedCounts> {
   if (!storeBackend(target).capabilities.transactions) {
     throw new MergeError(
       "mergeIncremental() requires a transaction-capable target backend. Incremental writes must preflight existing rows and commit atomically; non-transactional fallback would allow partial graph writes.",

@@ -8,6 +8,7 @@ import {
   CompilerInvariantError,
   UnsupportedPredicateError,
 } from "../../errors";
+import { IDENTITY_PATH_TOKEN_SEPARATOR } from "../../utils/path";
 import { type QueryAst, type SelectiveField } from "../ast";
 import {
   type DialectAdapter,
@@ -70,21 +71,15 @@ export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
 const NO_ALWAYS_REQUIRED_COLUMNS = new Set<string>();
 
 /**
- * Separator woven into composite (kind, id) path tokens for identity-expanded
- * traversals. U+001F (unit separator) is a control character that does not
- * occur in node kinds (identifier-like) and is vanishingly unlikely in ids, so
- * `kind || SEP || id` cannot collide across distinct (kind, id) pairs the way a
- * printable delimiter could. Bound as a parameter (not `sql.raw`) so it needs
- * no dialect-specific `char()`/`chr()` builtin — both dialects concatenate
- * bound text with `||`.
- */
-const IDENTITY_PATH_TOKEN_SEPARATOR = "\u001F";
-
-/**
  * The per-step cycle/path token for a node table alias. For identity-expanded
  * traversals it is the composite `kind || SEP || id` so folded peers (same id,
  * different kind) are distinct tokens; otherwise it is the bare id, preserving
  * the exact pre-identity token and public path output.
+ *
+ * The separator is bound as a parameter (not `sql.raw`) so it needs no
+ * dialect-specific `char()`/`chr()` builtin — both dialects concatenate bound
+ * text with `||`. Composite tokens never reach the caller: result
+ * materialization strips them back to bare ids with `stripIdentityPathTokens`.
  */
 function compilePathToken(tableAlias: string, composite: boolean): SqlFragment {
   if (!composite) {
@@ -418,7 +413,8 @@ function compileRecursiveCte(
   // both peers as a revisit — a spurious cycle. Scope the fix to identity
   // traversals: their cycle-detection and path tokens become the composite
   // (kind, id), leaving every other traversal's token (and public path output)
-  // byte-identical. See TraversalOptions.includeIdentityMembers JSDoc.
+  // byte-identical. See the `IdentityTraversalOption` JSDoc in
+  // src/query/builder/query-builder.ts for the option's public semantics.
   const baseToken = compilePathToken(
     "n0",
     traversal.includeIdentityMembers === true,

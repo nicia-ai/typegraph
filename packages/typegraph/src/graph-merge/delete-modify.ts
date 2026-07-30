@@ -164,9 +164,12 @@ function groupByEntity<T>(
  * The shared node/edge DELETE-MODIFY resolver — the single control flow behind
  * {@link resolveDeleteModify} (nodes) and {@link resolveEdgeDeleteModify} (edges).
  * `modifiedEntity`/`deletedEntity` extract each staged item's `(id, kind)` (its
- * `.node` or `.edge`), and `droppedKind` tags the {@link DroppedItem}; everything
- * else — conflict detection, policy application, pure-deletion/pure-modification
- * passthrough, and the canonical output sort — is identical for both.
+ * `.node` or `.edge`), and `dropDeleted` builds the {@link DroppedItem} for a
+ * finally-deleted entity — a factory rather than a `"node" | "edge"` tag because
+ * `DroppedItem` is discriminated on `kind`, so only the caller can pair the right
+ * discriminant with its own id type. Everything else — conflict detection, policy
+ * application, pure-deletion/pure-modification passthrough, and the canonical
+ * output sort — is identical for both.
  */
 function resolveDeleteModifyOver<
   ModifiedItem extends BranchTagged,
@@ -177,7 +180,7 @@ function resolveDeleteModifyOver<
   deleted: readonly DeletedItem[],
   modifiedEntity: (item: ModifiedItem) => Readonly<{ id: Id; kind: string }>,
   deletedEntity: (item: DeletedItem) => Readonly<{ id: Id; kind: string }>,
-  droppedKind: "node" | "edge",
+  dropDeleted: (id: Id) => DroppedItem,
   policy: DeleteModifyPolicy,
   branchRank: ReadonlyMap<BranchId, number>,
   preferredBranchId: BranchId | undefined,
@@ -237,7 +240,7 @@ function resolveDeleteModifyOver<
 
     if (effectivePolicy === "deleteWins") {
       deletions.push({ id, kind });
-      dropped.push({ kind: droppedKind, id, reason: DELETED_NODE_DROP_REASON });
+      dropped.push(dropDeleted(id));
       continue;
     }
 
@@ -401,7 +404,7 @@ export function resolveDeleteModify(
     staging.deletedNodes,
     (item) => item.node,
     (item) => item.node,
-    "node",
+    (id) => ({ kind: "node", id, reason: DELETED_NODE_DROP_REASON }),
     policy,
     branchRank,
     preferredBranchId,
@@ -633,7 +636,7 @@ export function resolveEdgeDeleteModify(
     staging.deletedEdges,
     (item) => item.edge,
     (item) => item.edge,
-    "edge",
+    (id) => ({ kind: "edge", id, reason: DELETED_NODE_DROP_REASON }),
     policy,
     branchRank,
     preferredBranchId,

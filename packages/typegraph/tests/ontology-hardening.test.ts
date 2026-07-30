@@ -232,6 +232,81 @@ describe("ontology truth and hardening", () => {
     );
   });
 
+  it("rejects disjoint sides joined by an equivalence chain through an external IRI", () => {
+    const externalIri = "http://example.org/X";
+    const ontology = [
+      { metaEdge: "equivalentTo", from: "Alpha", to: externalIri },
+      { metaEdge: "equivalentTo", from: externalIri, to: "Beta" },
+      { metaEdge: "disjointWith", from: "Alpha", to: "Beta" },
+    ];
+
+    // Equivalence classes are unioned through external IRIs, so the runtime
+    // holds Alpha ≡ Beta and Alpha | Beta at the same time unless validation
+    // rejects the declaration.
+    const closures = computeClosuresFromNamedOntology(ontology);
+    expect(closures.equivalenceSets.get("Alpha")?.has("Beta")).toBe(true);
+    expect(closures.disjointPairs.has("Alpha|Beta")).toBe(true);
+
+    expect(validateOntologyRelations(ontology)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+          details: matchingObject({ from: "Alpha", to: "Beta" }),
+        }),
+      ]),
+    );
+  });
+
+  it("stops disjointness descent at external IRIs in validation and runtime alike", () => {
+    const externalIri = "http://example.org/X";
+    const ontology = [
+      { metaEdge: "equivalentTo", from: "Alpha", to: externalIri },
+      { metaEdge: "subClassOf", from: "Gamma", to: externalIri },
+      { metaEdge: "disjointWith", from: "Alpha", to: "Beta" },
+    ];
+
+    // An IRI is an inert reference, so subclass descent stops there: Gamma
+    // inherits nothing from Alpha. Validation must agree rather than reason
+    // past what the registry actually materializes.
+    expect(validateOntologyRelations(ontology)).toEqual([]);
+
+    const closures = computeClosuresFromNamedOntology(ontology);
+    expect([...closures.disjointPairs]).toEqual(["Alpha|Beta"]);
+    expect(closures.equivalenceSets.get("Alpha")?.has("Gamma")).toBe(false);
+  });
+
+  it("serializes lazy equivalence-set views as complete member lists", () => {
+    const Client = defineNode("Client", { schema: emptySchema });
+    const Customer = defineNode("Customer", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "serialize-equivalence-views",
+      nodes: {
+        Client: { type: Client },
+        Customer: { type: Customer },
+        Person: { type: Person },
+      },
+      edges: {},
+      ontology: [
+        equivalentTo(Client, Customer),
+        equivalentTo(Customer, Person),
+      ],
+    });
+
+    const { equivalenceSets } = serializeSchema(graph, 1).ontology.closures;
+    expect(equivalenceSets["Client"]?.toSorted()).toEqual([
+      "Customer",
+      "Person",
+    ]);
+    expect(equivalenceSets["Customer"]?.toSorted()).toEqual([
+      "Client",
+      "Person",
+    ]);
+    expect(equivalenceSets["Person"]?.toSorted()).toEqual([
+      "Client",
+      "Customer",
+    ]);
+  });
+
   it("validates a long equivalence chain without overflowing the stack", () => {
     const chainLength = 20_000;
     const ontology = Array.from({ length: chainLength }, (_, index) => ({

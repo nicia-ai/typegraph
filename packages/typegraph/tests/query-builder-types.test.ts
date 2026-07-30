@@ -26,6 +26,7 @@ import {
   type TypedEdgeCollection,
 } from "../src";
 import { ConfigurationError } from "../src/errors";
+import type { TraversalBuilder } from "../src/query/builder/traversal-builder";
 import { buildKindRegistry } from "../src/registry";
 import type { Edge } from "../src/store/types";
 import { matchingObject } from "./test-utils";
@@ -123,8 +124,8 @@ describe("Query Builder Type Safety", () => {
           .from("Person", "person")
           // @ts-expect-error - disabled graphs cannot request identity expansion
           .traverse("knows", "edge", { includeIdentityMembers: true });
-        // @ts-expect-error - disabled graph identity facade resolves to never
-        void disabledStore.identity.membersOf;
+        // @ts-expect-error - identity is absent from a disabled graph's Store
+        void disabledStore.identity;
 
         enabledStore
           .query()
@@ -132,6 +133,15 @@ describe("Query Builder Type Safety", () => {
           .traverse("knows", "edge", { includeIdentityMembers: true });
         void enabledStore.identity.membersOf;
       }
+      // The property does not exist on the disabled surface at all — the
+      // encoding `tx.identity` has always used — rather than existing with a
+      // `never` type that only errors once a member is reached.
+      expectTypeOf<
+        "identity" extends keyof Store<typeof graph> ? true : false
+      >().toEqualTypeOf<false>();
+      expectTypeOf<
+        "identity" extends keyof Store<typeof identityGraph> ? true : false
+      >().toEqualTypeOf<true>();
       void assertIdentityGraphTypes;
       expect(identityGraph.identity).toEqual({ sameIdAcrossKinds: "fold" });
     });
@@ -173,6 +183,62 @@ describe("Query Builder Type Safety", () => {
 
       expect(traverseWithIdentity).toThrow(ConfigurationError);
       expect(traverseWithIdentity).toThrow(identityNotEnabled());
+    });
+  });
+
+  describe("TraversalBuilder constructor stability", () => {
+    type IsIdentityFlagSlot<T> =
+      [T] extends [boolean | undefined] ? true : false;
+
+    /**
+     * `TraversalBuilder` is part of the public traversal surface, so its
+     * positional parameters are a contract: a new parameter must be APPENDED,
+     * never inserted, or every caller's later arguments silently shift one slot
+     * (the way `includeIdentityMembers` once displaced `variableLength`).
+     */
+    it("pins the positional constructor parameter order", () => {
+      type Params = ConstructorParameters<typeof TraversalBuilder>;
+
+      // Six required parameters followed by five optional ones. Any insertion
+      // widens this union and fails here first.
+      expectTypeOf<Params["length"]>().toEqualTypeOf<6 | 7 | 8 | 9 | 10 | 11>();
+
+      expectTypeOf<Params[2]>().toEqualTypeOf<readonly string[]>();
+      expectTypeOf<Params[3]>().toEqualTypeOf<string>();
+      expectTypeOf<Params[5]>().toEqualTypeOf<string>();
+      expectTypeOf<Params[6]>().toEqualTypeOf<readonly string[] | undefined>();
+      // Slots 8 and 9 carry module-private state types, so assert only that the
+      // identity flag sits after them and not in them. Slots whose type comes
+      // from a class type parameter erase unusably under `ConstructorParameters`
+      // and are left to the arity check above.
+      expectTypeOf<IsIdentityFlagSlot<Params[8]>>().toEqualTypeOf<false>();
+      expectTypeOf<IsIdentityFlagSlot<Params[9]>>().toEqualTypeOf<false>();
+      expectTypeOf<IsIdentityFlagSlot<Params[10]>>().toEqualTypeOf<true>();
+    });
+
+    it("carries identity expansion through recursive and edge-predicate rebuilds", () => {
+      const identityRegistry = buildKindRegistry(identityGraph);
+
+      // `recursive()` and `whereEdge()` each rebuild the TraversalBuilder
+      // positionally, so a misordered argument shows up as a dropped flag or a
+      // lost variable-length spec here.
+      const ast = createQueryBuilder<typeof identityGraph>(
+        identityGraph.id,
+        identityRegistry,
+      )
+        .from("Person", "person")
+        .traverse("manages", "edge", { includeIdentityMembers: true })
+        .whereEdge("edge", (edge) => edge.since.eq("2024"))
+        .recursive({ depth: true, path: "hops" })
+        .to("Project", "project")
+        .select((context) => context.project)
+        .toAst();
+
+      const traversal = ast.traversals[0];
+      expect(traversal?.includeIdentityMembers).toBe(true);
+      expect(traversal?.variableLength?.pathAlias).toBe("hops");
+      expect(traversal?.variableLength?.depthAlias).toBe("project_depth");
+      expect(ast.predicates).toHaveLength(1);
     });
   });
 

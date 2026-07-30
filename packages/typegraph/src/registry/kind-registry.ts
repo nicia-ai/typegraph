@@ -388,6 +388,139 @@ export function computeClosuresFromOntology(
   );
 }
 
+type NamedRelationPair = readonly [string, string];
+
+/**
+ * The per-meta-edge relation lists every closure is derived from. Collecting
+ * them once keeps the mapping from meta-edge to closure input single-sourced:
+ * `narrower` and `hasPart` are normalized into their canonical direction here
+ * and nowhere else.
+ */
+type CollectedOntologyRelations = Readonly<{
+  subClass: readonly NamedRelationPair[];
+  broader: readonly NamedRelationPair[];
+  equivalent: readonly NamedRelationPair[];
+  related: readonly NamedRelationPair[];
+  disjoint: readonly NamedRelationPair[];
+  partOf: readonly NamedRelationPair[];
+  inverseOf: readonly NamedRelationPair[];
+  implies: readonly NamedRelationPair[];
+}>;
+
+/**
+ * The closures disjointness expansion consumes. `validateOntologyRelations`
+ * and the registry share this exact input so a declaration validation accepts
+ * can never expand differently at runtime.
+ */
+export type DisjointExpansionClosures = Readonly<{
+  subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
+  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
+}>;
+
+function collectOntologyRelations(
+  ontology: readonly NamedOntologyRelation[],
+): CollectedOntologyRelations {
+  const subClass: NamedRelationPair[] = [];
+  const broader: NamedRelationPair[] = [];
+  const equivalent: NamedRelationPair[] = [];
+  const related: NamedRelationPair[] = [];
+  const disjoint: NamedRelationPair[] = [];
+  const partOf: NamedRelationPair[] = [];
+  const inverseOf: NamedRelationPair[] = [];
+  const implies: NamedRelationPair[] = [];
+
+  for (const relation of ontology) {
+    const fromName = relation.from;
+    const toName = relation.to;
+
+    switch (relation.metaEdge) {
+      case META_EDGE_SUB_CLASS_OF: {
+        subClass.push([fromName, toName]);
+        break;
+      }
+      case META_EDGE_BROADER: {
+        broader.push([fromName, toName]);
+        break;
+      }
+      case META_EDGE_NARROWER: {
+        // narrower is inverse of broader
+        broader.push([toName, fromName]);
+        break;
+      }
+      case META_EDGE_EQUIVALENT_TO:
+      case META_EDGE_SAME_AS: {
+        equivalent.push([fromName, toName]);
+        break;
+      }
+      case META_EDGE_RELATED_TO: {
+        related.push([fromName, toName]);
+        break;
+      }
+      case META_EDGE_DISJOINT_WITH: {
+        disjoint.push([fromName, toName]);
+        break;
+      }
+      case META_EDGE_PART_OF: {
+        partOf.push([fromName, toName]);
+        break;
+      }
+      case META_EDGE_HAS_PART: {
+        // hasPart is inverse of partOf
+        partOf.push([toName, fromName]);
+        break;
+      }
+      case META_EDGE_INVERSE_OF: {
+        // inverseOf is symmetric: if A inverseOf B, then B inverseOf A
+        inverseOf.push([fromName, toName]);
+        break;
+      }
+      case META_EDGE_IMPLIES: {
+        implies.push([fromName, toName]);
+        break;
+      }
+    }
+  }
+
+  return {
+    subClass,
+    broader,
+    equivalent,
+    related,
+    disjoint,
+    partOf,
+    inverseOf,
+    implies,
+  };
+}
+
+function computeSubsumptionAndEquivalenceClosures(
+  collected: CollectedOntologyRelations,
+): DisjointExpansionClosures &
+  Readonly<{ subClassAncestors: ReadonlyMap<string, ReadonlySet<string>> }> {
+  const subClassAncestors = computeTransitiveClosure(collected.subClass);
+  return {
+    subClassAncestors,
+    subClassDescendants: invertClosure(subClassAncestors),
+    equivalenceSets: computeEquivalenceSets(collected.equivalent),
+  };
+}
+
+/**
+ * Computes only the closures disjointness expansion needs.
+ *
+ * Load-time validation calls this instead of {@link
+ * computeClosuresFromNamedOntology} so it never pays for the quadratic
+ * disjoint-pair materialization it is trying to prove unnecessary, while still
+ * expanding over byte-identical closures.
+ */
+export function computeDisjointExpansionClosures(
+  ontology: readonly NamedOntologyRelation[],
+): DisjointExpansionClosures {
+  return computeSubsumptionAndEquivalenceClosures(
+    collectOntologyRelations(ontology),
+  );
+}
+
 /** Computes all registry closures from already-normalized relation names. */
 export function computeClosuresFromNamedOntology(
   ontology: readonly NamedOntologyRelation[],
@@ -406,99 +539,35 @@ export function computeClosuresFromNamedOntology(
   edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
   edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
 } {
-  // Collect relations by type
-  const subClassRelations: [string, string][] = [];
-  const broaderRelations: [string, string][] = [];
-  const equivalentRelations: [string, string][] = [];
-  const relatedRelations: [string, string][] = [];
-  const disjointRelations: [string, string][] = [];
-  const partOfRelations: [string, string][] = [];
-  const inverseOfRelations: [string, string][] = [];
-  const impliesRelations: [string, string][] = [];
+  const collected = collectOntologyRelations(ontology);
 
-  for (const relation of ontology) {
-    const fromName = relation.from;
-    const toName = relation.to;
-
-    switch (relation.metaEdge) {
-      case META_EDGE_SUB_CLASS_OF: {
-        subClassRelations.push([fromName, toName]);
-        break;
-      }
-      case META_EDGE_BROADER: {
-        broaderRelations.push([fromName, toName]);
-        break;
-      }
-      case META_EDGE_NARROWER: {
-        // narrower is inverse of broader
-        broaderRelations.push([toName, fromName]);
-        break;
-      }
-      case META_EDGE_EQUIVALENT_TO:
-      case META_EDGE_SAME_AS: {
-        equivalentRelations.push([fromName, toName]);
-        break;
-      }
-      case META_EDGE_RELATED_TO: {
-        relatedRelations.push([fromName, toName]);
-        break;
-      }
-      case META_EDGE_DISJOINT_WITH: {
-        disjointRelations.push([fromName, toName]);
-        break;
-      }
-      case META_EDGE_PART_OF: {
-        partOfRelations.push([fromName, toName]);
-        break;
-      }
-      case META_EDGE_HAS_PART: {
-        // hasPart is inverse of partOf
-        partOfRelations.push([toName, fromName]);
-        break;
-      }
-      case META_EDGE_INVERSE_OF: {
-        // inverseOf is symmetric: if A inverseOf B, then B inverseOf A
-        inverseOfRelations.push([fromName, toName]);
-        break;
-      }
-      case META_EDGE_IMPLIES: {
-        impliesRelations.push([fromName, toName]);
-        break;
-      }
-    }
-  }
-
-  // Compute subClassOf closures
-  const subClassAncestors = computeTransitiveClosure(subClassRelations);
-  const subClassDescendants = invertClosure(subClassAncestors);
+  const { subClassAncestors, subClassDescendants, equivalenceSets } =
+    computeSubsumptionAndEquivalenceClosures(collected);
 
   // Compute broader/narrower closures
-  const broaderClosure = computeTransitiveClosure(broaderRelations);
+  const broaderClosure = computeTransitiveClosure(collected.broader);
   const narrowerClosure = invertClosure(broaderClosure);
 
-  // Compute equivalence sets and IRI mappings
-  const equivalenceSets = computeEquivalenceSets(equivalentRelations);
-  const iriToKind = computeIriMapping(equivalentRelations);
-  const relatedKinds = computeSymmetricRelations(relatedRelations);
+  const iriToKind = computeIriMapping(collected.equivalent);
+  const relatedKinds = computeSymmetricRelations(collected.related);
 
   // Compute disjoint pairs (normalize for symmetric lookup)
-  const disjointPairs = computeDisjointPairs(
-    disjointRelations,
+  const disjointPairs = computeDisjointPairs(collected.disjoint, {
     subClassDescendants,
     equivalenceSets,
-  );
+  });
 
   // Compute partOf closures
-  const partOfClosure = computeTransitiveClosure(partOfRelations);
+  const partOfClosure = computeTransitiveClosure(collected.partOf);
   const hasPartClosure = invertClosure(partOfClosure);
 
   // Compute edge inverses (symmetric: store both directions)
-  const edgeInverses = computeEdgeInverses(inverseOfRelations);
+  const edgeInverses = computeEdgeInverses(collected.inverseOf);
 
   // Compute edge implications closure (transitive)
   // edgeImplicationsClosure: A -> [B, C] means A implies B and C
   // edgeImplyingClosure: C -> [A, B] means A and B imply C (inverse direction)
-  const edgeImplicationsClosure = computeTransitiveClosure(impliesRelations);
+  const edgeImplicationsClosure = computeTransitiveClosure(collected.implies);
   const edgeImplyingClosure = invertClosure(edgeImplicationsClosure);
 
   return {
@@ -743,22 +812,13 @@ function computeIriMapping(
  */
 function computeDisjointPairs(
   relations: readonly (readonly [string, string])[],
-  subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>,
-  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>,
+  closures: DisjointExpansionClosures,
 ): ReadonlySet<string> {
   const result = new Set<string>();
 
   for (const [a, b] of relations) {
-    const leftKinds = expandDisjointSide(
-      a,
-      subClassDescendants,
-      equivalenceSets,
-    );
-    const rightKinds = expandDisjointSide(
-      b,
-      subClassDescendants,
-      equivalenceSets,
-    );
+    const leftKinds = expandDisjointSide(a, closures);
+    const rightKinds = expandDisjointSide(b, closures);
     for (const left of leftKinds) {
       for (const right of rightKinds) {
         if (left === right) continue;
@@ -777,22 +837,39 @@ function computeDisjointPairs(
  * disjointness: the kind itself, its subclass descendants, and its
  * equivalence-set members. External IRIs are excluded — they are inert
  * references, not local kinds that participate in identity folding.
+ *
+ * The IRI exclusion stops descent, so a subclass reached only *through* an
+ * IRI does not inherit disjointness. Equivalence, by contrast, still crosses
+ * IRIs because `computeEquivalenceSets` unions over them: a class containing
+ * an IRI is already closed, and every member is one hop away.
+ *
+ * Both the registry and `validateOntologyRelations` expand through this
+ * function. Re-implementing it against the declared relations instead of the
+ * precomputed closures reintroduces exactly that IRI asymmetry as a
+ * validation blind spot.
  */
-function expandDisjointSide(
+export function expandDisjointSide(
   kind: string,
-  subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>,
-  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>,
+  closures: DisjointExpansionClosures,
 ): readonly string[] {
   const expanded = new Set<string>();
+  // Equivalence sets partition the kinds, so every member of a class sees the
+  // same class. Consuming a class once keeps expansion linear in the class
+  // size instead of quadratic.
+  const consumedEquivalenceClasses = new Set<string>();
   const pending = [kind];
   while (pending.length > 0) {
     const current = requireDefined(pending.pop());
     if (expanded.has(current) || isExternalIri(current)) continue;
     expanded.add(current);
-    for (const equivalent of equivalenceSets.get(current) ?? []) {
-      pending.push(equivalent);
+    if (!consumedEquivalenceClasses.has(current)) {
+      consumedEquivalenceClasses.add(current);
+      for (const equivalent of closures.equivalenceSets.get(current) ?? []) {
+        consumedEquivalenceClasses.add(equivalent);
+        pending.push(equivalent);
+      }
     }
-    for (const descendant of subClassDescendants.get(current) ?? []) {
+    for (const descendant of closures.subClassDescendants.get(current) ?? []) {
       pending.push(descendant);
     }
   }

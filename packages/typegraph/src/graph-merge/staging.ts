@@ -42,6 +42,7 @@ import type {
   IdentityTransferAssertion,
   Store,
 } from "./typegraph-internal";
+import { storeRuntime } from "./typegraph-internal";
 import type { BranchId, GraphBranch } from "./types";
 
 /** A new fork node tagged with the branch that introduced it. */
@@ -107,6 +108,15 @@ export type StagingSet = Readonly<{
   deletedEdges: readonly StagedDeletedEdge[];
   newIdentityAssertions: readonly StagedIdentityAssertion[];
   retractedIdentityAssertions: readonly StagedIdentityAssertion[];
+  /**
+   * Every assertion CURRENT in the base store at staging time — the inherited
+   * truth the branches forked from. Untagged (it belongs to no branch). The
+   * planner needs it because a merge can only decide whether the branches'
+   * assertions contradict each other by evaluating them against the assertions
+   * that survive the merge unchanged: a staged `different` pair can contradict a
+   * `same` pair no branch touched (see the contradiction check in `merge.ts`).
+   */
+  baseIdentityAssertions: readonly IdentityTransferAssertion[];
   /**
    * `(kind, id) -> version` for the nodes of the branch named by
    * `stageBranches`' `captureTargetStateFor` argument, observed by that
@@ -212,6 +222,9 @@ export async function stageBranches<G extends GraphDef>(
   const newIdentityAssertions: StagedIdentityAssertion[] = [];
   const retractedIdentityAssertions: StagedIdentityAssertion[] = [];
 
+  const baseIdentityAssertions =
+    await storeRuntime(baseStore).identityAssertionsForInterchange("state");
+
   let targetNodeVersions: ReadonlyMap<MergeKey, number> = new Map();
   let targetEdgeSignatures: ReadonlyMap<MergeKey, string> = new Map();
   for (const branch of branches) {
@@ -278,6 +291,9 @@ export async function stageBranches<G extends GraphDef>(
             compareStrings(left.branchId, right.branchId)
           : byId;
       },
+    ),
+    baseIdentityAssertions: baseIdentityAssertions.toSorted((left, right) =>
+      compareStrings(left.id, right.id),
     ),
     targetNodeVersions,
     targetEdgeSignatures,

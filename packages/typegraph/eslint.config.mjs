@@ -205,8 +205,13 @@ export default [
   // parallel-path failure mode that hid the set-operation gap, so ban it here.
   // (Spreads DETERMINISM_RESTRICTIONS back in: this block REPLACES the src/**
   // no-restricted-syntax entry for query-compiler files.)
+  //
+  // `src/identity/historical-sql.ts` is query-compiler SQL construction that
+  // lives outside src/query, so it is in scope. The rest of src/identity is
+  // not: `service.ts` legitimately branches on dialect to gate PostgreSQL
+  // advisory locks, which is backend provisioning, not query compilation.
   {
-    files: ["src/query/**/*.ts"],
+    files: ["src/query/**/*.ts", "src/identity/historical-sql.ts"],
     rules: {
       "no-restricted-syntax": [
         "error",

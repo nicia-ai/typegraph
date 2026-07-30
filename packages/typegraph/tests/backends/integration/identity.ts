@@ -7,13 +7,18 @@ import {
   defineGraph,
   defineGraphExtension,
   defineNode,
+  type GraphBackend,
   rebuildIdentityClosure,
 } from "../../../src";
 import { exportGraph } from "../../../src/interchange";
 import { inverseOf } from "../../../src/ontology";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
-import { asCompiledStatementSql } from "../../../src/query/sql-intent";
+import {
+  asCompiledRowsSql,
+  asCompiledStatementSql,
+} from "../../../src/query/sql-intent";
+import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -73,6 +78,102 @@ async function provisionIdentityTraversalStore(
     history ? { history: true } : {},
   );
   return store;
+}
+
+/**
+ * Same node and edge kinds as {@link identityTraversalGraph} under the other
+ * identity profile: `sameIdAcrossKinds: "ignore"` keeps the assertion ledger
+ * but never folds two nodes just because they share an id.
+ */
+const identityIgnoreGraph = defineGraph({
+  id: "identity_ignore_profile",
+  nodes: {
+    Person: { type: IdentityTravPerson },
+    Company: { type: IdentityTravCompany },
+  },
+  edges: {
+    link: {
+      type: identityTravLink,
+      from: [IdentityTravPerson, IdentityTravCompany],
+      to: [IdentityTravPerson, IdentityTravCompany],
+    },
+  },
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+
+async function provisionIdentityIgnoreStore(context: IntegrationTestContext) {
+  const [store] = await createStoreWithSchema(
+    identityIgnoreGraph,
+    context.getStore().backend,
+  );
+  return store;
+}
+
+/**
+ * Reads the raw assertion ledger rows touching a node, including rows the
+ * public reads hide (retracted assertions are ended, not visible). Used to
+ * assert on persistence itself — row removal and stored window bounds.
+ */
+async function readAssertionRows(
+  store: Readonly<{ backend: GraphBackend; graphId: string }>,
+  ref: Readonly<{ kind: string; id: string }>,
+): Promise<readonly RawAssertionRow[]> {
+  const schema = createSqlSchema(store.backend.tableNames);
+  return store.backend.execute<RawAssertionRow>(
+    asCompiledRowsSql(sql`
+      SELECT id, valid_from, valid_to
+      FROM ${schema.identityAssertionsTable}
+      WHERE graph_id = ${store.graphId}
+        AND (
+          (a_kind = ${ref.kind} AND a_id = ${ref.id})
+          OR (b_kind = ${ref.kind} AND b_id = ${ref.id})
+        )
+    `),
+  );
+}
+
+type RawAssertionRow = Readonly<{
+  id: string;
+  valid_from: unknown;
+  valid_to: unknown;
+}>;
+
+/** An assertion row is ended once its `valid_to` bound is set. */
+function isEndedRow(row: RawAssertionRow): boolean {
+  return row.valid_to instanceof Date || typeof row.valid_to === "string";
+}
+
+/**
+ * Canonicalizes a raw stored timestamp so a stored-window assertion means the
+ * same thing on every backend. SQLite keeps ISO-8601 text; the PostgreSQL
+ * drivers hand back either a `Date` (node-postgres) or the server's own
+ * `YYYY-MM-DD HH:MM:SS.mmm+00` rendering (postgres-js).
+ */
+function toInstant(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value !== "string") {
+    throw new TypeError(`Unexpected stored timestamp: ${String(value)}`);
+  }
+  const isoCandidate = value
+    .replaceAll(" ", "T")
+    .replace(/([+-]\d\d)$/, "$1:00");
+  const parsed = new Date(isoCandidate);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new TypeError(`Unparsable stored timestamp: ${value}`);
+  }
+  return parsed.toISOString();
+}
+
+/**
+ * Row order is not guaranteed across backends, so traversal path assertions
+ * compare sorted sets rather than a specific row order.
+ */
+function sortPaths(
+  paths: readonly (readonly string[])[],
+): readonly (readonly string[])[] {
+  return [...paths].toSorted((left, right) =>
+    compareStrings(left.join("/"), right.join("/")),
+  );
 }
 
 export function registerIdentityIntegrationTests(
@@ -184,13 +285,23 @@ export function registerIdentityIntegrationTests(
         await store.identity.assertionsOf(requireDefined(bulk[0])),
       ).toEqual([]);
 
-      await store.nodes.Person.delete(requireDefined(bulk[1]).id);
+      const bulkNewId = requireDefined(bulk[1]).id;
+      await store.nodes.Person.delete(bulkNewId);
       await store.nodes.Person.bulkInsert([
-        { id: "bulk-new", props: { name: "Bulk inserted again" } },
+        {
+          id: "bulk-new",
+          props: { name: "Bulk inserted again" },
+          validFrom: recreatedValidFrom,
+          validTo: recreatedValidTo,
+        },
       ]);
       expect(
         await store.backend.getNode(store.graphId, "Person", "bulk-new"),
       ).toMatchObject({ deleted_at: undefined });
+      const reinserted = await store.nodes.Person.getById(bulkNewId);
+      expect(reinserted?.name).toBe("Bulk inserted again");
+      expect(reinserted?.meta.validFrom).toBe(recreatedValidFrom);
+      expect(reinserted?.meta.validTo).toBe(recreatedValidTo);
     });
 
     it("lifts different assertions to whole classes", async () => {
@@ -369,11 +480,25 @@ export function registerIdentityIntegrationTests(
 
     it("makes current reads equal a valid-time view at now", async () => {
       const store = context.getStore();
-      const person = await store.nodes.Person.create({ name: "Alice" });
-      const company = await store.nodes.Company.create({ name: "Alice LLC" });
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "now-person" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Alice LLC" },
+        { id: "now-company" },
+      );
       await store.identity.assertSame(person, company);
       const now = new Date().toISOString();
 
+      // Pin the class against the pair constructed above before comparing the
+      // two coordinates, so the law cannot be satisfied by both sides being
+      // empty.
+      const expectedClass = [
+        { kind: "Company", id: "now-company" },
+        { kind: "Person", id: "now-person" },
+      ];
+      expect(await store.identity.membersOf(person)).toEqual(expectedClass);
       expect(await store.asOf(now).identity.membersOf(person)).toEqual(
         await store.identity.membersOf(person),
       );
@@ -389,38 +514,102 @@ export function registerIdentityIntegrationTests(
         .from("Person", "person")
         .select((queryContext) => queryContext.person.id)
         .execute();
+      expect(currentPeople).toEqual([person.id]);
       expect(asOfPeople).toEqual(currentPeople);
     });
 
-    it("conducts through a future-valid folded bridge and filters it at read time", async () => {
-      const store = context.getStore();
-      const seed = await store.nodes.Person.create(
-        { name: "Seed" },
-        { id: "seed" },
-      );
-      const bridgePerson = await store.nodes.Person.create(
-        { name: "Future bridge" },
-        { id: "bridge" },
-      );
-      await store.nodes.Company.create(
-        { name: "Future bridge company" },
-        {
-          id: "bridge",
-          validFrom: new Date(Date.now() + 60_000).toISOString(),
-        },
-      );
-      const far = await store.nodes.Product.create(
-        { name: "Far", price: 1, category: "test" },
-        { id: "far" },
-      );
-      await store.identity.assertSame(seed, bridgePerson);
-      await store.identity.assertSame({ kind: "Company", id: "bridge" }, far);
+    /**
+     * A same-id fold is a derived consequence of two nodes existing, and node
+     * existence is a write event: the materialized closure can only track when
+     * a row was created or deleted, never the validity window the caller
+     * declared for it. These cases pin that decided semantics from both sides.
+     */
+    describe("fold conduction follows node lifecycle events (record time), not validity windows", () => {
+      it("conducts through a future-valid folded bridge and filters it at read time", async () => {
+        const store = context.getStore();
+        const seed = await store.nodes.Person.create(
+          { name: "Seed" },
+          { id: "seed" },
+        );
+        const bridgePerson = await store.nodes.Person.create(
+          { name: "Future bridge" },
+          { id: "bridge" },
+        );
+        await store.nodes.Company.create(
+          { name: "Future bridge company" },
+          {
+            id: "bridge",
+            validFrom: new Date(Date.now() + 60_000).toISOString(),
+          },
+        );
+        const far = await store.nodes.Product.create(
+          { name: "Far", price: 1, category: "test" },
+          { id: "far" },
+        );
+        await store.identity.assertSame(seed, bridgePerson);
+        await store.identity.assertSame({ kind: "Company", id: "bridge" }, far);
 
-      expect(await store.identity.membersOf(seed)).toEqual([
-        { kind: "Person", id: "bridge" },
-        { kind: "Person", id: "seed" },
-        { kind: "Product", id: "far" },
-      ]);
+        // The company was written now, so it conducts now, even though its
+        // validity window has not opened.
+        expect(await store.identity.membersOf(seed)).toEqual([
+          { kind: "Person", id: "bridge" },
+          { kind: "Person", id: "seed" },
+          { kind: "Product", id: "far" },
+        ]);
+        // Ordinary reads still apply the validity window: the bridge company
+        // conducts identity without being visible.
+        const visibleCompanies = await store
+          .query()
+          .from("Company", "company")
+          .select((queryContext) => queryContext.company.id)
+          .execute();
+        expect(visibleCompanies).toEqual([]);
+      });
+
+      it("does not conduct a backdated same-id fold before the nodes were written", async () => {
+        const store = context.getStore();
+        const backdatedValidFrom = "2020-01-01T00:00:00.000Z";
+        const asOfInstant = "2021-01-01T00:00:00.000Z";
+        const person = await store.nodes.Person.create(
+          { name: "Backdated" },
+          { id: "backdated", validFrom: backdatedValidFrom },
+        );
+        await store.nodes.Company.create(
+          { name: "Backdated LLC" },
+          { id: "backdated", validFrom: backdatedValidFrom },
+        );
+
+        // Both nodes are visible at 2021 — their validity windows opened in
+        // 2020 — so this is not a visibility effect.
+        const visiblePeople = await store
+          .asOf(asOfInstant)
+          .query()
+          .from("Person", "person")
+          .select((queryContext) => queryContext.person.id)
+          .execute();
+        const visibleCompanies = await store
+          .asOf(asOfInstant)
+          .query()
+          .from("Company", "company")
+          .select((queryContext) => queryContext.company.id)
+          .execute();
+        expect(visiblePeople).toEqual(["backdated"]);
+        expect(visibleCompanies).toEqual(["backdated"]);
+
+        // The fold itself was written now, so at 2021 the class is a singleton.
+        expect(
+          await store.asOf(asOfInstant).identity.membersOf(person),
+        ).toEqual([{ kind: "Person", id: "backdated" }]);
+
+        const currentMembers = await store.identity.membersOf(person);
+        expect(currentMembers).toEqual([
+          { kind: "Company", id: "backdated" },
+          { kind: "Person", id: "backdated" },
+        ]);
+        expect(
+          await store.asOf(new Date().toISOString()).identity.membersOf(person),
+        ).toEqual(currentMembers);
+      });
     });
 
     it("reconstructs a same-id fold before a later bridge deletion", async () => {
@@ -658,6 +847,149 @@ export function registerIdentityIntegrationTests(
 
       expect(await store.identity.areSame(person, company)).toBe(true);
       expect(await store.identity.assertionsOf(person)).toEqual([assertion]);
+    });
+
+    it("hydrates a folded multi-kind class into discriminated nodes", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Alice", age: 33 },
+        { id: "hydrate" },
+      );
+      await store.nodes.Company.create(
+        { name: "Alice LLC", industry: "books" },
+        { id: "hydrate" },
+      );
+      const product = await store.nodes.Product.create(
+        { name: "Alice Product", price: 7, category: "test" },
+        { id: "hydrate-product" },
+      );
+      await store.identity.assertSame(person, product);
+
+      const nodes = await store.identity.nodesOf(person);
+
+      expect(nodes).toHaveLength(3);
+      const byKind = new Map(nodes.map((node) => [node.kind, node]));
+      expect(byKind.get("Person")).toMatchObject({
+        id: "hydrate",
+        name: "Alice",
+        age: 33,
+      });
+      expect(byKind.get("Company")).toMatchObject({
+        id: "hydrate",
+        name: "Alice LLC",
+        industry: "books",
+      });
+      expect(byKind.get("Product")).toMatchObject({
+        id: "hydrate-product",
+        name: "Alice Product",
+        price: 7,
+        category: "test",
+      });
+    });
+
+    it("ends assertion rows on soft delete and removes them on hard delete", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "erased-person" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Alice LLC" },
+        { id: "erased-company" },
+      );
+      await store.identity.assertSame(person, company);
+      const personRef = { kind: "Person", id: "erased-person" };
+
+      await store.nodes.Person.delete(person.id);
+      const afterSoftDelete = await readAssertionRows(store, personRef);
+      expect(afterSoftDelete).toHaveLength(1);
+      expect(afterSoftDelete.every((row) => isEndedRow(row))).toBe(true);
+      expect(await store.identity.assertionsOf(company)).toEqual([]);
+
+      await store.nodes.Person.hardDelete(person.id);
+
+      expect(await readAssertionRows(store, personRef)).toEqual([]);
+      expect(await store.identity.assertionsOf(company)).toEqual([]);
+      expect(await store.identity.membersOf(company)).toEqual([
+        { kind: "Company", id: "erased-company" },
+      ]);
+    });
+
+    it("persists a zero-width window when the clock skews backward", async () => {
+      // Both instants are ahead of the real clock so the endpoints stay visible;
+      // only their order (retraction before assertion) drives the clamp.
+      const assertedAt = new Date(Date.now() + 120_000);
+      const retractedAt = new Date(Date.now() + 60_000);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const store = context.getStore();
+        const person = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "skew-person" },
+        );
+        const company = await store.nodes.Company.create(
+          { name: "Alice LLC" },
+          { id: "skew-company" },
+        );
+        vi.setSystemTime(assertedAt);
+        const assertion = await store.identity.assertSame(person, company);
+        vi.setSystemTime(retractedAt);
+        const ended = await store.identity.retractAssertion(
+          assertion.assertion.id,
+        );
+
+        expect(ended?.validTo).toBe(assertion.assertion.validFrom);
+        const rows = await readAssertionRows(store, {
+          kind: "Person",
+          id: "skew-person",
+        });
+        const row = requireDefined(rows[0]);
+        // The stored window must be zero-width after both bounds pass through
+        // the same dialect canonicalization, and must match what the API
+        // reported — a truncating dialect would otherwise widen it silently.
+        expect(toInstant(row.valid_to)).toBe(toInstant(row.valid_from));
+        expect(toInstant(row.valid_to)).toBe(assertion.assertion.validFrom);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("re-asserts a retracted pair into a live class over a new ledger row", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "reassert-person" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Alice LLC" },
+        { id: "reassert-company" },
+      );
+      const first = await store.identity.assertSame(person, company);
+      await store.identity.retractSameAssertion(person, company);
+      expect(await store.identity.areSame(person, company)).toBe(false);
+      expect(await store.identity.membersOf(person)).toEqual([
+        { kind: "Person", id: "reassert-person" },
+      ]);
+
+      const second = await store.identity.assertSame(person, company);
+
+      expect(second.action).toBe("created");
+      expect(second.assertion.id).not.toBe(first.assertion.id);
+      expect(await store.identity.areSame(person, company)).toBe(true);
+      expect(await store.identity.membersOf(person)).toEqual([
+        { kind: "Company", id: "reassert-company" },
+        { kind: "Person", id: "reassert-person" },
+      ]);
+      expect(await store.identity.assertionsOf(person)).toEqual([
+        second.assertion,
+      ]);
+      // The retraction ended the first row; it did not replace it.
+      const rows = await readAssertionRows(store, {
+        kind: "Person",
+        id: "reassert-person",
+      });
+      expect(rows).toHaveLength(2);
+      expect(rows.filter((row) => isEndedRow(row))).toHaveLength(1);
     });
 
     describe("identity-expanded traversal", () => {
@@ -930,6 +1262,218 @@ export function registerIdentityIntegrationTests(
 
         expect(current).toEqual([]);
         expect(recorded).toEqual([bob.id]);
+      });
+
+      it("returns bare node ids in identity-expanded recursive paths", async () => {
+        const store = await provisionIdentityTraversalStore(context, false);
+        const start = await store.nodes.Person.create(
+          { name: "Start" },
+          { id: "shared" },
+        );
+        await store.nodes.Company.create({ name: "Mid" }, { id: "mid" });
+        // Folded peer of `start`: same id, different kind. Reaching it makes the
+        // compiler's composite (kind, id) path token observable, so this is the
+        // case where an unstripped token would leak a kind-prefixed entry.
+        await store.nodes.Company.create({ name: "Peer" }, { id: "shared" });
+        await store.edges.link.create(
+          start,
+          { kind: "Company", id: "mid" },
+          {},
+          { id: "start-mid" },
+        );
+        await store.edges.link.create(
+          { kind: "Company", id: "mid" },
+          { kind: "Company", id: "shared" },
+          {},
+          { id: "mid-peer" },
+        );
+
+        const expanded = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Start"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .recursive({ path: "hops" })
+          .to("Company", "company")
+          .select((queryContext) => queryContext.hops)
+          .execute();
+        const control = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Start"))
+          .traverse("link", "edge", { expand: "none" })
+          .recursive({ path: "hops" })
+          .to("Company", "company")
+          .select((queryContext) => queryContext.hops)
+          .execute();
+
+        // Public contract: an array of bare node IDs, identical in shape to a
+        // non-identity traversal's path on both dialects.
+        expect(sortPaths(expanded)).toEqual([
+          ["shared", "mid"],
+          ["shared", "mid", "shared"],
+        ]);
+        // The control stops one hop short: with a bare-id cycle token the peer
+        // reads as a revisit of the start. That divergence is exactly what the
+        // composite token exists for, and it must not reach the path output.
+        expect(sortPaths(control)).toEqual([["shared", "mid"]]);
+      });
+
+      it("expands recursively at a historical coordinate", async () => {
+        const store = await provisionIdentityTraversalStore(context, true);
+        const alice = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "alice" },
+        );
+        const alias = await store.nodes.Person.create(
+          { name: "Alias" },
+          { id: "alias" },
+        );
+        const bob = await store.nodes.Person.create(
+          { name: "Bob" },
+          { id: "bob" },
+        );
+        const carol = await store.nodes.Person.create(
+          { name: "Carol" },
+          { id: "carol" },
+        );
+        const assertion = await store.identity.assertSame(alice, alias);
+        await store.edges.link.create(alias, bob, {}, { id: "alias-bob" });
+        await store.edges.link.create(bob, carol, {}, { id: "bob-carol" });
+        const beforeRetraction = await store.recordedNow();
+        expect(beforeRetraction).toBeDefined();
+
+        // The identity reconstruction is itself a WITH RECURSIVE, so pinning a
+        // coordinate nests it inside the traversal's WITH RECURSIVE. Exercise
+        // both coordinate kinds against that compiled shape.
+        const asOfExpanded = await store
+          .asOf(new Date().toISOString())
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .recursive()
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+        expect([...asOfExpanded].toSorted()).toEqual([bob.id, carol.id]);
+
+        await store.identity.retractAssertion(assertion.assertion.id);
+
+        const current = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .recursive()
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+        const recorded = await store
+          .asOfRecorded(requireDefined(beforeRetraction))
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .recursive()
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+
+        expect(current).toEqual([]);
+        expect([...recorded].toSorted()).toEqual([bob.id, carol.id]);
+      });
+    });
+
+    describe('sameIdAcrossKinds: "ignore"', () => {
+      it("keeps the assertion ledger without folding same-id nodes", async () => {
+        const store = await provisionIdentityIgnoreStore(context);
+        const person = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "shared" },
+        );
+        const company = await store.nodes.Company.create(
+          { name: "Alice LLC" },
+          { id: "shared" },
+        );
+
+        expect(await store.identity.areSame(person, company)).toBe(false);
+        expect(await store.identity.membersOf(person)).toEqual([
+          { kind: "Person", id: "shared" },
+        ]);
+        expect(await store.identity.membersOf(company)).toEqual([
+          { kind: "Company", id: "shared" },
+        ]);
+
+        const assertion = await store.identity.assertSame(person, company);
+
+        expect(await store.identity.areSame(person, company)).toBe(true);
+        expect(await store.identity.membersOf(person)).toEqual([
+          { kind: "Company", id: "shared" },
+          { kind: "Person", id: "shared" },
+        ]);
+
+        await store.identity.retractAssertion(assertion.assertion.id);
+
+        expect(await store.identity.areSame(person, company)).toBe(false);
+        expect(await store.identity.membersOf(person)).toEqual([
+          { kind: "Person", id: "shared" },
+        ]);
+      });
+
+      it("expands traversal over the asserted class only, never over a shared id", async () => {
+        const store = await provisionIdentityIgnoreStore(context);
+        const person = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "shared" },
+        );
+        const company = await store.nodes.Company.create(
+          { name: "Alice LLC" },
+          { id: "shared" },
+        );
+        const bob = await store.nodes.Person.create(
+          { name: "Bob" },
+          { id: "bob" },
+        );
+        await store.edges.link.create(company, bob, {}, { id: "company-bob" });
+
+        async function expandedFriends(): Promise<readonly string[]> {
+          return store
+            .query()
+            .from("Person", "person")
+            .whereNode("person", (node) => node.name.eq("Alice"))
+            .traverse("link", "edge", {
+              expand: "none",
+              includeIdentityMembers: true,
+            })
+            .to("Person", "friend")
+            .select((queryContext) => queryContext.friend.id)
+            .execute();
+        }
+
+        // Sharing an id is not identity under this profile, so the expansion
+        // agrees with the closure: no members, no extra reach.
+        expect(await expandedFriends()).toEqual([]);
+
+        await store.identity.assertSame(person, company);
+
+        expect(await store.identity.membersOf(person)).toEqual([
+          { kind: "Company", id: "shared" },
+          { kind: "Person", id: "shared" },
+        ]);
+        expect(await expandedFriends()).toEqual([bob.id]);
       });
     });
   });

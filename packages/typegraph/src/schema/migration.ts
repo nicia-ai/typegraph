@@ -294,9 +294,15 @@ function diffIdentity(
     };
   }
   if (before.sameIdAcrossKinds === after.sameIdAcrossKinds) return;
+  // A fold<->ignore flip rewrites the materialized identity closure and
+  // changes every areSame/membersOf/includeIdentityMembers answer against
+  // existing data — a read-semantics change, not a mechanical migration.
+  // Classified `breaking` (the same severity as identity removal, just
+  // above) so it cannot auto-migrate silently: it requires the same
+  // explicit `migrateSchema()` opt-in as any other breaking change.
   return {
     type: "modified",
-    severity: "safe",
+    severity: "breaking",
     details:
       `Operational Identity sameIdAcrossKinds changed from ` +
       `"${before.sameIdAcrossKinds}" to "${after.sameIdAcrossKinds}"`,
@@ -1294,6 +1300,41 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
   for (const change of diff.edges) {
     if (change.type === "removed") {
       actions.push(`DELETE data for removed edge kind "${change.kind}"`);
+    }
+  }
+
+  if (diff.identity !== undefined) {
+    switch (diff.identity.type) {
+      case "added": {
+        actions.push(
+          `BUILD Operational Identity closure: ${diff.identity.details} ` +
+            `(materializes the closure table, running a same-id fold scan ` +
+            `when sameIdAcrossKinds is "fold")`,
+        );
+        break;
+      }
+      case "modified": {
+        actions.push(
+          `REBUILD Operational Identity closure: ${diff.identity.details} ` +
+            `(every areSame/membersOf/includeIdentityMembers answer is ` +
+            `recomputed under the new profile)`,
+        );
+        break;
+      }
+      case "removed": {
+        actions.push(
+          `DISABLE Operational Identity: ${diff.identity.details} (the ` +
+            `materialized closure is left in place, unread; the identity ` +
+            `API becomes unavailable)`,
+        );
+        break;
+      }
+      case "renamed": {
+        // Unreachable: `diffIdentity` never emits "renamed" — identity is a
+        // graph-level capability, not a named entity that can be renamed.
+        // Handled only so the switch stays exhaustive over `ChangeType`.
+        break;
+      }
     }
   }
 

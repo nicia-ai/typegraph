@@ -24,6 +24,8 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  type GraphBackend,
+  MigrationError,
   rebuildIdentityClosure,
   StaleVersionError,
 } from "../src";
@@ -32,6 +34,7 @@ import {
   type LocalSqliteBackendResult,
 } from "../src/backend/sqlite/local";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { getActiveSchema, migrateSchema } from "../src/schema";
 import { matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -64,6 +67,22 @@ const ignoredGraph = defineGraph({
   edges: {},
   identity: { sameIdAcrossKinds: "ignore" },
 });
+
+/** A profile flip PLUS a dropped kind — two breaking changes in one diff. */
+const foldGraphWithoutAuthor = defineGraph({
+  id: GRAPH_ID,
+  nodes: { Person: { type: Person } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const alice = { kind: "Person", id: "alice" } as const;
+const aliceAuthor = { kind: "Author", id: "alice" } as const;
+
+async function activeVersion(backend: GraphBackend): Promise<number> {
+  const row = await getActiveSchema(backend, GRAPH_ID);
+  return row?.version ?? 0;
+}
 
 const IDENTITY_TABLES = [
   "typegraph_identity_assertions",
@@ -267,7 +286,7 @@ describe("Operational Identity provisioning + enablement gating", () => {
     }
   });
 
-  it("rebuilds closure when same-id folding is enabled on an existing identity graph", async () => {
+  it("gates a same-id folding flip behind an explicit migration that rebuilds the closure", async () => {
     const result = createLocalSqliteBackend();
     try {
       const [ignoredStore] = await createStoreWithSchema(
@@ -282,13 +301,25 @@ describe("Operational Identity provisioning + enablement gating", () => {
         { penName: "A." },
         { id: "alice" },
       );
-      expect(
-        await ignoredStore.identity.areSame(
-          { kind: "Person", id: "alice" },
-          { kind: "Author", id: "alice" },
-        ),
-      ).toBe(false);
+      expect(await ignoredStore.identity.areSame(alice, aliceAuthor)).toBe(
+        false,
+      );
 
+      // A `sameIdAcrossKinds` flip is a breaking change, so it never
+      // auto-migrates — and the identity-specific code wins over the generic
+      // MigrationError because identity is the only breaking change here.
+      await expect(
+        createStoreWithSchema(enabledGraph, result.backend),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          name: "ConfigurationError",
+          details: matchingObject({
+            code: "IDENTITY_PROFILE_MIGRATION_PENDING",
+          }),
+        }),
+      );
+      // The same refusal with autoMigrate disabled: the flip is unapplied
+      // either way.
       await expect(
         createStoreWithSchema(enabledGraph, result.backend, {
           autoMigrate: false,
@@ -302,32 +333,74 @@ describe("Operational Identity provisioning + enablement gating", () => {
         }),
       );
 
+      // Follow the error's own advice. `migrateSchema` commits the flip and
+      // rebuilds the closure in the same transaction, so the next open is
+      // clean rather than "migrated".
+      await migrateSchema(
+        result.backend,
+        enabledGraph,
+        await activeVersion(result.backend),
+      );
       const [foldedStore, migration] = await createStoreWithSchema(
         enabledGraph,
         result.backend,
       );
-      expect(migration.status).toBe("migrated");
-      expect(
-        await foldedStore.identity.areSame(
-          { kind: "Person", id: "alice" },
-          { kind: "Author", id: "alice" },
-        ),
-      ).toBe(true);
+      expect(migration.status).toBe("unchanged");
+      expect(await foldedStore.identity.areSame(alice, aliceAuthor)).toBe(true);
 
-      const [ignoredAgain, reverseMigration] = await createStoreWithSchema(
+      await migrateSchema(
+        result.backend,
+        ignoredGraph,
+        await activeVersion(result.backend),
+      );
+      const [ignoredAgain] = await createStoreWithSchema(
         ignoredGraph,
         result.backend,
       );
-      expect(reverseMigration.status).toBe("migrated");
-      expect(
-        await ignoredAgain.identity.areSame(
-          { kind: "Person", id: "alice" },
-          { kind: "Author", id: "alice" },
-        ),
-      ).toBe(false);
+      expect(await ignoredAgain.identity.areSame(alice, aliceAuthor)).toBe(
+        false,
+      );
 
       await expect(rebuildIdentityClosure(foldedStore)).rejects.toBeInstanceOf(
         StaleVersionError,
+      );
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("keeps the generic MigrationError when the diff has other breaking changes", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(ignoredGraph, result.backend);
+
+      // Identity flip AND a dropped kind. The identity error names only the
+      // identity change, so the generic error — which enumerates the whole
+      // diff — has to win.
+      const error = await createStoreWithSchema(
+        foldGraphWithoutAuthor,
+        result.backend,
+      ).then(
+        () => {
+          throw new Error("expected a breaking-change refusal");
+        },
+        (error_: unknown) => error_,
+      );
+
+      expect(error).toBeInstanceOf(MigrationError);
+      const details = (error as MigrationError).details;
+      expect(details).toMatchObject({ reason: "breaking-change" });
+      const diff = "diff" in details ? details.diff : undefined;
+      expect(diff?.identity).toMatchObject({
+        type: "modified",
+        severity: "breaking",
+      });
+      expect(diff?.nodes).toContainEqual(
+        expect.objectContaining({
+          kind: "Author",
+          type: "removed",
+          severity: "breaking",
+        }),
       );
     } finally {
       await result.backend.close();

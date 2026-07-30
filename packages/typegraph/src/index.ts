@@ -111,17 +111,14 @@ export {
 
 export {
   asIdentityAssertionId,
-  type GraphNodeRef,
   type IdentityAssertion,
   type IdentityAssertionId,
   type IdentityAssertionResult,
   type IdentityFacade,
-  type IdentityFacadeFor,
   type IdentityNode,
-  type IdentityNodeRef,
+  type IdentityNodeRefInput,
   type IdentityPair,
   type IdentityReadFacade,
-  type IdentityReadFacadeFor,
   type IdentityRelation,
   type IdentityWriteSummary,
   rebuildIdentityClosure,

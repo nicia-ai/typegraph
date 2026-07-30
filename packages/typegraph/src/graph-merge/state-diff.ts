@@ -35,6 +35,7 @@ import type {
   EdgeId,
   GraphBackend,
   GraphDef,
+  IdentityTransferAssertion,
   NodeId,
   NodeType,
   Store,
@@ -158,23 +159,17 @@ export type StateDiff = Readonly<{
     modified: readonly ModifiedEdge[];
     deleted: readonly DeletedEdge[];
   }>;
+  /**
+   * Identity-ledger delta: assertions current in the fork but not the base
+   * (`new`), and assertions current in the base but no longer in the fork
+   * (`retracted`). Both carry the ledger's own
+   * {@link IdentityTransferAssertion} shape — the same records the merge commit
+   * hands back to the identity import — so the diff never re-declares (and can
+   * never drift from) the assertion contract.
+   */
   identity: Readonly<{
-    new: readonly Readonly<{
-      id: string;
-      relation: "same" | "different";
-      a: Readonly<{ kind: string; id: string }>;
-      b: Readonly<{ kind: string; id: string }>;
-      validFrom: string;
-      validTo?: string | undefined;
-    }>[];
-    retracted: readonly Readonly<{
-      id: string;
-      relation: "same" | "different";
-      a: Readonly<{ kind: string; id: string }>;
-      b: Readonly<{ kind: string; id: string }>;
-      validFrom: string;
-      validTo?: string | undefined;
-    }>[];
+    new: readonly IdentityTransferAssertion[];
+    retracted: readonly IdentityTransferAssertion[];
   }>;
   /**
    * `(kind, id) -> version` for every fork-store node observed during this diff

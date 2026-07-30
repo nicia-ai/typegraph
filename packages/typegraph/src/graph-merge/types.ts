@@ -410,13 +410,17 @@ export type TypeReconciliation = Readonly<{
 
 /**
  * An item omitted from the merged result (e.g. an edge whose endpoint was
- * deleted, or an incompatible-typed cluster member).
+ * deleted, an incompatible-typed cluster member, or an identity assertion that
+ * lost the survivor rule to an equivalent assertion from another branch).
+ *
+ * Discriminated on `kind` so each variant keeps its own id type: node and edge
+ * ids are branded, while an identity assertion is named by the ledger's plain
+ * assertion id (it is not a graph entity and carries no brand).
  */
-export type DroppedItem = Readonly<{
-  kind: "edge" | "node";
-  id: NodeId<NodeType> | EdgeId;
-  reason: string;
-}>;
+export type DroppedItem =
+  | Readonly<{ kind: "node"; id: NodeId<NodeType>; reason: string }>
+  | Readonly<{ kind: "edge"; id: EdgeId; reason: string }>
+  | Readonly<{ kind: "identity"; id: string; reason: string }>;
 
 /**
  * A `(kind, id)` node identity as surfaced in the merge report. Node identity is the
@@ -481,11 +485,25 @@ export type ProvenanceRecord = Readonly<{
 }>;
 
 /**
+ * What the merge actually wrote to the target: node and edge counts plus the
+ * identity-ledger effects. `identity.asserted` counts the assertions the plan
+ * applied AFTER endpoint remap and survivor dedupe (so two branches asserting the
+ * same pair count once), and `identity.retracted` counts the distinct inherited
+ * assertion ids the merge ended. Assertions dropped by the survivor rule are
+ * enumerated in {@link MergeReport.dropped} rather than counted here.
+ */
+export type MergedCounts = Readonly<{
+  nodes: number;
+  edges: number;
+  identity: Readonly<{ asserted: number; retracted: number }>;
+}>;
+
+/**
  * The full result of a {@link merge}: counts, every resolution/conflict/
  * reconciliation/drop, and the report-only provenance index.
  */
 export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
-  merged: Readonly<{ nodes: number; edges: number }>;
+  merged: MergedCounts;
   resolutions: readonly EntityResolution[];
   conflicts: readonly PropertyConflict<G>[];
   deleteModifyConflicts: readonly DeleteModifyConflict[];

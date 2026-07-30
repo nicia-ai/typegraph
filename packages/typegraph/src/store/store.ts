@@ -40,6 +40,7 @@ import {
   type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
+  type GraphIdentityConfig,
   isKnownKind,
   type NodeKinds,
 } from "../core/define-graph";
@@ -66,6 +67,7 @@ import {
   ConfigurationError,
   EagerMaterializationError,
   KindNotFoundError,
+  MigrationError,
   ValidationError,
 } from "../errors";
 import {
@@ -77,6 +79,10 @@ import { type GraphExtension } from "../graph-extension/extension-types";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { planRemovals, stripGraphExtension } from "../graph-extension/remove";
 import {
+  ensureIdentitySchemaStorage,
+  identitySchemaCommitPreflight,
+} from "../identity/schema-transition";
+import {
   applyIdentityChangesForContext,
   createIdentityFacade,
   createIdentityReadFacade,
@@ -86,7 +92,6 @@ import {
   type IdentityServiceContext,
   type IdentityTransferAssertion,
   importIdentityAssertionsIntoTarget,
-  lockIdentityEnablementNodes,
   lockIdentityGraph,
   readIdentityAssertionsForInterchange,
   rebuildIdentityClosureForContext,
@@ -95,9 +100,8 @@ import {
 } from "../identity/service";
 import type {
   IdentityFacade,
-  IdentityFacadeFor,
   IdentityNode,
-  IdentityReadFacadeFor,
+  IdentityReadFacade,
 } from "../identity/types";
 import { type VectorIndexDeclaration } from "../indexes/types";
 import {
@@ -503,13 +507,30 @@ function defineUnavailableSqlGuard(context: object, guard: () => never): void {
   });
 }
 
+/**
+ * The identity surface a store carries, present only when the graph declared
+ * `identity: { ... }`. Conditional *presence* (not a `never`-typed property) is
+ * the encoding used everywhere identity is exposed — `tx.identity` and the
+ * read-only views included — so an identity-disabled graph simply has no
+ * `identity` member to reach for.
+ */
+type StoreIdentityAccess<G extends GraphDef> =
+  G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ identity: IdentityFacade<G> }>
+  : Readonly<Record<never, never>>;
+
+/** The same conditional presence for the read-only pinned views. */
+export type ViewIdentityAccess<G extends GraphDef> =
+  G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ identity: IdentityReadFacade<G> }>
+  : Readonly<Record<never, never>>;
+
 type StoreCore<G extends GraphDef> = Readonly<{
   [STORE_RUNTIME]: StoreRuntime<G>;
   graph: G;
   graphId: string;
   capabilities: BackendCapabilities;
   registry: KindRegistry;
-  identity: IdentityFacadeFor<G>;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;
@@ -577,7 +598,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     options?: MaterializeRemovalsOptions,
   ) => Promise<MaterializeRemovalsResult>;
   close: () => Promise<void>;
-}>;
+}> &
+  StoreIdentityAccess<G>;
 
 type StoreTransactions<G extends GraphDef> = Readonly<{
   transaction: <T>(
@@ -980,8 +1002,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return this.#registry;
   }
 
-  /** The TypeGraph Identity Profile facade for identity-enabled graphs. */
-  get identity(): IdentityFacadeFor<G> {
+  /**
+   * The TypeGraph Identity Profile facade. Reachable through the public
+   * {@link Store} surface only on graphs that declared `identity: { ... }`;
+   * the runtime guard below catches widened or JavaScript callers.
+   *
+   * The facade is memoized per store, so it must not close over any state a
+   * lifecycle operation can move — see `#identityContext`.
+   */
+  get identity(): IdentityFacade<G> {
     if (this.#graph.identity === undefined) {
       throw new ConfigurationError(
         "Identity is not enabled for this graph.",
@@ -993,14 +1022,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
     }
     const existing = IDENTITY_FACADES.get(this);
-    if (existing !== undefined) return existing as IdentityFacadeFor<G>;
+    if (existing !== undefined) return existing as IdentityFacade<G>;
     const facade = createIdentityFacade(this.#identityContext(this.#backend));
     IDENTITY_FACADES.set(this, facade);
-    return facade as IdentityFacadeFor<G>;
+    return facade;
   }
 
   /** @internal Builds the identity read facade for a pinned StoreView. */
-  identityAtCoordinate(coordinate: ReadCoordinate): IdentityReadFacadeFor<G> {
+  identityAtCoordinate(coordinate: ReadCoordinate): IdentityReadFacade<G> {
     if (this.#graph.identity === undefined) {
       throw new ConfigurationError("Identity is not enabled for this graph.", {
         code: "IDENTITY_NOT_ENABLED",
@@ -1031,7 +1060,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ...this.#identityContext(backend),
       schema,
       coordinate,
-    }) as IdentityReadFacadeFor<G>;
+    });
   }
 
   /** Rebuilds derived current identity closure without advancing revision. */
@@ -1059,17 +1088,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Validates/rebuilds identity under schema-transition locks. */
   async identitySchemaPreflight(target: TransactionBackend): Promise<void> {
-    await lockRecordedGraphWrite(target, this.graphId);
-    await lockIdentityGraph(target, this.graphId);
-    await rebuildIdentityClosureForContext(this.#identityContext(target));
+    await this.#identitySchemaPreflight(target, { enablement: false });
   }
 
   /** @internal First enablement additionally excludes legacy node writers. */
   async identityEnablementPreflight(target: TransactionBackend): Promise<void> {
-    await lockRecordedGraphWrite(target, this.graphId);
-    await lockIdentityGraph(target, this.graphId);
-    await lockIdentityEnablementNodes(target, this.#sqlSchema());
-    await rebuildIdentityClosureForContext(this.#identityContext(target));
+    await this.#identitySchemaPreflight(target, { enablement: true });
+  }
+
+  #identitySchemaPreflight(
+    target: TransactionBackend,
+    options: Readonly<{ enablement: boolean }>,
+  ): Promise<void> {
+    return identitySchemaCommitPreflight(
+      this.#identityContext(this.#backend),
+      options,
+    )(target);
   }
 
   /** @internal Read-only startup integrity verification. */
@@ -3208,10 +3242,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #identityContext(
     backend: GraphBackend | TransactionBackend,
   ): IdentityServiceContext<G> {
+    // `store.identity` memoizes its facade for the life of the store, so the
+    // context it captures must resolve the schema version at mutation time
+    // rather than snapshotting it here: `clear()` resets this store to the
+    // unversioned lifecycle, and a captured version would make every later
+    // identity write fail as stale against active version 0.
+    const currentSchemaVersion = (): number | undefined =>
+      this.#schemaMetadata.schemaVersion;
     return {
       graph: this.#graph,
       graphId: this.graphId,
-      schemaVersion: this.#schemaMetadata.schemaVersion,
+      get schemaVersion(): number | undefined {
+        return currentSchemaVersion();
+      },
       registry: this.#registry,
       backend,
       schema: this.#sqlSchema(),
@@ -3566,13 +3609,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // re-enter the per-graph write lock the commit holds. Idempotent, so a
     // no-op when identity is already enabled (the common evolve case).
     if (identityCandidate !== undefined) {
-      assertIdentityStoragePresent(
-        this.graphId,
-        (await this.#baseBackend.ensureIdentityTables?.(
-          identityTableNames(this.#sqlSchema()),
-          { provisionMissing: false },
-        )) ?? [],
-      );
+      await ensureIdentitySchemaStorage(this.#baseBackend, this.#sqlSchema(), {
+        graphId: this.graphId,
+        enablement: false,
+      });
     }
     const committed =
       identityCandidate === undefined ?
@@ -5415,37 +5455,6 @@ async function assertHistorySchemaOnOpen(
   );
 }
 
-function identityTableNames(schema: SqlSchema): Readonly<{
-  identityAssertions: string;
-  recordedIdentityAssertions: string;
-  identityClosure: string;
-}> {
-  return {
-    identityAssertions: schema.tables.identityAssertions,
-    recordedIdentityAssertions: schema.tables.recordedIdentityAssertions,
-    identityClosure: schema.tables.identityClosure,
-  };
-}
-
-function assertIdentityStoragePresent(
-  graphId: string,
-  missingTables: readonly string[],
-): void {
-  if (missingTables.length === 0) return;
-  throw new ConfigurationError(
-    "Operational Identity storage was missing from an already enabled graph.",
-    {
-      code: "IDENTITY_STORAGE_MISSING",
-      graphId,
-      tables: missingTables,
-    },
-    {
-      suggestion:
-        "Restore missing assertion-ledger tables from backup. If only the derived closure is missing, recreate that relation with the standard TypeGraph DDL, open the Store, and run rebuildIdentityClosure() before serving traffic.",
-    },
-  );
-}
-
 const IDENTITY_ONTOLOGY_META_EDGES: ReadonlySet<string> = new Set([
   META_EDGE_DISJOINT_WITH,
   META_EDGE_EQUIVALENT_TO,
@@ -5468,6 +5477,85 @@ function identityOntologyChanged(
   return (
     JSON.stringify(relevantRelations(before)) !==
     JSON.stringify(relevantRelations(after))
+  );
+}
+
+/** Which identity semantic change is waiting on an unapplied migration. */
+type IdentitySchemaGate = "enablement" | "profile" | "ontology";
+
+const IDENTITY_GATE_CODES = {
+  enablement: "IDENTITY_ENABLEMENT_PENDING",
+  profile: "IDENTITY_PROFILE_MIGRATION_PENDING",
+  ontology: "IDENTITY_SCHEMA_MIGRATION_PENDING",
+} as const;
+
+/**
+ * Runs the schema gate, but lets the identity-specific refusal win over the
+ * generic `MigrationError` when the identity change is the *only* breaking
+ * change in the diff.
+ *
+ * A `sameIdAcrossKinds` flip is classified breaking (it rewrites every
+ * `areSame` / `membersOf` answer), so the generic gate would otherwise be the
+ * only thing a caller ever sees and the documented `IDENTITY_*` codes would be
+ * unreachable. When the diff carries other breaking changes too, the generic
+ * error wins: it enumerates all of them, which the identity error cannot.
+ */
+async function ensureSchemaWithIdentityPrecedence<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  options: StoreOptions & SchemaManagerOptions,
+  gate: IdentitySchemaGate | undefined,
+): Promise<SchemaValidationResult> {
+  try {
+    return await ensureSchemaImpl(backend, graph, options);
+  } catch (error) {
+    if (gate === undefined || !isIdentityOnlyBreakingChange(error)) throw error;
+    throw identityMigrationRequiredError(graph.id, gate, {
+      blockedBy: "breaking-change",
+      cause: error,
+    });
+  }
+}
+
+function isIdentityOnlyBreakingChange(error: unknown): boolean {
+  if (!(error instanceof MigrationError)) return false;
+  const diff = "diff" in error.details ? error.details.diff : undefined;
+  if (diff?.identity?.severity !== "breaking") return false;
+  return ![
+    ...diff.nodes,
+    ...diff.edges,
+    ...diff.ontology,
+    ...diff.indexes,
+  ].some((change) => change.severity === "breaking");
+}
+
+function identityMigrationRequiredError(
+  graphId: string,
+  gate: IdentitySchemaGate,
+  context: Readonly<{
+    blockedBy: "breaking-change" | "auto-migrate-disabled";
+    pendingVersion?: number;
+    cause?: unknown;
+  }>,
+): ConfigurationError {
+  const blocker =
+    context.blockedBy === "breaking-change" ?
+      "but the change is breaking and has not been applied."
+    : "but autoMigrate is disabled and the change is pending.";
+  return new ConfigurationError(
+    `Changing Operational Identity semantics requires the schema migration to commit, ${blocker}`,
+    {
+      code: IDENTITY_GATE_CODES[gate],
+      graphId,
+      ...(context.pendingVersion === undefined ?
+        {}
+      : { pendingVersion: context.pendingVersion }),
+    },
+    {
+      cause: context.cause,
+      suggestion:
+        "Apply the migration explicitly with migrateSchema(backend, graph, activeVersion) — it commits the new version and rebuilds the identity closure in the same transaction — or, for a change that is not breaking, enable autoMigrate.",
+    },
   );
 }
 
@@ -5520,17 +5608,21 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   // when the schema turns out to be pending (finding: enablement requires an
   // applied migration) or the tables already exist.
   if (identityMigrationCandidate !== undefined) {
-    const schema = options?.schema ?? createSqlSchema(backend.tableNames);
-    const missingIdentityTables =
-      (await backend.ensureIdentityTables?.(identityTableNames(schema), {
-        provisionMissing: identityEnablement,
-      })) ?? [];
-    if (missingIdentityTables.length > 0 && !identityEnablement) {
-      assertIdentityStoragePresent(merged.id, missingIdentityTables);
-    }
+    await ensureIdentitySchemaStorage(
+      backend,
+      options?.schema ?? createSqlSchema(backend.tableNames),
+      { graphId: merged.id, enablement: identityEnablement },
+    );
   }
 
-  const result = await ensureSchemaImpl(backend, merged, {
+  const identityGate: IdentitySchemaGate | undefined =
+    identitySemanticsChanged ?
+      identityEnablement ? "enablement"
+      : identityProfileChanged ? "profile"
+      : "ontology"
+    : undefined;
+
+  const ensureOptions = {
     ...options,
     preloaded: { activeRow, storedSchema },
     ...(identityMigrationCandidate === undefined ?
@@ -5541,31 +5633,27 @@ async function prepareStoreWithSchema<G extends GraphDef>(
             identityMigrationCandidate.identityEnablementPreflight(target)
           : identityMigrationCandidate.identitySchemaPreflight(target),
       }),
-  });
+  };
 
-  // Enabling identity requires the enablement preflight (closure
-  // materialization + same-id fold) to have COMMITTED with the schema
-  // version. With autoMigrate disabled, ensureSchema returns "pending"
-  // WITHOUT running the preflight, so returning a store here would expose
-  // store.identity over an empty/unmaterialized closure — silently wrong
-  // reads. Refuse instead: the caller must apply the migration.
-  if (identitySemanticsChanged && result.status === "pending") {
-    throw new ConfigurationError(
-      "Changing Operational Identity semantics requires the schema migration " +
-        "to commit, but autoMigrate is disabled and the change is pending.",
-      {
-        code:
-          identityEnablement ? "IDENTITY_ENABLEMENT_PENDING"
-          : identityProfileChanged ? "IDENTITY_PROFILE_MIGRATION_PENDING"
-          : "IDENTITY_SCHEMA_MIGRATION_PENDING",
-        graphId: merged.id,
-        pendingVersion: result.version,
-      },
-      {
-        suggestion:
-          "Enable autoMigrate, or apply the pending migration explicitly, so the identity closure matches the configured schema before opening the store.",
-      },
-    );
+  // An identity semantic change reaches the store only after the preflight
+  // (closure materialization + same-id fold) has COMMITTED with the schema
+  // version; otherwise `store.identity` would answer from an empty or stale
+  // closure — silently wrong reads. Two blockers stop that commit, and each
+  // must surface the identity-specific code rather than a generic failure:
+  // an unapplied breaking change (a `sameIdAcrossKinds` flip or a disable),
+  // and `autoMigrate: false` leaving a safe change pending.
+  const result = await ensureSchemaWithIdentityPrecedence(
+    backend,
+    merged,
+    ensureOptions,
+    identityGate,
+  );
+
+  if (identityGate !== undefined && result.status === "pending") {
+    throw identityMigrationRequiredError(merged.id, identityGate, {
+      blockedBy: "auto-migrate-disabled",
+      pendingVersion: result.version,
+    });
   }
 
   await assertHistorySchemaOnOpen(backend, merged, options);

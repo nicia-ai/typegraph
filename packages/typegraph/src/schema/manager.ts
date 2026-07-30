@@ -31,6 +31,11 @@ import {
 } from "../errors";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { stripGraphExtension } from "../graph-extension/remove";
+import {
+  ensureIdentitySchemaStorage,
+  identitySchemaCommitPreflight,
+} from "../identity/schema-transition";
+import { createSqlSchema } from "../query/compiler/schema";
 import { buildKindRegistry } from "../registry";
 import { freezeDeep } from "../utils/object";
 import { isMissingTableError } from "../utils/sql-errors";
@@ -790,6 +795,7 @@ export async function migrateSchema<G extends GraphDef>(
         ...droppedKinds(storedSchema.nodes, getNodeKinds(target), "node"),
         ...droppedKinds(storedSchema.edges, getEdgeKinds(target), "edge"),
       ];
+  const guardedDrops = options?.discardDroppedKindRows === true ? [] : dropped;
   // No cleanup is queued here, deliberately, and redundancy is the whole
   // reason. `materializeRemovals` derives removals by walking schema-version
   // history (`reconcilePendingRemovals` diffs consecutive documents' kind
@@ -802,16 +808,103 @@ export async function migrateSchema<G extends GraphDef>(
   // stops at the first absent prior version, so a drop below a pruned or
   // gapped range becomes undiscoverable. Callers who prune schema versions
   // should run `materializeRemovals` before pruning.
+
+  // An identity-enabled target commits through the same data preflight
+  // `createStoreWithSchema` and `Store.evolve()` use: the closure is derived
+  // state, so a version that changes the identity profile — or turns identity
+  // on for the first time — must not become active while the closure still
+  // reflects the previous schema. Explicit `migrateSchema()` is the path the
+  // MigrationError message points operators at, so it cannot be the one path
+  // that skips it.
+  const identityPreflight =
+    activeRow === undefined || target.identity === undefined ?
+      undefined
+    : await prepareIdentitySchemaCommit(backend, target, {
+        enablement: storedSchema?.identity === undefined,
+      });
+
   const committed =
-    dropped.length > 0 && options?.discardDroppedKindRows !== true ?
-      await commitDroppedKindsOnlyWhenEmpty(
+    identityPreflight === undefined ?
+      guardedDrops.length > 0 ?
+        await commitDroppedKindsOnlyWhenEmpty(
+          backend,
+          target,
+          currentVersion,
+          guardedDrops,
+        )
+      : await commitNewSchemaVersion(backend, target, currentVersion)
+    : await commitNewSchemaVersionWithPreflight(
         backend,
         target,
         currentVersion,
-        dropped,
-      )
-    : await commitNewSchemaVersion(backend, target, currentVersion);
+        async (transactionBackend) => {
+          // The emptiness fence moves inside the commit transaction here: the
+          // preflight-carrying primitive is the only one that can also run the
+          // identity rebuild atomically, so the probe runs alongside it rather
+          // than through `commitSchemaVersionIfKindsEmpty`.
+          await assertDroppedKindsEmpty(
+            transactionBackend,
+            target.id,
+            currentVersion,
+            guardedDrops,
+          );
+          await identityPreflight(transactionBackend);
+        },
+      );
   return committed.version;
+}
+
+/**
+ * Ensures identity storage exists and builds the preflight the schema commit
+ * runs inside its own transaction. The DDL must happen *before* the commit
+ * transaction opens — issuing it inside would re-enter the per-graph write lock
+ * the commit holds.
+ */
+async function prepareIdentitySchemaCommit<G extends GraphDef>(
+  backend: GraphBackend,
+  target: G,
+  options: Readonly<{ enablement: boolean }>,
+): Promise<(transactionBackend: TransactionBackend) => Promise<void>> {
+  const schema = createSqlSchema(backend.tableNames);
+  await ensureIdentitySchemaStorage(backend, schema, {
+    graphId: target.id,
+    enablement: options.enablement,
+  });
+  return identitySchemaCommitPreflight(
+    {
+      graphId: target.id,
+      registry: buildKindRegistry(target),
+      schema,
+      sameIdAcrossKinds: target.identity?.sameIdAcrossKinds ?? "ignore",
+    },
+    options,
+  );
+}
+
+/**
+ * Refuses a commit that would drop kinds still holding rows, from inside the
+ * commit transaction. The transactional sibling of
+ * {@link commitDroppedKindsOnlyWhenEmpty}'s backend-side probe.
+ */
+async function assertDroppedKindsEmpty(
+  backend: TransactionBackend,
+  graphId: string,
+  currentVersion: number,
+  dropped: readonly DroppedKind[],
+): Promise<void> {
+  const counts = await Promise.all(
+    dropped.map(async (entry) => ({
+      entity: entry.entity,
+      kind: entry.kind,
+      count:
+        entry.entity === "node" ?
+          await backend.countNodesByKind({ graphId, kind: entry.kind })
+        : await backend.countEdgesByKind({ graphId, kind: entry.kind }),
+    })),
+  );
+  const populated = counts.filter((entry) => entry.count > 0);
+  if (populated.length === 0) return;
+  throwPopulatedKindRemovalError(graphId, currentVersion, populated);
 }
 
 /**

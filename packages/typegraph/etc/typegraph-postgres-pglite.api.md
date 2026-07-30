@@ -96,9 +96,6 @@ type ArrayPredicate = Readonly<{
 }>;
 
 // @public
-export function asIdentityAssertionId(value: string): IdentityAssertionId;
-
-// @public
 type BackendCapabilities = Readonly<{
     transactions: boolean;
     windowFunctions: boolean;
@@ -364,7 +361,6 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     // (undocumented)
     protected readonly coordinate: ReadCoordinate;
     degree(node: NodeIdentifier, options?: StoreViewDegreeOptions<G>): Promise<number>;
-    get identity(): IdentityReadFacadeFor<G>;
     // (undocumented)
     protected internalAlgorithms(): InternalGraphAlgorithms<G>;
     labelPropagation(options: StoreViewLabelPropagationOptions<G>): Promise<readonly LabelPropagationMembership[]>;
@@ -1555,9 +1551,6 @@ type GraphNodeCollections<G extends GraphDef> = {
     [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"], ConstraintNames<G["nodes"][K]>>;
 };
 
-// @public (undocumented)
-export type GraphNodeRef<G extends GraphDef> = NodeRef<AllNodeTypes<G>>;
-
 // @public
 type GraphNodeReference<G extends GraphDef> = {
     [K in NodeKinds<G>]: Readonly<{
@@ -1703,12 +1696,12 @@ type HybridVectorOptions = Readonly<{
     efSearch?: number;
 }>;
 
-// @public (undocumented)
+// @public
 export type IdentityAssertion<G extends GraphDef> = Readonly<{
     id: IdentityAssertionId;
     relation: IdentityRelation;
-    a: IdentityNodeRef<G>;
-    b: IdentityNodeRef<G>;
+    a: GraphNodeReference<G>;
+    b: GraphNodeReference<G>;
     validFrom: string;
     validTo?: string;
 }>;
@@ -1725,26 +1718,23 @@ export type IdentityAssertionResult<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-export type IdentityChange = Readonly<{
+type IdentityChange = Readonly<{
     type: ChangeType;
     severity: ChangeSeverity;
     details: string;
 }>;
 
-// @public (undocumented)
+// @public
 export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
-    assertSame: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<IdentityAssertionResult<G>>;
-    assertDifferent: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<IdentityAssertionResult<G>>;
+    assertSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertionResult<G>>;
+    assertDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertionResult<G>>;
     bulkAssertSame: (pairs: readonly IdentityPair<G>[]) => Promise<readonly IdentityAssertionResult<G>[]>;
     bulkAssertDifferent: (pairs: readonly IdentityPair<G>[]) => Promise<readonly IdentityAssertionResult<G>[]>;
     retractAssertion: (id: IdentityAssertionId) => Promise<IdentityAssertion<G> | undefined>;
-    retractSameAssertion: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<IdentityAssertion<G> | undefined>;
-    retractDifferentAssertion: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<IdentityAssertion<G> | undefined>;
+    retractSameAssertion: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertion<G> | undefined>;
+    retractDifferentAssertion: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertion<G> | undefined>;
     bulkRetractAssertions: (ids: readonly IdentityAssertionId[]) => Promise<readonly IdentityAssertion<G>[]>;
 }>;
-
-// @public (undocumented)
-export type IdentityFacadeFor<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? IdentityFacade<G> : never;
 
 // @public
 export type IdentityNode<G extends GraphDef> = {
@@ -1752,43 +1742,35 @@ export type IdentityNode<G extends GraphDef> = {
 }[NodeKinds<G>];
 
 // @public
-export type IdentityNodeRef<G extends GraphDef> = {
-    [K in NodeKinds<G>]: Readonly<{
-        kind: K;
-        id: NodeId<G["nodes"][K]["type"]>;
-    }>;
-}[NodeKinds<G>];
+export type IdentityNodeRefInput<G extends GraphDef> = NodeRef<AllNodeTypes<G>>;
 
-// @public (undocumented)
+// @public
 export type IdentityPair<G extends GraphDef> = Readonly<{
-    a: GraphNodeRef<G>;
-    b: GraphNodeRef<G>;
+    a: IdentityNodeRefInput<G>;
+    b: IdentityNodeRefInput<G>;
 }>;
 
-// @public (undocumented)
+// @public
 export type IdentityReadFacade<G extends GraphDef> = Readonly<{
-    representativeOf: (ref: GraphNodeRef<G>) => Promise<IdentityNodeRef<G> | undefined>;
-    membersOf: (ref: GraphNodeRef<G>) => Promise<readonly IdentityNodeRef<G>[]>;
-    nodesOf: (ref: GraphNodeRef<G>) => Promise<readonly IdentityNode<G>[]>;
-    areSame: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<boolean>;
-    areDifferent: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<boolean>;
-    assertionsOf: (ref: GraphNodeRef<G>) => Promise<readonly IdentityAssertion<G>[]>;
+    representativeOf: (ref: IdentityNodeRefInput<G>) => Promise<GraphNodeReference<G> | undefined>;
+    membersOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly GraphNodeReference<G>[]>;
+    nodesOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityNode<G>[]>;
+    areSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
+    areDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
+    assertionsOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityAssertion<G>[]>;
 }>;
 
-// @public (undocumented)
-export type IdentityReadFacadeFor<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? IdentityReadFacade<G> : never;
-
-// @public (undocumented)
+// @public
 export type IdentityRelation = "same" | "different";
 
 // @public
-export type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
+type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
     includeIdentityMembers?: boolean;
 }> : Readonly<{
     includeIdentityMembers?: never;
 }>;
 
-// @public (undocumented)
+// @public
 export type IdentityWriteSummary = Readonly<{
     sameAssertions: number;
     differentAssertions: number;
@@ -2986,11 +2968,6 @@ type RebuildFulltextResult = Readonly<{
 }>;
 
 // @public
-export function rebuildIdentityClosure<G extends GraphDef & Readonly<{
-    identity: GraphIdentityConfig;
-}>>(store: Store<G>): Promise<void>;
-
-// @public
 type ReclaimedVectorFieldEntry = Readonly<{
     kind: string;
     fieldPath: string;
@@ -3051,12 +3028,10 @@ type RecordedScanPage<T> = Readonly<{
 }>;
 
 // @public
-class RecordedStoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
-    constructor(store: Store<G>, coordinate: ReadCoordinate);
-    get asOfRecorded(): RecordedInstant;
-    get edges(): RecordedStoreViewEdgeCollections<G>;
-    get nodes(): RecordedStoreViewNodeCollections<G>;
-}
+type RecordedStoreView<G extends GraphDef> = RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
+
+// @public (undocumented)
+const RecordedStoreView: new <G extends GraphDef>(store: Store<G>, coordinate: ReadCoordinate) => RecordedStoreView<G>;
 
 // @public
 type RecordedStoreViewEdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType> = Pick<StoreViewEdgeCollection<E, From, To>, (typeof RECORDED_POINT_READ_NAMES)[number]> & Readonly<{
@@ -3067,6 +3042,14 @@ type RecordedStoreViewEdgeCollection<E extends AnyEdgeType, From extends NodeTyp
 type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
     [K in keyof G["edges"] & string]-?: TypedRecordedStoreViewEdgeCollection<G["edges"][K]>;
 };
+
+// @public
+class RecordedStoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
+    constructor(store: Store<G>, coordinate: ReadCoordinate);
+    get asOfRecorded(): RecordedInstant;
+    get edges(): RecordedStoreViewEdgeCollections<G>;
+    get nodes(): RecordedStoreViewNodeCollections<G>;
+}
 
 // @public
 type RecordedStoreViewNodeCollection<N extends NodeType> = Pick<StoreViewNodeCollection<N>, (typeof RECORDED_POINT_READ_NAMES)[number]> & Readonly<{
@@ -3571,7 +3554,6 @@ type StoreCore<G extends GraphDef> = Readonly<{
     graphId: string;
     capabilities: BackendCapabilities;
     registry: KindRegistry;
-    identity: IdentityFacadeFor<G>;
     historyEnabled: boolean;
     revisionTrackingEnabled: boolean;
     revisionSchema: SqlSchema;
@@ -3615,7 +3597,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     repairContributions: () => Promise<ContributionRepairResult>;
     materializeRemovals: (options?: MaterializeRemovalsOptions) => Promise<MaterializeRemovalsResult>;
     close: () => Promise<void>;
-}>;
+}> & StoreIdentityAccess<G>;
 
 // @public (undocumented)
 interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
@@ -3659,6 +3641,11 @@ type StoreHooks = Readonly<{
 }>;
 
 // @public
+type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
+    identity: IdentityFacade<G>;
+}> : Readonly<Record<never, never>>;
+
+// @public
 type StoreOptions = LiveStoreOptions | HistoryStoreOptions;
 
 // @public
@@ -3679,7 +3666,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     recordedEdgeScan: <E extends AnyEdgeType>(kind: string, coordinate: ReadCoordinate, options?: RecordedScanOptions) => Promise<RecordedScanPage<Edge<E>>>;
     subgraphAtCoordinate: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(rootId: NodeId<AllNodeTypes<G>>, options: InternalSubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
     algorithmsAtCoordinate: (coordinate: ReadCoordinate) => InternalGraphAlgorithms<G>;
-    identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacadeFor<G>;
+    identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
     identityAssertionsForInterchange: (mode: "state" | "archival", options?: Readonly<{
@@ -3775,14 +3762,10 @@ type StoreTransactions<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
-    constructor(store: Store<G>, coordinate: StoreViewCoordinate | ReadCoordinate);
-    asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
-    bulkFindEdgesFrom<const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">): Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
-    get edges(): StoreViewEdgeCollections<G>;
-    get nodes(): StoreViewNodeCollections<G>;
-    get search(): StoreSearch<G>;
-}
+type StoreView<G extends GraphDef> = StoreViewImplementation<G> & ViewIdentityAccess<G>;
+
+// @public (undocumented)
+const StoreView: new <G extends GraphDef>(store: Store<G>, coordinate: StoreViewCoordinate | ReadCoordinate) => StoreView<G>;
 
 // @public
 type StoreViewCanReachOptions<G extends GraphDef> = Omit<BaseTraversalOptions<G>, keyof TemporalAlgorithmOptions>;
@@ -3838,6 +3821,16 @@ type StoreViewGraphAlgorithms<G extends GraphDef> = Readonly<{
     pageRank: (options: StoreViewPageRankOptions<G>) => Promise<readonly PageRankScore[]>;
     personalizedPageRank: (options: StoreViewPersonalizedPageRankOptions<G>) => Promise<readonly PageRankScore[]>;
 }>;
+
+// @public
+class StoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
+    constructor(store: Store<G>, coordinate: StoreViewCoordinate | ReadCoordinate);
+    asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
+    bulkFindEdgesFrom<const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">): Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
+    get edges(): StoreViewEdgeCollections<G>;
+    get nodes(): StoreViewNodeCollections<G>;
+    get search(): StoreSearch<G>;
+}
 
 // @public
 type StoreViewLabelPropagationOptions<G extends GraphDef> = Omit<LabelPropagationOptions<G>, keyof TemporalAlgorithmOptions>;
@@ -4083,7 +4076,7 @@ type Traversal = Readonly<{
 
 // @public
 class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = EmptyEdgeAliasMap, EK extends keyof G["edges"] & string = keyof G["edges"] & string, EA extends string = string, Dir extends TraversalDirection = "out", Optional extends boolean = false, DC extends boolean | string = false, PC extends boolean | string = false, RecAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap, CoordinateState extends QueryCoordinateState = "open"> {
-    constructor(config: QueryBuilderConfig, state: QueryBuilderState, edgeKinds: readonly string[], edgeAlias: EA, direction: Dir, fromAlias: string, inverseEdgeKinds?: readonly string[], optional?: Optional, includeIdentityMembers?: boolean, variableLength?: VariableLengthState, pendingEdgePredicates?: readonly NodePredicate[]);
+    constructor(config: QueryBuilderConfig, state: QueryBuilderState, edgeKinds: readonly string[], edgeAlias: EA, direction: Dir, fromAlias: string, inverseEdgeKinds?: readonly string[], optional?: Optional, variableLength?: VariableLengthState, pendingEdgePredicates?: readonly NodePredicate[], includeIdentityMembers?: boolean);
     recursive<const O extends RecursiveTraversalOptions = Record<string, never>>(options?: O): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, O extends {
         depth: infer D extends boolean | string;
     } ? D : DC, O extends {
@@ -4495,6 +4488,11 @@ type VectorStrategy = Readonly<{
     }>) => SqlFragment | undefined;
     buildDropIndex?: (this: void, slot: VectorSlot) => SqlFragment | undefined;
 }>;
+
+// @public
+type ViewIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
+    identity: IdentityReadFacade<G>;
+}> : Readonly<Record<never, never>>;
 
 // @public
 type WeaklyConnectedComponentMembership = Readonly<{

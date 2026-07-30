@@ -38,7 +38,6 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
-export type * from "../identity";
 
 const DEFAULT_RETRACTED_FIELD = "retracted";
 const KEY_SEPARATOR = "\u0000";

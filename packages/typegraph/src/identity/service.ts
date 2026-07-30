@@ -15,6 +15,7 @@ import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
+import { type GraphNodeReference } from "../store/types";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { canonicalizeDatabaseTimestamp, nowIso } from "../utils/date";
@@ -29,13 +30,12 @@ import {
 } from "./historical-sql";
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
-  type GraphNodeRef,
   type IdentityAssertion,
   type IdentityAssertionId,
   type IdentityAssertionResult,
   type IdentityFacade,
   type IdentityNode,
-  type IdentityNodeRef,
+  type IdentityNodeRefInput,
   type IdentityReadFacade,
   type IdentityRelation,
 } from "./types";
@@ -182,13 +182,15 @@ type IdentitySnapshot = Readonly<{
   components: ReadonlyMap<string, readonly PlainNodeRef[]>;
 }>;
 
-function plainRef<G extends GraphDef>(ref: GraphNodeRef<G>): PlainNodeRef {
+function plainRef<G extends GraphDef>(
+  ref: IdentityNodeRefInput<G>,
+): PlainNodeRef {
   return { kind: ref.kind, id: ref.id };
 }
 
 function registeredPlainRef<G extends GraphDef>(
   ctx: Pick<IdentityServiceContext<G>, "graphId" | "registry">,
-  ref: GraphNodeRef<G>,
+  ref: IdentityNodeRefInput<G>,
 ): PlainNodeRef {
   const result = plainRef(ref);
   if (!ctx.registry.nodeKinds.has(result.kind)) {
@@ -307,11 +309,11 @@ function assertionResult<G extends GraphDef>(
 
 function publicNodeRef<G extends GraphDef>(
   ref: PlainNodeRef,
-): IdentityNodeRef<G> {
+): GraphNodeReference<G> {
   // Every service entry point validates kinds against the graph registry, and
   // persisted assertion/closure rows are constrained to those same endpoints.
   // Reapply the public per-kind NodeId brand at this storage boundary.
-  return ref as IdentityNodeRef<G>;
+  return ref as GraphNodeReference<G>;
 }
 
 function requireStatementTarget(target: Backend): asserts target is Backend & {
@@ -943,19 +945,23 @@ function sameComponent(
   return containsRef(componentFor(snapshot, first), second);
 }
 
+function kindsOf(members: readonly PlainNodeRef[]): ReadonlySet<string> {
+  return new Set(members.map((member) => member.kind));
+}
+
+/**
+ * Disjointness is a property of kinds, not of members, so an identity class of
+ * n members carries at most as many distinct kinds as the registry declares.
+ * Collapsing each class to its kind set before the pairwise scan keeps the check
+ * quadratic in kinds instead of in class size. `Set` preserves first-insertion
+ * order, so the reported pair is the same one the member-pair scan found.
+ */
 function classHasDisjointKinds(
   registry: KindRegistry,
   first: readonly PlainNodeRef[],
   second: readonly PlainNodeRef[],
 ): readonly [string, string] | undefined {
-  for (const left of first) {
-    for (const right of second) {
-      if (registry.areDisjoint(left.kind, right.kind)) {
-        return [left.kind, right.kind];
-      }
-    }
-  }
-  return undefined;
+  return kindSetsHaveDisjointKinds(registry, kindsOf(first), kindsOf(second));
 }
 
 function kindSetsHaveDisjointKinds(
@@ -1085,19 +1091,24 @@ function validateSnapshotIntegrity(
   for (const [memberKey, component] of snapshot.components) {
     if (visited.has(memberKey)) continue;
     for (const member of component) visited.add(refKey(member));
-    for (const [leftIndex, left] of component.entries()) {
-      for (const right of component.slice(leftIndex + 1)) {
-        if (!registry.areDisjoint(left.kind, right.kind)) continue;
-        throw new ConfigurationError(
-          "Operational Identity class conflicts with ontology disjointness.",
-          {
-            code: "IDENTITY_SCHEMA_CONTRADICTION",
-            graphId,
-            classMembers: component,
-            conflictingKinds: [left.kind, right.kind],
-          },
-        );
-      }
+    // Self-pairs are safe to include: `areDisjoint(kind, kind)` is false by
+    // construction, so scanning the component's kind set against itself finds
+    // exactly the member pairs an upper-triangle member scan would.
+    const conflictingKinds = classHasDisjointKinds(
+      registry,
+      component,
+      component,
+    );
+    if (conflictingKinds !== undefined) {
+      throw new ConfigurationError(
+        "Operational Identity class conflicts with ontology disjointness.",
+        {
+          code: "IDENTITY_SCHEMA_CONTRADICTION",
+          graphId,
+          classMembers: component,
+          conflictingKinds,
+        },
+      );
     }
   }
 }
@@ -1641,8 +1652,8 @@ async function assertPair<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   target: Backend,
   relation: IdentityRelation,
-  firstInput: GraphNodeRef<G>,
-  secondInput: GraphNodeRef<G>,
+  firstInput: IdentityNodeRefInput<G>,
+  secondInput: IdentityNodeRefInput<G>,
   touch: IdentityTouch,
 ): Promise<IdentityAssertionResult<G>> {
   const first = registeredPlainRef(ctx, firstInput);
@@ -1702,8 +1713,8 @@ async function bulkAssertPairs<G extends GraphDef>(
   target: Backend,
   relation: IdentityRelation,
   pairs: readonly Readonly<{
-    a: GraphNodeRef<G>;
-    b: GraphNodeRef<G>;
+    a: IdentityNodeRefInput<G>;
+    b: IdentityNodeRefInput<G>;
   }>[],
   touch: IdentityTouch,
 ): Promise<readonly IdentityAssertionResult<G>[]> {
@@ -2330,8 +2341,19 @@ export function createIdentityFacade<G extends GraphDef>(
   };
 }
 
+/**
+ * The context slice a closure rebuild reads. Narrower than the full
+ * {@link IdentityServiceContext} so a schema-transition preflight — which runs
+ * below the Store layer and has no node loader or write-transaction settings to
+ * offer — can drive the same rebuild the Store drives.
+ */
+export type IdentityRebuildContext<G extends GraphDef> = Pick<
+  IdentityServiceContext<G>,
+  "backend" | "graphId" | "registry" | "schema" | "sameIdAcrossKinds"
+>;
+
 export async function rebuildIdentityClosureForContext<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityRebuildContext<G>,
 ): Promise<void> {
   if (!ctx.backend.capabilities.transactions) {
     throw new ConfigurationError(
@@ -2550,6 +2572,35 @@ export async function foldIdentityForCreatedNodes(
   });
 }
 
+/**
+ * Reports whether the node carries a materialized identity class row.
+ *
+ * {@link insertClosureComponents} emits rows only for components with two or
+ * more members, and every current-class read resolves through that table
+ * ({@link loadCurrentStructuralClasses} anchors on it and coalesces a missing
+ * row to the node itself), so no row means the node is a singleton under every
+ * source of identity — assertions AND the same-id structural fold, which
+ * `foldIdentityForCreatedNodes` materializes at create time.
+ */
+async function hasMaterializedIdentityClass(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  ref: PlainNodeRef,
+): Promise<boolean> {
+  const rows = await target.execute<RawClosureClassRow>(
+    asCompiledRowsSql(sql`
+      SELECT member_kind, member_id
+      FROM ${schema.identityClosureTable}
+      WHERE graph_id = ${graphId}
+        AND member_kind = ${ref.kind}
+        AND member_id = ${ref.id}
+      LIMIT 1
+    `),
+  );
+  return rows.length > 0;
+}
+
 export async function detachIdentityForNode(
   ctx: Pick<
     IdentityServiceContext<GraphDef>,
@@ -2586,6 +2637,21 @@ export async function detachIdentityForNode(
           AND ${touchesNode}
       `),
     );
+    // Most deletes are of nodes that never participated in identity. Such a
+    // node has no assertion rows in scope and no materialized class row, so its
+    // component is itself and the closure repair below would delete and
+    // reinsert nothing — one indexed lookup replaces its five statements.
+    if (
+      rows.length === 0 &&
+      !(await hasMaterializedIdentityClass(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        ref,
+      ))
+    ) {
+      return;
+    }
     const now = nowIso();
     for (const rawRow of rows) {
       const row = normalizeAssertionRow(rawRow);
@@ -2773,17 +2839,18 @@ function validateTransferShape<G extends GraphDef>(
       },
     );
   }
-  // A state row is asserted as current-truth "now"; a future validFrom would
+  const now = nowIso();
+  // An open row is asserted as current-truth "now"; a future validFrom would
   // insert a row the closure filter (valid_from <= now) excludes yet
-  // currentAssertionForPair (valid_to IS NULL only) treats as current —
-  // two conflicting definitions of "current". Archival rows carry their own
-  // historical validFrom and are not subject to this.
+  // currentAssertionForPair (valid_to IS NULL only) treats as current — two
+  // conflicting definitions of "current". That split does not depend on the
+  // import mode: an archival open row is just as unended as a state one.
   if (
-    mode === "state" &&
-    compareCodePoints(assertion.validFrom, nowIso()) > 0
+    assertion.validTo === undefined &&
+    compareCodePoints(assertion.validFrom, now) > 0
   ) {
     throw new ValidationError(
-      "State identity import cannot contain future-dated assertions.",
+      "Identity import cannot contain future-dated open assertions.",
       {
         issues: [
           {
@@ -2813,6 +2880,32 @@ function validateTransferShape<G extends GraphDef>(
         },
       ],
     });
+  }
+  // An ended row takes the raw-INSERT branch of the importer, which skips
+  // endpoint-liveness validation, contradiction validation and closure
+  // maintenance because a row that ended in the past cannot be part of any
+  // current identity class. A validTo in the future breaks that premise: the
+  // snapshot filter (valid_from <= now AND (valid_to IS NULL OR valid_to > now))
+  // reports the row as CURRENT while no closure row backs it, wedging the store
+  // — membersOf disagrees with the ledger, validateIdentity() reports a
+  // permanent contradiction, and no retraction API can end the row because they
+  // all match on valid_to IS NULL.
+  if (
+    assertion.validTo !== undefined &&
+    compareCodePoints(assertion.validTo, now) > 0
+  ) {
+    throw new ValidationError(
+      "Identity import cannot contain assertions that end in the future.",
+      {
+        issues: [
+          {
+            path: "identity.assertions",
+            message: `Assertion ${assertion.id} validTo is in the future`,
+            code: "IDENTITY_IMPORT_FUTURE_VALID_TO",
+          },
+        ],
+      },
+    );
   }
   return normalized;
 }

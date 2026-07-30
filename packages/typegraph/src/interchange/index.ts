@@ -29,7 +29,6 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
-export type * from "../identity";
 
 // ============================================================
 // Types & Schemas

@@ -1756,7 +1756,7 @@ describe("Identity interchange streaming", () => {
         ]),
         importOptions({ onConflict: "error" }),
       ),
-    ).rejects.toThrow("cannot emit nodes after edges");
+    ).rejects.toThrow("cannot emit nodes after identity assertions");
   });
 
   it("rejects edges emitted after identity assertions", async () => {

@@ -1,12 +1,12 @@
 /**
  * Runtime guards for the identity surface on an identity-DISABLED graph.
  *
- * The identity accessors type as `never` for a graph without an `identity`
- * config, so a TypeScript caller cannot reach them — but a JS caller (or a
- * cast) can. Each must fail loudly with a typed `ConfigurationError`
- * (`IDENTITY_NOT_ENABLED`) rather than a bare `TypeError` or a silent empty
- * result: `store.identity`, a time-pinned `StoreView`'s `.identity`, and the
- * `rebuildIdentityClosure(store)` repair helper.
+ * The identity accessors are absent from the typed surface of a graph without
+ * an `identity` config, so a TypeScript caller cannot reach them — but a JS
+ * caller (or a cast) can. Each must fail loudly with a typed
+ * `ConfigurationError` (`IDENTITY_NOT_ENABLED`) rather than a bare `TypeError`
+ * or a silent empty result: `store.identity`, a time-pinned `StoreView`'s
+ * `.identity`, and the `rebuildIdentityClosure(store)` repair helper.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -27,8 +27,9 @@ const disabledGraph = defineGraph({
 });
 
 /**
- * The identity accessors resolve to `never` on a disabled graph, so reach them
- * through an untyped view to exercise the runtime guard a JS caller would hit.
+ * The identity accessors do not exist on a disabled graph's typed surface, so
+ * reach them through an untyped view to exercise the runtime guard a JS caller
+ * would hit.
  */
 type IdentityProbe = Readonly<{
   identity: unknown;

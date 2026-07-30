@@ -12,7 +12,7 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
-import { type IdentityReadFacadeFor } from "../identity/types";
+import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { type InternalGraphAlgorithms } from "./algorithms";
@@ -82,9 +82,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   algorithmsAtCoordinate: (
     coordinate: ReadCoordinate,
   ) => InternalGraphAlgorithms<G>;
-  identityAtCoordinate: (
-    coordinate: ReadCoordinate,
-  ) => IdentityReadFacadeFor<G>;
+  identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
   rebuildIdentityClosure: () => Promise<void>;
   validateIdentity: () => Promise<void>;
   identityAssertionsForInterchange: (

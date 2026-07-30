@@ -10,7 +10,6 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
-export type * from "../identity";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
 export {
@@ -58,6 +57,7 @@ export type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  MergedCounts,
   MergeIncrementalArgs,
   MergeOptions,
   MergeReport,

@@ -1,17 +1,18 @@
+import {
+  computeDisjointExpansionClosures,
+  expandDisjointSide,
+} from "../registry/kind-registry";
 import { computeTransitiveClosure } from "./closures";
 import {
   META_EDGE_BROADER,
   META_EDGE_DISJOINT_WITH,
-  META_EDGE_EQUIVALENT_TO,
   META_EDGE_HAS_PART,
   META_EDGE_INVERSE_OF,
   META_EDGE_NARROWER,
   META_EDGE_PART_OF,
-  META_EDGE_SAME_AS,
   META_EDGE_SUB_CLASS_OF,
   type MetaEdgeName,
 } from "./constants";
-import { isExternalIri } from "./external-iri";
 
 export type NamedOntologyRelation = Readonly<{
   metaEdge: string;
@@ -175,62 +176,20 @@ function collectDisjointDeclarations(
   return declarations;
 }
 
-function addPropagationEdge(
-  propagation: Map<string, Set<string>>,
-  from: string,
-  to: string,
-): void {
-  const targets = propagation.get(from) ?? new Set<string>();
-  targets.add(to);
-  propagation.set(from, targets);
-}
-
 /**
- * Mirrors the registry's disjointness propagation exactly: equivalence is
- * bidirectional and subclass inheritance flows from parent to descendant.
- * Interleaving both edge types in one worklist is essential; separate closure
- * checks miss paths such as equivalent → subclass → equivalent.
+ * Rejects any disjoint declaration whose fully propagated sides overlap.
+ *
+ * The expansion runs over the registry's own closures through the registry's
+ * own `expandDisjointSide`, so an accepted ontology cannot produce a runtime
+ * state where two kinds are simultaneously equivalent and disjoint. A
+ * validation-local re-implementation is what previously let an equivalence
+ * chain routed through an external IRI load clean.
+ *
+ * Cyclic and self-looping ontologies reach this pass too, since the cycle
+ * check only records issues rather than aborting. That is safe: closure
+ * computation is Warshall over a fixed node set and expansion is a worklist
+ * guarded by a visited set, so neither diverges on a cycle.
  */
-function buildDisjointPropagation(
-  ontology: readonly NamedOntologyRelation[],
-): ReadonlyMap<string, ReadonlySet<string>> {
-  const propagation = new Map<string, Set<string>>();
-  for (const relation of ontology) {
-    if (relation.metaEdge === META_EDGE_SUB_CLASS_OF) {
-      addPropagationEdge(propagation, relation.to, relation.from);
-    } else if (
-      relation.metaEdge === META_EDGE_EQUIVALENT_TO ||
-      relation.metaEdge === META_EDGE_SAME_AS
-    ) {
-      addPropagationEdge(propagation, relation.from, relation.to);
-      addPropagationEdge(propagation, relation.to, relation.from);
-    }
-  }
-  return propagation;
-}
-
-function expandDisjointSide(
-  kind: string,
-  propagation: ReadonlyMap<string, ReadonlySet<string>>,
-): ReadonlySet<string> {
-  const expanded = new Set<string>();
-  const pending = [kind];
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (
-      current === undefined ||
-      expanded.has(current) ||
-      isExternalIri(current)
-    ) {
-      continue;
-    }
-    expanded.add(current);
-    for (const next of propagation.get(current) ?? []) pending.push(next);
-  }
-  return expanded;
-}
-
-/** Rejects any disjoint declaration whose fully propagated sides overlap. */
 function detectDisjointExpansionConflicts(
   ontology: readonly NamedOntologyRelation[],
   issues: OntologyValidationIssue[],
@@ -238,10 +197,10 @@ function detectDisjointExpansionConflicts(
   const declarations = collectDisjointDeclarations(ontology);
   if (declarations.length === 0) return;
 
-  const propagation = buildDisjointPropagation(ontology);
+  const closures = computeDisjointExpansionClosures(ontology);
   for (const { a, b, index } of declarations) {
-    const left = expandDisjointSide(a, propagation);
-    const right = expandDisjointSide(b, propagation);
+    const left = expandDisjointSide(a, closures);
+    const right = new Set(expandDisjointSide(b, closures));
     const overlappingKind = [...left]
       .filter((kind) => right.has(kind))
       .toSorted()[0];

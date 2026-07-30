@@ -312,7 +312,7 @@ export type GraphInterchangeChunk = z.infer<typeof GraphInterchangeChunkSchema>;
  * An error that occurred during import.
  */
 export const ImportErrorSchema = z.object({
-  entityType: z.enum(["node", "edge"]),
+  entityType: z.enum(["node", "edge", "identity"]),
   kind: z.string(),
   id: z.string(),
   error: z.string(),

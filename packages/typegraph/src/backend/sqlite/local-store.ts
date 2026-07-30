@@ -24,7 +24,19 @@ import { type BackendCapabilities, closeAfterFailure } from "../types";
 import { createLocalSqliteBackend } from "./local";
 import { type LocalSqlitePragmaOptions } from "./local-options";
 
-export type * from "../../identity";
+export type { GraphIdentityConfig } from "../../core/define-graph";
+export type {
+  IdentityAssertion,
+  IdentityAssertionId,
+  IdentityAssertionResult,
+  IdentityFacade,
+  IdentityNode,
+  IdentityNodeRefInput,
+  IdentityPair,
+  IdentityReadFacade,
+  IdentityRelation,
+  IdentityWriteSummary,
+} from "../../identity";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,

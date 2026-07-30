@@ -1,22 +1,25 @@
 import {
   type AllNodeTypes,
   type GraphDef,
-  type GraphIdentityConfig,
   type NodeKinds,
 } from "../core/define-graph";
-import { type NodeId } from "../core/types";
 import { ValidationError } from "../errors";
-import { type Node, type NodeRef } from "../store/types";
+import {
+  type GraphNodeReference,
+  type Node,
+  type NodeRef,
+} from "../store/types";
 
-export type GraphNodeRef<G extends GraphDef> = NodeRef<AllNodeTypes<G>>;
-
-/** A graph-bounded identity result reference with a kind-specific branded id. */
-export type IdentityNodeRef<G extends GraphDef> = {
-  [K in NodeKinds<G>]: Readonly<{
-    kind: K;
-    id: NodeId<G["nodes"][K]["type"]>;
-  }>;
-}[NodeKinds<G>];
+/**
+ * The loose *input* form every identity facade method accepts: a whole node, a
+ * bare id, or a `{ kind, id }` pair, for any node kind in the graph. Its kind
+ * and id are independent, so a caller can pass what it already has without
+ * re-correlating them.
+ *
+ * Identity *results* use the strict {@link GraphNodeReference} instead, whose
+ * `kind` and branded `id` stay correlated.
+ */
+export type IdentityNodeRefInput<G extends GraphDef> = NodeRef<AllNodeTypes<G>>;
 
 /** A hydrated identity member, discriminated by its registered node kind. */
 export type IdentityNode<G extends GraphDef> = {
@@ -58,13 +61,23 @@ export function asIdentityAssertionId(value: string): IdentityAssertionId {
   return value as IdentityAssertionId;
 }
 
+/**
+ * What one assertion claims about a pair of nodes: `"same"` merges them into
+ * one equivalence set, `"different"` records a disjointness that a later
+ * `"same"` claim must not contradict.
+ */
 export type IdentityRelation = "same" | "different";
 
+/**
+ * One persisted identity claim about an ordered pair of nodes. Returned by the
+ * assertion writers and by `identity.assertionsOf(...)`; `validTo` is set when
+ * the assertion has been retracted, so a historical read can still see it.
+ */
 export type IdentityAssertion<G extends GraphDef> = Readonly<{
   id: IdentityAssertionId;
   relation: IdentityRelation;
-  a: IdentityNodeRef<G>;
-  b: IdentityNodeRef<G>;
+  a: GraphNodeReference<G>;
+  b: GraphNodeReference<G>;
   validFrom: string;
   validTo?: string;
 }>;
@@ -75,33 +88,61 @@ export type IdentityAssertionResult<G extends GraphDef> = Readonly<{
   action: "created" | "existing";
 }>;
 
+/** One ordered node pair handed to `bulkAssertSame` / `bulkAssertDifferent`. */
 export type IdentityPair<G extends GraphDef> = Readonly<{
-  a: GraphNodeRef<G>;
-  b: GraphNodeRef<G>;
+  a: IdentityNodeRefInput<G>;
+  b: IdentityNodeRefInput<G>;
 }>;
 
+/**
+ * The read half of the identity surface: equivalence-set membership,
+ * representative selection, and the assertions behind them.
+ *
+ * Obtained from a read-only lens — `store.asOf(...).identity`,
+ * `store.snapshot().identity` — where it answers at that view's coordinate.
+ * The full read+write surface is {@link IdentityFacade}.
+ */
 export type IdentityReadFacade<G extends GraphDef> = Readonly<{
   representativeOf: (
-    ref: GraphNodeRef<G>,
-  ) => Promise<IdentityNodeRef<G> | undefined>;
-  membersOf: (ref: GraphNodeRef<G>) => Promise<readonly IdentityNodeRef<G>[]>;
-  nodesOf: (ref: GraphNodeRef<G>) => Promise<readonly IdentityNode<G>[]>;
-  areSame: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<boolean>;
-  areDifferent: (a: GraphNodeRef<G>, b: GraphNodeRef<G>) => Promise<boolean>;
+    ref: IdentityNodeRefInput<G>,
+  ) => Promise<GraphNodeReference<G> | undefined>;
+  membersOf: (
+    ref: IdentityNodeRefInput<G>,
+  ) => Promise<readonly GraphNodeReference<G>[]>;
+  nodesOf: (
+    ref: IdentityNodeRefInput<G>,
+  ) => Promise<readonly IdentityNode<G>[]>;
+  areSame: (
+    a: IdentityNodeRefInput<G>,
+    b: IdentityNodeRefInput<G>,
+  ) => Promise<boolean>;
+  areDifferent: (
+    a: IdentityNodeRefInput<G>,
+    b: IdentityNodeRefInput<G>,
+  ) => Promise<boolean>;
   assertionsOf: (
-    ref: GraphNodeRef<G>,
+    ref: IdentityNodeRefInput<G>,
   ) => Promise<readonly IdentityAssertion<G>[]>;
 }>;
 
+/**
+ * The full TypeGraph Identity Profile surface: {@link IdentityReadFacade} plus
+ * the assertion writers and retractions.
+ *
+ * Obtained from `store.identity` or `tx.identity`, and present only on graphs
+ * that declared `identity: { ... }` in `defineGraph`. Every writer is
+ * idempotent — re-asserting an existing claim returns it with
+ * `action: "existing"` rather than duplicating it.
+ */
 export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
   Readonly<{
     assertSame: (
-      a: GraphNodeRef<G>,
-      b: GraphNodeRef<G>,
+      a: IdentityNodeRefInput<G>,
+      b: IdentityNodeRefInput<G>,
     ) => Promise<IdentityAssertionResult<G>>;
     assertDifferent: (
-      a: GraphNodeRef<G>,
-      b: GraphNodeRef<G>,
+      a: IdentityNodeRefInput<G>,
+      b: IdentityNodeRefInput<G>,
     ) => Promise<IdentityAssertionResult<G>>;
     bulkAssertSame: (
       pairs: readonly IdentityPair<G>[],
@@ -113,24 +154,22 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
       id: IdentityAssertionId,
     ) => Promise<IdentityAssertion<G> | undefined>;
     retractSameAssertion: (
-      a: GraphNodeRef<G>,
-      b: GraphNodeRef<G>,
+      a: IdentityNodeRefInput<G>,
+      b: IdentityNodeRefInput<G>,
     ) => Promise<IdentityAssertion<G> | undefined>;
     retractDifferentAssertion: (
-      a: GraphNodeRef<G>,
-      b: GraphNodeRef<G>,
+      a: IdentityNodeRefInput<G>,
+      b: IdentityNodeRefInput<G>,
     ) => Promise<IdentityAssertion<G> | undefined>;
     bulkRetractAssertions: (
       ids: readonly IdentityAssertionId[],
     ) => Promise<readonly IdentityAssertion<G>[]>;
   }>;
 
-export type IdentityFacadeFor<G extends GraphDef> =
-  G["identity"] extends GraphIdentityConfig ? IdentityFacade<G> : never;
-
-export type IdentityReadFacadeFor<G extends GraphDef> =
-  G["identity"] extends GraphIdentityConfig ? IdentityReadFacade<G> : never;
-
+/**
+ * Per-transaction identity write counts carried by a transaction receipt.
+ * `total` is the sum of the three preceding counters.
+ */
 export type IdentityWriteSummary = Readonly<{
   sameAssertions: number;
   differentAssertions: number;

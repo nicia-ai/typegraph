@@ -183,9 +183,11 @@ export class TraversalBuilder<
     fromAlias: string,
     inverseEdgeKinds: readonly string[] = [],
     optional: Optional = false as Optional,
-    includeIdentityMembers = false,
     variableLength: VariableLengthState = DEFAULT_VARIABLE_LENGTH_STATE,
     pendingEdgePredicates: readonly NodePredicate[] = [],
+    // Appended, never inserted: TraversalBuilder is public, so every
+    // pre-existing positional slot must keep its meaning.
+    includeIdentityMembers = false,
   ) {
     this.#config = config;
     this.#state = state;
@@ -258,7 +260,6 @@ export class TraversalBuilder<
       this.#fromAlias,
       this.#inverseEdgeKinds,
       this.#optional,
-      this.#includeIdentityMembers,
       {
         ...this.#variableLength,
         enabled: true,
@@ -275,6 +276,7 @@ export class TraversalBuilder<
         }),
       },
       this.#pendingEdgePredicates,
+      this.#includeIdentityMembers,
     );
   }
 
@@ -332,9 +334,9 @@ export class TraversalBuilder<
       this.#fromAlias,
       this.#inverseEdgeKinds,
       this.#optional,
-      this.#includeIdentityMembers,
       this.#variableLength,
       [...this.#pendingEdgePredicates, newPredicate],
+      this.#includeIdentityMembers,
     );
   }
 

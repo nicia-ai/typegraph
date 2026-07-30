@@ -143,12 +143,17 @@ const CONTENT_FINGERPRINT_BYTES = 16;
  * re-computed inside a commit transaction (via the tx-scoped backend) for the
  * in-transaction `base@V` re-validation — the reads then observe the
  * transaction's snapshot, not whatever a concurrent writer has since committed.
+ *
+ * `identityAssertions` is REQUIRED (never defaulted): a caller that forgot to
+ * read the ledger would silently mint a pre-identity token, so an identity-only
+ * divergence would pass the `base@V` precondition. Pass an empty array only when
+ * the store genuinely holds no current assertions.
  */
 export async function computeContentComponent<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
   graph: G,
-  identityAssertions: readonly IdentityTransferAssertion[] = [],
+  identityAssertions: readonly IdentityTransferAssertion[],
 ): Promise<string> {
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
@@ -244,18 +249,34 @@ export async function computeBaseVersion<G extends GraphDef>(
       `${schemaComponent}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
     );
   }
-  const [schemaComponent, identityAssertions] = await Promise.all([
+  const [schemaComponent, contentComponent] = await Promise.all([
     computeSchemaComponent(store),
-    storeRuntime(store).identityAssertionsForInterchange("state"),
+    computeStoreContentComponent(store),
   ]);
-  const contentComponent = await computeContentComponent(
+  return asBaseVersion(
+    `${schemaComponent}${TOKEN_SEPARATOR}${contentComponent}`,
+  );
+}
+
+/**
+ * The content component of a live {@link Store}: reads the store's current
+ * identity assertions, then fingerprints its live rows alongside them.
+ *
+ * Exists so {@link computeBaseVersion} can run the schema half and the content
+ * half CONCURRENTLY. The identity read must precede the fingerprint (it is an
+ * input to it), but that ordering is internal to this half and must not serialize
+ * the independent schema hash behind it.
+ */
+async function computeStoreContentComponent<G extends GraphDef>(
+  store: Store<G>,
+): Promise<string> {
+  const identityAssertions =
+    await storeRuntime(store).identityAssertionsForInterchange("state");
+  return computeContentComponent(
     storeBackend(store),
     store.graphId,
     store.graph,
     identityAssertions,
-  );
-  return asBaseVersion(
-    `${schemaComponent}${TOKEN_SEPARATOR}${contentComponent}`,
   );
 }
 

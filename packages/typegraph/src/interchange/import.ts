@@ -21,6 +21,8 @@ import {
 import { type EdgeRegistration, type NodeRegistration } from "../core/types";
 import {
   ConfigurationError,
+  IdentityContradictionError,
+  NodeNotFoundError,
   UniquenessError,
   ValidationError,
 } from "../errors";
@@ -163,13 +165,14 @@ export async function importGraph<G extends GraphDef>(
         importedNodeIds,
       );
       if (data.identity !== undefined) {
-        const identity = await runtime.importIdentityAssertionsAtTarget(
+        await importIdentitySection(
+          runtime,
           target,
-          data.identity.assertions,
-          data.identity.mode,
+          graphId,
+          data.identity,
+          result,
+          errors,
         );
-        result.identity.created += identity.created;
-        result.identity.skipped += identity.skipped;
       }
     },
   );
@@ -242,7 +245,9 @@ export async function importGraphStream<G extends GraphDef>(
         }
         if (receivedEdges || receivedIdentity) {
           throw new Error(
-            "Graph interchange stream cannot emit nodes after edges.",
+            `Graph interchange stream cannot emit nodes after ${
+              receivedEdges ? "edges" : "identity assertions"
+            }.`,
           );
         }
         if (chunk.nodes.length === 0) break;
@@ -380,6 +385,125 @@ function validateIdentitySection(identity: GraphData["identity"]): void {
     },
     { cause: parsed.error },
   );
+}
+
+/**
+ * An identity assertion is neither a node nor an edge, so it carries its own
+ * `entityType`. The identity analogue of a node or edge kind is the relation
+ * asserted, and the entity id is the assertion id. A failure that cannot be
+ * attributed to a document assertion — which the coordinator's own error
+ * details should always allow — falls back to naming the target graph, so the
+ * entry still reaches the caller rather than being dropped or rethrown.
+ */
+const IDENTITY_IMPORT_ERROR_ENTITY_TYPE = "identity";
+const IDENTITY_IMPORT_ERROR_PATH = "identity.assertions";
+const UNATTRIBUTED_IDENTITY_ERROR_KIND = "assertion";
+const IDENTITY_IMPORT_ID_CONFLICT_CODE = "IDENTITY_IMPORT_ID_CONFLICT";
+
+function identityImportError(
+  assertion: InterchangeIdentityAssertion | undefined,
+  graphId: string,
+  message: string,
+): ImportError {
+  const path =
+    assertion === undefined ?
+      IDENTITY_IMPORT_ERROR_PATH
+    : `${IDENTITY_IMPORT_ERROR_PATH}[${assertion.id}]`;
+  return {
+    entityType: IDENTITY_IMPORT_ERROR_ENTITY_TYPE,
+    kind: assertion?.relation ?? UNATTRIBUTED_IDENTITY_ERROR_KIND,
+    id: assertion?.id ?? graphId,
+    error: `${path}: ${message}`,
+  };
+}
+
+function isIdConflictError(error: unknown): error is ConfigurationError {
+  return (
+    error instanceof ConfigurationError &&
+    error.details["code"] === IDENTITY_IMPORT_ID_CONFLICT_CODE
+  );
+}
+
+function touchesRef(
+  assertion: InterchangeIdentityAssertion,
+  ref: Readonly<{ kind: string; id: string }>,
+): boolean {
+  return (
+    (assertion.a.kind === ref.kind && assertion.a.id === ref.id) ||
+    (assertion.b.kind === ref.kind && assertion.b.id === ref.id)
+  );
+}
+
+/**
+ * Converts a per-document identity failure into an {@link ImportError}, or
+ * returns `undefined` for anything that is not one — a configuration or
+ * programming fault must still propagate.
+ */
+function asIdentityImportError(
+  assertions: readonly InterchangeIdentityAssertion[],
+  graphId: string,
+  error: unknown,
+): ImportError | undefined {
+  if (error instanceof NodeNotFoundError) {
+    const ref = error.details;
+    const assertion = assertions.find((candidate) =>
+      touchesRef(candidate, ref),
+    );
+    return identityImportError(assertion, graphId, error.message);
+  }
+  if (error instanceof IdentityContradictionError) {
+    const { a, b } = error.details;
+    const assertion = assertions.find(
+      (candidate) => touchesRef(candidate, a) && touchesRef(candidate, b),
+    );
+    return identityImportError(assertion, graphId, error.message);
+  }
+  if (isIdConflictError(error)) {
+    const assertion = assertions.find(
+      (candidate) => candidate.id === error.details["assertionId"],
+    );
+    return identityImportError(assertion, graphId, error.message);
+  }
+  return undefined;
+}
+
+/**
+ * Applies the identity section, recording a per-document failure in
+ * `result.errors` instead of aborting the whole import.
+ *
+ * {@link importGraph} promises `{ success: false, errors }` for content the
+ * target rejects, and the node and edge paths honor that by recording the
+ * offending row and moving on. The identity coordinator instead throws, so a
+ * missing endpoint, a contradiction against the target graph, or a reused
+ * assertion id escaped the transaction and turned a rejected assertion into a
+ * thrown import — discarding the valid node and edge work alongside it.
+ *
+ * Assertions the coordinator applied before the failing one stay committed,
+ * exactly as rows accepted before a failing node do. They are not reflected in
+ * `result.identity.created`: the coordinator reports counts only on success, so
+ * the counts under-report rather than invent a number.
+ */
+async function importIdentitySection<G extends GraphDef>(
+  runtime: ReturnType<typeof storeRuntime<G>>,
+  target: GraphBackend | TransactionBackend,
+  graphId: string,
+  identity: NonNullable<GraphData["identity"]>,
+  result: ImportResult,
+  errors: ImportError[],
+): Promise<void> {
+  try {
+    const summary = await runtime.importIdentityAssertionsAtTarget(
+      target,
+      identity.assertions,
+      identity.mode,
+    );
+    result.identity.created += summary.created;
+    result.identity.skipped += summary.skipped;
+  } catch (error) {
+    const entry = asIdentityImportError(identity.assertions, graphId, error);
+    if (entry === undefined) throw error;
+    errors.push(entry);
+  }
 }
 
 function validateStreamHeader(header: GraphDataHeader): void {
