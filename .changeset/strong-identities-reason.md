@@ -96,3 +96,10 @@ the new opt-in profile, hence the minor bump.
   identity closure atomically with the schema commit, and an unapplied
   identity-only breaking change surfaces `IDENTITY_PROFILE_MIGRATION_PENDING`
   rather than a generic `MigrationError`.
+
+**Performance.** Current-coordinate identity reads (`membersOf`, `areSame`,
+`areDifferent`, `representativeOf`, `nodesOf`) were O(total graph size) on
+SQLite — the class-members lookup defeated the closure's class index and the
+planner scanned every live node per read. The rewritten statement is
+O(class size): ~40x faster on a populated graph (0.013 ms vs 0.56 ms per
+read at ~6,000 nodes), with a smaller improvement on PostgreSQL.

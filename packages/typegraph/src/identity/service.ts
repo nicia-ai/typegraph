@@ -500,6 +500,15 @@ async function loadCurrentVisibleMembers(
 ): Promise<readonly PlainNodeRef[]> {
   const now = nowIso();
   const coordinate = identitySqlCoordinate(undefined, now);
+  // Two deliberate deviations keep this read O(class size) instead of
+  // O(graph size) on SQLite. A row-value `(class_kind, class_id) IN
+  // (subquery)` defeats the closure's class index, so the members CTE joins
+  // the anchor row instead. And SQLite's planner, estimating without
+  // statistics, likes to drive the visibility join from the nodes table via
+  // the `(graph_id, deleted_at)` index — a scan of every live node per call.
+  // CROSS JOIN pins the join order on SQLite (a documented planner control)
+  // while remaining an ordinary inner join on PostgreSQL, whose planner
+  // orders freely from real statistics either way.
   const rows = await target.execute<RawIdentityMemberRow>(
     asCompiledRowsSql(sql`
       WITH anchor AS (
@@ -509,23 +518,23 @@ async function loadCurrentVisibleMembers(
           AND member_kind = ${ref.kind}
           AND member_id = ${ref.id}
       ), members(kind, id) AS (
-        SELECT member_kind, member_id
-        FROM ${schema.identityClosureTable}
-        WHERE graph_id = ${graphId}
-          AND (class_kind, class_id) IN (
-            SELECT class_kind, class_id FROM anchor
-          )
+        SELECT closure.member_kind, closure.member_id
+        FROM anchor
+        JOIN ${schema.identityClosureTable} closure
+          ON closure.graph_id = ${graphId}
+         AND closure.class_kind = anchor.class_kind
+         AND closure.class_id = anchor.class_id
         UNION ALL
         SELECT ${ref.kind}, ${ref.id}
         WHERE NOT EXISTS (SELECT 1 FROM anchor)
       )
       SELECT n.kind, n.id, n.valid_from, n.valid_to, n.created_at, n.deleted_at
       FROM members m
-      JOIN ${schema.nodesTable} n
-        ON n.graph_id = ${graphId}
-       AND n.kind = m.kind
-       AND n.id = m.id
-      WHERE ${identityNodeVisibilitySql(coordinate, "n")}
+      CROSS JOIN ${schema.nodesTable} n
+      WHERE n.graph_id = ${graphId}
+        AND n.kind = m.kind
+        AND n.id = m.id
+        AND ${identityNodeVisibilitySql(coordinate, "n")}
     `),
   );
   const members = rows
