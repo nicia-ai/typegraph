@@ -41,6 +41,7 @@ import { type Extension, PGlite } from "@electric-sql/pglite";
 import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 
 import { ConfigurationError } from "../../errors";
+export type { GraphIdentityConfig } from "../../core/define-graph";
 import {
   generatePostgresDDL,
   generatePostgresMigrationSQL,

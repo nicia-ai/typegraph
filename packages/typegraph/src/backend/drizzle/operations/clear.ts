@@ -11,8 +11,8 @@ export type ClearGraphStatement = Readonly<{
 /**
  * Builds DELETE FROM statements for all per-graph base tables filtered by
  * graph_id. Delete order respects implicit FK-like dependencies:
- * fulltext → recorded_edges → recorded_nodes → recorded_clock → uniques →
- * edges → nodes → schema_versions.
+ * fulltext → recorded identity/edges/nodes → identity closure/assertions →
+ * recorded_clock → uniques → edges → nodes → schema_versions.
  *
  * Embeddings are NOT cleared here: they live in per-`(nodeKind, fieldPath)`
  * strategy-owned tables that this graph-agnostic builder cannot enumerate.
@@ -34,6 +34,11 @@ export function buildClearGraph(
   return [
     { query: sql`DELETE FROM ${fulltext} WHERE "graph_id" = ${graphId}` },
     {
+      query: sql`DELETE FROM ${tables.recordedIdentityAssertions} WHERE ${tables.recordedIdentityAssertions.graphId} = ${graphId}`,
+      ignoreMissingTable: true,
+      requiredTableName: getTableName(tables.recordedIdentityAssertions),
+    },
+    {
       query: sql`DELETE FROM ${tables.recordedEdges} WHERE ${tables.recordedEdges.graphId} = ${graphId}`,
       ignoreMissingTable: true,
       requiredTableName: getTableName(tables.recordedEdges),
@@ -47,6 +52,16 @@ export function buildClearGraph(
       query: sql`DELETE FROM ${tables.recordedClock} WHERE ${tables.recordedClock.graphId} = ${graphId}`,
       ignoreMissingTable: true,
       requiredTableName: getTableName(tables.recordedClock),
+    },
+    {
+      query: sql`DELETE FROM ${tables.identityClosure} WHERE ${tables.identityClosure.graphId} = ${graphId}`,
+      ignoreMissingTable: true,
+      requiredTableName: getTableName(tables.identityClosure),
+    },
+    {
+      query: sql`DELETE FROM ${tables.identityAssertions} WHERE ${tables.identityAssertions.graphId} = ${graphId}`,
+      ignoreMissingTable: true,
+      requiredTableName: getTableName(tables.identityAssertions),
     },
     {
       query: sql`DELETE FROM ${tables.uniques} WHERE ${tables.uniques.graphId} = ${graphId}`,

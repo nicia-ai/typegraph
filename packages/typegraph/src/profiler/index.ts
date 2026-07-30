@@ -59,6 +59,7 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type * from "../identity";
 
 // ============================================================
 // Main Class

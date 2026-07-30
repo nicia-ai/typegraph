@@ -436,6 +436,8 @@ export type Traversal = Readonly<{
   joinEdgeField: "from_id" | "to_id";
   /** If true, use LEFT JOIN instead of INNER JOIN (optional match) */
   optional: boolean;
+  /** Expand this hop through coordinate-visible Operational Identity members. */
+  includeIdentityMembers?: boolean;
   /** Variable-length traversal configuration (for recursive CTEs) */
   variableLength?: VariableLengthSpec;
 }>;

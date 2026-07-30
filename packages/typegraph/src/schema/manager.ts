@@ -14,6 +14,7 @@ import {
   type PopulatedSchemaKind,
   type SchemaKindEmptinessProbe,
   type SchemaVersionRow,
+  type TransactionBackend,
 } from "../backend/types";
 import {
   getEdgeKinds,
@@ -318,6 +319,8 @@ export type SchemaManagerOptions = Readonly<{
   onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
   /** Called after a safe auto-migration is applied. For observability only. */
   onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
+  /** @internal Data preflight committed atomically with a safe schema CAS. */
+  schemaCommitPreflight?: (target: TransactionBackend) => Promise<void>;
 }>;
 
 // ============================================================
@@ -418,11 +421,15 @@ export async function ensureSchema<G extends GraphDef>(
         diff,
       };
       await options?.onBeforeMigrate?.(hookContext);
-      const committedRow = await commitNewSchemaVersion(
-        backend,
-        graph,
-        activeSchema.version,
-      );
+      const committedRow =
+        options?.schemaCommitPreflight === undefined ?
+          await commitNewSchemaVersion(backend, graph, activeSchema.version)
+        : await commitNewSchemaVersionWithPreflight(
+            backend,
+            graph,
+            activeSchema.version,
+            options.schemaCommitPreflight,
+          );
       await options?.onAfterMigrate?.(hookContext);
       return {
         status: "migrated",
@@ -963,7 +970,6 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
   const newVersion = currentVersion + 1;
   const schema = serializeSchema(graph, newVersion);
   const hash = await computeSchemaHash(schema);
-
   return {
     graphId: graph.id,
     expected: { kind: "active", version: currentVersion },
@@ -971,6 +977,32 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
     schemaHash: hash,
     schemaDoc: schema,
   };
+}
+
+/** @internal Commits a data preflight and schema CAS in one transaction. */
+export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  currentVersion: number,
+  preflight: (target: TransactionBackend) => Promise<void>,
+): Promise<SchemaVersionRow> {
+  const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
+  if (commitWithPreflight === undefined) {
+    // Match the graph-validation ordering of the plain path: reject a
+    // structurally invalid graph before probing backend capability.
+    buildKindRegistry(graph);
+    throw new ConfigurationError(
+      "This backend cannot atomically commit identity data with a schema transition.",
+      {
+        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId: graph.id,
+      },
+    );
+  }
+  return commitWithPreflight(
+    await buildNewSchemaVersionCommit(graph, currentVersion),
+    preflight,
+  );
 }
 
 /**

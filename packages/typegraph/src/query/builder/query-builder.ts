@@ -1,7 +1,10 @@
 /**
  * QueryBuilder - The fluent query builder.
  */
-import { type GraphDef } from "../../core/define-graph";
+import {
+  type GraphDef,
+  type GraphIdentityConfig,
+} from "../../core/define-graph";
 import {
   coordinateContext,
   describeCoordinate,
@@ -66,6 +69,12 @@ import {
   validateHybridFusionOptions,
   validateSqlIdentifier,
 } from "./validation";
+
+/** Identity-aware traversal option for a graph's configured identity mode. */
+export type IdentityTraversalOption<G extends GraphDef> =
+  G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ includeIdentityMembers?: boolean }>
+  : Readonly<{ includeIdentityMembers?: never }>;
 
 /**
  * Builds projected fields for a node alias (including all metadata columns).
@@ -443,7 +452,7 @@ export class QueryBuilder<
       direction?: "out";
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -475,7 +484,7 @@ export class QueryBuilder<
       direction: "in";
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -497,7 +506,7 @@ export class QueryBuilder<
       direction?: TraversalDirection;
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -515,6 +524,7 @@ export class QueryBuilder<
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
+    this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
@@ -553,6 +563,7 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       false,
+      options?.includeIdentityMembers ?? false,
     );
   }
 
@@ -567,7 +578,7 @@ export class QueryBuilder<
       direction?: TraversalDirection;
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -602,7 +613,7 @@ export class QueryBuilder<
       direction?: "out";
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -624,7 +635,7 @@ export class QueryBuilder<
       direction: "in";
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -646,7 +657,7 @@ export class QueryBuilder<
       direction?: TraversalDirection;
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -664,6 +675,7 @@ export class QueryBuilder<
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
+    this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
@@ -702,6 +714,7 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       true,
+      options?.includeIdentityMembers ?? false,
     );
   }
 
@@ -718,7 +731,7 @@ export class QueryBuilder<
       direction?: TraversalDirection;
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -745,11 +758,12 @@ export class QueryBuilder<
     edgeAlias: EA,
     optional: Optional,
     options:
-      | {
+      | ({
           direction?: TraversalDirection;
           expand?: TraversalExpansion;
           from?: keyof Aliases & string;
-        }
+          includeIdentityMembers?: boolean;
+        } & IdentityTraversalOption<G>)
       | undefined,
   ): TraversalBuilder<
     G,
@@ -772,6 +786,7 @@ export class QueryBuilder<
     }
 
     const direction = options?.direction ?? "out";
+    this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
@@ -816,6 +831,7 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       optional,
+      options?.includeIdentityMembers ?? false,
     );
   }
 
@@ -1263,6 +1279,25 @@ export class QueryBuilder<
   #hasSearchableField(kindNames: readonly string[] | undefined): boolean {
     if (!kindNames) return false;
     return this.#config.schemaIntrospector.hasSearchableField(kindNames);
+  }
+
+  /**
+   * Guards `includeIdentityMembers` against a non-identity-enabled builder.
+   */
+  #assertIdentityTraversalAllowed(
+    options: Readonly<{ includeIdentityMembers?: boolean }> | undefined,
+  ): void {
+    if (!options?.includeIdentityMembers || this.#config.identityEnabled) {
+      return;
+    }
+    throw new ConfigurationError(
+      "includeIdentityMembers requires an identity-enabled graph registry.",
+      { code: "IDENTITY_NOT_ENABLED", graphId: this.#config.graphId },
+      {
+        suggestion:
+          "Enable defineGraph(...).identity and build the registry from that graph.",
+      },
+    );
   }
 
   #expandTraversalEdgeKinds(

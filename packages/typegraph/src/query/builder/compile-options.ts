@@ -25,6 +25,7 @@ export function buildCompileOptions(
     dialect: config.dialect ?? "sqlite",
     schema: config.schema,
     windowFunctions: config.backend?.capabilities.windowFunctions ?? true,
+    identitySameIdAcrossKinds: config.identitySameIdAcrossKinds,
     ...(fulltextStrategy === undefined ?
       {}
     : {

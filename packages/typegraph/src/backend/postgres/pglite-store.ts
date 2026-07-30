@@ -23,6 +23,7 @@ import { createPostgresTables } from "../drizzle/schema/postgres";
 import { closeAfterFailure } from "../types";
 import { createLocalPgliteBackend } from "./pglite";
 
+export type * from "../../identity";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,

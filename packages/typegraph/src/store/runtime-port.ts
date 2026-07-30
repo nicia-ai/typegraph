@@ -12,6 +12,7 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
+import { type IdentityReadFacadeFor } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { type InternalGraphAlgorithms } from "./algorithms";
@@ -81,6 +82,71 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   algorithmsAtCoordinate: (
     coordinate: ReadCoordinate,
   ) => InternalGraphAlgorithms<G>;
+  identityAtCoordinate: (
+    coordinate: ReadCoordinate,
+  ) => IdentityReadFacadeFor<G>;
+  rebuildIdentityClosure: () => Promise<void>;
+  validateIdentity: () => Promise<void>;
+  identityAssertionsForInterchange: (
+    mode: "state" | "archival",
+    options?: Readonly<{
+      nodeKinds?: readonly string[];
+      includeDeleted?: boolean;
+    }>,
+  ) => Promise<
+    readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+    }>[]
+  >;
+  identityAssertionsAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    mode?: "state" | "archival",
+  ) => Promise<
+    readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+    }>[]
+  >;
+  lockIdentityImportTarget: (
+    target: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
+  foldImportedIdentityNodes: (
+    target: GraphBackend | TransactionBackend,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+  ) => Promise<void>;
+  importIdentityAssertionsAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    assertions: readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+    }>[],
+    mode: "state" | "archival",
+  ) => Promise<Readonly<{ created: number; skipped: number }>>;
+  applyIdentityMergeAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    retractionIds: readonly string[],
+    assertions: readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+    }>[],
+  ) => Promise<void>;
 }>;
 
 export function storeRuntime<G extends GraphDef>(

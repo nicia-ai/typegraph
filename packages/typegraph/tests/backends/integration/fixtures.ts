@@ -166,6 +166,7 @@ export const integrationTestGraph = defineGraph({
       cardinality: "many",
     },
   },
+  identity: { sameIdAcrossKinds: "fold" },
 });
 
 type IntegrationTestGraph = typeof integrationTestGraph;

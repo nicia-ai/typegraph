@@ -45,6 +45,20 @@ const trustedGraph = defineGraph({
   },
 });
 
+const identityTrustedGraph = defineGraph({
+  id: "trusted_import_identity_test",
+  nodes: { TrustedPerson: { type: Person } },
+  edges: {
+    trustedKnows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
 function graphData(
   nodes: GraphData["nodes"],
   edges: GraphData["edges"] = [],
@@ -205,6 +219,71 @@ describe("trusted import", () => {
       ),
     ).rejects.toEqual(expectReason("invalid_stream"));
 
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
+    ).toBeUndefined();
+  });
+
+  it("refuses an identity chunk instead of dropping identity truth", async () => {
+    const backend = createTestBackend();
+    const store = createStore(trustedGraph, backend);
+    const data = graphData([
+      { kind: "TrustedPerson", id: "alice", properties: { name: "Alice" } },
+    ]);
+    const { nodes, edges, ...header } = data;
+
+    await expect(
+      trustedImportGraphStream(
+        store,
+        chunkStream([
+          { type: "header", header },
+          { type: "nodes", nodes },
+          {
+            type: "identity",
+            assertions: [
+              {
+                id: "assertion-1",
+                relation: "same",
+                a: { kind: "TrustedPerson", id: "alice" },
+                b: { kind: "TrustedPerson", id: "alias" },
+                validFrom: "2026-01-01T00:00:00.000Z",
+              },
+            ],
+          },
+          { type: "edges", edges },
+        ]),
+      ),
+    ).rejects.toEqual(expectReason("invalid_stream"));
+
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
+    ).toBeUndefined();
+  });
+
+  it("refuses identity-enabled targets even when the input has no assertions", async () => {
+    const store = createStore(identityTrustedGraph, createTestBackend());
+
+    await expect(trustedImportGraph(store, graphData([]))).rejects.toEqual(
+      expectReason("identity_unsupported"),
+    );
+  });
+
+  it("refuses in-memory identity data before inserting its nodes", async () => {
+    const store = createStore(trustedGraph, createTestBackend());
+    const data: GraphData = {
+      ...graphData([
+        { kind: "TrustedPerson", id: "alice", properties: { name: "Alice" } },
+      ]),
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [],
+      },
+    };
+
+    await expect(trustedImportGraph(store, data)).rejects.toEqual(
+      expectReason("invalid_stream"),
+    );
     expect(
       await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
     ).toBeUndefined();

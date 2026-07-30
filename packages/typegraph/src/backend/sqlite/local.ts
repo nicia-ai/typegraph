@@ -399,3 +399,4 @@ function tryLoadSqliteVec(sqlite: Database.Database): boolean {
     return false;
   }
 }
+export type { GraphIdentityConfig } from "../../core/define-graph";

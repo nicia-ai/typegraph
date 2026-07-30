@@ -131,3 +131,4 @@ export async function createLibsqlBackend(
 
   return { backend, db };
 }
+export type { GraphIdentityConfig } from "../../core/define-graph";

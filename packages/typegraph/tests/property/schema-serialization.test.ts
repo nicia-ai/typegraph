@@ -29,6 +29,7 @@ import {
   relatedTo,
   subClassOf,
 } from "../../src/ontology/core-meta-edges";
+import { validateOntologyRelations } from "../../src/ontology/validation";
 import { sortedReplacer } from "../../src/schema/canonical";
 import { deserializeSchema } from "../../src/schema/deserializer";
 import {
@@ -430,6 +431,20 @@ const graphDefArb = fc
               seen.add(key);
               return true;
             });
+          })
+          .filter((relations) => {
+            const namedRelations = relations.map((relation) => ({
+              metaEdge: relation.metaEdge.name,
+              from:
+                typeof relation.from === "string" ?
+                  relation.from
+                : relation.from.kind,
+              to:
+                typeof relation.to === "string" ?
+                  relation.to
+                : relation.to.kind,
+            }));
+            return validateOntologyRelations(namedRelations).length === 0;
           })
       : fc.constant([]);
 

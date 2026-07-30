@@ -365,7 +365,11 @@ export function createCommonOperationBackend(
       if (!row)
         throw new DatabaseOperationError(
           "Insert node failed: no row returned",
-          { operation: "insert", entity: "node" },
+          {
+            operation: "insert",
+            entity: "node",
+            reason: "no_row_returned",
+          },
         );
       return rowMappers.toNodeRow(row);
     },
@@ -441,7 +445,11 @@ export function createCommonOperationBackend(
       if (!row)
         throw new DatabaseOperationError(
           "Update node failed: no row returned",
-          { operation: "update", entity: "node" },
+          {
+            operation: "update",
+            entity: "node",
+            reason: "no_row_returned",
+          },
         );
       return rowMappers.toNodeRow(row);
     },
@@ -522,7 +530,11 @@ export function createCommonOperationBackend(
       if (!row)
         throw new DatabaseOperationError(
           "Insert edge failed: no row returned",
-          { operation: "insert", entity: "edge" },
+          {
+            operation: "insert",
+            entity: "edge",
+            reason: "no_row_returned",
+          },
         );
       return rowMappers.toEdgeRow(row);
     },
@@ -593,7 +605,11 @@ export function createCommonOperationBackend(
       if (!row)
         throw new DatabaseOperationError(
           "Update edge failed: no row returned",
-          { operation: "update", entity: "edge" },
+          {
+            operation: "update",
+            entity: "edge",
+            reason: "no_row_returned",
+          },
         );
       return rowMappers.toEdgeRow(row);
     },

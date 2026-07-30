@@ -75,6 +75,7 @@ export {
   type EdgeChange,
   type ExtensionChange,
   getMigrationActions,
+  type IdentityChange,
   type IndexChange,
   isBackwardsCompatible,
   type NodeChange,
@@ -100,6 +101,7 @@ export {
 // Types
 // ============================================================
 
+export type { GraphIdentityConfig } from "../core/define-graph";
 export type {
   JsonSchema,
   SchemaHash,

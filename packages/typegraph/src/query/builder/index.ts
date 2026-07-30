@@ -24,7 +24,7 @@ export {
 } from "./executable-aggregate-query";
 export { ExecutableQuery } from "./executable-query";
 export { PreparedQuery } from "./prepared-query";
-export { QueryBuilder } from "./query-builder";
+export { type IdentityTraversalOption, QueryBuilder } from "./query-builder";
 export { TraversalBuilder } from "./traversal-builder";
 export { UnionableQuery } from "./unionable-query";
 

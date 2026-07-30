@@ -138,7 +138,11 @@ import {
   mapContributionMaterializationRow,
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
-import { generateSqliteCreateTableSQL, generateSqliteDDL } from "./ddl";
+import {
+  generateSqliteCreateTableSQL,
+  generateSqliteDDL,
+  sqliteContributions,
+} from "./ddl";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -163,7 +167,11 @@ import {
   createSqliteOperationStrategy,
   tableExistsFromRow,
 } from "./operations/strategy";
-import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
+import {
+  createSqliteTables as buildSqliteTables,
+  type SqliteTables,
+  tables as defaultTables,
+} from "./schema/sqlite";
 import {
   analyzeImportedTables,
   assertTrustedImportDatabaseEmpty,
@@ -241,6 +249,19 @@ const UNIQUE_INSERT_PARAM_COUNT = 6;
  * 1000 is SQLite's own documented suggestion for large databases.
  */
 export const SQLITE_ANALYZE_ROW_LIMIT = 1000;
+
+/**
+ * Barrel keys (contribution logical names) of the three relations that hold
+ * Operational Identity state: current assertions, recorded-time assertions,
+ * and the derived closure. `ensureIdentityTables()` scopes its idempotent
+ * CREATE TABLE / CREATE INDEX to exactly these when identity is first enabled
+ * on an existing database.
+ */
+const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
+  "identityAssertions",
+  "recordedIdentityAssertions",
+  "identityClosure",
+]);
 
 /**
  * Batch chunk sizes for the SQLite operation backend, derived from the
@@ -1105,24 +1126,31 @@ export function createSqliteBackend(
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
     revisionOrigins: getTableName(tables.revisionOrigins),
+    identityAssertions: getTableName(tables.identityAssertions),
+    recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
+    identityClosure: getTableName(tables.identityClosure),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
   // refreshStatistics() scopes ANALYZE to these — matching the Postgres
   // backend, which never touches unrelated tables sharing the database.
-  // The recorded relations are ANALYZEd separately under a missing-table
-  // guard: a schema created before recorded-time history landed
-  // (bring-your-own-connection, no DDL re-run) has no recorded_* tables.
+  // The recorded and identity relations are ANALYZEd separately under a
+  // missing-table guard: a schema created before recorded-time history or
+  // Operational Identity landed (bring-your-own-connection, no DDL re-run)
+  // has no recorded_* / identity_* tables.
   const coreAnalyzeTables = [
     tableNames.nodes,
     tableNames.edges,
     tableNames.uniques,
     tableNames.fulltext,
   ];
-  const recordedAnalyzeTables = [
+  const guardedAnalyzeTables = [
     tableNames.recordedNodes,
     tableNames.recordedEdges,
     tableNames.recordedClock,
+    tableNames.recordedIdentityAssertions,
+    tableNames.identityAssertions,
+    tableNames.identityClosure,
   ] as const;
   const operationStrategy = createSqliteOperationStrategy(
     tables,
@@ -1482,6 +1510,48 @@ export function createSqliteBackend(
       );
     },
 
+    async ensureIdentityTables(
+      identityTableNames,
+      options,
+    ): Promise<readonly string[]> {
+      // First enablement of Operational Identity on an existing populated
+      // database: createStore / createSqliteBackend run no DDL, so the three
+      // identity relations the enablement preflight reads/writes may not
+      // exist yet. Ensure them (and their indexes) idempotently — CREATE
+      // TABLE / CREATE INDEX IF NOT EXISTS — reusing the same contribution
+      // DDL bootstrapTables emits, scoped to the identity relations.
+      const identityTables = buildSqliteTables({
+        identityAssertions: identityTableNames.identityAssertions,
+        recordedIdentityAssertions:
+          identityTableNames.recordedIdentityAssertions,
+        identityClosure: identityTableNames.identityClosure,
+      });
+      const identityContributions = sqliteContributions(
+        identityTables,
+        fulltextStrategy,
+      ).filter((contribution) =>
+        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
+      );
+      const missing = [] as string[];
+      for (const contribution of identityContributions) {
+        if (!(await contributionTableExists(contribution.tableName))) {
+          missing.push(contribution.logicalName);
+        }
+      }
+      // Preserve missing ledger storage on already-enabled graphs so a retry
+      // cannot silently accept tables created empty by an earlier failed open.
+      // First enablement opts into provisioning; when every table exists,
+      // idempotent DDL still repairs missing secondary indexes.
+      if (missing.length === 0 || options.provisionMissing) {
+        for (const contribution of identityContributions) {
+          for (const ddl of contribution.createDdl) {
+            await db.run(sql.raw(ddl));
+          }
+        }
+      }
+      return missing;
+    },
+
     // Every fulltext-touching method asserts the durable marker instead
     // of lazily emitting DDL. Steady state performs zero ensure; an
     // uninitialized database throws `StoreNotInitializedError` rather
@@ -1736,10 +1806,11 @@ export function createSqliteBackend(
           ),
         );
       }
-      // The recorded relations may be absent on a schema created before
-      // recorded-time history landed (bring-your-own-connection, no DDL
-      // re-run); ANALYZE on a missing table errors, so skip those.
-      for (const tableName of recordedAnalyzeTables) {
+      // The recorded and identity relations may be absent on a schema
+      // created before recorded-time history or Operational Identity landed
+      // (bring-your-own-connection, no DDL re-run); ANALYZE on a missing
+      // table errors, so skip those.
+      for (const tableName of guardedAnalyzeTables) {
         try {
           await db.run(
             toDrizzleSql(
@@ -1770,6 +1841,16 @@ export function createSqliteBackend(
       return runSchemaWriteTransaction((target) =>
         commitSchemaVersionIfKindsEmpty(target, params, probes),
       );
+    },
+
+    async commitSchemaVersionWithPreflight(
+      params: CommitSchemaVersionParams,
+      preflight: (target: TransactionBackend) => Promise<void>,
+    ): Promise<SchemaVersionRow> {
+      return runSchemaWriteTransaction(async (target) => {
+        await preflight(target);
+        return target.commitSchemaVersion(params);
+      });
     },
 
     async setActiveVersion(params: SetActiveVersionParams): Promise<void> {

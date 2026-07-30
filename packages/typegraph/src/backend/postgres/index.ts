@@ -52,6 +52,7 @@
  */
 
 // Drizzle PostgreSQL backend
+export type { GraphIdentityConfig } from "../../core/define-graph";
 export type { AnyPgDatabase, AnyPgTransaction } from "../drizzle/execution";
 export {
   createPostgresBackend,

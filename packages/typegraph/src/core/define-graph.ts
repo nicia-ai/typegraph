@@ -153,6 +153,12 @@ function normalizeEdges(
 // Graph Definition Configuration
 // ============================================================
 
+/** Durable graph-level configuration for the TypeGraph Identity Profile. */
+export type GraphIdentityConfig = Readonly<{
+  /** Whether equal ids in different kinds implicitly join one identity class. */
+  sameIdAcrossKinds: "fold" | "ignore";
+}>;
+
 /**
  * Configuration for defineGraph.
  */
@@ -160,6 +166,7 @@ type GraphDefConfig<
   TNodes extends Record<string, NodeRegistration>,
   TEdges extends Record<string, EdgeEntry>,
   TOntology extends readonly OntologyRelation[],
+  TIdentity extends GraphIdentityConfig | undefined,
 > = Readonly<{
   /** Unique identifier for this graph */
   id: string;
@@ -171,6 +178,8 @@ type GraphDefConfig<
   ontology?: TOntology;
   /** Graph-wide defaults */
   defaults?: GraphDefaults;
+  /** Enables the TypeGraph Identity Profile for this graph. */
+  identity?: TIdentity;
   /**
    * Index declarations attached to this graph.
    *
@@ -210,12 +219,16 @@ export type GraphDef<
     EdgeRegistration
   >,
   TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[],
+  TIdentity extends GraphIdentityConfig | undefined =
+    GraphIdentityConfig | undefined,
 > = Readonly<{
   [GRAPH_DEF_BRAND]: true;
   id: string;
   nodes: TNodes;
   edges: TEdges;
   ontology: TOntology;
+  /** Durable graph-level opt-in to the TypeGraph Identity Profile. */
+  identity: TIdentity;
   defaults: Readonly<{
     onNodeDelete: DeleteBehavior;
     temporalMode: TemporalMode;
@@ -336,9 +349,10 @@ export function defineGraph<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
   const TOntology extends readonly OntologyRelation[],
+  const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
-  config: GraphDefConfig<TNodes, TEdges, TOntology>,
-): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology> {
+  config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
+): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
   const defaults = {
     onNodeDelete: config.defaults?.onNodeDelete ?? "restrict",
     temporalMode: config.defaults?.temporalMode ?? "current",
@@ -377,11 +391,12 @@ export function defineGraph<
     nodes: config.nodes,
     edges: normalizedEdges,
     ontology: config.ontology ?? ([] as unknown as TOntology),
+    identity: config.identity as TIdentity,
     defaults,
     indexes,
     extension: undefined,
     deprecatedKinds: EMPTY_DEPRECATED_KINDS,
-  }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology>;
+  }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
 }
 
 // Sharing one frozen empty Set keeps the canonical-form hash stable

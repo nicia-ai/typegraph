@@ -1078,6 +1078,55 @@ describe("computeSchemaDiff", () => {
     });
   });
 
+  describe("Operational Identity capability", () => {
+    it("classifies enablement as safe and removal as breaking", () => {
+      const disabled = createSchema({ version: 1 });
+      const enabled = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      expect(computeSchemaDiff(disabled, enabled).identity).toEqual({
+        type: "added",
+        severity: "safe",
+        details: "Operational Identity enabled",
+      });
+      expect(computeSchemaDiff(enabled, disabled).identity).toEqual({
+        type: "removed",
+        severity: "breaking",
+        details: "Operational Identity disabled",
+      });
+    });
+
+    it("classifies folding mode changes and never drops them as no-ops", () => {
+      const ignored = createSchema({
+        version: 1,
+        identity: { sameIdAcrossKinds: "ignore" },
+      });
+      const folded = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      expect(computeSchemaDiff(ignored, folded)).toMatchObject({
+        hasChanges: true,
+        hasBreakingChanges: false,
+        identity: {
+          type: "modified",
+          severity: "safe",
+        },
+      });
+      expect(computeSchemaDiff(folded, ignored)).toMatchObject({
+        hasChanges: true,
+        hasBreakingChanges: false,
+        identity: {
+          type: "modified",
+          severity: "safe",
+        },
+      });
+    });
+  });
+
   // ============================================================
   // Summary Generation
   // ============================================================

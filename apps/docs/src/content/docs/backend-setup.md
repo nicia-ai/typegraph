@@ -907,6 +907,16 @@ TypeGraph choosing separate query semantics per backend:
 | Per-query fulltext `language` override                 | ✗                                                 | ✓                                          | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query               |
 | HNSW `efSearch` query tuning                           | ✗                                                 | ✓                                          | Silent no-op on SQLite; Postgres applies `hnsw.ef_search`. Performance only — same results                                |
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
+| TypeGraph Identity Profile                             | ✓ transactional drivers                           | ✓ transactional drivers                    | Enabled graphs fail fast on non-atomic drivers; identity-disabled graphs retain their ordinary path                      |
+
+Identity support also has a **driver** dimension inside each dialect:
+
+| Driver                                                       | Atomic identity support | Behavior                                                                                                            |
+| ------------------------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Managed SQLite, libSQL, Durable Objects                      | ✓                       | Full profile                                                                                                        |
+| PostgreSQL `node-postgres`, `postgres-js`, neon-serverless, PGlite | ✓                  | Full profile; identity-affecting writes serialize per graph, limiting each graph to one identity writer at a time   |
+| Cloudflare D1                                                | ✗                       | Enabled graphs fail at store construction with `ConfigurationError` details code `IDENTITY_REQUIRES_ATOMIC_BACKEND` |
+| `drizzle-orm/neon-http`                                      | ✗                       | Same fail-fast error; identity-disabled graphs retain the ordinary single-statement path                            |
 
 ### Filtered approximate search
 
@@ -963,9 +973,10 @@ SQLite those run as `json_each()` scans — correct results, just not index-acce
 :::note[Transactions are driver-dependent, not backend-dependent]
 Both backends report `transactions: true` by default. The exception is symmetric and lives in specific drivers:
 Cloudflare D1 (SQLite) and `drizzle-orm/neon-http` (Postgres) are non-transactional, so they downgrade to
-`transactions: false`. Operations that require atomicity (`commitSchemaVersion`, `setActiveVersion`) throw on those
-drivers regardless of backend. Schema-managed Store writes also fail closed because they cannot hold the
-transaction-scoped schema fence; only raw Store or direct-backend writes retain the sequential, non-atomic fallback.
+`transactions: false`. Operations that require atomicity (`commitSchemaVersion`, `setActiveVersion`, Operational
+Identity) throw on those drivers regardless of backend. Schema-managed Store writes also fail closed because they
+cannot hold the transaction-scoped schema fence; only raw Store or direct-backend writes retain the sequential,
+non-atomic fallback.
 :::
 
 :::note[Aggregate set operations are a builder limitation, not a parity gap]

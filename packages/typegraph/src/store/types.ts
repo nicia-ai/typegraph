@@ -12,6 +12,7 @@ import {
 import {
   type EdgeKinds,
   type GraphDef,
+  type GraphIdentityConfig,
   type NodeKinds,
 } from "../core/define-graph";
 import { type RecordedInstant } from "../core/temporal";
@@ -26,6 +27,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
+import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
 import type {
   DynamicEdgeAccessor,
@@ -562,7 +564,9 @@ export type TransactionReceipt = Readonly<{
     nodes: Readonly<Record<string, number>>;
     /** Completed edge write intents by edge kind. */
     edges: Readonly<Record<string, number>>;
-    /** Sum of all node and edge write intents. */
+    /** Completed identity assertion and retraction write intents. */
+    identity: IdentityWriteSummary;
+    /** Sum of all node, edge, and identity write intents. */
     total: number;
   }>;
   /**
@@ -1770,7 +1774,10 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
    * registered in this graph.
    */
   getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
-}>;
+}> &
+  (G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ identity: IdentityFacade<G> }>
+  : Readonly<Record<never, never>>);
 
 /**
  * A portable transaction context containing only TypeGraph-owned graph

@@ -10,11 +10,13 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type * from "../identity";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
 export {
   BaseVersionMismatchError,
   BranchError,
+  IdentityMergeConflictError,
   MERGE_ERROR_CODES,
   MergeConflictError,
   MergeError,

@@ -24,10 +24,10 @@ export const META_EDGE_RELATED_TO = "relatedTo" as const;
 /** Same class, different representation */
 export const META_EDGE_EQUIVALENT_TO = "equivalentTo" as const;
 
-/** Same individual (for deduplication) */
+/** Deprecated type-level equivalence alias */
 export const META_EDGE_SAME_AS = "sameAs" as const;
 
-/** Explicitly different individuals */
+/** Deprecated decorative type-level non-identity relation */
 export const META_EDGE_DIFFERENT_FROM = "differentFrom" as const;
 
 /** Mutually exclusive types */

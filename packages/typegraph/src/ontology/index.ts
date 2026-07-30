@@ -2,6 +2,7 @@
 export {
   broader,
   core,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
   differentFrom,
   disjointWith,
   equivalentTo,
@@ -11,6 +12,7 @@ export {
   narrower,
   partOf,
   relatedTo,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
   sameAs,
   subClassOf,
 } from "./core-meta-edges";
@@ -39,6 +41,7 @@ export {
   invertClosure,
   isReachable,
 } from "./closures";
+export { isExternalIri } from "./external-iri";
 
 // Types
 export {

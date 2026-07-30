@@ -20,6 +20,8 @@ import {
   type NodeIndexConfig,
   type VectorIndexDeclaration,
 } from "../indexes/types";
+import { META_EDGE_IMPLIES, META_EDGE_INVERSE_OF } from "../ontology/constants";
+import { isExternalIri } from "../ontology/external-iri";
 import { type OntologyRelation } from "../ontology/types";
 import { canonicalEqual } from "../schema/canonical";
 import { compactUndefined } from "../utils/object";
@@ -28,6 +30,7 @@ import { unwrap } from "../utils/result";
 import { compileGraphExtension } from "./compiler";
 import {
   GraphExtensionUnresolvedEndpointError,
+  GraphExtensionUnresolvedOntologyEndpointError,
   KindCollisionError,
 } from "./errors";
 import { type ExtensionIndex, type GraphExtension } from "./extension-types";
@@ -200,7 +203,7 @@ export function mergeGraphExtension<G extends GraphDef>(
   const mergedOntology: readonly OntologyRelation[] = [
     ...compileTimeOntology,
     ...compiled.ontology.map((relation) =>
-      resolveOntologyEndpoints(relation, nodeKinds),
+      resolveOntologyEndpoints(relation, nodeKinds, mergedEdges, graph.id),
     ),
   ];
 
@@ -552,11 +555,30 @@ function resolveEndpoints(
 function resolveOntologyEndpoints(
   relation: OntologyRelation,
   nodeKinds: ReadonlyMap<string, NodeType>,
+  edgeKinds: Readonly<Record<string, EdgeRegistration>>,
+  graphId: string,
 ): OntologyRelation {
-  // Ontology endpoints are intentionally permissive — unresolved strings
-  // pass through as external IRIs (matching the existing runtime
-  // compiler behavior). Cross-graph kind validation only fires for edge
-  // endpoints, which require a NodeType reference.
+  if (
+    relation.metaEdge.name === META_EDGE_INVERSE_OF ||
+    relation.metaEdge.name === META_EDGE_IMPLIES
+  ) {
+    return {
+      ...relation,
+      from: resolveOntologyEdgeEndpoint(
+        relation.metaEdge.name,
+        relation.from,
+        edgeKinds,
+        graphId,
+      ),
+      to: resolveOntologyEdgeEndpoint(
+        relation.metaEdge.name,
+        relation.to,
+        edgeKinds,
+        graphId,
+      ),
+    };
+  }
+
   const from =
     typeof relation.from === "string" ?
       (nodeKinds.get(relation.from) ?? relation.from)
@@ -566,4 +588,20 @@ function resolveOntologyEndpoints(
       (nodeKinds.get(relation.to) ?? relation.to)
     : relation.to;
   return { ...relation, from, to };
+}
+
+function resolveOntologyEdgeEndpoint(
+  metaEdge: "inverseOf" | "implies",
+  endpoint: OntologyRelation["from"],
+  edgeKinds: Readonly<Record<string, EdgeRegistration>>,
+  graphId: string,
+): OntologyRelation["from"] {
+  if (typeof endpoint !== "string") return endpoint;
+  if (Object.hasOwn(edgeKinds, endpoint)) return endpoint;
+  if (isExternalIri(endpoint)) return endpoint;
+  throw new GraphExtensionUnresolvedOntologyEndpointError(
+    metaEdge,
+    endpoint,
+    graphId,
+  );
 }

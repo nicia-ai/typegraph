@@ -1,0 +1,45 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+Add the opt-in TypeGraph Identity Profile with typed store, transaction, and
+temporal-view APIs; configurable same-ID folding or assertion-only identity;
+kind-branded and hydrated member reads; idempotent assertion receipts; ended
+assertion retraction results; assertion history; interchange and graph
+merge propagation; identity-expanded traversal; cross-backend closure storage;
+and fail-fast capability errors for non-transactional D1 and neon-http drivers.
+
+Harden ontology construction and reload validation: propagate disjointness
+through interleaved subclass and equivalence closure, validate inverse endpoint
+compatibility and partner uniqueness, reject unresolved extension edge names in
+`inverseOf` and `implies` while retaining absolute external IRIs, recompute
+serialized closures, and deprecate the type-level `sameAs` and `differentFrom`
+factories in favor of Operational Identity.
+
+**Behavior changes.** Ontology and registry validation is now stricter and runs
+both at graph construction and when a persisted schema is loaded, so a few
+patterns earlier versions silently accepted now throw a `ConfigurationError`:
+duplicate ontology relations, hierarchical self-loops, disjointness
+contradictions (a kind disjoint with itself, with a subclass ancestor, a common
+subclass of two disjoint parents, or a kind declared both `equivalentTo` and
+`disjointWith`), multiple distinct `inverseOf` partners for one edge, inverse
+endpoint incompatibility, and unresolved extension edge names in `inverseOf`
+or `implies`. To
+recover, fix the graph definition; for a persisted extension document, correct
+the stored document before upgrading (or rewrite it through the previous minor,
+which still accepts it). Interchange documents remain readable across versions —
+`1.0` documents are still accepted on import, and exports write `2.0`.
+Trusted import rejects identity-enabled target stores (`identity_unsupported`)
+and identity-bearing input (`invalid_stream`) rather than silently dropping
+assertions or leaving the derived closure empty; use `importGraphStream` for an
+export that carries identity truth.
+Bundled SQLite and PostgreSQL backends provision the three identity relations,
+including effective custom `SqlSchema` names, before first-enable preflight. An
+already-enabled graph with missing identity storage instead fails with
+`IDENTITY_STORAGE_MISSING`; restore missing ledgers from backup, or recreate a
+missing derived closure and rebuild it before serving traffic.
+`create()`/`upsertById()` of a soft-deleted same-`(kind, id)` row now resurrects that
+row on every graph (properties replaced, validity window reset so `validFrom`
+becomes the resurrection instant) rather than leaking a storage constraint
+error. These are additive-strictness and semantics-pinning changes on top of
+the new opt-in profile, hence the minor bump.

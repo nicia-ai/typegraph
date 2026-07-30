@@ -45,11 +45,12 @@ import { enumerateAllEdges, enumerateAllNodes } from "./state-diff";
 import type {
   GraphBackend,
   GraphDef,
+  IdentityTransferAssertion,
   Store,
   TransactionBackend,
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
-import { storeBackend } from "./typegraph-internal";
+import { storeBackend, storeRuntime } from "./typegraph-internal";
 import { computeSchemaHash, serializeSchema } from "./typegraph-internal";
 import type { BaseVersion } from "./types";
 import { asBaseVersion } from "./types";
@@ -147,6 +148,7 @@ export async function computeContentComponent<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
   graph: G,
+  identityAssertions: readonly IdentityTransferAssertion[] = [],
 ): Promise<string> {
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
@@ -203,10 +205,18 @@ export async function computeContentComponent<G extends GraphDef>(
     }
   }
 
+  // Omit the `identity` key entirely when the assertion list is empty, mirroring
+  // the serializer's omit-when-empty convention (schema/serializer.ts). This keeps
+  // the content token byte-identical to the pre-identity shape for identity-disabled
+  // graphs and stores that carry identity config but zero live assertions — so a
+  // pre-upgrade branch does not spuriously fail the base@V precondition.
   return sha256Hex(
     canonicalizeProps({
       nodes: nodeDigest.sort((left, right) => byDigestEntry(left, right)),
       edges: edgeDigest.sort((left, right) => byDigestEntry(left, right)),
+      ...(identityAssertions.length === 0 ?
+        {}
+      : { identity: identityAssertions }),
     }),
     CONTENT_FINGERPRINT_BYTES,
   );
@@ -234,10 +244,16 @@ export async function computeBaseVersion<G extends GraphDef>(
       `${schemaComponent}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
     );
   }
-  const [schemaComponent, contentComponent] = await Promise.all([
+  const [schemaComponent, identityAssertions] = await Promise.all([
     computeSchemaComponent(store),
-    computeContentComponent(storeBackend(store), store.graphId, store.graph),
+    storeRuntime(store).identityAssertionsForInterchange("state"),
   ]);
+  const contentComponent = await computeContentComponent(
+    storeBackend(store),
+    store.graphId,
+    store.graph,
+    identityAssertions,
+  );
   return asBaseVersion(
     `${schemaComponent}${TOKEN_SEPARATOR}${contentComponent}`,
   );

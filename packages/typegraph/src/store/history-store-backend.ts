@@ -109,9 +109,11 @@ type HistoryStoreBackendMember = (typeof HISTORY_STORE_BACKEND_KEYS)[number];
 
 type UnsafeHistoryStoreBackendMember =
   | "clearGraph"
+  | "commitSchemaVersionWithPreflight"
   | "executeDdl"
   | "executeRaw"
   | "executeStatement"
+  | "ensureIdentityTables"
   | "repairContributions"
   | "schemaWriteTransaction"
   | "transaction"

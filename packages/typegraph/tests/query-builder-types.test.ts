@@ -25,8 +25,10 @@ import {
   type Store,
   type TypedEdgeCollection,
 } from "../src";
+import { ConfigurationError } from "../src/errors";
 import { buildKindRegistry } from "../src/registry";
 import type { Edge } from "../src/store/types";
+import { matchingObject } from "./test-utils";
 
 // ============================================================
 // Test Graph Definition
@@ -86,12 +88,94 @@ const graph = defineGraph({
 });
 
 const registry = buildKindRegistry(graph);
+const identityGraph = defineGraph({
+  id: "identity_type_test_graph",
+  nodes: graph.nodes,
+  edges: graph.edges,
+  ontology: [],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+function identityNotEnabled(): unknown {
+  return expect.objectContaining({
+    name: "ConfigurationError",
+    details: matchingObject({
+      code: "IDENTITY_NOT_ENABLED",
+      graphId: graph.id,
+    }),
+  });
+}
 
 // ============================================================
 // Type-Level Tests
 // ============================================================
 
 describe("Query Builder Type Safety", () => {
+  describe("Operational Identity capability", () => {
+    it("exposes identity traversal and facade only for enabled graph types", () => {
+      function assertIdentityGraphTypes(): void {
+        const disabledStore = undefined as unknown as Store<typeof graph>;
+        const enabledStore = undefined as unknown as Store<
+          typeof identityGraph
+        >;
+        disabledStore
+          .query()
+          .from("Person", "person")
+          // @ts-expect-error - disabled graphs cannot request identity expansion
+          .traverse("knows", "edge", { includeIdentityMembers: true });
+        // @ts-expect-error - disabled graph identity facade resolves to never
+        void disabledStore.identity.membersOf;
+
+        enabledStore
+          .query()
+          .from("Person", "person")
+          .traverse("knows", "edge", { includeIdentityMembers: true });
+        void enabledStore.identity.membersOf;
+      }
+      void assertIdentityGraphTypes;
+      expect(identityGraph.identity).toEqual({ sameIdAcrossKinds: "fold" });
+    });
+
+    it("infers identity capability for a compile-only builder", () => {
+      const identityRegistry = buildKindRegistry(identityGraph);
+
+      const builder = createQueryBuilder<typeof identityGraph>(
+        identityGraph.id,
+        identityRegistry,
+      )
+        .from("Person", "person")
+        .traverse("knows", "edge", { includeIdentityMembers: true })
+        .to("Person", "friend")
+        .select((context) => context.friend);
+      expect(builder.toAst().traversals[0]?.includeIdentityMembers).toBe(true);
+
+      expect(() =>
+        createQueryBuilder<typeof graph>(graph.id, registry, {
+          identityEnabled: true,
+        }),
+      ).toThrow(identityNotEnabled());
+    });
+
+    it("uses one error code for disabled builder identity features", () => {
+      expect(() =>
+        createQueryBuilder<typeof graph>(graph.id, registry, {
+          identitySameIdAcrossKinds: "fold",
+        }),
+      ).toThrow(identityNotEnabled());
+
+      const builder = createQueryBuilder<typeof graph>(graph.id, registry).from(
+        "Person",
+        "person",
+      );
+      const unsafeOptions = { includeIdentityMembers: true } as never;
+      const traverseWithIdentity = () =>
+        builder.traverse("knows", "edge", unsafeOptions);
+
+      expect(traverseWithIdentity).toThrow(ConfigurationError);
+      expect(traverseWithIdentity).toThrow(identityNotEnabled());
+    });
+  });
+
   describe("Node kind constraints", () => {
     it("accepts valid node kinds", () => {
       // These should compile without error

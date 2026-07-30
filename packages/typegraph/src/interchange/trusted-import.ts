@@ -40,6 +40,13 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
       { graphId: store.graphId },
     );
   }
+  if (store.graph.identity !== undefined) {
+    throw new TrustedImportError(
+      "Trusted import does not maintain Operational Identity assertions or closure.",
+      "identity_unsupported",
+      { graphId: store.graphId },
+    );
+  }
 
   const uniqueKinds = Object.values(store.graph.nodes)
     .filter((registration) => (registration.unique?.length ?? 0) > 0)
@@ -138,6 +145,12 @@ async function consumeTrustedChunks<G extends GraphDef>(
             "Trusted graph interchange stream emitted more than one header.",
           );
         }
+        if (chunk.header.identity !== undefined) {
+          throw invalidStream(
+            "Trusted graph interchange import does not support identity data. " +
+              "Use importGraphStream() for an identity export.",
+          );
+        }
         receivedHeader = true;
         break;
       }
@@ -190,6 +203,16 @@ async function consumeTrustedChunks<G extends GraphDef>(
         edgeCount += chunk.edges.length;
         break;
       }
+      case "identity": {
+        // The trusted session writes only the node and edge relations, so it
+        // has no way to persist assertions or materialize the derived closure.
+        // Refuse rather than drop identity truth from an identity-enabled
+        // export: `importGraph` / `importGraphStream` carry it correctly.
+        throw invalidStream(
+          "Trusted graph interchange import does not support identity assertions. " +
+            "Use importGraphStream() for an export that carries identity truth.",
+        );
+      }
     }
   }
 
@@ -241,10 +264,22 @@ export async function trustedImportGraphStream<G extends GraphDef>(
 }
 
 function* graphDataChunks(data: GraphData): Iterable<GraphInterchangeChunk> {
-  const { nodes, edges, ...header } = data;
-  yield { type: "header", header };
+  const { nodes, edges, identity, ...header } = data;
+  yield {
+    type: "header",
+    header:
+      identity === undefined ? header : (
+        {
+          ...header,
+          identity: { profile: identity.profile, mode: identity.mode },
+        }
+      ),
+  };
   yield { type: "nodes", nodes };
   yield { type: "edges", edges };
+  if (identity !== undefined) {
+    yield { type: "identity", assertions: identity.assertions };
+  }
 }
 
 /** In-memory convenience wrapper around {@link trustedImportGraphStream}. */

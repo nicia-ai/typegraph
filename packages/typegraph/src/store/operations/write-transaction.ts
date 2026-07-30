@@ -46,6 +46,38 @@ export type WriteTransactionContext = Readonly<{
   revisionSchema: SqlSchema;
 }>;
 
+interface WriteTransactionSession {
+  lock: GraphWriteLock | undefined;
+  wrote: boolean;
+}
+
+const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
+
+/**
+ * Binds nested typed mutations to one caller-owned transaction commit so a
+ * multi-operation `store.transaction(...)` advances its durable revision once.
+ */
+export async function withWriteTransactionSession<T>(
+  target: TransactionBackend,
+  ctx: WriteTransactionContext,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const session: WriteTransactionSession = {
+    lock: undefined,
+    wrote: false,
+  };
+  writeTransactionSessions.set(target, session);
+  try {
+    const result = await fn();
+    if (session.wrote && ctx.revisionTrackingEnabled && !ctx.historyEnabled) {
+      await advanceRevisionClock(target, ctx.revisionSchema, ctx.graphId, true);
+    }
+    return result;
+  } finally {
+    writeTransactionSessions.delete(target);
+  }
+}
+
 /**
  * Acquires and validates the transaction-scoped schema fence for one managed
  * Store write. This intentionally runs for every write: PostgreSQL releases
@@ -118,11 +150,21 @@ export function runInWriteTransaction<T>(
     "transaction" in backend && backend.capabilities.transactions;
   return runOptionallyInTransaction(backend, async (target) => {
     await lockSchemaVersionForStoreWrite(ctx, target);
-    const lock =
+    const session =
       ctx.historyEnabled || ctx.revisionTrackingEnabled ?
+        writeTransactionSessions.get(target)
+      : undefined;
+    const lock =
+      session?.lock ??
+      (ctx.historyEnabled || ctx.revisionTrackingEnabled ?
         await lockRecordedGraphWrite(target, ctx.graphId)
-      : uncapturedGraphWriteLock();
+      : uncapturedGraphWriteLock());
+    if (session !== undefined) session.lock = lock;
     const result = await fn(target, lock);
+    if (session !== undefined) {
+      session.wrote ||= options?.didWrite?.(result) ?? true;
+      return result;
+    }
     // History capture advances the same clock when it flushes its recorded
     // after-images. Live stores opt into revisions independently, so advance
     // only there and only after every row/sidecar write succeeded.

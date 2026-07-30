@@ -29,6 +29,7 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type * from "../identity";
 
 // ============================================================
 // Types & Schemas
@@ -54,6 +55,8 @@ export {
   GraphDataSourceSchema,
   type GraphInterchangeChunk,
   GraphInterchangeChunkSchema,
+  type IdentityInterchangeMode,
+  IdentityInterchangeModeSchema,
   type ImportError,
   ImportErrorSchema,
   type ImportOptions,
@@ -62,6 +65,10 @@ export {
   ImportResultSchema,
   type InterchangeEdge,
   InterchangeEdgeSchema,
+  type InterchangeIdentity,
+  type InterchangeIdentityAssertion,
+  InterchangeIdentityAssertionSchema,
+  InterchangeIdentitySchema,
   type InterchangeNode,
   InterchangeNodeSchema,
   type UnknownPropertyStrategy,
