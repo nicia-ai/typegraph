@@ -8,8 +8,16 @@
  * generation all get exercised on each backend.
  */
 import { beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { createStore, GraphAlgorithmConvergenceError } from "../../../src";
+import {
+  createStore,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  GraphAlgorithmConvergenceError,
+  type Store,
+} from "../../../src";
 import type {
   GraphBackend,
   TransactionBackend,
@@ -32,6 +40,30 @@ type AlgorithmFixture = Readonly<{
   dianaId: string;
   eveId: string;
 }>;
+
+const NODE_KIND_INITIALIZATION_KIND_COUNT = 30;
+const nodeKindInitializationNodes = Object.fromEntries(
+  Array.from({ length: NODE_KIND_INITIALIZATION_KIND_COUNT }, (_, index) => {
+    const kind = `BindKind${String(index).padStart(2, "0")}`;
+    return [
+      kind,
+      {
+        type: defineNode(kind, {
+          schema: z.object({ name: z.string() }),
+        }),
+      },
+    ];
+  }),
+);
+const nodeKindInitializationGraph = defineGraph({
+  id: "algorithm_node_kind_bind_budget",
+  nodes: nodeKindInitializationNodes,
+  edges: { connects: defineEdge("connects") },
+});
+const nodeKindInitializationKinds = Object.keys(
+  nodeKindInitializationNodes,
+).toSorted();
+type NodeKindInitializationStore = Store<typeof nodeKindInitializationGraph>;
 
 async function resolveAlgorithmFixture(
   store: IntegrationStore,
@@ -106,7 +138,11 @@ async function seedWeightedTriangle(store: IntegrationStore) {
   return { anna, bruno, clara };
 }
 
-function withBindLimit(backend: GraphBackend, maxBindParameters: number) {
+function withBindLimit(
+  backend: GraphBackend,
+  maxBindParameters: number,
+  onTemporaryStatement?: (sqlText: string) => void,
+) {
   return {
     ...backend,
     capabilities: { ...backend.capabilities, maxBindParameters },
@@ -125,7 +161,12 @@ function withBindLimit(backend: GraphBackend, maxBindParameters: number) {
           async executeTemporaryStatement(
             query: CompiledTemporaryStatementSql,
           ): Promise<void> {
-            assertWithinBindLimit(backend, query, maxBindParameters);
+            const sqlText = assertWithinBindLimit(
+              backend,
+              query,
+              maxBindParameters,
+            );
+            onTemporaryStatement?.(sqlText);
             await requireDefined(tx.executeTemporaryStatement)(query);
           },
         };
@@ -139,13 +180,36 @@ function assertWithinBindLimit(
   backend: GraphBackend,
   query: CompiledRowsSql | CompiledTemporaryStatementSql,
   maxBindParameters: number,
-): void {
-  const parameterCount = requireDefined(backend.compileSql)(query).params
-    .length;
-  if (parameterCount <= maxBindParameters) return;
-  throw new Error(
-    `Statement used ${parameterCount} bind parameters; limit is ${maxBindParameters}.`,
+): string {
+  const compiled = requireDefined(backend.compileSql)(query);
+  if (compiled.params.length > maxBindParameters) {
+    throw new Error(
+      `Statement used ${compiled.params.length} bind parameters; limit is ${maxBindParameters}.`,
+    );
+  }
+  return compiled.sql;
+}
+
+async function expectChunkedNodeKindInitialization(
+  backend: GraphBackend,
+  run: (store: NodeKindInitializationStore) => Promise<unknown>,
+): Promise<void> {
+  let initializationStatementCount = 0;
+  const constrainedStore = createStore(
+    nodeKindInitializationGraph,
+    withBindLimit(backend, 28, (sqlText) => {
+      if (
+        /^\s*INSERT INTO "typegraph_iterative_[^"]+"\s+\(graph_id, run_id, node_id, node_kind/u.test(
+          sqlText,
+        )
+      ) {
+        initializationStatementCount += 1;
+      }
+    }),
   );
+
+  await run(constrainedStore);
+  expect(initializationStatementCount).toBeGreaterThan(1);
 }
 
 function withoutTemporaryStatements(backend: GraphBackend): GraphBackend {
@@ -158,6 +222,84 @@ export function registerAlgorithmIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Graph Algorithms", () => {
+    it("chunks every iterative node-kind initializer within the bind budget", async () => {
+      const store = await context.createStore(nodeKindInitializationGraph);
+      const firstKind = requireDefined(nodeKindInitializationKinds[0]);
+      const lastKind = requireDefined(nodeKindInitializationKinds.at(-1));
+      const boundaryDuplicateKind = requireDefined(
+        nodeKindInitializationKinds[22],
+      );
+      const [firstNode] = await Promise.all([
+        requireDefined(store.nodes[firstKind]).create({ name: "First" }),
+        requireDefined(store.nodes[lastKind]).create({ name: "Last" }),
+      ]);
+
+      // With a 28-bind ceiling, the current initializer fits 23 kind binds.
+      // Repeating index 22 straddles that boundary unless normalization happens
+      // before chunking, which would violate the working table's primary key.
+      const selectedKinds = [
+        ...nodeKindInitializationKinds,
+        boundaryDuplicateKind,
+      ];
+      const expectedKinds = [firstKind, lastKind].toSorted();
+
+      await expectChunkedNodeKindInitialization(
+        store.backend,
+        async (scoped) => {
+          const memberships = await scoped.algorithms.weaklyConnectedComponents(
+            {
+              edges: ["connects"],
+              nodeKinds: selectedKinds,
+            },
+          );
+          expect(memberships.map((row) => row.kind).toSorted()).toEqual(
+            expectedKinds,
+          );
+        },
+      );
+
+      await expectChunkedNodeKindInitialization(
+        store.backend,
+        async (scoped) => {
+          const memberships = await scoped.algorithms.labelPropagation({
+            edges: ["connects"],
+            nodeKinds: selectedKinds,
+          });
+          expect(memberships.map((row) => row.kind).toSorted()).toEqual(
+            expectedKinds,
+          );
+        },
+      );
+
+      await expectChunkedNodeKindInitialization(
+        store.backend,
+        async (scoped) => {
+          const scores = await scoped.algorithms.pageRank({
+            edges: ["connects"],
+            nodeKinds: selectedKinds,
+          });
+          expect(scores.map((row) => row.kind).toSorted()).toEqual(
+            expectedKinds,
+          );
+        },
+      );
+
+      await expectChunkedNodeKindInitialization(
+        store.backend,
+        async (scoped) => {
+          const scores = await scoped.algorithms.personalizedPageRank({
+            dampingFactor: 0,
+            edges: ["connects"],
+            nodeKinds: selectedKinds,
+            seeds: [{ id: firstNode.id, kind: firstKind }],
+          });
+          expect(scores.map((row) => row.kind).toSorted()).toEqual(
+            expectedKinds,
+          );
+        },
+      );
+    });
+
     describe("core behaviors (seedKnowsChain: Alice→Bob→Charlie→Diana→Eve + Alice→Charlie)", () => {
       let ids: AlgorithmFixture;
 

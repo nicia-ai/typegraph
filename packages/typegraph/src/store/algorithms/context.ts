@@ -10,7 +10,6 @@ import {
   ConfigurationError,
   UnsupportedBackendCapabilityError,
 } from "../../errors";
-import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../query/compiler/recursive";
 import {
   type RecordedReadBinding,
@@ -23,9 +22,7 @@ import {
   type TemporalFilterOptions,
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
-import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { compareCodePoints } from "../../utils/compare";
 import type { AlgorithmCyclePolicy, TraversalDirection } from "./types";
 
 export const DEFAULT_ALGORITHM_MAX_HOPS = 10;
@@ -210,30 +207,6 @@ export function assertEdgeKinds(edges: readonly string[]): void {
       { edges },
     );
   }
-}
-
-/**
- * Compiles the induced-subgraph node filter for a working-table seeding
- * statement over the nodes-table alias `n`; `undefined` selects every kind.
- */
-export function compileNodeKindSeedFilter(
-  nodeKinds: readonly string[] | undefined,
-): SqlFragment {
-  if (nodeKinds === undefined) return sql`TRUE`;
-  return compileKindFilter(sql.raw("n.kind"), nodeKinds);
-}
-
-/**
- * Deduplicates and code-point-sorts an induced-subgraph kind selection so
- * compiled kind filters are deterministic across call sites and backends.
- */
-export function normalizeNodeKinds(
-  nodeKinds: readonly string[] | undefined,
-): readonly string[] | undefined {
-  if (nodeKinds === undefined) return undefined;
-  return [...new Set(nodeKinds)].toSorted((left, right) =>
-    compareCodePoints(left, right),
-  );
 }
 
 export function assertGraphAnalyticsSupported(

@@ -100,6 +100,11 @@ export function frontierIndexIdentifier(
 
 type WorkingTableCountRow = Readonly<{ count: number | string }>;
 
+type WorkingTableNodeSeedColumn = Readonly<{
+  name: string;
+  value: SqlFragment;
+}>;
+
 /** Counts this run's working-table rows; drivers may deliver bigint text. */
 export async function countWorkingTableRows(
   context: IterativeGraphRunContext,
@@ -112,6 +117,98 @@ export async function countWorkingTableRows(
     `),
   );
   return Number(rows[0]?.count ?? 0);
+}
+
+/**
+ * Populates an iterative working table from the visible induced subgraph.
+ * Explicit node-kind scopes are deterministic and split against the exact
+ * statement budget; an omitted scope keeps the single full-graph statement.
+ */
+export async function seedWorkingTableFromNodes(
+  context: IterativeGraphRunContext,
+  nodeKinds: readonly string[] | undefined,
+  seedColumns: readonly WorkingTableNodeSeedColumn[],
+): Promise<void> {
+  const additionalColumns =
+    seedColumns.length === 0 ?
+      sql``
+    : sql`, ${sql.join(
+        seedColumns.map((column) => sql.identifier(column.name)),
+        sql`, `,
+      )}`;
+  const additionalValues =
+    seedColumns.length === 0 ?
+      sql``
+    : sql`, ${sql.join(
+        seedColumns.map((column) => column.value),
+        sql`, `,
+      )}`;
+  const compileSeedStatement = (nodeKindFilter: SqlFragment): SqlFragment => {
+    return sql`
+      INSERT INTO ${context.workingTable}
+        (graph_id, run_id, node_id, node_kind${additionalColumns})
+      SELECT ${context.graphId}, ${context.runId}, n.id, n.kind${additionalValues}
+      FROM ${context.operation.schema.nodesTable} n
+      WHERE n.graph_id = ${context.graphId}
+        AND ${nodeKindFilter}
+        AND ${context.operation.nodeTemporalFilter}
+    `;
+  };
+
+  if (nodeKinds === undefined) {
+    const statement = compileSeedStatement(sql`TRUE`);
+    assertStatementFitsBindBudget(context, statement);
+    await context.executeTemporary(statement);
+    return;
+  }
+
+  const normalizedKinds = [...new Set(nodeKinds)].toSorted((left, right) =>
+    compareCodePoints(left, right),
+  );
+  if (normalizedKinds.length === 0) return;
+
+  const fixedStatement = compileSeedStatement(sql`TRUE`);
+  const parameterLimit =
+    context.operation.backend.capabilities.maxBindParameters ??
+    DEFAULT_MAX_BIND_PARAMETERS;
+  const fixedParameterCount = countBindParameters(fixedStatement);
+  const kindChunkSize = parameterLimit - fixedParameterCount;
+  if (kindChunkSize < 1) {
+    throw new ConfigurationError(
+      "An iterative graph operation cannot fit its node-kind initialization within the backend bind-parameter limit.",
+      { fixedParameterCount, parameterLimit },
+    );
+  }
+
+  for (const kindChunk of chunkValues(normalizedKinds, kindChunkSize)) {
+    await context.executeTemporary(
+      compileSeedStatement(compileKindFilter(sql.raw("n.kind"), kindChunk)),
+    );
+  }
+}
+
+function assertStatementFitsBindBudget(
+  context: IterativeGraphRunContext,
+  statement: SqlFragment,
+): void {
+  const parameterLimit =
+    context.operation.backend.capabilities.maxBindParameters ??
+    DEFAULT_MAX_BIND_PARAMETERS;
+  const fixedParameterCount = countBindParameters(statement);
+  if (fixedParameterCount <= parameterLimit) return;
+  throw new ConfigurationError(
+    "An iterative graph operation cannot fit its node-kind initialization within the backend bind-parameter limit.",
+    { fixedParameterCount, parameterLimit },
+  );
+}
+
+function countBindParameters(fragment: SqlFragment): number {
+  return fragment.chunks.reduce(
+    (count, chunk) =>
+      count +
+      (chunk.kind === "parameter" || chunk.kind === "placeholder" ? 1 : 0),
+    0,
+  );
 }
 
 export type IterativeGraphPlan<
