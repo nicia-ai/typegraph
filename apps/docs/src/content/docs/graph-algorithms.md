@@ -290,6 +290,7 @@ const globalScores = await store.algorithms.pageRank({
   edges: ["knows", "cites"],
   nodeKinds: ["Person", "Paper"],
   direction: "out",
+  topK: 20,
 });
 
 const relatedToAlice = await store.algorithms.personalizedPageRank({
@@ -311,6 +312,7 @@ const relatedToAlice = await store.algorithms.personalizedPageRank({
 | `dampingFactor` | `number` in `[0, 1)` | `0.85` | Probability of following an edge rather than teleporting |
 | `tolerance` | positive finite `number` | `1e-8` | Maximum per-node score change accepted as convergence |
 | `maxIterations` | positive integer | `1000` | Power-iteration backstop; exceeding it throws |
+| `topK` | positive safe integer | all scores | Return the first K scores after deterministic ordering |
 | `workingMemory` | PostgreSQL memory string | inherited | Same transaction-scoped override described above |
 
 Personalized seeds are qualified by the full `(kind, id)` identity so same-ID
@@ -332,6 +334,12 @@ requested numerical tolerance rather than bit-for-bit. Exact score ties use
 portable binary `(id, kind)` ordering. As with WCC, an exhausted iteration
 budget throws `GraphAlgorithmConvergenceError`—partial scores are never
 returned.
+
+`topK` bounds only result extraction: TypeGraph applies the limit in SQL after
+ordering by descending score and the deterministic tie-breaker, so rows beyond
+K do not reach the driver. PageRank still initializes and iterates over the
+entire visible induced graph; `topK` does not make the graph computation itself
+partial.
 
 Convergence needs roughly `ln(1/tolerance) / ln(1/dampingFactor)` rounds in the
 worst case. With the default `tolerance` and `maxIterations`, damping factors
@@ -409,6 +417,7 @@ const memberships =
   await store.algorithms.weaklyConnectedComponents({
     edges: ["knows", "worksAt"],
     nodeKinds: ["Person", "Company"], // optional; all kinds by default
+    minComponentSize: 2, // optional; singleton components are omitted
     maxIterations: 1000, // default
   });
 // [{ id, kind, componentId, componentKind, size }, ...]
@@ -419,6 +428,13 @@ binary ordering. Results and representatives are therefore deterministic on
 SQLite and PostgreSQL even when the PostgreSQL database uses a linguistic
 default collation. Edges are always treated as undirected—WCC has no
 `direction` option.
+
+`minComponentSize` is an inclusive positive safe-integer filter: a value of
+`2` returns every member of components containing two or more nodes, while a
+value of `1` preserves the default result. TypeGraph computes component sizes
+and filters memberships in extraction SQL, before rows reach the driver. The
+full visible induced graph is still processed to convergence, so the option
+bounds result materialization rather than WCC computation.
 
 WCC is iterative and runs multiple SQL rounds in one repeatable snapshot. It
 requires `backend.capabilities.graphAnalytics?.supported === true`; built-in

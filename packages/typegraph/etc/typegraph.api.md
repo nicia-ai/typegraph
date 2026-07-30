@@ -4123,6 +4123,7 @@ export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions & Ite
     dampingFactor?: number;
     tolerance?: number;
     maxIterations?: number;
+    topK?: number;
 }>;
 
 // @public
@@ -6525,6 +6526,7 @@ export type WeaklyConnectedComponentMembership = Readonly<{
 export type WeaklyConnectedComponentsOptions<G extends GraphDef> = TemporalAlgorithmOptions & IterativeMemoryOptions & Readonly<{
     edges: readonly EdgeKinds<G>[];
     nodeKinds?: readonly NodeKinds<G>[];
+    minComponentSize?: number;
     maxIterations?: number;
 }>;
 

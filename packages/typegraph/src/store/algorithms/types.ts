@@ -282,6 +282,11 @@ export type WeaklyConnectedComponentsOptions<G extends GraphDef> =
       edges: readonly EdgeKinds<G>[];
       /** Optional node kinds defining the induced subgraph to analyze. */
       nodeKinds?: readonly NodeKinds<G>[];
+      /**
+       * Return only components containing at least this many nodes. Must be a
+       * positive safe integer.
+       */
+      minComponentSize?: number;
       /** Maximum label-propagation rounds before throwing. Defaults to 1000. */
       maxIterations?: number;
     }>;
@@ -363,6 +368,11 @@ export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions &
     tolerance?: number;
     /** Maximum power-iteration rounds before throwing. Defaults to `1000`. */
     maxIterations?: number;
+    /**
+     * Return only the first this many scores after deterministic ordering.
+     * Must be a positive safe integer.
+     */
+    topK?: number;
   }>;
 
 export type InternalPageRankOptions<G extends GraphDef> =

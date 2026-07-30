@@ -6,6 +6,7 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
+  assertPositiveSafeIntegerOption,
   type InternalTraversalOptions,
   pickTemporalOptions,
   resolveMaxIterations,
@@ -42,6 +43,7 @@ type ResolvedPageRankOptions = Readonly<{
   tolerance: number;
   maxIterations: number;
   nodeKinds: readonly string[] | undefined;
+  topK: number | undefined;
 }>;
 
 type PageRankAlgorithm = "pageRank" | "personalizedPageRank";
@@ -114,7 +116,8 @@ function executePageRankOperation<G extends GraphDef>(
     hasConverged(state) {
       return state.maximumChange <= resolved.tolerance;
     },
-    extractResult: extractScores,
+    extractResult: (context, state) =>
+      extractScores(context, state, resolved.topK),
   });
 }
 
@@ -142,6 +145,8 @@ function resolvePageRankOptions<G extends GraphDef>(
     );
   }
 
+  assertPositiveSafeIntegerOption(options.topK, algorithm, "topK");
+
   return {
     dampingFactor,
     tolerance,
@@ -151,6 +156,7 @@ function resolvePageRankOptions<G extends GraphDef>(
       algorithm,
     ),
     nodeKinds: options.nodeKinds,
+    topK: options.topK,
   };
 }
 
@@ -542,16 +548,19 @@ async function readMaximumChange(
 async function extractScores(
   context: IterativeGraphRunContext,
   state: IterationState,
+  topK: number | undefined,
 ): Promise<readonly PageRankScore[]> {
   const score = sql.identifier(state.activeScoreColumn);
   const nodeId = context.operation.ctx.dialect.binaryText(sql`node_id`);
   const nodeKind = context.operation.ctx.dialect.binaryText(sql`node_kind`);
+  const limitClause = topK === undefined ? sql.empty() : sql`LIMIT ${topK}`;
   const rows = await context.backend.execute<ScoreRow>(
     asCompiledRowsSql(sql`
       SELECT node_id, node_kind, ${score} AS score
       FROM ${context.workingTable}
       WHERE graph_id = ${context.graphId} AND run_id = ${context.runId}
       ORDER BY ${score} DESC, ${nodeId}, ${nodeKind}
+      ${limitClause}
     `),
   );
   return rows.map((row) => ({

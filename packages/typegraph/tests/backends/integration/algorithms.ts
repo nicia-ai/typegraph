@@ -889,6 +889,81 @@ export function registerAlgorithmIntegrationTests(
         ]);
       });
 
+      it("filters whole components at inclusive size boundaries", async () => {
+        const store = context.getStore();
+        const [largeA, largeB, largeC, pairA, pairB, singleton] =
+          await Promise.all([
+            store.nodes.Person.create(
+              { name: "Large component A" },
+              { id: "wcc-size-a" },
+            ),
+            store.nodes.Person.create(
+              { name: "Large component B" },
+              { id: "wcc-size-b" },
+            ),
+            store.nodes.Person.create(
+              { name: "Large component C" },
+              { id: "wcc-size-c" },
+            ),
+            store.nodes.Person.create(
+              { name: "Pair component A" },
+              { id: "wcc-size-d" },
+            ),
+            store.nodes.Person.create(
+              { name: "Pair component B" },
+              { id: "wcc-size-e" },
+            ),
+            store.nodes.Person.create(
+              { name: "Singleton component" },
+              { id: "wcc-size-f" },
+            ),
+          ]);
+        await Promise.all([
+          store.edges.knows.create(largeA, largeB, {}),
+          store.edges.knows.create(largeB, largeC, {}),
+          store.edges.knows.create(pairA, pairB, {}),
+        ]);
+
+        const filtered = await store.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          minComponentSize: 2,
+        });
+        expect(filtered.map((row) => [row.id, row.size])).toEqual([
+          ["wcc-size-a", 3],
+          ["wcc-size-b", 3],
+          ["wcc-size-c", 3],
+          ["wcc-size-d", 2],
+          ["wcc-size-e", 2],
+        ]);
+
+        const unbounded = await store.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+        });
+        expect(unbounded.at(-1)).toEqual({
+          id: singleton.id,
+          kind: "Person",
+          componentId: singleton.id,
+          componentKind: "Person",
+          size: 1,
+        });
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            minComponentSize: 1,
+          }),
+        ).resolves.toEqual(unbounded);
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            minComponentSize: Number.MAX_SAFE_INTEGER,
+          }),
+        ).resolves.toEqual([]);
+      });
+
       it("preserves synchronous convergence across edge-kind chunks", async () => {
         const store = context.getStore();
         const [alpha, beta, gamma] = await Promise.all([
@@ -1306,6 +1381,105 @@ export function registerAlgorithmIntegrationTests(
         expect(byId.get(alpha.id)).toBeCloseTo(1 / normalization, 10);
         expect(byId.get(beta.id)).toBeCloseTo(0.85 / normalization, 10);
         expect(byId.get(gamma.id)).toBeCloseTo(0.85 ** 2 / normalization, 10);
+      });
+
+      it("applies topK after deterministic tie ordering", async () => {
+        const store = context.getStore();
+        const [alpha, beta] = await Promise.all([
+          store.nodes.Person.create(
+            { name: "Rank tie alpha" },
+            { id: "rank-tie-a" },
+          ),
+          store.nodes.Person.create(
+            { name: "Rank tie beta" },
+            { id: "rank-tie-b" },
+          ),
+          store.nodes.Person.create(
+            { name: "Rank tie gamma" },
+            { id: "rank-tie-c" },
+          ),
+        ]);
+
+        const unbounded = await store.algorithms.pageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          dampingFactor: 0,
+        });
+        await expect(
+          store.algorithms.pageRank({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            dampingFactor: 0,
+            topK: Number.MAX_SAFE_INTEGER,
+          }),
+        ).resolves.toEqual(unbounded);
+        const topTwo = await store.algorithms.pageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          dampingFactor: 0,
+          topK: 2,
+        });
+        expect(topTwo).toEqual(unbounded.slice(0, 2));
+        expect(topTwo.map((row) => row.id)).toEqual([
+          "rank-tie-a",
+          "rank-tie-b",
+        ]);
+
+        const personalized = await store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          dampingFactor: 0,
+          seeds: [
+            { id: alpha.id, kind: "Person" },
+            { id: beta.id, kind: "Person" },
+          ],
+          topK: 1,
+        });
+        expect(personalized).toEqual([
+          { id: alpha.id, kind: "Person", score: 0.5 },
+        ]);
+      });
+
+      it("rejects invalid bounded-result options with typed errors", async () => {
+        const store = context.getStore();
+        const invalidBounds = [
+          0,
+          -1,
+          1.5,
+          Number.NaN,
+          Number.POSITIVE_INFINITY,
+          Number.MAX_SAFE_INTEGER + 1,
+        ];
+
+        for (const topK of invalidBounds) {
+          await expect(
+            store.algorithms.pageRank({ edges: ["knows"], topK }),
+          ).rejects.toMatchObject({
+            code: "CONFIGURATION_ERROR",
+            details: { topK },
+          });
+          await expect(
+            store.algorithms.personalizedPageRank({
+              edges: ["knows"],
+              seeds: [{ id: "unused", kind: "Person" }],
+              topK,
+            }),
+          ).rejects.toMatchObject({
+            code: "CONFIGURATION_ERROR",
+            details: { topK },
+          });
+        }
+        for (const minComponentSize of invalidBounds) {
+          await expect(
+            store.algorithms.weaklyConnectedComponents({
+              edges: ["knows"],
+              minComponentSize,
+            }),
+          ).rejects.toMatchObject({
+            code: "CONFIGURATION_ERROR",
+            details: { minComponentSize },
+          });
+        }
       });
 
       it("preserves physical-edge and self-loop weights across chunking", async () => {
