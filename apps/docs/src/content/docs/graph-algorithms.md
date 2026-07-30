@@ -425,8 +425,13 @@ requires `backend.capabilities.graphAnalytics?.supported === true`; built-in
 SQLite and PostgreSQL connections that permit temporary tables advertise
 support. Cloudflare D1, Durable Objects SQLite, `neon-http`, and other
 restricted backends throw `UnsupportedBackendCapabilityError` before temporary
-state is created. If propagation has not converged after `maxIterations`, TypeGraph throws
-`GraphAlgorithmConvergenceError` rather than returning a partial partition.
+state is created. PostgreSQL checks the execution environment again when it
+creates the working table because a read replica or a role without `TEMP` can
+reject it even when the backend's static capability is true. Those failures are
+also reported as `UnsupportedBackendCapabilityError`; its `cause` preserves the
+original database error. If propagation has not converged after
+`maxIterations`, TypeGraph throws `GraphAlgorithmConvergenceError` rather than
+returning a partial partition.
 
 Each round expands only the indexed frontier of nodes whose label changed in
 the previous round. Candidate labels remain staged until every edge-kind chunk

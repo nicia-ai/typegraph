@@ -8,6 +8,7 @@ import {
   CompilerInvariantError,
   ConfigurationError,
   GraphAlgorithmConvergenceError,
+  UnsupportedBackendCapabilityError,
 } from "../../errors";
 import {
   compileKindFilter,
@@ -27,6 +28,7 @@ import {
 import { compareCodePoints, compareStrings } from "../../utils/compare";
 import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
+import { postgresTemporaryTableUnavailableSqlState } from "../../utils/sql-errors";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { resolveReadSchema, resolveTemporalOptions } from "./context";
 import type { PathNode, TraversalDirection } from "./types";
@@ -306,7 +308,35 @@ export async function runIterativeGraphOperation<
         await context.executeTemporary(workingMemoryStatement);
       }
     }
-    await context.executeTemporary(plan.createWorkingTable(context));
+    try {
+      await context.executeTemporary(plan.createWorkingTable(context));
+    } catch (error) {
+      const sqlState =
+        ctx.backend.dialect === "postgres" ?
+          postgresTemporaryTableUnavailableSqlState(error)
+        : undefined;
+      if (sqlState === undefined) throw error;
+
+      const capabilityError = new UnsupportedBackendCapabilityError(
+        plan.algorithm,
+        "graphAnalytics",
+        {
+          dialect: ctx.backend.dialect,
+          supported: false,
+          requirement: "transaction-local temporary tables",
+          sqlState,
+        },
+        "Run graph analytics on a writable PostgreSQL primary with a role that has the TEMP privilege.",
+      );
+      // Match the non-enumerable Error.cause property created by the native
+      // Error constructor without widening the public capability-error API.
+      Object.defineProperty(capabilityError, "cause", {
+        configurable: true,
+        value: error,
+        writable: true,
+      });
+      throw capabilityError;
+    }
     let operationFailure: CapturedFailure | undefined;
     try {
       let state = await plan.initialize(context);

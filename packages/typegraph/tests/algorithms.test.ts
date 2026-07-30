@@ -204,6 +204,35 @@ function createCountingBackend(
   };
 }
 
+function createPostgresTemporaryStatementFailureBackend(
+  backend: GraphBackend,
+  failure: Error,
+): GraphBackend {
+  return {
+    ...backend,
+    dialect: "postgres",
+    transaction<T>(
+      fn: (tx: TransactionBackend) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> {
+      return backend.transaction(async (tx) => {
+        const failingTransaction: TransactionBackend = {
+          ...tx,
+          dialect: "postgres",
+          executeTemporaryStatement(): Promise<void> {
+            return Promise.reject(failure);
+          },
+        };
+        return fn(failingTransaction);
+      }, options);
+    },
+  };
+}
+
+function postgresError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
 function personMembership(id: string, labelId: string) {
   return { id, kind: "Person", labelId, labelKind: "Person" };
 }
@@ -237,6 +266,134 @@ describe("store.algorithms", () => {
     backend = createTestBackend();
     store = createStore(testGraph, backend);
     ids = await seed(store);
+  });
+
+  describe("PostgreSQL temporary-table capability failures", () => {
+    const failureCases = [
+      {
+        environment: "read-only execution",
+        sqlState: "25006",
+        createFailure: () =>
+          postgresError(
+            "cannot execute CREATE TABLE in a read-only transaction",
+            "25006",
+          ),
+      },
+      {
+        environment: "read-only execution behind a driver wrapper",
+        sqlState: "25006",
+        createFailure: () =>
+          Object.assign(new Error("Failed query: CREATE TEMP TABLE"), {
+            cause: postgresError(
+              "cannot execute CREATE TABLE in a read-only transaction",
+              "25006",
+            ),
+          }),
+      },
+      {
+        environment: "a role without TEMP privilege",
+        sqlState: "42501",
+        createFailure: () =>
+          postgresError(
+            "permission denied to create temporary tables",
+            "42501",
+          ),
+      },
+      {
+        environment: "a role without TEMP privilege behind a driver wrapper",
+        sqlState: "42501",
+        createFailure: () =>
+          Object.assign(new Error("Failed query: CREATE TEMP TABLE"), {
+            cause: postgresError(
+              "permission denied to create temporary tables",
+              "42501",
+            ),
+          }),
+      },
+    ] as const;
+
+    const algorithmCases = [
+      {
+        operation: "weaklyConnectedComponents",
+        run: (target: Store<TestGraph>) =>
+          target.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
+      },
+      {
+        operation: "labelPropagation",
+        run: (target: Store<TestGraph>) =>
+          target.algorithms.labelPropagation({ edges: ["knows"] }),
+      },
+      {
+        operation: "pageRank",
+        run: (target: Store<TestGraph>) =>
+          target.algorithms.pageRank({ edges: ["knows"] }),
+      },
+      {
+        operation: "personalizedPageRank",
+        run: (target: Store<TestGraph>) =>
+          target.algorithms.personalizedPageRank({
+            edges: ["knows"],
+            seeds: [{ id: ids.alice, kind: "Person" }],
+          }),
+      },
+    ] as const;
+
+    for (const failureCase of failureCases) {
+      for (const algorithmCase of algorithmCases) {
+        it(`translates ${failureCase.environment} for ${algorithmCase.operation}`, async () => {
+          const failure = failureCase.createFailure();
+          const failingStore = createStore(
+            testGraph,
+            createPostgresTemporaryStatementFailureBackend(backend, failure),
+          );
+
+          await expect(algorithmCase.run(failingStore)).rejects.toMatchObject({
+            code: "UNSUPPORTED_BACKEND_CAPABILITY",
+            cause: failure,
+            details: {
+              operation: algorithmCase.operation,
+              capability: "graphAnalytics",
+              dialect: "postgres",
+              supported: false,
+              requirement: "transaction-local temporary tables",
+              sqlState: failureCase.sqlState,
+            },
+          });
+        });
+      }
+    }
+
+    it("preserves unrelated PostgreSQL failures during table creation", async () => {
+      const failure = postgresError("connection failure", "08006");
+      const failingStore = createStore(
+        testGraph,
+        createPostgresTemporaryStatementFailureBackend(backend, failure),
+      );
+
+      await expect(
+        failingStore.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+        }),
+      ).rejects.toBe(failure);
+    });
+
+    it("preserves permission failures outside table creation", async () => {
+      const failure = postgresError(
+        "permission denied to set parameter",
+        "42501",
+      );
+      const failingStore = createStore(
+        testGraph,
+        createPostgresTemporaryStatementFailureBackend(backend, failure),
+      );
+
+      await expect(
+        failingStore.algorithms.pageRank({
+          edges: ["knows"],
+          workingMemory: "64MB",
+        }),
+      ).rejects.toBe(failure);
+    });
   });
 
   // --------------------------------------------------------------

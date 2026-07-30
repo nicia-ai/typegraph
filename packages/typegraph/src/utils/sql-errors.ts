@@ -38,6 +38,15 @@ const POSTGRES_UNDEFINED_RELATION_PATTERN =
 const POSTGRES_UNDEFINED_TABLE_CODE = "42P01";
 const POSTGRES_UNIQUE_VIOLATION_CODE = "23505";
 
+/** PostgreSQL failures that mean a temporary table cannot be created here. */
+export type PostgresTemporaryTableUnavailableSqlState = "25006" | "42501";
+
+function isPostgresTemporaryTableUnavailableSqlState(
+  value: unknown,
+): value is PostgresTemporaryTableUnavailableSqlState {
+  return value === "25006" || value === "42501";
+}
+
 /**
  * Yields an error and each error reachable by following `.cause`,
  * outermost first. `seen` guards the pathological cyclic-cause case so a
@@ -201,6 +210,25 @@ export function isPostgresUniqueViolationError(error: unknown): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Returns the PostgreSQL SQLSTATE that prevented temporary-table creation.
+ *
+ * Callers must use this only at a `CREATE TEMP TABLE` execution seam: 42501
+ * is otherwise a generic permission failure, and translating it elsewhere
+ * would hide a different authorization problem. The cause walk handles both
+ * direct driver errors and wrappers such as DrizzleQueryError.
+ */
+export function postgresTemporaryTableUnavailableSqlState(
+  error: unknown,
+): PostgresTemporaryTableUnavailableSqlState | undefined {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (isPostgresTemporaryTableUnavailableSqlState(code)) return code;
+  }
+  return undefined;
 }
 
 /**
