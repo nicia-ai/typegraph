@@ -46,6 +46,13 @@ const WRITE_OPS = 20;
 const BULK_ASSERT_OPS = 500;
 const READ_OPS = 50;
 const HISTORICAL_READ_OPS = 10;
+const TRAVERSAL_GROWTH_OPS = 3;
+/**
+ * Source-row counts for the identity-expanded historical traversal. Doubling
+ * the count is what makes the reconstruction term's growth visible, so these
+ * must stay a 1:2 pair.
+ */
+const TRAVERSAL_GROWTH_SIZES = [125, 250] as const;
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -204,6 +211,82 @@ async function seedIdentityStore(backend: GraphBackend) {
   return { graph, store };
 }
 
+/**
+ * Narrow-edge fixture for the identity-expanded historical traversal: every
+ * `Person` row is a source row, and a single `knows` edge hangs off an asserted
+ * alias of the first one. The historical reconstruction therefore runs against
+ * `sourceRows` source rows over a graph of the same size, which is the
+ * (source rows x graph size) term the compiler's historical branch carries.
+ */
+async function seedTraversalGrowthQuery(
+  backend: GraphBackend,
+  sourceRows: number,
+) {
+  const graph = buildIdentityGraph(`perf_identity_traversal_${sourceRows}`);
+  const [store] = await createStoreWithSchema(graph, backend);
+  await store.nodes.Person.bulkCreate(
+    Array.from({ length: sourceRows }, (_, index) => ({
+      props: { name: `source-${index}` },
+      id: `source-${index}`,
+    })),
+  );
+  const alias = await store.nodes.Author.create(
+    { penName: "traversal-alias" },
+    { id: "traversal-alias" },
+  );
+  await store.identity.assertSame({ kind: "Person", id: "source-0" }, alias);
+  await store.edges.knows.create(
+    alias,
+    { kind: "Person", id: "source-1" },
+    {},
+    { id: "traversal-growth-edge" },
+  );
+  return store
+    .asOf(new Date().toISOString())
+    .query()
+    .from("Person", "person")
+    .traverse("knows", "edge", {
+      expand: "none",
+      includeIdentityMembers: true,
+    })
+    .to("Person", "friend")
+    .select((context) => context.friend.id);
+}
+
+/**
+ * Seeds a second, history-enabled store so recorded-time class reads have a
+ * recorded relation to reconstruct over. Same shape and seed size as
+ * {@link seedIdentityStore} so the two historical lanes are comparable.
+ */
+async function seedRecordedIdentityStore(backend: GraphBackend) {
+  const graph = buildIdentityGraph("perf_identity_recorded");
+  const [store] = await createStoreWithSchema(graph, backend, {
+    history: true,
+  });
+  await store.nodes.Person.bulkCreate(
+    Array.from({ length: SEED_ROWS_PER_KIND }, (_, index) => ({
+      props: { name: `person-${index}` },
+      id: `person-${index}`,
+    })),
+  );
+  await store.nodes.Author.bulkCreate(
+    Array.from({ length: SEED_ROWS_PER_KIND }, (_, index) => ({
+      props: { penName: `author-${index}` },
+      id: `author-${index}`,
+    })),
+  );
+  const anchor = await store.nodes.Person.create(
+    { name: "recorded-anchor" },
+    { id: "read-anchor" },
+  );
+  const alias = await store.nodes.Author.create(
+    { penName: "recorded-alias" },
+    { id: "read-alias" },
+  );
+  await store.identity.assertSame(anchor, alias);
+  return { store, anchor };
+}
+
 async function main(argv: readonly string[]): Promise<void> {
   const options = parseCliOptions(argv);
   const resources = await createResources(options.backend);
@@ -351,12 +434,44 @@ async function main(argv: readonly string[]): Promise<void> {
         }
       },
     );
+    // Valid-time reconstruction: this store carries no recorded history, so the
+    // fixed point is rebuilt from the live rows' validity windows and
+    // created_at/deleted_at lifecycle, not from a recorded relation.
     await record(
-      "identity:historical-class-read",
+      "identity:valid-time-class-read",
       HISTORICAL_READ_OPS,
       async () => async () => {
         for (let index = 0; index < HISTORICAL_READ_OPS; index += 1) {
           await store.asOf(historicalInstant).identity.membersOf(anchor);
+        }
+      },
+    );
+
+    // Recorded-time reconstruction: a history-enabled store, read through
+    // asOfRecorded, so the fixed point is rebuilt over the recorded node and
+    // assertion relations. This is the shape a valid-time read cannot exercise.
+    const { store: recordedStore, anchor: recordedAnchor } =
+      await seedRecordedIdentityStore(resources.backend);
+    const recordedInstant = await recordedStore.recordedNow();
+    if (recordedInstant === undefined) {
+      throw new Error("Recorded coordinate unavailable on a history store");
+    }
+    const recordedMembers = await recordedStore
+      .asOfRecorded(recordedInstant)
+      .identity.membersOf(recordedAnchor);
+    if (recordedMembers.length !== 2) {
+      throw new Error(
+        `Recorded class read returned ${recordedMembers.length} members, expected 2`,
+      );
+    }
+    await record(
+      "identity:recorded-class-read",
+      HISTORICAL_READ_OPS,
+      async () => async () => {
+        for (let index = 0; index < HISTORICAL_READ_OPS; index += 1) {
+          await recordedStore
+            .asOfRecorded(recordedInstant)
+            .identity.membersOf(recordedAnchor);
         }
       },
     );
@@ -385,6 +500,61 @@ async function main(argv: readonly string[]): Promise<void> {
         }
       },
     );
+
+    // Same traversal pinned to a valid-time coordinate: the planner replaces
+    // the materialized closure join with the historical reconstruction CTE, so
+    // this is the committed reproduction of the identity-traversal cost shape
+    // that the compiler's historical branch carries.
+    const traversalInstant = new Date().toISOString();
+    const expandedAsOfQuery = store
+      .asOf(traversalInstant)
+      .query()
+      .from("Person", "person")
+      .whereNode("person", (node) => node.id.eq(anchor.id))
+      .traverse("knows", "edge", {
+        expand: "none",
+        includeIdentityMembers: true,
+      })
+      .to("Person", "friend")
+      .select((context) => context.friend.id);
+    const expandedAsOfRows = await expandedAsOfQuery.execute();
+    if (expandedAsOfRows.length === 0) {
+      throw new Error("Historical identity traversal returned no rows");
+    }
+    await record(
+      "identity:expanded-traversal-asof",
+      HISTORICAL_READ_OPS,
+      async () => async () => {
+        for (let index = 0; index < HISTORICAL_READ_OPS; index += 1) {
+          await expandedAsOfQuery.execute();
+        }
+      },
+    );
+
+    // Growth points for the same historical branch with every row acting as a
+    // source row. Reported as a pair so the reconstruction term's scaling is
+    // reproducible from committed code rather than quoted from a lost fixture.
+    for (const sourceRows of TRAVERSAL_GROWTH_SIZES) {
+      const growthQuery = await seedTraversalGrowthQuery(
+        resources.backend,
+        sourceRows,
+      );
+      const growthRows = await growthQuery.execute();
+      if (growthRows.length === 0) {
+        throw new Error(
+          `Traversal growth fixture (n=${sourceRows}) returned no rows`,
+        );
+      }
+      await record(
+        `identity:expanded-traversal-asof-n${sourceRows}`,
+        TRAVERSAL_GROWTH_OPS,
+        async () => async () => {
+          for (let index = 0; index < TRAVERSAL_GROWTH_OPS; index += 1) {
+            await growthQuery.execute();
+          }
+        },
+      );
+    }
 
     await record("identity:import", 150, async () => {
       counter += 1;
