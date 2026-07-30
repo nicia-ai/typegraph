@@ -586,14 +586,59 @@ function computeEquivalenceSets(
   const result = new Map<string, ReadonlySet<string>>();
   for (const members of classes.values()) {
     for (const member of members) {
-      // Exclude self from equivalence set
-      const others = new Set(members);
-      others.delete(member);
-      result.set(member, others);
+      result.set(member, createEquivalenceSetView(members, member));
     }
   }
 
   return result;
+}
+
+/**
+ * Presents one shared equivalence class as an immutable set that excludes the
+ * member being queried. Copying the class once per member makes an N-member
+ * class consume O(N²) storage even though every view differs by one value.
+ */
+function createEquivalenceSetView(
+  members: ReadonlySet<string>,
+  excludedMember: string,
+): ReadonlySet<string> {
+  const view: ReadonlySet<string> = {
+    get size() {
+      return members.size - (members.has(excludedMember) ? 1 : 0);
+    },
+    has(value) {
+      return value !== excludedMember && members.has(value);
+    },
+    *entries(): Generator<[string, string], undefined, unknown> {
+      for (const value of members) {
+        if (value !== excludedMember) yield [value, value];
+      }
+      return undefined;
+    },
+    *keys(): Generator<string, undefined, unknown> {
+      for (const value of members) {
+        if (value !== excludedMember) yield value;
+      }
+      return undefined;
+    },
+    *values(): Generator<string, undefined, unknown> {
+      for (const value of members) {
+        if (value !== excludedMember) yield value;
+      }
+      return undefined;
+    },
+    forEach(callbackFunction, thisArgument?: unknown) {
+      for (const value of members) {
+        if (value !== excludedMember) {
+          callbackFunction.call(thisArgument, value, value, view);
+        }
+      }
+    },
+    [Symbol.iterator]() {
+      return view.values();
+    },
+  };
+  return view;
 }
 
 /**
