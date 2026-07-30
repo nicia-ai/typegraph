@@ -586,59 +586,124 @@ function computeEquivalenceSets(
   const result = new Map<string, ReadonlySet<string>>();
   for (const members of classes.values()) {
     for (const member of members) {
-      result.set(member, createEquivalenceSetView(members, member));
+      result.set(member, new ExcludingReadonlySet(members, member));
     }
   }
 
   return result;
 }
 
+type SetLike<T> = Readonly<{
+  size: number;
+  has(value: T): boolean;
+  keys(): Iterator<T>;
+}>;
+
+type SetComposition<T> = Readonly<{
+  union<U>(other: SetLike<U>): Set<T | U>;
+  intersection<U>(other: SetLike<U>): Set<T & U>;
+  difference<U>(other: SetLike<U>): Set<T>;
+  symmetricDifference<U>(other: SetLike<U>): Set<T | U>;
+  isSubsetOf(other: SetLike<unknown>): boolean;
+  isSupersetOf(other: SetLike<unknown>): boolean;
+  isDisjointFrom(other: SetLike<unknown>): boolean;
+}>;
+
+type ComposableSet<T> = Set<T> & SetComposition<T>;
+
 /**
  * Presents one shared equivalence class as an immutable set that excludes the
  * member being queried. Copying the class once per member makes an N-member
  * class consume O(N²) storage even though every view differs by one value.
+ *
+ * The ES2024 set-composition methods materialize only the selected view. This
+ * preserves the public `ReadonlySet` behavior without restoring quadratic
+ * eager storage for callers that only iterate or perform membership checks.
  */
-function createEquivalenceSetView(
-  members: ReadonlySet<string>,
-  excludedMember: string,
-): ReadonlySet<string> {
-  const view: ReadonlySet<string> = {
-    get size() {
-      return members.size - (members.has(excludedMember) ? 1 : 0);
-    },
-    has(value) {
-      return value !== excludedMember && members.has(value);
-    },
-    *entries(): Generator<[string, string], undefined, unknown> {
-      for (const value of members) {
-        if (value !== excludedMember) yield [value, value];
-      }
-      return undefined;
-    },
-    *keys(): Generator<string, undefined, unknown> {
-      for (const value of members) {
-        if (value !== excludedMember) yield value;
-      }
-      return undefined;
-    },
-    *values(): Generator<string, undefined, unknown> {
-      for (const value of members) {
-        if (value !== excludedMember) yield value;
-      }
-      return undefined;
-    },
-    forEach(callbackFunction, thisArgument?: unknown) {
-      for (const value of members) {
-        if (value !== excludedMember) {
-          callbackFunction.call(thisArgument, value, value, view);
-        }
-      }
-    },
-    [Symbol.iterator]() {
-      return view.values();
-    },
-  };
-  return view;
+class ExcludingReadonlySet
+  implements ReadonlySet<string>, SetComposition<string>
+{
+  readonly #members: ReadonlySet<string>;
+  readonly #excludedMember: string;
+  readonly [Symbol.toStringTag] = "Set";
+
+  constructor(members: ReadonlySet<string>, excludedMember: string) {
+    this.#members = members;
+    this.#excludedMember = excludedMember;
+  }
+
+  get size(): number {
+    return (
+      this.#members.size - (this.#members.has(this.#excludedMember) ? 1 : 0)
+    );
+  }
+
+  has(value: string): boolean {
+    return value !== this.#excludedMember && this.#members.has(value);
+  }
+
+  *entries(): SetIterator<[string, string]> {
+    for (const value of this) yield [value, value];
+  }
+
+  keys(): SetIterator<string> {
+    return this.values();
+  }
+
+  *values(): SetIterator<string> {
+    for (const value of this.#members) {
+      if (value !== this.#excludedMember) yield value;
+    }
+  }
+
+  forEach(
+    callbackFunction: (
+      value: string,
+      value2: string,
+      set: ReadonlySet<string>,
+    ) => void,
+    thisArgument?: unknown,
+  ): void {
+    for (const value of this) {
+      callbackFunction.call(thisArgument, value, value, this);
+    }
+  }
+
+  [Symbol.iterator](): SetIterator<string> {
+    return this.values();
+  }
+
+  union<U>(other: SetLike<U>): Set<string | U> {
+    return this.materialize().union(other);
+  }
+
+  intersection<U>(other: SetLike<U>): Set<string & U> {
+    return this.materialize().intersection(other);
+  }
+
+  difference<U>(other: SetLike<U>): Set<string> {
+    return this.materialize().difference(other);
+  }
+
+  symmetricDifference<U>(other: SetLike<U>): Set<string | U> {
+    return this.materialize().symmetricDifference(other);
+  }
+
+  isSubsetOf(other: SetLike<unknown>): boolean {
+    return this.materialize().isSubsetOf(other);
+  }
+
+  isSupersetOf(other: SetLike<unknown>): boolean {
+    return this.materialize().isSupersetOf(other);
+  }
+
+  isDisjointFrom(other: SetLike<unknown>): boolean {
+    return this.materialize().isDisjointFrom(other);
+  }
+
+  private materialize(): ComposableSet<string> {
+    return new Set(this) as ComposableSet<string>;
+  }
 }
 
 /**

@@ -30,6 +30,17 @@ const Person = defineNode("Person", { schema: emptySchema });
 const Organization = defineNode("Organization", { schema: emptySchema });
 const Company = defineNode("Company", { schema: emptySchema });
 
+type ComposableReadonlyStringSet = ReadonlySet<string> &
+  Readonly<{
+    union(other: ReadonlySet<string>): Set<string>;
+    intersection(other: ReadonlySet<string>): Set<string>;
+    difference(other: ReadonlySet<string>): Set<string>;
+    symmetricDifference(other: ReadonlySet<string>): Set<string>;
+    isSubsetOf(other: ReadonlySet<string>): boolean;
+    isSupersetOf(other: ReadonlySet<string>): boolean;
+    isDisjointFrom(other: ReadonlySet<string>): boolean;
+  }>;
+
 describe("ontology truth and hardening", () => {
   it("propagates disjointness through the subClassOf closure", () => {
     const graph = defineGraph({
@@ -244,6 +255,58 @@ describe("ontology truth and hardening", () => {
     expect(closures.equivalenceSets.get("Kind0")).toContain(
       `Kind${chainLength}`,
     );
+  });
+
+  it("exposes equivalence classes as complete readonly set views", () => {
+    const closures = computeClosuresFromNamedOntology([
+      { metaEdge: "equivalentTo", from: "Alpha", to: "Beta" },
+      { metaEdge: "equivalentTo", from: "Beta", to: "Gamma" },
+    ]);
+    const equivalents = closures.equivalenceSets.get("Alpha");
+    expect(equivalents).toBeDefined();
+    if (equivalents === undefined) throw new Error("Missing equivalence set");
+
+    expect(equivalents.size).toBe(2);
+    expect(equivalents.has("Alpha")).toBe(false);
+    expect(equivalents.has("Beta")).toBe(true);
+    expect([...equivalents]).toEqual(["Beta", "Gamma"]);
+    expect([...equivalents.keys()]).toEqual(["Beta", "Gamma"]);
+    expect([...equivalents.entries()]).toEqual([
+      ["Beta", "Beta"],
+      ["Gamma", "Gamma"],
+    ]);
+
+    const context = { visited: [] as string[] };
+    equivalents.forEach(function (this: typeof context, value, key, set) {
+      expect(this).toBe(context);
+      expect(key).toBe(value);
+      expect(set).toBe(equivalents);
+      this.visited.push(value);
+    }, context);
+    expect(context.visited).toEqual(["Beta", "Gamma"]);
+    expect(Object.keys(equivalents)).toEqual([]);
+    expect(Object.prototype.toString.call(equivalents)).toBe("[object Set]");
+
+    const composable = equivalents as ComposableReadonlyStringSet;
+    expect([...composable.union(new Set(["Delta"]))]).toEqual([
+      "Beta",
+      "Gamma",
+      "Delta",
+    ]);
+    expect([...composable.intersection(new Set(["Gamma", "Delta"]))]).toEqual([
+      "Gamma",
+    ]);
+    expect([...composable.difference(new Set(["Gamma"]))]).toEqual(["Beta"]);
+    expect([
+      ...composable.symmetricDifference(new Set(["Gamma", "Delta"])),
+    ]).toEqual(["Beta", "Delta"]);
+    expect(composable.isSubsetOf(new Set(["Beta", "Gamma", "Delta"]))).toBe(
+      true,
+    );
+    expect(composable.isSupersetOf(new Set(["Beta"]))).toBe(true);
+    expect(composable.isDisjointFrom(new Set(["Delta"]))).toBe(true);
+    expect(composable.isDisjointFrom(new Set(["Gamma"]))).toBe(false);
+    expect([...equivalents]).toEqual(["Beta", "Gamma"]);
   });
 
   it("lifts disjointness onto equivalence-set members", () => {
