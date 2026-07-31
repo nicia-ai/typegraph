@@ -3272,7 +3272,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         await Promise.all(
           [...idsByKind].map(async ([kind, idSet]) => {
             const ids = [...idSet];
-            if (coordinate !== undefined) {
+            // Only a recorded pin needs the recorded relation. Valid-time
+            // views also carry a coordinate, but their members were already
+            // selected as coordinate-visible, and valid time is a lens over
+            // the live rows — hydrating through the recorded reader would
+            // throw RECORDED_POINT_READ_MISSING_COORDINATE.
+            if (coordinate?.recorded !== undefined) {
               const nodes = await this.recordedNodeGetByIds(
                 kind,
                 ids.map((id) => id as NodeId<NodeType>),
@@ -5580,14 +5585,22 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     activeRow !== undefined &&
     storedSchema?.identity?.sameIdAcrossKinds !==
       merged.identity?.sameIdAcrossKinds;
+  // The very first schema commit is an enablement too: a legacy database
+  // populated through an unmanaged `createStore` can already hold same-id
+  // peers and assertions, so initialization must run the same fold scan,
+  // contradiction validation, and closure build as a later enablement
+  // migration — an empty database just makes them cheap no-ops.
+  const identityInitialization =
+    activeRow === undefined && merged.identity !== undefined;
   const identityEnablement =
-    identityProfileChanged &&
-    storedSchema?.identity === undefined &&
-    merged.identity !== undefined;
+    identityInitialization ||
+    (identityProfileChanged &&
+      storedSchema?.identity === undefined &&
+      merged.identity !== undefined);
   const identityMigrationCandidate =
-    activeRow !== undefined && merged.identity !== undefined ?
-      new StoreImplementation(merged, backend, options)
-    : undefined;
+    merged.identity === undefined ?
+      undefined
+    : new StoreImplementation(merged, backend, options);
   const identitySemanticsChanged =
     identityProfileChanged ||
     (activeRow !== undefined &&

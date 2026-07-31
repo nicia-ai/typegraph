@@ -21,9 +21,11 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createStore,
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  disjointWith,
   type GraphBackend,
   MigrationError,
   rebuildIdentityClosure,
@@ -35,6 +37,7 @@ import {
 } from "../src/backend/sqlite/local";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { getActiveSchema, migrateSchema } from "../src/schema";
+import { storeRuntime } from "../src/store/runtime-port";
 import { matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -405,5 +408,62 @@ describe("Operational Identity provisioning + enablement gating", () => {
     } finally {
       await result.backend.close();
     }
+  });
+});
+
+describe("identity on the first schema commit", () => {
+  const contradictionGraph = defineGraph({
+    id: GRAPH_ID,
+    nodes: { Person: { type: Person }, Author: { type: Author } },
+    edges: {},
+    ontology: [disjointWith(Person, Author)],
+    identity: { sameIdAcrossKinds: "fold" },
+  });
+
+  it("materializes legacy same-id folds when initialization enables identity", async () => {
+    const { backend } = createLocalSqliteBackend();
+    // Legacy deployment: an unmanaged, identity-DISABLED Store wrote rows
+    // without ever committing a schema version, so no closure exists and no
+    // fold was ever recorded for the shared id.
+    const legacy = createStore(disabledGraph, backend);
+    const person = await legacy.nodes.Person.create(
+      { name: "Shared" },
+      { id: "shared" },
+    );
+    await legacy.nodes.Author.create({ penName: "Shared" }, { id: "shared" });
+
+    const [store, validation] = await createStoreWithSchema(
+      enabledGraph,
+      backend,
+    );
+    expect(validation.status).toBe("initialized");
+    expect(
+      await store.identity.areSame(person, {
+        kind: "Author",
+        id: "shared",
+      }),
+    ).toBe(true);
+    expect(await store.identity.membersOf(person)).toEqual([
+      { kind: "Author", id: "shared" },
+      { kind: "Person", id: "shared" },
+    ]);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses initialization when legacy rows contradict the identity profile", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const legacy = createStore(disabledGraph, backend);
+    await legacy.nodes.Person.create({ name: "Clash" }, { id: "clash" });
+    await legacy.nodes.Author.create({ penName: "Clash" }, { id: "clash" });
+
+    await expect(
+      createStoreWithSchema(contradictionGraph, backend),
+    ).rejects.toMatchObject({
+      details: matchingObject({ code: "IDENTITY_SCHEMA_CONTRADICTION" }),
+    });
+    // The refused commit must not leave a schema row behind.
+    expect(await getActiveSchema(backend, GRAPH_ID)).toBeUndefined();
   });
 });

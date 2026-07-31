@@ -887,6 +887,62 @@ export function registerIdentityIntegrationTests(
       });
     });
 
+    it("hydrates classes through valid-time and recorded views", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Vera" },
+        { id: "view-hydrate" },
+      );
+      await store.nodes.Company.create(
+        { name: "Vera LLC" },
+        { id: "view-hydrate" },
+      );
+      const now = new Date().toISOString();
+
+      const expectClassNodes = (
+        nodes: readonly { kind: string; id: string }[],
+      ) => {
+        expect(nodes).toHaveLength(2);
+        const byKind = new Map(nodes.map((node) => [node.kind, node]));
+        expect(byKind.get("Person")).toMatchObject({
+          id: "view-hydrate",
+          name: "Vera",
+        });
+        expect(byKind.get("Company")).toMatchObject({
+          id: "view-hydrate",
+          name: "Vera LLC",
+        });
+      };
+
+      expectClassNodes(await store.asOf(now).identity.nodesOf(person));
+      expectClassNodes(
+        await store.view({ mode: "includeEnded" }).identity.nodesOf(person),
+      );
+
+      const [recordedStore] = await createStoreWithSchema(
+        context.getStore().graph,
+        context.getStore().backend,
+        { history: true },
+      );
+      const recordedPerson = await recordedStore.nodes.Person.create(
+        { name: "Vera" },
+        { id: "view-hydrate-recorded" },
+      );
+      await recordedStore.nodes.Company.create(
+        { name: "Vera LLC" },
+        { id: "view-hydrate-recorded" },
+      );
+      const pin = await recordedStore.recordedNow();
+      expect(pin).toBeDefined();
+      const recordedNodes = await recordedStore
+        .asOfRecorded(requireDefined(pin))
+        .identity.nodesOf(recordedPerson);
+      expect(recordedNodes).toHaveLength(2);
+      expect(
+        new Map(recordedNodes.map((node) => [node.kind, node])).get("Company"),
+      ).toMatchObject({ id: "view-hydrate-recorded", name: "Vera LLC" });
+    });
+
     it("ends assertion rows on soft delete and removes them on hard delete", async () => {
       const store = context.getStore();
       const person = await store.nodes.Person.create(

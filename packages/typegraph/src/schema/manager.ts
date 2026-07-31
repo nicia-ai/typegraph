@@ -384,7 +384,11 @@ export async function ensureSchema<G extends GraphDef>(
 
   if (activeSchema === undefined) {
     // No schema exists - initialize with version 1
-    const result = await initializeSchema(backend, graph);
+    const result = await initializeSchema(
+      backend,
+      graph,
+      options?.schemaCommitPreflight,
+    );
     return {
       status: "initialized",
       version: result.version,
@@ -695,6 +699,7 @@ function schemaNotInitializedError(
 export async function initializeSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
+  preflight?: (target: TransactionBackend) => Promise<void>,
 ): Promise<SchemaVersionRow> {
   // Structural gates (e.g. endpoint-incompatible implies() relations)
   // must reject before the schema is durably committed, not only when a
@@ -704,14 +709,32 @@ export async function initializeSchema<G extends GraphDef>(
 
   const schema = serializeSchema(graph, 1);
   const hash = await computeSchemaHash(schema);
-
-  return backend.commitSchemaVersion({
+  const commit = {
     graphId: graph.id,
-    expected: { kind: "initial" },
+    expected: { kind: "initial" } as const,
     version: 1,
     schemaHash: hash,
     schemaDoc: schema,
-  });
+  };
+
+  if (preflight === undefined) return backend.commitSchemaVersion(commit);
+
+  // An identity-enabled graph's FIRST schema commit is an enablement: a
+  // legacy database populated through an unmanaged Store can already hold
+  // same-id peers and assertions, so the fold scan, contradiction
+  // validation, and closure build must commit atomically with version 1 —
+  // exactly like a later enablement migration.
+  const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
+  if (commitWithPreflight === undefined) {
+    throw new ConfigurationError(
+      "This backend cannot atomically commit identity data with a schema transition.",
+      {
+        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId: graph.id,
+      },
+    );
+  }
+  return commitWithPreflight(commit, preflight);
 }
 
 export type MigrateSchemaOptions = Readonly<{

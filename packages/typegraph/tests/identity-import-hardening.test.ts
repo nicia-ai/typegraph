@@ -334,6 +334,34 @@ function documentAssertingOverNodes(
   };
 }
 
+function documentWithAssertion(
+  mode: "state" | "archival",
+  assertion: Readonly<{
+    id: string;
+    a: Ref;
+    b: Ref;
+    validFrom: string;
+    validTo?: string;
+  }>,
+): GraphData {
+  const [a, b] = orderPair(assertion.a, assertion.b);
+  return {
+    formatVersion: "2.0",
+    exportedAt: CANONICAL_TIMESTAMP,
+    source: { type: "external" },
+    nodes: [
+      { kind: "Person", id: a.id, properties: { name: "A" } },
+      { kind: "Person", id: b.id, properties: { name: "B" } },
+    ],
+    edges: [],
+    identity: {
+      profile: IDENTITY_PROFILE,
+      mode,
+      assertions: [{ ...assertion, relation: "same", a, b }],
+    },
+  };
+}
+
 describe("importGraph identity failure reporting", () => {
   it("records an identity failure in result.errors instead of throwing", async () => {
     const store = await createInitializedStore(graph, createTestBackend());
@@ -514,6 +542,109 @@ describe("importGraph identity failure reporting", () => {
     ).rejects.toThrow(
       "Graph interchange stream cannot emit nodes after identity assertions.",
     );
+  });
+
+  it("records a state-mode ended assertion as an identity error", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const result = await importGraph(
+      store,
+      documentWithAssertion("state", {
+        id: "ended-in-state",
+        a: { kind: "Person", id: "ended-a" },
+        b: { kind: "Person", id: "ended-b" },
+        validFrom: CANONICAL_TIMESTAMP,
+        validTo: CANONICAL_TIMESTAMP,
+      }),
+      { onConflict: "skip" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "ended-in-state",
+          error: matchingString("cannot contain ended assertions"),
+        }),
+      ]),
+    );
+    // Node work committed; the semantically invalid section was skipped.
+    expect(result.nodes.created).toBe(2);
+    expect(result.identity).toEqual({ created: 0, skipped: 0 });
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("records a future archival validity bound as an identity error", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const result = await importGraph(
+      store,
+      documentWithAssertion("archival", {
+        id: "future-window",
+        a: { kind: "Person", id: "future-a" },
+        b: { kind: "Person", id: "future-b" },
+        validFrom: CANONICAL_TIMESTAMP,
+        validTo: isoAt(60_000),
+      }),
+      { onConflict: "skip" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "future-window",
+          error: matchingString("validTo is in the future"),
+        }),
+      ]),
+    );
+    expect(result.nodes.created).toBe(2);
+  });
+
+  it("records semantic identity failures on the streaming path too", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const document = documentWithAssertion("state", {
+      id: "streamed-ended",
+      a: { kind: "Person", id: "stream-a" },
+      b: { kind: "Person", id: "stream-b" },
+      validFrom: CANONICAL_TIMESTAMP,
+      validTo: CANONICAL_TIMESTAMP,
+    });
+    const header: GraphDataHeader = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      identity: { profile: IDENTITY_PROFILE, mode: "state" },
+    };
+
+    const result = await importGraphStream(
+      store,
+      chunkStream([
+        { type: "header", header },
+        { type: "nodes", nodes: document.nodes },
+        {
+          type: "identity",
+          assertions: requireDefined(document.identity).assertions,
+        },
+      ]),
+      // The stream default aborts once a chunk reports errors (documented);
+      // "continue" surfaces the recorded identity error in the result, which
+      // is what this test pins — the failure is an error entry, not a throw.
+      { onConflict: "skip", onStreamChunkError: "continue" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "streamed-ended",
+        }),
+      ]),
+    );
+    expect(result.nodes.created).toBe(2);
   });
 });
 

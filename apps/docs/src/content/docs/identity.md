@@ -292,7 +292,11 @@ migration that also breaks other schema surfaces raises the generic
 `MigrationError` enumerating everything. First-time identity *enablement* (`autoMigrate: false` on a graph
 newly declaring `identity: { ... }`) is a safe, additive change, and
 `createStoreWithSchema` refuses to return a Store while it is pending with
-`ConfigurationError` details code `IDENTITY_ENABLEMENT_PENDING`.
+`ConfigurationError` details code `IDENTITY_ENABLEMENT_PENDING`. The very
+first schema commit of an identity-enabled graph is an enablement too: a
+legacy database populated through an unmanaged `createStore` gets the same
+atomic fold scan, contradiction validation, and closure build during
+initialization — an empty database just makes them cheap no-ops.
 
 ## Migrating from type-level factories
 
