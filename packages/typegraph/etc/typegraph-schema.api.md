@@ -1094,7 +1094,9 @@ type IndexWhereOperand = Readonly<{
 type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
 // @public
-export function initializeSchema<G extends GraphDef>(backend: GraphBackend, graph: G, schemaCommitPreflight?: (target: TransactionBackend) => Promise<void>): Promise<SchemaVersionRow>;
+export function initializeSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: Readonly<{
+    schema?: SqlSchema;
+}>): Promise<SchemaVersionRow>;
 
 // @public
 type InsertEdgeParams = Readonly<{
@@ -1309,6 +1311,7 @@ export function migrateSchema<G extends GraphDef>(backend: GraphBackend, graph: 
 // @public (undocumented)
 export type MigrateSchemaOptions = Readonly<{
     discardDroppedKindRows?: boolean;
+    schema?: SqlSchema;
 }>;
 
 // @public
@@ -1472,6 +1475,21 @@ type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable
 // @public
 export function requiresMigration<G extends GraphDef>(backend: GraphBackend, graph: G): Promise<boolean>;
 
+// @public (undocumented)
+type ResolvedSqlTableNames = Readonly<{
+    nodes: string;
+    edges: string;
+    recordedNodes: string;
+    recordedEdges: string;
+    recordedClock: string;
+    revisionOrigins: string;
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    fulltext: string;
+    uniques: string;
+}>;
+
 // @public
 export function rollbackSchema(backend: GraphBackend, graphId: string, targetVersion: number): Promise<void>;
 
@@ -1508,7 +1526,7 @@ export type SchemaManagerOptions = Readonly<{
     systemIndexes?: "materialize" | "skip";
     onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
     onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
-    schemaCommitPreflight?: (target: TransactionBackend) => Promise<void>;
+    schema?: SqlSchema;
 }>;
 
 // @public (undocumented)
@@ -1696,6 +1714,47 @@ type SqlParameterChunk = Readonly<{
 type SqlPlaceholderChunk = Readonly<{
     kind: "placeholder";
     value: Placeholder;
+}>;
+
+// @public
+abstract class SqlSchema implements SqlSchemaFields {
+    // (undocumented)
+    abstract readonly edgesTable: SqlFragment;
+    // (undocumented)
+    abstract readonly fulltextTable: SqlFragment;
+    // (undocumented)
+    abstract readonly identityAssertionsTable: SqlFragment;
+    // (undocumented)
+    abstract readonly identityClosureTable: SqlFragment;
+    // (undocumented)
+    abstract readonly nodesTable: SqlFragment;
+    // (undocumented)
+    abstract readonly recordedClockTable: SqlFragment;
+    // (undocumented)
+    abstract readonly recordedEdgesTable: SqlFragment;
+    // (undocumented)
+    abstract readonly recordedIdentityAssertionsTable: SqlFragment;
+    // (undocumented)
+    abstract readonly recordedNodesTable: SqlFragment;
+    // (undocumented)
+    abstract readonly revisionOriginsTable: SqlFragment;
+    // (undocumented)
+    abstract readonly tables: ResolvedSqlTableNames;
+}
+
+// @public (undocumented)
+type SqlSchemaFields = Readonly<{
+    tables: ResolvedSqlTableNames;
+    nodesTable: SqlFragment;
+    edgesTable: SqlFragment;
+    recordedNodesTable: SqlFragment;
+    recordedEdgesTable: SqlFragment;
+    recordedClockTable: SqlFragment;
+    revisionOriginsTable: SqlFragment;
+    identityAssertionsTable: SqlFragment;
+    recordedIdentityAssertionsTable: SqlFragment;
+    identityClosureTable: SqlFragment;
+    fulltextTable: SqlFragment;
 }>;
 
 // @public

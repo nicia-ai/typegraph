@@ -535,6 +535,120 @@ describe("identity on the first schema commit", () => {
     ).toBe(true);
   });
 
+  it("cannot be talked out of the version-1 closure build", async () => {
+    // The old shape accepted a caller preflight that REPLACED the identity
+    // work, so a no-op callback committed version 1 over populated peers and
+    // every later open accepted the hash as "unchanged". The preflight is now
+    // derived internally; a stray callback argument (what a pre-fix caller
+    // would pass) is ignored rather than honored.
+    const result = createLocalSqliteBackend();
+    try {
+      const legacy = createStore(disabledGraph, result.backend);
+      await legacy.nodes.Person.create({ name: "Shared" }, { id: "noop" });
+      await legacy.nodes.Author.create({ penName: "S." }, { id: "noop" });
+
+      const noopCallback = (() => Promise.resolve()) as never;
+      await initializeSchema(result.backend, enabledGraph, noopCallback);
+
+      const [store, reopened] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      expect(reopened.status).toBe("unchanged");
+      expect(
+        await store.identity.areSame(
+          { kind: "Person", id: "noop" },
+          { kind: "Author", id: "noop" },
+        ),
+      ).toBe(true);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("derives the version-1 preflight over a custom schema on the bare path too", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const legacy = createStore(disabledGraph, result.backend);
+      await legacy.nodes.Person.create({ name: "Shared" }, { id: "bare" });
+      await legacy.nodes.Author.create({ penName: "S." }, { id: "bare" });
+      const schema = createSqlSchema({
+        identityAssertions: "bare_v1_identity_assertions",
+        recordedIdentityAssertions: "bare_v1_recorded_identity_assertions",
+        identityClosure: "bare_v1_identity_closure",
+      });
+
+      await initializeSchema(result.backend, enabledGraph, { schema });
+
+      const closureRows = rawClient(result)
+        .prepare("SELECT COUNT(*) AS n FROM bare_v1_identity_closure")
+        .get() as { n: number };
+      expect(closureRows.n).toBeGreaterThan(0);
+      const [store] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+        {
+          schema,
+        },
+      );
+      expect(
+        await store.identity.areSame(
+          { kind: "Person", id: "bare" },
+          { kind: "Author", id: "bare" },
+        ),
+      ).toBe(true);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("rebuilds the custom-schema closure through explicit migrateSchema()", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const schema = createSqlSchema({
+        identityAssertions: "flip_identity_assertions",
+        recordedIdentityAssertions: "flip_recorded_identity_assertions",
+        identityClosure: "flip_identity_closure",
+      });
+      const [foldStore] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+        { schema },
+      );
+      await foldStore.nodes.Person.create({ name: "F" }, { id: "flip" });
+      await foldStore.nodes.Author.create({ penName: "F." }, { id: "flip" });
+      expect(
+        await foldStore.identity.areSame(
+          { kind: "Person", id: "flip" },
+          { kind: "Author", id: "flip" },
+        ),
+      ).toBe(true);
+
+      await migrateSchema(
+        result.backend,
+        ignoredGraph,
+        await activeVersion(result.backend),
+        { schema },
+      );
+
+      const [ignoreStore] = await createStoreWithSchema(
+        ignoredGraph,
+        result.backend,
+        { schema },
+      );
+      // The flip's closure rebuild must land in the custom tables the Store
+      // reads: under "ignore" the same-id pair no longer folds.
+      expect(
+        await ignoreStore.identity.areSame(
+          { kind: "Person", id: "flip" },
+          { kind: "Author", id: "flip" },
+        ),
+      ).toBe(false);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
   it("refuses initialization when legacy rows contradict the identity profile", async () => {
     const { backend } = createLocalSqliteBackend();
     const legacy = createStore(disabledGraph, backend);

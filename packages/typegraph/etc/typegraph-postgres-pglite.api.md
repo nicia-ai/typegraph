@@ -3213,7 +3213,7 @@ type SchemaManagerOptions = Readonly<{
     systemIndexes?: "materialize" | "skip";
     onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
     onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
-    schemaCommitPreflight?: (target: TransactionBackend) => Promise<void>;
+    schema?: SqlSchema;
 }>;
 
 // @public (undocumented)

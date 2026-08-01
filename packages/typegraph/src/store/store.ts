@@ -5604,10 +5604,6 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     (identityProfileChanged &&
       storedSchema?.identity === undefined &&
       merged.identity !== undefined);
-  const identityMigrationCandidate =
-    merged.identity === undefined ?
-      undefined
-    : new StoreImplementation(merged, backend, options);
   const identitySemanticsChanged =
     identityProfileChanged ||
     (activeRow !== undefined &&
@@ -5627,7 +5623,7 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   // (CREATE TABLE / CREATE INDEX IF NOT EXISTS), so it is a harmless no-op
   // when the schema turns out to be pending (finding: enablement requires an
   // applied migration) or the tables already exist.
-  if (identityMigrationCandidate !== undefined) {
+  if (merged.identity !== undefined) {
     await ensureIdentitySchemaStorage(
       backend,
       options?.schema ?? createSqlSchema(backend.tableNames),
@@ -5642,17 +5638,16 @@ async function prepareStoreWithSchema<G extends GraphDef>(
       : "ontology"
     : undefined;
 
+  // No identity preflight is passed here — the schema manager derives the
+  // mandatory one itself (from `options.schema` when supplied), so no public
+  // caller can substitute or suppress the closure rebuild.
   const ensureOptions = {
-    ...options,
+    // The fallback is not useless: spreading `options` while it is possibly
+    // undefined makes TypeScript distribute the StoreOptions union through
+    // the literal and reject the call below.
+    // eslint-disable-next-line unicorn/no-useless-fallback-in-spread
+    ...(options ?? {}),
     preloaded: { activeRow, storedSchema },
-    ...(identityMigrationCandidate === undefined ?
-      {}
-    : {
-        schemaCommitPreflight: async (target: TransactionBackend) =>
-          identityEnablement ?
-            identityMigrationCandidate.identityEnablementPreflight(target)
-          : identityMigrationCandidate.identitySchemaPreflight(target),
-      }),
   };
 
   // An identity semantic change reaches the store only after the preflight

@@ -35,7 +35,7 @@ import {
   ensureIdentitySchemaStorage,
   identitySchemaCommitPreflight,
 } from "../identity/schema-transition";
-import { createSqlSchema } from "../query/compiler/schema";
+import { createSqlSchema, type SqlSchema } from "../query/compiler/schema";
 import { buildKindRegistry } from "../registry";
 import { freezeDeep } from "../utils/object";
 import { isMissingTableError } from "../utils/sql-errors";
@@ -324,8 +324,13 @@ export type SchemaManagerOptions = Readonly<{
   onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
   /** Called after a safe auto-migration is applied. For observability only. */
   onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
-  /** @internal Data preflight committed atomically with a safe schema CAS. */
-  schemaCommitPreflight?: (target: TransactionBackend) => Promise<void>;
+  /**
+   * The effective `SqlSchema` (custom table names) the graph's Store reads.
+   * Identity schema commits derive their mandatory closure preflight from it;
+   * the preflight itself is never accepted from callers, so it cannot be
+   * substituted or suppressed.
+   */
+  schema?: SqlSchema;
 }>;
 
 // ============================================================
@@ -383,15 +388,13 @@ export async function ensureSchema<G extends GraphDef>(
     : preloaded.activeRow;
 
   if (activeSchema === undefined) {
-    // No schema exists - initialize with version 1. The Store-bound preflight
-    // is threaded through when the caller built one (it carries the effective
-    // custom `SqlSchema`); `initializeSchema` derives a fallback for bare
-    // callers, so no public first-commit path skips the enablement work.
-    const result = await initializeSchema(
-      backend,
-      graph,
-      options?.schemaCommitPreflight,
-    );
+    // No schema exists - initialize with version 1. Only the effective
+    // `SqlSchema` is threaded through; `initializeSchema` derives the
+    // mandatory identity preflight itself, so no public first-commit path
+    // can skip or replace the enablement work.
+    const result = await initializeSchema(backend, graph, {
+      ...(options?.schema === undefined ? {} : { schema: options.schema }),
+    });
     return {
       status: "initialized",
       version: result.version,
@@ -434,16 +437,18 @@ export async function ensureSchema<G extends GraphDef>(
       };
       await options?.onBeforeMigrate?.(hookContext);
       // An identity-enabled commit must never land without the closure
-      // preflight, whichever public path drove it: prefer the caller's
-      // Store-bound preflight, derive one when the caller (bare
-      // `ensureSchema`) supplied none.
+      // preflight, whichever public path drove it. It is derived HERE —
+      // never accepted from the caller — so it cannot be substituted or
+      // suppressed; `options.schema` only points it at the effective tables.
       const preflight =
-        options?.schemaCommitPreflight ??
-        (graph.identity === undefined ?
+        graph.identity === undefined ?
           undefined
         : await prepareIdentitySchemaCommit(backend, graph, {
             enablement: storedSchema.identity === undefined,
-          }));
+            ...(options?.schema === undefined ?
+              {}
+            : { schema: options.schema }),
+          });
       const committedRow =
         preflight === undefined ?
           await commitNewSchemaVersion(backend, graph, activeSchema.version)
@@ -713,7 +718,16 @@ function schemaNotInitializedError(
 export async function initializeSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
-  schemaCommitPreflight?: (target: TransactionBackend) => Promise<void>,
+  options?: Readonly<{
+    /**
+     * The effective `SqlSchema` (custom table names) the graph's Store will
+     * read. The identity enablement preflight is always derived internally —
+     * it is deliberately not a parameter, so no caller can commit version 1
+     * of an identity-enabled graph without the fold scan, contradiction
+     * validation, and closure build.
+     */
+    schema?: SqlSchema;
+  }>,
 ): Promise<SchemaVersionRow> {
   // Structural gates (e.g. endpoint-incompatible implies() relations)
   // must reject before the schema is durably committed, not only when a
@@ -739,18 +753,15 @@ export async function initializeSchema<G extends GraphDef>(
   // legacy database populated through an unmanaged Store can already hold
   // same-id peers and assertions, so the fold scan, contradiction
   // validation, and closure build must commit atomically with version 1 —
-  // exactly like a later enablement migration. A caller-supplied preflight
-  // (the Store-bound one, which knows an explicit custom `SqlSchema`) wins;
-  // absent one, the preflight is DERIVED here over the backend's effective
-  // table names, so the bare public paths (`ensureSchema`,
-  // `initializeSchema` directly) can never commit a version 1 that later
-  // hash checks accept while identity reads answer from a never-built
-  // closure.
-  const preflight =
-    schemaCommitPreflight ??
-    (await prepareIdentitySchemaCommit(backend, graph, {
-      enablement: true,
-    }));
+  // exactly like a later enablement migration. Always DERIVED here (over
+  // `options.schema` when supplied, else the backend's effective table
+  // names), never accepted from the caller — a substitutable preflight would
+  // let a no-op callback commit a version 1 that every later hash check
+  // accepts while identity reads answer from a never-built closure.
+  const preflight = await prepareIdentitySchemaCommit(backend, graph, {
+    enablement: true,
+    ...(options?.schema === undefined ? {} : { schema: options.schema }),
+  });
   const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
   if (commitWithPreflight === undefined) {
     throw new ConfigurationError(
@@ -785,6 +796,12 @@ export type MigrateSchemaOptions = Readonly<{
    * @defaultValue false
    */
   discardDroppedKindRows?: boolean;
+  /**
+   * The effective `SqlSchema` (custom table names) the graph's Store reads.
+   * The identity closure preflight an identity-enabled migration commits is
+   * derived from it and cannot be substituted by callers.
+   */
+  schema?: SqlSchema;
 }>;
 
 /**
@@ -871,6 +888,7 @@ export async function migrateSchema<G extends GraphDef>(
       undefined
     : await prepareIdentitySchemaCommit(backend, target, {
         enablement: storedSchema?.identity === undefined,
+        ...(options?.schema === undefined ? {} : { schema: options.schema }),
       });
 
   const committed =
@@ -913,9 +931,9 @@ export async function migrateSchema<G extends GraphDef>(
 async function prepareIdentitySchemaCommit<G extends GraphDef>(
   backend: GraphBackend,
   target: G,
-  options: Readonly<{ enablement: boolean }>,
+  options: Readonly<{ enablement: boolean; schema?: SqlSchema }>,
 ): Promise<(transactionBackend: TransactionBackend) => Promise<void>> {
-  const schema = createSqlSchema(backend.tableNames);
+  const schema = options.schema ?? createSqlSchema(backend.tableNames);
   await ensureIdentitySchemaStorage(backend, schema, {
     graphId: target.id,
     enablement: options.enablement,

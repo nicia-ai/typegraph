@@ -108,8 +108,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "e2fb0b5a7acb9ad9eedc9d5fb68c29409912d9fe425396fd9d692181bb1e49ec",
   },
   "./schema": {
-    count: 196,
-    sha256: "9a5430988c8e53a4217c19b71b618d0a5fe4f2ddd33bf72fa527b2ffeaa055a1",
+    count: 199,
+    sha256: "5e62700ad81b3ebe3973ddbe5046878cc6bc295826850f9f1185a5e5ac3dddf1",
   },
   "./sqlite/local": {
     count: 551,

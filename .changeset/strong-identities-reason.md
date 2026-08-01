@@ -122,3 +122,10 @@ coordinator tags rethrown errors with the id of the assertion it was
 applying, so `ImportResult.errors` attribution for contradictions and
 missing endpoints identifies the failing assertion rather than the first
 assertion sharing its endpoints.
+
+**The identity preflight is not substitutable.** `initializeSchema()` and
+`SchemaManagerOptions` no longer accept a schema-commit preflight callback —
+a no-op callback could suppress the mandatory closure build at version 1.
+Both (and `MigrateSchemaOptions`) instead accept the effective `SqlSchema`
+(`schema`), and every identity-enabled schema commit derives the closure
+preflight internally from it.
