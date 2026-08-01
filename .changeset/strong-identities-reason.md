@@ -138,3 +138,15 @@ tables that were never created. The manager brand-validates the `schema`
 option with `requireSqlSchema()` before any DDL or version commit, so a
 schema-shaped plain object is rejected (`INVALID_SQL_SCHEMA`) instead of
 committing a closure into tables the Store never reads.
+
+**Historical bridges must exist; plan-time simulation knows the profile.**
+Archival identity imports now require every ended assertion's endpoints to
+exist structurally (soft-deleted rows qualify; the store's own exports
+already satisfy this), so a hand-built document can no longer conduct
+historical identity through a node that never existed. The graph-merge
+plan-time contradiction check now simulates the target's identity semantics
+— implicit same-id folds under `sameIdAcrossKinds: "fold"` and ontology
+`disjointWith` between class member kinds — so those contradictions surface
+as `GRAPH_MERGE_IDENTITY_CONFLICT` at plan time instead of a generic commit
+failure. Counterfeit schema objects are rejected before any identity DDL
+runs, on fresh and already-enabled graphs alike.

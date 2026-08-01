@@ -175,6 +175,13 @@ the node as **live**. Choose deliberately: without `includeDeleted`, a
 backup silently loses soft-deleted endpoints and the assertions referencing
 them; with it, those nodes come back alive on restore.
 
+On import, every ended assertion's endpoints must exist as node rows in the
+target (soft-deleted rows qualify) — historical reads conduct identity
+through ended assertions, so an endpoint that never existed would become a
+phantom bridge joining real nodes at past coordinates. The store's own
+exports satisfy this by construction; a hand-built document that fails it is
+recorded as an `entityType: "identity"` entry in `result.errors`.
+
 ### Export Options
 
 | Option | Type | Default | Description |

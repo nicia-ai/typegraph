@@ -15,6 +15,7 @@ import {
   MERGE_ERROR_CODES,
 } from "../../src/graph-merge/errors";
 import {
+  assertNoContradictoryIdentityClosure,
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
   merge,
   planIdentityChanges,
@@ -755,5 +756,86 @@ describe("planIdentityChanges survivor tie-break", () => {
       },
     ]);
     expect(reverse.dropped).toEqual(forward.dropped);
+  });
+});
+
+describe("plan-time derived identity contradictions", () => {
+  const EMPTY_MAP = new Map<never, never>();
+  const noDisjoint = { sameIdAcrossKinds: undefined, areDisjoint: () => false };
+
+  it("rejects a different pair that same-id folding makes implicitly identical", () => {
+    const ledger: IdentityTransferAssertion[] = [
+      {
+        id: "different-folded",
+        relation: "different",
+        a: { kind: "Company", id: "shared" },
+        b: { kind: "Person", id: "shared" },
+        validFrom: "2024-01-01T00:00:00.000Z",
+      },
+    ];
+    expect(() =>
+      assertNoContradictoryIdentityClosure(
+        ledger,
+        [],
+        [],
+        EMPTY_MAP,
+        EMPTY_MAP,
+        {
+          sameIdAcrossKinds: "fold",
+          areDisjoint: () => false,
+        },
+      ),
+    ).toThrow(IdentityMergeConflictError);
+    // The identical ledger is fine under "ignore": no implicit union exists.
+    expect(() =>
+      assertNoContradictoryIdentityClosure(
+        ledger,
+        [],
+        [],
+        EMPTY_MAP,
+        EMPTY_MAP,
+        {
+          sameIdAcrossKinds: "ignore",
+          areDisjoint: () => false,
+        },
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects a class whose member kinds the ontology declares disjoint", () => {
+    const ledger: IdentityTransferAssertion[] = [
+      {
+        id: "same-into-disjoint",
+        relation: "same",
+        a: { kind: "Person", id: "a" },
+        b: { kind: "Robot", id: "b" },
+        validFrom: "2024-01-01T00:00:00.000Z",
+      },
+    ];
+    expect(() =>
+      assertNoContradictoryIdentityClosure(
+        ledger,
+        [],
+        [],
+        EMPTY_MAP,
+        EMPTY_MAP,
+        {
+          sameIdAcrossKinds: undefined,
+          areDisjoint: (left, right) =>
+            new Set([left, right]).size === 2 &&
+            new Set([left, right, "Person", "Robot"]).size === 2,
+        },
+      ),
+    ).toThrow(IdentityMergeConflictError);
+    expect(() =>
+      assertNoContradictoryIdentityClosure(
+        ledger,
+        [],
+        [],
+        EMPTY_MAP,
+        EMPTY_MAP,
+        noDisjoint,
+      ),
+    ).not.toThrow();
   });
 });

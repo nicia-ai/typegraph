@@ -727,6 +727,103 @@ describe("importGraph identity failure reporting", () => {
     );
   });
 
+  it("rejects ended assertions whose endpoints never existed", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const a = await store.nodes.Person.create({ name: "A" }, { id: "real-a" });
+    const b = await store.nodes.Person.create({ name: "B" }, { id: "real-b" });
+    // Two ended assertions bridging through Person/phantom, which no one ever
+    // wrote: without structural endpoint validation the historical CTE
+    // conducts identity through the phantom, and asOf reports areSame(a, b).
+    const phantom: Ref = { kind: "Person", id: "phantom" };
+    const bridge = (id: string, endpoint: Ref): GraphData => ({
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "archival",
+        assertions: [
+          (() => {
+            const [left, right] = orderPair(endpoint, phantom);
+            return {
+              id,
+              relation: "same" as const,
+              a: left,
+              b: right,
+              validFrom: isoAt(-2 * HOUR_MS),
+              validTo: isoAt(-HOUR_MS),
+            };
+          })(),
+        ],
+      },
+    });
+
+    const first = await importGraph(
+      store,
+      bridge("bridge-a", { kind: "Person", id: "real-a" }),
+      { onConflict: "skip" },
+    );
+    expect(first.success).toBe(false);
+    expect(first.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({ entityType: "identity", id: "bridge-a" }),
+      ]),
+    );
+    const second = await importGraph(
+      store,
+      bridge("bridge-b", { kind: "Person", id: "real-b" }),
+      { onConflict: "skip" },
+    );
+    expect(second.success).toBe(false);
+
+    const past = store.asOf(isoAt(-90 * 60 * 1000));
+    expect(await past.identity.areSame(a, b)).toBe(false);
+  });
+
+  it("accepts ended assertions over soft-deleted endpoints", async () => {
+    // Structural existence, not liveness: an archival export legitimately
+    // carries ended assertions whose endpoints were later soft-deleted (the
+    // rows still exist), so those must import.
+    const store = await createInitializedStore(graph, createTestBackend());
+    await store.nodes.Person.create({ name: "Gone" }, { id: "gone" });
+    await store.nodes.Person.create({ name: "Stays" }, { id: "stays" });
+    await store.nodes.Person.delete("gone" as never);
+
+    const [left, right] = orderPair(
+      { kind: "Person", id: "gone" },
+      { kind: "Person", id: "stays" },
+    );
+    const result = await importGraph(
+      store,
+      {
+        formatVersion: "2.0",
+        exportedAt: CANONICAL_TIMESTAMP,
+        source: { type: "external" },
+        nodes: [],
+        edges: [],
+        identity: {
+          profile: IDENTITY_PROFILE,
+          mode: "archival",
+          assertions: [
+            {
+              id: "ended-over-deleted",
+              relation: "same",
+              a: left,
+              b: right,
+              validFrom: isoAt(-2 * HOUR_MS),
+              validTo: isoAt(-HOUR_MS),
+            },
+          ],
+        },
+      },
+      { onConflict: "skip" },
+    );
+    expect(result.success).toBe(true);
+    expect(result.identity).toEqual({ created: 1, skipped: 0 });
+  });
+
   it("attributes a contradiction to the failing assertion, not the first pair-mate", async () => {
     const store = await createInitializedStore(graph, createTestBackend());
     const [a, b] = orderPair(

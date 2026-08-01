@@ -5624,9 +5624,14 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   // when the schema turns out to be pending (finding: enablement requires an
   // applied migration) or the tables already exist.
   if (merged.identity !== undefined) {
+    // Brand-validate BEFORE the DDL: a counterfeit schema-shaped object must
+    // reject with INVALID_SQL_SCHEMA and leave no tables behind — and must
+    // not surface as IDENTITY_STORAGE_MISSING on an already enabled graph.
     await ensureIdentitySchemaStorage(
       backend,
-      options?.schema ?? createSqlSchema(backend.tableNames),
+      options?.schema === undefined ?
+        createSqlSchema(backend.tableNames)
+      : requireSqlSchema(options.schema, "store schema"),
       { graphId: merged.id, enablement: identityEnablement },
     );
   }

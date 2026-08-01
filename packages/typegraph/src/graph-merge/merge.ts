@@ -1085,15 +1085,22 @@ function assertIdentityEndpointsNotDeleted(
  * assertions are folded into equivalence classes and every `different` pair —
  * staged or inherited — is rejected when both of its endpoints land in one class.
  *
- * Only the `(kind, id)` dimension is considered. Cross-kind identity folding is a
- * same-id relation, so it can never introduce a `different` pair.
+ * Two DERIVED relations join the explicit ledger in the simulation, because
+ * canonicalization and retyping can manufacture contradictions no branch wrote:
+ * under `sameIdAcrossKinds: "fold"` endpoints sharing an id across kinds are
+ * implicitly the same (a remapped cross-kind `different` pair can land on one
+ * id), and a retyped endpoint can pull a kind into a class that the ontology
+ * declares disjoint with another member's kind. Both used to surface only at
+ * commit time as a generic merge error.
  */
-function assertNoContradictoryIdentityClosure(
+/** @internal Exported for deterministic phase-level verification. */
+export function assertNoContradictoryIdentityClosure(
   plannedAssertions: readonly IdentityTransferAssertion[],
   retractions: readonly string[],
   baseAssertions: readonly IdentityTransferAssertion[],
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
   retypeMap: ReadonlyMap<MergeKey, string>,
+  identityContext: PlanIdentityContext,
 ): void {
   const retracted = new Set(retractions);
   const mergedLedger = [
@@ -1113,6 +1120,21 @@ function assertNoContradictoryIdentityClosure(
   for (const assertion of mergedLedger) {
     if (assertion.relation === "same") {
       sameClasses.union(mergeKeyOf(assertion.a), mergeKeyOf(assertion.b));
+    }
+  }
+  if (identityContext.sameIdAcrossKinds === "fold") {
+    const refsById = new Map<string, MergeKey[]>();
+    for (const assertion of mergedLedger) {
+      for (const endpoint of [assertion.a, assertion.b]) {
+        const keys = refsById.get(endpoint.id) ?? [];
+        keys.push(mergeKeyOf(endpoint));
+        refsById.set(endpoint.id, keys);
+      }
+    }
+    for (const keys of refsById.values()) {
+      const [first, ...rest] = keys;
+      if (first === undefined) continue;
+      for (const other of rest) sameClasses.union(first, other);
     }
   }
   for (const assertion of mergedLedger) {
@@ -1139,7 +1161,51 @@ function assertNoContradictoryIdentityClosure(
       },
     );
   }
+
+  // A class whose member kinds the ontology declares disjoint is the same
+  // contradiction in another coat: retyping (or a fold) pulled two mutually
+  // exclusive kinds into one identity class.
+  const kindsByRoot = new Map<MergeKey, Set<string>>();
+  for (const member of sameClasses.members()) {
+    const root = sameClasses.find(member);
+    const kinds = kindsByRoot.get(root) ?? new Set<string>();
+    kinds.add(kindOf(member));
+    kindsByRoot.set(root, kinds);
+  }
+  for (const [root, kinds] of kindsByRoot) {
+    const kindList = [...kinds];
+    for (const [index, left] of kindList.entries()) {
+      for (const right of kindList.slice(index + 1)) {
+        if (!identityContext.areDisjoint(left, right)) continue;
+        throw new IdentityMergeConflictError(
+          "The merged identity ledger would join two ontology-disjoint kinds into one class.",
+          {
+            details: {
+              disjointKinds: [left, right],
+              sameClass: sameClasses
+                .members()
+                .filter((member) => sameClasses.find(member) === root)
+                .map((member) => ({ kind: kindOf(member), id: idOf(member) }))
+                .toSorted((first, second) =>
+                  compareMergeKeys(mergeKeyOf(first), mergeKeyOf(second)),
+                ),
+            },
+          },
+        );
+      }
+    }
+  }
 }
+
+/**
+ * The identity semantics the plan-time contradiction simulation needs from the
+ * target: whether same-id folding is on, and which kind pairs the ontology
+ * declares disjoint.
+ */
+type PlanIdentityContext = Readonly<{
+  sameIdAcrossKinds: "fold" | "ignore" | undefined;
+  areDisjoint: (left: string, right: string) => boolean;
+}>;
 
 /**
  * Resolves the entire merge into a {@link MergePlan} WITHOUT touching the target.
@@ -1154,6 +1220,7 @@ function planMerge<G extends GraphDef>(
   options: NormalizedMergeOptions<G>,
   branchRank: ReadonlyMap<BranchId, number>,
   subClassClosure: ReturnType<typeof buildSubClassClosure>,
+  identityContext: PlanIdentityContext,
   preferredBranchId?: BranchId,
 ): MergePlan<G> {
   const identity = planIdentityChanges(staging);
@@ -1433,6 +1500,7 @@ function planMerge<G extends GraphDef>(
     staging.baseIdentityAssertions,
     canonicalOf,
     reconciliation.retypeMap,
+    identityContext,
   );
   const stagedEdges = buildStagedEdges(
     staging,
@@ -2157,6 +2225,10 @@ async function resolveMerge<G extends GraphDef>(
       options,
       branchRank,
       subClassClosure,
+      {
+        sameIdAcrossKinds: store.graph.identity?.sameIdAcrossKinds,
+        areDisjoint: (left, right) => store.registry.areDisjoint(left, right),
+      },
       preferredBranchId,
     );
 

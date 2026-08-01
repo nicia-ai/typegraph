@@ -1281,6 +1281,51 @@ async function requireLiveEndpoints(
   }
 }
 
+/**
+ * Requires every reference to name a node ROW — deleted or not. Ended
+ * assertions take the raw-INSERT import branch and never touch the closure,
+ * but historical reconstruction still conducts identity through them, so an
+ * endpoint that never existed would become a phantom bridge: two real nodes
+ * reporting `areSame` at an `asOf` coordinate via a node no one ever wrote.
+ * The store's own archival exports satisfy this by construction (hard
+ * deletion removes the assertions touching the node), so only hand-built
+ * documents are refused.
+ */
+async function requireStructuralEndpoints(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  references: readonly PlainNodeRef[],
+): Promise<void> {
+  if (references.length === 0) return;
+  const uniqueByKey = new Map<string, PlainNodeRef>();
+  for (const ref of references) uniqueByKey.set(refKey(ref), ref);
+  const unique = [...uniqueByKey.values()];
+  const chunkSize = identityChunkSize(target, {
+    fixedParameters: 1,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  const presentKeys = new Set<string>();
+  for (const refChunk of chunk(unique, chunkSize)) {
+    const matches = referenceCondition(sql`kind`, sql`id`, refChunk);
+    const rows = await target.execute<Readonly<{ kind: string; id: string }>>(
+      asCompiledRowsSql(sql`
+        SELECT kind, id
+        FROM ${schema.nodesTable}
+        WHERE graph_id = ${graphId}
+          AND ${matches}
+      `),
+    );
+    for (const row of rows) {
+      presentKeys.add(refKey({ kind: row.kind, id: row.id }));
+    }
+  }
+  for (const [key, ref] of uniqueByKey) {
+    if (!presentKeys.has(key)) throw new NodeNotFoundError(ref.kind, ref.id);
+  }
+}
+
 async function validateCurrentRelation(
   ctx: Pick<
     IdentityServiceContext<GraphDef>,
@@ -2992,27 +3037,26 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
       assertions.map((assertion) => assertion.id),
     );
     const currentEndpoints: PlainNodeRef[] = [];
+    const endedEndpoints: PlainNodeRef[] = [];
     for (const { assertion, endpoints } of normalized) {
-      if (assertion.validTo !== undefined) continue;
       const [a, b] = endpoints;
-      currentEndpoints.push(a, b);
+      if (assertion.validTo === undefined) {
+        currentEndpoints.push(a, b);
+      } else {
+        endedEndpoints.push(a, b);
+      }
     }
-    try {
-      await requireLiveEndpoints(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        currentEndpoints,
-      );
-    } catch (error) {
-      // The batch check loses per-assertion context; only OPEN assertions
-      // contributed endpoints, so the first open one touching the missing ref
-      // is the failing candidate.
+    const attributeMissingEndpoint = (
+      error: unknown,
+      ended: boolean,
+    ): never => {
+      // The batch checks lose per-assertion context; the first assertion of
+      // the checked kind touching the missing ref is the failing candidate.
       if (error instanceof NodeNotFoundError) {
         const missing = { kind: error.details.kind, id: error.details.id };
         const failing = normalized.find(
           ({ assertion, endpoints }) =>
-            assertion.validTo === undefined &&
+            (assertion.validTo !== undefined) === ended &&
             endpoints.some(
               (endpoint) =>
                 endpoint.kind === missing.kind && endpoint.id === missing.id,
@@ -3023,6 +3067,26 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
         }
       }
       throw error;
+    };
+    try {
+      await requireLiveEndpoints(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        currentEndpoints,
+      );
+    } catch (error) {
+      attributeMissingEndpoint(error, false);
+    }
+    try {
+      await requireStructuralEndpoints(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        endedEndpoints,
+      );
+    } catch (error) {
+      attributeMissingEndpoint(error, true);
     }
 
     for (const { assertion, endpoints } of normalized) {

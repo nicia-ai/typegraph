@@ -12,6 +12,7 @@
  *    names to provisioning while its SQL fragments targeted the defaults —
  *    committing version 1 with the closure in the wrong tables.
  */
+import type Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -100,7 +101,7 @@ describe("batteries-included constructors with a custom SqlSchema", () => {
 
 describe("schema option brand validation", () => {
   it("rejects a schema-shaped plain object before any commit", async () => {
-    const { backend } = createLocalSqliteBackend();
+    const { backend, db } = createLocalSqliteBackend();
     try {
       const legacy = createStore(
         defineGraph({
@@ -130,6 +131,36 @@ describe("schema option brand validation", () => {
       });
       // Rejection happens before the version commit: no active row remains.
       expect(await getActiveSchema(backend, graph.id)).toBeUndefined();
+      // ...and BEFORE any DDL: none of the counterfeit's custom tables exist.
+      const leaked = (db as unknown as { $client: Database.Database }).$client
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'nested_custom_%'",
+        )
+        .all();
+      expect(leaked).toEqual([]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("rejects a counterfeit schema on an already enabled graph too", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      // Enable identity properly first, so the reopen path is the
+      // already-enabled one — the counterfeit used to surface there as
+      // IDENTITY_STORAGE_MISSING instead of the promised validation error.
+      const [store] = await createStoreWithSchema(graph, backend);
+      await store.nodes.Person.create({ name: "S" }, { id: "enabled" });
+
+      const realSchema = createSqlSchema(CUSTOM_TABLES);
+      const counterfeit = Object.freeze({
+        ...(realSchema as unknown as Record<string, unknown>),
+      });
+      await expect(
+        createStoreWithSchema(graph, backend, { schema: counterfeit as never }),
+      ).rejects.toMatchObject({
+        details: matchingObject({ code: "INVALID_SQL_SCHEMA" }),
+      });
     } finally {
       await backend.close();
     }
