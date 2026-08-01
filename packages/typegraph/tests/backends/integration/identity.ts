@@ -943,6 +943,31 @@ export function registerIdentityIntegrationTests(
       ).toMatchObject({ id: "view-hydrate-recorded", name: "Vera LLC" });
     });
 
+    it("hydrates a tombstoned member the includeTombstones coordinate surfaces", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Tomb" },
+        { id: "tomb-seed" },
+      );
+      // Deleting a PEER detaches it from the class (event-driven identity),
+      // but the deleted SEED itself stays visible under includeTombstones —
+      // the closure's singleton fallback names it and the all-rows-visible
+      // predicate keeps it. membersOf and nodesOf must agree on it.
+      await store.nodes.Person.delete(person.id);
+      const view = store.view({ mode: "includeTombstones" });
+
+      expect(await view.identity.membersOf(person)).toEqual([
+        { kind: "Person", id: "tomb-seed" },
+      ]);
+      const nodes = await view.identity.nodesOf(person);
+      expect(nodes).toHaveLength(1);
+      expect(nodes[0]).toMatchObject({ id: "tomb-seed", name: "Tomb" });
+
+      // Outside the tombstone lens the seed is gone from both reads alike.
+      expect(await store.identity.membersOf(person)).toEqual([]);
+      expect(await store.identity.nodesOf(person)).toEqual([]);
+    });
+
     it("ends assertion rows on soft delete and removes them on hard delete", async () => {
       const store = context.getStore();
       const person = await store.nodes.Person.create(

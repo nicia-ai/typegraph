@@ -2809,6 +2809,7 @@ function validateTransferShape<G extends GraphDef>(
         issues: [
           {
             path: "identity.assertions",
+            assertionId: assertion.id,
             message: `Unknown identity endpoint kind in assertion ${assertion.id}`,
             code: "IDENTITY_IMPORT_UNKNOWN_KIND",
           },
@@ -2817,7 +2818,19 @@ function validateTransferShape<G extends GraphDef>(
     );
   }
   if (refKey(assertion.a) === refKey(assertion.b)) {
-    throw selfAssertionError(assertion.relation);
+    throw new ValidationError(
+      `Identity ${assertion.relation} assertions require two distinct node references.`,
+      {
+        issues: [
+          {
+            path: "identity.assertions",
+            assertionId: assertion.id,
+            message: `Assertion ${assertion.id} relates a node to itself`,
+            code: "IDENTITY_SELF_ASSERTION",
+          },
+        ],
+      },
+    );
   }
   const normalized = normalizePair(assertion.a, assertion.b);
   if (
@@ -2828,6 +2841,7 @@ function validateTransferShape<G extends GraphDef>(
       issues: [
         {
           path: "identity.assertions",
+          assertionId: assertion.id,
           message: `Assertion ${assertion.id} endpoints are not in code-point order`,
           code: "IDENTITY_IMPORT_PAIR_NOT_NORMALIZED",
         },
@@ -2841,6 +2855,7 @@ function validateTransferShape<G extends GraphDef>(
         issues: [
           {
             path: "identity.assertions",
+            assertionId: assertion.id,
             message: `Assertion ${assertion.id} is ended`,
             code: "IDENTITY_STATE_IMPORT_ENDED_ASSERTION",
           },
@@ -2864,6 +2879,7 @@ function validateTransferShape<G extends GraphDef>(
         issues: [
           {
             path: "identity.assertions",
+            assertionId: assertion.id,
             message: `Assertion ${assertion.id} validFrom is in the future`,
             code: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
           },
@@ -2884,6 +2900,7 @@ function validateTransferShape<G extends GraphDef>(
       issues: [
         {
           path: "identity.assertions",
+          assertionId: assertion.id,
           message: `Assertion ${assertion.id} validTo must not precede validFrom`,
           code: "IDENTITY_IMPORT_INVALID_WINDOW",
         },
@@ -2909,6 +2926,7 @@ function validateTransferShape<G extends GraphDef>(
         issues: [
           {
             path: "identity.assertions",
+            assertionId: assertion.id,
             message: `Assertion ${assertion.id} validTo is in the future`,
             code: "IDENTITY_IMPORT_FUTURE_VALID_TO",
           },

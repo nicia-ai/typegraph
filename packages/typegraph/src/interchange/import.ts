@@ -471,7 +471,7 @@ function asIdentityImportError(
         error.message
       : `${error.message} (${issue.message})`;
     return identityImportError(
-      assertionNamedInMessage(assertions, issue?.message),
+      assertions.find((candidate) => candidate.id === issue?.assertionId),
       graphId,
       message,
     );
@@ -482,8 +482,10 @@ function asIdentityImportError(
 /**
  * A `ValidationError` the identity import coordinator raised about assertion
  * CONTENT (ended rows in state mode, out-of-bounds validity windows, unknown
- * kinds, unnormalized pairs). Every issue it emits is pathed at
- * `identity.assertions`; a validation error pathed anywhere else is a
+ * kinds, unnormalized pairs, self-assertions). Every issue it emits is pathed
+ * at `identity.assertions` and carries the offending assertion's id
+ * structurally in `assertionId` — attribution never parses the
+ * human-readable message. A validation error shaped any other way is a
  * document-shape or programming fault and must still propagate.
  */
 function isIdentityAssertionValidationError(
@@ -492,28 +494,11 @@ function isIdentityAssertionValidationError(
   return (
     error instanceof ValidationError &&
     error.details.issues.length > 0 &&
-    error.details.issues.every((issue) => issue.path === "identity.assertions")
+    error.details.issues.every(
+      (issue) =>
+        issue.path === "identity.assertions" && issue.assertionId !== undefined,
+    )
   );
-}
-
-/**
- * Attributes a coordinator issue to the assertion it names. Issue messages
- * embed the assertion id verbatim; the longest matching id wins so an id that
- * is a prefix of another cannot steal the attribution.
- */
-function assertionNamedInMessage(
-  assertions: readonly InterchangeIdentityAssertion[],
-  message: string | undefined,
-): InterchangeIdentityAssertion | undefined {
-  if (message === undefined) return undefined;
-  let named: InterchangeIdentityAssertion | undefined;
-  for (const candidate of assertions) {
-    if (!message.includes(candidate.id)) continue;
-    if (named === undefined || candidate.id.length > named.id.length) {
-      named = candidate;
-    }
-  }
-  return named;
 }
 
 /**

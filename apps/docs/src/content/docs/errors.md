@@ -405,7 +405,11 @@ indexes raises the generic `MigrationError` enumerating all of them.
 
 Identity import also raises `ValidationError` with one of these
 `details.issues[].code` values when an interchange document's `identity`
-section fails shape or integrity checks:
+section fails shape or integrity checks. Each issue carries the offending
+assertion's id structurally in `details.issues[].assertionId`, and
+`importGraph`/`importGraphStream` record these failures as
+`entityType: "identity"` entries in `result.errors` (a self-assertion —
+`IDENTITY_SELF_ASSERTION` — included) rather than throwing:
 
 | Issue `code` | Meaning |
 | --- | --- |

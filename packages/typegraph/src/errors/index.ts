@@ -170,6 +170,12 @@ export type ValidationIssue = Readonly<{
   message: string;
   /** Zod error code if from Zod validation */
   code?: string;
+  /**
+   * The identity assertion the issue is about, carried structurally so
+   * consumers (e.g. interchange import error reporting) never have to parse
+   * the human-readable message for it.
+   */
+  assertionId?: string;
 }>;
 
 /**

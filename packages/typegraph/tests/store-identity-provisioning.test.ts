@@ -36,7 +36,12 @@ import {
   type LocalSqliteBackendResult,
 } from "../src/backend/sqlite/local";
 import { createSqlSchema } from "../src/query/compiler/schema";
-import { getActiveSchema, migrateSchema } from "../src/schema";
+import {
+  ensureSchema,
+  getActiveSchema,
+  initializeSchema,
+  migrateSchema,
+} from "../src/schema";
 import { storeRuntime } from "../src/store/runtime-port";
 import { matchingObject } from "./test-utils";
 
@@ -450,6 +455,48 @@ describe("identity on the first schema commit", () => {
     await expect(
       storeRuntime(store).validateIdentity(),
     ).resolves.toBeUndefined();
+  });
+
+  it("runs the enablement preflight from the public low-level commit paths too", async () => {
+    // Direct initializeSchema(): the preflight is derived internally, so a
+    // caller who never goes through createStoreWithSchema cannot commit
+    // version 1 over a never-built closure.
+    const direct = createLocalSqliteBackend();
+    const directLegacy = createStore(disabledGraph, direct.backend);
+    await directLegacy.nodes.Person.create({ name: "Shared" }, { id: "dup" });
+    await directLegacy.nodes.Author.create({ penName: "S." }, { id: "dup" });
+    await initializeSchema(direct.backend, enabledGraph);
+    const [directStore] = await createStoreWithSchema(
+      enabledGraph,
+      direct.backend,
+    );
+    expect(
+      await directStore.identity.areSame(
+        { kind: "Person", id: "dup" },
+        { kind: "Author", id: "dup" },
+      ),
+    ).toBe(true);
+
+    // Bare ensureSchema(): same guarantee for the other public first-commit
+    // path — the later createStoreWithSchema open sees a matching hash and
+    // returns "unchanged", so the closure MUST already be right.
+    const ensured = createLocalSqliteBackend();
+    const ensuredLegacy = createStore(disabledGraph, ensured.backend);
+    await ensuredLegacy.nodes.Person.create({ name: "Shared" }, { id: "dup" });
+    await ensuredLegacy.nodes.Author.create({ penName: "S." }, { id: "dup" });
+    const ensureResult = await ensureSchema(ensured.backend, enabledGraph);
+    expect(ensureResult.status).toBe("initialized");
+    const [ensuredStore, reopened] = await createStoreWithSchema(
+      enabledGraph,
+      ensured.backend,
+    );
+    expect(reopened.status).toBe("unchanged");
+    expect(
+      await ensuredStore.identity.areSame(
+        { kind: "Person", id: "dup" },
+        { kind: "Author", id: "dup" },
+      ),
+    ).toBe(true);
   });
 
   it("refuses initialization when legacy rows contradict the identity profile", async () => {

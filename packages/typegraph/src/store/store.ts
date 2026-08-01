@@ -3299,8 +3299,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                   ids.map((id) => backend.getNode(this.graphId, kind, id)),
                 )
               : await backend.getNodes(this.graphId, kind, ids);
+            // Identity visibility treats every row as visible under
+            // includeTombstones, so a soft-deleted member the coordinate
+            // surfaced must hydrate rather than silently vanish between
+            // membersOf and nodesOf.
+            const includeTombstoned =
+              coordinate?.valid.mode === "includeTombstones";
             for (const row of rows) {
-              if (row === undefined || row.deleted_at !== undefined) continue;
+              if (row === undefined) continue;
+              if (!includeTombstoned && row.deleted_at !== undefined) continue;
               loadedByReference.set(
                 JSON.stringify([kind, row.id]),
                 rowToNode(row) as IdentityNode<G>,

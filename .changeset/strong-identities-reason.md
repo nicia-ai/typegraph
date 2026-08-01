@@ -103,3 +103,13 @@ SQLite — the class-members lookup defeated the closure's class index and the
 planner scanned every live node per read. The rewritten statement is
 O(class size): ~40x faster on a populated graph (0.013 ms vs 0.56 ms per
 read at ~6,000 nodes), with a smaller improvement on PostgreSQL.
+
+**Follow-up hardening (same release).** `ValidationIssue` gained an optional
+`assertionId` field carrying the offending identity assertion structurally;
+identity import failures (self-assertions included) attribute their
+`result.errors` entries by that id, never by message parsing. The identity
+enablement preflight is derived inside `initializeSchema()` itself, so every
+public first-commit path — bare `ensureSchema`/`initializeSchema` included —
+builds and validates the closure atomically with version 1. Identity reads on
+`includeTombstones` views hydrate soft-deleted rows the coordinate makes
+visible instead of silently dropping them.

@@ -6275,6 +6275,7 @@ export type ValidationIssue = Readonly<{
     path: string;
     message: string;
     code?: string;
+    assertionId?: string;
 }>;
 
 // @public

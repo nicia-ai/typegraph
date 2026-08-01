@@ -603,6 +603,130 @@ describe("importGraph identity failure reporting", () => {
     expect(result.nodes.created).toBe(2);
   });
 
+  it("records a self-assertion as an identity error instead of throwing", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const selfRef: Ref = { kind: "Person", id: "narcissus" };
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [
+        { kind: "Person", id: "narcissus", properties: { name: "Self" } },
+      ],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        assertions: [
+          {
+            id: "self-loop",
+            relation: "same",
+            a: selfRef,
+            b: selfRef,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+        ],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "self-loop",
+          error: matchingString("relates a node to itself"),
+        }),
+      ]),
+    );
+    expect(result.nodes.created).toBe(1);
+
+    const streamed = await importGraphStream(
+      store,
+      chunkStream([
+        {
+          type: "header",
+          header: {
+            formatVersion: "2.0",
+            exportedAt: CANONICAL_TIMESTAMP,
+            source: { type: "external" },
+            identity: { profile: IDENTITY_PROFILE, mode: "state" },
+          },
+        },
+        {
+          type: "identity",
+          assertions: requireDefined(document.identity).assertions,
+        },
+      ]),
+      { onConflict: "skip", onStreamChunkError: "continue" },
+    );
+    expect(streamed.success).toBe(false);
+    expect(streamed.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({ entityType: "identity", id: "self-loop" }),
+      ]),
+    );
+  });
+
+  it("attributes an identity error by structural id, not by message text", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    // Two assertions whose ids collide inside human-readable text: the
+    // failing one is "x", and a valid one is literally named "Assertion x" —
+    // the exact string a message-substring heuristic would prefer.
+    const [decoyA, decoyB] = orderPair(
+      { kind: "Person", id: "decoy-a" },
+      { kind: "Person", id: "decoy-b" },
+    );
+    const [endedA, endedB] = orderPair(
+      { kind: "Person", id: "ended-a" },
+      { kind: "Person", id: "ended-b" },
+    );
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [decoyA, decoyB, endedA, endedB].map((ref) => ({
+        kind: ref.kind,
+        id: ref.id,
+        properties: { name: ref.id },
+      })),
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        assertions: [
+          {
+            id: "Assertion x",
+            relation: "same",
+            a: decoyA,
+            b: decoyB,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+          {
+            // Fails: ended assertion in state mode.
+            id: "x",
+            relation: "same",
+            a: endedA,
+            b: endedB,
+            validFrom: CANONICAL_TIMESTAMP,
+            validTo: CANONICAL_TIMESTAMP,
+          },
+        ],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({ entityType: "identity", id: "x" }),
+      ]),
+    );
+  });
+
   it("records semantic identity failures on the streaming path too", async () => {
     const store = await createInitializedStore(graph, createTestBackend());
     const document = documentWithAssertion("state", {

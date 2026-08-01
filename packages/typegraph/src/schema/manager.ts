@@ -383,12 +383,10 @@ export async function ensureSchema<G extends GraphDef>(
     : preloaded.activeRow;
 
   if (activeSchema === undefined) {
-    // No schema exists - initialize with version 1
-    const result = await initializeSchema(
-      backend,
-      graph,
-      options?.schemaCommitPreflight,
-    );
+    // No schema exists - initialize with version 1. `initializeSchema`
+    // derives the identity enablement preflight itself, so a caller-supplied
+    // `schemaCommitPreflight` is deliberately not threaded here.
+    const result = await initializeSchema(backend, graph);
     return {
       status: "initialized",
       version: result.version,
@@ -430,14 +428,25 @@ export async function ensureSchema<G extends GraphDef>(
         diff,
       };
       await options?.onBeforeMigrate?.(hookContext);
+      // An identity-enabled commit must never land without the closure
+      // preflight, whichever public path drove it: prefer the caller's
+      // Store-bound preflight, derive one when the caller (bare
+      // `ensureSchema`) supplied none.
+      const preflight =
+        options?.schemaCommitPreflight ??
+        (graph.identity === undefined ?
+          undefined
+        : await prepareIdentitySchemaCommit(backend, graph, {
+            enablement: storedSchema.identity === undefined,
+          }));
       const committedRow =
-        options?.schemaCommitPreflight === undefined ?
+        preflight === undefined ?
           await commitNewSchemaVersion(backend, graph, activeSchema.version)
         : await commitNewSchemaVersionWithPreflight(
             backend,
             graph,
             activeSchema.version,
-            options.schemaCommitPreflight,
+            preflight,
           );
       await options?.onAfterMigrate?.(hookContext);
       return {
@@ -699,7 +708,6 @@ function schemaNotInitializedError(
 export async function initializeSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
-  preflight?: (target: TransactionBackend) => Promise<void>,
 ): Promise<SchemaVersionRow> {
   // Structural gates (e.g. endpoint-incompatible implies() relations)
   // must reject before the schema is durably committed, not only when a
@@ -717,13 +725,22 @@ export async function initializeSchema<G extends GraphDef>(
     schemaDoc: schema,
   };
 
-  if (preflight === undefined) return backend.commitSchemaVersion(commit);
+  if (graph.identity === undefined) {
+    return backend.commitSchemaVersion(commit);
+  }
 
   // An identity-enabled graph's FIRST schema commit is an enablement: a
   // legacy database populated through an unmanaged Store can already hold
   // same-id peers and assertions, so the fold scan, contradiction
   // validation, and closure build must commit atomically with version 1 —
-  // exactly like a later enablement migration.
+  // exactly like a later enablement migration. Derived HERE, not accepted
+  // from the caller, so every public first-commit path (`ensureSchema`,
+  // `createStoreWithSchema`, or this function directly) gets it — a version 1
+  // committed without it would pass every later hash check while identity
+  // reads answer from a never-built closure.
+  const preflight = await prepareIdentitySchemaCommit(backend, graph, {
+    enablement: true,
+  });
   const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
   if (commitWithPreflight === undefined) {
     throw new ConfigurationError(
