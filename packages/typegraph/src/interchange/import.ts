@@ -26,6 +26,7 @@ import {
   UniquenessError,
   ValidationError,
 } from "../errors";
+import { IDENTITY_IMPORT_FAILED_ASSERTION } from "../identity/service";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   createNodeBatchValidationBackend,
@@ -444,18 +445,25 @@ function asIdentityImportError(
   graphId: string,
   error: unknown,
 ): ImportError | undefined {
+  // The coordinator tags the error with the id of the assertion it was
+  // APPLYING — exact attribution. The endpoint heuristics below are only the
+  // fallback for an untagged error: they pick the first assertion touching
+  // the endpoints, which is wrong whenever an earlier assertion over the same
+  // pair succeeded.
+  const tagged = taggedAssertion(assertions, error);
   if (error instanceof NodeNotFoundError) {
     const ref = error.details;
-    const assertion = assertions.find((candidate) =>
-      touchesRef(candidate, ref),
-    );
+    const assertion =
+      tagged ?? assertions.find((candidate) => touchesRef(candidate, ref));
     return identityImportError(assertion, graphId, error.message);
   }
   if (error instanceof IdentityContradictionError) {
     const { a, b } = error.details;
-    const assertion = assertions.find(
-      (candidate) => touchesRef(candidate, a) && touchesRef(candidate, b),
-    );
+    const assertion =
+      tagged ??
+      assertions.find(
+        (candidate) => touchesRef(candidate, a) && touchesRef(candidate, b),
+      );
     return identityImportError(assertion, graphId, error.message);
   }
   if (isIdConflictError(error)) {
@@ -488,6 +496,18 @@ function asIdentityImportError(
  * human-readable message. A validation error shaped any other way is a
  * document-shape or programming fault and must still propagate.
  */
+function taggedAssertion(
+  assertions: readonly InterchangeIdentityAssertion[],
+  error: unknown,
+): InterchangeIdentityAssertion | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const id = (error as Record<PropertyKey, unknown>)[
+    IDENTITY_IMPORT_FAILED_ASSERTION
+  ];
+  if (typeof id !== "string") return undefined;
+  return assertions.find((candidate) => candidate.id === id);
+}
+
 function isIdentityAssertionValidationError(
   error: unknown,
 ): error is ValidationError {

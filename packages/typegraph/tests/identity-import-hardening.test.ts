@@ -727,6 +727,120 @@ describe("importGraph identity failure reporting", () => {
     );
   });
 
+  it("attributes a contradiction to the failing assertion, not the first pair-mate", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const [a, b] = orderPair(
+      { kind: "Person", id: "contra-a" },
+      { kind: "Person", id: "contra-b" },
+    );
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [a, b].map((ref) => ({
+        kind: ref.kind,
+        id: ref.id,
+        properties: { name: ref.id },
+      })),
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        assertions: [
+          {
+            id: "same-first",
+            relation: "same",
+            a,
+            b,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+          {
+            // Contradicts same-first over the SAME endpoints: the endpoint
+            // heuristic would attribute the failure to same-first.
+            id: "different-fails",
+            relation: "different",
+            a,
+            b,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+        ],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "different-fails",
+        }),
+      ]),
+    );
+    // The assertion applied before the failing one stays committed.
+    expect(
+      await store.identity.areSame(
+        { kind: "Person", id: "contra-a" },
+        { kind: "Person", id: "contra-b" },
+      ),
+    ).toBe(true);
+  });
+
+  it("attributes a missing endpoint to the open assertion that required it", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const present = await store.nodes.Person.create(
+      { name: "Present" },
+      { id: "present" },
+    );
+    void present;
+    const missingRef: Ref = { kind: "Person", id: "missing" };
+    const [endedA, endedB] = orderPair(missingRef, {
+      kind: "Person",
+      id: "present",
+    });
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "archival",
+        assertions: [
+          {
+            // Ended rows skip the endpoint-liveness check entirely, so this
+            // one is NOT the failure even though it names the missing node
+            // first.
+            id: "ended-touches-missing",
+            relation: "same",
+            a: endedA,
+            b: endedB,
+            validFrom: isoAt(-2 * HOUR_MS),
+            validTo: isoAt(-HOUR_MS),
+          },
+          {
+            id: "open-fails",
+            relation: "same",
+            a: endedA,
+            b: endedB,
+            validFrom: isoAt(-HOUR_MS),
+          },
+        ],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({ entityType: "identity", id: "open-fails" }),
+      ]),
+    );
+  });
+
   it("records semantic identity failures on the streaming path too", async () => {
     const store = await createInitializedStore(graph, createTestBackend());
     const document = documentWithAssertion("state", {

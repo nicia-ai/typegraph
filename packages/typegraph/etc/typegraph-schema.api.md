@@ -1094,7 +1094,7 @@ type IndexWhereOperand = Readonly<{
 type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
 // @public
-export function initializeSchema<G extends GraphDef>(backend: GraphBackend, graph: G): Promise<SchemaVersionRow>;
+export function initializeSchema<G extends GraphDef>(backend: GraphBackend, graph: G, schemaCommitPreflight?: (target: TransactionBackend) => Promise<void>): Promise<SchemaVersionRow>;
 
 // @public
 type InsertEdgeParams = Readonly<{

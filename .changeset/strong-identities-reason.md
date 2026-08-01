@@ -113,3 +113,12 @@ public first-commit path — bare `ensureSchema`/`initializeSchema` included —
 builds and validates the closure atomically with version 1. Identity reads on
 `includeTombstones` views hydrate soft-deleted rows the coordinate makes
 visible instead of silently dropping them.
+
+**Attribution and first-commit precision.** `initializeSchema()` accepts an
+optional schema-commit preflight (the Store-bound one carries an explicit
+custom `SqlSchema`; bare callers get an internally derived enablement
+preflight over the backend's effective table names), and the import
+coordinator tags rethrown errors with the id of the assertion it was
+applying, so `ImportResult.errors` attribution for contradictions and
+missing endpoints identifies the failing assertion rather than the first
+assertion sharing its endpoints.

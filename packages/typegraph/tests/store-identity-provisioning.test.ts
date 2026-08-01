@@ -457,6 +457,42 @@ describe("identity on the first schema commit", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("builds the version-1 closure in the Store's custom identity tables", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const legacy = createStore(disabledGraph, result.backend);
+      await legacy.nodes.Person.create({ name: "Shared" }, { id: "custom" });
+      await legacy.nodes.Author.create({ penName: "S." }, { id: "custom" });
+      const schema = createSqlSchema({
+        identityAssertions: "custom_v1_identity_assertions",
+        recordedIdentityAssertions: "custom_v1_recorded_identity_assertions",
+        identityClosure: "custom_v1_identity_closure",
+      });
+
+      const [store, validation] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+        { schema },
+      );
+      expect(validation.status).toBe("initialized");
+      // The enablement fold must land in the tables the returned Store
+      // reads — a preflight derived from backend.tableNames would build the
+      // closure in the default tables and answer false here.
+      expect(
+        await store.identity.areSame(
+          { kind: "Person", id: "custom" },
+          { kind: "Author", id: "custom" },
+        ),
+      ).toBe(true);
+      const closureRows = rawClient(result)
+        .prepare("SELECT COUNT(*) AS n FROM custom_v1_identity_closure")
+        .get() as { n: number };
+      expect(closureRows.n).toBeGreaterThan(0);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
   it("runs the enablement preflight from the public low-level commit paths too", async () => {
     // Direct initializeSchema(): the preflight is derived internally, so a
     // caller who never goes through createStoreWithSchema cannot commit

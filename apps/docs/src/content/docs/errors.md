@@ -419,6 +419,7 @@ assertion's id structurally in `details.issues[].assertionId`, and
 | `IDENTITY_IMPORT_FUTURE_VALID_FROM` | An open (current) assertion's `validFrom` is in the future, in either import mode. |
 | `IDENTITY_IMPORT_FUTURE_VALID_TO` | An ended assertion's `validTo` is in the future. |
 | `IDENTITY_IMPORT_INVALID_WINDOW` | An assertion's `validTo` precedes its `validFrom`. |
+| `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
 
 #### Recorded-capture guard codes
 

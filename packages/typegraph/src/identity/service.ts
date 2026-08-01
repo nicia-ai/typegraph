@@ -2938,6 +2938,33 @@ function validateTransferShape<G extends GraphDef>(
 }
 
 /**
+ * Attribution tag the import coordinator attaches to an error it rethrows:
+ * the id of the assertion it was APPLYING when the failure surfaced. Interchange
+ * error reporting reads it so an `IdentityContradictionError` or
+ * `NodeNotFoundError` is attributed to the failing assertion, not to whichever
+ * earlier assertion happens to touch the same endpoints. A non-enumerable
+ * symbol so the original error class, message, and details stay byte-identical
+ * for direct callers.
+ */
+export const IDENTITY_IMPORT_FAILED_ASSERTION: unique symbol = Symbol(
+  "typegraph.identity.failedAssertionId",
+);
+
+function rethrowTaggedWithAssertion(
+  error: unknown,
+  assertionId: string,
+): never {
+  if (typeof error === "object" && error !== null) {
+    Object.defineProperty(error, IDENTITY_IMPORT_FAILED_ASSERTION, {
+      value: assertionId,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  throw error;
+}
+
+/**
  * Applies interchange identity rows inside the caller-owned write transaction.
  * The caller owns import conflict policy and acquires the graph identity lock;
  * this coordinator owns integrity, persistence, capture, and closure repair.
@@ -2970,112 +2997,137 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
       const [a, b] = endpoints;
       currentEndpoints.push(a, b);
     }
-    await requireLiveEndpoints(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-      currentEndpoints,
-    );
+    try {
+      await requireLiveEndpoints(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        currentEndpoints,
+      );
+    } catch (error) {
+      // The batch check loses per-assertion context; only OPEN assertions
+      // contributed endpoints, so the first open one touching the missing ref
+      // is the failing candidate.
+      if (error instanceof NodeNotFoundError) {
+        const missing = { kind: error.details.kind, id: error.details.id };
+        const failing = normalized.find(
+          ({ assertion, endpoints }) =>
+            assertion.validTo === undefined &&
+            endpoints.some(
+              (endpoint) =>
+                endpoint.kind === missing.kind && endpoint.id === missing.id,
+            ),
+        );
+        if (failing !== undefined) {
+          rethrowTaggedWithAssertion(error, failing.assertion.id);
+        }
+      }
+      throw error;
+    }
 
     for (const { assertion, endpoints } of normalized) {
       const [a, b] = endpoints;
-      const sameId = existingById.get(assertion.id);
-      if (sameId !== undefined) {
-        const exact =
-          sameId.rel === assertion.relation &&
-          sameId.a_kind === a.kind &&
-          sameId.a_id === a.id &&
-          sameId.b_kind === b.kind &&
-          sameId.b_id === b.id &&
-          sameId.valid_from === assertion.validFrom &&
-          sameId.valid_to === assertion.validTo;
-        if (exact) {
+      try {
+        const sameId = existingById.get(assertion.id);
+        if (sameId !== undefined) {
+          const exact =
+            sameId.rel === assertion.relation &&
+            sameId.a_kind === a.kind &&
+            sameId.a_id === a.id &&
+            sameId.b_kind === b.kind &&
+            sameId.b_id === b.id &&
+            sameId.valid_from === assertion.validFrom &&
+            sameId.valid_to === assertion.validTo;
+          if (exact) {
+            skipped += 1;
+            continue;
+          }
+          throw new ConfigurationError(
+            `Identity assertion id ${assertion.id} already identifies different truth.`,
+            {
+              code: "IDENTITY_IMPORT_ID_CONFLICT",
+              graphId: ctx.graphId,
+              assertionId: assertion.id,
+            },
+          );
+        }
+
+        if (assertion.validTo !== undefined) {
+          const timestamp = assertion.validFrom;
+          const row: IdentityAssertionStorageRow = {
+            graph_id: ctx.graphId,
+            id: assertion.id,
+            rel: assertion.relation,
+            a_kind: a.kind,
+            a_id: a.id,
+            b_kind: b.kind,
+            b_id: b.id,
+            valid_from: assertion.validFrom,
+            valid_to: assertion.validTo,
+            created_at: timestamp,
+            updated_at: assertion.validTo,
+            deleted_at: undefined,
+          };
+          await executeStatement(
+            rawTarget,
+            sql`
+              INSERT INTO ${ctx.schema.identityAssertionsTable} (
+                graph_id, id, rel, a_kind, a_id, b_kind, b_id,
+                valid_from, valid_to, created_at, updated_at, deleted_at
+              ) VALUES (
+                ${row.graph_id}, ${row.id}, ${row.rel}, ${row.a_kind}, ${row.a_id},
+                ${row.b_kind}, ${row.b_id}, ${row.valid_from}, ${row.valid_to},
+                ${row.created_at}, ${row.updated_at}, NULL
+              )
+            `,
+          );
+          touch(ctx.graphId, row.id, row);
+          existingById.set(row.id, row);
+          created += 1;
+          continue;
+        }
+
+        const existing = await currentAssertionForPair(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          assertion.relation,
+          a,
+          b,
+        );
+        if (existing !== undefined) {
           skipped += 1;
           continue;
         }
-        throw new ConfigurationError(
-          `Identity assertion id ${assertion.id} already identifies different truth.`,
-          {
-            code: "IDENTITY_IMPORT_ID_CONFLICT",
-            graphId: ctx.graphId,
-            assertionId: assertion.id,
-          },
-        );
-      }
-
-      if (assertion.validTo !== undefined) {
-        const timestamp = assertion.validFrom;
-        const row: IdentityAssertionStorageRow = {
-          graph_id: ctx.graphId,
-          id: assertion.id,
-          rel: assertion.relation,
-          a_kind: a.kind,
-          a_id: a.id,
-          b_kind: b.kind,
-          b_id: b.id,
-          valid_from: assertion.validFrom,
-          valid_to: assertion.validTo,
-          created_at: timestamp,
-          updated_at: assertion.validTo,
-          deleted_at: undefined,
-        };
-        await executeStatement(
+        await validateCurrentRelation(
+          ctx,
           rawTarget,
-          sql`
-            INSERT INTO ${ctx.schema.identityAssertionsTable} (
-              graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-              valid_from, valid_to, created_at, updated_at, deleted_at
-            ) VALUES (
-              ${row.graph_id}, ${row.id}, ${row.rel}, ${row.a_kind}, ${row.a_id},
-              ${row.b_kind}, ${row.b_id}, ${row.valid_from}, ${row.valid_to},
-              ${row.created_at}, ${row.updated_at}, NULL
-            )
-          `,
+          assertion.relation,
+          "import",
+          a,
+          b,
         );
-        touch(ctx.graphId, row.id, row);
-        existingById.set(row.id, row);
+        const inserted = await insertAssertion(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          assertion.relation,
+          a,
+          b,
+          nowIso(),
+          touch,
+          { id: assertion.id, validFrom: assertion.validFrom },
+        );
+        existingById.set(inserted.id, inserted);
         created += 1;
-        continue;
-      }
-
-      const existing = await currentAssertionForPair(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        assertion.relation,
-        a,
-        b,
-      );
-      if (existing !== undefined) {
-        skipped += 1;
-        continue;
-      }
-      await validateCurrentRelation(
-        ctx,
-        rawTarget,
-        assertion.relation,
-        "import",
-        a,
-        b,
-      );
-      const inserted = await insertAssertion(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        assertion.relation,
-        a,
-        b,
-        nowIso(),
-        touch,
-        { id: assertion.id, validFrom: assertion.validFrom },
-      );
-      existingById.set(inserted.id, inserted);
-      created += 1;
-      // Repair the closure incrementally, exactly as single assertPair does, so
-      // a later validation in this same batch (e.g. a following different(a,b))
-      // sees the merge instead of validating against a stale materialized class.
-      if (assertion.relation === "same") {
-        await mergeCurrentClasses(rawTarget, ctx.schema, ctx.graphId, a, b);
+        // Repair the closure incrementally, exactly as single assertPair does, so
+        // a later validation in this same batch (e.g. a following different(a,b))
+        // sees the merge instead of validating against a stale materialized class.
+        if (assertion.relation === "same") {
+          await mergeCurrentClasses(rawTarget, ctx.schema, ctx.graphId, a, b);
+        }
+      } catch (error) {
+        rethrowTaggedWithAssertion(error, assertion.id);
       }
     }
   });

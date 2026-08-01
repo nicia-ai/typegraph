@@ -383,10 +383,15 @@ export async function ensureSchema<G extends GraphDef>(
     : preloaded.activeRow;
 
   if (activeSchema === undefined) {
-    // No schema exists - initialize with version 1. `initializeSchema`
-    // derives the identity enablement preflight itself, so a caller-supplied
-    // `schemaCommitPreflight` is deliberately not threaded here.
-    const result = await initializeSchema(backend, graph);
+    // No schema exists - initialize with version 1. The Store-bound preflight
+    // is threaded through when the caller built one (it carries the effective
+    // custom `SqlSchema`); `initializeSchema` derives a fallback for bare
+    // callers, so no public first-commit path skips the enablement work.
+    const result = await initializeSchema(
+      backend,
+      graph,
+      options?.schemaCommitPreflight,
+    );
     return {
       status: "initialized",
       version: result.version,
@@ -708,6 +713,7 @@ function schemaNotInitializedError(
 export async function initializeSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
+  schemaCommitPreflight?: (target: TransactionBackend) => Promise<void>,
 ): Promise<SchemaVersionRow> {
   // Structural gates (e.g. endpoint-incompatible implies() relations)
   // must reject before the schema is durably committed, not only when a
@@ -733,14 +739,18 @@ export async function initializeSchema<G extends GraphDef>(
   // legacy database populated through an unmanaged Store can already hold
   // same-id peers and assertions, so the fold scan, contradiction
   // validation, and closure build must commit atomically with version 1 —
-  // exactly like a later enablement migration. Derived HERE, not accepted
-  // from the caller, so every public first-commit path (`ensureSchema`,
-  // `createStoreWithSchema`, or this function directly) gets it — a version 1
-  // committed without it would pass every later hash check while identity
-  // reads answer from a never-built closure.
-  const preflight = await prepareIdentitySchemaCommit(backend, graph, {
-    enablement: true,
-  });
+  // exactly like a later enablement migration. A caller-supplied preflight
+  // (the Store-bound one, which knows an explicit custom `SqlSchema`) wins;
+  // absent one, the preflight is DERIVED here over the backend's effective
+  // table names, so the bare public paths (`ensureSchema`,
+  // `initializeSchema` directly) can never commit a version 1 that later
+  // hash checks accept while identity reads answer from a never-built
+  // closure.
+  const preflight =
+    schemaCommitPreflight ??
+    (await prepareIdentitySchemaCommit(backend, graph, {
+      enablement: true,
+    }));
   const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
   if (commitWithPreflight === undefined) {
     throw new ConfigurationError(
