@@ -35,7 +35,11 @@ import {
   ensureIdentitySchemaStorage,
   identitySchemaCommitPreflight,
 } from "../identity/schema-transition";
-import { createSqlSchema, type SqlSchema } from "../query/compiler/schema";
+import {
+  createSqlSchema,
+  requireSqlSchema,
+  type SqlSchema,
+} from "../query/compiler/schema";
 import { buildKindRegistry } from "../registry";
 import { freezeDeep } from "../utils/object";
 import { isMissingTableError } from "../utils/sql-errors";
@@ -933,7 +937,15 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
   target: G,
   options: Readonly<{ enablement: boolean; schema?: SqlSchema }>,
 ): Promise<(transactionBackend: TransactionBackend) => Promise<void>> {
-  const schema = options.schema ?? createSqlSchema(backend.tableNames);
+  // Brand-validate before any DDL or commit: a schema-shaped plain object
+  // from an untyped caller can expose custom names to provisioning while its
+  // SQL fragments target the default tables, landing the closure where the
+  // Store never reads. Rejection happens before the version commit, so an
+  // invalid schema leaves no active row behind.
+  const schema =
+    options.schema === undefined ?
+      createSqlSchema(backend.tableNames)
+    : requireSqlSchema(options.schema, "The schema option");
   await ensureIdentitySchemaStorage(backend, schema, {
     graphId: target.id,
     enablement: options.enablement,

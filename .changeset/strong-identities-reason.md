@@ -129,3 +129,12 @@ a no-op callback could suppress the mandatory closure build at version 1.
 Both (and `MigrateSchemaOptions`) instead accept the effective `SqlSchema`
 (`schema`), and every identity-enabled schema commit derives the closure
 preflight internally from it.
+
+**One schema source in the batteries-included constructors.** The nested
+`schemaManagement` option no longer accepts `schema` (typed out and stripped
+at runtime): the effective `SqlSchema` has exactly one source, `store.schema`,
+which also drives physical table provisioning — a second schema could name
+tables that were never created. The manager brand-validates the `schema`
+option with `requireSqlSchema()` before any DDL or version commit, so a
+schema-shaped plain object is rejected (`INVALID_SQL_SCHEMA`) instead of
+committing a closure into tables the Store never reads.

@@ -2196,7 +2196,7 @@ export type LocalPgliteStoreOptions<TStoreOptions extends StoreOptions = StoreOp
     dataDir?: string;
     vector?: boolean;
     store?: TStoreOptions;
-    schemaManagement?: SchemaManagerOptions;
+    schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;
 
 // @public

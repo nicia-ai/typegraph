@@ -2213,7 +2213,7 @@ export type LocalSqliteStoreOptions<TStoreOptions extends StoreOptions = StoreOp
     pragmas?: LocalSqlitePragmaOptions | false;
     capabilities?: Partial<BackendCapabilities>;
     store?: TStoreOptions;
-    schemaManagement?: SchemaManagerOptions;
+    schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;
 
 // @public
