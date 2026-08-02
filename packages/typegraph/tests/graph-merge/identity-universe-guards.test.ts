@@ -79,6 +79,22 @@ const retypeGraph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
+const ClusterPerson = defineNode("Person", {
+  schema: z.object({ name: z.string(), birthDate: z.string() }),
+});
+const ClusterRobot = defineNode("Robot", {
+  schema: z.object({ name: z.string() }),
+});
+
+/** Clusterable variant: similarity fuses same-birthDate Persons. */
+const clusterFoldGraph = defineGraph({
+  id: "identity_universe_cluster",
+  nodes: { Person: { type: ClusterPerson }, Robot: { type: ClusterRobot } },
+  edges: {},
+  ontology: [disjointWith(ClusterPerson, ClusterRobot)],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
 
@@ -177,6 +193,74 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     expect(
       await target.nodes.Person.getById("shared" as never),
     ).toBeUndefined();
+  });
+
+  it("tolerates a window peer at an id canonicalization dropped", async () => {
+    // Person:a-keep and Person:z-drop reconcile into a-keep, so z-drop never
+    // reaches the committed plan. A window Robot:z-drop is therefore an
+    // unrelated target advance — refusing it would be a spurious replan.
+    const [forkPoint] = await createStoreWithSchema(
+      clusterFoldGraph,
+      await makeBackend(),
+    );
+    const [target] = await createStoreWithSchema(
+      clusterFoldGraph,
+      await makeBackend(),
+    );
+    const keepBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const dropBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    );
+    await keepBranch.store.nodes.Person.create(
+      { name: "Ana Rivera", birthDate: "1974-03-09" },
+      { id: "a-keep" },
+    );
+    await dropBranch.store.nodes.Person.create(
+      { name: "Ana  Rivera", birthDate: "1974-03-09" },
+      { id: "z-drop" },
+    );
+
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await target.nodes.Robot.create({ name: "Window" }, { id: "z-drop" });
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [keepBranch, dropBranch],
+        options: {
+          resolve: {
+            Person: {
+              block: (node) =>
+                (node as unknown as { birthDate?: string }).birthDate,
+              similarity: { kind: "fulltext", fields: ["name"] },
+              threshold: 0.85,
+            },
+          },
+          branchOrder: [BRANCH_A, BRANCH_B],
+        },
+      });
+      expect(isOk(result)).toBe(true);
+      if (isErr(result)) throw new Error(result.error.message);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+    expect(await target.nodes.Person.getById("a-keep" as never)).toBeDefined();
+    expect(
+      await target.nodes.Person.getById("z-drop" as never),
+    ).toBeUndefined();
+    expect(await target.nodes.Robot.getById("z-drop" as never)).toBeDefined();
   });
 
   it("refuses a same-id disjoint peer landing in the plan→commit window", async () => {

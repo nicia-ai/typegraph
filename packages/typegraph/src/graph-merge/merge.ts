@@ -2305,12 +2305,17 @@ async function resolveMerge<G extends GraphDef>(
           ...(foldProbeIds === undefined ?
             {}
           : {
-              identityPeerProbe: {
-                ids: foldProbeIds,
-                observed: new Set(
-                  targetPeers.map((peer) => mergeKey(peer.kind, peer.id)),
-                ),
-              },
+              // The plan-time probe ranges broadly (every staged and base
+              // id), but the COMMIT guard must range only over ids the final
+              // plan actually folds on — commit-ready canonical nodes and
+              // remapped assertion endpoints. A window row at an id
+              // canonicalization dropped never touches the committed plan,
+              // and refusing on it would reject an unrelated target advance.
+              identityPeerProbe: buildIdentityPeerProbe(
+                foldProbeIds,
+                targetPeers,
+                plan,
+              ),
             }),
           // The committed (kind, id) keys the base sources matched at PLAN time;
           // anything NEW the in-tx re-probe surfaces is a window write.
@@ -2999,6 +3004,39 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
     observed: ReadonlySet<MergeKey>;
   }>;
 }>;
+
+/**
+ * Narrows the plan-time fold probe to the ids the FINAL plan folds on: the
+ * commit-ready canonical node identities (minus planned deletions) and the
+ * remapped assertion endpoints. The observed peer set is filtered the same
+ * way so the in-transaction comparison ranges over one universe.
+ */
+function buildIdentityPeerProbe<G extends GraphDef>(
+  probedIds: readonly string[],
+  targetPeers: readonly Readonly<{ kind: string; id: string }>[],
+  plan: MergePlan<G>,
+): NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]> {
+  const finalIds = new Set([
+    ...plan.canonicalEntities
+      .filter(
+        (entity) =>
+          !plan.nodeDeletions.has(mergeKey(entity.kind, entity.canonicalId)),
+      )
+      .map((entity) => entity.canonicalId),
+    ...plan.identityAssertions.flatMap((assertion) => [
+      assertion.a.id,
+      assertion.b.id,
+    ]),
+  ]);
+  return {
+    ids: probedIds.filter((id) => finalIds.has(id)),
+    observed: new Set(
+      targetPeers
+        .filter((peer) => finalIds.has(peer.id))
+        .map((peer) => mergeKey(peer.kind, peer.id)),
+    ),
+  };
+}
 
 /**
  * Fold-peer TOCTOU guard: proves the live same-id peer set the plan-time

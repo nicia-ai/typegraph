@@ -162,3 +162,9 @@ from the diff source (`mergeAgainstBase`, `mergeIncremental`), and the
 incremental commit revalidates the probed peer set inside its transaction —
 a same-id peer landing in the plan→commit window is refused as the same
 typed replan error the other window guards raise.
+
+**The window guard ranges over the committed plan.** The incremental
+fold-peer revalidation compares only ids the final plan folds on —
+commit-ready canonical nodes and remapped assertion endpoints — so a window
+row at an id canonicalization dropped is tolerated as an ordinary target
+advance instead of raising a spurious replan error.
