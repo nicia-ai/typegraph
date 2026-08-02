@@ -3,6 +3,7 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  disjointWith,
   subClassOf,
 } from "@nicia-ai/typegraph";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -206,6 +207,45 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     const current = await store.identity.assertionsOf(first);
     expect(current.map((entry) => entry.id)).toEqual([reasserted.assertion.id]);
     expect(await store.identity.areSame(first, second)).toBe(true);
+  });
+
+  it("rejects assertion-free same-id nodes of disjoint kinds at plan time", async () => {
+    // Neither branch writes any assertion: the contradiction is entirely
+    // DERIVED — same-id folding would join a Person and a Robot that the
+    // ontology declares disjoint. The plan-time simulation must see nodes
+    // absent from the assertion ledger to catch it.
+    const Robot = defineNode("Robot", {
+      schema: z.object({ name: z.string() }),
+    });
+    const disjointGraph = defineGraph({
+      id: "identity_merge_disjoint_fold",
+      nodes: { Person: { type: Person }, Robot: { type: Robot } },
+      edges: {},
+      ontology: [disjointWith(Person, Robot)],
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    const [store] = await createStoreWithSchema(
+      disjointGraph,
+      await makeBackend(),
+    );
+    const personBranch = unwrap(await branch(store, () => makeBackend()));
+    const robotBranch = unwrap(await branch(store, () => makeBackend()));
+    await personBranch.store.nodes.Person.create(
+      { name: "Clash" },
+      { id: "clash" },
+    );
+    await robotBranch.store.nodes.Robot.create(
+      { name: "Clash" },
+      { id: "clash" },
+    );
+
+    const result = await merge(store, [personBranch, robotBranch], {});
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected identity merge conflict");
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    // Plan-time refusal: nothing reached the target.
+    expect(await store.nodes.Person.getById("clash" as never)).toBeUndefined();
+    expect(await store.nodes.Robot.getById("clash" as never)).toBeUndefined();
   });
 
   it("rejects an assertion naming a node another branch deleted (#3)", async () => {
@@ -784,6 +824,8 @@ describe("plan-time derived identity contradictions", () => {
           sameIdAcrossKinds: "fold",
           areDisjoint: () => false,
         },
+
+        [],
       ),
     ).toThrow(IdentityMergeConflictError);
     // The identical ledger is fine under "ignore": no implicit union exists.
@@ -798,6 +840,8 @@ describe("plan-time derived identity contradictions", () => {
           sameIdAcrossKinds: "ignore",
           areDisjoint: () => false,
         },
+
+        [],
       ),
     ).not.toThrow();
   });
@@ -825,6 +869,8 @@ describe("plan-time derived identity contradictions", () => {
             new Set([left, right]).size === 2 &&
             new Set([left, right, "Person", "Robot"]).size === 2,
         },
+
+        [],
       ),
     ).toThrow(IdentityMergeConflictError);
     expect(() =>
@@ -835,6 +881,7 @@ describe("plan-time derived identity contradictions", () => {
         EMPTY_MAP,
         EMPTY_MAP,
         noDisjoint,
+        [],
       ),
     ).not.toThrow();
   });

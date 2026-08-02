@@ -101,6 +101,14 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       validTo?: string | undefined;
     }>[]
   >;
+  /**
+   * Live nodes (registry kinds only) sharing any of the given bare ids —
+   * the cross-kind peer set same-id folding would join. Used by graph-merge's
+   * plan-time contradiction simulation to seed its node universe.
+   */
+  liveNodesSharingIds: (
+    ids: readonly string[],
+  ) => Promise<readonly Readonly<{ kind: string; id: string }>[]>;
   identityAssertionsAtTarget: (
     target: GraphBackend | TransactionBackend,
     mode?: "state" | "archival",

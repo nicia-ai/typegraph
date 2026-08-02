@@ -1101,6 +1101,7 @@ export function assertNoContradictoryIdentityClosure(
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
   retypeMap: ReadonlyMap<MergeKey, string>,
   identityContext: PlanIdentityContext,
+  nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
 ): void {
   const retracted = new Set(retractions);
   const mergedLedger = [
@@ -1117,6 +1118,13 @@ export function assertNoContradictoryIdentityClosure(
   const sameClasses = new UnionFind<MergeKey>((left, right) =>
     compareMergeKeys(left, right),
   );
+  // Assertion-free nodes participate too: a new or retyped canonical node —
+  // or a live target peer sharing its id — can fold into a class without any
+  // ledger edge naming it, so the simulation seeds the full node universe as
+  // singletons before the explicit assertions union anything.
+  for (const node of nodeUniverse) {
+    sameClasses.add(mergeKey(node.kind, node.id));
+  }
   for (const assertion of mergedLedger) {
     if (assertion.relation === "same") {
       sameClasses.union(mergeKeyOf(assertion.a), mergeKeyOf(assertion.b));
@@ -1124,12 +1132,15 @@ export function assertNoContradictoryIdentityClosure(
   }
   if (identityContext.sameIdAcrossKinds === "fold") {
     const refsById = new Map<string, MergeKey[]>();
+    const addRef = (kind: string, id: string): void => {
+      const keys = refsById.get(id) ?? [];
+      keys.push(mergeKey(kind, id));
+      refsById.set(id, keys);
+    };
+    for (const node of nodeUniverse) addRef(node.kind, node.id);
     for (const assertion of mergedLedger) {
-      for (const endpoint of [assertion.a, assertion.b]) {
-        const keys = refsById.get(endpoint.id) ?? [];
-        keys.push(mergeKeyOf(endpoint));
-        refsById.set(endpoint.id, keys);
-      }
+      addRef(assertion.a.kind, assertion.a.id);
+      addRef(assertion.b.kind, assertion.b.id);
     }
     for (const keys of refsById.values()) {
       const [first, ...rest] = keys;
@@ -1221,6 +1232,7 @@ function planMerge<G extends GraphDef>(
   branchRank: ReadonlyMap<BranchId, number>,
   subClassClosure: ReturnType<typeof buildSubClassClosure>,
   identityContext: PlanIdentityContext,
+  targetPeers: readonly Readonly<{ kind: string; id: string }>[],
   preferredBranchId?: BranchId,
 ): MergePlan<G> {
   const identity = planIdentityChanges(staging);
@@ -1494,6 +1506,13 @@ function planMerge<G extends GraphDef>(
     nodeDeletions,
     reconciliation.retypeMap,
   );
+  const identityNodeUniverse = [
+    ...canonicalEntities.map((entity) => ({
+      kind: entity.kind,
+      id: entity.canonicalId,
+    })),
+    ...targetPeers,
+  ].filter((node) => !nodeDeletions.has(mergeKey(node.kind, node.id)));
   assertNoContradictoryIdentityClosure(
     identityRemap.assertions,
     identity.retractions,
@@ -1501,6 +1520,7 @@ function planMerge<G extends GraphDef>(
     canonicalOf,
     reconciliation.retypeMap,
     identityContext,
+    identityNodeUniverse,
   );
   const stagedEdges = buildStagedEdges(
     staging,
@@ -2216,6 +2236,27 @@ async function resolveMerge<G extends GraphDef>(
       return err(candidates.error);
     }
 
+    // Same-id folding joins nodes no assertion names, so the plan-time
+    // contradiction simulation needs the LIVE target peers sharing any staged
+    // or base id. One kind-free indexed probe; skipped entirely off the fold
+    // profile.
+    const targetPeers =
+      store.graph.identity?.sameIdAcrossKinds === "fold" ?
+        await storeRuntime(store).liveNodesSharingIds([
+          ...new Set([
+            ...[...newNodesByKind(staging).values()].flatMap((entries) =>
+              entries.map((entry) => entry.node.id),
+            ),
+            ...staging.modifiedNodes.map((entry) => entry.node.id),
+            ...candidates.data.baseMembers.map((member) => member.id),
+            ...staging.newIdentityAssertions.flatMap((staged) => [
+              staged.assertion.a.id,
+              staged.assertion.b.id,
+            ]),
+          ]),
+        ])
+      : [];
+
     // (4–8) resolve the whole merge into a commit-ready plan.
     const plan = planMerge(
       staging,
@@ -2229,6 +2270,7 @@ async function resolveMerge<G extends GraphDef>(
         sameIdAcrossKinds: store.graph.identity?.sameIdAcrossKinds,
         areDisjoint: (left, right) => store.registry.areDisjoint(left, right),
       },
+      targetPeers,
       preferredBranchId,
     );
 

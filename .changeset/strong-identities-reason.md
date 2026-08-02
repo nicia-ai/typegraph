@@ -114,14 +114,10 @@ builds and validates the closure atomically with version 1. Identity reads on
 `includeTombstones` views hydrate soft-deleted rows the coordinate makes
 visible instead of silently dropping them.
 
-**Attribution and first-commit precision.** `initializeSchema()` accepts an
-optional schema-commit preflight (the Store-bound one carries an explicit
-custom `SqlSchema`; bare callers get an internally derived enablement
-preflight over the backend's effective table names), and the import
-coordinator tags rethrown errors with the id of the assertion it was
-applying, so `ImportResult.errors` attribution for contradictions and
-missing endpoints identifies the failing assertion rather than the first
-assertion sharing its endpoints.
+**Import error attribution.** The import coordinator tags rethrown errors
+with the id of the assertion it was applying, so `ImportResult.errors`
+attribution for contradictions and missing endpoints identifies the failing
+assertion rather than the first assertion sharing its endpoints.
 
 **The identity preflight is not substitutable.** `initializeSchema()` and
 `SchemaManagerOptions` no longer accept a schema-commit preflight callback —
@@ -150,3 +146,11 @@ plan-time contradiction check now simulates the target's identity semantics
 as `GRAPH_MERGE_IDENTITY_CONFLICT` at plan time instead of a generic commit
 failure. Counterfeit schema objects are rejected before any identity DDL
 runs, on fresh and already-enabled graphs alike.
+
+**Assertion-free nodes join the plan-time simulation.** The merge planner's
+contradiction check now seeds its universe with every post-merge canonical
+node and the live target peers sharing their ids (one kind-free indexed
+probe, only under `sameIdAcrossKinds: "fold"`), so a node no assertion
+names — newly created, retyped, or an existing same-id peer — can no longer
+fold into a disjoint-kind class undetected and fail at commit as a generic
+merge error.

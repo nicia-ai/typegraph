@@ -92,6 +92,7 @@ import {
   type IdentityServiceContext,
   type IdentityTransferAssertion,
   importIdentityAssertionsIntoTarget,
+  liveNodeKindsSharingIds,
   lockIdentityGraph,
   readIdentityAssertionsForInterchange,
   rebuildIdentityClosureForContext,
@@ -960,6 +961,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.identityAtCoordinate(coordinate),
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
+      liveNodesSharingIds: async (ids) => {
+        const liveKindsById = await liveNodeKindsSharingIds(
+          this.#identityContext(this.#baseBackend),
+          this.#baseBackend,
+          ids,
+        );
+        const peers: Readonly<{ kind: string; id: string }>[] = [];
+        for (const [id, kinds] of liveKindsById) {
+          for (const kind of kinds) peers.push({ kind, id });
+        }
+        return peers;
+      },
       identityAssertionsForInterchange: (mode, options) =>
         this.identityAssertionsForInterchange(mode, options),
       identityAssertionsAtTarget: (target, mode) =>

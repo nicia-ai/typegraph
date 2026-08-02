@@ -2546,6 +2546,53 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
   });
 }
 
+/**
+ * One chunked bare-id SELECT over ALL requested ids, not one per node kind:
+ * `typegraph_nodes_id_idx (graph_id, id)` makes the kind-free probe an indexed
+ * seek, so the whole cross-kind live peer set comes back in a single round
+ * trip. Rows whose kind is outside the registry are dropped — they never
+ * participate in identity.
+ */
+export async function liveNodeKindsSharingIds(
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "registry" | "schema"
+  >,
+  target: Backend,
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+  const uniqueIds = [...new Set(ids)];
+  const liveKindsById = new Map<string, Set<string>>();
+  if (uniqueIds.length === 0) return liveKindsById;
+  const chunkSize = identityChunkSize(target, {
+    fixedParameters: 1,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 1,
+  });
+  for (const idChunk of chunk(uniqueIds, chunkSize)) {
+    const idList = sql.join(
+      idChunk.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    const rows = await target.execute<Readonly<{ kind: string; id: string }>>(
+      asCompiledRowsSql(sql`
+        SELECT kind, id
+        FROM ${ctx.schema.nodesTable}
+        WHERE graph_id = ${ctx.graphId}
+          AND id IN (${idList})
+          AND deleted_at IS NULL
+      `),
+    );
+    for (const row of rows) {
+      if (!ctx.registry.nodeKinds.has(row.kind)) continue;
+      const kinds = liveKindsById.get(row.id) ?? new Set<string>();
+      kinds.add(row.kind);
+      liveKindsById.set(row.id, kinds);
+    }
+  }
+  return liveKindsById;
+}
+
 export async function foldIdentityForCreatedNodes(
   ctx: Pick<
     IdentityServiceContext<GraphDef>,
@@ -2557,38 +2604,11 @@ export async function foldIdentityForCreatedNodes(
   if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") return;
   await lockIdentityGraph(target, ctx.graphId);
   await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-    const ids = [...new Set(references.map((ref) => ref.id))];
-    // One chunked bare-id SELECT over ALL created ids, not one per node kind:
-    // `typegraph_nodes_id_idx (graph_id, id)` makes the kind-free probe an indexed seek,
-    // so the whole cross-kind peer set comes back in a single round trip.
-    const liveKindsById = new Map<string, Set<string>>();
-    const chunkSize = identityChunkSize(rawTarget, {
-      fixedParameters: 1,
-      maxItems: MAX_REFERENCE_CHUNK_SIZE,
-      parametersPerItem: 1,
-    });
-    for (const idChunk of chunk(ids, chunkSize)) {
-      const idList = sql.join(
-        idChunk.map((id) => sql`${id}`),
-        sql`, `,
-      );
-      const rows = await rawTarget.execute<
-        Readonly<{ kind: string; id: string }>
-      >(
-        asCompiledRowsSql(sql`
-          SELECT kind, id
-          FROM ${ctx.schema.nodesTable}
-          WHERE graph_id = ${ctx.graphId}
-            AND id IN (${idList})
-            AND deleted_at IS NULL
-        `),
-      );
-      for (const row of rows) {
-        const kinds = liveKindsById.get(row.id) ?? new Set<string>();
-        kinds.add(row.kind);
-        liveKindsById.set(row.id, kinds);
-      }
-    }
+    const liveKindsById = await liveNodeKindsSharingIds(
+      ctx,
+      rawTarget,
+      references.map((ref) => ref.id),
+    );
     const closureReferences: PlainNodeRef[] = [];
     for (const ref of references) {
       // Registry order, not row-arrival order: which conflicting peer
