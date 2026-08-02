@@ -2311,7 +2311,8 @@ async function resolveMerge<G extends GraphDef>(
               // remapped assertion endpoints. A window row at an id
               // canonicalization dropped never touches the committed plan,
               // and refusing on it would reject an unrelated target advance.
-              identityPeerProbe: buildIdentityPeerProbe(
+              identityPeerProbe: await buildIdentityPeerProbe(
+                target,
                 foldProbeIds,
                 targetPeers,
                 plan,
@@ -3002,6 +3003,16 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
   identityPeerProbe?: Readonly<{
     ids: readonly string[];
     observed: ReadonlySet<MergeKey>;
+    /**
+     * The plan-time structural identity class of every final fold seed,
+     * serialized to a comparable fingerprint per seed. The direct-peer set
+     * above covers planned ids that do not exist yet; this covers
+     * class-TRANSITIVE drift — a window row or assertion joining a seed's
+     * class through another member changes the class without changing the
+     * seed's direct same-id peers.
+     */
+    classFingerprints: ReadonlyMap<string, string>;
+    seeds: readonly Readonly<{ kind: string; id: string }>[];
   }>;
 }>;
 
@@ -3011,11 +3022,12 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
  * remapped assertion endpoints. The observed peer set is filtered the same
  * way so the in-transaction comparison ranges over one universe.
  */
-function buildIdentityPeerProbe<G extends GraphDef>(
+async function buildIdentityPeerProbe<G extends GraphDef>(
+  target: Store<G>,
   probedIds: readonly string[],
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
   plan: MergePlan<G>,
-): NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]> {
+): Promise<NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]>> {
   const finalIds = new Set([
     ...plan.canonicalEntities
       .filter(
@@ -3028,14 +3040,59 @@ function buildIdentityPeerProbe<G extends GraphDef>(
       assertion.b.id,
     ]),
   ]);
+  const relevantPeers = targetPeers.filter((peer) => finalIds.has(peer.id));
+  // The fold seeds whose classes plan legality depends on: the commit-ready
+  // canonical nodes (final retyped kinds), the remapped assertion endpoints,
+  // and the live target peers anchoring them into existing classes.
+  const seedsByKey = new Map<string, Readonly<{ kind: string; id: string }>>();
+  const addSeed = (kind: string, id: string): void => {
+    seedsByKey.set(mergeKey(kind, id), { kind, id });
+  };
+  for (const entity of plan.canonicalEntities) {
+    const sourceKey = mergeKey(entity.kind, entity.canonicalId);
+    if (plan.nodeDeletions.has(sourceKey)) continue;
+    addSeed(plan.retypeMap.get(sourceKey) ?? entity.kind, entity.canonicalId);
+  }
+  for (const assertion of plan.identityAssertions) {
+    addSeed(assertion.a.kind, assertion.a.id);
+    addSeed(assertion.b.kind, assertion.b.id);
+  }
+  for (const peer of relevantPeers) addSeed(peer.kind, peer.id);
+  const seeds = [...seedsByKey.values()];
   return {
     ids: probedIds.filter((id) => finalIds.has(id)),
     observed: new Set(
-      targetPeers
-        .filter((peer) => finalIds.has(peer.id))
-        .map((peer) => mergeKey(peer.kind, peer.id)),
+      relevantPeers.map((peer) => mergeKey(peer.kind, peer.id)),
     ),
+    classFingerprints: await structuralClassFingerprints(target, seeds),
+    seeds,
   };
+}
+
+/** One comparable fingerprint per seed: its sorted class member keys. */
+async function structuralClassFingerprints<G extends GraphDef>(
+  target: Store<G>,
+  seeds: readonly Readonly<{ kind: string; id: string }>[],
+  txBackend?: TransactionBackend,
+): Promise<ReadonlyMap<string, string>> {
+  const classes = await storeRuntime(target).structuralIdentityClasses(
+    seeds,
+    txBackend,
+  );
+  const fingerprints = new Map<string, string>();
+  for (const seed of seeds) {
+    const key = mergeKey(seed.kind, seed.id);
+    // The service keys classes by `JSON.stringify([kind, id])`.
+    const members = classes.get(JSON.stringify([seed.kind, seed.id])) ?? [seed];
+    fingerprints.set(
+      key,
+      members
+        .map((member) => mergeKey(member.kind, member.id))
+        .toSorted((left, right) => compareMergeKeys(left, right))
+        .join(","),
+    );
+  }
+  return fingerprints;
 }
 
 /**
@@ -3059,10 +3116,28 @@ async function assertIdentityPeersStable<G extends GraphDef>(
     .map((peer) => mergeKey(peer.kind, peer.id))
     .filter((key) => !probe.observed.has(key))
     .sort((left, right) => compareMergeKeys(left, right));
-  if (appeared.length === 0) return;
+  if (appeared.length > 0) {
+    throw new BaseVersionMismatchError(
+      `mergeIncremental() simulated identity folding against the target's live same-id peers as of planning, but ${appeared.length} committed row(s) sharing a planned node's id appeared before the commit transaction. Committing the plan could fold nodes into classes the plan never validated.`,
+      { details: { appeared } },
+    );
+  }
+  // Class-transitive drift: a window row or assertion can change a seed's
+  // identity class through ANOTHER member without touching the seed's direct
+  // same-id peers.
+  const liveFingerprints = await structuralClassFingerprints(
+    target,
+    probe.seeds,
+    txBackend,
+  );
+  const drifted = [...probe.classFingerprints]
+    .filter(([key, fingerprint]) => liveFingerprints.get(key) !== fingerprint)
+    .map(([key]) => key)
+    .sort((left, right) => compareStrings(left, right));
+  if (drifted.length === 0) return;
   throw new BaseVersionMismatchError(
-    `mergeIncremental() simulated identity folding against the target's live same-id peers as of planning, but ${appeared.length} committed row(s) sharing a planned node's id appeared before the commit transaction. Committing the plan could fold nodes into classes the plan never validated.`,
-    { details: { appeared } },
+    `mergeIncremental() validated identity against the classes visible at planning, but the identity class of ${drifted.length} node(s) the plan folds on changed before the commit transaction. Committing the plan could contradict identity truth it never validated.`,
+    { details: { drifted } },
   );
 }
 

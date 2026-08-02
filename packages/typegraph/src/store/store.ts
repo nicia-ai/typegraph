@@ -93,6 +93,7 @@ import {
   type IdentityTransferAssertion,
   importIdentityAssertionsIntoTarget,
   liveNodeKindsSharingIds,
+  loadCurrentStructuralClasses,
   lockIdentityGraph,
   readIdentityAssertionsForInterchange,
   rebuildIdentityClosureForContext,
@@ -973,6 +974,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           for (const kind of kinds) peers.push({ kind, id });
         }
         return peers;
+      },
+      structuralIdentityClasses: async (references, target) => {
+        const backend = target ?? this.#baseBackend;
+        const ctx = this.#identityContext(backend);
+        return loadCurrentStructuralClasses(
+          backend,
+          ctx.schema,
+          this.graphId,
+          references,
+        );
       },
       identityAssertionsForInterchange: (mode, options) =>
         this.identityAssertionsForInterchange(mode, options),

@@ -168,3 +168,11 @@ fold-peer revalidation compares only ids the final plan folds on —
 commit-ready canonical nodes and remapped assertion endpoints — so a window
 row at an id canonicalization dropped is tolerated as an ordinary target
 advance instead of raising a spurious replan error.
+
+**The window guard is class-transitive.** The incremental fold-peer guard
+also snapshots each final seed's structural identity class at plan time and
+revalidates the fingerprints inside the commit transaction — a window row
+or assertion that joins a seed's class through another member (leaving the
+seed's direct same-id peers untouched) is refused as the typed replan
+error, and a rerun surfaces the contradiction as a plan-time
+`GRAPH_MERGE_IDENTITY_CONFLICT`.

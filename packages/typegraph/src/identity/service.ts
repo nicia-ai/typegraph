@@ -421,7 +421,7 @@ function isCurrentClosureCoordinate(
   );
 }
 
-async function loadCurrentStructuralClasses(
+export async function loadCurrentStructuralClasses(
   target: Backend,
   schema: SqlSchema,
   graphId: string,

@@ -95,6 +95,23 @@ const clusterFoldGraph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
+const Anchor = defineNode("Anchor", {
+  schema: z.object({ name: z.string() }),
+});
+
+/** Person and Robot disjoint; Anchor freely folds/asserts with either. */
+const anchoredFoldGraph = defineGraph({
+  id: "identity_universe_anchored",
+  nodes: {
+    Person: { type: Person },
+    Robot: { type: Robot },
+    Anchor: { type: Anchor },
+  },
+  edges: {},
+  ontology: [disjointWith(Person, Robot)],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
 
@@ -193,6 +210,129 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     expect(
       await target.nodes.Person.getById("shared" as never),
     ).toBeUndefined();
+  });
+
+  it("refuses class-transitive drift from a window NODE at another member id", async () => {
+    // The anchors and their assertion live in the FORK POINT (and thus in
+    // the cloned target and the branch unchanged): nothing stages them, so
+    // no probe id covers "y" — only the class snapshot can see the drift
+    // when a window Robot:y joins the class through its other member.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredFoldGraph,
+      await makeBackend(),
+    );
+    const anchorX = await forkPoint.nodes.Anchor.create(
+      { name: "X" },
+      { id: "x" },
+    );
+    const anchorY = await forkPoint.nodes.Anchor.create(
+      { name: "Y" },
+      { id: "y" },
+    );
+    await forkPoint.identity.assertSame(anchorX, anchorY);
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+
+    const personBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await personBranch.store.nodes.Person.create({ name: "P" }, { id: "x" });
+
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await target.nodes.Robot.create({ name: "Window" }, { id: "y" });
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [personBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+    expect(await target.nodes.Person.getById("x" as never)).toBeUndefined();
+
+    // A rerun sees the new state at PLAN time and refuses typed.
+    const rerun = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [personBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    expect(isErr(rerun)).toBe(true);
+    if (isOk(rerun)) throw new Error("Expected identity merge conflict");
+    expect(rerun.error).toBeInstanceOf(IdentityMergeConflictError);
+  });
+
+  it("refuses class-transitive drift from a window ASSERTION", async () => {
+    // Robot:y already exists; the window does not insert any node — it
+    // ASSERTS same(Anchor:x, Anchor:y), joining the plan's fold class with
+    // Robot:y purely through the ledger.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredFoldGraph,
+      await makeBackend(),
+    );
+    const [target] = await createStoreWithSchema(
+      anchoredFoldGraph,
+      await makeBackend(),
+    );
+    const anchorX = await target.nodes.Anchor.create(
+      { name: "X" },
+      { id: "x" },
+    );
+    const anchorY = await target.nodes.Anchor.create(
+      { name: "Y" },
+      { id: "y" },
+    );
+    await target.nodes.Robot.create({ name: "R" }, { id: "y" });
+
+    const personBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await personBranch.store.nodes.Person.create({ name: "P" }, { id: "x" });
+
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await target.identity.assertSame(anchorX, anchorY);
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [personBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+    expect(await target.nodes.Person.getById("x" as never)).toBeUndefined();
   });
 
   it("tolerates a window peer at an id canonicalization dropped", async () => {

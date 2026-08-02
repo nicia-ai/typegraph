@@ -110,6 +110,18 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     ids: readonly string[],
     target?: GraphBackend | TransactionBackend,
   ) => Promise<readonly Readonly<{ kind: string; id: string }>[]>;
+  /**
+   * The CURRENT structural identity class (materialized closure: folds plus
+   * asserted links) of each reference, keyed by `kind|id`. A missing node
+   * coalesces to its singleton. Used by graph-merge's fold-peer window guard
+   * to detect class-transitive drift in the plan→commit window.
+   */
+  structuralIdentityClasses: (
+    references: readonly Readonly<{ kind: string; id: string }>[],
+    target?: GraphBackend | TransactionBackend,
+  ) => Promise<
+    ReadonlyMap<string, readonly Readonly<{ kind: string; id: string }>[]>
+  >;
   identityAssertionsAtTarget: (
     target: GraphBackend | TransactionBackend,
     mode?: "state" | "archival",
