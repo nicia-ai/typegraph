@@ -1102,6 +1102,17 @@ export function assertNoContradictoryIdentityClosure(
   retypeMap: ReadonlyMap<MergeKey, string>,
   identityContext: PlanIdentityContext,
   nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
+  /**
+   * Pre-linked member groups (a structural-class snapshot of the target):
+   * each group is unioned wholesale before the explicit assertions, so
+   * assertion-derived links already materialized in the target's closure —
+   * which the ledger inputs alone cannot reconstruct — participate in the
+   * simulation.
+   */
+  linkedGroups: readonly (readonly Readonly<{
+    kind: string;
+    id: string;
+  }>[])[] = [],
 ): void {
   const retracted = new Set(retractions);
   const mergedLedger = [
@@ -1125,6 +1136,14 @@ export function assertNoContradictoryIdentityClosure(
   for (const node of nodeUniverse) {
     sameClasses.add(mergeKey(node.kind, node.id));
   }
+  for (const group of linkedGroups) {
+    const [first, ...rest] = group;
+    if (first === undefined) continue;
+    const firstKey = mergeKey(first.kind, first.id);
+    for (const member of rest) {
+      sameClasses.union(firstKey, mergeKey(member.kind, member.id));
+    }
+  }
   for (const assertion of mergedLedger) {
     if (assertion.relation === "same") {
       sameClasses.union(mergeKeyOf(assertion.a), mergeKeyOf(assertion.b));
@@ -1138,6 +1157,9 @@ export function assertNoContradictoryIdentityClosure(
       refsById.set(id, keys);
     };
     for (const node of nodeUniverse) addRef(node.kind, node.id);
+    for (const group of linkedGroups) {
+      for (const member of group) addRef(member.kind, member.id);
+    }
     for (const assertion of mergedLedger) {
       addRef(assertion.a.kind, assertion.a.id);
       addRef(assertion.b.kind, assertion.b.id);
@@ -2292,6 +2314,55 @@ async function resolveMerge<G extends GraphDef>(
       preferredBranchId,
     );
 
+    // The commit guard's baseline must be a VALIDATED state: re-probe the
+    // live peers and snapshot the final seeds' classes AFTER planning, then
+    // re-run the identity simulation against that exact snapshot (the
+    // snapshot's classes union in as pre-linked groups). A class change in
+    // the plan→snapshot window therefore either fails this recheck as a
+    // typed plan-time conflict, or matches the plan; either way the
+    // transaction guard never baselines drift the plan did not validate.
+    // The probe ranges only over ids the final plan folds on — a window row
+    // at an id canonicalization dropped is an unrelated target advance.
+    let identityGuard:
+      NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]> | undefined;
+    if (foldProbeIds !== undefined && incremental !== undefined) {
+      const freshPeers =
+        await storeRuntime(target).liveNodesSharingIds(foldProbeIds);
+      const built = await buildIdentityPeerProbe(
+        target,
+        foldProbeIds,
+        freshPeers,
+        plan,
+      );
+      // Rebuild the canonical map from the plan's recorded resolutions —
+      // base assertion endpoints must be judged at their post-merge identity,
+      // exactly as the in-plan check judged them.
+      const canonicalIdentityOf = new Map<MergeKey, MergeKey>();
+      for (const resolution of plan.resolutions) {
+        for (const memberId of resolution.memberIds) {
+          canonicalIdentityOf.set(
+            mergeKey(resolution.kind, memberId),
+            mergeKey(resolution.kind, resolution.canonicalId),
+          );
+        }
+      }
+      assertNoContradictoryIdentityClosure(
+        plan.identityAssertions,
+        plan.identityRetractions,
+        staging.baseIdentityAssertions,
+        canonicalIdentityOf,
+        plan.retypeMap,
+        {
+          sameIdAcrossKinds: target.graph.identity?.sameIdAcrossKinds,
+          areDisjoint: (left, right) =>
+            target.registry.areDisjoint(left, right),
+        },
+        built.probe.seeds,
+        built.snapshot.groups,
+      );
+      identityGuard = built.probe;
+    }
+
     // (9) commit to the target. Incremental mode commits through the guarded path
     // (the existing-target-id write guard, §6.6); snapshot mode commits directly,
     // re-validating the captured base@V inside the transaction (TOCTOU guard).
@@ -2302,22 +2373,9 @@ async function resolveMerge<G extends GraphDef>(
           stagedNewByKind: newNodesByKind(staging),
           options,
           introspectionKinds,
-          ...(foldProbeIds === undefined ?
+          ...(identityGuard === undefined ?
             {}
-          : {
-              // The plan-time probe ranges broadly (every staged and base
-              // id), but the COMMIT guard must range only over ids the final
-              // plan actually folds on — commit-ready canonical nodes and
-              // remapped assertion endpoints. A window row at an id
-              // canonicalization dropped never touches the committed plan,
-              // and refusing on it would reject an unrelated target advance.
-              identityPeerProbe: await buildIdentityPeerProbe(
-                target,
-                foldProbeIds,
-                targetPeers,
-                plan,
-              ),
-            }),
+          : { identityPeerProbe: identityGuard }),
           // The committed (kind, id) keys the base sources matched at PLAN time;
           // anything NEW the in-tx re-probe surfaces is a window write.
           plannedBaseMatchKeys: new Set(
@@ -3027,7 +3085,12 @@ async function buildIdentityPeerProbe<G extends GraphDef>(
   probedIds: readonly string[],
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
   plan: MergePlan<G>,
-): Promise<NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]>> {
+): Promise<
+  Readonly<{
+    probe: NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]>;
+    snapshot: IdentityClassSnapshot;
+  }>
+> {
   const finalIds = new Set([
     ...plan.canonicalEntities
       .filter(
@@ -3059,40 +3122,79 @@ async function buildIdentityPeerProbe<G extends GraphDef>(
   }
   for (const peer of relevantPeers) addSeed(peer.kind, peer.id);
   const seeds = [...seedsByKey.values()];
+  const liveKeys = new Set(
+    targetPeers.map((peer) => mergeKey(peer.kind, peer.id)),
+  );
+  const snapshot = await snapshotIdentityClasses(target, seeds, liveKeys);
   return {
-    ids: probedIds.filter((id) => finalIds.has(id)),
-    observed: new Set(
-      relevantPeers.map((peer) => mergeKey(peer.kind, peer.id)),
-    ),
-    classFingerprints: await structuralClassFingerprints(target, seeds),
-    seeds,
+    probe: {
+      ids: probedIds.filter((id) => finalIds.has(id)),
+      observed: new Set(
+        relevantPeers.map((peer) => mergeKey(peer.kind, peer.id)),
+      ),
+      classFingerprints: snapshot.fingerprints,
+      seeds,
+    },
+    snapshot,
   };
 }
 
-/** One comparable fingerprint per seed: its sorted class member keys. */
-async function structuralClassFingerprints<G extends GraphDef>(
+type IdentityClassSnapshot = Readonly<{
+  /**
+   * One comparable fingerprint per seed: the seed's LIVENESS plus its sorted
+   * class member tuples, JSON-encoded — structural encoding because caller
+   * ids may contain any character, so a joined string is not injective, and
+   * the liveness bit because a live singleton and a deleted or missing one
+   * have identical (self-coalesced) classes.
+   */
+  fingerprints: ReadonlyMap<string, string>;
+  /** The raw class member groups, for revalidating the plan against them. */
+  groups: readonly (readonly Readonly<{ kind: string; id: string }>[])[];
+}>;
+
+async function snapshotIdentityClasses<G extends GraphDef>(
   target: Store<G>,
   seeds: readonly Readonly<{ kind: string; id: string }>[],
+  liveKeys: ReadonlySet<MergeKey>,
   txBackend?: TransactionBackend,
-): Promise<ReadonlyMap<string, string>> {
+): Promise<IdentityClassSnapshot> {
   const classes = await storeRuntime(target).structuralIdentityClasses(
     seeds,
     txBackend,
   );
   const fingerprints = new Map<string, string>();
+  const groups: (readonly Readonly<{ kind: string; id: string }>[])[] = [];
   for (const seed of seeds) {
     const key = mergeKey(seed.kind, seed.id);
     // The service keys classes by `JSON.stringify([kind, id])`.
     const members = classes.get(JSON.stringify([seed.kind, seed.id])) ?? [seed];
-    fingerprints.set(
-      key,
-      members
-        .map((member) => mergeKey(member.kind, member.id))
-        .toSorted((left, right) => compareMergeKeys(left, right))
-        .join(","),
-    );
+    groups.push(members);
+    fingerprints.set(key, encodeClassFingerprint(liveKeys.has(key), members));
   }
-  return fingerprints;
+  return { fingerprints, groups };
+}
+
+/**
+ * @internal Exported for deterministic verification. Structural (JSON)
+ * encoding of a seed's liveness plus its sorted class member tuples —
+ * injective even when ids contain the separator characters a joined string
+ * would collide on.
+ */
+export function encodeClassFingerprint(
+  live: boolean,
+  members: readonly Readonly<{ kind: string; id: string }>[],
+): string {
+  return JSON.stringify([
+    live,
+    members
+      .map((member) => [member.kind, member.id] as const)
+      .toSorted(([leftKind, leftId], [rightKind, rightId]) =>
+        compareMergeKeys(
+          mergeKey(leftKind, leftId),
+          mergeKey(rightKind, rightId),
+        ),
+      ),
+  ]);
 }
 
 /**
@@ -3124,10 +3226,12 @@ async function assertIdentityPeersStable<G extends GraphDef>(
   }
   // Class-transitive drift: a window row or assertion can change a seed's
   // identity class through ANOTHER member without touching the seed's direct
-  // same-id peers.
-  const liveFingerprints = await structuralClassFingerprints(
+  // same-id peers — and a seed can DISAPPEAR without changing its
+  // self-coalesced class, so liveness is part of the fingerprint.
+  const { fingerprints: liveFingerprints } = await snapshotIdentityClasses(
     target,
     probe.seeds,
+    new Set(live.map((peer) => mergeKey(peer.kind, peer.id))),
     txBackend,
   );
   const drifted = [...probe.classFingerprints]

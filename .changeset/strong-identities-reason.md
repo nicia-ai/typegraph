@@ -176,3 +176,13 @@ or assertion that joins a seed's class through another member (leaving the
 seed's direct same-id peers untouched) is refused as the typed replan
 error, and a rerun surfaces the contradiction as a plan-time
 `GRAPH_MERGE_IDENTITY_CONFLICT`.
+
+**A validated baseline, exactly.** The incremental identity guard now
+re-probes and snapshots the final seeds' classes AFTER planning and re-runs
+the identity simulation against that exact snapshot (its classes union in
+as pre-linked groups), so drift landing between planning and the snapshot
+fails as a typed plan-time conflict instead of becoming the guard's
+baseline. Fingerprints are structurally encoded (injective for ids
+containing any character) and carry a liveness bit, so a planned assertion
+endpoint deleted in the commit window is refused as the typed replan error
+rather than failing generically.

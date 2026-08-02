@@ -27,12 +27,14 @@ import {
   IdentityMergeConflictError,
 } from "../../src/graph-merge/errors";
 import {
+  encodeClassFingerprint,
   merge,
   mergeAgainstBase,
   mergeIncremental,
 } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
+import { storeRuntime } from "../../src/store/runtime-port";
 import { backendMatrix } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -333,6 +335,139 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
       (target as { transaction: unknown }).transaction = original;
     }
     expect(await target.nodes.Person.getById("x" as never)).toBeUndefined();
+  });
+
+  it("refuses drift landing between planning and the class snapshot", async () => {
+    // The guard's baseline is only sound if it is a VALIDATED state: a class
+    // change between planMerge() and the snapshot must fail the post-plan
+    // recheck as a typed conflict, never become the baseline. The injection
+    // fires before the SECOND live-peer probe — the post-plan one.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredFoldGraph,
+      await makeBackend(),
+    );
+    const anchorX = await forkPoint.nodes.Anchor.create(
+      { name: "X" },
+      { id: "x" },
+    );
+    const anchorY = await forkPoint.nodes.Anchor.create(
+      { name: "Y" },
+      { id: "y" },
+    );
+    await forkPoint.identity.assertSame(anchorX, anchorY);
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+
+    const personBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await personBranch.store.nodes.Person.create({ name: "P" }, { id: "x" });
+
+    const runtime = storeRuntime(target);
+    const originalProbe = runtime.liveNodesSharingIds;
+    let calls = 0;
+    (runtime as { liveNodesSharingIds: unknown }).liveNodesSharingIds = async (
+      ids: readonly string[],
+      probeTarget?: unknown,
+    ) => {
+      calls += 1;
+      if (calls === 2) {
+        await target.nodes.Robot.create({ name: "Window" }, { id: "y" });
+      }
+      return (
+        originalProbe as (
+          i: readonly string[],
+          t?: unknown,
+        ) => Promise<readonly Readonly<{ kind: string; id: string }>[]>
+      )(ids, probeTarget);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [personBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected identity merge conflict");
+      expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    } finally {
+      (runtime as { liveNodesSharingIds: unknown }).liveNodesSharingIds =
+        originalProbe;
+    }
+    expect(await target.nodes.Person.getById("x" as never)).toBeUndefined();
+  });
+
+  it("refuses a planned assertion endpoint deleted in the commit window", async () => {
+    // A live singleton and a missing one have identical self-coalesced
+    // classes — only the liveness bit in the fingerprint distinguishes them.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredFoldGraph,
+      await makeBackend(),
+    );
+    await forkPoint.nodes.Anchor.create({ name: "A" }, { id: "a" });
+    await forkPoint.nodes.Anchor.create({ name: "B" }, { id: "b" });
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+
+    const assertBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await assertBranch.store.identity.assertSame(
+      { kind: "Anchor", id: "a" },
+      { kind: "Anchor", id: "b" },
+    );
+
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await target.nodes.Anchor.delete("b" as never);
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [assertBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+  });
+
+  it("encodes class fingerprints injectively", () => {
+    // Comma-joining raw keys collides: [Anchor:a, B:"x,C\0y"] vs
+    // [Anchor:a, B:x, C:y]. The structural encoding must not.
+    const left = encodeClassFingerprint(true, [
+      { kind: "Anchor", id: "a" },
+      { kind: "B", id: "x,C\u0000y" },
+    ]);
+    const right = encodeClassFingerprint(true, [
+      { kind: "Anchor", id: "a" },
+      { kind: "B", id: "x" },
+      { kind: "C", id: "y" },
+    ]);
+    expect(left).not.toBe(right);
+    // Liveness participates: a vanished singleton is visible drift.
+    expect(
+      encodeClassFingerprint(true, [{ kind: "Anchor", id: "solo" }]),
+    ).not.toBe(encodeClassFingerprint(false, [{ kind: "Anchor", id: "solo" }]));
   });
 
   it("tolerates a window peer at an id canonicalization dropped", async () => {
