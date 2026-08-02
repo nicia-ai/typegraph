@@ -1506,13 +1506,27 @@ function planMerge<G extends GraphDef>(
     nodeDeletions,
     reconciliation.retypeMap,
   );
+  // Each canonical entity enters the universe under the kind the commit will
+  // actually WRITE — the retyped one when the ontology cascade retypes it —
+  // while its deletion check runs against the source identity, which is how
+  // `nodeDeletions` is keyed.
   const identityNodeUniverse = [
-    ...canonicalEntities.map((entity) => ({
-      kind: entity.kind,
-      id: entity.canonicalId,
-    })),
-    ...targetPeers,
-  ].filter((node) => !nodeDeletions.has(mergeKey(node.kind, node.id)));
+    ...canonicalEntities
+      .filter(
+        (entity) =>
+          !nodeDeletions.has(mergeKey(entity.kind, entity.canonicalId)),
+      )
+      .map((entity) => ({
+        kind:
+          reconciliation.retypeMap.get(
+            mergeKey(entity.kind, entity.canonicalId),
+          ) ?? entity.kind,
+        id: entity.canonicalId,
+      })),
+    ...targetPeers.filter(
+      (node) => !nodeDeletions.has(mergeKey(node.kind, node.id)),
+    ),
+  ];
   assertNoContradictoryIdentityClosure(
     identityRemap.assertions,
     identity.retractions,
@@ -2240,9 +2254,9 @@ async function resolveMerge<G extends GraphDef>(
     // contradiction simulation needs the LIVE target peers sharing any staged
     // or base id. One kind-free indexed probe; skipped entirely off the fold
     // profile.
-    const targetPeers =
-      store.graph.identity?.sameIdAcrossKinds === "fold" ?
-        await storeRuntime(store).liveNodesSharingIds([
+    const foldProbeIds =
+      target.graph.identity?.sameIdAcrossKinds === "fold" ?
+        [
           ...new Set([
             ...[...newNodesByKind(staging).values()].flatMap((entries) =>
               entries.map((entry) => entry.node.id),
@@ -2254,8 +2268,12 @@ async function resolveMerge<G extends GraphDef>(
               staged.assertion.b.id,
             ]),
           ]),
-        ])
-      : [];
+        ]
+      : undefined;
+    const targetPeers =
+      foldProbeIds === undefined ?
+        []
+      : await storeRuntime(target).liveNodesSharingIds(foldProbeIds);
 
     // (4–8) resolve the whole merge into a commit-ready plan.
     const plan = planMerge(
@@ -2267,8 +2285,8 @@ async function resolveMerge<G extends GraphDef>(
       branchRank,
       subClassClosure,
       {
-        sameIdAcrossKinds: store.graph.identity?.sameIdAcrossKinds,
-        areDisjoint: (left, right) => store.registry.areDisjoint(left, right),
+        sameIdAcrossKinds: target.graph.identity?.sameIdAcrossKinds,
+        areDisjoint: (left, right) => target.registry.areDisjoint(left, right),
       },
       targetPeers,
       preferredBranchId,
@@ -2284,6 +2302,16 @@ async function resolveMerge<G extends GraphDef>(
           stagedNewByKind: newNodesByKind(staging),
           options,
           introspectionKinds,
+          ...(foldProbeIds === undefined ?
+            {}
+          : {
+              identityPeerProbe: {
+                ids: foldProbeIds,
+                observed: new Set(
+                  targetPeers.map((peer) => mergeKey(peer.kind, peer.id)),
+                ),
+              },
+            }),
           // The committed (kind, id) keys the base sources matched at PLAN time;
           // anything NEW the in-tx re-probe surfaces is a window write.
           plannedBaseMatchKeys: new Set(
@@ -2958,7 +2986,47 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
    * edge the plan upserts OR deletes drifted in the plan→commit window.
    */
   targetEdgeSignatures: ReadonlyMap<MergeKey, string>;
+  /**
+   * The plan-time same-id fold probe: the bare ids probed and the live peer
+   * keys observed. Absent off the fold profile. The commit-time guard repeats
+   * the kind-free lookup through the transaction backend and refuses if the
+   * live peer set drifted — a same-id peer inserted in the plan→commit window
+   * could fold the plan's nodes into classes (including disjoint-kind
+   * contradictions) the plan-time simulation never saw.
+   */
+  identityPeerProbe?: Readonly<{
+    ids: readonly string[];
+    observed: ReadonlySet<MergeKey>;
+  }>;
 }>;
+
+/**
+ * Fold-peer TOCTOU guard: proves the live same-id peer set the plan-time
+ * contradiction simulation observed is still the peer set inside the commit
+ * transaction. Drift is refused as the same typed replan error the other
+ * window guards raise.
+ */
+async function assertIdentityPeersStable<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  guard: IncrementalCommitGuard<G>,
+): Promise<void> {
+  const probe = guard.identityPeerProbe;
+  if (probe === undefined) return;
+  const live = await storeRuntime(target).liveNodesSharingIds(
+    probe.ids,
+    txBackend,
+  );
+  const appeared = live
+    .map((peer) => mergeKey(peer.kind, peer.id))
+    .filter((key) => !probe.observed.has(key))
+    .sort((left, right) => compareMergeKeys(left, right));
+  if (appeared.length === 0) return;
+  throw new BaseVersionMismatchError(
+    `mergeIncremental() simulated identity folding against the target's live same-id peers as of planning, but ${appeared.length} committed row(s) sharing a planned node's id appeared before the commit transaction. Committing the plan could fold nodes into classes the plan never validated.`,
+    { details: { appeared } },
+  );
+}
 
 /**
  * Re-runs the NEW-vs-BASE identity probes — each kind's unique constraints
@@ -3285,6 +3353,9 @@ async function commitIncrementalPlan<G extends GraphDef>(
       // plan if a matching committed row appeared in the window. `tx` exposes
       // the same `.nodes` collection record a `BaseLookupStore` needs.
       await assertBaseResolutionStable(tx as unknown as BaseLookupStore, guard);
+      // Fold-peer TOCTOU guard: the bare-id peer probe also ran outside this
+      // transaction; repeat it on the tx snapshot and refuse on drift.
+      await assertIdentityPeersStable(target, transactionBackend(tx), guard);
       // Inherited-row TOCTOU guard: refuse if a committed node OR edge the plan
       // writes or deletes changed since it was observed at plan time (lost update).
       await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);

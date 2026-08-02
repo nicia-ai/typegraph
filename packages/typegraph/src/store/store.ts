@@ -961,10 +961,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.identityAtCoordinate(coordinate),
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
-      liveNodesSharingIds: async (ids) => {
+      liveNodesSharingIds: async (ids, target) => {
+        const backend = target ?? this.#baseBackend;
         const liveKindsById = await liveNodeKindsSharingIds(
-          this.#identityContext(this.#baseBackend),
-          this.#baseBackend,
+          this.#identityContext(backend),
+          backend,
           ids,
         );
         const peers: Readonly<{ kind: string; id: string }>[] = [];

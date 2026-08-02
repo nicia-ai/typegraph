@@ -154,3 +154,11 @@ probe, only under `sameIdAcrossKinds: "fold"`), so a node no assertion
 names — newly created, retyped, or an existing same-id peer — can no longer
 fold into a disjoint-kind class undetected and fail at commit as a generic
 merge error.
+
+**Universe seeding, precisely.** The plan-time simulation seeds retyped
+canonical nodes under the kind the commit writes (not their pre-retype
+kind), the live same-id peer probe reads the merge TARGET when it differs
+from the diff source (`mergeAgainstBase`, `mergeIncremental`), and the
+incremental commit revalidates the probed peer set inside its transaction —
+a same-id peer landing in the plan→commit window is refused as the same
+typed replan error the other window guards raise.

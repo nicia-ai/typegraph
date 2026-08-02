@@ -108,6 +108,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    */
   liveNodesSharingIds: (
     ids: readonly string[],
+    target?: GraphBackend | TransactionBackend,
   ) => Promise<readonly Readonly<{ kind: string; id: string }>[]>;
   identityAssertionsAtTarget: (
     target: GraphBackend | TransactionBackend,

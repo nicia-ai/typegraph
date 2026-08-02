@@ -3706,7 +3706,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         validFrom: string;
         validTo?: string | undefined;
     }>[]>;
-    liveNodesSharingIds: (ids: readonly string[]) => Promise<readonly Readonly<{
+    liveNodesSharingIds: (ids: readonly string[], target?: GraphBackend | TransactionBackend) => Promise<readonly Readonly<{
         kind: string;
         id: string;
     }>[]>;

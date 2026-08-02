@@ -1,0 +1,233 @@
+/**
+ * The plan-time identity simulation's node universe, from three review
+ * findings on its seeding:
+ *
+ *  - a RETYPED canonical entity must enter the universe under the kind the
+ *    commit will write, not its pre-retype kind;
+ *  - the live same-id peer probe must read the merge TARGET, not the diff
+ *    source, when the two differ (`mergeAgainstBase` / `mergeIncremental`);
+ *  - the peer set must be revalidated inside the incremental commit
+ *    transaction, so a peer landing in the plan→commit window is refused as
+ *    a typed replan error rather than a generic commit failure.
+ */
+import type { GraphBackend } from "@nicia-ai/typegraph";
+import {
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+  disjointWith,
+  subClassOf,
+} from "@nicia-ai/typegraph";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { branch } from "../../src/graph-merge/branch";
+import {
+  BaseVersionMismatchError,
+  IdentityMergeConflictError,
+} from "../../src/graph-merge/errors";
+import {
+  merge,
+  mergeAgainstBase,
+  mergeIncremental,
+} from "../../src/graph-merge/merge";
+import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
+import { asBranchId } from "../../src/graph-merge/types";
+import { backendMatrix } from "./test-utils";
+
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+const Robot = defineNode("Robot", {
+  schema: z.object({ name: z.string() }),
+});
+
+/** Person and Robot are disjoint; same-id folding is on. */
+const disjointFoldGraph = defineGraph({
+  id: "identity_universe_guards",
+  nodes: { Person: { type: Person }, Robot: { type: Robot } },
+  edges: {},
+  ontology: [disjointWith(Person, Robot)],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const Staff = defineNode("Staff", {
+  schema: z.object({ name: z.string(), birthDate: z.string() }),
+});
+const Employee = defineNode("Employee", {
+  schema: z.object({ name: z.string(), birthDate: z.string() }),
+});
+const Peer = defineNode("Peer", {
+  schema: z.object({ name: z.string() }),
+});
+
+/**
+ * The ontology-retype shape beside a disjoint peer: a cluster whose survivor
+ * keeps a Staff id but commits as Employee, while a live Peer shares that id
+ * and `disjointWith(Employee, Peer)` holds. Only the RETYPED kind makes the
+ * fold-into-disjoint-class contradiction visible.
+ */
+const retypeGraph = defineGraph({
+  id: "identity_universe_retype",
+  nodes: {
+    Staff: { type: Staff },
+    Employee: { type: Employee },
+    Peer: { type: Peer },
+  },
+  edges: {},
+  ontology: [subClassOf(Employee, Staff), disjointWith(Employee, Peer)],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const BRANCH_A = asBranchId("branch-a");
+const BRANCH_B = asBranchId("branch-b");
+
+describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
+  let cleanups: (() => Promise<void>)[];
+
+  beforeEach(() => {
+    cleanups = [];
+  });
+
+  afterEach(async () => {
+    for (const cleanup of cleanups) await cleanup();
+  });
+
+  async function makeBackend(): Promise<GraphBackend> {
+    const fixture = await entry.make();
+    cleanups.push(fixture.cleanup);
+    return fixture.backend;
+  }
+
+  it("seeds a retyped canonical node under its committed kind", async () => {
+    const [baseStore] = await createStoreWithSchema(
+      retypeGraph,
+      await makeBackend(),
+    );
+    await baseStore.nodes.Peer.create({ name: "Peer" }, { id: "s-a" });
+
+    const staffBranch = unwrap(
+      await branch(baseStore, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const employeeBranch = unwrap(
+      await branch(baseStore, () => makeBackend(), { id: BRANCH_B }),
+    );
+    // The cluster {Staff:s-a, Staff:s-b, Employee:s-b} survives as (Staff,
+    // "s-a") retyped to Employee. Folding then joins it with the live
+    // Peer:"s-a" — disjoint with Employee but NOT with Staff, so seeding the
+    // pre-retype kind would let planning pass and commit fail generically.
+    await staffBranch.store.nodes.Staff.create(
+      { name: "Anna Rivera", birthDate: "1974-03-09" },
+      { id: "s-a" },
+    );
+    await employeeBranch.store.nodes.Staff.create(
+      { name: "Ana Rivera", birthDate: "1974-03-09" },
+      { id: "s-b" },
+    );
+    await employeeBranch.store.nodes.Employee.create(
+      { name: "Ana Rivera", birthDate: "1974-03-09" },
+      { id: "s-b" },
+    );
+
+    const result = await merge(baseStore, [staffBranch, employeeBranch], {
+      reconcileTypes: "ontology",
+      resolve: {
+        Staff: {
+          block: (node) =>
+            (node as unknown as { birthDate?: string }).birthDate,
+          similarity: { kind: "fulltext", fields: ["name"] },
+          threshold: 0.85,
+        },
+      },
+      branchOrder: [BRANCH_A, BRANCH_B],
+    });
+
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected identity merge conflict");
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    // Plan-time refusal: nothing committed.
+    expect(
+      await baseStore.nodes.Employee.getById("s-a" as never),
+    ).toBeUndefined();
+  });
+
+  it("probes the merge TARGET for live peers, not the diff source", async () => {
+    const [source] = await createStoreWithSchema(
+      disjointFoldGraph,
+      await makeBackend(),
+    );
+    const [target] = await createStoreWithSchema(
+      disjointFoldGraph,
+      await makeBackend(),
+    );
+    await target.nodes.Robot.create({ name: "Clash" }, { id: "shared" });
+
+    const personBranch = unwrap(
+      await branch(source, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await personBranch.store.nodes.Person.create(
+      { name: "Clash" },
+      { id: "shared" },
+    );
+
+    const result = await mergeAgainstBase(source, [personBranch], { target });
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected identity merge conflict");
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    expect(
+      await target.nodes.Person.getById("shared" as never),
+    ).toBeUndefined();
+  });
+
+  it("refuses a same-id disjoint peer landing in the plan→commit window", async () => {
+    const [forkPoint] = await createStoreWithSchema(
+      disjointFoldGraph,
+      await makeBackend(),
+    );
+    const [target] = await createStoreWithSchema(
+      disjointFoldGraph,
+      await makeBackend(),
+    );
+    const personBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await personBranch.store.nodes.Person.create(
+      { name: "Clash" },
+      { id: "shared" },
+    );
+
+    // Deterministic window write: the first commit-transaction call first
+    // lands the disjoint peer, then delegates — exactly what a concurrent
+    // writer in the plan→commit window would do.
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await target.nodes.Robot.create({ name: "Window" }, { id: "shared" });
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [personBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+    // The window write survives; the stale plan committed nothing.
+    expect(await target.nodes.Robot.getById("shared" as never)).toBeDefined();
+    expect(
+      await target.nodes.Person.getById("shared" as never),
+    ).toBeUndefined();
+  });
+});
