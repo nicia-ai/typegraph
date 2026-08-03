@@ -470,6 +470,130 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     ).not.toBe(encodeClassFingerprint(false, [{ kind: "Anchor", id: "solo" }]));
   });
 
+  it("refuses a window `different` landing before the baseline", async () => {
+    // Negative truth is invisible to peers, liveness, and class structure:
+    // the recheck must consume the FRESH target ledger, so a different(a, b)
+    // committed between planning and the baseline fails typed.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredFoldGraph,
+      await makeBackend(),
+    );
+    await forkPoint.nodes.Anchor.create({ name: "A" }, { id: "a" });
+    await forkPoint.nodes.Anchor.create({ name: "B" }, { id: "b" });
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+
+    const sameBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await sameBranch.store.identity.assertSame(
+      { kind: "Anchor", id: "a" },
+      { kind: "Anchor", id: "b" },
+    );
+
+    const runtime = storeRuntime(target);
+    const originalProbe = runtime.liveNodesSharingIds;
+    let calls = 0;
+    (runtime as { liveNodesSharingIds: unknown }).liveNodesSharingIds = async (
+      ids: readonly string[],
+      probeTarget?: unknown,
+    ) => {
+      calls += 1;
+      if (calls === 2) {
+        await target.identity.assertDifferent(
+          { kind: "Anchor", id: "a" },
+          { kind: "Anchor", id: "b" },
+        );
+      }
+      return (
+        originalProbe as (
+          i: readonly string[],
+          t?: unknown,
+        ) => Promise<readonly Readonly<{ kind: string; id: string }>[]>
+      )(ids, probeTarget);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [sameBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected identity merge conflict");
+      expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    } finally {
+      (runtime as { liveNodesSharingIds: unknown }).liveNodesSharingIds =
+        originalProbe;
+    }
+    expect(
+      await target.identity.areSame(
+        { kind: "Anchor", id: "a" },
+        { kind: "Anchor", id: "b" },
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses a window `different` landing between baseline and transaction", async () => {
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredFoldGraph,
+      await makeBackend(),
+    );
+    await forkPoint.nodes.Anchor.create({ name: "A" }, { id: "a" });
+    await forkPoint.nodes.Anchor.create({ name: "B" }, { id: "b" });
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+
+    const sameBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await sameBranch.store.identity.assertSame(
+      { kind: "Anchor", id: "a" },
+      { kind: "Anchor", id: "b" },
+    );
+
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await target.identity.assertDifferent(
+          { kind: "Anchor", id: "a" },
+          { kind: "Anchor", id: "b" },
+        );
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [sameBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+    expect(
+      await target.identity.areSame(
+        { kind: "Anchor", id: "a" },
+        { kind: "Anchor", id: "b" },
+      ),
+    ).toBe(false);
+  });
+
   it("tolerates a window peer at an id canonicalization dropped", async () => {
     // Person:a-keep and Person:z-drop reconcile into a-keep, so z-drop never
     // reaches the committed plan. A window Robot:z-drop is therefore an

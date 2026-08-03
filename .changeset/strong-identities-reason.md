@@ -186,3 +186,10 @@ baseline. Fingerprints are structurally encoded (injective for ids
 containing any character) and carry a liveness bit, so a planned assertion
 endpoint deleted in the commit window is refused as the typed replan error
 rather than failing generically.
+
+**Negative truth in the baseline.** The post-plan identity recheck consumes
+the target's FRESH assertion ledger (not the pre-planning staging capture),
+and the transaction guard carries a deterministic fingerprint of the
+`different` assertions touching the guarded universe — a `different`
+committed in either window is refused typed instead of surfacing as a
+generic commit failure.

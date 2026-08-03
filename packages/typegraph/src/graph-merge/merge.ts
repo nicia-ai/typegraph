@@ -120,6 +120,7 @@ import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
 import type {
   Edge,
   EdgeId,
+  GraphBackend,
   GraphDef,
   IdentityTransferAssertion,
   JsonValue,
@@ -2349,7 +2350,10 @@ async function resolveMerge<G extends GraphDef>(
       assertNoContradictoryIdentityClosure(
         plan.identityAssertions,
         plan.identityRetractions,
-        staging.baseIdentityAssertions,
+        // The FRESH target ledger, not the pre-planning staging capture —
+        // a `different` committed in the window must invalidate the plan
+        // here, as a typed conflict, before it can become the baseline.
+        built.ledger,
         canonicalIdentityOf,
         plan.retypeMap,
         {
@@ -3062,6 +3066,19 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
     ids: readonly string[];
     observed: ReadonlySet<MergeKey>;
     /**
+     * Every `(kind, id)` the guarded universe contains — the seeds plus all
+     * snapshot class members. The negative-truth fingerprint below ranges
+     * over `different` assertions touching this set.
+     */
+    memberKeys: ReadonlySet<MergeKey>;
+    /**
+     * Deterministic fingerprint of the CURRENT `different` assertions
+     * touching the guarded universe at snapshot time. Negative truth changes
+     * plan legality without moving peers, liveness, or equivalence classes,
+     * so it needs its own drift signal.
+     */
+    differentFingerprint: string;
+    /**
      * The plan-time structural identity class of every final fold seed,
      * serialized to a comparable fingerprint per seed. The direct-peer set
      * above covers planned ids that do not exist yet; this covers
@@ -3089,6 +3106,7 @@ async function buildIdentityPeerProbe<G extends GraphDef>(
   Readonly<{
     probe: NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]>;
     snapshot: IdentityClassSnapshot;
+    ledger: readonly LedgerAssertion[];
   }>
 > {
   const finalIds = new Set([
@@ -3126,16 +3144,34 @@ async function buildIdentityPeerProbe<G extends GraphDef>(
     targetPeers.map((peer) => mergeKey(peer.kind, peer.id)),
   );
   const snapshot = await snapshotIdentityClasses(target, seeds, liveKeys);
+  const memberKeys = new Set<MergeKey>([
+    ...seeds.map((seed) => mergeKey(seed.kind, seed.id)),
+    ...snapshot.groups.flatMap((group) =>
+      group.map((member) => mergeKey(member.kind, member.id)),
+    ),
+  ]);
+  // Negative truth is invisible to peers, liveness, and class structure, so
+  // the CURRENT ledger touching the universe is read fresh here: the recheck
+  // validates the plan against it, and its `different` slice is fingerprinted
+  // for the in-transaction comparison.
+  const ledger = await relevantLedgerAssertions(
+    target,
+    memberKeys,
+    storeBackend(target),
+  );
   return {
     probe: {
       ids: probedIds.filter((id) => finalIds.has(id)),
       observed: new Set(
         relevantPeers.map((peer) => mergeKey(peer.kind, peer.id)),
       ),
+      memberKeys,
+      differentFingerprint: differentLedgerFingerprint(ledger),
       classFingerprints: snapshot.fingerprints,
       seeds,
     },
     snapshot,
+    ledger,
   };
 }
 
@@ -3172,6 +3208,55 @@ async function snapshotIdentityClasses<G extends GraphDef>(
     fingerprints.set(key, encodeClassFingerprint(liveKeys.has(key), members));
   }
   return { fingerprints, groups };
+}
+
+type LedgerAssertion = Readonly<{
+  id: string;
+  relation: "same" | "different";
+  a: Readonly<{ kind: string; id: string }>;
+  b: Readonly<{ kind: string; id: string }>;
+  validFrom: string;
+  validTo?: string | undefined;
+}>;
+
+/**
+ * The target's CURRENT assertions touching the guarded universe, read fresh
+ * from `backend` (the tx backend inside the commit transaction).
+ */
+async function relevantLedgerAssertions<G extends GraphDef>(
+  target: Store<G>,
+  memberKeys: ReadonlySet<MergeKey>,
+  backend: GraphBackend | TransactionBackend,
+): Promise<readonly LedgerAssertion[]> {
+  const current = await storeRuntime(target).identityAssertionsAtTarget(
+    backend,
+    "state",
+  );
+  return current.filter(
+    (assertion) =>
+      memberKeys.has(mergeKey(assertion.a.kind, assertion.a.id)) ||
+      memberKeys.has(mergeKey(assertion.b.kind, assertion.b.id)),
+  );
+}
+
+/** Deterministic fingerprint of the `different` assertions in a ledger slice. */
+function differentLedgerFingerprint(
+  assertions: readonly LedgerAssertion[],
+): string {
+  return JSON.stringify(
+    assertions
+      .filter((assertion) => assertion.relation === "different")
+      .map((assertion) => [
+        assertion.id,
+        assertion.a.kind,
+        assertion.a.id,
+        assertion.b.kind,
+        assertion.b.id,
+      ])
+      .toSorted((left, right) =>
+        compareStrings(left.join("\u0000"), right.join("\u0000")),
+      ),
+  );
 }
 
 /**
@@ -3238,11 +3323,25 @@ async function assertIdentityPeersStable<G extends GraphDef>(
     .filter(([key, fingerprint]) => liveFingerprints.get(key) !== fingerprint)
     .map(([key]) => key)
     .sort((left, right) => compareStrings(left, right));
-  if (drifted.length === 0) return;
-  throw new BaseVersionMismatchError(
-    `mergeIncremental() validated identity against the classes visible at planning, but the identity class of ${drifted.length} node(s) the plan folds on changed before the commit transaction. Committing the plan could contradict identity truth it never validated.`,
-    { details: { drifted } },
+  if (drifted.length > 0) {
+    throw new BaseVersionMismatchError(
+      `mergeIncremental() validated identity against the classes visible at planning, but the identity class of ${drifted.length} node(s) the plan folds on changed before the commit transaction. Committing the plan could contradict identity truth it never validated.`,
+      { details: { drifted } },
+    );
+  }
+  // Negative truth: a `different` assertion committed (or retracted) in the
+  // window changes plan legality without moving any class or peer.
+  const ledger = await relevantLedgerAssertions(
+    target,
+    probe.memberKeys,
+    txBackend,
   );
+  if (differentLedgerFingerprint(ledger) !== probe.differentFingerprint) {
+    throw new BaseVersionMismatchError(
+      "mergeIncremental() validated identity against the `different` assertions visible at planning, but that ledger changed before the commit transaction. Committing the plan could contradict identity truth it never validated.",
+      { details: {} },
+    );
+  }
 }
 
 /**
