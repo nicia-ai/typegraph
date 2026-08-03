@@ -1766,6 +1766,20 @@ async function applyMergePlan<G extends GraphDef>(
   // from the cluster union, which carries the OLDER base props) would clobber the
   // modification's fork edit. We therefore fold the fork props into the canonical
   // write and skip the standalone modification write for that identity.
+
+  // Soft-delete every finally-deleted node FIRST (key encodes the kind; the
+  // value repeats it for the collection lookup). Deletions precede the node
+  // writes so a plan replacing a node — e.g. deleting Robot:x and creating a
+  // disjoint Person:x — applies in the only order the create-time
+  // disjoint-id constraint permits, matching how the same operations run
+  // directly on a store. Deleted identities are never also written (the
+  // write loops filter on `plan.nodeDeletions`), and edge upserts still run
+  // after these cascades.
+  for (const [identity, kind] of plan.nodeDeletions) {
+    const collection = nodeCollection(nodesApi, kind);
+    await collection.delete(idOf(identity));
+  }
+
   const canonicalIdentities = new Set<MergeKey>();
   for (const entity of plan.canonicalEntities) {
     canonicalIdentities.add(mergeKey(entity.kind, entity.canonicalId));
@@ -1829,13 +1843,6 @@ async function applyMergePlan<G extends GraphDef>(
     const collection = nodeCollection(nodesApi, kind);
     await collection.upsertByIdFromRecord(entity.canonicalId, props);
     committedNodeIds.add(mergeKey(kind, entity.canonicalId));
-  }
-
-  // Soft-delete every finally-deleted node (key encodes the kind; the value repeats
-  // it for the collection lookup).
-  for (const [identity, kind] of plan.nodeDeletions) {
-    const collection = nodeCollection(nodesApi, kind);
-    await collection.delete(idOf(identity));
   }
 
   // Soft-delete every finally-deleted inherited edge. These ids are disjoint from
@@ -3098,6 +3105,14 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
     ids: readonly string[];
     observed: ReadonlySet<MergeKey>;
     /**
+     * The plan's node deletions, by composite key. Rows the plan removes are
+     * excluded from BOTH sides of every comparison — they are gone in the
+     * committed state, so treating them as present would falsely reject a
+     * legal delete-and-replace (and a still-live-at-tx-time row the plan
+     * deletes must not read as an "appeared" peer either).
+     */
+    plannedDeletions: ReadonlySet<MergeKey>;
+    /**
      * Every `(kind, id)` the guarded universe contains — the seeds plus all
      * snapshot class members. The negative-truth fingerprint below ranges
      * over `different` assertions touching this set.
@@ -3154,7 +3169,12 @@ async function buildIdentityPeerProbe<G extends GraphDef>(
       assertion.b.id,
     ]),
   ]);
-  const relevantPeers = targetPeers.filter((peer) => finalIds.has(peer.id));
+  const plannedDeletions = new Set<MergeKey>(plan.nodeDeletions.keys());
+  const relevantPeers = targetPeers.filter(
+    (peer) =>
+      finalIds.has(peer.id) &&
+      !plannedDeletions.has(mergeKey(peer.kind, peer.id)),
+  );
   // The fold seeds whose classes plan legality depends on: the commit-ready
   // canonical nodes (final retyped kinds), the remapped assertion endpoints,
   // and the live target peers anchoring them into existing classes.
@@ -3174,9 +3194,16 @@ async function buildIdentityPeerProbe<G extends GraphDef>(
   for (const peer of relevantPeers) addSeed(peer.kind, peer.id);
   const seeds = [...seedsByKey.values()];
   const liveKeys = new Set(
-    targetPeers.map((peer) => mergeKey(peer.kind, peer.id)),
+    targetPeers
+      .map((peer) => mergeKey(peer.kind, peer.id))
+      .filter((key) => !plannedDeletions.has(key)),
   );
-  const snapshot = await snapshotIdentityClasses(target, seeds, liveKeys);
+  const snapshot = await snapshotIdentityClasses(
+    target,
+    seeds,
+    liveKeys,
+    plannedDeletions,
+  );
   const memberKeys = new Set<MergeKey>([
     ...seeds.map((seed) => mergeKey(seed.kind, seed.id)),
     ...snapshot.groups.flatMap((group) =>
@@ -3187,14 +3214,17 @@ async function buildIdentityPeerProbe<G extends GraphDef>(
   // the CURRENT ledger touching the universe is read fresh here: the recheck
   // validates the plan against it, and its `different` slice is fingerprinted
   // for the in-transaction comparison.
-  const ledger = await relevantLedgerAssertions(
-    target,
-    memberKeys,
-    storeBackend(target),
+  const ledger = (
+    await relevantLedgerAssertions(target, memberKeys, storeBackend(target))
+  ).filter(
+    (assertion) =>
+      !plannedDeletions.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
+      !plannedDeletions.has(mergeKey(assertion.b.kind, assertion.b.id)),
   );
   return {
     probe: {
       profile,
+      plannedDeletions,
       ids: probedIds.filter((id) => finalIds.has(id)),
       observed: new Set(
         relevantPeers.map((peer) => mergeKey(peer.kind, peer.id)),
@@ -3226,6 +3256,7 @@ async function snapshotIdentityClasses<G extends GraphDef>(
   target: Store<G>,
   seeds: readonly Readonly<{ kind: string; id: string }>[],
   liveKeys: ReadonlySet<MergeKey>,
+  plannedDeletions: ReadonlySet<MergeKey>,
   txBackend?: TransactionBackend,
 ): Promise<IdentityClassSnapshot> {
   const classes = await storeRuntime(target).structuralIdentityClasses(
@@ -3236,8 +3267,15 @@ async function snapshotIdentityClasses<G extends GraphDef>(
   const groups: (readonly Readonly<{ kind: string; id: string }>[])[] = [];
   for (const seed of seeds) {
     const key = mergeKey(seed.kind, seed.id);
-    // The service keys classes by `JSON.stringify([kind, id])`.
-    const members = classes.get(JSON.stringify([seed.kind, seed.id])) ?? [seed];
+    // The service keys classes by `JSON.stringify([kind, id])`. Members the
+    // plan DELETES are excluded on both sides of the comparison — the
+    // committed state no longer contains them, so keeping them would reject
+    // a legal delete-and-replace.
+    const members = (
+      classes.get(JSON.stringify([seed.kind, seed.id])) ?? [seed]
+    ).filter(
+      (member) => !plannedDeletions.has(mergeKey(member.kind, member.id)),
+    );
     groups.push(members);
     fingerprints.set(key, encodeClassFingerprint(liveKeys.has(key), members));
   }
@@ -3329,10 +3367,9 @@ async function assertIdentityPeersStable<G extends GraphDef>(
 ): Promise<void> {
   const probe = guard.identityPeerProbe;
   if (probe === undefined) return;
-  const live = await storeRuntime(target).liveNodesSharingIds(
-    probe.ids,
-    txBackend,
-  );
+  const live = (
+    await storeRuntime(target).liveNodesSharingIds(probe.ids, txBackend)
+  ).filter((peer) => !probe.plannedDeletions.has(mergeKey(peer.kind, peer.id)));
   // Under "fold" ANY new same-id peer changes the classes the plan folded
   // on; under "ignore" only a peer of a kind DISJOINT with a seed sharing
   // its id changes legality (the create-time disjoint-id constraint) — a
@@ -3368,6 +3405,7 @@ async function assertIdentityPeersStable<G extends GraphDef>(
     target,
     probe.seeds,
     new Set(live.map((peer) => mergeKey(peer.kind, peer.id))),
+    probe.plannedDeletions,
     txBackend,
   );
   const drifted = [...probe.classFingerprints]
@@ -3382,10 +3420,12 @@ async function assertIdentityPeersStable<G extends GraphDef>(
   }
   // Negative truth: a `different` assertion committed (or retracted) in the
   // window changes plan legality without moving any class or peer.
-  const ledger = await relevantLedgerAssertions(
-    target,
-    probe.memberKeys,
-    txBackend,
+  const ledger = (
+    await relevantLedgerAssertions(target, probe.memberKeys, txBackend)
+  ).filter(
+    (assertion) =>
+      !probe.plannedDeletions.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
+      !probe.plannedDeletions.has(mergeKey(assertion.b.kind, assertion.b.id)),
   );
   if (differentLedgerFingerprint(ledger) !== probe.differentFingerprint) {
     throw new BaseVersionMismatchError(

@@ -203,3 +203,11 @@ models the profile-independent create-time constraint that one id cannot
 be shared by ontology-disjoint kinds, and the direct-peer window check
 refuses a disjoint same-id arrival under `"ignore"` while tolerating a
 benign one.
+
+**Replacement is legal.** Planned node deletions are excluded from both
+sides of the incremental identity guard (peers, liveness, class members,
+and the ledger slice), and `applyMergePlan` soft-deletes nodes BEFORE the
+node writes — so a plan replacing a node with a disjoint same-id one (the
+order the create-time constraint permits, and the order the same
+operations run directly on a store) commits instead of being falsely
+rejected or failing at apply.

@@ -813,6 +813,52 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     ).toBeUndefined();
   });
 
+  it.each([
+    ["ignore", anchoredIgnoreGraph],
+    ["fold", anchoredFoldGraph],
+  ] as const)(
+    "allows replacing a disjoint same-id node under %s",
+    async (_profile, graphDef) => {
+      // A branch deleting Robot:shared and creating disjoint Person:shared
+      // is legal — the committed state holds only Person. Planned deletions
+      // must be excluded from the guard baseline, or the stale Robot rejects
+      // the replacement the commit itself would accept.
+      const [forkPoint] = await createStoreWithSchema(
+        graphDef,
+        await makeBackend(),
+      );
+      await forkPoint.nodes.Robot.create({ name: "Old" }, { id: "shared" });
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), {
+          id: asBranchId("target-clone"),
+        }),
+      ).store;
+      const replaceBranch = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await replaceBranch.store.nodes.Robot.delete("shared" as never);
+      await replaceBranch.store.nodes.Person.create(
+        { name: "New" },
+        { id: "shared" },
+      );
+
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [replaceBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isOk(result)).toBe(true);
+      if (isErr(result)) throw new Error(result.error.message);
+      expect(
+        await target.nodes.Person.getById("shared" as never),
+      ).toBeDefined();
+      expect(
+        await target.nodes.Robot.getById("shared" as never),
+      ).toBeUndefined();
+    },
+  );
+
   it("tolerates a window peer at an id canonicalization dropped", async () => {
     // Person:a-keep and Person:z-drop reconcile into a-keep, so z-drop never
     // reaches the committed plan. A window Robot:z-drop is therefore an
