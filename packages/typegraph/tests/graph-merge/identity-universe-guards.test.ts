@@ -114,6 +114,19 @@ const anchoredFoldGraph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
+/** The same anchored shape under the assertion-only profile. */
+const anchoredIgnoreGraph = defineGraph({
+  id: "identity_universe_ignore",
+  nodes: {
+    Person: { type: Person },
+    Robot: { type: Robot },
+    Anchor: { type: Anchor },
+  },
+  edges: {},
+  ontology: [disjointWith(Person, Robot)],
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
 
@@ -592,6 +605,212 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
         { kind: "Anchor", id: "b" },
       ),
     ).toBe(false);
+  });
+
+  it("guards negative truth under the ignore profile too", async () => {
+    // Explicit assertions exist under both profiles, so the negative-ledger
+    // guard must not be fold-gated: a window different(a, b) against a
+    // planned same(a, b) refuses typed on an "ignore" graph as well.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredIgnoreGraph,
+      await makeBackend(),
+    );
+    await forkPoint.nodes.Anchor.create({ name: "A" }, { id: "a" });
+    await forkPoint.nodes.Anchor.create({ name: "B" }, { id: "b" });
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+
+    const sameBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await sameBranch.store.identity.assertSame(
+      { kind: "Anchor", id: "a" },
+      { kind: "Anchor", id: "b" },
+    );
+
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await target.identity.assertDifferent(
+          { kind: "Anchor", id: "a" },
+          { kind: "Anchor", id: "b" },
+        );
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [sameBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+    expect(
+      await target.identity.areSame(
+        { kind: "Anchor", id: "a" },
+        { kind: "Anchor", id: "b" },
+      ),
+    ).toBe(false);
+
+    // A rerun sees the different at PLAN time and refuses typed there.
+    const rerun = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [sameBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    expect(isErr(rerun)).toBe(true);
+    if (isOk(rerun)) throw new Error("Expected identity merge conflict");
+    expect(rerun.error).toBeInstanceOf(IdentityMergeConflictError);
+  });
+
+  it("tolerates a benign window same-id node under the ignore profile", async () => {
+    // Under "ignore" a same-id row never folds, so a window Anchor (not
+    // disjoint with Person) at a planned Person id is an unrelated target
+    // advance the guard must not refuse.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredIgnoreGraph,
+      await makeBackend(),
+    );
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    const personBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await personBranch.store.nodes.Person.create(
+      { name: "P" },
+      { id: "shared" },
+    );
+
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await target.nodes.Anchor.create({ name: "Window" }, { id: "shared" });
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [personBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isOk(result)).toBe(true);
+      if (isErr(result)) throw new Error(result.error.message);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+    expect(await target.nodes.Person.getById("shared" as never)).toBeDefined();
+    expect(await target.nodes.Anchor.getById("shared" as never)).toBeDefined();
+  });
+
+  it("refuses a DISJOINT window same-id node under the ignore profile", async () => {
+    // Disjoint id-sharing is a create-time constraint under both profiles:
+    // a window Robot at a planned Person id changes plan legality even
+    // though nothing folds.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredIgnoreGraph,
+      await makeBackend(),
+    );
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    const personBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await personBranch.store.nodes.Person.create(
+      { name: "P" },
+      { id: "shared" },
+    );
+
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await target.nodes.Robot.create({ name: "Window" }, { id: "shared" });
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [personBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+    expect(
+      await target.nodes.Person.getById("shared" as never),
+    ).toBeUndefined();
+  });
+
+  it("refuses a pre-existing disjoint same-id peer at plan time under ignore", async () => {
+    // The create-time disjoint-id constraint is profile-independent, so the
+    // plan-time simulation must model it even when nothing folds.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredIgnoreGraph,
+      await makeBackend(),
+    );
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    await target.nodes.Robot.create({ name: "R" }, { id: "shared" });
+    const personBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await personBranch.store.nodes.Person.create(
+      { name: "P" },
+      { id: "shared" },
+    );
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [personBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected identity merge conflict");
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    expect(
+      await target.nodes.Person.getById("shared" as never),
+    ).toBeUndefined();
   });
 
   it("tolerates a window peer at an id canonicalization dropped", async () => {

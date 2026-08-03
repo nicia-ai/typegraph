@@ -193,3 +193,13 @@ and the transaction guard carries a deterministic fingerprint of the
 `different` assertions touching the guarded universe — a `different`
 committed in either window is refused typed instead of surfacing as a
 generic commit failure.
+
+**The identity guard covers both profiles.** The incremental identity
+baseline, class/liveness fingerprints, and negative-ledger guard run for
+every identity-enabled merge — under `sameIdAcrossKinds: "ignore"` too,
+where explicit assertions still change plan legality. Only the same-id
+fold expansion stays profile-gated; the plan-time simulation additionally
+models the profile-independent create-time constraint that one id cannot
+be shared by ontology-disjoint kinds, and the direct-peer window check
+refuses a disjoint same-id arrival under `"ignore"` while tolerating a
+benign one.

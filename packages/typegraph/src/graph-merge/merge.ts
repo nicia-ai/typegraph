@@ -1150,21 +1150,41 @@ export function assertNoContradictoryIdentityClosure(
       sameClasses.union(mergeKeyOf(assertion.a), mergeKeyOf(assertion.b));
     }
   }
+  const refsById = new Map<string, MergeKey[]>();
+  const addRef = (kind: string, id: string): void => {
+    const keys = refsById.get(id) ?? [];
+    keys.push(mergeKey(kind, id));
+    refsById.set(id, keys);
+  };
+  for (const node of nodeUniverse) addRef(node.kind, node.id);
+  for (const group of linkedGroups) {
+    for (const member of group) addRef(member.kind, member.id);
+  }
+  for (const assertion of mergedLedger) {
+    addRef(assertion.a.kind, assertion.a.id);
+    addRef(assertion.b.kind, assertion.b.id);
+  }
+  // Sharing an id across DISJOINT kinds is a create-time constraint under
+  // BOTH profiles — under "ignore" the rows do not fold, but the id is still
+  // refused. Scan every same-id group regardless of profile.
+  for (const keys of refsById.values()) {
+    const kinds = [...new Set(keys.map((key) => kindOf(key)))];
+    for (const [index, left] of kinds.entries()) {
+      for (const right of kinds.slice(index + 1)) {
+        if (!identityContext.areDisjoint(left, right)) continue;
+        throw new IdentityMergeConflictError(
+          "The merged graph would give one id to two ontology-disjoint kinds.",
+          {
+            details: {
+              disjointKinds: [left, right],
+              sharedId: idOf(requireDefined(keys[0])),
+            },
+          },
+        );
+      }
+    }
+  }
   if (identityContext.sameIdAcrossKinds === "fold") {
-    const refsById = new Map<string, MergeKey[]>();
-    const addRef = (kind: string, id: string): void => {
-      const keys = refsById.get(id) ?? [];
-      keys.push(mergeKey(kind, id));
-      refsById.set(id, keys);
-    };
-    for (const node of nodeUniverse) addRef(node.kind, node.id);
-    for (const group of linkedGroups) {
-      for (const member of group) addRef(member.kind, member.id);
-    }
-    for (const assertion of mergedLedger) {
-      addRef(assertion.a.kind, assertion.a.id);
-      addRef(assertion.b.kind, assertion.b.id);
-    }
     for (const keys of refsById.values()) {
       const [first, ...rest] = keys;
       if (first === undefined) continue;
@@ -2277,9 +2297,14 @@ async function resolveMerge<G extends GraphDef>(
     // contradiction simulation needs the LIVE target peers sharing any staged
     // or base id. One kind-free indexed probe; skipped entirely off the fold
     // profile.
-    const foldProbeIds =
-      target.graph.identity?.sameIdAcrossKinds === "fold" ?
-        [
+    // The identity guard protects EVERY identity-enabled incremental merge —
+    // explicit same/different assertions exist under both profiles. Only the
+    // same-id peer expansion (and the direct-peer window check) is
+    // fold-specific.
+    const identityProbeIds =
+      target.graph.identity === undefined ?
+        undefined
+      : [
           ...new Set([
             ...[...newNodesByKind(staging).values()].flatMap((entries) =>
               entries.map((entry) => entry.node.id),
@@ -2291,12 +2316,11 @@ async function resolveMerge<G extends GraphDef>(
               staged.assertion.b.id,
             ]),
           ]),
-        ]
-      : undefined;
+        ];
     const targetPeers =
-      foldProbeIds === undefined ?
+      identityProbeIds === undefined ?
         []
-      : await storeRuntime(target).liveNodesSharingIds(foldProbeIds);
+      : await storeRuntime(target).liveNodesSharingIds(identityProbeIds);
 
     // (4–8) resolve the whole merge into a commit-ready plan.
     const plan = planMerge(
@@ -2326,14 +2350,15 @@ async function resolveMerge<G extends GraphDef>(
     // at an id canonicalization dropped is an unrelated target advance.
     let identityGuard:
       NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]> | undefined;
-    if (foldProbeIds !== undefined && incremental !== undefined) {
+    if (identityProbeIds !== undefined && incremental !== undefined) {
       const freshPeers =
-        await storeRuntime(target).liveNodesSharingIds(foldProbeIds);
+        await storeRuntime(target).liveNodesSharingIds(identityProbeIds);
       const built = await buildIdentityPeerProbe(
         target,
-        foldProbeIds,
+        identityProbeIds,
         freshPeers,
         plan,
+        target.graph.identity?.sameIdAcrossKinds ?? "ignore",
       );
       // Rebuild the canonical map from the plan's recorded resolutions —
       // base assertion endpoints must be judged at their post-merge identity,
@@ -3063,6 +3088,13 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
    * contradictions) the plan-time simulation never saw.
    */
   identityPeerProbe?: Readonly<{
+    /**
+     * The target's identity profile. The direct-peer window check below only
+     * applies under `"fold"` — a same-id row appearing under `"ignore"` never
+     * changes plan legality, so refusing on it would reject an unrelated
+     * target advance.
+     */
+    profile: "fold" | "ignore";
     ids: readonly string[];
     observed: ReadonlySet<MergeKey>;
     /**
@@ -3102,6 +3134,7 @@ async function buildIdentityPeerProbe<G extends GraphDef>(
   probedIds: readonly string[],
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
   plan: MergePlan<G>,
+  profile: "fold" | "ignore",
 ): Promise<
   Readonly<{
     probe: NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]>;
@@ -3161,6 +3194,7 @@ async function buildIdentityPeerProbe<G extends GraphDef>(
   );
   return {
     probe: {
+      profile,
       ids: probedIds.filter((id) => finalIds.has(id)),
       observed: new Set(
         relevantPeers.map((peer) => mergeKey(peer.kind, peer.id)),
@@ -3299,7 +3333,24 @@ async function assertIdentityPeersStable<G extends GraphDef>(
     probe.ids,
     txBackend,
   );
+  // Under "fold" ANY new same-id peer changes the classes the plan folded
+  // on; under "ignore" only a peer of a kind DISJOINT with a seed sharing
+  // its id changes legality (the create-time disjoint-id constraint) — a
+  // benign same-id row is an unrelated target advance.
+  const seedKindsById = new Map<string, Set<string>>();
+  for (const seed of probe.seeds) {
+    const kinds = seedKindsById.get(seed.id) ?? new Set<string>();
+    kinds.add(seed.kind);
+    seedKindsById.set(seed.id, kinds);
+  }
   const appeared = live
+    .filter(
+      (peer) =>
+        probe.profile === "fold" ||
+        [...(seedKindsById.get(peer.id) ?? [])].some((kind) =>
+          target.registry.areDisjoint(peer.kind, kind),
+        ),
+    )
     .map((peer) => mergeKey(peer.kind, peer.id))
     .filter((key) => !probe.observed.has(key))
     .sort((left, right) => compareMergeKeys(left, right));
