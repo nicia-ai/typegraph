@@ -859,6 +859,57 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     },
   );
 
+  it("allows deleting an identity bridge and asserting its ends different", async () => {
+    // Deleting the bridge ends both touching assertions and SPLITS the class
+    // {a, bridge, b}. Modeling the post-deletion class by filtering the old
+    // member list would leave [a, b] pre-linked and falsely reject the
+    // different(a, b) the branch legally asserted after the deletion.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredIgnoreGraph,
+      await makeBackend(),
+    );
+    const a = await forkPoint.nodes.Anchor.create({ name: "A" }, { id: "a" });
+    const bridge = await forkPoint.nodes.Anchor.create(
+      { name: "Bridge" },
+      { id: "bridge" },
+    );
+    const b = await forkPoint.nodes.Anchor.create({ name: "B" }, { id: "b" });
+    await forkPoint.identity.assertSame(a, bridge);
+    await forkPoint.identity.assertSame(bridge, b);
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+
+    const splitBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await splitBranch.store.nodes.Anchor.delete("bridge" as never);
+    await splitBranch.store.identity.assertDifferent(
+      { kind: "Anchor", id: "a" },
+      { kind: "Anchor", id: "b" },
+    );
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [splitBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    expect(isOk(result)).toBe(true);
+    if (isErr(result)) throw new Error(result.error.message);
+    expect(
+      await target.nodes.Anchor.getById("bridge" as never),
+    ).toBeUndefined();
+    expect(
+      await target.identity.areDifferent(
+        { kind: "Anchor", id: "a" },
+        { kind: "Anchor", id: "b" },
+      ),
+    ).toBe(true);
+  });
+
   it("tolerates a window peer at an id canonicalization dropped", async () => {
     // Person:a-keep and Person:z-drop reconcile into a-keep, so z-drop never
     // reaches the committed plan. A window Robot:z-drop is therefore an

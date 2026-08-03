@@ -1103,17 +1103,6 @@ export function assertNoContradictoryIdentityClosure(
   retypeMap: ReadonlyMap<MergeKey, string>,
   identityContext: PlanIdentityContext,
   nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
-  /**
-   * Pre-linked member groups (a structural-class snapshot of the target):
-   * each group is unioned wholesale before the explicit assertions, so
-   * assertion-derived links already materialized in the target's closure —
-   * which the ledger inputs alone cannot reconstruct — participate in the
-   * simulation.
-   */
-  linkedGroups: readonly (readonly Readonly<{
-    kind: string;
-    id: string;
-  }>[])[] = [],
 ): void {
   const retracted = new Set(retractions);
   const mergedLedger = [
@@ -1137,14 +1126,6 @@ export function assertNoContradictoryIdentityClosure(
   for (const node of nodeUniverse) {
     sameClasses.add(mergeKey(node.kind, node.id));
   }
-  for (const group of linkedGroups) {
-    const [first, ...rest] = group;
-    if (first === undefined) continue;
-    const firstKey = mergeKey(first.kind, first.id);
-    for (const member of rest) {
-      sameClasses.union(firstKey, mergeKey(member.kind, member.id));
-    }
-  }
   for (const assertion of mergedLedger) {
     if (assertion.relation === "same") {
       sameClasses.union(mergeKeyOf(assertion.a), mergeKeyOf(assertion.b));
@@ -1157,9 +1138,6 @@ export function assertNoContradictoryIdentityClosure(
     refsById.set(id, keys);
   };
   for (const node of nodeUniverse) addRef(node.kind, node.id);
-  for (const group of linkedGroups) {
-    for (const member of group) addRef(member.kind, member.id);
-  }
   for (const assertion of mergedLedger) {
     addRef(assertion.a.kind, assertion.a.id);
     addRef(assertion.b.kind, assertion.b.id);
@@ -2385,6 +2363,13 @@ async function resolveMerge<G extends GraphDef>(
         // The FRESH target ledger, not the pre-planning staging capture —
         // a `different` committed in the window must invalidate the plan
         // here, as a typed conflict, before it can become the baseline.
+        // Connectivity is REBUILT from this deletion-filtered ledger (plus
+        // the fold unions inside the checker) rather than from the old
+        // closure's member lists: filtering a deleted member out of a class
+        // does not model the post-deletion state — deleting a bridge ends
+        // its assertions and SPLITS the class, so pre-linking the filtered
+        // remainder would falsely reject a plan that deletes the bridge and
+        // asserts the ends different.
         built.ledger,
         canonicalIdentityOf,
         plan.retypeMap,
@@ -2393,8 +2378,12 @@ async function resolveMerge<G extends GraphDef>(
           areDisjoint: (left, right) =>
             target.registry.areDisjoint(left, right),
         },
-        built.probe.seeds,
-        built.snapshot.groups,
+        // The snapshot's (deletion-filtered) class MEMBERS join the universe
+        // as unlinked refs: their same-id fold links at ids outside the probe
+        // range are re-derived by the checker's fold union, and their
+        // assertion links come from the fresh ledger — never from the old
+        // class shape itself.
+        [...built.probe.seeds, ...built.snapshot.groups.flat()],
       );
       identityGuard = built.probe;
     }

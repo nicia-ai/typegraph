@@ -211,3 +211,11 @@ node writes — so a plan replacing a node with a disjoint same-id one (the
 order the create-time constraint permits, and the order the same
 operations run directly on a store) commits instead of being falsely
 rejected or failing at apply.
+
+**Deleting a bridge splits the class.** The incremental recheck derives
+connectivity from the deletion-filtered fresh ledger and the checker's
+fold unions — never by pre-linking the old closure's filtered member
+lists — so a plan that deletes an identity bridge and asserts its former
+ends `different` commits instead of being falsely rejected. Snapshot class
+members still join the simulation universe (unlinked) so fold links at
+unprobed ids keep participating.
