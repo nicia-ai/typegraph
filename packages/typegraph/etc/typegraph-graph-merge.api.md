@@ -4057,7 +4057,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
-    identityAssertionsForInterchange: (mode: "state" | "archival", options?: Readonly<{
+    readCurrentIdentityAssertions: (mode: "state" | "archival", options?: Readonly<{
         nodeKinds?: readonly string[];
         includeDeleted?: boolean;
     }>) => Promise<readonly Readonly<{

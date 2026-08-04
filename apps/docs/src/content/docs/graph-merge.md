@@ -397,12 +397,19 @@ persist provenance, or feed a downstream step.
 
 ```typescript
 type MergeReport = {
-  merged: { nodes: number; edges: number }; // counts committed
+  merged: {
+    nodes: number;
+    edges: number;
+    identity: { asserted: number; retracted: number }; // ledger effects
+  };
   resolutions: EntityResolution[]; // which fork ids collapsed into each canonical
   conflicts: PropertyConflict[]; // per-property disagreements + how they resolved
   deleteModifyConflicts: DeleteModifyConflict[]; // node/edge delete-vs-modify cases
   typeReconciliations: TypeReconciliation[]; // ontology kind collapses
-  dropped: DroppedItem[]; // edges to deleted endpoints, incompatible members
+  // Node drops (deleted endpoints, incompatible members), edge drops, and
+  // identity drops (identity:duplicate-assertion, identity:endpoints-collapsed,
+  // identity:retraction-target-mismatch, identity:deletion-overruled)
+  dropped: DroppedItem[];
   baseAmbiguities: BaseAmbiguity[]; // new-vs-base matches that spanned >= 2 committed entities
   provenance: ProvenanceIndex; // byBranch(id) -> { nodeIds, edgeIds }
   warnings: string[]; // non-fatal advisories (ceiling skips, provenance-persist failures)
@@ -538,7 +545,8 @@ subclass you can branch on:
 | Error | When |
 | ----- | ---- |
 | `BranchError` | `branch()` could not materialize a working copy. |
-| `BaseVersionMismatchError` | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). |
+| `BaseVersionMismatchError` | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
+| `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge). |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`. |
 | `MergeConflictError` | A conflict could not be resolved under the configured policy. |
 | `MergeError` | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes. |

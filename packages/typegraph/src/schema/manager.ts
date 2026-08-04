@@ -707,6 +707,28 @@ function schemaNotInitializedError(
 }
 
 /**
+ * Returns the backend's atomic preflight-commit primitive, throwing
+ * `IDENTITY_REQUIRES_ATOMIC_BACKEND` if the backend doesn't support
+ * committing identity data atomically with a schema transition.
+ */
+function requireCommitWithPreflight(
+  backend: GraphBackend,
+  graph: GraphDef,
+): NonNullable<GraphBackend["commitSchemaVersionWithPreflight"]> {
+  const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
+  if (commitWithPreflight === undefined) {
+    throw new ConfigurationError(
+      "This backend cannot atomically commit identity data with a schema transition.",
+      {
+        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId: graph.id,
+      },
+    );
+  }
+  return commitWithPreflight;
+}
+
+/**
  * Initializes the schema for a new graph.
  *
  * Creates version 1 of the schema and marks it as active. Goes through
@@ -766,16 +788,7 @@ export async function initializeSchema<G extends GraphDef>(
     enablement: true,
     ...(options?.schema === undefined ? {} : { schema: options.schema }),
   });
-  const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
-  if (commitWithPreflight === undefined) {
-    throw new ConfigurationError(
-      "This backend cannot atomically commit identity data with a schema transition.",
-      {
-        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-        graphId: graph.id,
-      },
-    );
-  }
+  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
   return commitWithPreflight(commit, preflight);
 }
 
@@ -1159,19 +1172,12 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   currentVersion: number,
   preflight: (target: TransactionBackend) => Promise<void>,
 ): Promise<SchemaVersionRow> {
-  const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
-  if (commitWithPreflight === undefined) {
+  if (backend.commitSchemaVersionWithPreflight === undefined) {
     // Match the graph-validation ordering of the plain path: reject a
     // structurally invalid graph before probing backend capability.
     buildKindRegistry(graph);
-    throw new ConfigurationError(
-      "This backend cannot atomically commit identity data with a schema transition.",
-      {
-        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-        graphId: graph.id,
-      },
-    );
   }
+  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
   return commitWithPreflight(
     await buildNewSchemaVersionCommit(graph, currentVersion),
     preflight,

@@ -98,7 +98,9 @@ import {
   lockIdentityGraph,
   readIdentityAssertionsForInterchange,
   rebuildIdentityClosureForContext,
+  refKey,
   removeIdentityKindsForContext,
+  toTransferAssertion,
   validateIdentityForContext,
 } from "../identity/service";
 import type {
@@ -977,6 +979,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         return peers;
       },
       identityAssertionRowsByIds: async (ids, target) => {
+        // An identity-disabled graph has no assertions table to read from.
+        if (this.#graph.identity === undefined) return new Map();
         const backend = target ?? this.#baseBackend;
         const ctx = this.#identityContext(backend);
         const rows = await loadAssertionsByIds(
@@ -986,20 +990,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           ids,
         );
         return new Map(
-          [...rows].map(([id, row]) => [
-            id,
-            {
-              id: row.id,
-              relation: row.rel,
-              a: { kind: row.a_kind, id: row.a_id },
-              b: { kind: row.b_kind, id: row.b_id },
-              validFrom: row.valid_from,
-              ...(row.valid_to === undefined ? {} : { validTo: row.valid_to }),
-            },
-          ]),
+          [...rows].map(([id, row]) => [id, toTransferAssertion(row)]),
         );
       },
       structuralIdentityClasses: async (references, target) => {
+        // An identity-disabled graph has no closure table to read from.
+        if (this.#graph.identity === undefined) return new Map();
         const backend = target ?? this.#baseBackend;
         const ctx = this.#identityContext(backend);
         return loadCurrentStructuralClasses(
@@ -1009,8 +1005,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           references,
         );
       },
-      identityAssertionsForInterchange: (mode, options) =>
-        this.identityAssertionsForInterchange(mode, options),
+      readCurrentIdentityAssertions: (mode, options) =>
+        this.readCurrentIdentityAssertions(mode, options),
       identityAssertionsAtTarget: (target, mode) =>
         this.identityAssertionsAtTarget(target, mode),
       lockIdentityImportTarget: (target) =>
@@ -1060,16 +1056,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * lifecycle operation can move — see `#identityContext`.
    */
   get identity(): IdentityFacade<G> {
-    if (this.#graph.identity === undefined) {
-      throw new ConfigurationError(
-        "Identity is not enabled for this graph.",
-        { code: "IDENTITY_NOT_ENABLED", graphId: this.graphId },
-        {
-          suggestion:
-            'Add identity: { sameIdAcrossKinds: "fold" } to defineGraph(...).',
-        },
-      );
-    }
+    this.#requireIdentityEnabled(
+      'Add identity: { sameIdAcrossKinds: "fold" } to defineGraph(...).',
+    );
     const existing = IDENTITY_FACADES.get(this);
     if (existing !== undefined) return existing as IdentityFacade<G>;
     const facade = createIdentityFacade(this.#identityContext(this.#backend));
@@ -1077,14 +1066,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return facade;
   }
 
+  /**
+   * Refuses an identity operation on a graph that never declared
+   * `identity: { ... }`, where none of the identity tables exist.
+   */
+  #requireIdentityEnabled(suggestion?: string): void {
+    if (this.#graph.identity !== undefined) return;
+    throw new ConfigurationError(
+      "Identity is not enabled for this graph.",
+      { code: "IDENTITY_NOT_ENABLED", graphId: this.graphId },
+      suggestion === undefined ? undefined : { suggestion },
+    );
+  }
+
   /** @internal Builds the identity read facade for a pinned StoreView. */
   identityAtCoordinate(coordinate: ReadCoordinate): IdentityReadFacade<G> {
-    if (this.#graph.identity === undefined) {
-      throw new ConfigurationError("Identity is not enabled for this graph.", {
-        code: "IDENTITY_NOT_ENABLED",
-        graphId: this.graphId,
-      });
-    }
+    this.#requireIdentityEnabled();
     // A recorded-time identity read must reconstruct from the SAME recorded
     // relation the coordinate's node/edge reads use — binding-aware, so an
     // externally bound recorded relation with divergent table names resolves
@@ -1114,12 +1111,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** Rebuilds derived current identity closure without advancing revision. */
   async rebuildIdentityClosure(): Promise<void> {
-    if (this.#graph.identity === undefined) {
-      throw new ConfigurationError("Identity is not enabled for this graph.", {
-        code: "IDENTITY_NOT_ENABLED",
-        graphId: this.graphId,
-      });
-    }
+    this.#requireIdentityEnabled();
     await runInWriteTransaction(
       {
         graphId: this.graphId,
@@ -1137,22 +1129,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Validates/rebuilds identity under schema-transition locks. */
   async identitySchemaPreflight(target: TransactionBackend): Promise<void> {
-    await this.#identitySchemaPreflight(target, { enablement: false });
-  }
-
-  /** @internal First enablement additionally excludes legacy node writers. */
-  async identityEnablementPreflight(target: TransactionBackend): Promise<void> {
-    await this.#identitySchemaPreflight(target, { enablement: true });
-  }
-
-  #identitySchemaPreflight(
-    target: TransactionBackend,
-    options: Readonly<{ enablement: boolean }>,
-  ): Promise<void> {
-    return identitySchemaCommitPreflight(
-      this.#identityContext(this.#backend),
-      options,
-    )(target);
+    await identitySchemaCommitPreflight(this.#identityContext(this.#backend), {
+      enablement: false,
+    })(target);
   }
 
   /** @internal Read-only startup integrity verification. */
@@ -1186,8 +1165,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await scope.flush();
   }
 
-  /** @internal Interchange export seam that honors this store's SQL binding. */
-  identityAssertionsForInterchange(
+  /**
+   * @internal Reads the graph's identity assertions in transfer shape, honoring
+   * this store's SQL binding. Used by interchange export, base-version
+   * fingerprinting, and merge staging/diff.
+   */
+  readCurrentIdentityAssertions(
     mode: "state" | "archival",
     options?: Readonly<{
       nodeKinds?: readonly string[];
@@ -3335,7 +3318,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               for (const [index, node] of nodes.entries()) {
                 if (node !== undefined) {
                   loadedByReference.set(
-                    JSON.stringify([kind, ids[index]]),
+                    refKey({ kind, id: requireDefined(ids[index]) }),
                     node as IdentityNode<G>,
                   );
                 }
@@ -3358,14 +3341,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               if (row === undefined) continue;
               if (!includeTombstoned && row.deleted_at !== undefined) continue;
               loadedByReference.set(
-                JSON.stringify([kind, row.id]),
+                refKey({ kind, id: row.id }),
                 rowToNode(row) as IdentityNode<G>,
               );
             }
           }),
         );
         return references.map((reference) =>
-          loadedByReference.get(JSON.stringify([reference.kind, reference.id])),
+          loadedByReference.get(refKey(reference)),
         );
       },
     };

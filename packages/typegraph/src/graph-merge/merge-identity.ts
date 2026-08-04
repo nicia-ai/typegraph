@@ -8,6 +8,20 @@
  * from here, never the reverse. Functions that need plan data take
  * {@link IdentityPlanSlice} — a structural subset of `MergePlan` — so this
  * module never names the full plan type.
+ *
+ * COMMIT-GUARD LAYERING. The in-transaction guard is deliberately redundant.
+ * Correctness needs only two layers: the by-id freshness check
+ * ({@link assertPlannedIdentityIdsFresh} — ended rows included, which no
+ * ledger slice or class fingerprint can see) and the FULL simulation re-run
+ * on transaction reads (re-deriving legality is the only complete window
+ * guard), with the identity applier's own refusals — translated typed at the
+ * apply boundary by {@link translateIdentityCommitError} — as the final
+ * backstop. The earlier layers (direct-peer arrivals, per-seed
+ * class/liveness fingerprints, the negative-ledger fingerprint) exist to
+ * refuse EARLY with a message naming exactly what drifted; removing them
+ * would lose diagnosability, not soundness. Never add a NEW invariant as a
+ * fingerprint alone: make the simulation or the applier enforce it, then
+ * fingerprint it for the error message if useful.
  */
 import { requireDefined } from "../utils/presence";
 import type { CanonicalEntity } from "./canonicalize";
@@ -40,7 +54,7 @@ import {
   type TransactionBackend,
   TypeGraphError,
 } from "./typegraph-internal";
-import type { DroppedItem, EntityResolution } from "./types";
+import type { DroppedItem } from "./types";
 import { UnionFind } from "./union-find";
 
 /**
@@ -54,26 +68,27 @@ export type IdentityPlanSlice = Readonly<{
   identityRetractions: readonly IdentityTransferAssertion[];
   nodeDeletions: ReadonlyMap<MergeKey, string>;
   retypeMap: ReadonlyMap<MergeKey, string>;
-  resolutions: readonly EntityResolution[];
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>;
 }>;
 
+/**
+ * The `(a.kind, a.id, b.kind, b.id)` endpoint tuple every identity key encoder
+ * below is built from. One definition keeps their FIELD ORDER identical — the
+ * keys are compared against each other's encodings, so a drifted order in one
+ * encoder would silently stop matching rows the others key the same way.
+ */
+function endpointTuple(
+  assertion: Readonly<{ a: IdentityEndpoint; b: IdentityEndpoint }>,
+): readonly string[] {
+  return [assertion.a.kind, assertion.a.id, assertion.b.kind, assertion.b.id];
+}
+
 function identityEndpointKey(assertion: IdentityTransferAssertion): string {
-  return JSON.stringify([
-    assertion.a.kind,
-    assertion.a.id,
-    assertion.b.kind,
-    assertion.b.id,
-  ]);
+  return JSON.stringify(endpointTuple(assertion));
 }
 
 function identitySemanticKey(assertion: IdentityTransferAssertion): string {
-  return JSON.stringify([
-    assertion.relation,
-    assertion.a.kind,
-    assertion.a.id,
-    assertion.b.kind,
-    assertion.b.id,
-  ]);
+  return JSON.stringify([assertion.relation, ...endpointTuple(assertion)]);
 }
 
 function compareIdentitySurvivors(
@@ -107,13 +122,22 @@ function droppedIdentityAssertion(
 }
 
 /**
- * Keeps ONE assertion per semantic pair — the {@link compareIdentitySurvivors}
- * minimum — and reports every loser as a {@link DroppedItem}, so a duplicate
- * assertion silently discarded from a losing branch is still enumerable in the
- * merge report. Survivors come back in semantic-key order.
+ * Keeps ONE assertion per semantic pair and reports every loser as a
+ * {@link DroppedItem}, so a duplicate assertion silently discarded from a
+ * losing branch is still enumerable in the merge report. Survivors come back
+ * in semantic-key order.
+ *
+ * An id in `committedIds` (already committed on the target with the exact
+ * staged truth) ALWAYS wins over an uncommitted challenger, regardless of the
+ * {@link compareIdentitySurvivors} order: the applier is idempotent per
+ * semantic pair, so the challenger would never be written — picking it would
+ * report an id as applied that never lands while listing the target's own row
+ * as dropped. Between two ids of equal committed status the comparator
+ * decides.
  */
 function dedupeIdentityAssertions(
   assertions: readonly IdentityTransferAssertion[],
+  committedIds: ReadonlySet<string>,
 ): Readonly<{
   survivors: readonly IdentityTransferAssertion[];
   dropped: readonly DroppedItem[];
@@ -127,10 +151,15 @@ function dedupeIdentityAssertions(
       survivorBySemantic.set(key, assertion);
       continue;
     }
+    const assertionCommitted = committedIds.has(assertion.id);
+    const previousCommitted = committedIds.has(previous.id);
     const [survivor, loser] =
-      compareIdentitySurvivors(assertion, previous) < 0 ?
-        [assertion, previous]
-      : [previous, assertion];
+      assertionCommitted === previousCommitted ?
+        compareIdentitySurvivors(assertion, previous) < 0 ?
+          ([assertion, previous] as const)
+        : ([previous, assertion] as const)
+      : assertionCommitted ? ([assertion, previous] as const)
+      : ([previous, assertion] as const);
     survivorBySemantic.set(key, survivor);
     // Two branches staging the IDENTICAL row (same id, same complete truth —
     // e.g. both imported one interchange document) is ONE assertion, not a
@@ -241,14 +270,29 @@ function assertNoRetractReassertRace(staging: StagingSet): void {
 export const RETRACTION_TARGET_MISMATCH_DROP_REASON =
   "identity:retraction-target-mismatch";
 
+/**
+ * Reason recorded when a staged retraction touched a node whose deletion the
+ * delete/modify resolution OVERRULED. A node soft-delete cascades — it ends
+ * every open assertion touching the node — so the deleting branch's diff
+ * stages those endings as retractions indistinguishable from intent. When the
+ * modification wins and the node survives, applying the cascaded retraction
+ * would end the resurrected node's assertions anyway; dropping it (visibly)
+ * keeps the node's identity truth alongside the node.
+ */
+export const RETRACTION_DELETION_OVERRULED_DROP_REASON =
+  "identity:deletion-overruled";
+
 /** The empty stored-row map, for validating staged assertions intra-plan only. */
 export const NO_STORED_ASSERTIONS: ReadonlyMap<string, LedgerAssertion> =
   new Map();
 
+/** The empty committed-id set, for dedupe passes with no target knowledge. */
+const NO_COMMITTED_IDS: ReadonlySet<string> = new Set();
+
 /** @internal Exported for deterministic phase-level verification. */
 export function planIdentityChanges(
   staging: StagingSet,
-  storedRetractionRowsById: ReadonlyMap<string, LedgerAssertion>,
+  storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>,
 ): Readonly<{
   assertions: readonly IdentityTransferAssertion[];
   retractions: readonly IdentityTransferAssertion[];
@@ -269,8 +313,26 @@ export function planIdentityChanges(
     NO_STORED_ASSERTIONS,
   );
 
+  // Staged ids the target ALREADY holds with the exact staged truth. The
+  // survivor dedupe must prefer these: the applier is idempotent per semantic
+  // pair, so a freshly minted branch id can never displace the target's
+  // committed row — choosing it would report an id as applied that is never
+  // written while listing the target's own row as dropped.
+  const committedIds = new Set<string>(
+    staging.newIdentityAssertions
+      .map((staged) => staged.assertion)
+      .filter((assertion) => {
+        const stored = storedIdentityRowsById.get(assertion.id);
+        return (
+          stored !== undefined &&
+          assertionTruthKey(stored) === assertionTruthKey(assertion)
+        );
+      })
+      .map((assertion) => assertion.id),
+  );
   const deduped = dedupeIdentityAssertions(
     staging.newIdentityAssertions.map((staged) => staged.assertion),
+    committedIds,
   );
   const retractionById = new Map<string, IdentityTransferAssertion>();
   for (const staged of staging.retractedIdentityAssertions) {
@@ -295,7 +357,7 @@ export function planIdentityChanges(
   const retractions: IdentityTransferAssertion[] = [];
   const retractionDropped: DroppedItem[] = [];
   for (const [assertionId, retraction] of retractionById) {
-    const stored = storedRetractionRowsById.get(assertionId);
+    const stored = storedIdentityRowsById.get(assertionId);
     if (
       stored !== undefined &&
       stored.validTo === undefined &&
@@ -309,6 +371,23 @@ export function planIdentityChanges(
       continue;
     }
     retractions.push(retraction);
+  }
+  // Defensive: one id planned as BOTH a new assertion and a retraction would
+  // reach the applier as retract-then-import of one id, which the import
+  // refuses generically (the freshly ended row fails its exact-match test).
+  // Unreachable through the supported staging paths today — the truth-aware
+  // diff and the retraction truth filter each break every construction we
+  // know — so refuse typed if a future path assembles it.
+  const survivingIds = new Set(
+    deduped.survivors.map((survivor) => survivor.id),
+  );
+  for (const retraction of retractions) {
+    if (survivingIds.has(retraction.id)) {
+      throw new IdentityMergeConflictError(
+        "One assertion id was staged as both a new assertion and a retraction.",
+        { details: { assertionId: retraction.id } },
+      );
+    }
   }
   return {
     assertions: deduped.survivors,
@@ -419,7 +498,11 @@ export function remapIdentityAssertionEndpoints(
       : [remappedB, remappedA];
     remapped.push({ ...assertion, a, b });
   }
-  const deduped = dedupeIdentityAssertions(remapped);
+  // No committed-id precedence here: this second pass dedupes pairs that
+  // node reconciliation COLLAPSED, and remapped endpoints no longer compare
+  // equal to any stored row — the post-plan one-id-one-truth check still
+  // validates the surviving ids against the target.
+  const deduped = dedupeIdentityAssertions(remapped, NO_COMMITTED_IDS);
   // Node reconciliation can collapse previously distinct endpoint pairs onto
   // the same canonical pair, so the pre-reconciliation check above is not
   // sufficient on its own.
@@ -498,22 +581,41 @@ export function assertIdentityEndpointsNotDeleted(
  * id), and a retyped endpoint can pull a kind into a class that the ontology
  * declares disjoint with another member's kind. Both used to surface only at
  * commit time as a generic merge error.
+ *
+ * @internal Exported for deterministic phase-level verification.
  */
-/** @internal Exported for deterministic phase-level verification. */
 export function assertNoContradictoryIdentityClosure(
   plannedAssertions: readonly IdentityTransferAssertion[],
   retractions: readonly string[],
   baseAssertions: readonly IdentityTransferAssertion[],
+  deletedNodes: ReadonlySet<MergeKey>,
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
   retypeMap: ReadonlyMap<MergeKey, string>,
   identityContext: PlanIdentityContext,
   nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
 ): void {
   const retracted = new Set(retractions);
+  // Deleting a node ends its assertions, so a base assertion touching a
+  // plan-deleted endpoint must not conduct in the simulated post-merge
+  // ledger. The commit-guard re-runs filter their fresh ledger the same way
+  // BEFORE calling here; applying the rule inside the checker keeps all
+  // three call sites on one rule even when a retraction was dropped (e.g.
+  // target-truth mismatch) and the cascade id never reaches `retractions`.
+  const survivesDeletion = (
+    assertion: Readonly<{
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+    }>,
+  ): boolean =>
+    !deletedNodes.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
+    !deletedNodes.has(mergeKey(assertion.b.kind, assertion.b.id));
   const mergedLedger = [
     ...plannedAssertions,
     ...baseAssertions
-      .filter((assertion) => !retracted.has(assertion.id))
+      .filter(
+        (assertion) =>
+          !retracted.has(assertion.id) && survivesDeletion(assertion),
+      )
       .map((assertion) => ({
         ...assertion,
         a: resolveIdentityEndpoint(assertion.a, canonicalOf, retypeMap),
@@ -536,6 +638,31 @@ export function assertNoContradictoryIdentityClosure(
       sameClasses.union(mergeKeyOf(assertion.a), mergeKeyOf(assertion.b));
     }
   }
+  // The class a root identifies, as sorted public `(kind, id)` refs — the shape
+  // both contradiction reports carry in their details.
+  const membersOfClass = (
+    root: MergeKey,
+  ): readonly Readonly<{ kind: string; id: string }>[] =>
+    sameClasses
+      .members()
+      .filter((member) => sameClasses.find(member) === root)
+      .map((member) => ({ kind: kindOf(member), id: idOf(member) }))
+      .toSorted((left, right) =>
+        compareMergeKeys(mergeKeyOf(left), mergeKeyOf(right)),
+      );
+  // The first ontology-disjoint pair among `kinds`, or `undefined` when every
+  // pair may coexist. Each caller raises its own error for the pair it finds.
+  const firstDisjointPair = (
+    kinds: readonly string[],
+  ): readonly [string, string] | undefined => {
+    for (const [index, left] of kinds.entries()) {
+      for (const right of kinds.slice(index + 1)) {
+        if (identityContext.areDisjoint(left, right)) return [left, right];
+      }
+    }
+    return undefined;
+  };
+
   const refsById = new Map<string, MergeKey[]>();
   const addRef = (kind: string, id: string): void => {
     const keys = refsById.get(id) ?? [];
@@ -551,21 +678,19 @@ export function assertNoContradictoryIdentityClosure(
   // BOTH profiles — under "ignore" the rows do not fold, but the id is still
   // refused. Scan every same-id group regardless of profile.
   for (const keys of refsById.values()) {
-    const kinds = [...new Set(keys.map((key) => kindOf(key)))];
-    for (const [index, left] of kinds.entries()) {
-      for (const right of kinds.slice(index + 1)) {
-        if (!identityContext.areDisjoint(left, right)) continue;
-        throw new IdentityMergeConflictError(
-          "The merged graph would give one id to two ontology-disjoint kinds.",
-          {
-            details: {
-              disjointKinds: [left, right],
-              sharedId: idOf(requireDefined(keys[0])),
-            },
-          },
-        );
-      }
-    }
+    const disjointKinds = firstDisjointPair([
+      ...new Set(keys.map((key) => kindOf(key))),
+    ]);
+    if (disjointKinds === undefined) continue;
+    throw new IdentityMergeConflictError(
+      "The merged graph would give one id to two ontology-disjoint kinds.",
+      {
+        details: {
+          disjointKinds,
+          sharedId: idOf(requireDefined(keys[0])),
+        },
+      },
+    );
   }
   if (identityContext.sameIdAcrossKinds === "fold") {
     for (const keys of refsById.values()) {
@@ -584,18 +709,7 @@ export function assertNoContradictoryIdentityClosure(
     }
     throw new IdentityMergeConflictError(
       "The merged identity ledger would assert one pair of nodes is both the same and different.",
-      {
-        details: {
-          assertion,
-          sameClass: sameClasses
-            .members()
-            .filter((member) => sameClasses.find(member) === root)
-            .map((member) => ({ kind: kindOf(member), id: idOf(member) }))
-            .toSorted((left, right) =>
-              compareMergeKeys(mergeKeyOf(left), mergeKeyOf(right)),
-            ),
-        },
-      },
+      { details: { assertion, sameClass: membersOfClass(root) } },
     );
   }
 
@@ -610,27 +724,12 @@ export function assertNoContradictoryIdentityClosure(
     kindsByRoot.set(root, kinds);
   }
   for (const [root, kinds] of kindsByRoot) {
-    const kindList = [...kinds];
-    for (const [index, left] of kindList.entries()) {
-      for (const right of kindList.slice(index + 1)) {
-        if (!identityContext.areDisjoint(left, right)) continue;
-        throw new IdentityMergeConflictError(
-          "The merged identity ledger would join two ontology-disjoint kinds into one class.",
-          {
-            details: {
-              disjointKinds: [left, right],
-              sameClass: sameClasses
-                .members()
-                .filter((member) => sameClasses.find(member) === root)
-                .map((member) => ({ kind: kindOf(member), id: idOf(member) }))
-                .toSorted((first, second) =>
-                  compareMergeKeys(mergeKeyOf(first), mergeKeyOf(second)),
-                ),
-            },
-          },
-        );
-      }
-    }
+    const disjointKinds = firstDisjointPair([...kinds]);
+    if (disjointKinds === undefined) continue;
+    throw new IdentityMergeConflictError(
+      "The merged identity ledger would join two ontology-disjoint kinds into one class.",
+      { details: { disjointKinds, sameClass: membersOfClass(root) } },
+    );
   }
 }
 
@@ -871,13 +970,7 @@ function differentLedgerFingerprint(
   return JSON.stringify(
     assertions
       .filter((assertion) => assertion.relation === "different")
-      .map((assertion) => [
-        assertion.id,
-        assertion.a.kind,
-        assertion.a.id,
-        assertion.b.kind,
-        assertion.b.id,
-      ])
+      .map((assertion) => [assertion.id, ...endpointTuple(assertion)])
       .toSorted((left, right) =>
         compareStrings(left.join("\u0000"), right.join("\u0000")),
       ),
@@ -911,10 +1004,7 @@ export function encodeClassFingerprint(
 export function assertionTruthKey(assertion: LedgerAssertion): string {
   return JSON.stringify([
     assertion.relation,
-    assertion.a.kind,
-    assertion.a.id,
-    assertion.b.kind,
-    assertion.b.id,
+    ...endpointTuple(assertion),
     assertion.validFrom,
     assertion.validTo ?? null,
   ]);
@@ -931,10 +1021,7 @@ export function assertionTruthKey(assertion: LedgerAssertion): string {
 function assertionIdentityKey(assertion: LedgerAssertion): string {
   return JSON.stringify([
     assertion.relation,
-    assertion.a.kind,
-    assertion.a.id,
-    assertion.b.kind,
-    assertion.b.id,
+    ...endpointTuple(assertion),
     assertion.validFrom,
   ]);
 }
@@ -1046,6 +1133,13 @@ const IDENTITY_ENVIRONMENT_CODES: ReadonlySet<string> = new Set([
   "IDENTITY_REQUIRES_ATOMIC_BACKEND",
   "IDENTITY_REQUIRES_STATEMENT_EXECUTION",
   "IDENTITY_BIND_BUDGET_TOO_SMALL",
+  // Unreachable from the applier today, but environment/corruption
+  // statements all the same — translating one into "re-plan against the
+  // current target" would be advice that can never succeed.
+  "IDENTITY_NOT_ENABLED",
+  "IDENTITY_STORAGE_MISSING",
+  "IDENTITY_SCHEMA_CONTRADICTION",
+  "IDENTITY_IMPORT_REQUIRES_PROFILE",
 ]);
 
 /**
@@ -1108,23 +1202,6 @@ export function translateIdentityCommitError(error: unknown): unknown {
       details: { ...(identityCode === undefined ? {} : { identityCode }) },
     },
   );
-}
-
-/** The plan's recorded resolutions as a source→canonical identity map. */
-
-export function planCanonicalMap(
-  plan: IdentityPlanSlice,
-): ReadonlyMap<MergeKey, MergeKey> {
-  const canonicalIdentityOf = new Map<MergeKey, MergeKey>();
-  for (const resolution of plan.resolutions) {
-    for (const memberId of resolution.memberIds) {
-      canonicalIdentityOf.set(
-        mergeKey(resolution.kind, memberId),
-        mergeKey(resolution.kind, resolution.canonicalId),
-      );
-    }
-  }
-  return canonicalIdentityOf;
 }
 
 /**
@@ -1211,11 +1288,6 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
       { details: {} },
     );
   }
-  // One-id-one-truth against TRANSACTION reads: a window row claiming a
-  // planned assertion or retraction id (possibly with endpoints entirely
-  // outside the guarded member universe, invisible to the ledger slice above)
-  // would make the applier fail generically — or end unrelated truth.
-  await assertPlannedIdentityIdsFresh(target, txBackend, plan);
 
   // The decisive backstop: re-run the identity simulation on TRANSACTION
   // reads. Every fingerprint above can survive a window write that still
@@ -1228,7 +1300,8 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
       plan.identityAssertions,
       plan.identityRetractions.map((retraction) => retraction.id),
       ledger,
-      planCanonicalMap(plan),
+      probe.plannedDeletions,
+      plan.canonicalOf,
       plan.retypeMap,
       {
         sameIdAcrossKinds: probe.profile,

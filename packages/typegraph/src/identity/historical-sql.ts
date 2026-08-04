@@ -8,6 +8,29 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { type IdentityRelation } from "./types";
 
+/**
+ * Column list of the identity assertion relation, in storage order. Every
+ * assertion SELECT projection and the INSERT column clause share this fragment,
+ * so a column added to the relation cannot be picked up by one read path and
+ * silently missed by another.
+ */
+export const IDENTITY_ASSERTION_COLUMNS: SqlFragment = sql.raw(
+  [
+    "graph_id",
+    "id",
+    "rel",
+    "a_kind",
+    "a_id",
+    "b_kind",
+    "b_id",
+    "valid_from",
+    "valid_to",
+    "created_at",
+    "updated_at",
+    "deleted_at",
+  ].join(", "),
+);
+
 export type HistoricalIdentitySqlCoordinate = Readonly<{
   validMode: TemporalMode;
   validAsOf?: string | undefined;
@@ -134,8 +157,7 @@ export function identityAssertionSnapshotSource(
     relation === undefined ? sql`` : sql`AND rel = ${relation}`;
   const instant = validityInstant(coordinate);
   return sql`
-    SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-           valid_from, valid_to, created_at, updated_at, deleted_at
+    SELECT ${IDENTITY_ASSERTION_COLUMNS}
     FROM ${table}
     WHERE graph_id = ${graphId}
       ${recordedFilter}

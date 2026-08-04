@@ -32,7 +32,11 @@ export class KindRegistry {
   // === Node & Edge Kinds ===
   readonly nodeKinds: ReadonlyMap<string, NodeType>;
   readonly edgeKinds: ReadonlyMap<string, AnyEdgeType>;
-  /** Durable graph capability used by compile-only query builders. */
+  /**
+   * Durable graph identity capability; supplies the identity defaults for
+   * every query builder built from this registry (compile-only and
+   * store-bound).
+   */
   readonly identity: GraphIdentityConfig | undefined;
 
   // === Subsumption (subClassOf) ===

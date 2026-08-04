@@ -117,13 +117,13 @@ function validateSelfLoopsAndDuplicates(
 
 function buildHierarchicalGroups(
   ontology: readonly NamedOntologyRelation[],
-  options: Readonly<{ skipSelfLoops: boolean }>,
 ): Map<MetaEdgeName, NormalizedHierarchicalEdge[]> {
   const groups = new Map<MetaEdgeName, NormalizedHierarchicalEdge[]>();
   for (const [index, relation] of ontology.entries()) {
     const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
     if (normalization === undefined) continue;
-    if (options.skipSelfLoops && relation.from === relation.to) continue;
+    // Self-loops are reported elsewhere; skip them for cycle detection.
+    if (relation.from === relation.to) continue;
 
     const from = normalization.flip ? relation.to : relation.from;
     const to = normalization.flip ? relation.from : relation.to;
@@ -138,7 +138,7 @@ function detectHierarchicalCycles(
   ontology: readonly NamedOntologyRelation[],
   issues: OntologyValidationIssue[],
 ): void {
-  const groups = buildHierarchicalGroups(ontology, { skipSelfLoops: true });
+  const groups = buildHierarchicalGroups(ontology);
   for (const [name, edges] of groups) {
     const closure = computeTransitiveClosure(
       edges.map((edge) => [edge.from, edge.to] as const),
@@ -169,7 +169,8 @@ function collectDisjointDeclarations(
   for (const [index, relation] of ontology.entries()) {
     if (relation.metaEdge !== META_EDGE_DISJOINT_WITH) continue;
     // Self disjointWith is reported by validateSelfLoopsAndDuplicates; skip
-    // it here so the hierarchy pass never double-reports the same relation.
+    // it here so the disjoint-expansion pass never double-reports the same
+    // relation.
     if (relation.from === relation.to) continue;
     declarations.push({ a: relation.from, b: relation.to, index });
   }

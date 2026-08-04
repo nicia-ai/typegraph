@@ -488,13 +488,9 @@ function asIdentityImportError(
 }
 
 /**
- * A `ValidationError` the identity import coordinator raised about assertion
- * CONTENT (ended rows in state mode, out-of-bounds validity windows, unknown
- * kinds, unnormalized pairs, self-assertions). Every issue it emits is pathed
- * at `identity.assertions` and carries the offending assertion's id
- * structurally in `assertionId` — attribution never parses the
- * human-readable message. A validation error shaped any other way is a
- * document-shape or programming fault and must still propagate.
+ * The assertion the coordinator tagged onto the error via
+ * `IDENTITY_IMPORT_FAILED_ASSERTION` — exact, structural attribution for any
+ * error shape.
  */
 function taggedAssertion(
   assertions: readonly InterchangeIdentityAssertion[],
@@ -508,6 +504,15 @@ function taggedAssertion(
   return assertions.find((candidate) => candidate.id === id);
 }
 
+/**
+ * A `ValidationError` the identity import coordinator raised about assertion
+ * CONTENT (ended rows in state mode, out-of-bounds validity windows, unknown
+ * kinds, unnormalized pairs, self-assertions). Every issue it emits is pathed
+ * at `identity.assertions` and carries the offending assertion's id
+ * structurally in `assertionId` — attribution never parses the
+ * human-readable message. A validation error shaped any other way is a
+ * document-shape or programming fault and must still propagate.
+ */
 function isIdentityAssertionValidationError(
   error: unknown,
 ): error is ValidationError {

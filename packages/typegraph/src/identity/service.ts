@@ -15,6 +15,7 @@ import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
+import { recordedBindParamBudget } from "../store/recorded-capture/relations";
 import { type GraphNodeReference } from "../store/types";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
@@ -23,6 +24,7 @@ import { generateId } from "../utils/id";
 import { requireDefined } from "../utils/presence";
 import {
   historicalIdentityReconstructionCtes,
+  IDENTITY_ASSERTION_COLUMNS,
   identityAssertionSnapshotSource,
   identityNodeSnapshotSource,
   identityNodeVisibilitySql,
@@ -48,7 +50,6 @@ type IdentityTouch = (
   afterImage?: IdentityAssertionStorageRow,
 ) => void;
 
-const DEFAULT_MAX_BIND_PARAMETERS = 900;
 const MAX_REFERENCE_CHUNK_SIZE = 200;
 const MAX_CLOSURE_INSERT_CHUNK_SIZE = 100;
 const MAX_ASSERTION_INSERT_CHUNK_SIZE = 50;
@@ -61,18 +62,7 @@ function identityChunkSize(
     parametersPerItem: number;
   }>,
 ): number {
-  const parameterLimit =
-    target.capabilities.maxBindParameters ?? DEFAULT_MAX_BIND_PARAMETERS;
-  if (!Number.isSafeInteger(parameterLimit) || parameterLimit < 1) {
-    throw new ConfigurationError(
-      `backend capabilities.maxBindParameters must be a positive integer, got: ${String(parameterLimit)}`,
-      {
-        code: "INVALID_BACKEND_CAPABILITY",
-        capability: "maxBindParameters",
-        value: parameterLimit,
-      },
-    );
-  }
+  const parameterLimit = recordedBindParamBudget(target);
   const chunkSize = Math.floor(
     (parameterLimit - input.fixedParameters) / input.parametersPerItem,
   );
@@ -150,9 +140,6 @@ type RawNodeSnapshotRow = Readonly<{
   deleted_at: unknown;
 }>;
 
-type RawIdentityMemberRow = RawNodeSnapshotRow &
-  Readonly<{ kind: string; id: string }>;
-
 type RawClosureClassRow = Readonly<{
   member_kind: string;
   member_id: string;
@@ -201,8 +188,32 @@ function registeredPlainRef<G extends GraphDef>(
   return result;
 }
 
-function refKey(ref: PlainNodeRef): string {
+/**
+ * The canonical map key for a node reference. Every identity closure map —
+ * structural classes, affected-closure sets, loaded-node lookups — is keyed
+ * with it, so any caller building or probing one of those maps must produce
+ * its keys through this helper rather than re-spelling the serialization.
+ */
+export function refKey(ref: PlainNodeRef): string {
   return JSON.stringify([ref.kind, ref.id]);
+}
+
+/**
+ * Projects a stored assertion row into the interchange transfer shape. The row
+ * must already be normalized (see `normalizeAssertionRow`); raw driver rows
+ * carry dialect-specific timestamp and NULL spellings this shape does not.
+ */
+export function toTransferAssertion(
+  row: IdentityAssertionStorageRow,
+): IdentityTransferAssertion {
+  return {
+    id: row.id,
+    relation: row.rel,
+    a: { kind: row.a_kind, id: row.a_id },
+    b: { kind: row.b_kind, id: row.b_id },
+    validFrom: row.valid_from,
+    ...(row.valid_to === undefined ? {} : { validTo: row.valid_to }),
+  };
 }
 
 /**
@@ -402,16 +413,6 @@ async function loadNodeSnapshot(
   }));
 }
 
-function normalizeMemberRow(row: RawIdentityMemberRow): NodeSnapshot {
-  return {
-    ref: { kind: row.kind, id: row.id },
-    validFrom: optionalTimestamp(row.valid_from),
-    validTo: optionalTimestamp(row.valid_to),
-    createdAt: toCanonicalIso(row.created_at),
-    deletedAt: optionalTimestamp(row.deleted_at),
-  };
-}
-
 function isCurrentClosureCoordinate(
   coordinate: ReadCoordinate | undefined,
 ): boolean {
@@ -509,7 +510,10 @@ async function loadCurrentVisibleMembers(
   // CROSS JOIN pins the join order on SQLite (a documented planner control)
   // while remaining an ordinary inner join on PostgreSQL, whose planner
   // orders freely from real statistics either way.
-  const rows = await target.execute<RawIdentityMemberRow>(
+  // Only the endpoint identity is projected: the visibility predicate below
+  // already consumed this row's timestamps in SQL, so hydrating them into JS
+  // would validate columns nothing downstream reads.
+  const rows = await target.execute<PlainNodeRef>(
     asCompiledRowsSql(sql`
       WITH anchor AS (
         SELECT class_kind, class_id
@@ -528,7 +532,7 @@ async function loadCurrentVisibleMembers(
         SELECT ${ref.kind}, ${ref.id}
         WHERE NOT EXISTS (SELECT 1 FROM anchor)
       )
-      SELECT n.kind, n.id, n.valid_from, n.valid_to, n.created_at, n.deleted_at
+      SELECT n.kind, n.id
       FROM members m
       CROSS JOIN ${schema.nodesTable} n
       WHERE n.graph_id = ${graphId}
@@ -538,7 +542,7 @@ async function loadCurrentVisibleMembers(
     `),
   );
   const members = rows
-    .map((row) => normalizeMemberRow(row).ref)
+    .map((row) => ({ kind: row.kind, id: row.id }))
     .toSorted((left, right) => compareReferences(left, right));
   return containsRef(members, ref) ? members : [];
 }
@@ -759,8 +763,7 @@ async function loadAssertionsTouching(
   );
   const rows = await target.execute<RawIdentityAssertionRow>(
     asCompiledRowsSql(sql`
-      SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-             valid_from, valid_to, created_at, updated_at, deleted_at
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
       FROM (${source}) identity_assertions
       WHERE ${aMatches} OR ${bMatches}
     `),
@@ -1392,8 +1395,7 @@ async function currentAssertionForPair(
 ): Promise<IdentityAssertionStorageRow | undefined> {
   const rows = await target.execute<RawIdentityAssertionRow>(
     asCompiledRowsSql(sql`
-      SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-             valid_from, valid_to, created_at, updated_at, deleted_at
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
       FROM ${schema.identityAssertionsTable}
       WHERE graph_id = ${graphId}
         AND rel = ${relation}
@@ -1478,10 +1480,7 @@ async function insertAssertionRows(
     await executeStatement(
       target,
       sql`
-        INSERT INTO ${schema.identityAssertionsTable} (
-          graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-          valid_from, valid_to, created_at, updated_at, deleted_at
-        ) VALUES ${sql.join(values, sql`, `)}
+        INSERT INTO ${schema.identityAssertionsTable} (${IDENTITY_ASSERTION_COLUMNS}) VALUES ${sql.join(values, sql`, `)}
       `,
     );
   }
@@ -1508,8 +1507,7 @@ export async function loadAssertionsByIds(
     );
     const rows = await target.execute<RawIdentityAssertionRow>(
       asCompiledRowsSql(sql`
-        SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-               valid_from, valid_to, created_at, updated_at, deleted_at
+        SELECT ${IDENTITY_ASSERTION_COLUMNS}
         FROM ${schema.identityAssertionsTable}
         WHERE graph_id = ${graphId} AND id IN (${idList})
       `),
@@ -1965,8 +1963,7 @@ async function findCurrentAssertionById(
 ): Promise<IdentityAssertionStorageRow | undefined> {
   const rows = await target.execute<RawIdentityAssertionRow>(
     asCompiledRowsSql(sql`
-      SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-             valid_from, valid_to, created_at, updated_at, deleted_at
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
       FROM ${schema.identityAssertionsTable}
       WHERE graph_id = ${graphId}
         AND id = ${id}
@@ -1987,11 +1984,7 @@ async function retractById(
   ctx: IdentityServiceContext<GraphDef>,
   target: Backend,
   id: string,
-  touch: (
-    graphId: string,
-    assertionId: string,
-    afterImage?: IdentityAssertionStorageRow,
-  ) => void,
+  touch: IdentityTouch,
 ): Promise<IdentityAssertionStorageRow | undefined> {
   const existing = await findCurrentAssertionById(
     target,
@@ -2038,8 +2031,7 @@ async function retractByIds(
     );
     const rows = await target.execute<RawIdentityAssertionRow>(
       asCompiledRowsSql(sql`
-        SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-               valid_from, valid_to, created_at, updated_at, deleted_at
+        SELECT ${IDENTITY_ASSERTION_COLUMNS}
         FROM ${ctx.schema.identityAssertionsTable}
         WHERE graph_id = ${ctx.graphId}
           AND id IN (${placeholders})
@@ -2108,16 +2100,17 @@ async function runIdentityMutation<G extends GraphDef, T>(
   ctx: IdentityServiceContext<G>,
   fn: (
     target: Backend,
-    touch: (
-      graphId: string,
-      id: string,
-      afterImage?: IdentityAssertionStorageRow,
-    ) => void,
+    touch: IdentityTouch,
+    markWritten: () => void,
   ) => Promise<T>,
 ): Promise<T> {
   // Track whether the mutation actually touched a row: a successful no-op
   // (retracting an unknown id, an idempotent reassert) must not advance the
-  // durable revision clock on revision-tracking stores.
+  // durable revision clock on revision-tracking stores. `markWritten` is for
+  // sub-operations that record their capture touches through their OWN
+  // recorded binding (the interchange import does) — the wrapped touch never
+  // sees those rows, so the sub-operation must mark the write explicitly or
+  // the clock stays unmoved and base@V tokens go stale.
   let touched = false;
   return runInWriteTransaction(
     {
@@ -2131,10 +2124,16 @@ async function runIdentityMutation<G extends GraphDef, T>(
     async (target) => {
       await lockIdentityGraph(target, ctx.graphId);
       return withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
-        fn(rawTarget, (graphId, id, afterImage) => {
-          touched = true;
-          touch(graphId, id, afterImage);
-        }),
+        fn(
+          rawTarget,
+          (graphId, id, afterImage) => {
+            touched = true;
+            touch(graphId, id, afterImage);
+          },
+          () => {
+            touched = true;
+          },
+        ),
       );
     },
     { didWrite: () => touched },
@@ -2406,15 +2405,35 @@ export type IdentityRebuildContext<G extends GraphDef> = Pick<
   "backend" | "graphId" | "registry" | "schema" | "sameIdAcrossKinds"
 >;
 
+function requireAtomicIdentityBackend(backend: Backend, graphId: string): void {
+  if (!backend.capabilities.transactions) {
+    throw new ConfigurationError(
+      "Operational Identity requires atomic transaction support.",
+      { code: "IDENTITY_REQUIRES_ATOMIC_BACKEND", graphId },
+    );
+  }
+}
+
+/**
+ * Runs `fn` against a transactional target. A top-level `GraphBackend` opens
+ * one; a `TransactionBackend` is already inside the caller's transaction and
+ * has no `transaction` method to nest with, so it runs as-is.
+ */
+async function runOnTransactionIfSupported(
+  backend: Backend,
+  fn: (target: Backend) => Promise<void>,
+): Promise<void> {
+  if ("transaction" in backend) {
+    await backend.transaction(async (target) => fn(target));
+    return;
+  }
+  await fn(backend);
+}
+
 export async function rebuildIdentityClosureForContext<G extends GraphDef>(
   ctx: IdentityRebuildContext<G>,
 ): Promise<void> {
-  if (!ctx.backend.capabilities.transactions) {
-    throw new ConfigurationError(
-      "Operational Identity requires atomic transaction support.",
-      { code: "IDENTITY_REQUIRES_ATOMIC_BACKEND" },
-    );
-  }
+  requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
 
   async function rebuildAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
@@ -2439,22 +2458,15 @@ export async function rebuildIdentityClosureForContext<G extends GraphDef>(
     });
   }
 
-  if ("transaction" in ctx.backend) {
-    await ctx.backend.transaction(async (target) => rebuildAtTarget(target));
-    return;
-  }
-  await rebuildAtTarget(ctx.backend);
+  await runOnTransactionIfSupported(ctx.backend, async (target) =>
+    rebuildAtTarget(target),
+  );
 }
 
 export async function validateIdentityForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
 ): Promise<void> {
-  if (!ctx.backend.capabilities.transactions) {
-    throw new ConfigurationError(
-      "Operational Identity requires atomic transaction support.",
-      { code: "IDENTITY_REQUIRES_ATOMIC_BACKEND" },
-    );
-  }
+  requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
 
   async function validateAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
@@ -2476,11 +2488,9 @@ export async function validateIdentityForContext<G extends GraphDef>(
     );
   }
 
-  if ("transaction" in ctx.backend) {
-    await ctx.backend.transaction(async (target) => validateAtTarget(target));
-    return;
-  }
-  await validateAtTarget(ctx.backend);
+  await runOnTransactionIfSupported(ctx.backend, async (target) =>
+    validateAtTarget(target),
+  );
 }
 
 export async function removeIdentityKindsForContext<G extends GraphDef>(
@@ -2503,8 +2513,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
       );
       const rows = await target.execute<RawIdentityAssertionRow>(
         asCompiledRowsSql(sql`
-          SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-                 valid_from, valid_to, created_at, updated_at, deleted_at
+          SELECT ${IDENTITY_ASSERTION_COLUMNS}
           FROM ${ctx.schema.identityAssertionsTable}
           WHERE graph_id = ${ctx.graphId}
             AND (a_kind IN (${kindList}) OR b_kind IN (${kindList}))
@@ -2703,8 +2712,7 @@ export async function detachIdentityForNode(
       : sql`AND valid_to IS NULL AND deleted_at IS NULL`;
     const rows = await rawTarget.execute<RawIdentityAssertionRow>(
       asCompiledRowsSql(sql`
-        SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-               valid_from, valid_to, created_at, updated_at, deleted_at
+        SELECT ${IDENTITY_ASSERTION_COLUMNS}
         FROM ${ctx.schema.identityAssertionsTable}
         WHERE graph_id = ${ctx.graphId}
           ${scope}
@@ -2843,20 +2851,29 @@ export async function readIdentityAssertionsForInterchange<G extends GraphDef>(
         allowedKinds === undefined ||
         (allowedKinds.has(row.a_kind) && allowedKinds.has(row.b_kind)),
     )
-    .map((row): IdentityTransferAssertion => {
-      const assertion = normalizeAssertionRow(row);
-      return {
-        id: assertion.id,
-        relation: assertion.rel,
-        a: { kind: assertion.a_kind, id: assertion.a_id },
-        b: { kind: assertion.b_kind, id: assertion.b_id },
-        validFrom: assertion.valid_from,
-        ...(assertion.valid_to === undefined ?
-          {}
-        : { validTo: assertion.valid_to }),
-      };
-    })
+    .map((row) => toTransferAssertion(normalizeAssertionRow(row)))
     .toSorted((left, right) => compareCodePoints(left.id, right.id));
+}
+
+/**
+ * Every transfer-shape rejection reports the same way: one issue against the
+ * `identity.assertions` path, attributed to the offending assertion id.
+ */
+function transferShapeError(
+  assertion: IdentityTransferAssertion,
+  message: string,
+  issue: Readonly<{ message: string; code: string }>,
+): ValidationError {
+  return new ValidationError(message, {
+    issues: [
+      {
+        path: "identity.assertions",
+        assertionId: assertion.id,
+        message: issue.message,
+        code: issue.code,
+      },
+    ],
+  });
 }
 
 function validateTransferShape<G extends GraphDef>(
@@ -2868,32 +2885,22 @@ function validateTransferShape<G extends GraphDef>(
     !ctx.registry.nodeKinds.has(assertion.a.kind) ||
     !ctx.registry.nodeKinds.has(assertion.b.kind)
   ) {
-    throw new ValidationError(
+    throw transferShapeError(
+      assertion,
       "Identity import references an unknown node kind.",
       {
-        issues: [
-          {
-            path: "identity.assertions",
-            assertionId: assertion.id,
-            message: `Unknown identity endpoint kind in assertion ${assertion.id}`,
-            code: "IDENTITY_IMPORT_UNKNOWN_KIND",
-          },
-        ],
+        message: `Unknown identity endpoint kind in assertion ${assertion.id}`,
+        code: "IDENTITY_IMPORT_UNKNOWN_KIND",
       },
     );
   }
   if (refKey(assertion.a) === refKey(assertion.b)) {
-    throw new ValidationError(
+    throw transferShapeError(
+      assertion,
       `Identity ${assertion.relation} assertions require two distinct node references.`,
       {
-        issues: [
-          {
-            path: "identity.assertions",
-            assertionId: assertion.id,
-            message: `Assertion ${assertion.id} relates a node to itself`,
-            code: "IDENTITY_SELF_ASSERTION",
-          },
-        ],
+        message: `Assertion ${assertion.id} relates a node to itself`,
+        code: "IDENTITY_SELF_ASSERTION",
       },
     );
   }
@@ -2902,29 +2909,22 @@ function validateTransferShape<G extends GraphDef>(
     refKey(normalized[0]) !== refKey(assertion.a) ||
     refKey(normalized[1]) !== refKey(assertion.b)
   ) {
-    throw new ValidationError("Identity import pairs must be normalized.", {
-      issues: [
-        {
-          path: "identity.assertions",
-          assertionId: assertion.id,
-          message: `Assertion ${assertion.id} endpoints are not in code-point order`,
-          code: "IDENTITY_IMPORT_PAIR_NOT_NORMALIZED",
-        },
-      ],
-    });
+    throw transferShapeError(
+      assertion,
+      "Identity import pairs must be normalized.",
+      {
+        message: `Assertion ${assertion.id} endpoints are not in code-point order`,
+        code: "IDENTITY_IMPORT_PAIR_NOT_NORMALIZED",
+      },
+    );
   }
   if (mode === "state" && assertion.validTo !== undefined) {
-    throw new ValidationError(
+    throw transferShapeError(
+      assertion,
       "State identity import cannot contain ended assertions.",
       {
-        issues: [
-          {
-            path: "identity.assertions",
-            assertionId: assertion.id,
-            message: `Assertion ${assertion.id} is ended`,
-            code: "IDENTITY_STATE_IMPORT_ENDED_ASSERTION",
-          },
-        ],
+        message: `Assertion ${assertion.id} is ended`,
+        code: "IDENTITY_STATE_IMPORT_ENDED_ASSERTION",
       },
     );
   }
@@ -2938,17 +2938,12 @@ function validateTransferShape<G extends GraphDef>(
     assertion.validTo === undefined &&
     compareCodePoints(assertion.validFrom, now) > 0
   ) {
-    throw new ValidationError(
+    throw transferShapeError(
+      assertion,
       "Identity import cannot contain future-dated open assertions.",
       {
-        issues: [
-          {
-            path: "identity.assertions",
-            assertionId: assertion.id,
-            message: `Assertion ${assertion.id} validFrom is in the future`,
-            code: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
-          },
-        ],
+        message: `Assertion ${assertion.id} validFrom is in the future`,
+        code: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
       },
     );
   }
@@ -2961,16 +2956,14 @@ function validateTransferShape<G extends GraphDef>(
     assertion.validTo !== undefined &&
     compareCodePoints(assertion.validTo, assertion.validFrom) < 0
   ) {
-    throw new ValidationError("Identity assertion validity window is empty.", {
-      issues: [
-        {
-          path: "identity.assertions",
-          assertionId: assertion.id,
-          message: `Assertion ${assertion.id} validTo must not precede validFrom`,
-          code: "IDENTITY_IMPORT_INVALID_WINDOW",
-        },
-      ],
-    });
+    throw transferShapeError(
+      assertion,
+      "Identity assertion validity window is empty.",
+      {
+        message: `Assertion ${assertion.id} validTo must not precede validFrom`,
+        code: "IDENTITY_IMPORT_INVALID_WINDOW",
+      },
+    );
   }
   // An ended row takes the raw-INSERT branch of the importer, which skips
   // endpoint-liveness validation, contradiction validation and closure
@@ -2985,17 +2978,12 @@ function validateTransferShape<G extends GraphDef>(
     assertion.validTo !== undefined &&
     compareCodePoints(assertion.validTo, now) > 0
   ) {
-    throw new ValidationError(
+    throw transferShapeError(
+      assertion,
       "Identity import cannot contain assertions that end in the future.",
       {
-        issues: [
-          {
-            path: "identity.assertions",
-            assertionId: assertion.id,
-            message: `Assertion ${assertion.id} validTo is in the future`,
-            code: "IDENTITY_IMPORT_FUTURE_VALID_TO",
-          },
-        ],
+        message: `Assertion ${assertion.id} validTo is in the future`,
+        code: "IDENTITY_IMPORT_FUTURE_VALID_TO",
       },
     );
   }
@@ -3152,19 +3140,7 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
             updated_at: assertion.validTo,
             deleted_at: undefined,
           };
-          await executeStatement(
-            rawTarget,
-            sql`
-              INSERT INTO ${ctx.schema.identityAssertionsTable} (
-                graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-                valid_from, valid_to, created_at, updated_at, deleted_at
-              ) VALUES (
-                ${row.graph_id}, ${row.id}, ${row.rel}, ${row.a_kind}, ${row.a_id},
-                ${row.b_kind}, ${row.b_id}, ${row.valid_from}, ${row.valid_to},
-                ${row.created_at}, ${row.updated_at}, NULL
-              )
-            `,
-          );
+          await insertAssertionRows(rawTarget, ctx.schema, [row]);
           touch(ctx.graphId, row.id, row);
           existingById.set(row.id, row);
           created += 1;
@@ -3224,11 +3200,11 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
   assertions: readonly IdentityTransferAssertion[],
 ): Promise<void> {
   if (retractionIds.length === 0 && assertions.length === 0) return;
-  await runIdentityMutation(ctx, async (target, touch) => {
+  await runIdentityMutation(ctx, async (target, touch, markWritten) => {
+    const retracted = await retractByIds(ctx, target, retractionIds, touch);
     const closureReferences: PlainNodeRef[] = [];
-    for (const id of retractionIds) {
-      const ended = await retractById(ctx, target, id, touch);
-      if (ended?.rel === "same") {
+    for (const ended of retracted) {
+      if (ended.rel === "same") {
         closureReferences.push(
           { kind: ended.a_kind, id: ended.a_id },
           { kind: ended.b_kind, id: ended.b_id },
@@ -3248,6 +3224,16 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
         ctx.sameIdAcrossKinds,
       );
     }
-    await importIdentityAssertionsIntoTarget(ctx, target, assertions, "state");
+    const summary = await importIdentityAssertionsIntoTarget(
+      ctx,
+      target,
+      assertions,
+      "state",
+    );
+    // The import records capture touches through its OWN recorded binding, so
+    // the mutation's wrapped touch never fires for created rows — an
+    // identity-only merge would otherwise leave the durable revision clock
+    // unmoved and every base@V token stale.
+    if (summary.created > 0) markWritten();
   });
 }

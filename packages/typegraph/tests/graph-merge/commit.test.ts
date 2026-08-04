@@ -83,6 +83,7 @@ function emptyPlan(): MergePlan<CareGraph> {
     warnings: [],
     identityAssertions: [],
     identityRetractions: [],
+    canonicalOf: new Map(),
   };
 }
 

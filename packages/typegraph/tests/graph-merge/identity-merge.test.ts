@@ -29,6 +29,7 @@ import {
   REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
   translateIdentityCommitError,
 } from "../../src/graph-merge/merge-identity";
+import type { MergeKey } from "../../src/graph-merge/node-key";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { StagingSet } from "../../src/graph-merge/staging";
 import { stageBranches } from "../../src/graph-merge/staging";
@@ -209,8 +210,7 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     );
 
     const result = await merge(store, [retractBranch, reassertBranch], {});
-    expect(isOk(result)).toBe(true);
-    if (isErr(result)) throw new Error(result.error.message);
+    if (isErr(result)) throw result.error;
     expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 1 });
 
     const current = await store.identity.assertionsOf(first);
@@ -303,8 +303,7 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     await splitBranch.store.identity.assertDifferent(third, fourth);
 
     const result = await merge(store, [chainBranch, splitBranch], {});
-    expect(isOk(result)).toBe(true);
-    if (isErr(result)) throw new Error(result.error.message);
+    if (isErr(result)) throw result.error;
     expect(result.data.merged.identity).toEqual({ asserted: 2, retracted: 0 });
     expect(await store.identity.areSame(first, third)).toBe(true);
   });
@@ -315,9 +314,13 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     const otherBranch = unwrap(await branch(store, () => makeBackend()));
     // One branch retracts the inherited same(second, third) and asserts a fresh
     // pair; the other asserts the SAME fresh pair under its own id, so the
-    // survivor rule keeps one and must report the loser.
+    // survivor rule keeps one and must report the loser. The survivor rule
+    // breaks ties by validFrom (earlier wins), so the sleep between the two
+    // assertions makes `kept` deterministically the survivor rather than
+    // leaving the outcome to be read back and used to derive the loser.
     await retractBranch.store.identity.retractAssertion(assertion.id);
     const kept = await retractBranch.store.identity.assertSame(first, fourth);
+    await new Promise((resolve) => setTimeout(resolve, 2));
     const duplicate = await otherBranch.store.identity.assertSame(
       first,
       fourth,
@@ -331,16 +334,11 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     const survivingIds = (await store.identity.assertionsOf(first)).map(
       (entry) => entry.id,
     );
-    expect(survivingIds).toHaveLength(1);
-    const [survivorId] = survivingIds;
-    const loserId =
-      survivorId === kept.assertion.id ?
-        duplicate.assertion.id
-      : kept.assertion.id;
+    expect(survivingIds).toEqual([kept.assertion.id]);
     expect(result.data.dropped).toEqual([
       {
         kind: "identity",
-        id: loserId,
+        id: duplicate.assertion.id,
         reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
       },
     ]);
@@ -394,8 +392,7 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       },
       branchOrder: [BRANCH_A, BRANCH_B],
     });
-    expect(isOk(result)).toBe(true);
-    if (isErr(result)) throw new Error(result.error.message);
+    if (isErr(result)) throw result.error;
 
     // The whole cluster committed as ONE Employee row; no Staff row survives at
     // either staged id.
@@ -612,8 +609,7 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       branchOrder: [BRANCH_A],
     });
 
-    expect(isOk(result)).toBe(true);
-    if (isErr(result)) throw new Error(result.error.message);
+    if (isErr(result)) throw result.error;
     expect(result.data.merged.identity).toEqual({ asserted: 0, retracted: 0 });
     expect(result.data.dropped).toEqual([
       {
@@ -836,6 +832,7 @@ describe("plan-time derived identity contradictions", () => {
         ledger,
         [],
         [],
+        new Set<MergeKey>(),
         EMPTY_MAP,
         EMPTY_MAP,
         {
@@ -852,6 +849,7 @@ describe("plan-time derived identity contradictions", () => {
         ledger,
         [],
         [],
+        new Set<MergeKey>(),
         EMPTY_MAP,
         EMPTY_MAP,
         {
@@ -879,6 +877,7 @@ describe("plan-time derived identity contradictions", () => {
         ledger,
         [],
         [],
+        new Set<MergeKey>(),
         EMPTY_MAP,
         EMPTY_MAP,
         {
@@ -896,6 +895,7 @@ describe("plan-time derived identity contradictions", () => {
         ledger,
         [],
         [],
+        new Set<MergeKey>(),
         EMPTY_MAP,
         EMPTY_MAP,
         noDisjoint,

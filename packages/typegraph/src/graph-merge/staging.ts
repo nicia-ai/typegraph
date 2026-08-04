@@ -223,7 +223,7 @@ export async function stageBranches<G extends GraphDef>(
   const retractedIdentityAssertions: StagedIdentityAssertion[] = [];
 
   const baseIdentityAssertions =
-    await storeRuntime(baseStore).identityAssertionsForInterchange("state");
+    await storeRuntime(baseStore).readCurrentIdentityAssertions("state");
 
   let targetNodeVersions: ReadonlyMap<MergeKey, number> = new Map();
   let targetEdgeSignatures: ReadonlyMap<MergeKey, string> = new Map();

@@ -439,8 +439,8 @@ export async function diffAgainstBase<G extends GraphDef>(
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
   const [baseIdentity, forkIdentity] = await Promise.all([
-    storeRuntime(baseStore).identityAssertionsForInterchange("state"),
-    storeRuntime(forkStore).identityAssertionsForInterchange("state"),
+    storeRuntime(baseStore).readCurrentIdentityAssertions("state"),
+    storeRuntime(forkStore).readCurrentIdentityAssertions("state"),
   ]);
   const baseIdentityById = new Map(
     baseIdentity.map((assertion) => [assertion.id, assertion]),

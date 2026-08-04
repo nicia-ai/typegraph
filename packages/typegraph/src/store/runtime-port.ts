@@ -85,7 +85,12 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
   rebuildIdentityClosure: () => Promise<void>;
   validateIdentity: () => Promise<void>;
-  identityAssertionsForInterchange: (
+  /**
+   * @internal Reads the graph's identity assertions in transfer shape, honoring
+   * this store's SQL binding. Used by interchange export, base-version
+   * fingerprinting, and merge staging/diff.
+   */
+  readCurrentIdentityAssertions: (
     mode: "state" | "archival",
     options?: Readonly<{
       nodeKinds?: readonly string[];
@@ -134,9 +139,11 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   >;
   /**
    * The CURRENT structural identity class (materialized closure: folds plus
-   * asserted links) of each reference, keyed by `kind|id`. A missing node
-   * coalesces to its singleton. Used by graph-merge's fold-peer window guard
-   * to detect class-transitive drift in the plan→commit window.
+   * asserted links) of each reference, keyed by `refKey` — the
+   * `JSON.stringify([kind, id])` serialization exported from
+   * `identity/service`, which callers must use to probe the returned map. A
+   * missing node coalesces to its singleton. Used by graph-merge's fold-peer
+   * window guard to detect class-transitive drift in the plan→commit window.
    */
   structuralIdentityClasses: (
     references: readonly Readonly<{ kind: string; id: string }>[],

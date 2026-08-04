@@ -37,6 +37,7 @@ import {
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
+import { refKey } from "../../identity/service";
 import {
   compileIndexWhere,
   compileNodeIndexFieldKeys,
@@ -1363,13 +1364,13 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
     await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
     const byReference = new Map(
       [...inserted, ...resurrected].map((row) => [
-        JSON.stringify([row.kind, row.id]),
+        refKey({ kind: row.kind, id: row.id }),
         row,
       ]),
     );
     const rows = preparedCreates.map((prepared) =>
       requireDefined(
-        byReference.get(JSON.stringify([prepared.kind, prepared.id])),
+        byReference.get(refKey({ kind: prepared.kind, id: prepared.id })),
         `Missing written row for ${prepared.kind} ${prepared.id}`,
       ),
     );

@@ -137,12 +137,13 @@ export async function* exportGraphStream<G extends GraphDef>(
     yield* exportEdgeChunks(backend, graphId, kind, resolved);
   }
   if (store.graph.identity !== undefined) {
-    const assertions = await storeRuntime(
-      store,
-    ).identityAssertionsForInterchange(resolved.identityMode, {
-      ...(resolved.nodeKinds === undefined ? {} : { nodeKinds }),
-      includeDeleted: resolved.includeDeleted,
-    });
+    const assertions = await storeRuntime(store).readCurrentIdentityAssertions(
+      resolved.identityMode,
+      {
+        ...(resolved.nodeKinds === undefined ? {} : { nodeKinds }),
+        includeDeleted: resolved.includeDeleted,
+      },
+    );
     for (
       let index = 0;
       index < assertions.length;

@@ -171,8 +171,8 @@ folds now even though it is not yet valid-time visible. Explicit `same` and
 windows and conduct exactly when they are current. This keeps the fold
 computation tied to write events rather than to valid-time windows, so the
 materialized closure used by current reads and by `asOf(now)` reads is
-identical — a fixed-point reconstruction of "current" never needs to special-
-case valid-time skew on the folding edge itself.
+identical — a fixed-point reconstruction of "current" never needs to
+special-case valid-time skew on the folding edge itself.
 
 ## Identity-expanded traversal
 
@@ -257,14 +257,21 @@ through a chain of `same` assertions no single branch wrote, retract/reassert
 races, and an assertion over a node another branch deleted. A branch that
 retracts a pair and also reasserts it itself (convergent, not racing) merges
 cleanly. This is mechanical truth propagation, not semantic entity
-reconciliation. See [`IdentityMergeConflictError`](/errors/#identitymergeconflicterror)
+reconciliation. Plan time is the early surface, not the only one: any
+identity refusal that still escapes to the applier inside the commit
+transaction is translated into the same typed `IdentityMergeConflictError`,
+with the original error preserved as its cause. See
+[`IdentityMergeConflictError`](/errors/#identitymergeconflicterror)
 for the exact `merge()` signature and how to catch it.
 
 ### Independent targets and assertion IDs
 
-`merge()` and `mergeIncremental()` accept a target that does not descend from
-the branches' fork point, so a branch's assertion IDs can meet a ledger that
-assigned those IDs independently. The contract is by ID, on complete truth:
+`mergeIncremental()` accepts a target that has moved on from the branches'
+fork point, so a branch's assertion IDs can meet a ledger that assigned those
+IDs independently. Snapshot `merge()` still requires its target to match the
+branches' base@V exactly, but the same by-ID contract governs the divergence
+a branch can create within its own lineage (hard-delete/recreate replacement)
+and the plan→commit window. The contract is by ID, on complete truth:
 
 - **One assertion ID, one complete truth.** A planned assertion whose ID the
   target's ledger — ended rows included — already binds to a different
@@ -281,8 +288,9 @@ assigned those IDs independently. The contract is by ID, on complete truth:
   a branch can legally rebind an assertion ID by hard-deleting an endpoint
   (which physically removes the row) and importing the ID for different
   truth. The diff stages that replacement as a retraction plus a new
-  assertion; because the applier never reuses an ended row's ID, the merge
-  refuses typed rather than silently keeping either side's truth.
+  assertion; because the target's ledger still holds the ID's prior truth in
+  an ended row, the plan-time one-ID-one-truth check refuses it typed rather
+  than silently keeping either side's truth.
 - **The commit re-verifies IDs.** Both commit modes re-read every planned
   assertion and retraction ID inside the commit transaction and refuse
   plan→commit drift as `BaseVersionMismatchError` — re-plan against the

@@ -32,7 +32,9 @@ import {
   mergeIncremental,
 } from "../../src/graph-merge/merge";
 import {
+  DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
   encodeClassFingerprint,
+  RETRACTION_DELETION_OVERRULED_DROP_REASON,
   RETRACTION_TARGET_MISMATCH_DROP_REASON,
 } from "../../src/graph-merge/merge-identity";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
@@ -42,7 +44,7 @@ import { importGraph } from "../../src/interchange";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../../src/query/sql-intent";
 import { storeRuntime } from "../../src/store/runtime-port";
-import { backendMatrix } from "./test-utils";
+import { backendMatrix, identityAssertionDocument } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -145,7 +147,22 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
   });
 
   afterEach(async () => {
-    for (const cleanup of cleanups) await cleanup();
+    // Every fixture is released even when one disposer rejects — stopping at
+    // the first failure would leak the remaining backends (and, on the shared
+    // Postgres lane, their connections) for the rest of the worker process.
+    // Reverse order so a fixture is torn down before whatever it was built on.
+    const outcomes = await Promise.allSettled(
+      cleanups.toReversed().map((cleanup) => cleanup()),
+    );
+    const rejection = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult =>
+        outcome.status === "rejected",
+    );
+    if (rejection !== undefined) {
+      throw rejection.reason instanceof Error ?
+          rejection.reason
+        : new Error(String(rejection.reason));
+    }
   });
 
   async function makeBackend(): Promise<GraphBackend> {
@@ -725,8 +742,8 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
         branches: [personBranch],
         options: { branchOrder: [BRANCH_A] },
       });
+      if (isErr(result)) throw result.error;
       expect(isOk(result)).toBe(true);
-      if (isErr(result)) throw new Error(result.error.message);
     } finally {
       (target as { transaction: unknown }).transaction = original;
     }
@@ -855,8 +872,8 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
         branches: [replaceBranch],
         options: { branchOrder: [BRANCH_A] },
       });
+      if (isErr(result)) throw result.error;
       expect(isOk(result)).toBe(true);
-      if (isErr(result)) throw new Error(result.error.message);
       expect(
         await target.nodes.Person.getById("shared" as never),
       ).toBeDefined();
@@ -904,8 +921,8 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
       branches: [splitBranch],
       options: { branchOrder: [BRANCH_A] },
     });
+    if (isErr(result)) throw result.error;
     expect(isOk(result)).toBe(true);
-    if (isErr(result)) throw new Error(result.error.message);
     expect(
       await target.nodes.Anchor.getById("bridge" as never),
     ).toBeUndefined();
@@ -1001,37 +1018,14 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     },
   );
 
-  const IDENTITY_PROFILE = "typegraph-identity-v1" as const;
-
+  /** {@link identityAssertionDocument} for the Anchor kind this suite folds on. */
   function assertionDocument(
     id: string,
     a: string,
     b: string,
-    validFrom = "2024-01-01T00:00:00.000Z",
+    validFrom?: string,
   ): Parameters<typeof importGraph>[1] {
-    const refA = { kind: "Anchor", id: a };
-    const refB = { kind: "Anchor", id: b };
-    const [left, right] = a < b ? [refA, refB] : [refB, refA];
-    return {
-      formatVersion: "2.0",
-      exportedAt: "2024-01-01T00:00:00.000Z",
-      source: { type: "external" },
-      nodes: [],
-      edges: [],
-      identity: {
-        profile: IDENTITY_PROFILE,
-        mode: "state",
-        assertions: [
-          {
-            id,
-            relation: "same",
-            a: left,
-            b: right,
-            validFrom,
-          },
-        ],
-      },
-    };
+    return identityAssertionDocument("Anchor", id, a, b, validFrom);
   }
 
   async function anchoredForkPoint() {
@@ -1063,7 +1057,8 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
       assertionDocument("shared-id", "c", "d"),
       { onConflict: "skip" },
     );
-    expect(first.success && second.success).toBe(true);
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
 
     const result = await merge(forkPoint, [branchA, branchB], {});
     expect(isErr(result)).toBe(true);
@@ -1208,8 +1203,8 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
       branches: [retractBranch],
       options: { branchOrder: [BRANCH_A] },
     });
-    expect(isOk(result)).toBe(true);
     if (isErr(result)) throw result.error;
+    expect(isOk(result)).toBe(true);
     expect(result.data.dropped).toContainEqual({
       kind: "identity",
       id: "x-shared",
@@ -1338,6 +1333,109 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     }
   });
 
+  it("keeps identity truth when a modification overrules a deletion", async () => {
+    // Branch A deletes node b — the soft-delete CASCADES, ending same(a, b)
+    // on the branch and staging that ending as a retraction indistinguishable
+    // from intent. Branch B modifies b. Under the default "flag" policy the
+    // modification wins and b survives; the cascaded retraction must not
+    // outlive the overruled deletion and end the resurrected node's
+    // assertion on the target.
+    const forkPoint = await anchoredForkPoint();
+    const forkImport = await importGraph(
+      forkPoint,
+      assertionDocument("cascade-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(forkImport.success).toBe(true);
+    const deleteBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await deleteBranch.store.nodes.Anchor.delete("b" as never);
+    const modifyBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    );
+    await modifyBranch.store.nodes.Anchor.update("b" as never, {
+      name: "b-modified",
+    });
+
+    const result = await merge(forkPoint, [deleteBranch, modifyBranch], {
+      branchOrder: [BRANCH_A, BRANCH_B],
+    });
+    if (isErr(result)) throw result.error;
+    expect(isOk(result)).toBe(true);
+    expect(result.data.deleteModifyConflicts.length).toBeGreaterThan(0);
+    expect(result.data.dropped).toContainEqual({
+      kind: "identity",
+      id: "cascade-id",
+      reason: RETRACTION_DELETION_OVERRULED_DROP_REASON,
+    });
+    // The node survived WITH its identity truth.
+    expect(await forkPoint.nodes.Anchor.getById("b" as never)).toMatchObject({
+      name: "b-modified",
+    });
+    const rows = await storeRuntime(forkPoint).identityAssertionRowsByIds([
+      "cascade-id",
+    ]);
+    expect(rows.get("cascade-id")?.validTo).toBeUndefined();
+    expect(rows.get("cascade-id")).toMatchObject({
+      a: { kind: "Anchor", id: "a" },
+      b: { kind: "Anchor", id: "b" },
+    });
+  });
+
+  it("prefers the target's committed row over a branch-minted duplicate id", async () => {
+    // The ADVANCED target committed the pair under shared-x2; the branch
+    // minted shared-x1 for the same pair. The applier is idempotent per
+    // semantic pair, so shared-x1 can never actually be written — the
+    // survivor pick must keep the committed id and drop the challenger,
+    // or the report claims an id as applied that never lands while listing
+    // the target's own committed row as dropped.
+    const forkPoint = await anchoredForkPoint();
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    const targetImport = await importGraph(
+      target,
+      assertionDocument("shared-x2", "b", "c"),
+      { onConflict: "skip" },
+    );
+    expect(targetImport.success).toBe(true);
+    const mintBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchImport = await importGraph(
+      mintBranch.store,
+      assertionDocument("shared-x1", "b", "c"),
+      { onConflict: "skip" },
+    );
+    expect(branchImport.success).toBe(true);
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [mintBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    if (isErr(result)) throw result.error;
+    expect(isOk(result)).toBe(true);
+    const rows = await storeRuntime(target).identityAssertionRowsByIds([
+      "shared-x1",
+      "shared-x2",
+    ]);
+    expect(rows.get("shared-x2")?.validTo).toBeUndefined();
+    expect(rows.get("shared-x1")).toBeUndefined();
+    expect(result.data.dropped).toContainEqual({
+      kind: "identity",
+      id: "shared-x1",
+      reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+    });
+    expect(result.data.dropped.some((item) => item.id === "shared-x2")).toBe(
+      false,
+    );
+  });
+
   it("stages a same-id truth replacement instead of diffing it empty", async () => {
     // The one legal way two truths share an id inside ONE lineage: the branch
     // hard-deletes an endpoint (physically removing the assertion row),
@@ -1416,7 +1514,8 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
       assertionDocument("dup-id", "a", "b", "2024-02-01T00:00:00.000Z"),
       { onConflict: "skip" },
     );
-    expect(first.success && second.success).toBe(true);
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
 
     const result = await merge(forkPoint, [branchA, branchB], {});
     expect(isErr(result)).toBe(true);
@@ -1480,8 +1579,8 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
           branchOrder: [BRANCH_A, BRANCH_B],
         },
       });
+      if (isErr(result)) throw result.error;
       expect(isOk(result)).toBe(true);
-      if (isErr(result)) throw new Error(result.error.message);
     } finally {
       (target as { transaction: unknown }).transaction = original;
     }

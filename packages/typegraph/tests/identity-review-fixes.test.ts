@@ -578,4 +578,40 @@ describe("identity review fixes", () => {
       total: 4,
     });
   });
+
+  it("advances the revision clock for merge-applied assertions", async () => {
+    // The interchange import records its capture touches through its OWN
+    // recorded binding, so the identity mutation's written-flag never fires
+    // for created rows unless the apply marks the write explicitly — an
+    // identity-only merge would otherwise leave the durable revision clock
+    // unmoved and every base@V token stale, silently passing a later
+    // commit's target-unchanged guard against a target that DID move.
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { revisionTracking: true },
+    );
+    const person = await store.nodes.Person.create({ name: "Rev A" });
+    const author = await store.nodes.Author.create({ penName: "Rev B" });
+    const before = await store.revisionNow();
+    expect(before).toBeDefined();
+
+    await storeRuntime(store).applyIdentityMergeAtTarget(
+      store.backend,
+      [],
+      [
+        transfer(
+          "rev-clock-s1",
+          "same",
+          { kind: "Person", id: person.id },
+          { kind: "Author", id: author.id },
+          "2024-01-01T00:00:00.000Z",
+        ),
+      ],
+    );
+
+    const after = await store.revisionNow();
+    expect(after).toBeDefined();
+    expect(after).not.toEqual(before);
+  });
 });

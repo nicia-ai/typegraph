@@ -41,7 +41,6 @@ export {
   invertClosure,
   isReachable,
 } from "./closures";
-export { isExternalIri } from "./external-iri";
 
 // Types
 export {

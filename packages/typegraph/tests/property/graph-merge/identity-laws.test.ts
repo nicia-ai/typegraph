@@ -10,32 +10,39 @@
  *   1. TYPED-FAILURE   A merge of identity-only branch histories never fails
  *      with the generic merge wrapper: any refusal is a typed
  *      `IdentityMergeConflictError` (the plan is illegal) or
- *      `BaseVersionMismatchError` (the target moved — impossible here, but
- *      permitted by the law) with an actionable message.
+ *      `BaseVersionMismatchError` (the target moved) with an actionable
+ *      message.
  *   2. LEDGER-CONSISTENCY   A merge that SUCCEEDS commits a non-contradictory
  *      ledger: no `different(a, b)` whose endpoints the current `same`
  *      assertions transitively connect.
  *   3. TRUTH-PRESERVATION   A successful merge never ends a target assertion
- *      no branch invalidated: every pre-merge current row survives unless a
- *      branch retracted that id or deleted/replaced one of its endpoints.
+ *      no history invalidated: every pre-merge current row survives unless
+ *      some history retracted THAT COMPLETE TRUTH (a retraction of the same
+ *      id over different truth does not excuse the row's death) or
+ *      deleted/replaced one of its endpoints.
  *   4. REPORT-COHERENCE    An id the report lists as dropped-as-duplicate was
  *      not applied — it never BECOMES current in the same merge.
  *   5. BRANCH-EFFECT       Every truth a branch holds at merge time is
  *      accounted for on a successful merge: applied with equal complete
- *      truth, enumerated as dropped, retracted by some branch, or
+ *      truth, enumerated as dropped, retracted by some history, or
  *      invalidated by an endpoint deletion/replacement. Silent loss of a
  *      branch's belief is a law violation, not a quiet no-op.
  *
  * Scenarios are identity histories (assert same/different, retract, delete a
  * node, hard-delete + recreate a node, import an assertion under a CHOSEN id)
- * over a fixed four-node universe on both branches, applied through the
- * public store API with only the expected semantic refusals skipped. Chosen-id
- * imports matter: they are the only way two independent lineages mint the
- * SAME assertion id — the collision class every hand-built review repro lived
- * in. Hard-delete/recreate matters for the same reason within ONE lineage: it
- * physically removes assertion rows, making same-id truth replacement legal
- * on a branch. Both profiles run: `"ignore"` (assertion-only) and `"fold"`
- * (with same-id Robot peers joining and leaving Agent fold classes).
+ * over a fixed four-node universe, applied through the public store API with
+ * only the expected semantic refusals skipped. Chosen-id imports matter: they
+ * are the only way two independent lineages mint the SAME assertion id — the
+ * collision class every hand-built review repro lived in. Hard-delete /
+ * recreate matters for the same reason within ONE lineage: it physically
+ * removes assertion rows, making same-id truth replacement legal on a branch.
+ *
+ * Three lanes: snapshot `merge()` under the `"ignore"` and `"fold"` profiles
+ * (fold adds same-id Robot peers joining and leaving Agent fold classes), and
+ * `mergeIncremental()` against a target that ADVANCED after the fork — the
+ * regime where branch truth meets independently-moved target truth (id
+ * collisions, truth-mismatched retractions, endpoint deletions on one side
+ * only).
  */
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
@@ -56,12 +63,13 @@ import {
   BaseVersionMismatchError,
   IdentityMergeConflictError,
 } from "../../../src/graph-merge/errors";
-import { merge } from "../../../src/graph-merge/merge";
+import { merge, mergeIncremental } from "../../../src/graph-merge/merge";
 import {
   assertionTruthKey,
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
 } from "../../../src/graph-merge/merge-identity";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
+import type { MergeReport } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { asIdentityAssertionId } from "../../../src/identity/types";
 import { importGraph } from "../../../src/interchange";
@@ -87,29 +95,19 @@ function defineLawGraph(id: string, profile: "fold" | "ignore") {
 
 type LawGraph = ReturnType<typeof defineLawGraph>;
 
-const LAW_LANES = [
-  {
-    name: "ignore",
-    graph: defineLawGraph("identity-law-ignore", "ignore"),
-    includeRobotOps: false,
-  },
-  {
-    name: "fold",
-    graph: defineLawGraph("identity-law-fold", "fold"),
-    includeRobotOps: true,
-  },
-] as const;
-
 const NODE_IDS = ["n1", "n2", "n3", "n4"] as const;
 const BRANCH_A = asBranchId("identity-law-a");
 const BRANCH_B = asBranchId("identity-law-b");
+const TARGET_CLONE = asBranchId("identity-law-target");
 
 /**
  * fast-check iterations PER LANE. Each iteration builds a fork point plus two
- * branch stores and runs one merge; CI keeps a smaller budget, mirroring the
- * other merge property files.
+ * branch stores (the incremental lane adds a target clone) and runs one
+ * merge. NOTE: fast-check consumes pinned `examples` OUT OF this budget, so
+ * the randomized count is `LAW_RUNS - examples.length`; the budget is sized
+ * with that in mind (the full SQLite matrix runs in a few seconds).
  */
-const LAW_RUNS = process.env["CI"] ? 5 : 10;
+const LAW_RUNS = process.env["CI"] ? 12 : 24;
 
 type IdentityOp =
   | Readonly<{ op: "same"; left: number; right: number }>
@@ -139,87 +137,119 @@ const IMPORT_VALID_FROMS = [
   "2024-02-01T00:00:00.000Z",
 ] as const;
 
-type IdentityLawScenario = Readonly<{
-  baseOps: readonly IdentityOp[];
-  branchAOps: readonly IdentityOp[];
-  branchBOps: readonly IdentityOp[];
-}>;
-
 const nodeIndexArb = fc.integer({ min: 0, max: NODE_IDS.length - 1 });
 const pairArb = fc
   .tuple(nodeIndexArb, nodeIndexArb)
   .filter(([left, right]) => left !== right);
 
-function opArbFor(includeRobotOps: boolean): fc.Arbitrary<IdentityOp> {
-  const weighted: { weight: number; arbitrary: fc.Arbitrary<IdentityOp> }[] = [
-    {
-      weight: 3,
-      arbitrary: pairArb.map(
-        ([left, right]) => ({ op: "same", left, right }) as const,
-      ),
-    },
-    {
-      weight: 3,
-      arbitrary: pairArb.map(
-        ([left, right]) => ({ op: "different", left, right }) as const,
-      ),
-    },
-    {
-      weight: 2,
-      arbitrary: fc
-        .nat({ max: 7 })
-        .map((pick) => ({ op: "retract", pick }) as const),
-    },
-    {
-      weight: 1,
-      arbitrary: nodeIndexArb.map(
-        (node) => ({ op: "deleteNode", node }) as const,
-      ),
-    },
-    {
-      weight: 1,
-      arbitrary: nodeIndexArb.map(
-        (node) => ({ op: "hardDeleteRecreate", node }) as const,
-      ),
-    },
-    {
-      weight: 3,
-      arbitrary: fc
-        .tuple(
-          fc.nat({ max: IMPORT_ID_POOL.length - 1 }),
-          pairArb,
-          fc.nat({ max: IMPORT_VALID_FROMS.length - 1 }),
-        )
-        .map(
-          ([idPick, [left, right], validFromPick]) =>
-            ({
-              op: "importAssertion",
-              idPick,
-              left,
-              right,
-              validFromPick,
-            }) as const,
-        ),
-    },
-  ];
-  if (includeRobotOps) {
-    weighted.push(
-      {
-        weight: 1,
-        arbitrary: nodeIndexArb.map(
-          (node) => ({ op: "robotPeer", node }) as const,
-        ),
-      },
-      {
-        weight: 1,
-        arbitrary: nodeIndexArb.map(
-          (node) => ({ op: "dropRobotPeer", node }) as const,
-        ),
-      },
-    );
-  }
-  return fc.oneof(...weighted);
+interface WeightedOp {
+  weight: number;
+  arbitrary: fc.Arbitrary<IdentityOp>;
 }
+
+const ASSERTION_OPS: readonly WeightedOp[] = [
+  {
+    weight: 3,
+    arbitrary: pairArb.map(
+      ([left, right]) => ({ op: "same", left, right }) as const,
+    ),
+  },
+  {
+    weight: 3,
+    arbitrary: pairArb.map(
+      ([left, right]) => ({ op: "different", left, right }) as const,
+    ),
+  },
+  {
+    weight: 2,
+    arbitrary: fc
+      .nat({ max: 7 })
+      .map((pick) => ({ op: "retract", pick }) as const),
+  },
+  {
+    weight: 1,
+    arbitrary: nodeIndexArb.map(
+      (node) => ({ op: "deleteNode", node }) as const,
+    ),
+  },
+  {
+    weight: 3,
+    arbitrary: fc
+      .tuple(
+        fc.nat({ max: IMPORT_ID_POOL.length - 1 }),
+        pairArb,
+        fc.nat({ max: IMPORT_VALID_FROMS.length - 1 }),
+      )
+      .map(
+        ([idPick, [left, right], validFromPick]) =>
+          ({
+            op: "importAssertion",
+            idPick,
+            left,
+            right,
+            validFromPick,
+          }) as const,
+      ),
+  },
+];
+
+const HARD_DELETE_OP: WeightedOp = {
+  weight: 1,
+  arbitrary: nodeIndexArb.map(
+    (node) => ({ op: "hardDeleteRecreate", node }) as const,
+  ),
+};
+
+const ROBOT_OPS: readonly WeightedOp[] = [
+  {
+    weight: 1,
+    arbitrary: nodeIndexArb.map((node) => ({ op: "robotPeer", node }) as const),
+  },
+  {
+    weight: 1,
+    arbitrary: nodeIndexArb.map(
+      (node) => ({ op: "dropRobotPeer", node }) as const,
+    ),
+  },
+];
+
+function opArb(extra: readonly WeightedOp[]): fc.Arbitrary<IdentityOp> {
+  return fc.oneof(...ASSERTION_OPS, ...extra);
+}
+
+type SnapshotScenario = Readonly<{
+  baseOps: readonly IdentityOp[];
+  branchAOps: readonly IdentityOp[];
+  branchBOps: readonly IdentityOp[];
+}>;
+
+type IncrementalScenario = SnapshotScenario &
+  Readonly<{ targetOps: readonly IdentityOp[] }>;
+
+function snapshotScenarioArb(
+  ops: fc.Arbitrary<IdentityOp>,
+): fc.Arbitrary<SnapshotScenario> {
+  return fc.record({
+    baseOps: fc.array(ops, { maxLength: 2 }),
+    branchAOps: fc.array(ops, { minLength: 1, maxLength: 3 }),
+    branchBOps: fc.array(ops, { minLength: 1, maxLength: 3 }),
+  });
+}
+
+/**
+ * The incremental lane restricts BRANCH ops to non-node-creating ones: a
+ * branch node staged onto a `(kind, id)` the target already committed is
+ * refused by the incremental existing-id write guard — a legitimate but
+ * non-identity refusal that would only add noise to the identity laws. The
+ * TARGET side keeps hard-delete/recreate (that is where truth-mismatched id
+ * reuse comes from), branches keep the full assertion alphabet.
+ */
+const incrementalScenarioArb: fc.Arbitrary<IncrementalScenario> = fc.record({
+  baseOps: fc.array(opArb([]), { maxLength: 2 }),
+  targetOps: fc.array(opArb([HARD_DELETE_OP]), { maxLength: 2 }),
+  branchAOps: fc.array(opArb([]), { minLength: 1, maxLength: 3 }),
+  branchBOps: fc.array(opArb([]), { minLength: 1, maxLength: 3 }),
+});
 
 /**
  * The validity-only collision as a pinned example: both branches import ONE id
@@ -227,7 +257,7 @@ function opArbFor(includeRobotOps: boolean): fc.Arbitrary<IdentityOp> {
  * dedupe used to collapse the two silently — merge succeeded while the report
  * listed the surviving id as dropped (law 4).
  */
-const VALIDITY_COLLISION_EXAMPLE: IdentityLawScenario = {
+const VALIDITY_COLLISION_EXAMPLE: SnapshotScenario = {
   baseOps: [],
   branchAOps: [
     { op: "importAssertion", idPick: 0, left: 0, right: 1, validFromPick: 0 },
@@ -244,7 +274,7 @@ const VALIDITY_COLLISION_EXAMPLE: IdentityLawScenario = {
  * identity diff staged nothing here — the merge silently kept the base truth
  * while the branch believed the replacement (law 5).
  */
-const TRUTH_REPLACEMENT_EXAMPLE: IdentityLawScenario = {
+const TRUTH_REPLACEMENT_EXAMPLE: SnapshotScenario = {
   baseOps: [
     { op: "importAssertion", idPick: 0, left: 0, right: 1, validFromPick: 0 },
   ],
@@ -255,25 +285,89 @@ const TRUTH_REPLACEMENT_EXAMPLE: IdentityLawScenario = {
   branchBOps: [{ op: "same", left: 2, right: 3 }],
 };
 
-function scenarioArbFor(
-  includeRobotOps: boolean,
-): fc.Arbitrary<IdentityLawScenario> {
-  const opArb = opArbFor(includeRobotOps);
-  return fc.record({
-    baseOps: fc.array(opArb, { maxLength: 2 }),
-    branchAOps: fc.array(opArb, { minLength: 1, maxLength: 3 }),
-    branchBOps: fc.array(opArb, { minLength: 1, maxLength: 3 }),
-  });
-}
+/**
+ * Truth-mismatched retraction as a pinned example: the branch retracts the
+ * fork's imported id while the ADVANCED target has replaced that id with
+ * different truth (hard-delete/recreate + reimport). Two layers make this
+ * lawful — the truth-aware identity diff stages the target's replacement, and
+ * the retraction truth filter skips the mismatched retraction — and law 3's
+ * truth-aware retraction exclusion fails any combined regression that reaches
+ * silent deletion again. (Removing only the retraction filter degrades to a
+ * TYPED false refusal, which law 1 tolerates; the deterministic guard test
+ * "keeps unrelated target truth when a retraction's id was reused" pins that
+ * success direction.)
+ */
+const RETRACTION_MISMATCH_EXAMPLE: IncrementalScenario = {
+  baseOps: [
+    { op: "importAssertion", idPick: 0, left: 0, right: 1, validFromPick: 0 },
+  ],
+  targetOps: [
+    { op: "hardDeleteRecreate", node: 0 },
+    { op: "importAssertion", idPick: 0, left: 2, right: 3, validFromPick: 0 },
+  ],
+  branchAOps: [{ op: "retract", pick: 0 }],
+  branchBOps: [{ op: "same", left: 1, right: 2 }],
+};
 
-/** What a history actually did — refused operations are skipped, not recorded. */
+/**
+ * What a history actually did — refused operations are skipped, not recorded.
+ * Retractions record the COMPLETE truth they ended (from the returned row),
+ * so the laws can tell "this row died because its truth was retracted" from
+ * "an unrelated row sharing the id died".
+ */
 interface AppliedHistory {
   /** Every assertion id this store can see (inherited + created), in order. */
   assertionIds: string[];
   retractedIds: Set<string>;
-  /** Nodes a branch deleted OR hard-delete-replaced — either invalidates
-   * assertions using them as endpoints. */
+  retractedTruths: Set<string>;
+  /** Nodes deleted OR hard-delete-replaced — either invalidates assertions
+   * using them as endpoints. */
   deletedNodes: Set<string>;
+}
+
+function emptyHistory(): AppliedHistory {
+  return {
+    assertionIds: [],
+    retractedIds: new Set(),
+    retractedTruths: new Set(),
+    deletedNodes: new Set(),
+  };
+}
+
+/** A branch's starting history: the base's, copied (histories then diverge). */
+function copyHistory(base: AppliedHistory): AppliedHistory {
+  return {
+    assertionIds: [...base.assertionIds],
+    retractedIds: new Set(base.retractedIds),
+    retractedTruths: new Set(base.retractedTruths),
+    deletedNodes: new Set(base.deletedNodes),
+  };
+}
+
+/**
+ * A row's identity WITHOUT `validTo`: the immutable part of its truth. The
+ * key a retraction records (from the ended copy, whose `validTo` is set) and
+ * the key of the live row it ended must agree, so `validTo` cannot be part of
+ * the comparison.
+ */
+function rowIdentityKey(
+  row: Readonly<{
+    id: string;
+    relation: string;
+    a: Readonly<{ kind: string; id: string }>;
+    b: Readonly<{ kind: string; id: string }>;
+    validFrom: string;
+  }>,
+): string {
+  return JSON.stringify([
+    row.id,
+    row.relation,
+    row.a.kind,
+    row.a.id,
+    row.b.kind,
+    row.b.id,
+    row.validFrom,
+  ]);
 }
 
 function nodeRef(index: number): Readonly<{ kind: "Agent"; id: string }> {
@@ -311,8 +405,13 @@ async function applyOp(
         const id = requireDefined(
           history.assertionIds[op.pick % history.assertionIds.length],
         );
-        await store.identity.retractAssertion(asIdentityAssertionId(id));
-        history.retractedIds.add(id);
+        const ended = await store.identity.retractAssertion(
+          asIdentityAssertionId(id),
+        );
+        if (ended !== undefined) {
+          history.retractedIds.add(id);
+          history.retractedTruths.add(rowIdentityKey(ended));
+        }
         break;
       }
       case "deleteNode": {
@@ -323,10 +422,19 @@ async function applyOp(
       }
       case "hardDeleteRecreate": {
         const id = requireDefined(NODE_IDS[op.node]);
+        // The physical delete kills exactly the rows CURRENTLY touching the
+        // node on THIS store — record those truths rather than exempting the
+        // (recreated, live) node wholesale, which would excuse over half the
+        // ledger from laws 3 and 5 for the rest of the run.
+        const killed = (
+          await currentLedger(store, history.assertionIds)
+        ).filter((row) => row.a.id === id || row.b.id === id);
         await store.nodes.Agent.delete(id as never);
         await store.nodes.Agent.hardDelete(id as never);
         await store.nodes.Agent.create({ name: id }, { id });
-        history.deletedNodes.add(id);
+        for (const row of killed) {
+          history.retractedTruths.add(rowIdentityKey(row));
+        }
         break;
       }
       case "robotPeer": {
@@ -374,7 +482,14 @@ async function applyOp(
           { onConflict: "skip" },
         );
         if (outcome.success && !history.assertionIds.includes(id)) {
-          history.assertionIds.push(id);
+          // "success" also covers silent skips (the pair already current
+          // under a different id) — track the id only if the store actually
+          // holds it now, or the laws would demand accounting for a belief
+          // the branch never acquired.
+          const written = await storeRuntime(store).identityAssertionRowsByIds([
+            id,
+          ]);
+          if (written.has(id)) history.assertionIds.push(id);
         }
         break;
       }
@@ -431,168 +546,210 @@ function expectConsistentLedger(rows: readonly LedgerRow[]): void {
   }
 }
 
+/** Law 1: refusals are TYPED — never the generic wrapper. */
+function expectTypedRefusal(error: Error): void {
+  expect(
+    error instanceof IdentityMergeConflictError ||
+      error instanceof BaseVersionMismatchError,
+    `expected a typed identity refusal, got ${error.constructor.name}: ${error.message}`,
+  ).toBe(true);
+}
+
+/** Laws 2–5 over a SUCCESSFUL merge's outcome. */
+async function expectLawfulOutcome(args: {
+  target: Store<LawGraph>;
+  report: MergeReport<LawGraph>;
+  preMerge: readonly LedgerRow[];
+  branchStores: readonly Store<LawGraph>[];
+  histories: readonly AppliedHistory[];
+  trackedIds: readonly string[];
+}): Promise<void> {
+  const { target, report, preMerge, branchStores, histories, trackedIds } =
+    args;
+  const postMerge = await currentLedger(target, trackedIds);
+  // Law 2: the committed ledger is internally consistent.
+  expectConsistentLedger(postMerge);
+
+  const postMergeIds = new Set(postMerge.map((row) => row.id));
+  // Law 4 (report coherence): an id reported dropped as a DUPLICATE was not
+  // applied and must not be current post-merge at all — committed target
+  // rows always win the survivor pick, so a "dropped" id that remains
+  // current is a self-contradictory report.
+  for (const droppedItem of report.dropped) {
+    if (
+      droppedItem.kind !== "identity" ||
+      droppedItem.reason !== DUPLICATE_IDENTITY_ASSERTION_DROP_REASON
+    ) {
+      continue;
+    }
+    expect(
+      postMergeIds.has(droppedItem.id),
+      `id ${droppedItem.id} reported dropped as duplicate yet current post-merge`,
+    ).toBe(false);
+  }
+
+  // "This row's death is excused": some history retracted THAT COMPLETE
+  // truth (id-level matches over different truth do NOT excuse it), or some
+  // history deleted/replaced one of its endpoints.
+  const invalidated = (row: LedgerRow): boolean =>
+    histories.some(
+      (history) =>
+        history.retractedTruths.has(rowIdentityKey(row)) ||
+        history.deletedNodes.has(row.a.id) ||
+        history.deletedNodes.has(row.b.id),
+    );
+
+  // Law 3: no pre-merge target truth ended without a matching invalidation.
+  for (const row of preMerge) {
+    if (invalidated(row)) continue;
+    expect(
+      postMergeIds.has(row.id),
+      `pre-merge assertion ${row.id} (${row.relation}(${row.a.id}, ${row.b.id})) ended without a truth-matching retraction or endpoint invalidation`,
+    ).toBe(true);
+  }
+
+  // Law 5: every truth a branch holds is accounted for — applied with equal
+  // complete truth, enumerated as dropped, retracted, or invalidated.
+  const droppedIds = new Set(report.dropped.map((item) => item.id));
+  const postById = new Map(postMerge.map((row) => [row.id, row] as const));
+  for (const branchStore of branchStores) {
+    const branchLedger = await currentLedger(branchStore, trackedIds);
+    for (const row of branchLedger) {
+      const applied =
+        postById.get(row.id) !== undefined &&
+        assertionTruthKey(requireDefined(postById.get(row.id))) ===
+          assertionTruthKey(row);
+      expect(
+        applied ||
+          droppedIds.has(row.id) ||
+          histories.some((history) => history.retractedIds.has(row.id)) ||
+          invalidated(row),
+        `branch truth ${row.id} (${row.relation}(${row.a.id}, ${row.b.id})) vanished: not applied, not dropped, not retracted, endpoints intact`,
+      ).toBe(true);
+    }
+  }
+}
+
 // Per-fixture backends (no shared PGlite engine): the shared engine renames
 // only the CORE table set, so an identity-enabled graph would provision its
 // assertion/closure tables under the default names once per engine — leaking
 // ledger rows across property iterations.
 describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
-  for (const lane of LAW_LANES) {
+  type Fixture = Readonly<{
+    forkPoint: Store<LawGraph>;
+    branchA: Awaited<ReturnType<typeof makeBranches>>["branchA"];
+    branchB: Awaited<ReturnType<typeof makeBranches>>["branchB"];
+    histories: Map<Store<LawGraph>, AppliedHistory>;
+    trackedIds: readonly string[];
+  }>;
+
+  async function makeBranches(
+    forkPoint: Store<LawGraph>,
+    makeBackend: () => Promise<GraphBackend>,
+  ) {
+    const branchA = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchB = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    );
+    return { branchA, branchB };
+  }
+
+  async function materialize(
+    graph: LawGraph,
+    scenario: SnapshotScenario,
+    makeBackend: () => Promise<GraphBackend>,
+  ): Promise<Fixture> {
+    const [forkPoint] = await createStoreWithSchema(graph, await makeBackend());
+    for (const id of NODE_IDS) {
+      await forkPoint.nodes.Agent.create({ name: id }, { id });
+    }
+    const baseHistory = emptyHistory();
+    for (const op of scenario.baseOps) {
+      await applyOp(forkPoint, op, baseHistory);
+    }
+    const { branchA, branchB } = await makeBranches(forkPoint, makeBackend);
+    const histories = new Map<Store<LawGraph>, AppliedHistory>([
+      [branchA.store, copyHistory(baseHistory)],
+      [branchB.store, copyHistory(baseHistory)],
+    ]);
+    for (const op of scenario.branchAOps) {
+      await applyOp(
+        branchA.store,
+        op,
+        requireDefined(histories.get(branchA.store)),
+      );
+    }
+    for (const op of scenario.branchBOps) {
+      await applyOp(
+        branchB.store,
+        op,
+        requireDefined(histories.get(branchB.store)),
+      );
+    }
+    const trackedIds = [
+      ...new Set(
+        [...histories.values()].flatMap((history) => history.assertionIds),
+      ),
+    ];
+    return { forkPoint, branchA, branchB, histories, trackedIds };
+  }
+
+  const SNAPSHOT_LANES = [
+    {
+      name: "ignore",
+      graph: defineLawGraph("identity-law-ignore", "ignore"),
+      ops: opArb([HARD_DELETE_OP]),
+    },
+    {
+      name: "fold",
+      graph: defineLawGraph("identity-law-fold", "fold"),
+      ops: opArb([HARD_DELETE_OP, ...ROBOT_OPS]),
+    },
+  ] as const;
+
+  for (const lane of SNAPSHOT_LANES) {
     it(`merges random ${lane.name}-profile histories lawfully`, async () => {
       await fc.assert(
-        fc.asyncProperty(
-          scenarioArbFor(lane.includeRobotOps),
-          async (scenario) => {
-            const cleanups: (() => Promise<void>)[] = [];
-            async function makeBackend(): Promise<GraphBackend> {
-              const fixture = await entry.make();
-              cleanups.push(fixture.cleanup);
-              return fixture.backend;
+        fc.asyncProperty(snapshotScenarioArb(lane.ops), async (scenario) => {
+          const cleanups: (() => Promise<void>)[] = [];
+          async function makeBackend(): Promise<GraphBackend> {
+            const fixture = await entry.make();
+            cleanups.push(fixture.cleanup);
+            return fixture.backend;
+          }
+          try {
+            const fixture = await materialize(
+              lane.graph,
+              scenario,
+              makeBackend,
+            );
+            const preMerge = await currentLedger(
+              fixture.forkPoint,
+              fixture.trackedIds,
+            );
+            const result = await merge(
+              fixture.forkPoint,
+              [fixture.branchA, fixture.branchB],
+              { branchOrder: [BRANCH_A, BRANCH_B] },
+            );
+            if (isErr(result)) {
+              expectTypedRefusal(result.error);
+              return;
             }
-            try {
-              const [forkPoint] = await createStoreWithSchema(
-                lane.graph,
-                await makeBackend(),
-              );
-              for (const id of NODE_IDS) {
-                await forkPoint.nodes.Agent.create({ name: id }, { id });
-              }
-              const baseHistory: AppliedHistory = {
-                assertionIds: [],
-                retractedIds: new Set(),
-                deletedNodes: new Set(),
-              };
-              for (const op of scenario.baseOps) {
-                await applyOp(forkPoint, op, baseHistory);
-              }
-
-              const branchA = unwrap(
-                await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
-              );
-              const branchB = unwrap(
-                await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
-              );
-              const histories = new Map<Store<LawGraph>, AppliedHistory>([
-                [branchA.store, structuredHistory(baseHistory)],
-                [branchB.store, structuredHistory(baseHistory)],
-              ]);
-              for (const op of scenario.branchAOps) {
-                await applyOp(
-                  branchA.store,
-                  op,
-                  requireDefined(histories.get(branchA.store)),
-                );
-              }
-              for (const op of scenario.branchBOps) {
-                await applyOp(
-                  branchB.store,
-                  op,
-                  requireDefined(histories.get(branchB.store)),
-                );
-              }
-
-              const trackedIds = [
-                ...new Set(
-                  [...histories.values()].flatMap(
-                    (history) => history.assertionIds,
-                  ),
-                ),
-              ];
-              const preMerge = await currentLedger(forkPoint, trackedIds);
-
-              const result = await merge(forkPoint, [branchA, branchB], {
-                branchOrder: [BRANCH_A, BRANCH_B],
-              });
-
-              if (isErr(result)) {
-                // Law 1: refusals are TYPED — never the generic wrapper.
-                expect(
-                  result.error instanceof IdentityMergeConflictError ||
-                    result.error instanceof BaseVersionMismatchError,
-                  `expected a typed identity refusal, got ${result.error.constructor.name}: ${result.error.message}`,
-                ).toBe(true);
-                return;
-              }
-
-              const postMerge = await currentLedger(forkPoint, trackedIds);
-              // Law 2: the committed ledger is internally consistent.
-              expectConsistentLedger(postMerge);
-
-              const preMergeIds = new Set(preMerge.map((row) => row.id));
-              const postMergeIds = new Set(postMerge.map((row) => row.id));
-              // Law 4 (report coherence): an id reported dropped as a
-              // DUPLICATE was not applied — it must not have BECOME current.
-              for (const droppedItem of result.data.dropped) {
-                if (
-                  droppedItem.kind !== "identity" ||
-                  droppedItem.reason !==
-                    DUPLICATE_IDENTITY_ASSERTION_DROP_REASON
-                ) {
-                  continue;
-                }
-                expect(
-                  postMergeIds.has(droppedItem.id) &&
-                    !preMergeIds.has(droppedItem.id),
-                  `id ${droppedItem.id} reported dropped as duplicate yet newly current`,
-                ).toBe(false);
-              }
-
-              const branchHistories = [...histories.values()];
-              const invalidatedEndpoint = (row: LedgerRow): boolean =>
-                branchHistories.some(
-                  (history) =>
-                    history.deletedNodes.has(row.a.id) ||
-                    history.deletedNodes.has(row.b.id),
-                );
-              const retractedByAnyBranch = (row: LedgerRow): boolean =>
-                branchHistories.some((history) =>
-                  history.retractedIds.has(row.id),
-                );
-
-              // Law 3: no pre-merge truth ended without a matching branch
-              // action.
-              for (const row of preMerge) {
-                if (retractedByAnyBranch(row) || invalidatedEndpoint(row)) {
-                  continue;
-                }
-                expect(
-                  postMergeIds.has(row.id),
-                  `pre-merge assertion ${row.id} (${row.relation}(${row.a.id}, ${row.b.id})) ended without a branch retraction or endpoint invalidation`,
-                ).toBe(true);
-              }
-
-              // Law 5: every truth a branch holds is accounted for — applied
-              // with equal complete truth, enumerated as dropped, retracted
-              // by some branch, or invalidated by an endpoint deletion.
-              const droppedIds = new Set(
-                result.data.dropped.map((item) => item.id),
-              );
-              const postById = new Map(
-                postMerge.map((row) => [row.id, row] as const),
-              );
-              for (const branchStore of [branchA.store, branchB.store]) {
-                const branchLedger = await currentLedger(
-                  branchStore,
-                  trackedIds,
-                );
-                for (const row of branchLedger) {
-                  const applied =
-                    postById.get(row.id) !== undefined &&
-                    assertionTruthKey(requireDefined(postById.get(row.id))) ===
-                      assertionTruthKey(row);
-                  expect(
-                    applied ||
-                      droppedIds.has(row.id) ||
-                      retractedByAnyBranch(row) ||
-                      invalidatedEndpoint(row),
-                    `branch truth ${row.id} (${row.relation}(${row.a.id}, ${row.b.id})) vanished: not applied, not dropped, not retracted, endpoints intact`,
-                  ).toBe(true);
-                }
-              }
-            } finally {
-              for (const cleanup of cleanups.reverse()) await cleanup();
-            }
-          },
-        ),
+            await expectLawfulOutcome({
+              target: fixture.forkPoint,
+              report: result.data,
+              preMerge,
+              branchStores: [fixture.branchA.store, fixture.branchB.store],
+              histories: [...fixture.histories.values()],
+              trackedIds: fixture.trackedIds,
+            });
+          } finally {
+            for (const cleanup of cleanups.reverse()) await cleanup();
+          }
+        }),
         {
           examples: [[VALIDITY_COLLISION_EXAMPLE], [TRUTH_REPLACEMENT_EXAMPLE]],
           numRuns: LAW_RUNS,
@@ -600,13 +757,82 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
       );
     });
   }
-});
 
-/** A branch's starting history: the base's, copied (histories then diverge). */
-function structuredHistory(base: AppliedHistory): AppliedHistory {
-  return {
-    assertionIds: [...base.assertionIds],
-    retractedIds: new Set(base.retractedIds),
-    deletedNodes: new Set(base.deletedNodes),
-  };
-}
+  it("merges random target-advanced incremental histories lawfully", async () => {
+    const graph = defineLawGraph("identity-law-incremental", "ignore");
+    await fc.assert(
+      fc.asyncProperty(incrementalScenarioArb, async (scenario) => {
+        const cleanups: (() => Promise<void>)[] = [];
+        async function makeBackend(): Promise<GraphBackend> {
+          const fixture = await entry.make();
+          cleanups.push(fixture.cleanup);
+          return fixture.backend;
+        }
+        try {
+          const [forkPoint] = await createStoreWithSchema(
+            graph,
+            await makeBackend(),
+          );
+          for (const id of NODE_IDS) {
+            await forkPoint.nodes.Agent.create({ name: id }, { id });
+          }
+          const baseHistory = emptyHistory();
+          for (const op of scenario.baseOps) {
+            await applyOp(forkPoint, op, baseHistory);
+          }
+          // The target CLONES the fork point, then advances independently —
+          // the regime where a branch's ids and retractions meet target
+          // truth the branch never saw.
+          const target = unwrap(
+            await branch(forkPoint, () => makeBackend(), {
+              id: TARGET_CLONE,
+            }),
+          ).store;
+          const targetHistory = copyHistory(baseHistory);
+          for (const op of scenario.targetOps) {
+            await applyOp(target, op, targetHistory);
+          }
+          const { branchA, branchB } = await makeBranches(
+            forkPoint,
+            makeBackend,
+          );
+          const branchAHistory = copyHistory(baseHistory);
+          const branchBHistory = copyHistory(baseHistory);
+          for (const op of scenario.branchAOps) {
+            await applyOp(branchA.store, op, branchAHistory);
+          }
+          for (const op of scenario.branchBOps) {
+            await applyOp(branchB.store, op, branchBHistory);
+          }
+          const histories = [branchAHistory, branchBHistory, targetHistory];
+          const trackedIds = [
+            ...new Set(histories.flatMap((history) => history.assertionIds)),
+          ];
+          const preMerge = await currentLedger(target, trackedIds);
+
+          const result = await mergeIncremental({
+            forkPoint,
+            target,
+            branches: [branchA, branchB],
+            options: { branchOrder: [BRANCH_A, BRANCH_B] },
+          });
+          if (isErr(result)) {
+            expectTypedRefusal(result.error);
+            return;
+          }
+          await expectLawfulOutcome({
+            target,
+            report: result.data,
+            preMerge,
+            branchStores: [branchA.store, branchB.store],
+            histories,
+            trackedIds,
+          });
+        } finally {
+          for (const cleanup of cleanups.reverse()) await cleanup();
+        }
+      }),
+      { examples: [[RETRACTION_MISMATCH_EXAMPLE]], numRuns: LAW_RUNS },
+    );
+  });
+});

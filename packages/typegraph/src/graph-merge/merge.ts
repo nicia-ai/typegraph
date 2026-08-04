@@ -81,10 +81,10 @@ import {
   type IdentityPeerProbe,
   type LedgerAssertion,
   NO_STORED_ASSERTIONS,
-  planCanonicalMap,
   planIdentityChanges,
   type PlanIdentityContext,
   remapIdentityAssertionEndpoints,
+  RETRACTION_DELETION_OVERRULED_DROP_REASON,
   translateIdentityCommitError,
 } from "./merge-identity";
 import {
@@ -272,10 +272,23 @@ async function precomputeEmbeddings<G extends GraphDef>(
     }
   }
 
-  const lookup = new Map<string, Float32Array>();
   if (texts.size === 0) {
-    return lookup;
+    return new Map<string, Float32Array>();
   }
+  return embedSortedTexts(texts, embedder);
+}
+
+/**
+ * Runs the injected {@link Embedder} over `texts` in sorted order and returns the
+ * text→vector lookup. Sorting here is what makes every embedding call a pure
+ * function of the text SET rather than of arrival order (the determinism
+ * contract), and the one-vector-per-text contract is enforced loudly — a short
+ * or long batch would otherwise silently mis-key the lookup.
+ */
+async function embedSortedTexts(
+  texts: ReadonlySet<string>,
+  embedder: Embedder,
+): Promise<ReadonlyMap<string, Float32Array>> {
   const orderedTexts = [...texts].sort((left, right) =>
     compareStrings(left, right),
   );
@@ -290,6 +303,7 @@ async function precomputeEmbeddings<G extends GraphDef>(
       },
     );
   }
+  const lookup = new Map<string, Float32Array>();
   for (const [index, text] of orderedTexts.entries()) {
     lookup.set(text, requireDefined(vectors[index]));
   }
@@ -331,25 +345,7 @@ async function embedMissingPairTexts(
   if (missing.size === 0) {
     return existing;
   }
-  const orderedTexts = [...missing].sort((left, right) =>
-    compareStrings(left, right),
-  );
-  const vectors = await embedder(orderedTexts);
-  if (vectors.length !== orderedTexts.length) {
-    throw new MergeError(
-      `Embedder returned ${vectors.length} vectors for ${orderedTexts.length} texts; expected exactly one per text.`,
-      {
-        details: { texts: orderedTexts.length, vectors: vectors.length },
-        suggestion:
-          "Ensure MergeOptions.embedder returns one vector per input text, in order.",
-      },
-    );
-  }
-  const augmented = new Map(existing);
-  for (const [index, text] of orderedTexts.entries()) {
-    augmented.set(text, requireDefined(vectors[index]));
-  }
-  return augmented;
+  return new Map([...existing, ...(await embedSortedTexts(missing, embedder))]);
 }
 
 /**
@@ -673,21 +669,6 @@ function buildProvenanceIndex(
 }
 
 /**
- * Appends a branch's contribution of a CANONICAL node id (`role: "node"`) or a
- * SURVIVING edge id (`role: "edge"`), keeping its source.
- */
-function pushProvenance(
-  records: ProvenanceRecord[],
-  role: ProvenanceRecord["role"],
-  branchId: BranchId,
-  canonicalId: string,
-  canonicalKind: string,
-  sourceId: string,
-): void {
-  records.push({ role, canonicalId, canonicalKind, branchId, sourceId });
-}
-
-/**
  * Empty per-branch trust weights — the fallback when the caller supplies no
  * {@link MergeOptions.provenanceWeights}. With empty weights the
  * `"provenanceWeighted"` policy degrades to the stable branch order (its
@@ -720,6 +701,13 @@ export type MergePlan<G extends GraphDef> = Readonly<{
     Readonly<Record<string, unknown>>
   >;
   retypeMap: ReadonlyMap<MergeKey, string>;
+  // The REAL member->survivor canonical map the commit repoints edges and
+  // assertion endpoints with, carried on the plan so every closure re-run
+  // judges endpoints at their post-merge identity. Never reconstruct this
+  // from `resolutions` — those record only multi-bare-id clusters, keyed by
+  // the survivor's kind, so a reconstruction drops pure ontology-retype
+  // clusters and mis-keys mixed-kind members.
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>;
   resolutions: readonly EntityResolution[];
   propertyConflicts: readonly PropertyConflict<G>[];
   deleteModifyConflicts: readonly DeleteModifyConflict[];
@@ -751,15 +739,17 @@ function planMerge<G extends GraphDef>(
   branchRank: ReadonlyMap<BranchId, number>,
   subClassClosure: ReturnType<typeof buildSubClassClosure>,
   identityContext: PlanIdentityContext,
-  storedRetractionRowsById: ReadonlyMap<string, LedgerAssertion>,
+  storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>,
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
   preferredBranchId?: BranchId,
 ): MergePlan<G> {
-  const identity = planIdentityChanges(staging, storedRetractionRowsById);
+  const identity = planIdentityChanges(staging, storedIdentityRowsById);
   const provenanceRecords: ProvenanceRecord[] = [];
   // Per-branch trust weights for the `"provenanceWeighted"` policy, or empty when
   // the caller supplied none (then the policy falls back to the stable branch order).
   const weights = options.provenanceWeights ?? EMPTY_WEIGHTS;
+  // Records a branch's contribution of a CANONICAL node id (`role: "node"`) or a
+  // SURVIVING edge id (`role: "edge"`), keeping its source.
   const recordProvenance = (
     role: ProvenanceRecord["role"],
     branchId: BranchId,
@@ -770,14 +760,13 @@ function planMerge<G extends GraphDef>(
     if (branchId === preferredBranchId) {
       return;
     }
-    pushProvenance(
-      provenanceRecords,
+    provenanceRecords.push({
       role,
-      branchId,
       canonicalId,
       canonicalKind,
+      branchId,
       sourceId,
-    );
+    });
   };
 
   // (4) cluster over every staged new-node id + every base member id (so a forced
@@ -930,6 +919,38 @@ function planMerge<G extends GraphDef>(
   for (const deletion of deleteModify.nodeDeletions) {
     nodeDeletions.set(mergeKey(deletion.kind, deletion.id), deletion.kind);
   }
+  // A node soft-delete CASCADES: it ends every open assertion touching the
+  // node, so the deleting branch's diff stages those endings as identity
+  // retractions with no marker distinguishing cascade from intent. When the
+  // delete/modify resolution OVERRULES the deletion ("flag"/"modifyWins"
+  // keep the modification), applying the cascaded retraction would end the
+  // resurrected node's assertions anyway — the losing deletion's side effect
+  // outliving the decision. Drop retractions touching an overruled deletion,
+  // visibly, so the node survives WITH its identity truth.
+  const overruledDeletions = new Set<MergeKey>(
+    staging.deletedNodes
+      .map((deletion) => mergeKey(deletion.node.kind, deletion.node.id))
+      .filter((key) => !nodeDeletions.has(key)),
+  );
+  const overruledRetractionDrops: DroppedItem[] = [];
+  const survivingRetractions =
+    overruledDeletions.size === 0 ?
+      identity.retractions
+    : identity.retractions.filter((retraction) => {
+        const touchesOverruled =
+          overruledDeletions.has(
+            mergeKey(retraction.a.kind, retraction.a.id),
+          ) ||
+          overruledDeletions.has(mergeKey(retraction.b.kind, retraction.b.id));
+        if (touchesOverruled) {
+          overruledRetractionDrops.push({
+            kind: "identity",
+            id: retraction.id,
+            reason: RETRACTION_DELETION_OVERRULED_DROP_REASON,
+          });
+        }
+        return !touchesOverruled;
+      });
   for (const modification of deleteModify.survivingModifications) {
     recordProvenance(
       "node",
@@ -1049,8 +1070,9 @@ function planMerge<G extends GraphDef>(
   ];
   assertNoContradictoryIdentityClosure(
     identityRemap.assertions,
-    identity.retractions.map((retraction) => retraction.id),
+    survivingRetractions.map((retraction) => retraction.id),
     staging.baseIdentityAssertions,
+    new Set(nodeDeletions.keys()),
     canonicalOf,
     reconciliation.retypeMap,
     identityContext,
@@ -1096,6 +1118,7 @@ function planMerge<G extends GraphDef>(
     ...repoint.dropped,
     ...reconciliation.dropped,
     ...identity.dropped,
+    ...overruledRetractionDrops,
     ...identityRemap.dropped,
   ].sort((left, right) =>
     compareStrings(`${left.kind}|${left.id}`, `${right.kind}|${right.id}`),
@@ -1114,6 +1137,7 @@ function planMerge<G extends GraphDef>(
       ]),
     ),
     retypeMap: reconciliation.retypeMap,
+    canonicalOf,
     // Order report arrays by the composite (kind, id) identity — never a bare id
     // or a `|`-joined string. A bare id ties two different-kind entities that
     // share an id, and a `|` separator collides on caller-supplied ids/property
@@ -1163,7 +1187,7 @@ function planMerge<G extends GraphDef>(
     provenanceRecords,
     warnings: candidateWarnings,
     identityAssertions: identityRemap.assertions,
-    identityRetractions: identity.retractions,
+    identityRetractions: survivingRetractions,
   };
 }
 
@@ -1221,6 +1245,21 @@ function commitModificationProps(
 }
 
 /**
+ * The `(kind, id)` an edge endpoint finally carries in the committed target: its
+ * own kind unless the ontology retype cascade reconciled that identity to a more
+ * specific one. Every consumer — the commit's edge upserts, the write signature,
+ * and the incremental endpoint guard — resolves endpoints through here, so a
+ * guard can never compare a pre-retype endpoint against a post-retype row.
+ */
+function finalEdgeEndpoint<G extends GraphDef>(
+  plan: MergePlan<G>,
+  kind: string,
+  id: AnyNodeId,
+): Readonly<{ kind: string; id: AnyNodeId }> {
+  return { kind: plan.retypeMap.get(mergeKey(kind, id)) ?? kind, id };
+}
+
+/**
  * Applies a resolved {@link MergePlan} through a transaction's collection API.
  * Shared by `commitPlan()` and the guarded `mergeIncremental()` commit path so
  * both modes execute the same resolved semantics.
@@ -1236,14 +1275,6 @@ async function applyMergePlan<G extends GraphDef>(
   // share an id string each count once (and never collide in the dedupe set).
   const committedNodeIds = new Set<MergeKey>();
 
-  // Identities written as canonical cluster entities, and the fork props of every
-  // surviving inherited modification keyed by identity. On the new-vs-base path a
-  // committed node can be BOTH a base-member cluster survivor AND an inherited
-  // modification; without coordinating the two writes the canonical upsert (built
-  // from the cluster union, which carries the OLDER base props) would clobber the
-  // modification's fork edit. We therefore fold the fork props into the canonical
-  // write and skip the standalone modification write for that identity.
-
   // Soft-delete every finally-deleted node FIRST (key encodes the kind; the
   // value repeats it for the collection lookup). Deletions precede the node
   // writes so a plan replacing a node — e.g. deleting Robot:x and creating a
@@ -1257,6 +1288,13 @@ async function applyMergePlan<G extends GraphDef>(
     await collection.delete(idOf(identity));
   }
 
+  // Identities written as canonical cluster entities, and the fork props of every
+  // surviving inherited modification keyed by identity. On the new-vs-base path a
+  // committed node can be BOTH a base-member cluster survivor AND an inherited
+  // modification; without coordinating the two writes the canonical upsert (built
+  // from the cluster union, which carries the OLDER base props) would clobber the
+  // modification's fork edit. We therefore fold the fork props into the canonical
+  // write and skip the standalone modification write for that identity.
   const canonicalIdentities = new Set<MergeKey>();
   for (const entity of plan.canonicalEntities) {
     canonicalIdentities.add(mergeKey(entity.kind, entity.canonicalId));
@@ -1334,8 +1372,6 @@ async function applyMergePlan<G extends GraphDef>(
   // each endpoint's full `(kind, id)` identity.
   const edgesByKind = new Map<string, EdgeUpsert[]>();
   for (const edge of plan.mergedEdges) {
-    const fromKind = plan.retypeMap.get(mergeKey(edge.fromKind, edge.fromId));
-    const toKind = plan.retypeMap.get(mergeKey(edge.toKind, edge.toId));
     // Honor a fork's property deletion on an inherited edge: drop base keys absent
     // from the merged props (the edge upsert PATCH-merges, so a removed key would
     // otherwise survive). New edges have no base entry, so their props pass through.
@@ -1346,8 +1382,8 @@ async function applyMergePlan<G extends GraphDef>(
       : commitModificationProps(edgeBaseProps, edge.props);
     const item: EdgeUpsert = {
       id: edge.id,
-      from: { kind: fromKind ?? edge.fromKind, id: edge.fromId },
-      to: { kind: toKind ?? edge.toKind, id: edge.toId },
+      from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
+      to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
       props,
     };
     const existing = edgesByKind.get(edge.kind);
@@ -1380,10 +1416,12 @@ async function applyMergePlan<G extends GraphDef>(
   return {
     nodes: committedNodeIds.size,
     edges: committedEdges,
-    // The plan's identity arrays ARE what was applied: both are already deduped
-    // (survivor rule + endpoint remap) and the apply runs inside this
-    // transaction, so any failure aborts the whole merge rather than reporting a
-    // partial count. Same basis as the edge count above.
+    // Planned INTENTS, not applied row counts: the applier skips exact
+    // matches the target already holds (the normal incremental case — the
+    // target's own additions are staged back at it) and no-ops retractions
+    // of already-ended ids, mirroring how the node/edge counts above tally
+    // upserts. Any apply failure aborts the whole merge, so the counts never
+    // describe a partial commit.
     identity: {
       asserted: plan.identityAssertions.length,
       retracted: plan.identityRetractions.length,
@@ -1565,21 +1603,10 @@ type TxEdges = Record<string, EdgeCollectionLike>;
 
 /** The node-collection surface the commit uses (runtime, kind-string keyed). */
 type NodeCollectionLike = Readonly<{
-  getById: (
-    id: string,
-    options?: Readonly<{ temporalMode?: "includeTombstones" }>,
-  ) => Promise<Node | undefined>;
   getByIds: (
     ids: readonly string[],
     options?: Readonly<{ temporalMode?: "includeTombstones" }>,
   ) => Promise<readonly (Node | undefined)[]>;
-  bulkCreate: (
-    items: readonly Readonly<{
-      id?: string;
-      props: Record<string, unknown>;
-    }>[],
-  ) => Promise<unknown>;
-  update: (id: string, props: Record<string, unknown>) => Promise<unknown>;
   upsertByIdFromRecord: (
     id: string,
     data: Record<string, unknown>,
@@ -1589,22 +1616,10 @@ type NodeCollectionLike = Readonly<{
 
 /** The edge-collection surface the commit uses (runtime, kind-string keyed). */
 type EdgeCollectionLike = Readonly<{
-  getById: (
-    id: string,
-    options?: Readonly<{ temporalMode?: "includeTombstones" }>,
-  ) => Promise<Edge | undefined>;
   getByIds: (
     ids: readonly string[],
     options?: Readonly<{ temporalMode?: "includeTombstones" }>,
   ) => Promise<readonly (Edge | undefined)[]>;
-  bulkCreate: (
-    items: readonly Readonly<{
-      id?: string;
-      from: Readonly<{ kind: string; id: string }>;
-      to: Readonly<{ kind: string; id: string }>;
-      props?: Record<string, unknown>;
-    }>[],
-  ) => Promise<unknown>;
   bulkUpsertById: (
     items: readonly Readonly<{
       id: string;
@@ -1733,6 +1748,9 @@ async function resolveMerge<G extends GraphDef>(
     // lost-update guard (assertInheritedTargetUnchanged).
     const preferredBranchId = incremental?.targetBranchId;
     const staging = await stageBranches(store, branches, preferredBranchId);
+    // Pure over the (now fixed) staging set, so the deterministic per-kind order
+    // is computed once and shared by every consumer below.
+    const stagedNewByKind = newNodesByKind(staging);
 
     // Capture the stable branch order ONCE (never wall-clock).
     const branchIds = branches.map((branch) => branch.id);
@@ -1769,7 +1787,7 @@ async function resolveMerge<G extends GraphDef>(
       options.embedder === undefined ?
         undefined
       : await precomputeEmbeddings(
-          newNodesByKind(staging),
+          stagedNewByKind,
           options.resolve,
           options.embedder,
         );
@@ -1792,8 +1810,7 @@ async function resolveMerge<G extends GraphDef>(
 
     // Same-id folding joins nodes no assertion names, so the plan-time
     // contradiction simulation needs the LIVE target peers sharing any staged
-    // or base id. One kind-free indexed probe; skipped entirely off the fold
-    // profile.
+    // or base id. One kind-free indexed probe.
     // The identity guard protects EVERY identity-enabled incremental merge —
     // explicit same/different assertions exist under both profiles. Only the
     // same-id peer expansion (and the direct-peer window check) is
@@ -1803,7 +1820,7 @@ async function resolveMerge<G extends GraphDef>(
         undefined
       : [
           ...new Set([
-            ...[...newNodesByKind(staging).values()].flatMap((entries) =>
+            ...[...stagedNewByKind.values()].flatMap((entries) =>
               entries.map((entry) => entry.node.id),
             ),
             ...staging.modifiedNodes.map((entry) => entry.node.id),
@@ -1819,24 +1836,35 @@ async function resolveMerge<G extends GraphDef>(
         []
       : await storeRuntime(target).liveNodesSharingIds(identityProbeIds);
 
-    // The staged retractions' target rows, fetched BEFORE planning: a
-    // retraction ends whatever CURRENT row carries its id, so the planner
-    // validates each one against the complete truth that id identifies on the
-    // target — a current row with DIFFERENT truth (the target reused the id
-    // independently) must not be ended by a branch that never saw it.
-    const stagedRetractionIds = [
-      ...new Set(
-        staging.retractedIdentityAssertions.map(
+    // Every staged assertion and retraction id's target row, fetched BEFORE
+    // planning. Retractions are validated against the complete truth their id
+    // identifies on the target (a current row with DIFFERENT truth — the
+    // target reused the id independently — must not be ended by a branch that
+    // never saw it), and the survivor dedupe must know which staged ids are
+    // ALREADY COMMITTED on the target: the applier is idempotent per semantic
+    // pair, so a committed row can never lose the survivor pick to a branch's
+    // freshly minted id.
+    const stagedIdentityIds = [
+      ...new Set([
+        ...staging.newIdentityAssertions.map((staged) => staged.assertion.id),
+        ...staging.retractedIdentityAssertions.map(
           (staged) => staged.assertion.id,
         ),
-      ),
+      ]),
     ];
-    const storedRetractionRowsById =
-      stagedRetractionIds.length === 0 ?
+    const storedIdentityRowsById =
+      stagedIdentityIds.length === 0 || target.graph.identity === undefined ?
         NO_STORED_ASSERTIONS
       : await storeRuntime(target).identityAssertionRowsByIds(
-          stagedRetractionIds,
+          stagedIdentityIds,
         );
+
+    // The target's identity semantics, shared by the plan-time simulation and
+    // the post-plan recheck so both judge legality under one context.
+    const identityContext: PlanIdentityContext = {
+      sameIdAcrossKinds: target.graph.identity?.sameIdAcrossKinds,
+      areDisjoint: (left, right) => target.registry.areDisjoint(left, right),
+    };
 
     // (4–8) resolve the whole merge into a commit-ready plan.
     const plan = planMerge(
@@ -1847,11 +1875,8 @@ async function resolveMerge<G extends GraphDef>(
       options,
       branchRank,
       subClassClosure,
-      {
-        sameIdAcrossKinds: target.graph.identity?.sameIdAcrossKinds,
-        areDisjoint: (left, right) => target.registry.areDisjoint(left, right),
-      },
-      storedRetractionRowsById,
+      identityContext,
+      storedIdentityRowsById,
       targetPeers,
       preferredBranchId,
     );
@@ -1891,8 +1916,9 @@ async function resolveMerge<G extends GraphDef>(
         target.graph.identity?.sameIdAcrossKinds ?? "ignore",
       );
       // Base assertion endpoints must be judged at their post-merge
-      // identity, exactly as the in-plan check judged them.
-      const canonicalIdentityOf = planCanonicalMap(plan);
+      // identity, exactly as the in-plan check judged them — through the
+      // REAL canonical map the plan carries.
+      const canonicalIdentityOf = plan.canonicalOf;
       assertNoContradictoryIdentityClosure(
         plan.identityAssertions,
         plan.identityRetractions.map((retraction) => retraction.id),
@@ -1907,13 +1933,10 @@ async function resolveMerge<G extends GraphDef>(
         // remainder would falsely reject a plan that deletes the bridge and
         // asserts the ends different.
         built.ledger,
+        new Set(plan.nodeDeletions.keys()),
         canonicalIdentityOf,
         plan.retypeMap,
-        {
-          sameIdAcrossKinds: target.graph.identity?.sameIdAcrossKinds,
-          areDisjoint: (left, right) =>
-            target.registry.areDisjoint(left, right),
-        },
+        identityContext,
         // The snapshot's (deletion-filtered) class MEMBERS join the universe
         // as unlinked refs: their same-id fold links at ids outside the probe
         // range are re-derived by the checker's fold union, and their
@@ -1935,7 +1958,7 @@ async function resolveMerge<G extends GraphDef>(
       incremental === undefined ?
         await commitPlan(target, plan, expectedBaseVersion)
       : await commitIncrementalPlan(target, plan, {
-          stagedNewByKind: newNodesByKind(staging),
+          stagedNewByKind,
           options,
           introspectionKinds,
           ...(identityGuard === undefined ?
@@ -2195,10 +2218,11 @@ function edgeSchemaFor<G extends GraphDef>(
 }
 
 /**
- * Models TypeGraph's re-validating update semantics for one row:
- * `schema.safeParse({...current, ...planned})`, then storing the parsed result. This
- * is NOT used as a pre-transaction write guard anymore; `mergeIncremental()` calls it
- * inside the target transaction to decide between create/update/skip/error.
+ * Models TypeGraph's re-validating update semantics for one row —
+ * `schema.safeParse({...current, ...planned})`, then storing the parsed result —
+ * so `mergeIncremental()` can route each planned write to create / update / skip /
+ * error from INSIDE the target transaction, where `current` is the row the commit
+ * will actually overwrite.
  */
 function analyzeRevalidatingWrite(
   schema: PropsSchema | undefined,
@@ -2283,24 +2307,6 @@ function edgeProps(edge: Edge): Record<string, unknown> {
 
 const INCLUDE_TOMBSTONES = { temporalMode: "includeTombstones" as const };
 
-function finalEdgeFrom<G extends GraphDef>(
-  edge: MergedEdge,
-  plan: MergePlan<G>,
-) {
-  return {
-    kind:
-      plan.retypeMap.get(mergeKey(edge.fromKind, edge.fromId)) ?? edge.fromKind,
-    id: edge.fromId,
-  };
-}
-
-function finalEdgeTo<G extends GraphDef>(edge: MergedEdge, plan: MergePlan<G>) {
-  return {
-    kind: plan.retypeMap.get(mergeKey(edge.toKind, edge.toId)) ?? edge.toKind,
-    id: edge.toId,
-  };
-}
-
 function assertValidRevalidatingWrite(
   analysis: RevalidatingWriteAnalysis,
   message: string,
@@ -2373,8 +2379,8 @@ function edgeWriteSignature<G extends GraphDef>(
   edge: MergedEdge,
   plan: MergePlan<G>,
 ): string {
-  const from = finalEdgeFrom(edge, plan);
-  const to = finalEdgeTo(edge, plan);
+  const from = finalEdgeEndpoint(plan, edge.fromKind, edge.fromId);
+  const to = finalEdgeEndpoint(plan, edge.toKind, edge.toId);
   return JSON.stringify([
     edge.kind,
     from.kind,
@@ -2550,8 +2556,8 @@ async function validateIncrementalEdgeWrites<G extends GraphDef>(
       );
     }
 
-    const from = finalEdgeFrom(edge, plan);
-    const to = finalEdgeTo(edge, plan);
+    const from = finalEdgeEndpoint(plan, edge.fromKind, edge.fromId);
+    const to = finalEdgeEndpoint(plan, edge.toKind, edge.toId);
     if (
       current.fromId !== from.id ||
       current.fromKind !== from.kind ||
@@ -2612,12 +2618,13 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
    */
   targetEdgeSignatures: ReadonlyMap<MergeKey, string>;
   /**
-   * The plan-time same-id fold probe: the bare ids probed and the live peer
-   * keys observed. Absent off the fold profile. The commit-time guard repeats
-   * the kind-free lookup through the transaction backend and refuses if the
-   * live peer set drifted — a same-id peer inserted in the plan→commit window
-   * could fold the plan's nodes into classes (including disjoint-kind
-   * contradictions) the plan-time simulation never saw.
+   * The plan-time identity probe: the bare ids probed, the live peer keys
+   * observed, per-seed class fingerprints, and the negative-ledger
+   * fingerprint. Present for EVERY identity-enabled incremental merge (both
+   * profiles — explicit assertions change legality under `"ignore"` too; only
+   * the direct-peer window check is fold-specific). The commit-time guard
+   * revalidates all of it through the transaction backend and refuses
+   * plan→commit drift as a typed replan error.
    */
   identityPeerProbe?: IdentityPeerProbe;
 }>;
@@ -2947,8 +2954,12 @@ async function commitIncrementalPlan<G extends GraphDef>(
       // plan if a matching committed row appeared in the window. `tx` exposes
       // the same `.nodes` collection record a `BaseLookupStore` needs.
       await assertBaseResolutionStable(tx as unknown as BaseLookupStore, guard);
-      // Fold-peer TOCTOU guard: the bare-id peer probe also ran outside this
-      // transaction; repeat it on the tx snapshot and refuse on drift.
+      // Identity window guards: the by-id freshness check runs DIRECTLY (not
+      // via the probe guard, whose early return must never be able to skip
+      // it), then the probe-based layers revalidate peers, classes, the
+      // negative ledger, and finally re-run the full identity simulation on
+      // the tx snapshot.
+      await assertPlannedIdentityIdsFresh(target, transactionBackend(tx), plan);
       await assertIdentityPeersStable(
         target,
         transactionBackend(tx),

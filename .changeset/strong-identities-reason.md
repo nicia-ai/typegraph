@@ -232,8 +232,8 @@ refused as the typed replan error instead of failing generically at apply.
 planner refuses one id staged for two different complete truths and any
 staged id already identifying different truth among the target's stored
 rows (ended included, exactly the set the import coordinator compares);
-the incremental transaction revalidates every planned id against
-transaction reads, so a window row reusing a planned id — even with
+the commit transaction revalidates every planned id against transaction
+reads (both commit modes), so a window row reusing a planned id — even with
 endpoints entirely outside the guarded universe — refuses as the typed
 replan error instead of a generic id-conflict at apply.
 
@@ -288,14 +288,65 @@ surfacing as the generic wrapper. Exact-duplicate staging (two branches
 importing one identical row) no longer reports the id as dropped while
 applying it.
 
-**Five laws, two profiles.** The property suite now also holds every
+**Five laws, three lanes.** The property suite now also holds every
 successful merge to BRANCH-EFFECT accounting — every truth a branch holds
 is applied with equal complete truth, enumerated as dropped, retracted,
 or invalidated by an endpoint deletion; silent loss is a law violation —
-and runs the whole law set under both identity profiles, with
-hard-delete/recreate and same-id fold peers in the operation alphabet and
-the truth-replacement scenario pinned as a deterministic example. The
-generator skips only expected semantic refusals (contradiction,
-missing node); any other error fails the run rather than silently
-emptying the histories. Independent-target merge semantics are now
-documented in the identity guide.
+and runs the whole law set in three lanes: snapshot `merge()` under both
+identity profiles (with hard-delete/recreate and same-id fold peers in
+the operation alphabet) and `mergeIncremental()` against a target that
+ADVANCED after the fork, where branch truth meets independently-moved
+target truth. Truth-preservation and branch-effect exclusions are
+truth-aware: a retraction excuses a row's death only when the retracted
+COMPLETE truth matches, and a hard-delete/recreate excuses exactly the
+rows it physically killed, not everything ever touching the node. A
+dropped-as-duplicate id must never be current post-merge. The generator
+skips only expected semantic refusals (contradiction, missing node); any
+other error fails the run rather than silently emptying the histories.
+Independent-target merge semantics are now documented in the identity
+guide.
+
+**The survivor pick respects committed truth.** The law suite caught its
+first live defect within a day: a branch-minted assertion id could win
+the semantic-pair dedupe against the target's own committed row — the
+applier (idempotent per pair) then skipped the write, so the report
+claimed an id as applied that never landed while listing the target's
+committed row as dropped. Ids already committed on the target with the
+exact staged truth now always win the survivor pick, pinned by a
+deterministic incremental test alongside the law.
+
+**The simulation uses the plan's REAL canonical map.** Both closure
+re-runs (post-plan and in-transaction) previously reconstructed the
+member→survivor map from the report-shaped resolutions, which drops pure
+ontology-retype clusters and mis-keys mixed-kind members — degrading the
+decisive in-transaction backstop into judging endpoints at pre-merge
+identities (a false negative) and enabling an unresolvable replan loop (a
+false refusal). The plan now carries the exact `canonicalOf` map the
+commit repoints edges with, and the reconstruction is deleted. The
+simulated base ledger is also deletion-filtered inside the checker
+itself, so all three call sites share one post-deletion rule.
+
+**An overruled deletion no longer ends identity truth.** A node
+soft-delete cascades — it ends every open assertion touching the node —
+so the deleting branch's diff stages those endings as retractions
+indistinguishable from intent. When the delete/modify resolution keeps
+the modification (the default `"flag"` and `"modifyWins"` policies), the
+node survives, and the cascaded retraction is now dropped with it —
+reported as `identity:deletion-overruled` — instead of ending the
+resurrected node's assertions anyway.
+
+**Identity-only merges advance the revision clock.** The interchange
+import records capture touches through its own recorded binding, so a
+merge whose only effect was creating assertions never marked the mutation
+as written: the durable revision clock stayed unmoved and every base@V
+token went stale, letting a later commit's target-unchanged guard pass
+against a target that DID move. The apply now marks the write from the
+import summary, with a regression test on a revision-tracking store.
+
+**Guard structure hardened.** The by-id freshness check is invoked
+directly by BOTH commit paths (never through the peer-probe guard's early
+return), the environment-code passthrough covers the identity
+environment/corruption codes that must never be translated into replan
+advice, and one id staged as both a new assertion and a retraction — an
+applier-refusing shape currently unreachable through any supported
+staging path — refuses typed defensively at plan time.

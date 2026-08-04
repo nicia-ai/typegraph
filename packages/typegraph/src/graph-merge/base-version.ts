@@ -271,7 +271,7 @@ async function computeStoreContentComponent<G extends GraphDef>(
   store: Store<G>,
 ): Promise<string> {
   const identityAssertions =
-    await storeRuntime(store).identityAssertionsForInterchange("state");
+    await storeRuntime(store).readCurrentIdentityAssertions("state");
   return computeContentComponent(
     storeBackend(store),
     store.graphId,
