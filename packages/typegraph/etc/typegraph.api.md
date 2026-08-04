@@ -5485,6 +5485,20 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>[]>;
+    identityAssertionRowsByIds: (ids: readonly string[], target?: GraphBackend | TransactionBackend) => Promise<ReadonlyMap<string, Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        b: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        validFrom: string;
+        validTo?: string | undefined;
+    }>>>;
     structuralIdentityClasses: (references: readonly Readonly<{
         kind: string;
         id: string;

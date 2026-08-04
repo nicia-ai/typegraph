@@ -31,10 +31,14 @@ import {
   merge,
   mergeAgainstBase,
   mergeIncremental,
+  RETRACTION_TARGET_MISMATCH_DROP_REASON,
 } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
+import { asIdentityAssertionId } from "../../src/identity/types";
 import { importGraph } from "../../src/interchange";
+import { sql } from "../../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../../src/query/sql-intent";
 import { storeRuntime } from "../../src/store/runtime-port";
 import { backendMatrix } from "./test-utils";
 
@@ -1001,6 +1005,7 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     id: string,
     a: string,
     b: string,
+    validFrom = "2024-01-01T00:00:00.000Z",
   ): Parameters<typeof importGraph>[1] {
     const refA = { kind: "Anchor", id: a };
     const refB = { kind: "Anchor", id: b };
@@ -1020,7 +1025,7 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
             relation: "same",
             a: left,
             b: right,
-            validFrom: "2024-01-01T00:00:00.000Z",
+            validFrom,
           },
         ],
       },
@@ -1158,6 +1163,207 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     expect(isErr(rerun)).toBe(true);
     if (isOk(rerun)) throw new Error("Expected identity merge conflict");
     expect(rerun.error).toBeInstanceOf(IdentityMergeConflictError);
+  });
+
+  it("keeps unrelated target truth when a retraction's id was reused", async () => {
+    // The branch retracted x-shared=same(a,b); the INDEPENDENT target uses
+    // x-shared for same(c,d). A retraction reduced to its bare id would end
+    // the target's row — deleting truth the branch never saw — so the plan
+    // validates the complete retracted row against the target and skips,
+    // visibly, when the truths differ: the branch's intent ("MY assertion no
+    // longer holds") is already satisfied by that assertion's absence.
+    const forkPoint = await anchoredForkPoint();
+    const forkImport = await importGraph(
+      forkPoint,
+      assertionDocument("x-shared", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(forkImport.success).toBe(true);
+    const retractBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await retractBranch.store.identity.retractAssertion(
+      asIdentityAssertionId("x-shared"),
+    );
+
+    const [target] = await createStoreWithSchema(
+      anchoredIgnoreGraph,
+      await makeBackend(),
+    );
+    for (const id of ["a", "b", "c", "d"]) {
+      await target.nodes.Anchor.create({ name: id }, { id });
+    }
+    const targetImport = await importGraph(
+      target,
+      assertionDocument("x-shared", "c", "d"),
+      { onConflict: "skip" },
+    );
+    expect(targetImport.success).toBe(true);
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [retractBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    expect(isOk(result)).toBe(true);
+    if (isErr(result)) throw result.error;
+    expect(result.data.dropped).toContainEqual({
+      kind: "identity",
+      id: "x-shared",
+      reason: RETRACTION_TARGET_MISMATCH_DROP_REASON,
+    });
+    const rows = await storeRuntime(target).identityAssertionRowsByIds([
+      "x-shared",
+    ]);
+    expect(rows.get("x-shared")).toMatchObject({
+      relation: "same",
+      a: { kind: "Anchor", id: "c" },
+      b: { kind: "Anchor", id: "d" },
+    });
+    expect(rows.get("x-shared")?.validTo).toBeUndefined();
+  });
+
+  it("refuses a window row claiming a planned id in snapshot mode", async () => {
+    // Snapshot commits carry no identity peer probe — only the shared by-id
+    // freshness guard runs inside commitPlan's transaction. The window row
+    // claims the planned id and is immediately retracted, so the CURRENT
+    // ledger (all the legacy base@V token fingerprints) looks unchanged;
+    // only the ended-rows-included by-id check can see it.
+    const forkPoint = await anchoredForkPoint();
+    const assertBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchImport = await importGraph(
+      assertBranch.store,
+      assertionDocument("win-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(branchImport.success).toBe(true);
+
+    const original = forkPoint.transaction.bind(forkPoint);
+    let injected = false;
+    (forkPoint as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        const windowImport = await importGraph(
+          forkPoint,
+          assertionDocument("win-id", "c", "d"),
+          { onConflict: "skip" },
+        );
+        if (!windowImport.success) throw new Error("window import failed");
+        await forkPoint.identity.retractAssertion(
+          asIdentityAssertionId("win-id"),
+        );
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await merge(forkPoint, [assertBranch], {});
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (forkPoint as { transaction: unknown }).transaction = original;
+    }
+    // A rerun sees the ended row at PLAN time and refuses typed.
+    const rerun = await merge(forkPoint, [assertBranch], {});
+    expect(isErr(rerun)).toBe(true);
+    if (isOk(rerun)) throw new Error("Expected identity merge conflict");
+    expect(rerun.error).toBeInstanceOf(IdentityMergeConflictError);
+  });
+
+  it("refuses in-transaction drift of a planned retraction's target row", async () => {
+    // Assertion rows are immutable through every TypeGraph API, so this
+    // simulates an out-of-band writer (raw SQL) swapping the truth behind a
+    // planned retraction id in the plan→commit window: the commit must
+    // refuse to end a row the plan never validated.
+    const forkPoint = await anchoredForkPoint();
+    const forkImport = await importGraph(
+      forkPoint,
+      assertionDocument("drift-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(forkImport.success).toBe(true);
+    const targetBackend = await makeBackend();
+    const target = unwrap(
+      await branch(forkPoint, () => Promise.resolve(targetBackend), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    const retractBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await retractBranch.store.identity.retractAssertion(
+      asIdentityAssertionId("drift-id"),
+    );
+    const executeStatement = targetBackend.executeStatement;
+    if (executeStatement === undefined) {
+      throw new Error("matrix backend must support statement execution");
+    }
+
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        await executeStatement(
+          asCompiledStatementSql(
+            sql`UPDATE typegraph_identity_assertions SET a_id = ${"c"}, b_id = ${"d"} WHERE id = ${"drift-id"}`,
+          ),
+        );
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [retractBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+  });
+
+  it("rejects one id staged for the same pair with two validities", async () => {
+    // Same id, same semantic pair, different validFrom: the semantic survivor
+    // dedupe would collapse the two into one — reporting the id as dropped
+    // while also applying it — so the complete-truth id check runs on the RAW
+    // staged assertions, before the survivor pass.
+    const forkPoint = await anchoredForkPoint();
+    const branchA = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchB = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    );
+    const first = await importGraph(
+      branchA.store,
+      assertionDocument("dup-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    const second = await importGraph(
+      branchB.store,
+      assertionDocument("dup-id", "a", "b", "2024-02-01T00:00:00.000Z"),
+      { onConflict: "skip" },
+    );
+    expect(first.success && second.success).toBe(true);
+
+    const result = await merge(forkPoint, [branchA, branchB], {});
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected identity merge conflict");
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
   });
 
   it("tolerates a window peer at an id canonicalization dropped", async () => {

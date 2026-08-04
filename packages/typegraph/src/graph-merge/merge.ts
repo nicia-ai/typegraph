@@ -134,12 +134,14 @@ import type {
 } from "./typegraph-internal";
 import {
   compareCodePoints,
+  IdentityContradictionError,
   lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
   storeBackend,
   storeRuntime,
   transactionBackend,
+  TypeGraphError,
 } from "./typegraph-internal";
 import type {
   BaseAmbiguity,
@@ -721,7 +723,12 @@ export type MergePlan<G extends GraphDef> = Readonly<{
   provenanceRecords: readonly ProvenanceRecord[];
   warnings: readonly string[];
   identityAssertions: readonly IdentityTransferAssertion[];
-  identityRetractions: readonly string[];
+  // Complete expected rows, never bare ids: a retraction ends whatever CURRENT
+  // row carries its id, so it is only legal against the exact truth the branch
+  // retracted. The plan therefore carries the full staged assertion, and both
+  // validation layers (the plan-time filter and the in-transaction freshness
+  // guard) compare it to the target's row before the id is ended.
+  identityRetractions: readonly IdentityTransferAssertion[];
 }>;
 
 function identityEndpointKey(assertion: IdentityTransferAssertion): string {
@@ -887,30 +894,90 @@ function assertNoRetractReassertRace(staging: StagingSet): void {
   }
 }
 
+/**
+ * Reason recorded when a branch retracted an assertion whose id identifies a
+ * DIFFERENT complete truth on the target's current ledger. Ending that row
+ * would delete truth the branch never saw, while the branch's actual intent —
+ * "the assertion I retracted no longer holds" — is already satisfied by that
+ * assertion's absence, so the retraction is skipped and reported instead.
+ */
+export const RETRACTION_TARGET_MISMATCH_DROP_REASON =
+  "identity:retraction-target-mismatch";
+
+/** The empty stored-row map, for validating staged assertions intra-plan only. */
+const NO_STORED_ASSERTIONS: ReadonlyMap<string, LedgerAssertion> = new Map();
+
 /** @internal Exported for deterministic phase-level verification. */
-export function planIdentityChanges(staging: StagingSet): Readonly<{
+export function planIdentityChanges(
+  staging: StagingSet,
+  storedRetractionRowsById: ReadonlyMap<string, LedgerAssertion>,
+): Readonly<{
   assertions: readonly IdentityTransferAssertion[];
-  retractions: readonly string[];
+  retractions: readonly IdentityTransferAssertion[];
   dropped: readonly DroppedItem[];
 }> {
   assertNoOpposingIdentityRelations(
     staging.newIdentityAssertions.map((staged) => staged.assertion),
   );
   assertNoRetractReassertRace(staging);
+  // One id, one truth — over the RAW staged assertions, BEFORE the semantic
+  // survivor dedupe: two branches staging one id for the same pair with
+  // different validFrom values collapse into one survivor under the semantic
+  // key (which excludes validity), so a later check would never see the
+  // collision — while the report would list the id as both applied and
+  // dropped.
+  assertOneIdOneTruth(
+    staging.newIdentityAssertions.map((staged) => staged.assertion),
+    NO_STORED_ASSERTIONS,
+  );
 
   const deduped = dedupeIdentityAssertions(
     staging.newIdentityAssertions.map((staged) => staged.assertion),
   );
+  const retractionById = new Map<string, IdentityTransferAssertion>();
+  for (const staged of staging.retractedIdentityAssertions) {
+    const previous = retractionById.get(staged.assertion.id);
+    if (
+      previous !== undefined &&
+      assertionIdentityKey(previous) !== assertionIdentityKey(staged.assertion)
+    ) {
+      throw new IdentityMergeConflictError(
+        "One assertion id was staged for retraction with two different identity truths.",
+        {
+          details: {
+            assertionId: staged.assertion.id,
+            first: previous,
+            second: staged.assertion,
+          },
+        },
+      );
+    }
+    retractionById.set(staged.assertion.id, staged.assertion);
+  }
+  const retractions: IdentityTransferAssertion[] = [];
+  const retractionDropped: DroppedItem[] = [];
+  for (const [assertionId, retraction] of retractionById) {
+    const stored = storedRetractionRowsById.get(assertionId);
+    if (
+      stored !== undefined &&
+      stored.validTo === undefined &&
+      assertionIdentityKey(stored) !== assertionIdentityKey(retraction)
+    ) {
+      retractionDropped.push({
+        kind: "identity",
+        id: assertionId,
+        reason: RETRACTION_TARGET_MISMATCH_DROP_REASON,
+      });
+      continue;
+    }
+    retractions.push(retraction);
+  }
   return {
     assertions: deduped.survivors,
-    retractions: [
-      ...new Set(
-        staging.retractedIdentityAssertions.map(
-          (staged) => staged.assertion.id,
-        ),
-      ),
-    ].toSorted((left, right) => compareCodePoints(left, right)),
-    dropped: deduped.dropped,
+    retractions: retractions.toSorted((left, right) =>
+      compareCodePoints(left.id, right.id),
+    ),
+    dropped: [...deduped.dropped, ...retractionDropped],
   };
 }
 
@@ -1253,10 +1320,11 @@ function planMerge<G extends GraphDef>(
   branchRank: ReadonlyMap<BranchId, number>,
   subClassClosure: ReturnType<typeof buildSubClassClosure>,
   identityContext: PlanIdentityContext,
+  storedRetractionRowsById: ReadonlyMap<string, LedgerAssertion>,
   targetPeers: readonly Readonly<{ kind: string; id: string }>[],
   preferredBranchId?: BranchId,
 ): MergePlan<G> {
-  const identity = planIdentityChanges(staging);
+  const identity = planIdentityChanges(staging, storedRetractionRowsById);
   const provenanceRecords: ProvenanceRecord[] = [];
   // Per-branch trust weights for the `"provenanceWeighted"` policy, or empty when
   // the caller supplied none (then the policy falls back to the stable branch order).
@@ -1550,7 +1618,7 @@ function planMerge<G extends GraphDef>(
   ];
   assertNoContradictoryIdentityClosure(
     identityRemap.assertions,
-    identity.retractions,
+    identity.retractions.map((retraction) => retraction.id),
     staging.baseIdentityAssertions,
     canonicalOf,
     reconciliation.retypeMap,
@@ -1866,7 +1934,7 @@ async function applyMergePlan<G extends GraphDef>(
 
   await storeRuntime(target).applyIdentityMergeAtTarget(
     txBackend,
-    plan.identityRetractions,
+    plan.identityRetractions.map((retraction) => retraction.id),
     plan.identityAssertions,
   );
 
@@ -1934,6 +2002,11 @@ export async function commitPlan<G extends GraphDef>(
           expectedBaseVersion,
         );
       }
+      // Identity ids are re-validated EXPLICITLY even under a base@V match:
+      // the legacy fingerprint ranges over CURRENT assertions only, so a row
+      // that claimed a planned id in the window and was then ended would pass
+      // the token check and fail generically inside the applier.
+      await assertPlannedIdentityIdsFresh(target, transactionBackend(tx), plan);
       return applyMergePlan(
         plan,
         tx.nodes as unknown as TxNodes,
@@ -2307,6 +2380,25 @@ async function resolveMerge<G extends GraphDef>(
         []
       : await storeRuntime(target).liveNodesSharingIds(identityProbeIds);
 
+    // The staged retractions' target rows, fetched BEFORE planning: a
+    // retraction ends whatever CURRENT row carries its id, so the planner
+    // validates each one against the complete truth that id identifies on the
+    // target — a current row with DIFFERENT truth (the target reused the id
+    // independently) must not be ended by a branch that never saw it.
+    const stagedRetractionIds = [
+      ...new Set(
+        staging.retractedIdentityAssertions.map(
+          (staged) => staged.assertion.id,
+        ),
+      ),
+    ];
+    const storedRetractionRowsById =
+      stagedRetractionIds.length === 0 ?
+        NO_STORED_ASSERTIONS
+      : await storeRuntime(target).identityAssertionRowsByIds(
+          stagedRetractionIds,
+        );
+
     // (4–8) resolve the whole merge into a commit-ready plan.
     const plan = planMerge(
       staging,
@@ -2320,6 +2412,7 @@ async function resolveMerge<G extends GraphDef>(
         sameIdAcrossKinds: target.graph.identity?.sameIdAcrossKinds,
         areDisjoint: (left, right) => target.registry.areDisjoint(left, right),
       },
+      storedRetractionRowsById,
       targetPeers,
       preferredBranchId,
     );
@@ -2364,7 +2457,7 @@ async function resolveMerge<G extends GraphDef>(
       const canonicalIdentityOf = planCanonicalMap(plan);
       assertNoContradictoryIdentityClosure(
         plan.identityAssertions,
-        plan.identityRetractions,
+        plan.identityRetractions.map((retraction) => retraction.id),
         // The FRESH target ledger, not the pre-planning staging capture —
         // a `different` committed in the window must invalidate the plan
         // here, as a typed conflict, before it can become the baseline.
@@ -2396,7 +2489,10 @@ async function resolveMerge<G extends GraphDef>(
     // (9) commit to the target. Incremental mode commits through the guarded path
     // (the existing-target-id write guard, §6.6); snapshot mode commits directly,
     // re-validating the captured base@V inside the transaction (TOCTOU guard).
-    const merged =
+    // Identity refusals escaping the commit are translated to the typed
+    // conflict error (see translateIdentityCommitError) — the plan-time
+    // simulation is the EARLY surface for those refusals, not the only one.
+    const commitResolvedPlan = async (): Promise<MergedCounts> =>
       incremental === undefined ?
         await commitPlan(target, plan, expectedBaseVersion)
       : await commitIncrementalPlan(target, plan, {
@@ -2414,6 +2510,12 @@ async function resolveMerge<G extends GraphDef>(
           targetNodeVersions: staging.targetNodeVersions,
           targetEdgeSignatures: staging.targetEdgeSignatures,
         });
+    let merged: MergedCounts;
+    try {
+      merged = await commitResolvedPlan();
+    } catch (error) {
+      throw translateIdentityCommitError(error);
+    }
 
     // (10) assemble the report. The full provenance records are always built in the
     // plan; the in-memory index is gated by `provenance`, and on-graph persistence
@@ -3362,6 +3464,25 @@ function assertionTruthKey(assertion: LedgerAssertion): string {
 }
 
 /**
+ * The immutable identity of a ledger row — everything but `validTo`. Two
+ * captures of ONE row always agree on this key (retraction only sets
+ * `validTo`), so it is the right comparator for "is the target's row the same
+ * assertion the branch retracted": the branch's staged copy carries its own end
+ * timestamp while the target's current row carries none, which makes the
+ * complete {@link assertionTruthKey} unusable for that question.
+ */
+function assertionIdentityKey(assertion: LedgerAssertion): string {
+  return JSON.stringify([
+    assertion.relation,
+    assertion.a.kind,
+    assertion.a.id,
+    assertion.b.kind,
+    assertion.b.id,
+    assertion.validFrom,
+  ]);
+}
+
+/**
  * One assertion id identifies ONE complete truth — the invariant the import
  * coordinator enforces with `IDENTITY_IMPORT_ID_CONFLICT` inside the commit.
  * Validated here at plan time instead: intra-plan (two branches staging one
@@ -3403,6 +3524,108 @@ function assertOneIdOneTruth(
       );
     }
   }
+}
+
+/**
+ * In-transaction freshness of every planned assertion and retraction id,
+ * shared by BOTH commit modes. The plan validated each id against the target's
+ * ledger as of planning; a row committed (or ended) in the plan→commit window
+ * can claim a planned id — with endpoints entirely outside the guarded member
+ * universe — without moving the legacy base@V token, which fingerprints
+ * CURRENT assertions only. A planned NEW assertion refuses when its id
+ * identifies any different complete truth (ended rows included, exactly the
+ * set the applier compares); a planned RETRACTION refuses when the CURRENT row
+ * its id ends is no longer the truth the branch retracted.
+ */
+async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  plan: MergePlan<G>,
+): Promise<void> {
+  const plannedIds = [
+    ...plan.identityAssertions.map((assertion) => assertion.id),
+    ...plan.identityRetractions.map((retraction) => retraction.id),
+  ];
+  if (plannedIds.length === 0) return;
+  const storedById = await storeRuntime(target).identityAssertionRowsByIds(
+    plannedIds,
+    txBackend,
+  );
+  for (const assertion of plan.identityAssertions) {
+    const stored = storedById.get(assertion.id);
+    if (
+      stored !== undefined &&
+      assertionTruthKey(stored) !== assertionTruthKey(assertion)
+    ) {
+      throw new BaseVersionMismatchError(
+        "The merge validated its assertion ids as of planning, but a row identifying different truth under a planned id was committed before the commit transaction. Re-plan against the current target.",
+        { details: { assertionId: assertion.id } },
+      );
+    }
+  }
+  for (const retraction of plan.identityRetractions) {
+    const stored = storedById.get(retraction.id);
+    if (
+      stored !== undefined &&
+      stored.validTo === undefined &&
+      assertionIdentityKey(stored) !== assertionIdentityKey(retraction)
+    ) {
+      throw new BaseVersionMismatchError(
+        "The merge validated each planned retraction against the target row its id identified at planning, but that row's truth changed before the commit transaction. Re-plan against the current target.",
+        { details: { assertionId: retraction.id } },
+      );
+    }
+  }
+}
+
+/**
+ * Codes the identity service raises for ENVIRONMENT problems — a missing
+ * profile, a non-atomic backend, an undersized bind budget. These are not
+ * statements about identity truth, so they pass through untranslated; every
+ * other identity refusal escaping the commit IS a truth conflict.
+ */
+const IDENTITY_ENVIRONMENT_CODES: ReadonlySet<string> = new Set([
+  "IDENTITY_MERGE_REQUIRES_PROFILE",
+  "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+  "IDENTITY_REQUIRES_STATEMENT_EXECUTION",
+  "IDENTITY_BIND_BUDGET_TOO_SMALL",
+]);
+
+/**
+ * The commit-phase completeness backstop for identity invariants. The planner
+ * SIMULATES the identity applier's rules to refuse illegal plans early and
+ * typed — but a simulation can lag the applier, and an invariant it does not
+ * (yet) mirror would surface as the generic merge wrapper around the applier's
+ * refusal. Translating every identity-typed refusal that escapes the commit
+ * into the typed conflict error (cause preserved) gives NEW applier invariants
+ * a typed surface by construction instead of by hand-built plan-time twins.
+ *
+ * Typed {@link MergeError}s (the guards' own refusals) and non-identity
+ * failures pass through unchanged.
+ *
+ * @internal Exported for isolated verification of the translation contract.
+ */
+export function translateIdentityCommitError(error: unknown): unknown {
+  if (error instanceof MergeError) return error;
+  if (!(error instanceof TypeGraphError)) return error;
+  const detailCode = error.details["code"];
+  const identityCode =
+    typeof detailCode === "string" && detailCode.startsWith("IDENTITY_") ?
+      detailCode
+    : error.code.startsWith("IDENTITY_") ? error.code
+    : undefined;
+  const identityRefusal =
+    error instanceof IdentityContradictionError ||
+    (identityCode !== undefined &&
+      !IDENTITY_ENVIRONMENT_CODES.has(identityCode));
+  if (!identityRefusal) return error;
+  return new IdentityMergeConflictError(
+    `The identity applier refused the resolved plan inside the commit transaction — identity truth on the target is incompatible with the plan. Re-plan against the current target. Cause: ${describeCause(error)}`,
+    {
+      cause: error,
+      details: { ...(identityCode === undefined ? {} : { identityCode }) },
+    },
+  );
 }
 
 /** The plan's recorded resolutions as a source→canonical identity map. */
@@ -3507,28 +3730,11 @@ async function assertIdentityPeersStable<G extends GraphDef>(
       { details: {} },
     );
   }
-  // One-id-one-truth against TRANSACTION reads: a window assertion reusing a
-  // planned id (possibly with endpoints entirely outside the guarded member
-  // universe, invisible to the ledger slice above) would make the import's
-  // id-conflict check fail generically at apply.
-  if (plan.identityAssertions.length > 0) {
-    const storedById = await storeRuntime(target).identityAssertionRowsByIds(
-      plan.identityAssertions.map((assertion) => assertion.id),
-      txBackend,
-    );
-    for (const assertion of plan.identityAssertions) {
-      const stored = storedById.get(assertion.id);
-      if (
-        stored !== undefined &&
-        assertionTruthKey(stored) !== assertionTruthKey(assertion)
-      ) {
-        throw new BaseVersionMismatchError(
-          "mergeIncremental() validated its assertion ids as of planning, but a row identifying different truth under a planned id was committed before the commit transaction. Re-plan against the current target.",
-          { details: { assertionId: assertion.id } },
-        );
-      }
-    }
-  }
+  // One-id-one-truth against TRANSACTION reads: a window row claiming a
+  // planned assertion or retraction id (possibly with endpoints entirely
+  // outside the guarded member universe, invisible to the ledger slice above)
+  // would make the applier fail generically — or end unrelated truth.
+  await assertPlannedIdentityIdsFresh(target, txBackend, plan);
 
   // The decisive backstop: re-run the identity simulation on TRANSACTION
   // reads. Every fingerprint above can survive a window write that still
@@ -3539,7 +3745,7 @@ async function assertIdentityPeersStable<G extends GraphDef>(
   try {
     assertNoContradictoryIdentityClosure(
       plan.identityAssertions,
-      plan.identityRetractions,
+      plan.identityRetractions.map((retraction) => retraction.id),
       ledger,
       planCanonicalMap(plan),
       plan.retypeMap,

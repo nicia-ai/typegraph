@@ -236,3 +236,31 @@ the incremental transaction revalidates every planned id against
 transaction reads, so a window row reusing a planned id — even with
 endpoints entirely outside the guarded universe — refuses as the typed
 replan error instead of a generic id-conflict at apply.
+
+**Retractions carry their complete truth.** A merge plan's identity
+retractions are full expected rows, never bare ids: the planner validates
+each one against the row its id identifies on the target and SKIPS —
+reported as `identity:retraction-target-mismatch` in `dropped` — a
+retraction whose id the target reuses for different truth, instead of
+ending a row the branch never saw. The commit transaction revalidates the
+surviving retractions (and every planned assertion id) by id in BOTH
+commit modes; snapshot commits need this explicitly because the legacy
+base@V token fingerprints only CURRENT assertions, so an ended window row
+claiming a planned id would otherwise slip through to a generic apply
+failure. The raw staged assertions are also checked one-id-one-truth
+BEFORE the semantic survivor dedupe, closing the validity-only collision
+(same id, same pair, different `validFrom`) that dedupe used to collapse
+silently while the report listed the id as both applied and dropped.
+
+**The applier is the completeness backstop, typed.** Any identity refusal
+that still escapes the commit — an invariant the plan-time simulation
+does not (yet) mirror — is translated into the typed
+`IdentityMergeConflictError` with the applier's error as its cause,
+instead of surfacing as the generic merge wrapper. Identity-typed
+environment errors (missing profile, non-atomic backend) pass through
+unchanged. A property-based law suite additionally quantifies the merge
+contract over randomized identity histories on both backends: refusals
+are always typed, a committed ledger is internally consistent, pre-merge
+truth survives unless a branch retracted it or deleted an endpoint, and
+the report never lists an id as both dropped-as-duplicate and newly
+current.

@@ -14,7 +14,11 @@ export {
 } from "../core/define-graph";
 export { defineNode } from "../core/node";
 export type { EdgeId, JsonValue, NodeId, NodeType } from "../core/types";
-export { TypeGraphError, type TypeGraphErrorOptions } from "../errors";
+export {
+  IdentityContradictionError,
+  TypeGraphError,
+  type TypeGraphErrorOptions,
+} from "../errors";
 export type { IdentityTransferAssertion } from "../identity/service";
 export { exportGraphStream } from "../interchange/export";
 export { importGraphStream } from "../interchange/import";

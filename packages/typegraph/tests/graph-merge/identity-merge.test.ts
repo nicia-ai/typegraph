@@ -9,6 +9,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import {
+  ConfigurationError,
+  IdentityContradictionError,
+} from "../../src/errors";
 import { branch } from "../../src/graph-merge/branch";
 import {
   BaseVersionMismatchError,
@@ -21,6 +25,7 @@ import {
   merge,
   planIdentityChanges,
   REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
+  translateIdentityCommitError,
 } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { StagingSet } from "../../src/graph-merge/staging";
@@ -158,9 +163,11 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
 
     const forward = planIdentityChanges(
       await stageBranches(store, [branchA, branchB]),
+      new Map(),
     );
     const reverse = planIdentityChanges(
       await stageBranches(store, [branchB, branchA]),
+      new Map(),
     );
     expect(reverse).toEqual(forward);
     expect(forward.assertions).toEqual([
@@ -719,6 +726,7 @@ describe("planIdentityChanges retract/reassert rules", () => {
           [{ branchId: BRANCH_B, assertion: reasserted }],
           [{ branchId: BRANCH_A, assertion: inherited }],
         ),
+        new Map(),
       ),
     ).toThrow(IdentityMergeConflictError);
   });
@@ -734,9 +742,12 @@ describe("planIdentityChanges retract/reassert rules", () => {
           { branchId: BRANCH_B, assertion: inherited },
         ],
       ),
+      new Map(),
     );
 
-    expect(planned.retractions).toEqual([inherited.id]);
+    expect(planned.retractions.map((entry) => entry.id)).toEqual([
+      inherited.id,
+    ]);
     expect(planned.assertions.map((entry) => entry.id)).toEqual([
       reasserted.id,
     ]);
@@ -749,9 +760,12 @@ describe("planIdentityChanges retract/reassert rules", () => {
         [{ branchId: BRANCH_A, assertion: reasserted }],
         [{ branchId: BRANCH_A, assertion: inherited }],
       ),
+      new Map(),
     );
 
-    expect(planned.retractions).toEqual([inherited.id]);
+    expect(planned.retractions.map((entry) => entry.id)).toEqual([
+      inherited.id,
+    ]);
     expect(planned.assertions.map((entry) => entry.id)).toEqual([
       reasserted.id,
     ]);
@@ -777,12 +791,14 @@ describe("planIdentityChanges survivor tie-break", () => {
         { branchId: BRANCH_A, assertion: shortId },
         { branchId: BRANCH_B, assertion: longId },
       ]),
+      new Map(),
     );
     const reverse = planIdentityChanges(
       stagingWithIdentityChanges([
         { branchId: BRANCH_B, assertion: longId },
         { branchId: BRANCH_A, assertion: shortId },
       ]),
+      new Map(),
     );
 
     expect(forward.assertions.map((entry) => entry.id)).toEqual(["z10"]);
@@ -884,5 +900,42 @@ describe("plan-time derived identity contradictions", () => {
         [],
       ),
     ).not.toThrow();
+  });
+});
+
+describe("translateIdentityCommitError", () => {
+  it("translates identity refusals into the typed conflict, cause preserved", () => {
+    const contradiction = new IdentityContradictionError({
+      operation: "import",
+      a: { kind: "Person", id: "a" },
+      b: { kind: "Person", id: "b" },
+      reason: "different-assertion",
+    });
+    const translated = translateIdentityCommitError(contradiction);
+    expect(translated).toBeInstanceOf(IdentityMergeConflictError);
+    expect((translated as Error).cause).toBe(contradiction);
+
+    const importConflict = new ConfigurationError(
+      "Identity assertion id x already identifies different truth.",
+      { code: "IDENTITY_IMPORT_ID_CONFLICT" },
+    );
+    expect(translateIdentityCommitError(importConflict)).toBeInstanceOf(
+      IdentityMergeConflictError,
+    );
+  });
+
+  it("passes through merge errors, environment codes, and foreign failures", () => {
+    // A typed merge refusal (a guard's own error) must keep its exact type —
+    // wrapping it would strip the replan signal.
+    const alreadyTyped = new BaseVersionMismatchError("window drift", {});
+    expect(translateIdentityCommitError(alreadyTyped)).toBe(alreadyTyped);
+    // Environment problems are not statements about identity truth.
+    const environment = new ConfigurationError(
+      "Cannot apply identity merge changes to an identity-disabled graph.",
+      { code: "IDENTITY_MERGE_REQUIRES_PROFILE" },
+    );
+    expect(translateIdentityCommitError(environment)).toBe(environment);
+    const foreign = new Error("disk full");
+    expect(translateIdentityCommitError(foreign)).toBe(foreign);
   });
 });
