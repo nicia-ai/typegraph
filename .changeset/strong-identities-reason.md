@@ -219,3 +219,10 @@ lists — so a plan that deletes an identity bridge and asserts its former
 ends `different` commits instead of being falsely rejected. Snapshot class
 members still join the simulation universe (unlinked) so fold links at
 unprobed ids keep participating.
+
+**The transaction re-derives legality.** The incremental commit guard's
+final step re-runs the full identity simulation on transaction reads —
+fresh deletion-filtered ledger, snapshot members, fold unions — so drift
+that leaves every fingerprint unchanged (a redundant `same(a, b)` that
+becomes the surviving link once the plan removes the pair's bridge) is
+refused as the typed replan error instead of failing generically at apply.

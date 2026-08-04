@@ -2345,18 +2345,9 @@ async function resolveMerge<G extends GraphDef>(
         plan,
         target.graph.identity?.sameIdAcrossKinds ?? "ignore",
       );
-      // Rebuild the canonical map from the plan's recorded resolutions —
-      // base assertion endpoints must be judged at their post-merge identity,
-      // exactly as the in-plan check judged them.
-      const canonicalIdentityOf = new Map<MergeKey, MergeKey>();
-      for (const resolution of plan.resolutions) {
-        for (const memberId of resolution.memberIds) {
-          canonicalIdentityOf.set(
-            mergeKey(resolution.kind, memberId),
-            mergeKey(resolution.kind, resolution.canonicalId),
-          );
-        }
-      }
+      // Base assertion endpoints must be judged at their post-merge
+      // identity, exactly as the in-plan check judged them.
+      const canonicalIdentityOf = planCanonicalMap(plan);
       assertNoContradictoryIdentityClosure(
         plan.identityAssertions,
         plan.identityRetractions,
@@ -3343,16 +3334,37 @@ export function encodeClassFingerprint(
   ]);
 }
 
+/** The plan's recorded resolutions as a source→canonical identity map. */
+function planCanonicalMap<G extends GraphDef>(
+  plan: MergePlan<G>,
+): ReadonlyMap<MergeKey, MergeKey> {
+  const canonicalIdentityOf = new Map<MergeKey, MergeKey>();
+  for (const resolution of plan.resolutions) {
+    for (const memberId of resolution.memberIds) {
+      canonicalIdentityOf.set(
+        mergeKey(resolution.kind, memberId),
+        mergeKey(resolution.kind, resolution.canonicalId),
+      );
+    }
+  }
+  return canonicalIdentityOf;
+}
+
 /**
- * Fold-peer TOCTOU guard: proves the live same-id peer set the plan-time
- * contradiction simulation observed is still the peer set inside the commit
- * transaction. Drift is refused as the same typed replan error the other
- * window guards raise.
+ * Fold-peer TOCTOU guard: proves the identity state the plan-time simulation
+ * validated still holds inside the commit transaction — direct peers,
+ * per-seed class/liveness fingerprints, the negative ledger, and finally the
+ * FULL simulation re-run on transaction reads (drift that leaves every
+ * fingerprint unchanged, like a redundant `same(a, b)` that becomes decisive
+ * once the plan removes the pair's bridge, can only be caught by
+ * re-deriving legality itself). Drift is refused as the same typed replan
+ * error the other window guards raise.
  */
 async function assertIdentityPeersStable<G extends GraphDef>(
   target: Store<G>,
   txBackend: TransactionBackend,
   guard: IncrementalCommitGuard<G>,
+  plan: MergePlan<G>,
 ): Promise<void> {
   const probe = guard.identityPeerProbe;
   if (probe === undefined) return;
@@ -3390,13 +3402,14 @@ async function assertIdentityPeersStable<G extends GraphDef>(
   // identity class through ANOTHER member without touching the seed's direct
   // same-id peers — and a seed can DISAPPEAR without changing its
   // self-coalesced class, so liveness is part of the fingerprint.
-  const { fingerprints: liveFingerprints } = await snapshotIdentityClasses(
-    target,
-    probe.seeds,
-    new Set(live.map((peer) => mergeKey(peer.kind, peer.id))),
-    probe.plannedDeletions,
-    txBackend,
-  );
+  const { fingerprints: liveFingerprints, groups: liveGroups } =
+    await snapshotIdentityClasses(
+      target,
+      probe.seeds,
+      new Set(live.map((peer) => mergeKey(peer.kind, peer.id))),
+      probe.plannedDeletions,
+      txBackend,
+    );
   const drifted = [...probe.classFingerprints]
     .filter(([key, fingerprint]) => liveFingerprints.get(key) !== fingerprint)
     .map(([key]) => key)
@@ -3420,6 +3433,32 @@ async function assertIdentityPeersStable<G extends GraphDef>(
     throw new BaseVersionMismatchError(
       "mergeIncremental() validated identity against the `different` assertions visible at planning, but that ledger changed before the commit transaction. Committing the plan could contradict identity truth it never validated.",
       { details: {} },
+    );
+  }
+  // The decisive backstop: re-run the identity simulation on TRANSACTION
+  // reads. Every fingerprint above can survive a window write that still
+  // changes post-plan legality — the canonical example is a `same(a, b)`
+  // added while a and b are already transitively connected (no class or
+  // ledger-slice fingerprint moves) that becomes the surviving link once the
+  // plan removes their bridge and asserts them different.
+  try {
+    assertNoContradictoryIdentityClosure(
+      plan.identityAssertions,
+      plan.identityRetractions,
+      ledger,
+      planCanonicalMap(plan),
+      plan.retypeMap,
+      {
+        sameIdAcrossKinds: probe.profile,
+        areDisjoint: (left, right) => target.registry.areDisjoint(left, right),
+      },
+      [...probe.seeds, ...liveGroups.flat()],
+    );
+  } catch (error) {
+    if (!(error instanceof IdentityMergeConflictError)) throw error;
+    throw new BaseVersionMismatchError(
+      "mergeIncremental() validated identity as of planning, but identity truth committed before the commit transaction invalidates the plan. Re-plan against the current target.",
+      { details: { conflict: error.message } },
     );
   }
 }
@@ -3751,7 +3790,12 @@ async function commitIncrementalPlan<G extends GraphDef>(
       await assertBaseResolutionStable(tx as unknown as BaseLookupStore, guard);
       // Fold-peer TOCTOU guard: the bare-id peer probe also ran outside this
       // transaction; repeat it on the tx snapshot and refuse on drift.
-      await assertIdentityPeersStable(target, transactionBackend(tx), guard);
+      await assertIdentityPeersStable(
+        target,
+        transactionBackend(tx),
+        guard,
+        plan,
+      );
       // Inherited-row TOCTOU guard: refuse if a committed node OR edge the plan
       // writes or deletes changed since it was observed at plan time (lost update).
       await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);

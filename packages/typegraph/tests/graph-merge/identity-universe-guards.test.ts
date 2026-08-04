@@ -910,6 +910,90 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     ).toBe(true);
   });
 
+  it.each([
+    ["deleting the bridge node", "delete" as const],
+    ["retracting the bridge assertions", "retract" as const],
+  ])(
+    "refuses a surviving window same-assertion decisive after %s",
+    async (_label, mode) => {
+      // A window same(a, b) added while a and b are already transitively
+      // connected changes NO fingerprint — the class members are identical
+      // and the different-slice is empty. It becomes the decisive surviving
+      // link once the plan removes the bridge and asserts a, b different;
+      // only re-running the simulation on transaction reads can see it.
+      const [forkPoint] = await createStoreWithSchema(
+        anchoredIgnoreGraph,
+        await makeBackend(),
+      );
+      const a = await forkPoint.nodes.Anchor.create({ name: "A" }, { id: "a" });
+      const bridge = await forkPoint.nodes.Anchor.create(
+        { name: "Bridge" },
+        { id: "bridge" },
+      );
+      const b = await forkPoint.nodes.Anchor.create({ name: "B" }, { id: "b" });
+      const first = await forkPoint.identity.assertSame(a, bridge);
+      const second = await forkPoint.identity.assertSame(bridge, b);
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), {
+          id: asBranchId("target-clone"),
+        }),
+      ).store;
+
+      const splitBranch = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      if (mode === "delete") {
+        await splitBranch.store.nodes.Anchor.delete("bridge" as never);
+      } else {
+        await splitBranch.store.identity.retractAssertion(first.assertion.id);
+        await splitBranch.store.identity.retractAssertion(second.assertion.id);
+      }
+      await splitBranch.store.identity.assertDifferent(
+        { kind: "Anchor", id: "a" },
+        { kind: "Anchor", id: "b" },
+      );
+
+      const original = target.transaction.bind(target);
+      let injected = false;
+      (target as { transaction: unknown }).transaction = async (
+        fn: unknown,
+        options: unknown,
+      ) => {
+        if (!injected) {
+          injected = true;
+          await target.identity.assertSame(
+            { kind: "Anchor", id: "a" },
+            { kind: "Anchor", id: "b" },
+          );
+        }
+        return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+      };
+      try {
+        const result = await mergeIncremental({
+          forkPoint,
+          target,
+          branches: [splitBranch],
+          options: { branchOrder: [BRANCH_A] },
+        });
+        expect(isErr(result)).toBe(true);
+        if (isOk(result)) throw new Error("Expected typed replan refusal");
+        expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+      } finally {
+        (target as { transaction: unknown }).transaction = original;
+      }
+      // A rerun sees the surviving same at PLAN time and refuses typed.
+      const rerun = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [splitBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(rerun)).toBe(true);
+      if (isOk(rerun)) throw new Error("Expected identity merge conflict");
+      expect(rerun.error).toBeInstanceOf(IdentityMergeConflictError);
+    },
+  );
+
   it("tolerates a window peer at an id canonicalization dropped", async () => {
     // Person:a-keep and Person:z-drop reconcile into a-keep, so z-drop never
     // reaches the committed plan. A window Robot:z-drop is therefore an
