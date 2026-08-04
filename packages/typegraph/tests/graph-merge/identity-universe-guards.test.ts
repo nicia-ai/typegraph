@@ -34,6 +34,7 @@ import {
 } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
+import { importGraph } from "../../src/interchange";
 import { storeRuntime } from "../../src/store/runtime-port";
 import { backendMatrix } from "./test-utils";
 
@@ -993,6 +994,171 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
       expect(rerun.error).toBeInstanceOf(IdentityMergeConflictError);
     },
   );
+
+  const IDENTITY_PROFILE = "typegraph-identity-v1" as const;
+
+  function assertionDocument(
+    id: string,
+    a: string,
+    b: string,
+  ): Parameters<typeof importGraph>[1] {
+    const refA = { kind: "Anchor", id: a };
+    const refB = { kind: "Anchor", id: b };
+    const [left, right] = a < b ? [refA, refB] : [refB, refA];
+    return {
+      formatVersion: "2.0",
+      exportedAt: "2024-01-01T00:00:00.000Z",
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        assertions: [
+          {
+            id,
+            relation: "same",
+            a: left,
+            b: right,
+            validFrom: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    };
+  }
+
+  async function anchoredForkPoint() {
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredIgnoreGraph,
+      await makeBackend(),
+    );
+    for (const id of ["a", "b", "c", "d"]) {
+      await forkPoint.nodes.Anchor.create({ name: id }, { id });
+    }
+    return forkPoint;
+  }
+
+  it("rejects one assertion id staged for two truths at plan time", async () => {
+    const forkPoint = await anchoredForkPoint();
+    const branchA = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchB = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    );
+    const first = await importGraph(
+      branchA.store,
+      assertionDocument("shared-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    const second = await importGraph(
+      branchB.store,
+      assertionDocument("shared-id", "c", "d"),
+      { onConflict: "skip" },
+    );
+    expect(first.success && second.success).toBe(true);
+
+    const result = await merge(forkPoint, [branchA, branchB], {});
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected identity merge conflict");
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+  });
+
+  it("rejects a staged id already identifying different target truth", async () => {
+    const forkPoint = await anchoredForkPoint();
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    const imported = await importGraph(
+      target,
+      assertionDocument("shared-id", "c", "d"),
+      { onConflict: "skip" },
+    );
+    expect(imported.success).toBe(true);
+    const sameBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchImport = await importGraph(
+      sameBranch.store,
+      assertionDocument("shared-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(branchImport.success).toBe(true);
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [sameBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected identity merge conflict");
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+  });
+
+  it("refuses a window assertion reusing a planned id outside the universe", async () => {
+    const forkPoint = await anchoredForkPoint();
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    const sameBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchImport = await importGraph(
+      sameBranch.store,
+      assertionDocument("shared-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(branchImport.success).toBe(true);
+
+    // The window row reuses the planned id with endpoints c, d — entirely
+    // outside the plan's member universe, so no ledger-slice or class
+    // fingerprint sees it; only the by-id revalidation can.
+    const original = target.transaction.bind(target);
+    let injected = false;
+    (target as { transaction: unknown }).transaction = async (
+      fn: unknown,
+      options: unknown,
+    ) => {
+      if (!injected) {
+        injected = true;
+        const windowImport = await importGraph(
+          target,
+          assertionDocument("shared-id", "c", "d"),
+          { onConflict: "skip" },
+        );
+        if (!windowImport.success) throw new Error("window import failed");
+      }
+      return (original as (f: unknown, o: unknown) => unknown)(fn, options);
+    };
+    try {
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [sameBranch],
+        options: { branchOrder: [BRANCH_A] },
+      });
+      expect(isErr(result)).toBe(true);
+      if (isOk(result)) throw new Error("Expected typed replan refusal");
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    } finally {
+      (target as { transaction: unknown }).transaction = original;
+    }
+    // A rerun sees the stored row at PLAN time and refuses typed.
+    const rerun = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [sameBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    expect(isErr(rerun)).toBe(true);
+    if (isOk(rerun)) throw new Error("Expected identity merge conflict");
+    expect(rerun.error).toBeInstanceOf(IdentityMergeConflictError);
+  });
 
   it("tolerates a window peer at an id canonicalization dropped", async () => {
     // Person:a-keep and Person:z-drop reconcile into a-keep, so z-drop never

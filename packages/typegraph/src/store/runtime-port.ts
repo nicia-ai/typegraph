@@ -111,6 +111,28 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     target?: GraphBackend | TransactionBackend,
   ) => Promise<readonly Readonly<{ kind: string; id: string }>[]>;
   /**
+   * Every stored assertion row (ended rows included) for the given assertion
+   * ids — the rows the import coordinator's id-conflict check compares
+   * against. Used by graph-merge to validate the one-id-one-truth invariant
+   * at plan time and inside the commit transaction.
+   */
+  identityAssertionRowsByIds: (
+    ids: readonly string[],
+    target?: GraphBackend | TransactionBackend,
+  ) => Promise<
+    ReadonlyMap<
+      string,
+      Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{ kind: string; id: string }>;
+        b: Readonly<{ kind: string; id: string }>;
+        validFrom: string;
+        validTo?: string | undefined;
+      }>
+    >
+  >;
+  /**
    * The CURRENT structural identity class (materialized closure: folds plus
    * asserted links) of each reference, keyed by `kind|id`. A missing node
    * coalesces to its singleton. Used by graph-merge's fold-peer window guard

@@ -2326,13 +2326,27 @@ async function resolveMerge<G extends GraphDef>(
 
     // The commit guard's baseline must be a VALIDATED state: re-probe the
     // live peers and snapshot the final seeds' classes AFTER planning, then
-    // re-run the identity simulation against that exact snapshot (the
-    // snapshot's classes union in as pre-linked groups). A class change in
-    // the plan→snapshot window therefore either fails this recheck as a
-    // typed plan-time conflict, or matches the plan; either way the
+    // re-run the identity simulation against that exact snapshot — its
+    // members join the universe UNLINKED, with connectivity rebuilt from the
+    // deletion-filtered fresh ledger and the checker's fold unions. A class
+    // change in the plan→snapshot window therefore either fails this recheck
+    // as a typed plan-time conflict, or matches the plan; either way the
     // transaction guard never baselines drift the plan did not validate.
     // The probe ranges only over ids the final plan folds on — a window row
     // at an id canonicalization dropped is an unrelated target advance.
+    // One-id-one-truth, for BOTH commit modes: two branches staging one id
+    // for different truths, or a staged id already identifying different
+    // truth in the target (ended rows included), used to surface only inside
+    // the commit as a generic wrap of IDENTITY_IMPORT_ID_CONFLICT.
+    if (plan.identityAssertions.length > 0) {
+      assertOneIdOneTruth(
+        plan.identityAssertions,
+        await storeRuntime(target).identityAssertionRowsByIds(
+          plan.identityAssertions.map((assertion) => assertion.id),
+        ),
+      );
+    }
+
     let identityGuard:
       NonNullable<IncrementalCommitGuard<G>["identityPeerProbe"]> | undefined;
     if (identityProbeIds !== undefined && incremental !== undefined) {
@@ -3334,7 +3348,65 @@ export function encodeClassFingerprint(
   ]);
 }
 
+/** The complete truth an assertion id identifies, as a comparable string. */
+function assertionTruthKey(assertion: LedgerAssertion): string {
+  return JSON.stringify([
+    assertion.relation,
+    assertion.a.kind,
+    assertion.a.id,
+    assertion.b.kind,
+    assertion.b.id,
+    assertion.validFrom,
+    assertion.validTo ?? null,
+  ]);
+}
+
+/**
+ * One assertion id identifies ONE complete truth — the invariant the import
+ * coordinator enforces with `IDENTITY_IMPORT_ID_CONFLICT` inside the commit.
+ * Validated here at plan time instead: intra-plan (two branches staging one
+ * id for different truths) and against every stored row for those ids —
+ * ended rows included, exactly the set the importer compares. An exact match
+ * is fine (the importer skips it as already applied).
+ */
+function assertOneIdOneTruth(
+  planned: readonly IdentityTransferAssertion[],
+  storedById: ReadonlyMap<string, LedgerAssertion>,
+): void {
+  const plannedById = new Map<string, IdentityTransferAssertion>();
+  for (const assertion of planned) {
+    const previous = plannedById.get(assertion.id);
+    if (
+      previous !== undefined &&
+      assertionTruthKey(previous) !== assertionTruthKey(assertion)
+    ) {
+      throw new IdentityMergeConflictError(
+        "One assertion id was staged for two different identity truths.",
+        {
+          details: {
+            assertionId: assertion.id,
+            first: previous,
+            second: assertion,
+          },
+        },
+      );
+    }
+    plannedById.set(assertion.id, assertion);
+    const stored = storedById.get(assertion.id);
+    if (
+      stored !== undefined &&
+      assertionTruthKey(stored) !== assertionTruthKey(assertion)
+    ) {
+      throw new IdentityMergeConflictError(
+        "A staged assertion id already identifies different truth in the target ledger.",
+        { details: { assertionId: assertion.id, staged: assertion, stored } },
+      );
+    }
+  }
+}
+
 /** The plan's recorded resolutions as a source→canonical identity map. */
+
 function planCanonicalMap<G extends GraphDef>(
   plan: MergePlan<G>,
 ): ReadonlyMap<MergeKey, MergeKey> {
@@ -3435,6 +3507,29 @@ async function assertIdentityPeersStable<G extends GraphDef>(
       { details: {} },
     );
   }
+  // One-id-one-truth against TRANSACTION reads: a window assertion reusing a
+  // planned id (possibly with endpoints entirely outside the guarded member
+  // universe, invisible to the ledger slice above) would make the import's
+  // id-conflict check fail generically at apply.
+  if (plan.identityAssertions.length > 0) {
+    const storedById = await storeRuntime(target).identityAssertionRowsByIds(
+      plan.identityAssertions.map((assertion) => assertion.id),
+      txBackend,
+    );
+    for (const assertion of plan.identityAssertions) {
+      const stored = storedById.get(assertion.id);
+      if (
+        stored !== undefined &&
+        assertionTruthKey(stored) !== assertionTruthKey(assertion)
+      ) {
+        throw new BaseVersionMismatchError(
+          "mergeIncremental() validated its assertion ids as of planning, but a row identifying different truth under a planned id was committed before the commit transaction. Re-plan against the current target.",
+          { details: { assertionId: assertion.id } },
+        );
+      }
+    }
+  }
+
   // The decisive backstop: re-run the identity simulation on TRANSACTION
   // reads. Every fingerprint above can survive a window write that still
   // changes post-plan legality — the canonical example is a `same(a, b)`

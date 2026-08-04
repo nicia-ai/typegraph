@@ -179,10 +179,11 @@ error, and a rerun surfaces the contradiction as a plan-time
 
 **A validated baseline, exactly.** The incremental identity guard now
 re-probes and snapshots the final seeds' classes AFTER planning and re-runs
-the identity simulation against that exact snapshot (its classes union in
-as pre-linked groups), so drift landing between planning and the snapshot
-fails as a typed plan-time conflict instead of becoming the guard's
-baseline. Fingerprints are structurally encoded (injective for ids
+the identity simulation against that exact snapshot — its members join the
+simulation universe unlinked, with connectivity rebuilt from the
+deletion-filtered fresh ledger and fold unions — so drift landing between
+planning and the snapshot fails as a typed plan-time conflict instead of
+becoming the guard's baseline. Fingerprints are structurally encoded (injective for ids
 containing any character) and carry a liveness bit, so a planned assertion
 endpoint deleted in the commit window is refused as the typed replan error
 rather than failing generically.
@@ -226,3 +227,12 @@ fresh deletion-filtered ledger, snapshot members, fold unions — so drift
 that leaves every fingerprint unchanged (a redundant `same(a, b)` that
 becomes the surviving link once the plan removes the pair's bridge) is
 refused as the typed replan error instead of failing generically at apply.
+
+**One assertion id, one truth — validated where it can be typed.** The
+planner refuses one id staged for two different complete truths and any
+staged id already identifying different truth among the target's stored
+rows (ended included, exactly the set the import coordinator compares);
+the incremental transaction revalidates every planned id against
+transaction reads, so a window row reusing a planned id — even with
+endpoints entirely outside the guarded universe — refuses as the typed
+replan error instead of a generic id-conflict at apply.

@@ -93,6 +93,7 @@ import {
   type IdentityTransferAssertion,
   importIdentityAssertionsIntoTarget,
   liveNodeKindsSharingIds,
+  loadAssertionsByIds,
   loadCurrentStructuralClasses,
   lockIdentityGraph,
   readIdentityAssertionsForInterchange,
@@ -974,6 +975,29 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           for (const kind of kinds) peers.push({ kind, id });
         }
         return peers;
+      },
+      identityAssertionRowsByIds: async (ids, target) => {
+        const backend = target ?? this.#baseBackend;
+        const ctx = this.#identityContext(backend);
+        const rows = await loadAssertionsByIds(
+          backend,
+          ctx.schema,
+          this.graphId,
+          ids,
+        );
+        return new Map(
+          [...rows].map(([id, row]) => [
+            id,
+            {
+              id: row.id,
+              relation: row.rel,
+              a: { kind: row.a_kind, id: row.a_id },
+              b: { kind: row.b_kind, id: row.b_id },
+              validFrom: row.valid_from,
+              ...(row.valid_to === undefined ? {} : { validTo: row.valid_to }),
+            },
+          ]),
+        );
       },
       structuralIdentityClasses: async (references, target) => {
         const backend = target ?? this.#baseBackend;

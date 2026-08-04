@@ -1487,7 +1487,7 @@ async function insertAssertionRows(
   }
 }
 
-async function loadAssertionsByIds(
+export async function loadAssertionsByIds(
   target: Backend,
   schema: SqlSchema,
   graphId: string,
