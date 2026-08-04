@@ -264,3 +264,38 @@ are always typed, a committed ledger is internally consistent, pre-merge
 truth survives unless a branch retracted it or deleted an endpoint, and
 the report never lists an id as both dropped-as-duplicate and newly
 current.
+
+**Truth replacement is visible to the diff.** The identity diff compares
+ids present on both sides by COMPLETE truth, not presence: a branch that
+hard-deletes an assertion's endpoint (physically removing the row),
+recreates it, and imports the same id for different truth used to diff as
+empty — the merge silently kept the base truth the branch had replaced.
+The replacement now stages as a retraction plus a new assertion, and
+because the applier never reuses an ended row's id, the merge refuses
+typed instead of silently preserving either side.
+
+**Identity semantics extracted; translation at the applier boundary.**
+The plan-time identity derivation, contradiction simulation, and commit
+guards now live in `graph-merge/merge-identity.ts` with a one-directional
+dependency from the merge orchestrator (functions take a structural
+`IdentityPlanSlice`, never the full plan type). The typed-conflict
+translation wraps exactly the identity-apply call inside the commit, so
+it also classifies refusals whose identity code lives in nested
+validation issues (`details.issues[].code`) and — because only identity
+rows are applied at that boundary — a missing-node error there can only
+mean a vanished assertion endpoint, which now translates too instead of
+surfacing as the generic wrapper. Exact-duplicate staging (two branches
+importing one identical row) no longer reports the id as dropped while
+applying it.
+
+**Five laws, two profiles.** The property suite now also holds every
+successful merge to BRANCH-EFFECT accounting — every truth a branch holds
+is applied with equal complete truth, enumerated as dropped, retracted,
+or invalidated by an endpoint deletion; silent loss is a law violation —
+and runs the whole law set under both identity profiles, with
+hard-delete/recreate and same-id fold peers in the operation alphabet and
+the truth-replacement scenario pinned as a deterministic example. The
+generator skips only expected semantic refusals (contradiction,
+missing node); any other error fails the run rather than silently
+emptying the histories. Independent-target merge semantics are now
+documented in the identity guide.

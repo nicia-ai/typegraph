@@ -260,6 +260,34 @@ cleanly. This is mechanical truth propagation, not semantic entity
 reconciliation. See [`IdentityMergeConflictError`](/errors/#identitymergeconflicterror)
 for the exact `merge()` signature and how to catch it.
 
+### Independent targets and assertion IDs
+
+`merge()` and `mergeIncremental()` accept a target that does not descend from
+the branches' fork point, so a branch's assertion IDs can meet a ledger that
+assigned those IDs independently. The contract is by ID, on complete truth:
+
+- **One assertion ID, one complete truth.** A planned assertion whose ID the
+  target's ledger — ended rows included — already binds to a different
+  complete truth (relation, endpoints, validity) refuses at plan time as
+  `IdentityMergeConflictError`. An exact match is applied idempotently.
+- **Retractions carry the truth they retract.** A branch retraction ends the
+  target's current row for its ID only when that row *is* the truth the
+  branch retracted. When the target reuses the ID for different truth, the
+  retraction is skipped and reported in `MergeReport.dropped` as
+  `identity:retraction-target-mismatch` — the branch's own assertion is
+  already absent from the target, and ending the target's unrelated row
+  would delete truth the branch never saw.
+- **Truth replacement is a conflict, not a silent keep.** Within one lineage
+  a branch can legally rebind an assertion ID by hard-deleting an endpoint
+  (which physically removes the row) and importing the ID for different
+  truth. The diff stages that replacement as a retraction plus a new
+  assertion; because the applier never reuses an ended row's ID, the merge
+  refuses typed rather than silently keeping either side's truth.
+- **The commit re-verifies IDs.** Both commit modes re-read every planned
+  assertion and retraction ID inside the commit transaction and refuse
+  plan→commit drift as `BaseVersionMismatchError` — re-plan against the
+  current target and retry.
+
 ## Operational notes
 
 On PostgreSQL, every identity-affecting node write on an identity-enabled graph

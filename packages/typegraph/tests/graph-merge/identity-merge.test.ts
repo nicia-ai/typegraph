@@ -12,6 +12,8 @@ import { z } from "zod";
 import {
   ConfigurationError,
   IdentityContradictionError,
+  NodeNotFoundError,
+  ValidationError,
 } from "../../src/errors";
 import { branch } from "../../src/graph-merge/branch";
 import {
@@ -19,14 +21,14 @@ import {
   IdentityMergeConflictError,
   MERGE_ERROR_CODES,
 } from "../../src/graph-merge/errors";
+import { merge } from "../../src/graph-merge/merge";
 import {
   assertNoContradictoryIdentityClosure,
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
-  merge,
   planIdentityChanges,
   REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
   translateIdentityCommitError,
-} from "../../src/graph-merge/merge";
+} from "../../src/graph-merge/merge-identity";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { StagingSet } from "../../src/graph-merge/staging";
 import { stageBranches } from "../../src/graph-merge/staging";
@@ -920,6 +922,28 @@ describe("translateIdentityCommitError", () => {
       { code: "IDENTITY_IMPORT_ID_CONFLICT" },
     );
     expect(translateIdentityCommitError(importConflict)).toBeInstanceOf(
+      IdentityMergeConflictError,
+    );
+
+    // The transfer validator reports per-assertion issues — the identity code
+    // lives in details.issues[].code, never at the top level.
+    const validation = new ValidationError("Identity transfer failed.", {
+      issues: [
+        {
+          path: "identity.assertions[0]",
+          message: "future validFrom",
+          code: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
+        },
+      ],
+    });
+    expect(translateIdentityCommitError(validation)).toBeInstanceOf(
+      IdentityMergeConflictError,
+    );
+
+    // At the identity-applier boundary a missing node can only be a vanished
+    // assertion endpoint.
+    const missingEndpoint = new NodeNotFoundError("Person", "gone");
+    expect(translateIdentityCommitError(missingEndpoint)).toBeInstanceOf(
       IdentityMergeConflictError,
     );
   });

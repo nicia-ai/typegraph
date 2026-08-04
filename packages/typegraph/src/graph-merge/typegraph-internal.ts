@@ -16,6 +16,7 @@ export { defineNode } from "../core/node";
 export type { EdgeId, JsonValue, NodeId, NodeType } from "../core/types";
 export {
   IdentityContradictionError,
+  NodeNotFoundError,
   TypeGraphError,
   type TypeGraphErrorOptions,
 } from "../errors";

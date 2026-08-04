@@ -30,6 +30,7 @@ import {
   edgeStateSignature,
   parseRowProps,
 } from "./canonical-props";
+import { assertionTruthKey } from "./merge-identity";
 import { compareStrings, type MergeKey, mergeKey } from "./node-key";
 import type {
   EdgeId,
@@ -162,10 +163,11 @@ export type StateDiff = Readonly<{
   /**
    * Identity-ledger delta: assertions current in the fork but not the base
    * (`new`), and assertions current in the base but no longer in the fork
-   * (`retracted`). Both carry the ledger's own
-   * {@link IdentityTransferAssertion} shape — the same records the merge commit
-   * hands back to the identity import — so the diff never re-declares (and can
-   * never drift from) the assertion contract.
+   * (`retracted`). An id current on BOTH sides with DIFFERENT complete truth
+   * (a hard-delete/recreate replacement) appears in both lists. Entries carry
+   * the ledger's own {@link IdentityTransferAssertion} shape — the same
+   * records the merge commit hands back to the identity import — so the diff
+   * never re-declares (and can never drift from) the assertion contract.
    */
   identity: Readonly<{
     new: readonly IdentityTransferAssertion[];
@@ -540,11 +542,31 @@ export async function diffAgainstBase<G extends GraphDef>(
       deleted: deletedEdges.sort((left, right) => byId(left, right)),
     },
     identity: {
+      // Ids present on BOTH sides are compared by COMPLETE truth, not
+      // presence: a fork can hard-delete an assertion's endpoint (physically
+      // removing the row), recreate it, and legally import the same id for
+      // different truth. Presence-only comparison would diff that replacement
+      // as empty and the merge would silently keep the base truth. A shared
+      // id with changed truth surfaces as BOTH retracted (the base row) and
+      // new (the fork row), so planning sees the replacement and can refuse
+      // unsupported id reuse as a typed conflict.
       new: forkIdentity
-        .filter((assertion) => !baseIdentityById.has(assertion.id))
+        .filter((assertion) => {
+          const base = baseIdentityById.get(assertion.id);
+          return (
+            base === undefined ||
+            assertionTruthKey(base) !== assertionTruthKey(assertion)
+          );
+        })
         .toSorted((left, right) => compareStrings(left.id, right.id)),
       retracted: baseIdentity
-        .filter((assertion) => !forkIdentityById.has(assertion.id))
+        .filter((assertion) => {
+          const fork = forkIdentityById.get(assertion.id);
+          return (
+            fork === undefined ||
+            assertionTruthKey(fork) !== assertionTruthKey(assertion)
+          );
+        })
         .toSorted((left, right) => compareStrings(left.id, right.id)),
     },
     forkNodeVersions,

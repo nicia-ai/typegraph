@@ -145,3 +145,13 @@ export class BaseVersionMismatchError extends MergeError {
     this.name = "BaseVersionMismatchError";
   }
 }
+
+/**
+ * One-line human description of an unknown thrown value, for wrapping into
+ * typed error messages.
+ *
+ * @internal
+ */
+export function describeCause(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}

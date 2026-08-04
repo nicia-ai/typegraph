@@ -27,12 +27,14 @@ import {
   IdentityMergeConflictError,
 } from "../../src/graph-merge/errors";
 import {
-  encodeClassFingerprint,
   merge,
   mergeAgainstBase,
   mergeIncremental,
-  RETRACTION_TARGET_MISMATCH_DROP_REASON,
 } from "../../src/graph-merge/merge";
+import {
+  encodeClassFingerprint,
+  RETRACTION_TARGET_MISMATCH_DROP_REASON,
+} from "../../src/graph-merge/merge-identity";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
 import { asIdentityAssertionId } from "../../src/identity/types";
@@ -1334,6 +1336,62 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     } finally {
       (target as { transaction: unknown }).transaction = original;
     }
+  });
+
+  it("stages a same-id truth replacement instead of diffing it empty", async () => {
+    // The one legal way two truths share an id inside ONE lineage: the branch
+    // hard-deletes an endpoint (physically removing the assertion row),
+    // recreates it, and imports the same id for different truth. A
+    // presence-only identity diff sees the id on both sides and stages
+    // NOTHING — the merge silently keeps the base truth while the branch
+    // believes the replacement. The diff must compare complete truth and
+    // surface the replacement so planning refuses unsupported id reuse typed.
+    const forkPoint = await anchoredForkPoint();
+    const forkImport = await importGraph(
+      forkPoint,
+      assertionDocument("swap-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(forkImport.success).toBe(true);
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    const replaceBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await replaceBranch.store.nodes.Anchor.delete("a" as never);
+    await replaceBranch.store.nodes.Anchor.hardDelete("a" as never);
+    await replaceBranch.store.nodes.Anchor.create({ name: "a" }, { id: "a" });
+    const reimport = await importGraph(
+      replaceBranch.store,
+      assertionDocument("swap-id", "c", "d"),
+      { onConflict: "skip" },
+    );
+    expect(reimport.success).toBe(true);
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [replaceBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    // The replacement cannot be applied (the applier refuses reusing an ended
+    // row's id), so the only sound outcome is a typed plan-time refusal — not
+    // a silent success that keeps the base truth the branch replaced.
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected identity merge conflict");
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    // Plan-time refusal: the target's row is untouched.
+    const rows = await storeRuntime(target).identityAssertionRowsByIds([
+      "swap-id",
+    ]);
+    expect(rows.get("swap-id")).toMatchObject({
+      a: { kind: "Anchor", id: "a" },
+      b: { kind: "Anchor", id: "b" },
+    });
+    expect(rows.get("swap-id")?.validTo).toBeUndefined();
   });
 
   it("rejects one id staged for the same pair with two validities", async () => {
