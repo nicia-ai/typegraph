@@ -532,6 +532,12 @@ function clusterMembersFor(
         kind: staged.node.kind,
         branchId: staged.branchId,
         props: staged.node.props as Readonly<Record<string, JsonValue>>,
+        ...(staged.node.row.valid_from === undefined ?
+          {}
+        : { validFrom: staged.node.row.valid_from }),
+        ...(staged.node.row.valid_to === undefined ?
+          {}
+        : { validTo: staged.node.row.valid_to }),
       });
     }
     const base = baseMembersById.get(key);
@@ -932,24 +938,63 @@ function planMerge<G extends GraphDef>(
       .map((deletion) => mergeKey(deletion.node.kind, deletion.node.id))
       .filter((key) => !nodeDeletions.has(key)),
   );
+  // Provenance decides which retractions are cascade artifacts. A retraction
+  // is dropped ONLY when every branch that staged it can be explained as
+  // "cascade of an overruled deletion": that branch deleted an endpoint of
+  // the assertion, and every endpoint it deleted was overruled. A contributor
+  // that deleted NO endpoint retracted independently — its intent survives —
+  // and a contributor whose endpoint deletion SURVIVED has a legitimate
+  // cascade. (A branch that explicitly retracted and then deleted the same
+  // endpoint is indistinguishable from a pure cascade in a snapshot diff;
+  // the conservative drop-and-report stands for that narrower ambiguity.)
+  const deletionsByBranch = new Map<BranchId, Set<MergeKey>>();
+  for (const deletion of staging.deletedNodes) {
+    const key = mergeKey(deletion.node.kind, deletion.node.id);
+    const keys =
+      deletionsByBranch.get(deletion.branchId) ?? new Set<MergeKey>();
+    keys.add(key);
+    deletionsByBranch.set(deletion.branchId, keys);
+  }
+  const retractionContributors = new Map<string, Set<BranchId>>();
+  for (const staged of staging.retractedIdentityAssertions) {
+    const contributors =
+      retractionContributors.get(staged.assertion.id) ?? new Set<BranchId>();
+    contributors.add(staged.branchId);
+    retractionContributors.set(staged.assertion.id, contributors);
+  }
   const overruledRetractionDrops: DroppedItem[] = [];
   const survivingRetractions =
     overruledDeletions.size === 0 ?
       identity.retractions
     : identity.retractions.filter((retraction) => {
-        const touchesOverruled =
-          overruledDeletions.has(
-            mergeKey(retraction.a.kind, retraction.a.id),
-          ) ||
-          overruledDeletions.has(mergeKey(retraction.b.kind, retraction.b.id));
-        if (touchesOverruled) {
-          overruledRetractionDrops.push({
-            kind: "identity",
-            id: retraction.id,
-            reason: RETRACTION_DELETION_OVERRULED_DROP_REASON,
-          });
+        const endpointKeys = [
+          mergeKey(retraction.a.kind, retraction.a.id),
+          mergeKey(retraction.b.kind, retraction.b.id),
+        ];
+        if (!endpointKeys.some((key) => overruledDeletions.has(key))) {
+          return true;
         }
-        return !touchesOverruled;
+        const contributors = retractionContributors.get(retraction.id);
+        const cascadeOnly =
+          contributors !== undefined &&
+          [...contributors].every((branchId) => {
+            const deleted = deletionsByBranch.get(branchId);
+            if (deleted === undefined) return false;
+            const deletedEndpoints = endpointKeys.filter((key) =>
+              deleted.has(key),
+            );
+            return (
+              deletedEndpoints.length > 0 &&
+              deletedEndpoints.every((key) => !nodeDeletions.has(key))
+            );
+          });
+        if (!cascadeOnly) return true;
+        overruledRetractionDrops.push({
+          kind: "identity",
+          id: retraction.id,
+          reason: RETRACTION_DELETION_OVERRULED_DROP_REASON,
+        });
+        return false;
       });
   for (const modification of deleteModify.survivingModifications) {
     recordProvenance(
@@ -1041,6 +1086,7 @@ function planMerge<G extends GraphDef>(
     identity.assertions,
     canonicalOf,
     reconciliation.retypeMap,
+    storedIdentityRowsById,
   );
   assertIdentityEndpointsNotDeleted(
     identityRemap.assertions,
@@ -1356,7 +1402,18 @@ async function applyMergePlan<G extends GraphDef>(
           ),
         };
     const collection = nodeCollection(nodesApi, kind);
-    await collection.upsertByIdFromRecord(entity.canonicalId, props);
+    // A staged survivor's valid-time window travels with the write: for a
+    // fresh insert it IS the branch's window, and for a resurrection it stops
+    // the upsert from resetting a branch-authored (possibly already ENDED)
+    // window to merge time — an ended member must not come back current and,
+    // under `"fold"`, silently join a live fold class. Base-member survivors
+    // carry no window; their committed row's window stays untouched.
+    await collection.upsertByIdFromRecord(entity.canonicalId, props, {
+      ...(entity.validFrom === undefined ?
+        {}
+      : { validFrom: entity.validFrom }),
+      ...(entity.validTo === undefined ? {} : { validTo: entity.validTo }),
+    });
     committedNodeIds.add(mergeKey(kind, entity.canonicalId));
   }
 
@@ -1403,8 +1460,9 @@ async function applyMergePlan<G extends GraphDef>(
   // identity statement by construction, so it is translated into the typed
   // conflict error here — the completeness backstop for applier invariants
   // the plan-time simulation does not (yet) mirror.
+  let appliedIdentity: Readonly<{ created: number; retracted: number }>;
   try {
-    await storeRuntime(target).applyIdentityMergeAtTarget(
+    appliedIdentity = await storeRuntime(target).applyIdentityMergeAtTarget(
       txBackend,
       plan.identityRetractions.map((retraction) => retraction.id),
       plan.identityAssertions,
@@ -1416,15 +1474,15 @@ async function applyMergePlan<G extends GraphDef>(
   return {
     nodes: committedNodeIds.size,
     edges: committedEdges,
-    // Planned INTENTS, not applied row counts: the applier skips exact
-    // matches the target already holds (the normal incremental case — the
-    // target's own additions are staged back at it) and no-ops retractions
-    // of already-ended ids, mirroring how the node/edge counts above tally
-    // upserts. Any apply failure aborts the whole merge, so the counts never
-    // describe a partial commit.
+    // ACTUAL ledger effects from the applier: rows created (idempotent
+    // exact/pair matches the target already held are excluded — the normal
+    // incremental case, where the target's own additions are staged back at
+    // it) and rows ended (already-ended or unknown ids excluded). Any apply
+    // failure aborts the whole merge, so the counts never describe a
+    // partial commit.
     identity: {
-      asserted: plan.identityAssertions.length,
-      retracted: plan.identityRetractions.length,
+      asserted: appliedIdentity.created,
+      retracted: appliedIdentity.retracted,
     },
   };
 }
@@ -1610,6 +1668,7 @@ type NodeCollectionLike = Readonly<{
   upsertByIdFromRecord: (
     id: string,
     data: Record<string, unknown>,
+    options?: Readonly<{ validFrom?: string; validTo?: string }>,
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
 }>;
@@ -1738,6 +1797,38 @@ async function resolveMerge<G extends GraphDef>(
         );
       }
       targetBranchSeen = true;
+    }
+  }
+
+  // A branch must be a DATA fork. A schema operation on the branch's store
+  // after forking (evolve, migrateSchema, removeKinds) mutates rows through
+  // its own preflights, and the state diff would project those side effects
+  // into the merge as ordinary data changes detached from the schema change
+  // that caused them — e.g. a kind removal's cascaded assertion cleanup
+  // arriving as bare identity retractions against a target that still has the
+  // kind. Refuse typed when any branch's committed schema differs from the
+  // fork source's. (The incremental path separately proves forkPoint and
+  // target agree, so one comparison basis covers both modes.)
+  const sourceSchemaRow = await storeBackend(store).getActiveSchema(
+    store.graphId,
+  );
+  for (const branch of branches) {
+    const branchSchemaRow = await storeBackend(branch.store).getActiveSchema(
+      branch.store.graphId,
+    );
+    if (branchSchemaRow?.schema_hash !== sourceSchemaRow?.schema_hash) {
+      return err(
+        new BaseVersionMismatchError(
+          `Branch "${branch.id}"'s store has a committed schema different from the fork source's — a schema operation ran on the branch after forking. Merge carries data changes only; apply the schema change to the target first (or re-fork), then merge.`,
+          {
+            details: {
+              branchId: branch.id,
+              branchSchemaHash: branchSchemaRow?.schema_hash,
+              sourceSchemaHash: sourceSchemaRow?.schema_hash,
+            },
+          },
+        ),
+      );
     }
   }
 

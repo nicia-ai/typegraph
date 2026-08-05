@@ -2,8 +2,12 @@ import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
-import { lockRecordedGraphWrite } from "../store/recorded-capture";
 import {
+  lockRecordedGraphWrite,
+  withRecordedIdentityMutationTarget,
+} from "../store/recorded-capture";
+import {
+  deleteAssertionsTouchingKinds,
   type IdentityRebuildContext,
   lockIdentityEnablementNodes,
   lockIdentityGraph,
@@ -81,13 +85,34 @@ function assertIdentityStoragePresent(
  */
 export function identitySchemaCommitPreflight<G extends GraphDef>(
   ctx: Omit<IdentityRebuildContext<G>, "backend">,
-  options: Readonly<{ enablement: boolean }>,
+  options: Readonly<{
+    enablement: boolean;
+    droppedNodeKinds?: readonly string[];
+  }>,
 ): (target: TransactionBackend) => Promise<void> {
   return async (target: TransactionBackend) => {
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
     if (options.enablement) {
       await lockIdentityEnablementNodes(target, ctx.schema);
+    }
+    // A commit that DROPS node kinds cascades the assertion ledger exactly as
+    // Store.removeKinds() does. The rebuild below silently FILTERS rows
+    // touching unregistered kinds, so skipping this would leave a dropped
+    // kind's assertions current as orphans — invisible to the closure and to
+    // live-endpoint interchange reads, yet still visible to raw ledger reads
+    // and merge staging, where a later "no-op" merge would end them.
+    const droppedNodeKinds = options.droppedNodeKinds ?? [];
+    if (droppedNodeKinds.length > 0) {
+      await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
+        deleteAssertionsTouchingKinds(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          droppedNodeKinds,
+          touch,
+        ),
+      );
     }
     await rebuildIdentityClosureForContext({ ...ctx, backend: target });
   };

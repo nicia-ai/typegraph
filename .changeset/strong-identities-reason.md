@@ -350,3 +350,28 @@ environment/corruption codes that must never be translated into replan
 advice, and one id staged as both a new assertion and a retraction — an
 applier-refusing shape currently unreachable through any supported
 staging path — refuses typed defensively at plan time.
+
+**External-review hardening (cross-model pass).** An independent review
+with a different model produced six verified fixes: (1) the
+deletion-overruled retraction filter is provenance-aware — a retraction
+is dropped only when EVERY contributing branch is explained by an
+overruled endpoint deletion, so a branch that retracted independently
+keeps its effect (the earlier filter silently suppressed it); (2)
+committed-row precedence in the survivor dedupe is RE-DERIVED after
+endpoint canonicalization, closing the collision the first fix missed
+when reconciliation collapses a branch pair onto a committed target
+pair; (3) merges refuse, typed, any branch whose store ran a schema
+operation after forking (its committed schema hash no longer matches the
+fork source's) — schema side effects can no longer be smuggled into a
+data merge as bare identity changes; (4) a kind-dropping
+`migrateSchema()` now cascades the assertion ledger exactly as
+`Store.removeKinds()` does, instead of stranding current assertions on
+unregistered kinds where a later "no-op" merge would end them; (5) a
+staged survivor's valid-time window travels with the commit write, so a
+branch-authored — possibly already ended — window survives resurrection
+instead of being reset to merge time and silently joining a live fold
+class; (6) `merged.identity` reports rows the applier actually created
+and ended (idempotent skips excluded) instead of planned intents, and
+the replan-vs-conflict error suggestions are path-specific. Temporal
+windows on MODIFIED inherited nodes remain outside merge state — a
+documented boundary.

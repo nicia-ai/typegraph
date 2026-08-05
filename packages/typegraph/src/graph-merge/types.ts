@@ -486,11 +486,12 @@ export type ProvenanceRecord = Readonly<{
 
 /**
  * What the merge actually wrote to the target: node and edge counts plus the
- * identity-ledger effects. `identity.asserted` counts the assertions the plan
- * applied AFTER endpoint remap and survivor dedupe (so two branches asserting the
- * same pair count once), and `identity.retracted` counts the distinct inherited
- * assertion ids the merge ended. Assertions dropped by the survivor rule are
- * enumerated in {@link MergeReport.dropped} rather than counted here.
+ * identity-ledger effects. `identity.asserted` counts rows the applier
+ * CREATED — planned assertions the target already held (idempotent exact or
+ * semantic-pair matches, the normal incremental case) are excluded — and
+ * `identity.retracted` counts rows the applier ENDED, excluding already-ended
+ * or unknown ids. Assertions dropped by the survivor rule are enumerated in
+ * {@link MergeReport.dropped} rather than counted here.
  */
 export type MergedCounts = Readonly<{
   nodes: number;

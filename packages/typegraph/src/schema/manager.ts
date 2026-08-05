@@ -905,6 +905,14 @@ export async function migrateSchema<G extends GraphDef>(
       undefined
     : await prepareIdentitySchemaCommit(backend, target, {
         enablement: storedSchema?.identity === undefined,
+        // Node kinds this commit REMOVES cascade the assertion ledger inside
+        // the commit transaction (edge kinds carry no assertions). This uses
+        // the full `dropped` list, not `guardedDrops`: with
+        // `discardDroppedKindRows` the rows are reclaimed later by
+        // materializeRemovals, which never touches identity tables.
+        droppedNodeKinds: dropped
+          .filter((drop) => drop.entity === "node")
+          .map((drop) => drop.kind),
         ...(options?.schema === undefined ? {} : { schema: options.schema }),
       });
 
@@ -948,7 +956,11 @@ export async function migrateSchema<G extends GraphDef>(
 async function prepareIdentitySchemaCommit<G extends GraphDef>(
   backend: GraphBackend,
   target: G,
-  options: Readonly<{ enablement: boolean; schema?: SqlSchema }>,
+  options: Readonly<{
+    enablement: boolean;
+    schema?: SqlSchema;
+    droppedNodeKinds?: readonly string[];
+  }>,
 ): Promise<(transactionBackend: TransactionBackend) => Promise<void>> {
   // Brand-validate before any DDL or commit: a schema-shaped plain object
   // from an untyped caller can expose custom names to provisioning while its
@@ -970,7 +982,10 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
       schema,
       sameIdAcrossKinds: target.identity?.sameIdAcrossKinds ?? "ignore",
     },
-    options,
+    {
+      enablement: options.enablement,
+      droppedNodeKinds: options.droppedNodeKinds ?? [],
+    },
   );
 }
 

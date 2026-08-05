@@ -2493,6 +2493,74 @@ export async function validateIdentityForContext<G extends GraphDef>(
   );
 }
 
+/**
+ * Hard-deletes every assertion row (current AND ended) touching any of the
+ * given node kinds, touching each removed row for recorded capture. Shared by
+ * {@link removeIdentityKindsForContext} (Store.removeKinds) and the schema
+ * commit preflight for kind-dropping migrations — the closure rebuild those
+ * paths run afterwards silently FILTERS rows with unregistered kinds, so
+ * without this cascade a dropped kind's assertions would survive as current
+ * orphans: invisible to closure and live-endpoint interchange reads, yet
+ * still present to raw ledger reads and merge staging.
+ *
+ * @internal
+ */
+export async function deleteAssertionsTouchingKinds(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  kinds: readonly string[],
+  touch: (graphId: string, id: string) => void,
+): Promise<void> {
+  const removedKinds = [...new Set(kinds)];
+  if (removedKinds.length === 0) return;
+  const matched = new Map<string, IdentityAssertionStorageRow>();
+  const kindChunkSize = identityChunkSize(target, {
+    fixedParameters: 1,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  for (const kindChunk of chunk(removedKinds, kindChunkSize)) {
+    const kindList = sql.join(
+      kindChunk.map((kind) => sql`${kind}`),
+      sql`, `,
+    );
+    const rows = await target.execute<RawIdentityAssertionRow>(
+      asCompiledRowsSql(sql`
+        SELECT ${IDENTITY_ASSERTION_COLUMNS}
+        FROM ${schema.identityAssertionsTable}
+        WHERE graph_id = ${graphId}
+          AND (a_kind IN (${kindList}) OR b_kind IN (${kindList}))
+      `),
+    );
+    for (const rawRow of rows) {
+      matched.set(rawRow.id, normalizeAssertionRow(rawRow));
+    }
+  }
+  const ids = [...matched.keys()];
+  if (ids.length > 0) {
+    const idChunkSize = identityChunkSize(target, {
+      fixedParameters: 1,
+      maxItems: MAX_REFERENCE_CHUNK_SIZE,
+      parametersPerItem: 1,
+    });
+    for (const idChunk of chunk(ids, idChunkSize)) {
+      const idList = sql.join(
+        idChunk.map((id) => sql`${id}`),
+        sql`, `,
+      );
+      await executeStatement(
+        target,
+        sql`
+          DELETE FROM ${schema.identityAssertionsTable}
+          WHERE graph_id = ${graphId} AND id IN (${idList})
+        `,
+      );
+    }
+  }
+  for (const row of matched.values()) touch(graphId, row.id);
+}
+
 export async function removeIdentityKindsForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   kinds: readonly string[],
@@ -2500,51 +2568,13 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
   if (kinds.length === 0) return;
   const removedKinds = [...new Set(kinds)];
   await runIdentityMutation(ctx, async (target, touch) => {
-    const matched = new Map<string, IdentityAssertionStorageRow>();
-    const kindChunkSize = identityChunkSize(target, {
-      fixedParameters: 1,
-      maxItems: MAX_REFERENCE_CHUNK_SIZE,
-      parametersPerItem: 2,
-    });
-    for (const kindChunk of chunk(removedKinds, kindChunkSize)) {
-      const kindList = sql.join(
-        kindChunk.map((kind) => sql`${kind}`),
-        sql`, `,
-      );
-      const rows = await target.execute<RawIdentityAssertionRow>(
-        asCompiledRowsSql(sql`
-          SELECT ${IDENTITY_ASSERTION_COLUMNS}
-          FROM ${ctx.schema.identityAssertionsTable}
-          WHERE graph_id = ${ctx.graphId}
-            AND (a_kind IN (${kindList}) OR b_kind IN (${kindList}))
-        `),
-      );
-      for (const rawRow of rows) {
-        matched.set(rawRow.id, normalizeAssertionRow(rawRow));
-      }
-    }
-    const ids = [...matched.keys()];
-    if (ids.length > 0) {
-      const idChunkSize = identityChunkSize(target, {
-        fixedParameters: 1,
-        maxItems: MAX_REFERENCE_CHUNK_SIZE,
-        parametersPerItem: 1,
-      });
-      for (const idChunk of chunk(ids, idChunkSize)) {
-        const idList = sql.join(
-          idChunk.map((id) => sql`${id}`),
-          sql`, `,
-        );
-        await executeStatement(
-          target,
-          sql`
-            DELETE FROM ${ctx.schema.identityAssertionsTable}
-            WHERE graph_id = ${ctx.graphId} AND id IN (${idList})
-          `,
-        );
-      }
-    }
-    for (const row of matched.values()) touch(ctx.graphId, row.id);
+    await deleteAssertionsTouchingKinds(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      removedKinds,
+      touch,
+    );
     await replaceClosure(
       target,
       ctx.schema,
@@ -3198,9 +3228,11 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   retractionIds: readonly string[],
   assertions: readonly IdentityTransferAssertion[],
-): Promise<void> {
-  if (retractionIds.length === 0 && assertions.length === 0) return;
-  await runIdentityMutation(ctx, async (target, touch, markWritten) => {
+): Promise<Readonly<{ created: number; retracted: number }>> {
+  if (retractionIds.length === 0 && assertions.length === 0) {
+    return { created: 0, retracted: 0 };
+  }
+  return runIdentityMutation(ctx, async (target, touch, markWritten) => {
     const retracted = await retractByIds(ctx, target, retractionIds, touch);
     const closureReferences: PlainNodeRef[] = [];
     for (const ended of retracted) {
@@ -3235,5 +3267,9 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
     // identity-only merge would otherwise leave the durable revision clock
     // unmoved and every base@V token stale.
     if (summary.created > 0) markWritten();
+    // ACTUAL ledger effects, not planned intents: rows the import created
+    // (idempotent exact/pair matches excluded) and rows the retraction ended
+    // (already-ended or unknown ids excluded).
+    return { created: summary.created, retracted: retracted.length };
   });
 }

@@ -286,9 +286,6 @@ export const RETRACTION_DELETION_OVERRULED_DROP_REASON =
 export const NO_STORED_ASSERTIONS: ReadonlyMap<string, LedgerAssertion> =
   new Map();
 
-/** The empty committed-id set, for dedupe passes with no target knowledge. */
-const NO_COMMITTED_IDS: ReadonlySet<string> = new Set();
-
 /** @internal Exported for deterministic phase-level verification. */
 export function planIdentityChanges(
   staging: StagingSet,
@@ -460,6 +457,7 @@ export function remapIdentityAssertionEndpoints(
   assertions: readonly IdentityTransferAssertion[],
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
   retypeMap: ReadonlyMap<MergeKey, string>,
+  storedRowsById: ReadonlyMap<string, LedgerAssertion>,
 ): Readonly<{
   assertions: readonly IdentityTransferAssertion[];
   dropped: readonly DroppedItem[];
@@ -498,11 +496,25 @@ export function remapIdentityAssertionEndpoints(
       : [remappedB, remappedA];
     remapped.push({ ...assertion, a, b });
   }
-  // No committed-id precedence here: this second pass dedupes pairs that
-  // node reconciliation COLLAPSED, and remapped endpoints no longer compare
-  // equal to any stored row — the post-plan one-id-one-truth check still
-  // validates the surviving ids against the target.
-  const deduped = dedupeIdentityAssertions(remapped, NO_COMMITTED_IDS);
+  // Committed-id precedence must be RE-DERIVED post-remap: node
+  // reconciliation can collapse two previously distinct pairs onto one
+  // semantic key (a branch pair canonicalized onto a target pair), and the
+  // target's committed row — whose endpoints the remap leaves unchanged —
+  // still exactly matches its stored truth here. Without the recompute, the
+  // branch's unwritable challenger could win this second dedupe and recreate
+  // the applied-but-never-written report divergence.
+  const committedIds = new Set<string>(
+    remapped
+      .filter((assertion) => {
+        const stored = storedRowsById.get(assertion.id);
+        return (
+          stored !== undefined &&
+          assertionTruthKey(stored) === assertionTruthKey(assertion)
+        );
+      })
+      .map((assertion) => assertion.id),
+  );
+  const deduped = dedupeIdentityAssertions(remapped, committedIds);
   // Node reconciliation can collapse previously distinct endpoint pairs onto
   // the same canonical pair, so the pre-reconciliation check above is not
   // sufficient on its own.
@@ -1102,8 +1114,12 @@ export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
       assertionTruthKey(stored) !== assertionTruthKey(assertion)
     ) {
       throw new BaseVersionMismatchError(
-        "The merge validated its assertion ids as of planning, but a row identifying different truth under a planned id was committed before the commit transaction. Re-plan against the current target.",
-        { details: { assertionId: assertion.id } },
+        "The merge validated its assertion ids as of planning, but a row identifying different truth under a planned id was committed before the commit transaction.",
+        {
+          details: { assertionId: assertion.id },
+          suggestion:
+            "Retry the merge — the plan is recomputed from current state. A persistent refusal means the branch's assertion id conflicts with target truth and needs manual resolution.",
+        },
       );
     }
   }
@@ -1115,8 +1131,12 @@ export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
       assertionIdentityKey(stored) !== assertionIdentityKey(retraction)
     ) {
       throw new BaseVersionMismatchError(
-        "The merge validated each planned retraction against the target row its id identified at planning, but that row's truth changed before the commit transaction. Re-plan against the current target.",
-        { details: { assertionId: retraction.id } },
+        "The merge validated each planned retraction against the target row its id identified at planning, but that row's truth changed before the commit transaction.",
+        {
+          details: { assertionId: retraction.id },
+          suggestion:
+            "Retry the merge — the plan is recomputed from current state.",
+        },
       );
     }
   }
@@ -1196,10 +1216,12 @@ export function translateIdentityCommitError(error: unknown): unknown {
       !IDENTITY_ENVIRONMENT_CODES.has(identityCode));
   if (!identityRefusal) return error;
   return new IdentityMergeConflictError(
-    `The identity applier refused the resolved plan inside the commit transaction — identity truth on the target is incompatible with the plan. Re-plan against the current target. Cause: ${describeCause(error)}`,
+    `The identity applier refused the resolved plan inside the commit transaction — identity truth on the target is incompatible with the plan. Cause: ${describeCause(error)}`,
     {
       cause: error,
       details: { ...(identityCode === undefined ? {} : { identityCode }) },
+      suggestion:
+        "Retry once — the plan is recomputed from current state. If the refusal persists, the branches' identity truth conflicts with the target and needs manual resolution (change the branch's assertion, or resolve the target's truth first).",
     },
   );
 }

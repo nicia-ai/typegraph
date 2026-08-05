@@ -43,7 +43,9 @@ import { asIdentityAssertionId } from "../../src/identity/types";
 import { importGraph } from "../../src/interchange";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../../src/query/sql-intent";
+import { getCommittedSchemaVersion, migrateSchema } from "../../src/schema";
 import { storeRuntime } from "../../src/store/runtime-port";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, identityAssertionDocument } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -138,6 +140,7 @@ const anchoredIgnoreGraph = defineGraph({
 
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
+const BRANCH_C = asBranchId("branch-c");
 
 describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
   let cleanups: (() => Promise<void>)[];
@@ -1434,6 +1437,180 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     expect(result.data.dropped.some((item) => item.id === "shared-x2")).toBe(
       false,
     );
+  });
+
+  it("keeps an explicit retraction when a third branch overrules the deletion", async () => {
+    // Branch A retracts cascade-id EXPLICITLY (no deletion). Branch B deletes
+    // endpoint b (its diff stages the same retraction as a cascade). Branch C
+    // modifies b, overruling B's deletion under the default "flag" policy.
+    // Provenance must keep A's independent intent: only retractions whose
+    // EVERY contributor is explained by an overruled deletion are dropped.
+    const forkPoint = await anchoredForkPoint();
+    const forkImport = await importGraph(
+      forkPoint,
+      assertionDocument("cascade-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(forkImport.success).toBe(true);
+    const retractBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await retractBranch.store.identity.retractAssertion(
+      asIdentityAssertionId("cascade-id"),
+    );
+    const deleteBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    );
+    await deleteBranch.store.nodes.Anchor.delete("b" as never);
+    const modifyBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_C }),
+    );
+    await modifyBranch.store.nodes.Anchor.update("b" as never, {
+      name: "b-modified",
+    });
+
+    const result = await merge(
+      forkPoint,
+      [retractBranch, deleteBranch, modifyBranch],
+      { branchOrder: [BRANCH_A, BRANCH_B, BRANCH_C] },
+    );
+    expect(isOk(result)).toBe(true);
+    if (isErr(result)) throw result.error;
+    // The node survives the overruled deletion — but branch A's explicit
+    // retraction survives with it: the assertion is ENDED, not preserved.
+    expect(await forkPoint.nodes.Anchor.getById("b" as never)).toMatchObject({
+      name: "b-modified",
+    });
+    const rows = await storeRuntime(forkPoint).identityAssertionRowsByIds([
+      "cascade-id",
+    ]);
+    expect(rows.get("cascade-id")?.validTo).toBeDefined();
+    expect(result.data.dropped.some((item) => item.id === "cascade-id")).toBe(
+      false,
+    );
+  });
+
+  it("refuses a branch whose store ran a schema operation after forking", async () => {
+    // removeKinds on the branch's backend commits a new schema version and
+    // cascades rows through its own preflights; projecting those side
+    // effects into a merge as bare data changes would detach them from the
+    // schema change that caused them. The merge must refuse typed instead.
+    const forkPoint = await anchoredForkPoint();
+    const branchBackend = await makeBackend();
+    const driftBranch = unwrap(
+      await branch(forkPoint, () => Promise.resolve(branchBackend), {
+        id: BRANCH_A,
+      }),
+    );
+    await driftBranch.store.identity.assertSame(
+      { kind: "Anchor", id: "a" },
+      { kind: "Anchor", id: "b" },
+    );
+    // A profile flip is a breaking schema change — exactly the migrateSchema
+    // surgery a branch backend must not smuggle into a data merge.
+    const driftedGraph = defineGraph({
+      id: "identity_universe_ignore",
+      nodes: {
+        Person: { type: Person },
+        Robot: { type: Robot },
+        Anchor: { type: Anchor },
+      },
+      edges: {},
+      ontology: [disjointWith(Person, Robot)],
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    await migrateSchema(
+      branchBackend,
+      driftedGraph,
+      requireDefined(
+        await getCommittedSchemaVersion(branchBackend, driftedGraph.id),
+      ),
+    );
+
+    const result = await merge(forkPoint, [driftBranch], {
+      branchOrder: [BRANCH_A],
+    });
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected schema-drift refusal");
+    expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    expect(result.error.message).toContain("schema");
+  });
+
+  it("preserves a branch-authored validity window through the merge", async () => {
+    // The branch recreates a tombstoned Person:x with an already-ENDED
+    // valid-time window. The commit's resurrection upsert must carry that
+    // window instead of resetting it to merge time — an ended member coming
+    // back CURRENT would silently join Robot:x's live fold class.
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredFoldGraph,
+      await makeBackend(),
+    );
+    await forkPoint.nodes.Robot.create({ name: "robot" }, { id: "x" });
+    await forkPoint.nodes.Anchor.create({ name: "anchor" }, { id: "x" });
+    await forkPoint.nodes.Anchor.delete("x" as never);
+    const windowBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await windowBranch.store.nodes.Anchor.create(
+      { name: "anchor-historical" },
+      {
+        id: "x",
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2021-01-01T00:00:00.000Z",
+      },
+    );
+
+    const result = await merge(forkPoint, [windowBranch], {
+      branchOrder: [BRANCH_A],
+    });
+    expect(isOk(result)).toBe(true);
+    if (isErr(result)) throw result.error;
+    expect(await forkPoint.nodes.Anchor.getById("x" as never)).toBeUndefined();
+    expect(
+      await forkPoint.identity.membersOf({ kind: "Robot", id: "x" }),
+    ).toEqual([{ kind: "Robot", id: "x" }]);
+  });
+
+  it("counts applied ledger effects, not planned intents", async () => {
+    // The ADVANCED target's own addition is staged back at it and skipped by
+    // the idempotent applier; the branch's identical import is an exact-match
+    // skip. Only the branch's genuinely new assertion creates a row, and the
+    // report must say so.
+    const forkPoint = await anchoredForkPoint();
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    const targetImport = await importGraph(
+      target,
+      assertionDocument("shared-x2", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(targetImport.success).toBe(true);
+    const countBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchImport = await importGraph(
+      countBranch.store,
+      assertionDocument("shared-x2", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(branchImport.success).toBe(true);
+    await countBranch.store.identity.assertSame(
+      { kind: "Anchor", id: "c" },
+      { kind: "Anchor", id: "d" },
+    );
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [countBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    expect(isOk(result)).toBe(true);
+    if (isErr(result)) throw result.error;
+    expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 0 });
   });
 
   it("stages a same-id truth replacement instead of diffing it empty", async () => {

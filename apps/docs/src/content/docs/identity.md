@@ -250,7 +250,14 @@ tables are not part of interchange.
 
 Graph merge includes identity truth in staleness fingerprints and diffs.
 Duplicate current assertions use the earliest `validFrom`, then the
-code-point-smallest assertion ID. `merge()` detects identity conflicts at plan
+code-point-smallest assertion ID — unless one candidate is already committed
+on the target with the exact staged truth, which always wins: the applier is
+idempotent per semantic pair, so a challenger could never actually be
+written. A node deletion cascades into ending the assertions touching it;
+when a delete/modify conflict resolution keeps the node, cascaded
+retractions whose every contributing branch is explained by the overruled
+deletion are dropped with it (reported as `identity:deletion-overruled`),
+while a branch that retracted independently keeps its effect. `merge()` detects identity conflicts at plan
 time and returns them as a typed `IdentityMergeConflictError` — direct
 opposing relations on one endpoint pair, transitive contradictions reached
 through a chain of `same` assertions no single branch wrote, retract/reassert
@@ -260,7 +267,9 @@ cleanly. This is mechanical truth propagation, not semantic entity
 reconciliation. Plan time is the early surface, not the only one: any
 identity refusal that still escapes to the applier inside the commit
 transaction is translated into the same typed `IdentityMergeConflictError`,
-with the original error preserved as its cause. See
+with the original error preserved as its cause (identity environment and
+storage-corruption codes pass through untranslated — they are not statements
+about merge truth). See
 [`IdentityMergeConflictError`](/errors/#identitymergeconflicterror)
 for the exact `merge()` signature and how to catch it.
 
@@ -293,8 +302,11 @@ and the plan→commit window. The contract is by ID, on complete truth:
   than silently keeping either side's truth.
 - **The commit re-verifies IDs.** Both commit modes re-read every planned
   assertion and retraction ID inside the commit transaction and refuse
-  plan→commit drift as `BaseVersionMismatchError` — re-plan against the
-  current target and retry.
+  plan→commit drift as `BaseVersionMismatchError` — retrying recomputes the
+  plan from current state. One deliberate exception: a planned retraction
+  whose row another writer already ended is accepted as a no-op, not drift.
+  `MergeReport.merged.identity` reports the rows the applier actually
+  created and ended; idempotent skips are excluded.
 
 ## Operational notes
 

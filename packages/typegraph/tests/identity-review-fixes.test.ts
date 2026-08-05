@@ -184,7 +184,7 @@ describe("identity review fixes", () => {
         [existing.assertion.id],
         [transfer("d1", "different", aRef, bRef, new Date().toISOString())],
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ created: 1, retracted: 1 });
 
     expect(await store.identity.areSame(a, b)).toBe(false);
     expect(await store.identity.areDifferent(a, b)).toBe(true);

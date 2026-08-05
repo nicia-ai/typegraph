@@ -28,6 +28,7 @@ import {
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { getActiveSchema, migrateSchema } from "../src/schema";
+import { storeRuntime } from "../src/store/runtime-port";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -189,5 +190,41 @@ describe("migrateSchema() identity preflight", () => {
     );
 
     await enabled.close();
+  });
+
+  it("cascades a dropped kind through the assertion ledger", async () => {
+    // The closure rebuild silently FILTERS assertions touching unregistered
+    // kinds, so a kind-dropping migration that skipped the cascade would
+    // leave the Author assertion current as an orphan — invisible to closure
+    // and live-endpoint reads, yet visible to raw ledger reads and merge
+    // staging, where a later "no-op" merge would end it.
+    const { backend } = createLocalSqliteBackend();
+    const [store] = await createStoreWithSchema(ignoreGraph, backend);
+    await store.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+    await store.nodes.Author.create({ penName: "A." }, { id: "alias" });
+    const asserted = await store.identity.assertSame(alice, {
+      kind: "Author",
+      id: "alias",
+    });
+
+    const personOnlyGraph = defineGraph({
+      id: GRAPH_ID,
+      nodes: { Person: { type: Person } },
+      edges: {},
+      identity: { sameIdAcrossKinds: "ignore" },
+    });
+    await migrateSchema(
+      backend,
+      personOnlyGraph,
+      await activeVersion(backend),
+      { discardDroppedKindRows: true },
+    );
+
+    const [migrated] = await createStoreWithSchema(personOnlyGraph, backend);
+    const rows = await storeRuntime(migrated).identityAssertionRowsByIds([
+      asserted.assertion.id,
+    ]);
+    expect(rows.size).toBe(0);
+    await migrated.close();
   });
 });

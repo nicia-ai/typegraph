@@ -1254,9 +1254,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     target: GraphBackend | TransactionBackend,
     retractionIds: readonly string[],
     assertions: readonly IdentityTransferAssertion[],
-  ): Promise<void> {
+  ): Promise<Readonly<{ created: number; retracted: number }>> {
     if (retractionIds.length === 0 && assertions.length === 0) {
-      return Promise.resolve();
+      return Promise.resolve({ created: 0, retracted: 0 });
     }
     if (this.#graph.identity === undefined) {
       throw new ConfigurationError(

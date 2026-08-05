@@ -4060,7 +4060,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
-    }>[]) => Promise<void>;
+    }>[]) => Promise<Readonly<{
+        created: number;
+        retracted: number;
+    }>>;
 }>;
 
 // @public

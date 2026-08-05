@@ -27,9 +27,10 @@ import {
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
   planIdentityChanges,
   REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
+  remapIdentityAssertionEndpoints,
   translateIdentityCommitError,
 } from "../../src/graph-merge/merge-identity";
-import type { MergeKey } from "../../src/graph-merge/node-key";
+import { type MergeKey, mergeKey } from "../../src/graph-merge/node-key";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { StagingSet } from "../../src/graph-merge/staging";
 import { stageBranches } from "../../src/graph-merge/staging";
@@ -902,6 +903,47 @@ describe("plan-time derived identity contradictions", () => {
         [],
       ),
     ).not.toThrow();
+  });
+});
+
+describe("remapIdentityAssertionEndpoints committed precedence", () => {
+  it("keeps the target's committed row when canonicalization collides pairs", () => {
+    // The branch pair (x1, x2) canonicalizes onto the target pair (a1, a2),
+    // colliding with the target's COMMITTED z-target row only AFTER the
+    // remap. The post-remap dedupe must re-derive committed precedence from
+    // the stored rows — by id/validity order the challenger would win, and
+    // the idempotent applier would then write nothing while the report
+    // claimed the challenger applied and the committed row dropped.
+    const committed: IdentityTransferAssertion = {
+      id: "z-target",
+      relation: "same",
+      a: { kind: "Person", id: "a1" },
+      b: { kind: "Person", id: "a2" },
+      validFrom: "2024-01-01T00:00:00.000Z",
+    };
+    const challenger: IdentityTransferAssertion = {
+      id: "a-branch",
+      relation: "same",
+      a: { kind: "Person", id: "x1" },
+      b: { kind: "Person", id: "x2" },
+      validFrom: "2024-01-01T00:00:00.000Z",
+    };
+    const canonicalOf = new Map([
+      [mergeKey("Person", "x1"), mergeKey("Person", "a1")],
+      [mergeKey("Person", "x2"), mergeKey("Person", "a2")],
+    ]);
+    const remapped = remapIdentityAssertionEndpoints(
+      [challenger, committed],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map([["z-target", committed]]),
+    );
+    expect(remapped.assertions.map((entry) => entry.id)).toEqual(["z-target"]);
+    expect(remapped.dropped).toContainEqual({
+      kind: "identity",
+      id: "a-branch",
+      reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+    });
   });
 });
 
