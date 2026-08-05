@@ -64,6 +64,8 @@ function stagedEdge(
     kind?: string;
     props?: Readonly<Record<string, JsonValue>>;
     branchId?: typeof BRANCH_A;
+    validFrom?: string;
+    validTo?: string;
   }>,
 ): StagedEdge {
   return {
@@ -75,6 +77,8 @@ function stagedEdge(
     toKind: "Doc",
     props: args.props ?? {},
     branchId: args.branchId ?? BRANCH_A,
+    ...(args.validFrom === undefined ? {} : { validFrom: args.validFrom }),
+    ...(args.validTo === undefined ? {} : { validTo: args.validTo }),
   };
 }
 
@@ -122,6 +126,8 @@ type MergedEdgeShape = Readonly<{
   toId: string;
   props: Readonly<Record<string, JsonValue>>;
   mergedIds: readonly string[];
+  validFrom: string | undefined;
+  validTo: string | undefined;
 }>;
 
 function projectEdges(
@@ -134,6 +140,8 @@ function projectEdges(
     toId: edge.toId,
     props: edge.props,
     mergedIds: edge.mergedIds.map((id) => id as string),
+    validFrom: edge.validFrom,
+    validTo: edge.validTo,
   }));
 }
 
@@ -482,6 +490,325 @@ describe("repointEdges", () => {
         })),
       };
       expect(shape).toEqual(referenceShape);
+    }
+  });
+});
+
+/**
+ * The fold's SCOPE (issue #393): only a collision repointing INDUCED is folded.
+ * Staged edges that already shared their endpoints are ordinary multigraph
+ * multiplicity — `create()` makes a parallel edge and nothing enforces uniqueness on
+ * `(from, type, to)`, so a merge must commit them as parallel rows to produce what
+ * the branch's operation would have produced applied straight to the target.
+ *
+ * Every case below pins one half of that line: what still folds, what no longer does,
+ * and that EDGE ID (not props equality) decides which.
+ */
+describe("repointEdges fold scope (#393)", () => {
+  // No clustering at all: every endpoint maps to itself, so nothing is repointed.
+  const noRepoint = new Map<MergeKey, MergeKey>();
+  // {a, b} collapse to canonical "a" (min id) — the repoint-induced case.
+  const collapse = buildCanonicalMap([clusterOf("a", "b")], (cluster) =>
+    minIdCanonical(cluster),
+  );
+
+  it("keeps two same-endpoint edges with DIFFERING props as parallel edges", () => {
+    // On main these folded onto the min-id survivor and raised a bogus property
+    // conflict between two rows that were never the same row.
+    const staged = [
+      stagedEdge({
+        id: "edge-inherited",
+        from: "x",
+        to: "y",
+        props: { weight: 1 },
+        branchId: BRANCH_A,
+      }),
+      stagedEdge({
+        id: "edge-new",
+        from: "x",
+        to: "y",
+        props: { weight: 2 },
+        branchId: BRANCH_B,
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      noRepoint,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.edges).toHaveLength(2);
+    expect(
+      result.edges.map((edge) => ({
+        id: edge.id,
+        weight: edge.props["weight"],
+        mergedIds: edge.mergedIds.map((id) => id as string),
+      })),
+    ).toEqual([
+      { id: "edge-inherited", weight: 1, mergedIds: ["edge-inherited"] },
+      { id: "edge-new", weight: 2, mergedIds: ["edge-new"] },
+    ]);
+    // Two distinct rows never disagree about a property — the disagreement the old
+    // fold reported was an artifact of merging them.
+    expect(result.conflicts).toEqual([]);
+    expect(result.dropped).toEqual([]);
+  });
+
+  it("keeps two same-endpoint edges with IDENTICAL props as parallel edges", () => {
+    // The id-keyed ruling: a distinct id is a distinct row even when its props
+    // coincide, because `create()` on the target would have made a second row.
+    const staged = [
+      stagedEdge({ id: "edge-inherited", from: "x", to: "y", props: { n: 1 } }),
+      stagedEdge({
+        id: "edge-new",
+        from: "x",
+        to: "y",
+        props: { n: 1 },
+        branchId: BRANCH_B,
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      noRepoint,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.edges.map((edge) => edge.id as string)).toEqual([
+      "edge-inherited",
+      "edge-new",
+    ]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it("folds the SAME edge id staged by several branches into one row", () => {
+    // The other half of the id-keyed ruling: one inherited row modified by two
+    // branches is still ONE row, so it must fold and its property disagreement
+    // must be reconciled rather than committed twice.
+    const staged = [
+      stagedEdge({
+        id: "edge-1",
+        from: "x",
+        to: "y",
+        props: { weight: 1 },
+        branchId: BRANCH_A,
+      }),
+      stagedEdge({
+        id: "edge-1",
+        from: "x",
+        to: "y",
+        props: { weight: 2 },
+        branchId: BRANCH_B,
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      noRepoint,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.edges).toHaveLength(1);
+    const edge = requireDefined(result.edges[0]);
+    expect(edge.id).toBe("edge-1");
+    expect(edge.props["weight"]).toBe(1);
+    expect(result.conflicts).toHaveLength(1);
+    expect(`${result.conflicts[0]?.entityId}`).toBe("edge-1");
+    expect(result.conflicts[0]?.property).toBe("weight");
+  });
+
+  it("still folds a group repointing INDUCED even when a parallel edge is in it", () => {
+    // A repointed member (x→b, with {a,b} collapsed) joins a group that already
+    // held two parallel x→a edges. Repointing defines this group's identity, so the
+    // documented §6.3 set-collapse applies to the whole group — the conservative
+    // reading, and the only one under which the collapsed relationship is a set.
+    const staged = [
+      stagedEdge({ id: "edge-1", from: "x", to: "a", props: { weight: 1 } }),
+      stagedEdge({ id: "edge-2", from: "x", to: "a", props: { weight: 1 } }),
+      stagedEdge({
+        id: "edge-3",
+        from: "x",
+        to: "b",
+        props: { weight: 1 },
+        branchId: BRANCH_B,
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.edges).toHaveLength(1);
+    const edge = requireDefined(result.edges[0]);
+    expect(edge.id).toBe("edge-1");
+    expect(edge.mergedIds.map((id) => id as string)).toEqual([
+      "edge-1",
+      "edge-2",
+      "edge-3",
+    ]);
+  });
+
+  it("gives each parallel edge its own valid-time window", () => {
+    // The window-landing consequence: an end claimed on one row stays on that row
+    // instead of migrating to an unrelated min-id survivor.
+    const staged = [
+      stagedEdge({
+        id: "edge-inherited",
+        from: "x",
+        to: "y",
+        validTo: "2100-06-01T00:00:00.000Z",
+      }),
+      stagedEdge({
+        id: "edge-new",
+        from: "x",
+        to: "y",
+        branchId: BRANCH_B,
+        validFrom: "2026-01-01T00:00:00.000Z",
+        validTo: "2100-01-01T00:00:00.000Z",
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      noRepoint,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(
+      result.edges.map((edge) => ({
+        id: edge.id,
+        validFrom: edge.validFrom,
+        validTo: edge.validTo,
+      })),
+    ).toEqual([
+      {
+        id: "edge-inherited",
+        validFrom: undefined,
+        validTo: "2100-06-01T00:00:00.000Z",
+      },
+      {
+        id: "edge-new",
+        validFrom: "2026-01-01T00:00:00.000Z",
+        validTo: "2100-01-01T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("takes the EARLIEST end across a repoint-induced fold (#383)", () => {
+    // The window fold still applies where the fold itself does: the end claimed on
+    // the folded-away x→b must not be lost to the arbitrary min-id survivor pick.
+    const staged = [
+      stagedEdge({
+        id: "edge-1",
+        from: "x",
+        to: "a",
+        validTo: "2100-06-01T00:00:00.000Z",
+      }),
+      stagedEdge({
+        id: "edge-2",
+        from: "x",
+        to: "b",
+        branchId: BRANCH_B,
+        validTo: "2100-01-01T00:00:00.000Z",
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.edges).toHaveLength(1);
+    const edge = requireDefined(result.edges[0]);
+    expect(edge.id).toBe("edge-1");
+    expect(edge.validTo).toBe("2100-01-01T00:00:00.000Z");
+  });
+
+  it("lets a preferred-branch survivor of a repoint-induced fold keep its own end", () => {
+    // The incremental rule: the preferred branch IS the committed target, and a
+    // user branch never re-windows a row the target already ended.
+    const staged = [
+      stagedEdge({
+        id: "edge-1",
+        from: "x",
+        to: "a",
+        branchId: BRANCH_A,
+        validTo: "2100-06-01T00:00:00.000Z",
+      }),
+      stagedEdge({
+        id: "edge-2",
+        from: "x",
+        to: "b",
+        branchId: BRANCH_B,
+        validTo: "2100-01-01T00:00:00.000Z",
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+      undefined,
+      BRANCH_A,
+    );
+
+    expect(result.edges).toHaveLength(1);
+    expect(result.edges[0]?.validTo).toBe("2100-06-01T00:00:00.000Z");
+  });
+
+  it("produces an identical result across shuffled input for parallel edges", () => {
+    // Parallel edges agree on endpoints, type AND props, so the output sort must
+    // break the tie on edge id — a stable sort over a non-total key would leak
+    // input order into the result.
+    const staged = [
+      stagedEdge({ id: "edge-3", from: "x", to: "y", props: { n: 1 } }),
+      stagedEdge({ id: "edge-1", from: "x", to: "y", props: { n: 1 } }),
+      stagedEdge({
+        id: "edge-2",
+        from: "x",
+        to: "y",
+        props: { n: 1 },
+        branchId: BRANCH_B,
+      }),
+    ];
+
+    const reference = projectEdges(
+      repointEdges(staged, noRepoint, new Set<MergeKey>(), "flag", rank())
+        .edges,
+    );
+    expect(reference.map((edge) => edge.id)).toEqual([
+      "edge-1",
+      "edge-2",
+      "edge-3",
+    ]);
+
+    for (let seed = 1; seed <= 6; seed += 1) {
+      const result = repointEdges(
+        shuffled(staged, seed),
+        noRepoint,
+        new Set<MergeKey>(),
+        "flag",
+        rank(),
+      );
+      expect(projectEdges(result.edges)).toEqual(reference);
     }
   });
 });

@@ -11,23 +11,45 @@ import { requireDefined } from "../utils/presence";
  *   2. DROPPED — any edge whose (repointed) `from` or `to` is a finally-deleted
  *      node (per T8a, NOT resurrected) is removed, recorded as a
  *      {@link DroppedItem} with reason {@link ENDPOINT_DELETED_DROP_REASON}.
- *   3. DEDUPED — repointing can make two distinct edges identical. Edges are
- *      collapsed as a pure SET operation keyed by
+ *   3. DEDUPED — repointing can make two distinct edges identical. Edges brought
+ *      together THAT WAY are collapsed as a pure SET operation keyed by
  *      `(fromCanonical | type | toCanonical | propsKey)`, where `propsKey` is the
  *      T2 canonical serializer over PARSED props. So `x → a` and `x → b` (both
  *      repointed to `x → c*`) with equal props yield a SINGLE `x → c*`.
- *   4. RECONCILED — when two edges collapse to the same `(from, type, to)` but
- *      carry DIFFERING props, the per-property disagreement is resolved by the
+ *   4. RECONCILED — when two such edges collapse to the same `(from, type, to)`
+ *      but carry DIFFERING props, the per-property disagreement is resolved by the
  *      shared T8 conflict policy ({@link resolvePropertyUnion}) on the captured,
  *      non-wall-clock branch order, recording an edge-level {@link PropertyConflict}
  *      whose `entityId` is the surviving edge's id.
  *
+ * SCOPE OF THE FOLD (issue #393). Steps 3 and 4 apply ONLY to a collision the
+ * repointing INDUCED — a group whose members did not all start from the same
+ * `(from, to)` endpoint pair, so two originally-distinct relationships became one
+ * identity. The store is a MULTIGRAPH: nothing enforces uniqueness on
+ * `(from, type, to)`, `create()` makes a parallel edge, and
+ * `getOrCreateByEndpoints()` is the opt-in set-semantics accessor. Folding an
+ * ALREADY-colliding pair would therefore destroy authored multigraph intent and
+ * break branch-effect commutativity — a merge must produce what the operation
+ * would have produced applied directly to the target, and `create(x, y, props)`
+ * on the target yields a parallel edge.
+ *
+ * So when every member of a group named the same endpoints before repointing, the
+ * group is partitioned by EDGE ID and each id commits as its own row. Keying on
+ * ID rather than props is the deciding line: re-staging one INHERITED row from
+ * several branches is the same row (it folds, so concurrent property edits still
+ * reconcile into one write), while a branch-CREATED row carries a fresh id and is
+ * a new parallel edge even when its props happen to coincide with an inherited
+ * one's. Consequently a window claim lands on the row its author touched.
+ *
  * Determinism: the dedupe is a pure function of the (unordered) staged-edge SET.
- * Within a collision group the surviving edge id is the lexicographically-minimal
- * member id, property resolution uses only the captured `branchRank`, and the
- * output is sorted by dedupe key — so shuffling the input edges yields an
- * identical result. Clusters are computed once upstream (T8) and passed in as
- * {@link canonicalOf}; this module never re-clusters.
+ * Group membership derives only from the staged endpoints and {@link canonicalOf} —
+ * never from id sort order. Within a folded group the surviving edge id is the
+ * lexicographically-minimal member id, property resolution uses only the captured
+ * `branchRank`, and the output is sorted by dedupe key with the edge id as the
+ * final tiebreaker (parallel edges can share every other component) — so
+ * shuffling the input edges yields an identical result. Clusters are computed once
+ * upstream (T8) and passed in as {@link canonicalOf}; this module never
+ * re-clusters.
  */
 import { canonicalizeProps } from "./canonical-props";
 import type { ClusterResult } from "./clustering";
@@ -208,16 +230,69 @@ function groupKey(fromKey: MergeKey, type: string, toKey: MergeKey): string {
 }
 
 /**
+ * The PRE-repoint endpoint identity pair of a staged edge. Comparing these across a
+ * collision group is what distinguishes a repoint-INDUCED collapse (members started
+ * from different pairs) from ordinary multigraph multiplicity (they did not) — see
+ * the module header. Direction-sensitive, so the reversed intra-cluster pair
+ * `a → b` / `b → a` reads as two source pairs and still folds once `{a, b}` collapse.
+ * JSON-encoded (see {@link dedupeKey}) so a separator-bearing id cannot fuse pairs.
+ */
+function sourcePairKey(fromKey: MergeKey, toKey: MergeKey): string {
+  return JSON.stringify([fromKey, toKey]);
+}
+
+/**
  * A repointed staged edge plus both endpoints already mapped to their canonical
  * IDENTITY key (`(kind, id)`). The composite keys carry the canonical node's kind, so
  * the surviving edge's bare `fromId`/`toId` and `fromKind`/`toKind` are read off
  * `idOf`/`kindOf` of these keys — never the (possibly different-kind) staged endpoint.
+ * `sourcePair` and `dedupeKey` are computed during the single repoint pass so the
+ * fold partition and the props-identity check never recanonicalize props.
  */
 type RepointedEdge = Readonly<{
   staged: StagedEdge;
   fromKey: MergeKey;
   toKey: MergeKey;
+  sourcePair: string;
+  dedupeKey: string;
 }>;
+
+/**
+ * Partitions one `(from', type, to')` collision group into the member sets that each
+ * commit as a SINGLE row.
+ *
+ * The whole group is one set when repointing induced the collision — its members do
+ * not all share a pre-repoint endpoint pair, so originally-distinct relationships
+ * became one identity and the §6.3 set-collapse applies. (A group that gains a
+ * repointed member folds in FULL, including any member that was already there: once
+ * repointing defines the group's identity, that identity is the collapsed one.)
+ *
+ * Otherwise the members already named the same endpoints, so the collision is
+ * multigraph multiplicity and the partition is by EDGE ID. Ids are returned in
+ * lexicographic order for a stable emission order; neither the partition itself nor
+ * the survivor within a set depends on input order.
+ */
+function foldSets(
+  groupEdges: readonly RepointedEdge[],
+): readonly (readonly RepointedEdge[])[] {
+  const sourcePairs = new Set(groupEdges.map((edge) => edge.sourcePair));
+  if (sourcePairs.size > 1) {
+    return [groupEdges];
+  }
+
+  const byId = new Map<EdgeId, RepointedEdge[]>();
+  for (const edge of groupEdges) {
+    const bucket = byId.get(edge.staged.id);
+    if (bucket === undefined) {
+      byId.set(edge.staged.id, [edge]);
+    } else {
+      bucket.push(edge);
+    }
+  }
+  return [...byId.keys()]
+    .sort((left, right) => compareStrings(left, right))
+    .map((id) => requireDefined(byId.get(id)));
+}
 
 /**
  * Picks the canonical survivor edge of a collision group: the member with the
@@ -316,18 +391,133 @@ function unionEdgeProps(
 }
 
 /**
- * Repoints every staged edge onto its cluster canonical, drops edges whose
- * (repointed) endpoints are finally deleted, and dedupes the survivors as a pure
- * set operation keyed by `(from' | type | to' | propsKey)`.
+ * Folds one set of staged edges (a {@link foldSets} partition) onto the single row the
+ * commit will write, resolving props and the valid-time window across its members.
  *
- * Within a collision group sharing `(from', type, to')`:
+ * @param foldSet Non-empty. Every member shares the same repointed `(from, type, to)`.
+ */
+function foldEdgeSet(
+  foldSet: readonly RepointedEdge[],
+  context: ResolutionContext<GraphDef>,
+  branchRank: ReadonlyMap<BranchId, number>,
+  preferredBranchId?: BranchId,
+): Readonly<{ edge: MergedEdge; conflicts: readonly PropertyConflict[] }> {
+  const survivor = pickSurvivor(foldSet, preferredBranchId);
+  const survivorId = survivor.staged.id;
+  const mergedIds = foldSet
+    .map((edge) => edge.staged.id)
+    .sort((left, right) => compareStrings(left, right));
+
+  // Endpoint ids AND kinds come from the canonical IDENTITY keys, so a repointed
+  // edge always names the canonical node's own kind (the commit then applies any
+  // retype cascade), never a staged endpoint that merely shared the id string.
+  const fromId = idOf(survivor.fromKey);
+  const fromKind = kindOf(survivor.fromKey);
+  const toId = idOf(survivor.toKey);
+  const toKind = kindOf(survivor.toKey);
+  // The survivor's lower bound rides along unchanged — a `validFrom` is the
+  // branch's authored start for the row we commit, and the set's members are
+  // the same edge as seen by different branches.
+  //
+  // The END is folded across the set. When repoint/dedupe collapses several
+  // DISTINCT edges into one survivor, an end claimed by a non-survivor would
+  // otherwise be discarded by the arbitrary min-id pick — a silent window
+  // loss — so the earliest claimed end wins, the same least-claim rule the
+  // inherited-window reconciler uses.
+  //
+  // A survivor from the PREFERRED branch keeps its own end verbatim when it
+  // HAS one: that member is the live incremental target's row, and a user
+  // branch never re-windows what the target already holds. When it has none
+  // there is no target window to protect, so the fold still resolves across
+  // the set — otherwise a preferred survivor would silently swallow the
+  // only end any branch claimed.
+  const preferredSurvivorEnd =
+    survivor.staged.branchId === preferredBranchId ?
+      survivor.staged.validTo
+    : undefined;
+  const foldedEnd =
+    preferredSurvivorEnd ??
+    resolveEndClaims(
+      foldSet
+        .filter((edge) => edge.staged.validTo !== undefined)
+        .map((edge) => ({
+          branchId: edge.staged.branchId,
+          validTo: requireDefined(edge.staged.validTo),
+        })),
+      preferredBranchId,
+    );
+  const window = {
+    ...(survivor.staged.validFrom === undefined ?
+      {}
+    : { validFrom: survivor.staged.validFrom }),
+    ...(foldedEnd === undefined ? {} : { validTo: foldedEnd }),
+  };
+
+  const contentKeys = new Set(foldSet.map((edge) => edge.dedupeKey));
+  if (contentKeys.size === 1) {
+    // Exact-equal collapse: every member shares identical props, so no
+    // conflict is possible — keep the survivor's props verbatim.
+    return {
+      edge: {
+        id: survivorId,
+        kind: survivor.staged.kind,
+        fromId,
+        toId,
+        fromKind,
+        toKind,
+        props: survivor.staged.props,
+        mergedIds,
+        ...window,
+      },
+      conflicts: [],
+    };
+  }
+
+  const { props, conflicts } = unionEdgeProps(
+    survivorId,
+    survivor.staged.kind,
+    survivor,
+    foldSet,
+    context,
+    branchRank,
+    preferredBranchId,
+  );
+  return {
+    edge: {
+      id: survivorId,
+      kind: survivor.staged.kind,
+      fromId,
+      toId,
+      fromKind,
+      toKind,
+      props,
+      mergedIds,
+      ...window,
+    },
+    conflicts,
+  };
+}
+
+/**
+ * Repoints every staged edge onto its cluster canonical, drops edges whose
+ * (repointed) endpoints are finally deleted, and dedupes the survivors that
+ * repointing brought together as a pure set operation keyed by
+ * `(from' | type | to' | propsKey)`.
+ *
+ * Within a REPOINT-INDUCED collision group sharing `(from', type, to')` — one whose
+ * members did not all name the same endpoints before repointing:
  *   - identical props collapse silently to one edge,
  *   - DIFFERING props are reconciled by `policy` on the captured `branchRank`,
  *     recording one edge-level {@link PropertyConflict} per disagreeing property.
  *
- * The surviving edge of every group is the lexicographically-minimal contributing
- * edge id; its `mergedIds` lists every collapsed edge id. Output is sorted by the
- * full dedupe key, so the result is a pure function of the unordered input set.
+ * Edges that already shared their endpoints are NOT folded together: the store is a
+ * multigraph, so each distinct edge id commits as its own parallel row (see the
+ * module header for the full rule and why identity, not props equality, decides it).
+ *
+ * The surviving edge of every folded set is the lexicographically-minimal
+ * contributing edge id; its `mergedIds` lists every collapsed edge id. Output is
+ * sorted by the full dedupe key plus the edge id, so the result is a pure function
+ * of the unordered input set.
  *
  * @param stagedEdges The new + surviving-inherited edges to merge. Order does not
  *   affect the result. Props MUST already be parsed objects.
@@ -351,21 +541,19 @@ export function repointEdges<G extends GraphDef = GraphDef>(
   preferredBranchId?: BranchId,
 ): EdgeRepointResult<G> {
   const dropped: DroppedEdge[] = [];
-  const liveByDedupeKey = new Map<string, RepointedEdge[]>();
-  // Per `(from', type, to')` group → the SET of distinct dedupe keys seen for it.
-  // Insertion order is irrelevant: Phase 2 re-derives the survivor and sorts the
-  // output explicitly, so the set carries membership only.
-  const dedupeKeyByGroup = new Map<string, Set<string>>();
+  // Per `(from', type, to')` group → its members. Insertion order is irrelevant:
+  // Phase 2 partitions the group, re-derives each survivor, and sorts the output
+  // explicitly, so the bucket carries membership only.
+  const liveByGroup = new Map<string, RepointedEdge[]>();
 
   // Phase 1: repoint endpoints (by their `(kind, id)` identity, so a cross-kind id
   // collision can never repoint two unrelated edges onto one survivor), drop edges to
-  // deleted nodes, and bucket the survivors by their full dedupe key.
+  // deleted nodes, and bucket the survivors by their post-repoint endpoint group.
   for (const staged of stagedEdges) {
-    const fromKey = repoint(
-      mergeKey(staged.fromKind, staged.fromId),
-      canonicalOf,
-    );
-    const toKey = repoint(mergeKey(staged.toKind, staged.toId), canonicalOf);
+    const sourceFromKey = mergeKey(staged.fromKind, staged.fromId);
+    const sourceToKey = mergeKey(staged.toKind, staged.toId);
+    const fromKey = repoint(sourceFromKey, canonicalOf);
+    const toKey = repoint(sourceToKey, canonicalOf);
 
     if (deletedNodeIds.has(fromKey) || deletedNodeIds.has(toKey)) {
       dropped.push({
@@ -376,28 +564,28 @@ export function repointEdges<G extends GraphDef = GraphDef>(
       continue;
     }
 
-    const repointed: RepointedEdge = { staged, fromKey, toKey };
-    const key = dedupeKey(fromKey, staged.kind, toKey, staged.props);
-    const bucket = liveByDedupeKey.get(key);
+    const repointed: RepointedEdge = {
+      staged,
+      fromKey,
+      toKey,
+      sourcePair: sourcePairKey(sourceFromKey, sourceToKey),
+      dedupeKey: dedupeKey(fromKey, staged.kind, toKey, staged.props),
+    };
+    const group = groupKey(fromKey, staged.kind, toKey);
+    const bucket = liveByGroup.get(group);
     if (bucket === undefined) {
-      liveByDedupeKey.set(key, [repointed]);
+      liveByGroup.set(group, [repointed]);
     } else {
       bucket.push(repointed);
     }
-
-    const group = groupKey(fromKey, staged.kind, toKey);
-    const keysForGroup = dedupeKeyByGroup.get(group);
-    if (keysForGroup === undefined) {
-      dedupeKeyByGroup.set(group, new Set([key]));
-    } else {
-      keysForGroup.add(key);
-    }
   }
 
-  // Phase 2: per `(from', type, to')` group, fold the per-dedupe-key buckets into
-  // one survivor. A group with a single dedupe key is an exact-equal collapse (no
-  // conflict); a group with several dedupe keys means props differ, so the union
-  // runs the conflict policy.
+  // Phase 2: partition every `(from', type, to')` group into the sets that commit as
+  // one row ({@link foldSets} — a repoint-induced collapse folds whole, ordinary
+  // multigraph multiplicity splits per edge id) and fold each set onto its survivor.
+  // A set whose members share one dedupe key is an exact-equal collapse (no conflict
+  // is possible); several dedupe keys means props differ, so the union runs the
+  // conflict policy.
   const context: ResolutionContext<GraphDef> = {
     policy: policy as PropertyConflictPolicy<GraphDef>,
     ...(weights === undefined ? {} : { weights }),
@@ -406,123 +594,43 @@ export function repointEdges<G extends GraphDef = GraphDef>(
   const merged: MergedEdge[] = [];
   const conflicts: PropertyConflict<G>[] = [];
 
-  const sortedGroups = [...dedupeKeyByGroup.keys()].sort((left, right) =>
+  const sortedGroups = [...liveByGroup.keys()].sort((left, right) =>
     compareStrings(left, right),
   );
 
   for (const group of sortedGroups) {
-    const dedupeKeys = [...requireDefined(dedupeKeyByGroup.get(group))];
-    const groupEdges: RepointedEdge[] = [];
-    for (const key of dedupeKeys) {
-      for (const edge of requireDefined(liveByDedupeKey.get(key))) {
-        groupEdges.push(edge);
-      }
-    }
-
-    const survivor = pickSurvivor(groupEdges, preferredBranchId);
-    const survivorId = survivor.staged.id;
-    const mergedIds = [...groupEdges]
-      .map((edge) => edge.staged.id)
-      .sort((left, right) => compareStrings(left, right));
-
-    // Endpoint ids AND kinds come from the canonical IDENTITY keys, so a repointed
-    // edge always names the canonical node's own kind (the commit then applies any
-    // retype cascade), never a staged endpoint that merely shared the id string.
-    const fromId = idOf(survivor.fromKey);
-    const fromKind = kindOf(survivor.fromKey);
-    const toId = idOf(survivor.toKey);
-    const toKind = kindOf(survivor.toKey);
-    // The survivor's lower bound rides along unchanged — a `validFrom` is the
-    // branch's authored start for the row we commit, and the group's members are
-    // the same edge as seen by different branches.
-    //
-    // The END is folded across the group. When repoint/dedupe collapses several
-    // DISTINCT edges into one survivor, an end claimed by a non-survivor would
-    // otherwise be discarded by the arbitrary min-id pick — a silent window
-    // loss — so the earliest claimed end wins, the same least-claim rule the
-    // inherited-window reconciler uses.
-    //
-    // A survivor from the PREFERRED branch keeps its own end verbatim when it
-    // HAS one: that member is the live incremental target's row, and a user
-    // branch never re-windows what the target already holds. When it has none
-    // there is no target window to protect, so the fold still resolves across
-    // the group — otherwise a preferred survivor would silently swallow the
-    // only end any branch claimed.
-    const preferredSurvivorEnd =
-      survivor.staged.branchId === preferredBranchId ?
-        survivor.staged.validTo
-      : undefined;
-    const foldedEnd =
-      preferredSurvivorEnd ??
-      resolveEndClaims(
-        groupEdges
-          .filter((edge) => edge.staged.validTo !== undefined)
-          .map((edge) => ({
-            branchId: edge.staged.branchId,
-            validTo: requireDefined(edge.staged.validTo),
-          })),
+    const groupEdges = requireDefined(liveByGroup.get(group));
+    for (const foldSet of foldSets(groupEdges)) {
+      const folded = foldEdgeSet(
+        foldSet,
+        context,
+        branchRank,
         preferredBranchId,
       );
-    const window = {
-      ...(survivor.staged.validFrom === undefined ?
-        {}
-      : { validFrom: survivor.staged.validFrom }),
-      ...(foldedEnd === undefined ? {} : { validTo: foldedEnd }),
-    };
-
-    if (dedupeKeys.length === 1) {
-      // Exact-equal collapse: every member shares identical props, so no
-      // conflict is possible — keep the survivor's props verbatim.
-      merged.push({
-        id: survivorId,
-        kind: survivor.staged.kind,
-        fromId,
-        toId,
-        fromKind,
-        toKind,
-        props: survivor.staged.props,
-        mergedIds,
-        ...window,
-      });
-      continue;
+      merged.push(folded.edge);
+      for (const conflict of folded.conflicts) {
+        conflicts.push(conflict as PropertyConflict<G>);
+      }
     }
-
-    const { props, conflicts: groupConflicts } = unionEdgeProps(
-      survivorId,
-      survivor.staged.kind,
-      survivor,
-      groupEdges,
-      context,
-      branchRank,
-      preferredBranchId,
-    );
-    for (const conflict of groupConflicts) {
-      conflicts.push(conflict as PropertyConflict<G>);
-    }
-    merged.push({
-      id: survivorId,
-      kind: survivor.staged.kind,
-      fromId,
-      toId,
-      fromKind,
-      toKind,
-      props,
-      mergedIds,
-      ...window,
-    });
   }
 
-  // Sort on a PRECOMPUTED dedupe key per edge (Schwartzian) so `canonicalizeProps` +
-  // serialization run once per edge, not twice on every comparison.
+  // Sort on a PRECOMPUTED key per edge (Schwartzian) so `canonicalizeProps` +
+  // serialization run once per edge, not twice on every comparison. The edge id is
+  // the final component: parallel edges on one endpoint pair can agree on every
+  // other one, and a non-total key would leave their order dependent on the stable
+  // sort's view of input order.
   const sortedEdges = merged
     .map((edge) => ({
       edge,
-      sortKey: dedupeKey(
-        mergeKey(edge.fromKind, edge.fromId),
-        edge.kind,
-        mergeKey(edge.toKind, edge.toId),
-        edge.props,
-      ),
+      sortKey: JSON.stringify([
+        dedupeKey(
+          mergeKey(edge.fromKind, edge.fromId),
+          edge.kind,
+          mergeKey(edge.toKind, edge.toId),
+          edge.props,
+        ),
+        edge.id,
+      ]),
     }))
     .sort((left, right) => compareStrings(left.sortKey, right.sortKey))
     .map(({ edge }) => edge);
