@@ -33,3 +33,12 @@ the new `typegraph_identity_separation` relation through the same idempotent
 identity DDL path as the other identity relations and recomputes it from the
 ledger once, before anything reads it. A missing assertion ledger or closure
 relation is still refused as data loss.
+
+Custom backend authors: the resolved table-name types (`ResolvedSqlTableNames`,
+`SqliteTableNames`, `PostgresTableNames`) and the `ensureIdentityTables`
+parameter each gained a required `identitySeparation` entry, so an
+implementation that builds one of those objects needs the new name added. Code
+that only reads `backend.tableNames`, or that passes a partial name override to
+`createSqliteTables` / `createPostgresTables` / `createSqlSchema`, is
+unaffected — an omitted name still resolves to the default
+`typegraph_identity_separation`.
