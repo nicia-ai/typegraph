@@ -54,7 +54,13 @@
  * wins. The callers pass the finally-deleted identity sets so the ending is
  * dropped with the row.
  */
-import { compareStrings, type MergeKey, mergeKey } from "./node-key";
+import { requireDefined } from "../utils/presence";
+import {
+  compareMergeKeys,
+  compareStrings,
+  type MergeKey,
+  mergeKey,
+} from "./node-key";
 import type { StagedWindowedEdge, StagedWindowedNode } from "./staging";
 import type { ValidWindow } from "./state-diff";
 import type { EdgeId, NodeId, NodeType } from "./typegraph-internal";
@@ -209,22 +215,26 @@ function resolvePopulation(
       continue;
     }
     ends.set(identity, resolved);
-    const first = group[0];
-    if (first !== undefined) {
-      resolutions.push({
-        entity,
-        kind: first.kind,
-        id: first.id,
-        validTo: resolved,
-        claimedBy: claimingBranches(claims),
-      });
-    }
+    const first = requireDefined(group[0]);
+    resolutions.push({
+      entity,
+      kind: first.kind,
+      id: first.id,
+      validTo: resolved,
+      claimedBy: claimingBranches(claims),
+    });
   }
 
+  // Ordered by the composite `(kind, id)` identity, never a joined string: a
+  // caller-supplied id may contain any character, so a separator-joined key
+  // would not be a total order and the output would depend on insertion order.
   return {
     ends,
     resolutions: resolutions.sort((left, right) =>
-      compareStrings(`${left.id}|${left.kind}`, `${right.id}|${right.kind}`),
+      compareMergeKeys(
+        mergeKey(left.kind, left.id),
+        mergeKey(right.kind, right.id),
+      ),
     ),
     dropped: dropped.sort((left, right) => compareStrings(left.id, right.id)),
   };
