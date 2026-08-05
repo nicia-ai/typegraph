@@ -203,6 +203,7 @@ export type BackendCapabilities = Readonly<{
     vector?: VectorCapabilities | undefined;
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
+    contributions?: ContributionCapabilities | undefined;
 }>;
 
 // @public
@@ -478,6 +479,13 @@ export type ConstraintNames<R extends NodeRegistration> = "unique" extends keyof
 }[] ? N & string : string : never;
 
 // @public
+export type ContributionCapabilities = Readonly<{
+    supported: boolean;
+    probe: boolean;
+    rebuild: boolean;
+}>;
+
+// @public
 export type ContributionDiagnostic = Readonly<{
     owner: string;
     logicalName: string;
@@ -515,6 +523,48 @@ type ContributionMaterializationRow = Readonly<{
 }>;
 
 // @public
+export type ContributionProbeContribution = "fulltext" | "vector";
+
+// @public
+export type ContributionProbeEntry = Readonly<{
+    contribution: ContributionProbeContribution;
+    state: ContributionProbeState;
+    detail?: string;
+}>;
+
+// @public
+export type ContributionProbeResult = Readonly<{
+    graphRevision?: string;
+    entries: readonly ContributionProbeEntry[];
+}>;
+
+// @public
+export type ContributionProbeState = "ready" | "degraded" | "building";
+
+// @public
+export type ContributionRebuildRefusal = "vector-source-unavailable" | "no-drop-ddl" | "no-schema-fence";
+
+// @public
+export type ContributionRebuildResult = Readonly<{
+    rebuilt: readonly string[];
+    processed: number;
+    repopulated: number;
+    skipped: number;
+}>;
+
+// @public
+export type ContributionRebuildScope = ContributionProbeContribution;
+
+// @public
+export class ContributionRebuildUnsupportedError extends TypeGraphError {
+    constructor(reason: ContributionRebuildRefusal, details?: Readonly<Record<string, unknown>>, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly reason: ContributionRebuildRefusal;
+}
+
+// @public
 export type ContributionRepairEntry = Readonly<{
     diagnostic: ContributionDiagnostic;
     status: "repaired";
@@ -531,6 +581,13 @@ export type ContributionRepairEntry = Readonly<{
 export type ContributionRepairResult = Readonly<{
     results: readonly ContributionRepairEntry[];
     remaining: readonly ContributionDiagnostic[];
+}>;
+
+// @public
+export type ContributionRepopulationStats = Readonly<{
+    processed: number;
+    repopulated: number;
+    skipped: number;
 }>;
 
 // @public
@@ -2340,6 +2397,8 @@ export type GraphBackend = Readonly<{
     deleteVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
     verifyContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionDiagnostic[]>;
     repairContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<ContributionRepairResult>;
+    probeContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionProbeEntry[]>;
+    rebuildContribution?: (this: void, graphId: string, scope: ContributionRebuildScope, repopulate: (target: TransactionBackend) => Promise<ContributionRepopulationStats>) => Promise<ContributionRebuildResult>;
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
@@ -2570,7 +2629,7 @@ export function havingLt(aggregate: AggregateExpr, value: number): AggregateComp
 export function havingLte(aggregate: AggregateExpr, value: number): AggregateComparisonPredicate;
 
 // @public
-const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "checkUnique", "checkUniqueBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertNode", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
+const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "checkUnique", "checkUniqueBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertNode", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
 
 // @public (undocumented)
 export type HistoryStore<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
@@ -4482,6 +4541,11 @@ type ReadCoordinate = Readonly<{
 // @public
 type ReadInstantMode = "literal" | "placeholder";
 
+// @public
+export type RebuildContributionOptions = Readonly<{
+    pageSize?: number;
+}>;
+
 // @public (undocumented)
 export type RebuildFulltextOptions = Readonly<{
     pageSize?: number;
@@ -5392,6 +5456,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     reembedVectorField: (kind: string, fieldPath: string, options?: ReembedVectorFieldOptions) => Promise<ReembedVectorFieldResult>;
     verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
     repairContributions: () => Promise<ContributionRepairResult>;
+    probeContributions: () => Promise<ContributionProbeResult>;
+    rebuildContribution: (scope: ContributionRebuildScope, options?: RebuildContributionOptions) => Promise<ContributionRebuildResult>;
     materializeRemovals: (options?: MaterializeRemovalsOptions) => Promise<MaterializeRemovalsResult>;
     close: () => Promise<void>;
 }> & StoreIdentityAccess<G>;
@@ -5891,6 +5957,7 @@ export type TableContribution = Readonly<{
     owner: string;
     tableName: string;
     createDdl: readonly string[];
+    dropDdl?: readonly string[];
     runtimeEnsure: boolean;
 }>;
 
@@ -6215,7 +6282,7 @@ type UniqueRow = Readonly<{
 }>;
 
 // @public (undocumented)
-type UnsafeHistoryStoreBackendMember = "clearGraph" | "commitSchemaVersionWithPreflight" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "repairContributions" | "schemaWriteTransaction" | "transaction" | "trustedImport";
+type UnsafeHistoryStoreBackendMember = "clearGraph" | "commitSchemaVersionWithPreflight" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "rebuildContribution" | "repairContributions" | "schemaWriteTransaction" | "transaction" | "trustedImport";
 
 // @public
 export class UnsupportedBackendCapabilityError extends TypeGraphError {

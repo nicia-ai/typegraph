@@ -1121,6 +1121,51 @@ reopen it through a managed factory before resuming version-fenced writes.
   [The store opens clean but a fulltext or vector read fails](/troubleshooting#the-store-opens-clean-but-a-fulltext-or-vector-read-fails)
   rather than applying one repair to every entry.
 
+- **`store.probeContributions()` is the read-only readiness check;
+  `store.rebuildContribution()` is the destructive last resort.**
+  The two bracket `repairContributions()` into one escalation ladder:
+  probe (writes nothing) → repair (non-destructive) → rebuild (drops and
+  recreates storage). The probe reports one `ready` / `degraded` entry per
+  search projection and is safe on a read path, on a replica, and under
+  the least-privilege role — it shares the detection logic of the other
+  two rather than reimplementing it, so it cannot disagree with the gate
+  the hot path actually consults. The rebuild is the only repair for a
+  `stale` contribution, whose table exists at a shape the current
+  `createDdl` no longer produces; it runs drop → recreate → refill →
+  stamp inside one transaction under the schema-write fence, and refuses
+  with `ContributionRebuildUnsupportedError` for vector storage, whose
+  embeddings exist only in the table it would drop. Run rebuilds through
+  the DDL-capable migration role, in a maintenance window: the
+  transaction is held for the whole refill, and on PostgreSQL the drop's
+  exclusive lock blocks concurrent searches until it commits. See
+  [Contribution health: probe, repair, rebuild](/troubleshooting#contribution-health-probe-repair-rebuild).
+
+### Contribution capability parity
+
+`backend.capabilities.contributions` declares how far up the ladder a
+backend goes. Each rung is separate because a backend can genuinely stop
+at any of them, and a rung a backend cannot serve refuses with a typed
+error rather than returning something that looks like success.
+
+| Backend | `supported` | `probe` | `rebuild` |
+| --- | --- | --- | --- |
+| SQLite (better-sqlite3, bun:sqlite, libSQL, Durable Objects) | ✅ | ✅ | ✅ |
+| SQLite with `transactionMode: "none"` | ✅ | ✅ | ❌ no schema fence |
+| PostgreSQL (`pg`, `postgres-js`, PGlite, `neon-serverless`) | ✅ | ✅ | ✅ |
+| PostgreSQL over `neon-http` | ✅ | ✅ | ❌ no schema fence |
+| Custom fulltext strategy without `dropDdl` | ✅ | ✅ | ❌ no teardown DDL |
+
+`rebuild` requires two things at once: a fulltext strategy that declares
+`dropDdl` on its contribution, and a transactional schema fence
+(`schemaWriteTransaction`) to run the sequence under. The HTTP-only
+PostgreSQL drivers cannot hold a session across statements, so they have
+no fence — the same reason they already report
+`capabilities.transactions === false`. A third-party strategy predating
+`dropDdl` keeps working for every other operation and is reported as not
+rebuildable rather than being dropped through a synthesized statement
+TypeGraph guessed at. Vector contributions are never rebuildable on any
+backend; that is a property of what TypeGraph stores, not of the engine.
+
 ### Recommended deployment shape
 
 Run schema/DDL changes as a **privileged, one-time migration step**, then

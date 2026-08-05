@@ -163,6 +163,34 @@ Also useful for:
 - Re-tokenizing after changing `language` on a `searchable()` field.
 - Recovering from bulk inserts that bypassed the store layer.
 
+### Checking Whether Search Is Ready
+
+`store.search.rebuildFulltext()` fixes *content*. It cannot fix storage
+that is missing, unattested, or provisioned at the wrong shape — and it
+throws `StoreNotInitializedError` when it is, because the hot-path gate
+refuses fulltext writes until the durable contribution marker attests the
+table. To find out which situation you are in without writing anything:
+
+```typescript
+const health = await store.probeContributions();
+const fulltext = health.entries.find(
+  (entry) => entry.contribution === "fulltext",
+);
+
+if (fulltext?.state !== "ready") {
+  console.warn(`fulltext search is ${fulltext?.state}`, fulltext?.detail);
+}
+```
+
+The probe writes nothing, so it is safe to call from a health check, on a
+read path, or on a replica — which is the point: the alternative was to
+run `store.repairContributions()`, a write with repair side effects, and
+hope. When it reports `degraded`, escalate through the contribution health
+ladder — probe, then `repairContributions()`, then
+`rebuildContribution("fulltext")` for storage that has to be dropped and
+recreated. The three rungs, what each one writes, and when to stop are in
+[Contribution health: probe, repair, rebuild](/troubleshooting#contribution-health-probe-repair-rebuild).
+
 ## Database Setup
 
 ### Initialization is required (boot via `createStoreWithSchema`)

@@ -37,6 +37,7 @@ export type BackendCapabilities = Readonly<{
     vector?: VectorCapabilities | undefined;
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
+    contributions?: ContributionCapabilities | undefined;
 }>;
 
 // @public (undocumented)
@@ -135,6 +136,13 @@ export type CompiledStatementSql = IntentSql<"statement">;
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
+export type ContributionCapabilities = Readonly<{
+    supported: boolean;
+    probe: boolean;
+    rebuild: boolean;
+}>;
+
+// @public
 export type ContributionDiagnostic = Readonly<{
     owner: string;
     logicalName: string;
@@ -172,6 +180,36 @@ export type ContributionMaterializationRow = Readonly<{
 }>;
 
 // @public
+export type ContributionProbeContribution = "fulltext" | "vector";
+
+// @public
+export type ContributionProbeEntry = Readonly<{
+    contribution: ContributionProbeContribution;
+    state: ContributionProbeState;
+    detail?: string;
+}>;
+
+// @public
+export type ContributionProbeResult = Readonly<{
+    graphRevision?: string;
+    entries: readonly ContributionProbeEntry[];
+}>;
+
+// @public
+export type ContributionProbeState = "ready" | "degraded" | "building";
+
+// @public
+export type ContributionRebuildResult = Readonly<{
+    rebuilt: readonly string[];
+    processed: number;
+    repopulated: number;
+    skipped: number;
+}>;
+
+// @public
+export type ContributionRebuildScope = ContributionProbeContribution;
+
+// @public
 export type ContributionRepairEntry = Readonly<{
     diagnostic: ContributionDiagnostic;
     status: "repaired";
@@ -188,6 +226,13 @@ export type ContributionRepairEntry = Readonly<{
 export type ContributionRepairResult = Readonly<{
     results: readonly ContributionRepairEntry[];
     remaining: readonly ContributionDiagnostic[];
+}>;
+
+// @public
+export type ContributionRepopulationStats = Readonly<{
+    processed: number;
+    repopulated: number;
+    skipped: number;
 }>;
 
 // @public
@@ -840,6 +885,8 @@ export type GraphBackend = Readonly<{
     deleteVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
     verifyContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionDiagnostic[]>;
     repairContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<ContributionRepairResult>;
+    probeContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionProbeEntry[]>;
+    rebuildContribution?: (this: void, graphId: string, scope: ContributionRebuildScope, repopulate: (target: TransactionBackend) => Promise<ContributionRepopulationStats>) => Promise<ContributionRebuildResult>;
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
@@ -1614,6 +1661,7 @@ export type TableContribution = Readonly<{
     owner: string;
     tableName: string;
     createDdl: readonly string[];
+    dropDdl?: readonly string[];
     runtimeEnsure: boolean;
 }>;
 

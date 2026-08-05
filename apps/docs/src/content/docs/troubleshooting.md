@@ -469,8 +469,9 @@ empty, a second call is idempotent and returns no results.
 For a vector `requires-rebuild` entry, use
 `reembedVectorField(kind, fieldPath, { embed })`. It drops and recreates the
 slot, so pass an `embed` callback or the field comes back with zero embeddings.
-A stale fulltext contribution requires an operator-planned rebuild; do not
-hand-edit the marker or run backend-owned DDL directly.
+For a fulltext `requires-rebuild` entry, use
+`rebuildContribution("fulltext")` — the third rung of the ladder, described
+below. Do not hand-edit the marker or run backend-owned DDL directly.
 
 `repairContributions()` intentionally does not use the public diagnostic as an
 instruction list and does not force marker writes. A warm backend re-reads the
@@ -488,6 +489,108 @@ false positive on every store it opens. For a readiness check, first attach with
 this diagnostic. Also assert `backend.capabilities.vector?.supported` when
 embedding storage is required rather than treating an empty array as proof that
 it is intact.
+
+### Contribution health: probe, repair, rebuild
+
+The three contribution maintenance operations form one escalation ladder.
+Each rung does strictly more, and costs strictly more, than the one below
+it. Start at the top of this table and stop as soon as the projection is
+`ready`.
+
+| Rung | Call | Writes | Use when |
+| --- | --- | --- | --- |
+| 1. Probe | `store.probeContributions()` | Nothing | You want to know whether search is coherent right now. Safe on a read path, on a replica, and under a least-privilege role |
+| 2. Repair | `store.repairContributions()` | Marker rows and idempotent `CREATE ... IF NOT EXISTS` | The probe reports `degraded` and `verifyContributions()` says `missing-marker` or `failed-materialization` — storage is intact and only the bookkeeping is wrong |
+| 3. Rebuild | `store.rebuildContribution("fulltext")` | **Drops and recreates storage** | `verifyContributions()` says `stale` or `orphaned-marker`, which repair reports as `requires-rebuild` |
+
+**Rung 1 — the read-only probe.** One entry per search projection the
+graph declares, so a caller can decide whether to issue a query without
+running a write operation first:
+
+```typescript
+const health = await store.probeContributions();
+
+for (const entry of health.entries) {
+  if (entry.state !== "ready") {
+    console.warn(`${entry.contribution} search is ${entry.state}`, entry.detail);
+  }
+}
+```
+
+`entries` is empty when there is nothing to assess — a graph with no
+`searchable()` or `embedding()` fields, or a backend with no contribution
+machinery. It is never empty because a check was skipped: a backend that
+provisions contributions but cannot probe its catalog throws
+`ConfigurationError`, and declares the gap as
+`capabilities.contributions.probe === false`. Route on `state`; `detail`
+is a human-readable summary and not a stable format, so call
+`verifyContributions()` for the structured per-table findings behind it.
+
+`graphRevision` stamps the durable revision the assessment was taken at,
+so a caller can order the probe against its own writes. It is absent
+unless the Store is revision-tracked (`revisionTracking: true` or
+`history: true`) and a tracked write has already anchored the clock. A
+store with no revision clock has no revision to stamp, and substituting a
+wall-clock timestamp or the schema version would be a weaker guarantee
+wearing the name of a stronger one — the schema version in particular does
+not advance on data writes, so it could not order anything.
+
+`state: "building"` is reserved. No shipped path publishes it; the
+destructive rebuild is atomic, so a concurrent probe observes the state
+before or after it and never a partial one. Treat it as "not `ready`".
+
+**Rung 3 — the destructive rebuild.** A `stale` fulltext contribution
+means the table exists at the shape a *previous* `createDdl` produced. The
+ordinary ensure path cannot fix it: its `CREATE ... IF NOT EXISTS` no-ops
+against the existing table, and re-stamping the marker there would leave
+it blessing storage whose shape is wrong — precisely what the drift guard
+exists to prevent. Only a drop makes the recreate meaningful, so the drop
+is its own named operation rather than a flag on the ensure path:
+
+```typescript
+const result = await adminStore.rebuildContribution("fulltext");
+// { rebuilt: ["typegraph_node_fulltext"], processed, repopulated, skipped }
+```
+
+It drops the storage, recreates it from the current `createDdl`,
+reconstructs the content from the node rows, and stamps the marker — all
+in one transaction under the same per-graph fence as a schema commit. An
+interrupted rebuild therefore rolls back to the state it started from
+rather than leaving storage attested but empty.
+
+What that costs, and why it is still the right trade: the transaction is
+held for the whole refill, and on PostgreSQL the `DROP TABLE` takes an
+exclusive lock the rebuild keeps until commit, so concurrent searches
+block for the duration. Run it in a maintenance window on a large graph.
+When the storage *shape* is fine and only the content is stale — a field
+gained `searchable()` after data was written, or a `language` changed —
+`store.search.rebuildFulltext()` is the incremental, resumable pass that
+transacts per page instead.
+
+Nothing is permanently lost for fulltext: the searchable text is derived
+from node properties TypeGraph already stores. Nodes whose stored `props`
+cannot be read as an object are counted in `skipped` and are absent from
+the rebuilt index; `store.search.rebuildFulltext()` reports their ids
+individually.
+
+**Vector contributions cannot be rebuilt, and the call refuses rather
+than trying.** `rebuildContribution("vector")` always throws
+`ContributionRebuildUnsupportedError` with
+`reason: "vector-source-unavailable"`. TypeGraph stores the vectors
+callers supply and never the inputs that produced them, so the embeddings
+exist only in the storage a rebuild would drop — dropping anyway would
+destroy them and hand back storage that looks healthy and returns
+nothing. `reembedVectorField(kind, fieldPath, { embed })` is the
+sanctioned destructive path for vector storage precisely because it takes
+the callback that can regenerate what the drop discards.
+
+The same typed error covers two wiring gaps, and both refuse before
+anything is dropped: `reason: "no-drop-ddl"` when the active fulltext
+strategy declares no `dropDdl` on its contribution, and
+`reason: "no-schema-fence"` when the backend exposes no
+`schemaWriteTransaction` to make the sequence atomic (the HTTP-only
+PostgreSQL drivers, and SQLite with transactions disabled). Both are
+declared ahead of time as `capabilities.contributions.rebuild === false`.
 
 ## Semantic Search Issues
 
