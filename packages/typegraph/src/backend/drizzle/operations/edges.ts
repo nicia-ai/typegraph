@@ -161,7 +161,19 @@ export function buildUpdateEdge(
     sql`${quotedColumn(edges.updatedAt)} = ${timestamp}`,
   ];
 
-  if (params.validTo !== undefined) {
+  // A resurrection that names `valid_from` is asserting a COMPLETE window, so
+  // both endpoints are rewritten together — an omitted `valid_to` reopens the
+  // window rather than leaving the tombstoned incarnation's upper bound behind
+  // to truncate it. A resurrection that omits `valid_from` keeps the stored
+  // window (only an explicit `valid_to` moves), which is what
+  // `getOrCreateByEndpoints` relies on when it cardinality-checks the
+  // tombstone's own `valid_to`.
+  if (params.clearDeleted && params.validFrom !== undefined) {
+    setParts.push(
+      sql`${quotedColumn(edges.validFrom)} = ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}`,
+      sql`${quotedColumn(edges.validTo)} = ${sqlNull(params.validTo)}`,
+    );
+  } else if (params.validTo !== undefined) {
     setParts.push(sql`${quotedColumn(edges.validTo)} = ${params.validTo}`);
   }
 

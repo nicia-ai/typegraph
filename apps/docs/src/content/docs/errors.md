@@ -142,6 +142,66 @@ try {
 }
 ```
 
+### `IdentityContradictionError`
+
+Thrown when an identity mutation would make the assertion ledger contradictory —
+for example asserting two nodes are the same after they were asserted different,
+folding a same-class pair the ontology forbids, or importing an archive whose
+assertions conflict with the target graph. Only raised on identity-enabled
+graphs.
+
+```typescript
+try {
+  await tx.identity.assertSame(alice, aliceCopy);
+} catch (error) {
+  if (error instanceof IdentityContradictionError) {
+    console.log(error.code); // "IDENTITY_CONTRADICTION"
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // {
+    //   operation: "assertSame",       // "assertSame" | "assertDifferent" | "fold" | "import"
+    //   a: { kind: "Person", id: "..." },
+    //   b: { kind: "Person", id: "..." },
+    //   reason: "different-assertion", // "different-assertion" | "same-class" | "disjoint-kinds"
+    //   conflictingAssertionId: "...", // present when an existing assertion conflicts
+    //   conflictingKinds: ["Person", "Organization"], // present when reason is "disjoint-kinds"
+    // }
+    console.log(error.suggestion);
+    // "Retract the conflicting identity assertion or correct the graph ontology before retrying."
+  }
+}
+```
+
+### `IdentityMergeConflictError`
+
+Detected at merge **plan time** when the branches being merged carry opposing
+or otherwise contradictory identity truth: one branch asserts a pair `same`
+while another asserts it `different` (directly, or transitively through a
+chain of `same` assertions no single branch ever wrote), a branch retracts an
+assertion that a different branch reasserts under a new id (a retract/reassert
+race — a branch that reasserts a pair it *also* retracted itself is
+convergent, not a conflict, and merges cleanly), or a branch asserts an
+identity relation over a node another branch deleted. Extends `MergeError`, so
+an `instanceof MergeError` catch covers it alongside the other merge failures.
+
+`merge()` and `IdentityMergeConflictError` are both exported from
+`@nicia-ai/typegraph/graph-merge`, not the package root. `merge()` takes an
+array of branches and never throws a `MergeError` — it **returns** a
+`Result<MergeReport, MergeError>`:
+
+```typescript
+import { merge, IdentityMergeConflictError, isErr } from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, [branch]);
+if (isErr(result)) {
+  if (result.error instanceof IdentityMergeConflictError) {
+    console.log(result.error.code); // "GRAPH_MERGE_IDENTITY_CONFLICT"
+    console.log(result.error.details);
+  }
+  throw result.error;
+}
+```
+
 ### `EndpointError`
 
 Thrown when an edge is created with invalid endpoint types.
@@ -317,6 +377,49 @@ try {
   }
 }
 ```
+
+#### Operational Identity guard codes
+
+Operational Identity lifecycle failures use stable `details.code` values on
+`ConfigurationError`:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `IDENTITY_REQUIRES_ATOMIC_BACKEND` | The selected adapter cannot provide the interactive transaction required by identity writes. |
+| `IDENTITY_REQUIRES_STATEMENT_EXECUTION` | The backend cannot execute the raw statements Operational Identity issues internally. |
+| `IDENTITY_NOT_ENABLED` | `store.identity`, `tx.identity`, `StoreView.identity`, or an identity-expanded query option was reached on a graph without `identity: { ... }` — normally caught at compile time; this is the runtime guard for a widened or `any`-typed handle. |
+| `IDENTITY_STORAGE_MISSING` | An identity relation disappeared after enablement; restore ledgers or recreate and rebuild the derived closure before serving traffic. |
+| `IDENTITY_ENABLEMENT_PENDING` | First enablement is pending because `autoMigrate` is disabled. |
+| `IDENTITY_PROFILE_MIGRATION_PENDING` | A `sameIdAcrossKinds` change (a breaking `fold`↔`ignore` flip, or disabling identity) has not been applied — either it is breaking, or `autoMigrate` is disabled. |
+| `IDENTITY_SCHEMA_MIGRATION_PENDING` | An identity-relevant ontology change is pending because `autoMigrate` is disabled. |
+| `IDENTITY_SCHEMA_CONTRADICTION` | Existing nodes or assertions contradict the proposed identity profile or ontology, or the materialized closure disagrees with the assertions it was derived from. Run `rebuildIdentityClosure(store)` to recover from a closure mismatch. |
+| `IDENTITY_IMPORT_REQUIRES_PROFILE` | An interchange document carries an `identity` section but the target graph does not have the profile enabled. |
+| `IDENTITY_MERGE_REQUIRES_PROFILE` | A branch carries identity changes but the merge target graph does not have the profile enabled. |
+| `IDENTITY_IMPORT_ID_CONFLICT` | An imported assertion id already exists in the target ledger identifying different truth (relation, endpoints, or validity window). |
+| `RECORDED_IDENTITY_SCHEMA_MISSING` | A `history: true` open of an identity-enabled graph could not find the recorded identity relation. Bundled backends provision it, so this is rare there and more likely on a custom backend. |
+
+When an unapplied migration's **only** breaking change is the identity one, the
+specific pending code above wins over the generic `MigrationError` (which is
+attached as `cause`); a diff that also breaks nodes, edges, ontology, or
+indexes raises the generic `MigrationError` enumerating all of them.
+
+Identity import also raises `ValidationError` with one of these
+`details.issues[].code` values when an interchange document's `identity`
+section fails shape or integrity checks. Each issue carries the offending
+assertion's id structurally in `details.issues[].assertionId`, and
+`importGraph`/`importGraphStream` record these failures as
+`entityType: "identity"` entries in `result.errors` (a self-assertion —
+`IDENTITY_SELF_ASSERTION` — included) rather than throwing:
+
+| Issue `code` | Meaning |
+| --- | --- |
+| `IDENTITY_IMPORT_UNKNOWN_KIND` | An assertion endpoint names a node kind not in the target graph's registry. |
+| `IDENTITY_IMPORT_PAIR_NOT_NORMALIZED` | An assertion's `a`/`b` endpoints are not in code-point order. |
+| `IDENTITY_STATE_IMPORT_ENDED_ASSERTION` | A `state`-mode import (the default) contains an already-ended assertion; use `identityMode: "archival"` on export to carry ended assertions. |
+| `IDENTITY_IMPORT_FUTURE_VALID_FROM` | An open (current) assertion's `validFrom` is in the future, in either import mode. |
+| `IDENTITY_IMPORT_FUTURE_VALID_TO` | An ended assertion's `validTo` is in the future. |
+| `IDENTITY_IMPORT_INVALID_WINDOW` | An assertion's `validTo` precedes its `validFrom`. |
+| `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
 
 #### Recorded-capture guard codes
 
@@ -606,6 +709,8 @@ try {
 |------|-------------|----------|-------------|
 | `VALIDATION_ERROR` | `ValidationError` | user | Schema validation failed |
 | `DISJOINT_ERROR` | `DisjointError` | constraint | Disjointness constraint violated |
+| `IDENTITY_CONTRADICTION` | `IdentityContradictionError` | constraint | Identity mutation would make the assertion ledger contradictory |
+| `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
 | `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |

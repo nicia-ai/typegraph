@@ -5,6 +5,7 @@
  */
 import { type NodeType } from "../../core/types";
 import { normalizePath } from "../../utils";
+import { stripIdentityPathTokens } from "../../utils/path";
 import { type Traversal } from "../ast";
 import type {
   AliasMap,
@@ -18,34 +19,66 @@ import type {
 import { type SqlDialect } from "../dialect/types";
 
 /**
- * Transforms SQLite path columns from pipe-delimited strings to arrays.
- * PostgreSQL returns native arrays, so no transformation needed.
+ * A variable-length traversal's path column, plus whether its tokens carry the
+ * identity-expansion `kind || SEP || id` wrapper the compiler emits for cycle
+ * detection.
+ */
+type PathColumn = Readonly<{
+  alias: string;
+  identityExpanded: boolean;
+}>;
+
+function collectPathColumns(state: QueryBuilderState): readonly PathColumn[] {
+  const columns: PathColumn[] = [];
+  for (const traversal of state.traversals) {
+    const pathAlias = traversal.variableLength?.pathAlias;
+    if (pathAlias !== undefined) {
+      columns.push({
+        alias: pathAlias,
+        identityExpanded: traversal.includeIdentityMembers === true,
+      });
+    }
+  }
+  return columns;
+}
+
+/**
+ * Materializes path columns into the array of bare node IDs the public
+ * traversal contract promises.
+ *
+ * SQLite returns pipe-delimited strings and PostgreSQL native arrays, so the
+ * shape is normalized here. Identity-expanded traversals additionally carry
+ * composite `kind || SEP || id` tokens (the compiler needs them so folded peers
+ * stay distinct for cycle detection); those are stripped here so identity and
+ * non-identity traversals produce identical path output on both dialects.
+ *
+ * This is the single seam where paths become caller-visible arrays — every
+ * execution path (execute, prepared, paginated, selective) funnels through it,
+ * so stripping exactly once here is safe.
  */
 export function transformPathColumns(
   rows: readonly Record<string, unknown>[],
   state: QueryBuilderState,
   _dialect: SqlDialect,
 ): readonly Record<string, unknown>[] {
-  // Find path columns from variable-length traversals
-  const pathAliases: string[] = [];
-  for (const traversal of state.traversals) {
-    if (traversal.variableLength?.pathAlias !== undefined) {
-      pathAliases.push(traversal.variableLength.pathAlias);
-    }
-  }
-
-  if (pathAliases.length === 0) return rows;
+  const pathColumns = collectPathColumns(state);
+  if (pathColumns.length === 0) return rows;
 
   const result: Record<string, unknown>[] = [];
   let changed = false;
   for (const row of rows) {
     let transformed: Record<string, unknown> | undefined;
-    for (const alias of pathAliases) {
+    for (const { alias, identityExpanded } of pathColumns) {
       const value = row[alias];
-      if (value !== undefined && !Array.isArray(value)) {
-        transformed ??= { ...row };
-        transformed[alias] = normalizePath(value);
-      }
+      if (value === undefined) continue;
+      const normalized = normalizePath(value);
+      const path =
+        identityExpanded ? stripIdentityPathTokens(normalized) : normalized;
+      // normalizePath returns native arrays by reference, so an already-shaped
+      // path that needs no stripping leaves the row untouched.
+      if (path === value) continue;
+      transformed ??= { ...row };
+      transformed[alias] = path;
     }
     if (transformed === undefined) {
       result.push(row);

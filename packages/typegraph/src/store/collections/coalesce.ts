@@ -45,15 +45,27 @@ export type UpsertDirtyCheckFunction = (
  * swallowed.
  */
 export function shouldCoalesceUpsert(
-  existing: Readonly<{ deleted_at: string | undefined }>,
+  existing: Readonly<{
+    deleted_at: string | undefined;
+    valid_from?: string | undefined;
+    valid_to?: string | undefined;
+  }>,
   options: Readonly<{ validFrom?: string; validTo?: string }> | undefined,
   runDirtyCheck: (() => UpsertDirtyCheck) | undefined,
 ): boolean {
+  // An explicit temporal override blocks coalescing ONLY when it would
+  // change the stored window: merge commits pass the staged survivor's
+  // window on every canonical write, so a target row staged back at itself
+  // (identical props AND identical window) must still coalesce instead of
+  // rewriting version, history, and revision state.
+  const windowChanges =
+    (options?.validFrom !== undefined &&
+      options.validFrom !== existing.valid_from) ||
+    (options?.validTo !== undefined && options.validTo !== existing.valid_to);
   if (
     runDirtyCheck === undefined ||
     existing.deleted_at !== undefined ||
-    options?.validFrom !== undefined ||
-    options?.validTo !== undefined
+    windowChanges
   ) {
     return false;
   }

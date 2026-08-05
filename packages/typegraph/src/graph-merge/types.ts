@@ -64,6 +64,18 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
   id: BranchId;
   base: BaseVersion;
   store: Store<G>;
+  /**
+   * The branch store's committed schema row `(version, hash)` captured AT
+   * FORK. The merge requires the branch's CURRENT committed schema to still
+   * equal this anchor: any schema operation on the branch after forking —
+   * including a round-trip that restores the original document hash —
+   * advances the version and is refused, so its row side effects can never
+   * be projected into a merge as bare data changes. `undefined` inside the
+   * tuple-less field means the clone committed no schema row (unmanaged
+   * stores); absent entirely on hand-built branch objects, where the merge
+   * falls back to comparing the branch's hash against the fork source's.
+   */
+  schemaAnchor?: Readonly<{ version: number; hash: string }> | undefined;
 }>;
 
 /**
@@ -410,13 +422,17 @@ export type TypeReconciliation = Readonly<{
 
 /**
  * An item omitted from the merged result (e.g. an edge whose endpoint was
- * deleted, or an incompatible-typed cluster member).
+ * deleted, an incompatible-typed cluster member, or an identity assertion that
+ * lost the survivor rule to an equivalent assertion from another branch).
+ *
+ * Discriminated on `kind` so each variant keeps its own id type: node and edge
+ * ids are branded, while an identity assertion is named by the ledger's plain
+ * assertion id (it is not a graph entity and carries no brand).
  */
-export type DroppedItem = Readonly<{
-  kind: "edge" | "node";
-  id: NodeId<NodeType> | EdgeId;
-  reason: string;
-}>;
+export type DroppedItem =
+  | Readonly<{ kind: "node"; id: NodeId<NodeType>; reason: string }>
+  | Readonly<{ kind: "edge"; id: EdgeId; reason: string }>
+  | Readonly<{ kind: "identity"; id: string; reason: string }>;
 
 /**
  * A `(kind, id)` node identity as surfaced in the merge report. Node identity is the
@@ -481,11 +497,26 @@ export type ProvenanceRecord = Readonly<{
 }>;
 
 /**
+ * What the merge actually wrote to the target: node and edge counts plus the
+ * identity-ledger effects. `identity.asserted` counts rows the applier
+ * CREATED — planned assertions the target already held (idempotent exact or
+ * semantic-pair matches, the normal incremental case) are excluded — and
+ * `identity.retracted` counts rows the applier ENDED, excluding already-ended
+ * or unknown ids. Assertions dropped by the survivor rule are enumerated in
+ * {@link MergeReport.dropped} rather than counted here.
+ */
+export type MergedCounts = Readonly<{
+  nodes: number;
+  edges: number;
+  identity: Readonly<{ asserted: number; retracted: number }>;
+}>;
+
+/**
  * The full result of a {@link merge}: counts, every resolution/conflict/
  * reconciliation/drop, and the report-only provenance index.
  */
 export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
-  merged: Readonly<{ nodes: number; edges: number }>;
+  merged: MergedCounts;
   resolutions: readonly EntityResolution[];
   conflicts: readonly PropertyConflict<G>[];
   deleteModifyConflicts: readonly DeleteModifyConflict[];

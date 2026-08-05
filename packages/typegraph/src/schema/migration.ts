@@ -81,6 +81,13 @@ export type OntologyChange = Readonly<{
   details: string;
 }>;
 
+/** A durable graph-level Operational Identity capability change. */
+export type IdentityChange = Readonly<{
+  type: ChangeType;
+  severity: ChangeSeverity;
+  details: string;
+}>;
+
 // ============================================================
 // Index Changes
 // ============================================================
@@ -166,6 +173,9 @@ export type SchemaDiff = Readonly<{
   /** Changes to ontology */
   ontology: readonly OntologyChange[];
 
+  /** Change to the graph-level identity capability, if any. */
+  identity?: IdentityChange;
+
   /** Changes to index declarations */
   indexes: readonly IndexChange[];
 
@@ -212,6 +222,7 @@ export function computeSchemaDiff(
   const nodeChanges = diffNodes(before.nodes, after.nodes);
   const edgeChanges = diffEdges(before.edges, after.edges);
   const ontologyChanges = diffOntology(before.ontology, after.ontology);
+  const identityChange = diffIdentity(before.identity, after.identity);
   const indexChanges = diffIndexes(before.indexes, after.indexes);
   const extensionChange = diffExtension(before.extension, after.extension);
   const deprecatedKindsChange = diffDeprecatedKinds(
@@ -225,11 +236,12 @@ export function computeSchemaDiff(
     ...ontologyChanges,
     ...indexChanges,
   ];
-  const hasBreakingChanges = allChanges.some(
-    (change) => change.severity === "breaking",
-  );
+  const hasBreakingChanges =
+    allChanges.some((change) => change.severity === "breaking") ||
+    identityChange?.severity === "breaking";
   const hasChanges =
     allChanges.length > 0 ||
+    identityChange !== undefined ||
     extensionChange !== undefined ||
     deprecatedKindsChange !== undefined;
 
@@ -237,6 +249,7 @@ export function computeSchemaDiff(
     nodeChanges,
     edgeChanges,
     ontologyChanges,
+    identityChange,
     indexChanges,
     extensionChange,
     deprecatedKindsChange,
@@ -248,6 +261,7 @@ export function computeSchemaDiff(
     nodes: nodeChanges,
     edges: edgeChanges,
     ontology: ontologyChanges,
+    ...(identityChange === undefined ? {} : { identity: identityChange }),
     indexes: indexChanges,
     ...(extensionChange === undefined ? {} : { extension: extensionChange }),
     ...(deprecatedKindsChange === undefined ?
@@ -257,6 +271,41 @@ export function computeSchemaDiff(
     isBackwardsCompatible: !hasBreakingChanges,
     hasChanges,
     summary,
+  };
+}
+
+function diffIdentity(
+  before: SerializedSchema["identity"],
+  after: SerializedSchema["identity"],
+): IdentityChange | undefined {
+  if (before === undefined && after === undefined) return;
+  if (before === undefined) {
+    return {
+      type: "added",
+      severity: "safe",
+      details: "Operational Identity enabled",
+    };
+  }
+  if (after === undefined) {
+    return {
+      type: "removed",
+      severity: "breaking",
+      details: "Operational Identity disabled",
+    };
+  }
+  if (before.sameIdAcrossKinds === after.sameIdAcrossKinds) return;
+  // A fold<->ignore flip rewrites the materialized identity closure and
+  // changes every areSame/membersOf/includeIdentityMembers answer against
+  // existing data — a read-semantics change, not a mechanical migration.
+  // Classified `breaking` (the same severity as identity removal, just
+  // above) so it cannot auto-migrate silently: it requires the same
+  // explicit `migrateSchema()` opt-in as any other breaking change.
+  return {
+    type: "modified",
+    severity: "breaking",
+    details:
+      `Operational Identity sameIdAcrossKinds changed from ` +
+      `"${before.sameIdAcrossKinds}" to "${after.sameIdAcrossKinds}"`,
   };
 }
 
@@ -1119,6 +1168,7 @@ function generateSummary(
   nodeChanges: readonly NodeChange[],
   edgeChanges: readonly EdgeChange[],
   ontologyChanges: readonly OntologyChange[],
+  identityChange: IdentityChange | undefined,
   indexChanges: readonly IndexChange[],
   extensionChange: ExtensionChange | undefined,
   deprecatedKindsChange: DeprecatedKindsChange | undefined,
@@ -1154,6 +1204,10 @@ function generateSummary(
 
   if (ontologyAdded > 0 || ontologyRemoved > 0) {
     parts.push(`Ontology: ${ontologyAdded} added, ${ontologyRemoved} removed`);
+  }
+
+  if (identityChange !== undefined) {
+    parts.push(`Identity: ${identityChange.type}`);
   }
 
   const indexAdded = indexChanges.filter((c) => c.type === "added").length;
@@ -1246,6 +1300,41 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
   for (const change of diff.edges) {
     if (change.type === "removed") {
       actions.push(`DELETE data for removed edge kind "${change.kind}"`);
+    }
+  }
+
+  if (diff.identity !== undefined) {
+    switch (diff.identity.type) {
+      case "added": {
+        actions.push(
+          `BUILD Operational Identity closure: ${diff.identity.details} ` +
+            `(materializes the closure table, running a same-id fold scan ` +
+            `when sameIdAcrossKinds is "fold")`,
+        );
+        break;
+      }
+      case "modified": {
+        actions.push(
+          `REBUILD Operational Identity closure: ${diff.identity.details} ` +
+            `(every areSame/membersOf/includeIdentityMembers answer is ` +
+            `recomputed under the new profile)`,
+        );
+        break;
+      }
+      case "removed": {
+        actions.push(
+          `DISABLE Operational Identity: ${diff.identity.details} (the ` +
+            `materialized closure is left in place, unread; the identity ` +
+            `API becomes unavailable)`,
+        );
+        break;
+      }
+      case "renamed": {
+        // Unreachable: `diffIdentity` never emits "renamed" — identity is a
+        // graph-level capability, not a named entity that can be renamed.
+        // Handled only so the switch stays exhaustive over `ChangeType`.
+        break;
+      }
     }
   }
 

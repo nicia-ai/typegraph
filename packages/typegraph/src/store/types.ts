@@ -12,6 +12,7 @@ import {
 import {
   type EdgeKinds,
   type GraphDef,
+  type GraphIdentityConfig,
   type NodeKinds,
 } from "../core/define-graph";
 import { type RecordedInstant } from "../core/temporal";
@@ -26,6 +27,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
+import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
 import type {
   DynamicEdgeAccessor,
@@ -562,7 +564,9 @@ export type TransactionReceipt = Readonly<{
     nodes: Readonly<Record<string, number>>;
     /** Completed edge write intents by edge kind. */
     edges: Readonly<Record<string, number>>;
-    /** Sum of all node and edge write intents. */
+    /** Completed identity assertion and retraction write intents. */
+    identity: IdentityWriteSummary;
+    /** Sum of all node, edge, and identity write intents. */
     total: number;
   }>;
   /**
@@ -853,8 +857,10 @@ export type NodeCollection<
    * If a node with the given ID exists, updates it with the provided props.
    * Otherwise, creates a new node with that ID.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. It has no effect on an update to a live
+   * row, whose lower bound is already history.
    */
   upsertById: (
     id: string,
@@ -869,8 +875,10 @@ export type NodeCollection<
    * the data shape is determined at runtime, not compile time.
    * The return type is fully typed — only the input gate is relaxed.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. It has no effect on an update to a live
+   * row, whose lower bound is already history.
    */
   upsertByIdFromRecord: (
     id: string,
@@ -901,8 +909,10 @@ export type NodeCollection<
    * For each item, if a node with the given ID exists, updates it.
    * Otherwise, creates a new node with that ID.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. It has no effect on an update to a live
+   * row, whose lower bound is already history.
    */
   bulkUpsertById: (
     items: readonly Readonly<{
@@ -1287,8 +1297,10 @@ export type EdgeCollection<
    * For each item, if an edge with the given ID exists, updates it.
    * Otherwise, creates a new edge with that ID.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. It has no effect on an update to a live
+   * row, whose lower bound is already history.
    */
   bulkUpsertById: (
     items: readonly Readonly<{
@@ -1770,7 +1782,10 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
    * registered in this graph.
    */
   getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
-}>;
+}> &
+  (G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ identity: IdentityFacade<G> }>
+  : Readonly<Record<never, never>>);
 
 /**
  * A portable transaction context containing only TypeGraph-owned graph

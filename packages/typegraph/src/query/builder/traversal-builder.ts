@@ -170,6 +170,7 @@ export class TraversalBuilder<
   readonly #direction: Dir;
   readonly #fromAlias: string;
   readonly #optional: Optional;
+  readonly #includeIdentityMembers: boolean;
   readonly #variableLength: VariableLengthState;
   readonly #pendingEdgePredicates: readonly NodePredicate[];
 
@@ -184,6 +185,9 @@ export class TraversalBuilder<
     optional: Optional = false as Optional,
     variableLength: VariableLengthState = DEFAULT_VARIABLE_LENGTH_STATE,
     pendingEdgePredicates: readonly NodePredicate[] = [],
+    // Appended, never inserted: TraversalBuilder is public, so every
+    // pre-existing positional slot must keep its meaning.
+    includeIdentityMembers = false,
   ) {
     this.#config = config;
     this.#state = state;
@@ -193,6 +197,7 @@ export class TraversalBuilder<
     this.#direction = direction;
     this.#fromAlias = fromAlias;
     this.#optional = optional;
+    this.#includeIdentityMembers = includeIdentityMembers;
     this.#variableLength = variableLength;
     this.#pendingEdgePredicates = pendingEdgePredicates;
   }
@@ -271,6 +276,7 @@ export class TraversalBuilder<
         }),
       },
       this.#pendingEdgePredicates,
+      this.#includeIdentityMembers,
     );
   }
 
@@ -330,6 +336,7 @@ export class TraversalBuilder<
       this.#optional,
       this.#variableLength,
       [...this.#pendingEdgePredicates, newPredicate],
+      this.#includeIdentityMembers,
     );
   }
 
@@ -563,6 +570,7 @@ export class TraversalBuilder<
       joinFromAlias: this.#fromAlias,
       joinEdgeField: this.#direction === "out" ? "from_id" : "to_id",
       optional: this.#optional,
+      ...(this.#includeIdentityMembers ? { includeIdentityMembers: true } : {}),
     };
 
     const baseTraversal: Traversal =

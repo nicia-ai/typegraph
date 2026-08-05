@@ -81,6 +81,9 @@ function emptyPlan(): MergePlan<CareGraph> {
     baseAmbiguities: [],
     provenanceRecords: [],
     warnings: [],
+    identityAssertions: [],
+    identityRetractions: [],
+    canonicalOf: new Map(),
   };
 }
 

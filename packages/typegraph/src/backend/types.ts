@@ -395,6 +395,8 @@ export type UpdateNodeParams = Readonly<{
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
+  /** Applied when resurrecting a tombstone; omitted means the resurrection instant. */
+  validFrom?: string | null;
   validTo?: string;
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
@@ -486,6 +488,12 @@ export type UpdateEdgeParams = Readonly<{
   graphId: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
+  /**
+   * Applied when resurrecting a tombstone, where it asserts a COMPLETE window:
+   * `validTo` is rewritten alongside it (omitted `validTo` reopens the window).
+   * Omitting `validFrom` on a resurrection leaves the stored window in place.
+   */
+  validFrom?: string | null;
   validTo?: string;
   clearDeleted?: boolean;
 }>;
@@ -1509,6 +1517,20 @@ export type GraphBackend = Readonly<{
     params: Readonly<{ graphId: string; expectedVersion: number }>,
   ) => Promise<void>;
   /**
+   * Internal schema-lifecycle seam for features whose data preflight must
+   * commit atomically with the schema CAS. The callback runs in the same
+   * write transaction after the schema write fence is acquired and before the
+   * version write; it receives only the ordinary transaction backend, so
+   * callers cannot bypass the CAS.
+   *
+   * @internal
+   */
+  commitSchemaVersionWithPreflight?: (
+    this: void,
+    params: CommitSchemaVersionParams,
+    preflight: (target: TransactionBackend) => Promise<void>,
+  ) => Promise<SchemaVersionRow>;
+  /**
    * Atomically flips the active schema pointer to an existing version,
    * with optimistic compare-and-swap on the currently active version.
    * Used by `rollbackSchema` and any other "promote/demote existing
@@ -1669,6 +1691,37 @@ export type GraphBackend = Readonly<{
    * without replaying all base-table DDL during a merge read.
    */
   ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+
+  /**
+   * Idempotently ensure ONLY the three Operational Identity relations exist —
+   * the current-assertions table, the recorded-time assertions table, and the
+   * derived closure table — with their indexes (CREATE TABLE / CREATE INDEX IF
+   * NOT EXISTS).
+   *
+   * First enablement of identity on an existing populated deployment attaches
+   * via `createStore` / `createSqliteBackend` / `createPostgresBackend`, none
+   * of which run DDL, so the enablement preflight would otherwise
+   * SELECT/DELETE/INSERT tables that do not exist yet. The store calls this
+   * before the enablement locks and closure rebuild. Focused rather than
+   * `bootstrapTables` for the same concurrency rationale as
+   * {@link ensureRevisionOriginsTable}. Stores call it before opening the
+   * schema-commit transaction so DDL does not re-enter its per-graph lock.
+   * Returns the logical names that were absent before this call. Callers set
+   * `provisionMissing` only for safe first enablement; on an already-enabled
+   * graph, missing ledger tables are deliberately left absent so a failed open
+   * cannot make its next retry silently accept empty replacement storage.
+   *
+   * @internal
+   */
+  ensureIdentityTables?: (
+    this: void,
+    tableNames: Readonly<{
+      identityAssertions: string;
+      recordedIdentityAssertions: string;
+      identityClosure: string;
+    }>,
+    options: Readonly<{ provisionMissing: boolean }>,
+  ) => Promise<readonly string[]>;
 
   /**
    * Look up a recorded materialization for a declared index by its

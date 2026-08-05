@@ -81,6 +81,7 @@ export {
   type GetNodeType,
   getSearchableMetadata,
   type GraphDef,
+  type GraphIdentityConfig,
   // Type guards
   isEdgeType,
   isEdgeTypeWithEndpoints,
@@ -103,6 +104,25 @@ export {
   type SearchableOptions,
   type SearchableSchema,
 } from "./core";
+
+// ============================================================
+// Operational Identity
+// ============================================================
+
+export {
+  asIdentityAssertionId,
+  type IdentityAssertion,
+  type IdentityAssertionId,
+  type IdentityAssertionResult,
+  type IdentityFacade,
+  type IdentityNode,
+  type IdentityNodeRefInput,
+  type IdentityPair,
+  type IdentityReadFacade,
+  type IdentityRelation,
+  type IdentityWriteSummary,
+  rebuildIdentityClosure,
+} from "./identity";
 
 // ============================================================
 // Backend Types
@@ -264,6 +284,7 @@ export {
   computeTransitiveClosure,
   // Core ontology module
   core,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
   differentFrom,
   disjointWith,
   equivalentTo,
@@ -277,6 +298,7 @@ export {
   narrower,
   partOf,
   relatedTo,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
   sameAs,
   subClassOf,
 } from "./ontology";
@@ -295,6 +317,7 @@ export type {
   EndpointErrorDetails,
   EndpointNotFoundErrorDetails,
   ErrorCategory,
+  IdentityContradictionErrorDetails,
   InvalidEdgeWeightErrorDetails,
   InvalidEdgeWeightReason,
   KindNotFoundErrorDetails,
@@ -334,6 +357,7 @@ export {
   // Error utility functions
   getErrorSuggestion,
   GraphAlgorithmConvergenceError,
+  IdentityContradictionError,
   InvalidEdgeWeightError,
   isConstraintError,
   isRecordedCaptureGuardError,
@@ -465,7 +489,7 @@ export {
 // Reads of the committed schema: the document, its version, and whether one
 // exists at all. Also available from the "./schema" subpath alongside the
 // migration machinery.
-export type { SerializedSchema } from "./schema";
+export type { IdentityChange, SerializedSchema } from "./schema";
 export {
   getActiveSchema,
   getCommittedSchemaVersion,
@@ -584,6 +608,7 @@ export type {
   EmptyRecursiveAliasMap,
   FieldAccessor,
   FieldRef,
+  IdentityTraversalOption,
   InitialQueryBuilder,
   IntentSql,
   JsonPointer,
@@ -749,6 +774,7 @@ export {
   defineGraphExtension,
   GraphExtensionError,
   GraphExtensionUnresolvedEndpointError,
+  GraphExtensionUnresolvedOntologyEndpointError,
   GraphExtensionValidationError,
   GraphExtensionVersionUnsupportedError,
   IncompatibleChangeError,

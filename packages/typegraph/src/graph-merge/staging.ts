@@ -37,7 +37,12 @@ import type {
   ModifiedNode,
 } from "./state-diff";
 import { diffAgainstBase } from "./state-diff";
-import type { GraphDef, Store } from "./typegraph-internal";
+import type {
+  GraphDef,
+  IdentityTransferAssertion,
+  Store,
+} from "./typegraph-internal";
+import { storeRuntime } from "./typegraph-internal";
 import type { BranchId, GraphBranch } from "./types";
 
 /** A new fork node tagged with the branch that introduced it. */
@@ -76,6 +81,11 @@ type StagedDeletedEdge = Readonly<{
   edge: DeletedEdge;
 }>;
 
+export type StagedIdentityAssertion = Readonly<{
+  branchId: BranchId;
+  assertion: IdentityTransferAssertion;
+}>;
+
 /**
  * The provenance-tagged union of every branch's state-diff against the base.
  *
@@ -96,6 +106,17 @@ export type StagingSet = Readonly<{
   modifiedEdges: readonly StagedModifiedEdge[];
   /** Deleted inherited edges (one entry per (id, branch) deletion). */
   deletedEdges: readonly StagedDeletedEdge[];
+  newIdentityAssertions: readonly StagedIdentityAssertion[];
+  retractedIdentityAssertions: readonly StagedIdentityAssertion[];
+  /**
+   * Every assertion CURRENT in the base store at staging time — the inherited
+   * truth the branches forked from. Untagged (it belongs to no branch). The
+   * planner needs it because a merge can only decide whether the branches'
+   * assertions contradict each other by evaluating them against the assertions
+   * that survive the merge unchanged: a staged `different` pair can contradict a
+   * `same` pair no branch touched (see the contradiction check in `merge.ts`).
+   */
+  baseIdentityAssertions: readonly IdentityTransferAssertion[];
   /**
    * `(kind, id) -> version` for the nodes of the branch named by
    * `stageBranches`' `captureTargetStateFor` argument, observed by that
@@ -198,6 +219,11 @@ export async function stageBranches<G extends GraphDef>(
   const modifiedEdges: (StagedModifiedEdge & { kind: string; id: string })[] =
     [];
   const deletedEdges: (StagedDeletedEdge & { kind: string; id: string })[] = [];
+  const newIdentityAssertions: StagedIdentityAssertion[] = [];
+  const retractedIdentityAssertions: StagedIdentityAssertion[] = [];
+
+  const baseIdentityAssertions =
+    await storeRuntime(baseStore).readCurrentIdentityAssertions("state");
 
   let targetNodeVersions: ReadonlyMap<MergeKey, number> = new Map();
   let targetEdgeSignatures: ReadonlyMap<MergeKey, string> = new Map();
@@ -231,6 +257,12 @@ export async function stageBranches<G extends GraphDef>(
     for (const edge of diff.edges.deleted) {
       deletedEdges.push({ branchId, edge, kind: edge.kind, id: edge.id });
     }
+    for (const assertion of diff.identity.new) {
+      newIdentityAssertions.push({ branchId, assertion });
+    }
+    for (const assertion of diff.identity.retracted) {
+      retractedIdentityAssertions.push({ branchId, assertion });
+    }
   }
 
   return {
@@ -247,6 +279,21 @@ export async function stageBranches<G extends GraphDef>(
     ),
     deletedEdges: [...deletedEdges].sort((left, right) =>
       compareByKindIdBranch(left, right),
+    ),
+    newIdentityAssertions: newIdentityAssertions.toSorted((left, right) => {
+      const byId = compareStrings(left.assertion.id, right.assertion.id);
+      return byId === 0 ? compareStrings(left.branchId, right.branchId) : byId;
+    }),
+    retractedIdentityAssertions: retractedIdentityAssertions.toSorted(
+      (left, right) => {
+        const byId = compareStrings(left.assertion.id, right.assertion.id);
+        return byId === 0 ?
+            compareStrings(left.branchId, right.branchId)
+          : byId;
+      },
+    ),
+    baseIdentityAssertions: baseIdentityAssertions.toSorted((left, right) =>
+      compareStrings(left.id, right.id),
     ),
     targetNodeVersions,
     targetEdgeSignatures,

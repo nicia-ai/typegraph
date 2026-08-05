@@ -23,6 +23,19 @@ import { createPostgresTables } from "../drizzle/schema/postgres";
 import { closeAfterFailure } from "../types";
 import { createLocalPgliteBackend } from "./pglite";
 
+export type { GraphIdentityConfig } from "../../core/define-graph";
+export type {
+  IdentityAssertion,
+  IdentityAssertionId,
+  IdentityAssertionResult,
+  IdentityFacade,
+  IdentityNode,
+  IdentityNodeRefInput,
+  IdentityPair,
+  IdentityReadFacade,
+  IdentityRelation,
+  IdentityWriteSummary,
+} from "../../identity";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
@@ -39,9 +52,29 @@ export type LocalPgliteStoreOptions<
   vector?: boolean;
   /** Store behavior, including hooks, history, and custom table names. */
   store?: TStoreOptions;
-  /** Schema initialization and migration policy. */
-  schemaManagement?: SchemaManagerOptions;
+  /**
+   * Schema initialization and migration policy. `schema` is excluded here:
+   * the effective SqlSchema has exactly one source — `store.schema` — which
+   * this constructor also uses to provision the physical tables, so a
+   * second schema could name tables that were never created.
+   */
+  schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;
+
+/**
+ * Drops a smuggled `schema` from the nested schema-management options: the
+ * effective `SqlSchema` has exactly one source (`store.schema`), which also
+ * drives physical table provisioning in this constructor.
+ */
+function withoutSchemaOverride(
+  schemaManagement: Omit<SchemaManagerOptions, "schema"> | undefined,
+): Omit<SchemaManagerOptions, "schema"> {
+  if (schemaManagement === undefined) return {};
+  const { schema: smuggled, ...rest } =
+    schemaManagement as SchemaManagerOptions;
+  void smuggled;
+  return rest;
+}
 
 /** Creates, provisions, and returns a full typed local PGlite Store. */
 export function createLocalPgliteStore<G extends GraphDef>(
@@ -82,7 +115,10 @@ export async function createLocalPgliteStore<G extends GraphDef>(
   try {
     const [store] = await createStoreWithSchema(graph, backend, {
       ...options.store,
-      ...options.schemaManagement,
+      // The type already excludes `schema` here; the runtime strip guards
+      // untyped callers, so the provisioned schema (or the default tables)
+      // can never diverge from the one the Store reads.
+      ...withoutSchemaOverride(options.schemaManagement),
     });
     return store;
   } catch (error) {

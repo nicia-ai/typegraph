@@ -140,7 +140,11 @@ import {
   mapContributionMaterializationRow,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
-import { generatePgCreateTableSQL, generatePostgresDDL } from "./ddl";
+import {
+  generatePgCreateTableSQL,
+  generatePostgresDDL,
+  postgresContributions,
+} from "./ddl";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
@@ -179,6 +183,7 @@ import {
   tableExistsFromRow,
 } from "./operations/strategy";
 import {
+  createPostgresTables as buildPostgresTables,
   type PostgresTables,
   tables as defaultTables,
 } from "./schema/postgres";
@@ -352,6 +357,19 @@ function computePostgresBatchChunkSizes(
   };
 }
 
+/**
+ * Barrel keys (contribution logical names) of the three relations that hold
+ * Operational Identity state: current assertions, recorded-time assertions,
+ * and the derived closure. `ensureIdentityTables()` scopes its idempotent
+ * CREATE TABLE / CREATE INDEX to exactly these when identity is first enabled
+ * on an existing database.
+ */
+const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
+  "identityAssertions",
+  "recordedIdentityAssertions",
+  "identityClosure",
+]);
+
 // ============================================================
 // Utilities
 // ============================================================
@@ -460,16 +478,20 @@ export function createPostgresBackend(
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
     revisionOrigins: getTableName(tables.revisionOrigins),
+    identityAssertions: getTableName(tables.identityAssertions),
+    recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
+    identityClosure: getTableName(tables.identityClosure),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
-  // ANALYZE statements on every call. The recorded relations are ANALYZEd
-  // separately under an existence guard (see refreshStatistics): a schema
-  // created before recorded-time history landed (bring-your-own-pool, no DDL
-  // re-run) has no recorded tables, and Postgres fails the whole ANALYZE if any
-  // named relation is missing. Per-field vector tables are created lazily and
-  // live outside this base set, so they are not ANALYZEd here.
+  // ANALYZE statements on every call. The recorded and identity relations
+  // are ANALYZEd separately under an existence guard (see refreshStatistics):
+  // a schema created before recorded-time history or Operational Identity
+  // landed (bring-your-own-pool, no DDL re-run) has no recorded_* / identity_*
+  // tables, and Postgres fails the whole ANALYZE if any named relation is
+  // missing. Per-field vector tables are created lazily and live outside this
+  // base set, so they are not ANALYZEd here.
   //
   // ONE statement per table with SKIP_LOCKED, never `ANALYZE a, b, c`:
   // ANALYZE takes a ShareUpdateExclusive lock, the same class CREATE INDEX
@@ -491,10 +513,13 @@ export function createPostgresBackend(
       "postgres",
     ),
   );
-  const recordedAnalyzeTables = [
+  const guardedAnalyzeTables = [
     tableNames.recordedNodes,
     tableNames.recordedEdges,
     tableNames.recordedClock,
+    tableNames.recordedIdentityAssertions,
+    tableNames.identityAssertions,
+    tableNames.identityClosure,
   ] as const;
   const operationStrategy = createPostgresOperationStrategy(
     tables,
@@ -502,11 +527,11 @@ export function createPostgresBackend(
   );
 
   // Whether `tableName` currently exists, via the same catalog probe `clear()`
-  // uses — so refreshStatistics() never ANALYZEs a recorded relation that a
-  // bring-your-own-pool schema has not yet created. The Postgres probe is
-  // search_path-aware, so positive results are deliberately not cached by bare
-  // table name.
-  const recordedTableExists = createCachedTableExistence(
+  // uses — so refreshStatistics() never ANALYZEs a recorded or identity
+  // relation that a bring-your-own-pool schema has not yet created. The
+  // Postgres probe is search_path-aware, so positive results are deliberately
+  // not cached by bare table name.
+  const guardedTableExists = createCachedTableExistence(
     async (tableName) => {
       const rows = await executionAdapter.execute<Record<string, unknown>>(
         operationStrategy.buildTableExists(tableName),
@@ -525,10 +550,8 @@ export function createPostgresBackend(
   // ensure through it instead of issuing DDL on the hot path.
   const matTable = tables.contributionMaterializations;
 
-  async function ensureTableWithConcurrentCreateRetry(
-    table: Parameters<typeof generatePgCreateTableSQL>[0],
-  ): Promise<void> {
-    const statement = sql.raw(generatePgCreateTableSQL(table));
+  async function executeConcurrentCreateDdl(ddl: string): Promise<void> {
+    const statement = sql.raw(ddl);
     try {
       await db.execute(statement);
     } catch (error) {
@@ -540,6 +563,12 @@ export function createPostgresBackend(
       if (!isPostgresUniqueViolationError(error)) throw error;
       await db.execute(statement);
     }
+  }
+
+  async function ensureTableWithConcurrentCreateRetry(
+    table: Parameters<typeof generatePgCreateTableSQL>[0],
+  ): Promise<void> {
+    await executeConcurrentCreateDdl(generatePgCreateTableSQL(table));
   }
 
   async function ensureContributionMaterializationsTableImpl(): Promise<void> {
@@ -826,6 +855,51 @@ export function createPostgresBackend(
 
     async ensureRevisionOriginsTable(): Promise<void> {
       await ensureTableWithConcurrentCreateRetry(tables.revisionOrigins);
+    },
+
+    async ensureIdentityTables(
+      identityTableNames,
+      options,
+    ): Promise<readonly string[]> {
+      // First enablement of Operational Identity on an existing populated
+      // database: createStore / createPostgresBackend run no DDL, so the
+      // three identity relations the enablement preflight reads/writes may
+      // not exist yet. Ensure them (and their indexes) idempotently — CREATE
+      // TABLE / CREATE INDEX IF NOT EXISTS — reusing the same contribution
+      // DDL bootstrapTables emits, scoped to the identity relations. Stores
+      // run this before opening the schema-commit transaction so DDL does not
+      // re-enter its per-graph write lock.
+      const identityTables = buildPostgresTables({
+        identityAssertions: identityTableNames.identityAssertions,
+        recordedIdentityAssertions:
+          identityTableNames.recordedIdentityAssertions,
+        identityClosure: identityTableNames.identityClosure,
+      });
+      const identityContributions = postgresContributions(
+        identityTables,
+        fulltextStrategy,
+      ).filter((contribution) =>
+        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
+      );
+      const missing = [] as string[];
+      for (const contribution of identityContributions) {
+        if (!(await contributionTableExists(contribution.tableName))) {
+          missing.push(contribution.logicalName);
+        }
+      }
+      // Do not turn a missing assertion ledger on an already-enabled graph
+      // into an empty-but-present table. Otherwise the first open fails, then
+      // a retry silently accepts lost identity truth. First enablement opts
+      // into provisioning; when all tables exist, idempotent DDL still repairs
+      // missing secondary indexes.
+      if (missing.length === 0 || options.provisionMissing) {
+        for (const contribution of identityContributions) {
+          for (const ddl of contribution.createDdl) {
+            await executeConcurrentCreateDdl(ddl);
+          }
+        }
+      }
+      return missing;
     },
 
     // Every fulltext-touching method asserts the durable marker instead
@@ -1117,20 +1191,20 @@ export function createPostgresBackend(
       for (const statement of coreAnalyzeStatements) {
         await db.execute(statement);
       }
-      // The recorded relations may be absent on a schema created before
-      // recorded-time history landed (bring-your-own-pool, no DDL re-run).
-      // Postgres fails an ANALYZE naming a missing relation, so ANALYZE
-      // only the recorded tables that exist.
+      // The recorded and identity relations may be absent on a schema created
+      // before recorded-time history or Operational Identity landed
+      // (bring-your-own-pool, no DDL re-run). Postgres fails an ANALYZE naming
+      // a missing relation, so ANALYZE only the guarded tables that exist.
       const tablePresence = await Promise.all(
-        recordedAnalyzeTables.map(async (tableName) => ({
+        guardedAnalyzeTables.map(async (tableName) => ({
           tableName,
-          exists: await recordedTableExists(tableName),
+          exists: await guardedTableExists(tableName),
         })),
       );
-      const presentRecordedTables = tablePresence
+      const presentGuardedTables = tablePresence
         .filter((entry) => entry.exists)
         .map((entry) => entry.tableName);
-      for (const tableName of presentRecordedTables) {
+      for (const tableName of presentGuardedTables) {
         await db.execute(
           toDrizzleSql(
             portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(tableName)}`,
@@ -1155,6 +1229,16 @@ export function createPostgresBackend(
       return runSchemaWriteTransaction(params.graphId, (target) =>
         commitSchemaVersionIfKindsEmpty(target, params, probes),
       );
+    },
+
+    async commitSchemaVersionWithPreflight(
+      params: CommitSchemaVersionParams,
+      preflight: (target: TransactionBackend) => Promise<void>,
+    ): Promise<SchemaVersionRow> {
+      return runSchemaWriteTransaction(params.graphId, async (target) => {
+        await preflight(target);
+        return target.commitSchemaVersion(params);
+      });
     },
 
     async setActiveVersion(params: SetActiveVersionParams): Promise<void> {

@@ -55,6 +55,15 @@ import { asBranchId } from "./types";
 export const BASE_PROVENANCE_BRANCH: BranchId =
   asBranchId("__committed_base__");
 
+/**
+ * Reserved branch id for the live incremental target staged as a synthetic
+ * branch. Lives beside {@link BASE_PROVENANCE_BRANCH} so survivor selection
+ * can recognize target-contributed members.
+ */
+export const COMMITTED_TARGET_BRANCH: BranchId = asBranchId(
+  "__committed_target__",
+);
+
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
 
@@ -82,6 +91,11 @@ export type ClusterMember = Readonly<{
   kind: string;
   branchId: BranchId;
   props: Readonly<Record<string, JsonValue>>;
+  // The staged row's valid-time window, present only for `origin: "staged"`
+  // members. A `validTo` means the branch authored the node as ALREADY ENDED
+  // — the commit must not resurrect it as current.
+  validFrom?: string;
+  validTo?: string;
 }>;
 
 /**
@@ -95,6 +109,13 @@ export type CanonicalEntity = Readonly<{
   props: Readonly<Record<string, JsonValue>>;
   resolution: EntityResolution;
   conflicts: readonly PropertyConflict[];
+  // The SURVIVOR's staged valid-time window, when the survivor is a staged
+  // member (absent for base-member survivors, whose committed window stays
+  // untouched). Carried to the commit upsert so a branch-authored window —
+  // including a deliberately ENDED one on a resurrection — survives the
+  // merge instead of being reset to merge time.
+  validFrom?: string;
+  validTo?: string;
 }>;
 
 /**
@@ -421,5 +442,29 @@ export function canonicalizeCluster(
     branchOrigins,
   };
 
-  return { canonicalId, kind, props, resolution, conflicts };
+  // Window precedence mirrors committed-first assertion precedence: when the
+  // live incremental target itself contributed a member for the surviving
+  // identity, the target's committed window wins — a user branch's staged
+  // window must not end (or re-window) a row the target already holds.
+  // Otherwise the survivor member's own staged window rides.
+  const windowSource =
+    members.find(
+      (member) =>
+        member.branchId === COMMITTED_TARGET_BRANCH &&
+        member.kind === kind &&
+        member.id === canonicalId,
+    ) ?? survivor;
+  return {
+    canonicalId,
+    kind,
+    props,
+    resolution,
+    conflicts,
+    ...(windowSource.validFrom === undefined ?
+      {}
+    : { validFrom: windowSource.validFrom }),
+    ...(windowSource.validTo === undefined ?
+      {}
+    : { validTo: windowSource.validTo }),
+  };
 }

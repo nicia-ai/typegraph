@@ -52,4 +52,5 @@ export {
 } from "../drizzle/schema/sqlite";
 
 // DDL generation
+export type { GraphIdentityConfig } from "../../core/define-graph";
 export { generateSqliteDDL, generateSqliteMigrationSQL } from "../drizzle/ddl";

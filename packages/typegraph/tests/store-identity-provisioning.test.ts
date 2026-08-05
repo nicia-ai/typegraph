@@ -1,0 +1,666 @@
+/**
+ * Provisioning + enablement-gating for Operational Identity on databases that
+ * were not created with identity already present.
+ *
+ * Two review findings on PR #268:
+ *
+ *  - First enablement on an EXISTING populated deployment attaches through
+ *    createStore / createSqliteBackend, which run no DDL, so the identity
+ *    relations the enablement preflight reads/writes may not exist yet.
+ *    `backend.ensureIdentityTables()` (called before the enablement locks)
+ *    must create them idempotently, so enablement succeeds and membersOf
+ *    reflects folded same-id pairs.
+ *
+ *  - With autoMigrate disabled, enabling identity leaves the schema "pending"
+ *    WITHOUT running the enablement preflight — so returning a store would
+ *    expose store.identity over an empty/unmaterialized closure. That must be
+ *    refused with a typed ConfigurationError, not silently returned.
+ */
+import type Database from "better-sqlite3";
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import {
+  createStore,
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+  disjointWith,
+  type GraphBackend,
+  MigrationError,
+  rebuildIdentityClosure,
+  StaleVersionError,
+} from "../src";
+import {
+  createLocalSqliteBackend,
+  type LocalSqliteBackendResult,
+} from "../src/backend/sqlite/local";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import {
+  ensureSchema,
+  getActiveSchema,
+  initializeSchema,
+  migrateSchema,
+} from "../src/schema";
+import { storeRuntime } from "../src/store/runtime-port";
+import { matchingObject } from "./test-utils";
+
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+const Author = defineNode("Author", {
+  schema: z.object({ penName: z.string() }),
+});
+
+const GRAPH_ID = "identity_provisioning";
+
+/** Identity-disabled graph — the "already deployed" shape. */
+const disabledGraph = defineGraph({
+  id: GRAPH_ID,
+  nodes: { Person: { type: Person }, Author: { type: Author } },
+  edges: {},
+});
+
+/** Same graph with Operational Identity enabled (folds same id across kinds). */
+const enabledGraph = defineGraph({
+  id: GRAPH_ID,
+  nodes: { Person: { type: Person }, Author: { type: Author } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const ignoredGraph = defineGraph({
+  id: GRAPH_ID,
+  nodes: { Person: { type: Person }, Author: { type: Author } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+
+/** A profile flip PLUS a dropped kind — two breaking changes in one diff. */
+const foldGraphWithoutAuthor = defineGraph({
+  id: GRAPH_ID,
+  nodes: { Person: { type: Person } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const alice = { kind: "Person", id: "alice" } as const;
+const aliceAuthor = { kind: "Author", id: "alice" } as const;
+
+async function activeVersion(backend: GraphBackend): Promise<number> {
+  const row = await getActiveSchema(backend, GRAPH_ID);
+  return row?.version ?? 0;
+}
+
+const IDENTITY_TABLES = [
+  "typegraph_identity_assertions",
+  "typegraph_recorded_identity_assertions",
+  "typegraph_identity_closure",
+] as const;
+
+function rawClient(result: LocalSqliteBackendResult): Database.Database {
+  // Drizzle attaches the raw better-sqlite3 handle as `$client` at runtime;
+  // the published type omits it (same access pattern as
+  // refresh-statistics-scope.test.ts).
+  return (result.db as unknown as { $client: Database.Database }).$client;
+}
+
+function dropIdentityTables(result: LocalSqliteBackendResult): void {
+  for (const table of IDENTITY_TABLES) {
+    rawClient(result).exec(`DROP TABLE IF EXISTS ${table}`);
+  }
+}
+
+function existingIdentityTables(
+  result: LocalSqliteBackendResult,
+): readonly string[] {
+  const placeholders = IDENTITY_TABLES.map(() => "?").join(", ");
+  const rows = rawClient(result)
+    .prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders}) ORDER BY name`,
+    )
+    .all(...IDENTITY_TABLES) as { name: string }[];
+  return rows.map((row) => row.name);
+}
+
+describe("Operational Identity provisioning + enablement gating", () => {
+  it("provisions identity tables and folds same-id pairs when enabling on an existing DB", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      // 1. Deploy the identity-disabled schema and populate a same-id pair
+      //    across kinds (alice as both Person and Author).
+      const [disabledStore] = await createStoreWithSchema(
+        disabledGraph,
+        result.backend,
+      );
+      await disabledStore.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      await disabledStore.nodes.Author.create(
+        { penName: "A." },
+        { id: "alice" },
+      );
+
+      // 2. Simulate a deployment whose identity relations were never created
+      //    (bring-your-own-connection: no DDL re-run) by dropping them.
+      dropIdentityTables(result);
+
+      // 3. Reopen with the identity-enabled graph. Without ensureIdentityTables
+      //    the enablement preflight would fail with a raw "no such table"
+      //    error inside the schema-commit transaction.
+      const [enabledStore, migration] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      expect(migration.status).toBe("migrated");
+
+      const members = await enabledStore.identity.membersOf({
+        kind: "Person",
+        id: "alice",
+      });
+      expect(members).toEqual(
+        expect.arrayContaining([
+          { kind: "Person", id: "alice" },
+          { kind: "Author", id: "alice" },
+        ]),
+      );
+      expect(members).toHaveLength(2);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("provisions the effective Store schema's identity table names", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const [disabledStore] = await createStoreWithSchema(
+        disabledGraph,
+        result.backend,
+      );
+      await disabledStore.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      await disabledStore.nodes.Author.create(
+        { penName: "A." },
+        { id: "alice" },
+      );
+      const schema = createSqlSchema({
+        identityAssertions: "custom_identity_assertions",
+        recordedIdentityAssertions: "custom_recorded_identity_assertions",
+        identityClosure: "custom_identity_closure",
+      });
+
+      const [enabledStore] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+        { schema },
+      );
+      expect(
+        await enabledStore.identity.areSame(
+          { kind: "Person", id: "alice" },
+          { kind: "Author", id: "alice" },
+        ),
+      ).toBe(true);
+      const names = rawClient(result)
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'custom_%identity%' ORDER BY name",
+        )
+        .all() as { name: string }[];
+      expect(names.map((row) => row.name)).toEqual([
+        "custom_identity_assertions",
+        "custom_identity_closure",
+        "custom_recorded_identity_assertions",
+      ]);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("refuses to open an identity store when enablement is pending (autoMigrate off)", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const [disabledStore] = await createStoreWithSchema(
+        disabledGraph,
+        result.backend,
+      );
+      await disabledStore.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      await disabledStore.nodes.Author.create(
+        { penName: "A." },
+        { id: "alice" },
+      );
+
+      // autoMigrate disabled: the identity-enabling change is pending and the
+      // enablement preflight never runs, so the store must be refused rather
+      // than expose an unmaterialized identity surface.
+      await expect(
+        createStoreWithSchema(enabledGraph, result.backend, {
+          autoMigrate: false,
+        }),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          name: "ConfigurationError",
+          details: matchingObject({
+            code: "IDENTITY_ENABLEMENT_PENDING",
+          }),
+        }),
+      );
+
+      // With autoMigrate on, the same enablement commits and works.
+      const [enabledStore] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      expect(
+        await enabledStore.identity.areSame(
+          { kind: "Person", id: "alice" },
+          { kind: "Author", id: "alice" },
+        ),
+      ).toBe(true);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("fails loudly when an enabled graph has lost identity storage", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(enabledGraph, result.backend);
+      dropIdentityTables(result);
+
+      await expect(
+        createStoreWithSchema(enabledGraph, result.backend),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          name: "ConfigurationError",
+          details: matchingObject({ code: "IDENTITY_STORAGE_MISSING" }),
+        }),
+      );
+      expect(existingIdentityTables(result)).toEqual([]);
+      await expect(
+        createStoreWithSchema(enabledGraph, result.backend),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          name: "ConfigurationError",
+          details: matchingObject({ code: "IDENTITY_STORAGE_MISSING" }),
+        }),
+      );
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("gates a same-id folding flip behind an explicit migration that rebuilds the closure", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const [ignoredStore] = await createStoreWithSchema(
+        ignoredGraph,
+        result.backend,
+      );
+      await ignoredStore.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      await ignoredStore.nodes.Author.create(
+        { penName: "A." },
+        { id: "alice" },
+      );
+      expect(await ignoredStore.identity.areSame(alice, aliceAuthor)).toBe(
+        false,
+      );
+
+      // A `sameIdAcrossKinds` flip is a breaking change, so it never
+      // auto-migrates — and the identity-specific code wins over the generic
+      // MigrationError because identity is the only breaking change here.
+      await expect(
+        createStoreWithSchema(enabledGraph, result.backend),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          name: "ConfigurationError",
+          details: matchingObject({
+            code: "IDENTITY_PROFILE_MIGRATION_PENDING",
+          }),
+        }),
+      );
+      // The same refusal with autoMigrate disabled: the flip is unapplied
+      // either way.
+      await expect(
+        createStoreWithSchema(enabledGraph, result.backend, {
+          autoMigrate: false,
+        }),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          name: "ConfigurationError",
+          details: matchingObject({
+            code: "IDENTITY_PROFILE_MIGRATION_PENDING",
+          }),
+        }),
+      );
+
+      // Follow the error's own advice. `migrateSchema` commits the flip and
+      // rebuilds the closure in the same transaction, so the next open is
+      // clean rather than "migrated".
+      await migrateSchema(
+        result.backend,
+        enabledGraph,
+        await activeVersion(result.backend),
+      );
+      const [foldedStore, migration] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      expect(migration.status).toBe("unchanged");
+      expect(await foldedStore.identity.areSame(alice, aliceAuthor)).toBe(true);
+
+      await migrateSchema(
+        result.backend,
+        ignoredGraph,
+        await activeVersion(result.backend),
+      );
+      const [ignoredAgain] = await createStoreWithSchema(
+        ignoredGraph,
+        result.backend,
+      );
+      expect(await ignoredAgain.identity.areSame(alice, aliceAuthor)).toBe(
+        false,
+      );
+
+      await expect(rebuildIdentityClosure(foldedStore)).rejects.toBeInstanceOf(
+        StaleVersionError,
+      );
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("keeps the generic MigrationError when the diff has other breaking changes", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(ignoredGraph, result.backend);
+
+      // Identity flip AND a dropped kind. The identity error names only the
+      // identity change, so the generic error — which enumerates the whole
+      // diff — has to win.
+      const error = await createStoreWithSchema(
+        foldGraphWithoutAuthor,
+        result.backend,
+      ).then(
+        () => {
+          throw new Error("expected a breaking-change refusal");
+        },
+        (error_: unknown) => error_,
+      );
+
+      expect(error).toBeInstanceOf(MigrationError);
+      const details = (error as MigrationError).details;
+      expect(details).toMatchObject({ reason: "breaking-change" });
+      const diff = "diff" in details ? details.diff : undefined;
+      expect(diff?.identity).toMatchObject({
+        type: "modified",
+        severity: "breaking",
+      });
+      expect(diff?.nodes).toContainEqual(
+        expect.objectContaining({
+          kind: "Author",
+          type: "removed",
+          severity: "breaking",
+        }),
+      );
+    } finally {
+      await result.backend.close();
+    }
+  });
+});
+
+describe("identity on the first schema commit", () => {
+  const contradictionGraph = defineGraph({
+    id: GRAPH_ID,
+    nodes: { Person: { type: Person }, Author: { type: Author } },
+    edges: {},
+    ontology: [disjointWith(Person, Author)],
+    identity: { sameIdAcrossKinds: "fold" },
+  });
+
+  it("materializes legacy same-id folds when initialization enables identity", async () => {
+    const { backend } = createLocalSqliteBackend();
+    // Legacy deployment: an unmanaged, identity-DISABLED Store wrote rows
+    // without ever committing a schema version, so no closure exists and no
+    // fold was ever recorded for the shared id.
+    const legacy = createStore(disabledGraph, backend);
+    const person = await legacy.nodes.Person.create(
+      { name: "Shared" },
+      { id: "shared" },
+    );
+    await legacy.nodes.Author.create({ penName: "Shared" }, { id: "shared" });
+
+    const [store, validation] = await createStoreWithSchema(
+      enabledGraph,
+      backend,
+    );
+    expect(validation.status).toBe("initialized");
+    expect(
+      await store.identity.areSame(person, {
+        kind: "Author",
+        id: "shared",
+      }),
+    ).toBe(true);
+    expect(await store.identity.membersOf(person)).toEqual([
+      { kind: "Author", id: "shared" },
+      { kind: "Person", id: "shared" },
+    ]);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("builds the version-1 closure in the Store's custom identity tables", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const legacy = createStore(disabledGraph, result.backend);
+      await legacy.nodes.Person.create({ name: "Shared" }, { id: "custom" });
+      await legacy.nodes.Author.create({ penName: "S." }, { id: "custom" });
+      const schema = createSqlSchema({
+        identityAssertions: "custom_v1_identity_assertions",
+        recordedIdentityAssertions: "custom_v1_recorded_identity_assertions",
+        identityClosure: "custom_v1_identity_closure",
+      });
+
+      const [store, validation] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+        { schema },
+      );
+      expect(validation.status).toBe("initialized");
+      // The enablement fold must land in the tables the returned Store
+      // reads — a preflight derived from backend.tableNames would build the
+      // closure in the default tables and answer false here.
+      expect(
+        await store.identity.areSame(
+          { kind: "Person", id: "custom" },
+          { kind: "Author", id: "custom" },
+        ),
+      ).toBe(true);
+      const closureRows = rawClient(result)
+        .prepare("SELECT COUNT(*) AS n FROM custom_v1_identity_closure")
+        .get() as { n: number };
+      expect(closureRows.n).toBeGreaterThan(0);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("runs the enablement preflight from the public low-level commit paths too", async () => {
+    // Direct initializeSchema(): the preflight is derived internally, so a
+    // caller who never goes through createStoreWithSchema cannot commit
+    // version 1 over a never-built closure.
+    const direct = createLocalSqliteBackend();
+    const directLegacy = createStore(disabledGraph, direct.backend);
+    await directLegacy.nodes.Person.create({ name: "Shared" }, { id: "dup" });
+    await directLegacy.nodes.Author.create({ penName: "S." }, { id: "dup" });
+    await initializeSchema(direct.backend, enabledGraph);
+    const [directStore] = await createStoreWithSchema(
+      enabledGraph,
+      direct.backend,
+    );
+    expect(
+      await directStore.identity.areSame(
+        { kind: "Person", id: "dup" },
+        { kind: "Author", id: "dup" },
+      ),
+    ).toBe(true);
+
+    // Bare ensureSchema(): same guarantee for the other public first-commit
+    // path — the later createStoreWithSchema open sees a matching hash and
+    // returns "unchanged", so the closure MUST already be right.
+    const ensured = createLocalSqliteBackend();
+    const ensuredLegacy = createStore(disabledGraph, ensured.backend);
+    await ensuredLegacy.nodes.Person.create({ name: "Shared" }, { id: "dup" });
+    await ensuredLegacy.nodes.Author.create({ penName: "S." }, { id: "dup" });
+    const ensureResult = await ensureSchema(ensured.backend, enabledGraph);
+    expect(ensureResult.status).toBe("initialized");
+    const [ensuredStore, reopened] = await createStoreWithSchema(
+      enabledGraph,
+      ensured.backend,
+    );
+    expect(reopened.status).toBe("unchanged");
+    expect(
+      await ensuredStore.identity.areSame(
+        { kind: "Person", id: "dup" },
+        { kind: "Author", id: "dup" },
+      ),
+    ).toBe(true);
+  });
+
+  it("cannot be talked out of the version-1 closure build", async () => {
+    // The old shape accepted a caller preflight that REPLACED the identity
+    // work, so a no-op callback committed version 1 over populated peers and
+    // every later open accepted the hash as "unchanged". The preflight is now
+    // derived internally; a stray callback argument (what a pre-fix caller
+    // would pass) is ignored rather than honored.
+    const result = createLocalSqliteBackend();
+    try {
+      const legacy = createStore(disabledGraph, result.backend);
+      await legacy.nodes.Person.create({ name: "Shared" }, { id: "noop" });
+      await legacy.nodes.Author.create({ penName: "S." }, { id: "noop" });
+
+      const noopCallback = (() => Promise.resolve()) as never;
+      await initializeSchema(result.backend, enabledGraph, noopCallback);
+
+      const [store, reopened] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      expect(reopened.status).toBe("unchanged");
+      expect(
+        await store.identity.areSame(
+          { kind: "Person", id: "noop" },
+          { kind: "Author", id: "noop" },
+        ),
+      ).toBe(true);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("derives the version-1 preflight over a custom schema on the bare path too", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const legacy = createStore(disabledGraph, result.backend);
+      await legacy.nodes.Person.create({ name: "Shared" }, { id: "bare" });
+      await legacy.nodes.Author.create({ penName: "S." }, { id: "bare" });
+      const schema = createSqlSchema({
+        identityAssertions: "bare_v1_identity_assertions",
+        recordedIdentityAssertions: "bare_v1_recorded_identity_assertions",
+        identityClosure: "bare_v1_identity_closure",
+      });
+
+      await initializeSchema(result.backend, enabledGraph, { schema });
+
+      const closureRows = rawClient(result)
+        .prepare("SELECT COUNT(*) AS n FROM bare_v1_identity_closure")
+        .get() as { n: number };
+      expect(closureRows.n).toBeGreaterThan(0);
+      const [store] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+        {
+          schema,
+        },
+      );
+      expect(
+        await store.identity.areSame(
+          { kind: "Person", id: "bare" },
+          { kind: "Author", id: "bare" },
+        ),
+      ).toBe(true);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("rebuilds the custom-schema closure through explicit migrateSchema()", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const schema = createSqlSchema({
+        identityAssertions: "flip_identity_assertions",
+        recordedIdentityAssertions: "flip_recorded_identity_assertions",
+        identityClosure: "flip_identity_closure",
+      });
+      const [foldStore] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+        { schema },
+      );
+      await foldStore.nodes.Person.create({ name: "F" }, { id: "flip" });
+      await foldStore.nodes.Author.create({ penName: "F." }, { id: "flip" });
+      expect(
+        await foldStore.identity.areSame(
+          { kind: "Person", id: "flip" },
+          { kind: "Author", id: "flip" },
+        ),
+      ).toBe(true);
+
+      await migrateSchema(
+        result.backend,
+        ignoredGraph,
+        await activeVersion(result.backend),
+        { schema },
+      );
+
+      const [ignoreStore] = await createStoreWithSchema(
+        ignoredGraph,
+        result.backend,
+        { schema },
+      );
+      // The flip's closure rebuild must land in the custom tables the Store
+      // reads: under "ignore" the same-id pair no longer folds.
+      expect(
+        await ignoreStore.identity.areSame(
+          { kind: "Person", id: "flip" },
+          { kind: "Author", id: "flip" },
+        ),
+      ).toBe(false);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("refuses initialization when legacy rows contradict the identity profile", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const legacy = createStore(disabledGraph, backend);
+    await legacy.nodes.Person.create({ name: "Clash" }, { id: "clash" });
+    await legacy.nodes.Author.create({ penName: "Clash" }, { id: "clash" });
+
+    await expect(
+      createStoreWithSchema(contradictionGraph, backend),
+    ).rejects.toMatchObject({
+      details: matchingObject({ code: "IDENTITY_SCHEMA_CONTRADICTION" }),
+    });
+    // The refused commit must not leave a schema row behind.
+    expect(await getActiveSchema(backend, GRAPH_ID)).toBeUndefined();
+  });
+});

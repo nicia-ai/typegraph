@@ -14,6 +14,7 @@ import {
   type PopulatedSchemaKind,
   type SchemaKindEmptinessProbe,
   type SchemaVersionRow,
+  type TransactionBackend,
 } from "../backend/types";
 import {
   getEdgeKinds,
@@ -30,6 +31,17 @@ import {
 } from "../errors";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { stripGraphExtension } from "../graph-extension/remove";
+import {
+  ensureIdentitySchemaStorage,
+  identityKindCascadeNeeded,
+  identityKindCascadePreflight,
+  identitySchemaCommitPreflight,
+} from "../identity/schema-transition";
+import {
+  createSqlSchema,
+  requireSqlSchema,
+  type SqlSchema,
+} from "../query/compiler/schema";
 import { buildKindRegistry } from "../registry";
 import { freezeDeep } from "../utils/object";
 import { isMissingTableError } from "../utils/sql-errors";
@@ -318,6 +330,13 @@ export type SchemaManagerOptions = Readonly<{
   onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
   /** Called after a safe auto-migration is applied. For observability only. */
   onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
+  /**
+   * The effective `SqlSchema` (custom table names) the graph's Store reads.
+   * Identity schema commits derive their mandatory closure preflight from it;
+   * the preflight itself is never accepted from callers, so it cannot be
+   * substituted or suppressed.
+   */
+  schema?: SqlSchema;
 }>;
 
 // ============================================================
@@ -375,8 +394,13 @@ export async function ensureSchema<G extends GraphDef>(
     : preloaded.activeRow;
 
   if (activeSchema === undefined) {
-    // No schema exists - initialize with version 1
-    const result = await initializeSchema(backend, graph);
+    // No schema exists - initialize with version 1. Only the effective
+    // `SqlSchema` is threaded through; `initializeSchema` derives the
+    // mandatory identity preflight itself, so no public first-commit path
+    // can skip or replace the enablement work.
+    const result = await initializeSchema(backend, graph, {
+      ...(options?.schema === undefined ? {} : { schema: options.schema }),
+    });
     return {
       status: "initialized",
       version: result.version,
@@ -418,11 +442,28 @@ export async function ensureSchema<G extends GraphDef>(
         diff,
       };
       await options?.onBeforeMigrate?.(hookContext);
-      const committedRow = await commitNewSchemaVersion(
-        backend,
-        graph,
-        activeSchema.version,
-      );
+      // An identity-enabled commit must never land without the closure
+      // preflight, whichever public path drove it. It is derived HERE —
+      // never accepted from the caller — so it cannot be substituted or
+      // suppressed; `options.schema` only points it at the effective tables.
+      const preflight =
+        graph.identity === undefined ?
+          undefined
+        : await prepareIdentitySchemaCommit(backend, graph, {
+            enablement: storedSchema.identity === undefined,
+            ...(options?.schema === undefined ?
+              {}
+            : { schema: options.schema }),
+          });
+      const committedRow =
+        preflight === undefined ?
+          await commitNewSchemaVersion(backend, graph, activeSchema.version)
+        : await commitNewSchemaVersionWithPreflight(
+            backend,
+            graph,
+            activeSchema.version,
+            preflight,
+          );
       await options?.onAfterMigrate?.(hookContext);
       return {
         status: "migrated",
@@ -668,6 +709,28 @@ function schemaNotInitializedError(
 }
 
 /**
+ * Returns the backend's atomic preflight-commit primitive, throwing
+ * `IDENTITY_REQUIRES_ATOMIC_BACKEND` if the backend doesn't support
+ * committing identity data atomically with a schema transition.
+ */
+function requireCommitWithPreflight(
+  backend: GraphBackend,
+  graph: GraphDef,
+): NonNullable<GraphBackend["commitSchemaVersionWithPreflight"]> {
+  const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
+  if (commitWithPreflight === undefined) {
+    throw new ConfigurationError(
+      "This backend cannot atomically commit identity data with a schema transition.",
+      {
+        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId: graph.id,
+      },
+    );
+  }
+  return commitWithPreflight;
+}
+
+/**
  * Initializes the schema for a new graph.
  *
  * Creates version 1 of the schema and marks it as active. Goes through
@@ -683,6 +746,16 @@ function schemaNotInitializedError(
 export async function initializeSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
+  options?: Readonly<{
+    /**
+     * The effective `SqlSchema` (custom table names) the graph's Store will
+     * read. The identity enablement preflight is always derived internally —
+     * it is deliberately not a parameter, so no caller can commit version 1
+     * of an identity-enabled graph without the fold scan, contradiction
+     * validation, and closure build.
+     */
+    schema?: SqlSchema;
+  }>,
 ): Promise<SchemaVersionRow> {
   // Structural gates (e.g. endpoint-incompatible implies() relations)
   // must reject before the schema is durably committed, not only when a
@@ -692,14 +765,33 @@ export async function initializeSchema<G extends GraphDef>(
 
   const schema = serializeSchema(graph, 1);
   const hash = await computeSchemaHash(schema);
-
-  return backend.commitSchemaVersion({
+  const commit = {
     graphId: graph.id,
-    expected: { kind: "initial" },
+    expected: { kind: "initial" } as const,
     version: 1,
     schemaHash: hash,
     schemaDoc: schema,
+  };
+
+  if (graph.identity === undefined) {
+    return backend.commitSchemaVersion(commit);
+  }
+
+  // An identity-enabled graph's FIRST schema commit is an enablement: a
+  // legacy database populated through an unmanaged Store can already hold
+  // same-id peers and assertions, so the fold scan, contradiction
+  // validation, and closure build must commit atomically with version 1 —
+  // exactly like a later enablement migration. Always DERIVED here (over
+  // `options.schema` when supplied, else the backend's effective table
+  // names), never accepted from the caller — a substitutable preflight would
+  // let a no-op callback commit a version 1 that every later hash check
+  // accepts while identity reads answer from a never-built closure.
+  const preflight = await prepareIdentitySchemaCommit(backend, graph, {
+    enablement: true,
+    ...(options?.schema === undefined ? {} : { schema: options.schema }),
   });
+  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
+  return commitWithPreflight(commit, preflight);
 }
 
 export type MigrateSchemaOptions = Readonly<{
@@ -723,6 +815,12 @@ export type MigrateSchemaOptions = Readonly<{
    * @defaultValue false
    */
   discardDroppedKindRows?: boolean;
+  /**
+   * The effective `SqlSchema` (custom table names) the graph's Store reads.
+   * The identity closure preflight an identity-enabled migration commits is
+   * derived from it and cannot be substituted by callers.
+   */
+  schema?: SqlSchema;
 }>;
 
 /**
@@ -783,6 +881,7 @@ export async function migrateSchema<G extends GraphDef>(
         ...droppedKinds(storedSchema.nodes, getNodeKinds(target), "node"),
         ...droppedKinds(storedSchema.edges, getEdgeKinds(target), "edge"),
       ];
+  const guardedDrops = options?.discardDroppedKindRows === true ? [] : dropped;
   // No cleanup is queued here, deliberately, and redundancy is the whole
   // reason. `materializeRemovals` derives removals by walking schema-version
   // history (`reconcilePendingRemovals` diffs consecutive documents' kind
@@ -795,16 +894,184 @@ export async function migrateSchema<G extends GraphDef>(
   // stops at the first absent prior version, so a drop below a pruned or
   // gapped range becomes undiscoverable. Callers who prune schema versions
   // should run `materializeRemovals` before pruning.
+
+  // An identity-enabled target commits through the same data preflight
+  // `createStoreWithSchema` and `Store.evolve()` use: the closure is derived
+  // state, so a version that changes the identity profile — or turns identity
+  // on for the first time — must not become active while the closure still
+  // reflects the previous schema. Explicit `migrateSchema()` is the path the
+  // MigrationError message points operators at, so it cannot be the one path
+  // that skips it.
+  // Node kinds this commit REMOVES cascade the assertion ledger inside the
+  // commit transaction (edge kinds carry no assertions). This uses the full
+  // `dropped` list, not `guardedDrops`: with `discardDroppedKindRows` the rows
+  // are reclaimed later by materializeRemovals, which never touches identity
+  // tables.
+  const droppedNodeKinds = dropped
+    .filter((drop) => drop.entity === "node")
+    .map((drop) => drop.kind);
+  const identityPreflight =
+    activeRow === undefined ? undefined
+    : target.identity === undefined ?
+      // Identity being OFF in the target is not evidence the ledger is empty:
+      // disabling retains the assertion rows. A drop committed here would
+      // strand every assertion touching the kind — a later re-enablement
+      // filters them out of the closure while raw ledger reads and merge
+      // staging still see them.
+      await prepareIdentityKindCascade(backend, target, {
+        droppedNodeKinds,
+        probeBeforeCascade: storedSchema?.identity === undefined,
+        ...(options?.schema === undefined ? {} : { schema: options.schema }),
+      })
+    : await prepareIdentitySchemaCommit(backend, target, {
+        enablement: storedSchema?.identity === undefined,
+        droppedNodeKinds,
+        ...(options?.schema === undefined ? {} : { schema: options.schema }),
+      });
+
   const committed =
-    dropped.length > 0 && options?.discardDroppedKindRows !== true ?
-      await commitDroppedKindsOnlyWhenEmpty(
+    identityPreflight === undefined ?
+      guardedDrops.length > 0 ?
+        await commitDroppedKindsOnlyWhenEmpty(
+          backend,
+          target,
+          currentVersion,
+          guardedDrops,
+        )
+      : await commitNewSchemaVersion(backend, target, currentVersion)
+    : await commitNewSchemaVersionWithPreflight(
         backend,
         target,
         currentVersion,
-        dropped,
-      )
-    : await commitNewSchemaVersion(backend, target, currentVersion);
+        async (transactionBackend) => {
+          // The emptiness fence moves inside the commit transaction here: the
+          // preflight-carrying primitive is the only one that can also run the
+          // identity rebuild atomically, so the probe runs alongside it rather
+          // than through `commitSchemaVersionIfKindsEmpty`.
+          await assertDroppedKindsEmpty(
+            transactionBackend,
+            target.id,
+            currentVersion,
+            guardedDrops,
+          );
+          await identityPreflight(transactionBackend);
+        },
+      );
   return committed.version;
+}
+
+/**
+ * Builds the ledger-cleanup preflight for a kind-dropping commit whose target
+ * graph has no identity profile. Returns `undefined` when there is nothing to
+ * cascade — the ordinary case, which pays one probe and then commits through
+ * exactly the primitive it always did, emptiness fence included.
+ *
+ * The prior schema's profile is deliberately NOT the test. The stranding case
+ * is a drop committed one or more versions AFTER identity was switched off, so
+ * the immediately-preceding schema has no profile either; only the ledger
+ * answers whether rows are there.
+ */
+async function prepareIdentityKindCascade<G extends GraphDef>(
+  backend: GraphBackend,
+  target: G,
+  options: Readonly<{
+    droppedNodeKinds: readonly string[];
+    schema?: SqlSchema;
+    // False when THIS commit is the one disabling identity: writers on the
+    // still-enabled prior schema can commit assertions until the commit
+    // transaction takes its locks, so the outside-transaction emptiness
+    // probe is not sound and the locked cascade must always run.
+    probeBeforeCascade: boolean;
+  }>,
+): Promise<
+  ((transactionBackend: TransactionBackend) => Promise<void>) | undefined
+> {
+  if (options.droppedNodeKinds.length === 0) return undefined;
+  const schema =
+    options.schema === undefined ?
+      createSqlSchema(backend.tableNames)
+    : requireSqlSchema(options.schema, "The schema option");
+  if (options.probeBeforeCascade) {
+    const needed = await identityKindCascadeNeeded(
+      backend,
+      schema,
+      target.id,
+      options.droppedNodeKinds,
+    );
+    if (!needed) return undefined;
+  }
+  return identityKindCascadePreflight(
+    { graphId: target.id, schema },
+    options.droppedNodeKinds,
+  );
+}
+
+/**
+ * Ensures identity storage exists and builds the preflight the schema commit
+ * runs inside its own transaction. The DDL must happen *before* the commit
+ * transaction opens — issuing it inside would re-enter the per-graph write lock
+ * the commit holds.
+ */
+async function prepareIdentitySchemaCommit<G extends GraphDef>(
+  backend: GraphBackend,
+  target: G,
+  options: Readonly<{
+    enablement: boolean;
+    schema?: SqlSchema;
+    droppedNodeKinds?: readonly string[];
+  }>,
+): Promise<(transactionBackend: TransactionBackend) => Promise<void>> {
+  // Brand-validate before any DDL or commit: a schema-shaped plain object
+  // from an untyped caller can expose custom names to provisioning while its
+  // SQL fragments target the default tables, landing the closure where the
+  // Store never reads. Rejection happens before the version commit, so an
+  // invalid schema leaves no active row behind.
+  const schema =
+    options.schema === undefined ?
+      createSqlSchema(backend.tableNames)
+    : requireSqlSchema(options.schema, "The schema option");
+  await ensureIdentitySchemaStorage(backend, schema, {
+    graphId: target.id,
+    enablement: options.enablement,
+  });
+  return identitySchemaCommitPreflight(
+    {
+      graphId: target.id,
+      registry: buildKindRegistry(target),
+      schema,
+      sameIdAcrossKinds: target.identity?.sameIdAcrossKinds ?? "ignore",
+    },
+    {
+      enablement: options.enablement,
+      droppedNodeKinds: options.droppedNodeKinds ?? [],
+    },
+  );
+}
+
+/**
+ * Refuses a commit that would drop kinds still holding rows, from inside the
+ * commit transaction. The transactional sibling of
+ * {@link commitDroppedKindsOnlyWhenEmpty}'s backend-side probe.
+ */
+async function assertDroppedKindsEmpty(
+  backend: TransactionBackend,
+  graphId: string,
+  currentVersion: number,
+  dropped: readonly DroppedKind[],
+): Promise<void> {
+  const counts = await Promise.all(
+    dropped.map(async (entry) => ({
+      entity: entry.entity,
+      kind: entry.kind,
+      count:
+        entry.entity === "node" ?
+          await backend.countNodesByKind({ graphId, kind: entry.kind })
+        : await backend.countEdgesByKind({ graphId, kind: entry.kind }),
+    })),
+  );
+  const populated = counts.filter((entry) => entry.count > 0);
+  if (populated.length === 0) return;
+  throwPopulatedKindRemovalError(graphId, currentVersion, populated);
 }
 
 /**
@@ -963,7 +1230,6 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
   const newVersion = currentVersion + 1;
   const schema = serializeSchema(graph, newVersion);
   const hash = await computeSchemaHash(schema);
-
   return {
     graphId: graph.id,
     expected: { kind: "active", version: currentVersion },
@@ -971,6 +1237,25 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
     schemaHash: hash,
     schemaDoc: schema,
   };
+}
+
+/** @internal Commits a data preflight and schema CAS in one transaction. */
+export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  currentVersion: number,
+  preflight: (target: TransactionBackend) => Promise<void>,
+): Promise<SchemaVersionRow> {
+  if (backend.commitSchemaVersionWithPreflight === undefined) {
+    // Match the graph-validation ordering of the plain path: reject a
+    // structurally invalid graph before probing backend capability.
+    buildKindRegistry(graph);
+  }
+  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
+  return commitWithPreflight(
+    await buildNewSchemaVersionCommit(graph, currentVersion),
+    preflight,
+  );
 }
 
 /**

@@ -115,6 +115,31 @@ describe("SQLite refreshStatistics scope and cost bound", () => {
     }
   });
 
+  it("does not throw when identity tables are absent", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const store = createStore(
+        buildGraph("scope_no_identity"),
+        result.backend,
+      );
+      await store.nodes.Item.create({ name: "seed" });
+
+      // Simulate a database created before Operational Identity added its
+      // three relations. They are optional for identity-disabled graphs.
+      for (const tableName of [
+        "typegraph_identity_assertions",
+        "typegraph_recorded_identity_assertions",
+        "typegraph_identity_closure",
+      ]) {
+        rawClient(result).exec(`DROP TABLE IF EXISTS ${tableName}`);
+      }
+
+      await expect(store.refreshStatistics()).resolves.toBeUndefined();
+    } finally {
+      await result.backend.close();
+    }
+  });
+
   it("re-applies bounded, scoped ANALYZE after every qualifying bulkInsert", async () => {
     const result = createLocalSqliteBackend();
     try {

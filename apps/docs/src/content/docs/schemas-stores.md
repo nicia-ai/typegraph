@@ -565,6 +565,24 @@ an unmigrated schema throws a typed `ConfigurationError` with
 `details.code === "RECORDED_SCHEMA_INCOMPATIBLE"` at open rather than on the
 first write.
 
+For an existing history-enabled database that predates identity enablement,
+open it once through `createStoreWithSchema(...)` after adding
+`defineGraph(...).identity`. Bundled backends provision the identity relations
+before the migration preflight. A later missing relation reports
+`details.code === "IDENTITY_STORAGE_MISSING"` instead of opening over silently
+empty state. Restore a missing assertion ledger from backup. If only the
+derived closure is missing, recreate that relation with TypeGraph's standard
+DDL, then run `rebuildIdentityClosure()` before serving traffic. Any
+`history: true` open of an identity-enabled graph verifies the recorded
+identity relation exists and reports `RECORDED_IDENTITY_SCHEMA_MISSING` if it
+does not; bundled backends provision it, so this is rare there and more likely
+on a custom backend that skipped it. Restore that recorded ledger from backup;
+recreating it empty would silently discard identity history. Provision an empty
+relation through the backend's privileged setup path only when this is confirmed
+first-time identity enablement with no identity history to preserve. Malformed
+columns in an existing relation continue to report
+`RECORDED_SCHEMA_INCOMPATIBLE`.
+
 ```typescript
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 

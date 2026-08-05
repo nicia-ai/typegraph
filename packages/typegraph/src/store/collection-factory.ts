@@ -13,6 +13,8 @@ import type { CompiledSelectSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
 import { type UpsertDirtyCheckFunction } from "./collections/coalesce";
+import { type UpsertUpdateEdgeInput } from "./collections/edge-collection";
+import { type UpsertUpdateNodeInput } from "./collections/node-collection";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
   type CreateEdgeInput,
@@ -26,7 +28,6 @@ import {
   type NodeBulkFindByIndexOptions,
   type NodeGetOrCreateByConstraintOptions,
   type QueryOptions,
-  type UpdateNodeInput,
 } from "./types";
 
 /**
@@ -55,7 +56,7 @@ export type NodeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
   executeUpdate: (
-    input: UpdateNodeInput,
+    input: UpsertUpdateNodeInput,
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
@@ -67,7 +68,7 @@ export type NodeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdate: (
-    input: UpdateNodeInput,
+    input: UpsertUpdateNodeInput,
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
@@ -157,11 +158,7 @@ export type EdgeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
   executeUpsertUpdate: (
-    input: {
-      id: string;
-      props: Partial<Record<string, unknown>>;
-      validTo?: string;
-    },
+    input: UpsertUpdateEdgeInput,
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Edge>;

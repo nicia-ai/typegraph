@@ -35,6 +35,8 @@ import {
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerFulltextIntegrationTests,
+  registerIdentityImportIntegrationTests,
+  registerIdentityIntegrationTests,
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
   registerMigrateSchemaKindIntegrationTests,
@@ -58,6 +60,7 @@ import {
   registerTraversalIntegrationTests,
   registerTrustedImportIntegrationTests,
 } from "./integration";
+import type { InspectableHistoryStore } from "./integration/test-context";
 
 /**
  * Result from a backend factory, including optional cleanup function.
@@ -137,7 +140,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
           adapterBackend,
           { ...options, history: true },
         );
-        return createdStore;
+        return createdStore as unknown as InspectableHistoryStore<typeof graph>;
       },
     } as const satisfies IntegrationTestContext;
 
@@ -193,6 +196,8 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerAlgorithmIntegrationTests(context);
     registerFulltextIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
+    registerIdentityIntegrationTests(context);
+    registerIdentityImportIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
     registerTrustedImportIntegrationTests(context);

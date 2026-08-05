@@ -1078,6 +1078,72 @@ describe("computeSchemaDiff", () => {
     });
   });
 
+  describe("Operational Identity capability", () => {
+    it("classifies enablement as safe/backwards-compatible and removal as breaking", () => {
+      const disabled = createSchema({ version: 1 });
+      const enabled = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      const enablementDiff = computeSchemaDiff(disabled, enabled);
+      expect(enablementDiff.identity).toEqual({
+        type: "added",
+        severity: "safe",
+        details: "Operational Identity enabled",
+      });
+      expect(enablementDiff.hasBreakingChanges).toBe(false);
+      expect(enablementDiff.isBackwardsCompatible).toBe(true);
+
+      const removalDiff = computeSchemaDiff(enabled, disabled);
+      expect(removalDiff.identity).toEqual({
+        type: "removed",
+        severity: "breaking",
+        details: "Operational Identity disabled",
+      });
+      expect(removalDiff.hasBreakingChanges).toBe(true);
+      expect(removalDiff.isBackwardsCompatible).toBe(false);
+    });
+
+    it("classifies a sameIdAcrossKinds profile flip as breaking in both directions", () => {
+      // A fold<->ignore flip rewrites the materialized identity closure and
+      // changes every areSame/membersOf/includeIdentityMembers answer against
+      // existing data, so it must never auto-migrate silently — it needs the
+      // same explicit opt-in as any other breaking change (identity removal
+      // included, tested above).
+      const ignored = createSchema({
+        version: 1,
+        identity: { sameIdAcrossKinds: "ignore" },
+      });
+      const folded = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      const ignoreToFold = computeSchemaDiff(ignored, folded);
+      expect(ignoreToFold).toMatchObject({
+        hasChanges: true,
+        hasBreakingChanges: true,
+        isBackwardsCompatible: false,
+        identity: {
+          type: "modified",
+          severity: "breaking",
+        },
+      });
+
+      const foldToIgnore = computeSchemaDiff(folded, ignored);
+      expect(foldToIgnore).toMatchObject({
+        hasChanges: true,
+        hasBreakingChanges: true,
+        isBackwardsCompatible: false,
+        identity: {
+          type: "modified",
+          severity: "breaking",
+        },
+      });
+    });
+  });
+
   // ============================================================
   // Summary Generation
   // ============================================================
@@ -1665,5 +1731,58 @@ describe("getMigrationActions", () => {
     const actions = getMigrationActions(diff);
 
     expect(actions).toHaveLength(0);
+  });
+
+  describe("Operational Identity actions", () => {
+    it("returns a BUILD action describing closure materialization for enablement", () => {
+      const before = createSchema({ version: 1 });
+      const after = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+      const actions = getMigrationActions(diff);
+
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toContain("BUILD");
+      expect(actions[0]).toContain("closure");
+      expect(actions[0]).toContain("Operational Identity enabled");
+    });
+
+    it("returns a REBUILD action describing closure recomputation for a profile flip", () => {
+      const before = createSchema({
+        version: 1,
+        identity: { sameIdAcrossKinds: "ignore" },
+      });
+      const after = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+      const actions = getMigrationActions(diff);
+
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toContain("REBUILD");
+      expect(actions[0]).toContain("closure");
+      expect(actions[0]).toContain("ignore");
+      expect(actions[0]).toContain("fold");
+    });
+
+    it("returns a DISABLE action describing the orphaned closure for removal", () => {
+      const before = createSchema({
+        version: 1,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+      const after = createSchema({ version: 2 });
+
+      const diff = computeSchemaDiff(before, after);
+      const actions = getMigrationActions(diff);
+
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toContain("DISABLE");
+      expect(actions[0]).toContain("Operational Identity disabled");
+    });
   });
 });

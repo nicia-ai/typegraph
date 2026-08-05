@@ -12,6 +12,7 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
+import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { type InternalGraphAlgorithms } from "./algorithms";
@@ -81,6 +82,119 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   algorithmsAtCoordinate: (
     coordinate: ReadCoordinate,
   ) => InternalGraphAlgorithms<G>;
+  identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
+  rebuildIdentityClosure: () => Promise<void>;
+  validateIdentity: () => Promise<void>;
+  /**
+   * @internal Reads the graph's identity assertions in transfer shape, honoring
+   * this store's SQL binding. Used by interchange export, base-version
+   * fingerprinting, and merge staging/diff.
+   */
+  readCurrentIdentityAssertions: (
+    mode: "state" | "archival",
+    options?: Readonly<{
+      nodeKinds?: readonly string[];
+      includeDeleted?: boolean;
+    }>,
+  ) => Promise<
+    readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+    }>[]
+  >;
+  /**
+   * Live nodes (registry kinds only) sharing any of the given bare ids —
+   * the cross-kind peer set same-id folding would join. Used by graph-merge's
+   * plan-time contradiction simulation to seed its node universe.
+   */
+  liveNodesSharingIds: (
+    ids: readonly string[],
+    target?: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Readonly<{ kind: string; id: string }>[]>;
+  /**
+   * Every stored assertion row (ended rows included) for the given assertion
+   * ids — the rows the import coordinator's id-conflict check compares
+   * against. Used by graph-merge to validate the one-id-one-truth invariant
+   * at plan time and inside the commit transaction.
+   */
+  identityAssertionRowsByIds: (
+    ids: readonly string[],
+    target?: GraphBackend | TransactionBackend,
+  ) => Promise<
+    ReadonlyMap<
+      string,
+      Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{ kind: string; id: string }>;
+        b: Readonly<{ kind: string; id: string }>;
+        validFrom: string;
+        validTo?: string | undefined;
+      }>
+    >
+  >;
+  /**
+   * The CURRENT structural identity class (materialized closure: folds plus
+   * asserted links) of each reference, keyed by `refKey` — the
+   * `JSON.stringify([kind, id])` serialization exported from
+   * `identity/service`, which callers must use to probe the returned map. A
+   * missing node coalesces to its singleton. Used by graph-merge's fold-peer
+   * window guard to detect class-transitive drift in the plan→commit window.
+   */
+  structuralIdentityClasses: (
+    references: readonly Readonly<{ kind: string; id: string }>[],
+    target?: GraphBackend | TransactionBackend,
+  ) => Promise<
+    ReadonlyMap<string, readonly Readonly<{ kind: string; id: string }>[]>
+  >;
+  identityAssertionsAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    mode?: "state" | "archival",
+  ) => Promise<
+    readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+    }>[]
+  >;
+  lockIdentityImportTarget: (
+    target: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
+  foldImportedIdentityNodes: (
+    target: GraphBackend | TransactionBackend,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+  ) => Promise<void>;
+  importIdentityAssertionsAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    assertions: readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+    }>[],
+    mode: "state" | "archival",
+  ) => Promise<Readonly<{ created: number; skipped: number }>>;
+  applyIdentityMergeAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    retractionIds: readonly string[],
+    assertions: readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+    }>[],
+  ) => Promise<Readonly<{ created: number; retracted: number }>>;
 }>;
 
 export function storeRuntime<G extends GraphDef>(

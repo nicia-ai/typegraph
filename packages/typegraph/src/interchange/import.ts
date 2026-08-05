@@ -19,7 +19,14 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import { type EdgeRegistration, type NodeRegistration } from "../core/types";
-import { UniquenessError } from "../errors";
+import {
+  ConfigurationError,
+  IdentityContradictionError,
+  NodeNotFoundError,
+  UniquenessError,
+  ValidationError,
+} from "../errors";
+import { IDENTITY_IMPORT_FAILED_ASSERTION } from "../identity/service";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   createNodeBatchValidationBackend,
@@ -33,19 +40,22 @@ import {
 } from "../store/operations/node-write-pipeline";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
-import { storeBackend } from "../store/runtime-port";
+import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { checkUniquenessConstraints } from "../store/uniqueness";
 import { validateOptionalCanonicalIsoDate } from "../utils/date";
 import {
   type GraphData,
   type GraphDataHeader,
+  GraphDataHeaderSchema,
   type GraphInterchangeChunk,
   type ImportError,
   type ImportOptions,
   ImportOptionsSchema,
   type ImportResult,
   type InterchangeEdge,
+  type InterchangeIdentityAssertion,
+  InterchangeIdentitySchema,
   type InterchangeNode,
   type ResolvedImportOptions,
   type UnknownPropertyStrategy,
@@ -85,12 +95,20 @@ export async function importGraph<G extends GraphDef>(
   // only exist after parsing, and every internal stage reads them
   // directly.
   const options = ImportOptionsSchema.parse(rawOptions);
+
+  // Reject an identity payload aimed at an identity-disabled graph, and
+  // runtime-validate the (bounded) identity section, BEFORE any entity write —
+  // see assertIdentityImportSupported / validateIdentitySection.
+  assertIdentityImportSupported(store, data.identity !== undefined);
+  validateIdentitySection(data.identity);
+
   const result = emptyImportResult();
 
   const errors: ImportError[] = [];
   const graph = store.graph;
   const graphId = store.graphId;
   const backend = storeBackend(store);
+  const runtime = storeRuntime(store);
   const registry = store.registry;
 
   // Build lookup maps for schema validation
@@ -114,6 +132,7 @@ export async function importGraph<G extends GraphDef>(
     },
     backend,
     async (target, lock) => {
+      await runtime.lockIdentityImportTarget(target);
       await processNodes(
         target,
         graphId,
@@ -125,6 +144,14 @@ export async function importGraph<G extends GraphDef>(
         errors,
         importedNodeIds,
         lock,
+      );
+      await runtime.foldImportedIdentityNodes(
+        target,
+        data.nodes
+          .filter((node) =>
+            importedNodeIds.has(makeNodeKey(node.kind, node.id)),
+          )
+          .map((node) => ({ kind: node.kind, id: node.id })),
       );
       await processEdges(
         target,
@@ -138,6 +165,16 @@ export async function importGraph<G extends GraphDef>(
         errors,
         importedNodeIds,
       );
+      if (data.identity !== undefined) {
+        await importIdentitySection(
+          runtime,
+          target,
+          graphId,
+          data.identity,
+          result,
+          errors,
+        );
+      }
     },
   );
 
@@ -180,6 +217,7 @@ export async function importGraphStream<G extends GraphDef>(
   const result = emptyImportResult();
   let header: GraphDataHeader | undefined;
   let receivedEdges = false;
+  let receivedIdentity = false;
 
   for await (const chunk of chunks) {
     switch (chunk.type) {
@@ -189,6 +227,16 @@ export async function importGraphStream<G extends GraphDef>(
             "Graph interchange stream emitted more than one header.",
           );
         }
+        // The header is bounded, so validate it at the runtime stream boundary.
+        // In particular, an invalid identity profile/mode must not slip through
+        // merely because the stream's identity assertion chunk is empty.
+        validateStreamHeader(chunk.header);
+        // Reject an identity-bearing header aimed at an identity-disabled graph
+        // before any chunk is processed, matching importGraph's guard.
+        assertIdentityImportSupported(
+          store,
+          chunk.header.identity !== undefined,
+        );
         header = chunk.header;
         break;
       }
@@ -196,18 +244,24 @@ export async function importGraphStream<G extends GraphDef>(
         if (header === undefined) {
           throw new Error("Graph interchange stream must start with a header.");
         }
-        if (receivedEdges) {
+        if (receivedEdges || receivedIdentity) {
           throw new Error(
-            "Graph interchange stream cannot emit nodes after edges.",
+            `Graph interchange stream cannot emit nodes after ${
+              receivedEdges ? "edges" : "identity assertions"
+            }.`,
           );
         }
         if (chunk.nodes.length === 0) break;
         mergeImportResult(
           result,
-          await importGraph(store, graphDataForChunk(header, chunk.nodes, []), {
-            ...options,
-            refreshStatistics: false,
-          }),
+          await importGraph(
+            store,
+            graphDataForChunk(header, chunk.nodes, [], []),
+            {
+              ...options,
+              refreshStatistics: false,
+            },
+          ),
         );
         throwIfStreamChunkFailed(result, options);
         break;
@@ -216,14 +270,45 @@ export async function importGraphStream<G extends GraphDef>(
         if (header === undefined) {
           throw new Error("Graph interchange stream must start with a header.");
         }
+        if (receivedIdentity) {
+          throw new Error(
+            "Graph interchange stream cannot emit edges after identity assertions.",
+          );
+        }
         receivedEdges = true;
         if (chunk.edges.length === 0) break;
         mergeImportResult(
           result,
-          await importGraph(store, graphDataForChunk(header, [], chunk.edges), {
-            ...options,
-            refreshStatistics: false,
-          }),
+          await importGraph(
+            store,
+            graphDataForChunk(header, [], chunk.edges, []),
+            {
+              ...options,
+              refreshStatistics: false,
+            },
+          ),
+        );
+        throwIfStreamChunkFailed(result, options);
+        break;
+      }
+      case "identity": {
+        if (header === undefined) {
+          throw new Error("Graph interchange stream must start with a header.");
+        }
+        if (header.identity === undefined) {
+          throw new Error(
+            "Graph interchange stream emitted identity rows without an identity header.",
+          );
+        }
+        receivedIdentity = true;
+        if (chunk.assertions.length === 0) break;
+        mergeImportResult(
+          result,
+          await importGraph(
+            store,
+            graphDataForChunk(header, [], [], chunk.assertions),
+            { ...options, refreshStatistics: false },
+          ),
         );
         throwIfStreamChunkFailed(result, options);
         break;
@@ -256,11 +341,252 @@ function throwIfStreamChunkFailed(
   );
 }
 
+/**
+ * Rejects an identity payload aimed at an identity-disabled graph BEFORE any
+ * entity write. The internal identity import coordinator raises the same
+ * typed `ConfigurationError` (code `IDENTITY_IMPORT_REQUIRES_PROFILE`), but only
+ * after `processNodes`/`processEdges` have run — a partial write on a
+ * non-transactional backend — and only for a NON-empty assertions array (an
+ * empty envelope short-circuits and silently succeeds there). This guard fires
+ * first and regardless of assertion count.
+ */
+function assertIdentityImportSupported<G extends GraphDef>(
+  store: Store<G>,
+  hasIdentitySection: boolean,
+): void {
+  if (hasIdentitySection && store.graph.identity === undefined) {
+    throw new ConfigurationError(
+      "Cannot import identity assertions into an identity-disabled graph.",
+      { code: "IDENTITY_IMPORT_REQUIRES_PROFILE", graphId: store.graphId },
+    );
+  }
+}
+
+/**
+ * Runtime-validates just the identity section of an otherwise pre-typed
+ * `GraphData`. {@link importGraph} deliberately trusts the type for the
+ * (potentially graph-sized) node and edge arrays to preserve its per-row
+ * performance, but a JS caller can still smuggle an out-of-domain `relation` or
+ * a non-canonical timestamp straight into SQL — which SQLite accepts and
+ * PostgreSQL rejects, a backend-parity divergence. The identity section is
+ * bounded, so parsing only it closes that gap without the whole-envelope cost.
+ */
+function validateIdentitySection(identity: GraphData["identity"]): void {
+  if (identity === undefined) return;
+  const parsed = InterchangeIdentitySchema.safeParse(identity);
+  if (parsed.success) return;
+  throw new ValidationError(
+    `Invalid identity interchange section: ${parsed.error.message}`,
+    {
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+        code: issue.code,
+      })),
+    },
+    { cause: parsed.error },
+  );
+}
+
+/**
+ * An identity assertion is neither a node nor an edge, so it carries its own
+ * `entityType`. The identity analogue of a node or edge kind is the relation
+ * asserted, and the entity id is the assertion id. A failure that cannot be
+ * attributed to a document assertion — which the coordinator's own error
+ * details should always allow — falls back to naming the target graph, so the
+ * entry still reaches the caller rather than being dropped or rethrown.
+ */
+const IDENTITY_IMPORT_ERROR_ENTITY_TYPE = "identity";
+const IDENTITY_IMPORT_ERROR_PATH = "identity.assertions";
+const UNATTRIBUTED_IDENTITY_ERROR_KIND = "assertion";
+const IDENTITY_IMPORT_ID_CONFLICT_CODE = "IDENTITY_IMPORT_ID_CONFLICT";
+
+function identityImportError(
+  assertion: InterchangeIdentityAssertion | undefined,
+  graphId: string,
+  message: string,
+): ImportError {
+  const path =
+    assertion === undefined ?
+      IDENTITY_IMPORT_ERROR_PATH
+    : `${IDENTITY_IMPORT_ERROR_PATH}[${assertion.id}]`;
+  return {
+    entityType: IDENTITY_IMPORT_ERROR_ENTITY_TYPE,
+    kind: assertion?.relation ?? UNATTRIBUTED_IDENTITY_ERROR_KIND,
+    id: assertion?.id ?? graphId,
+    error: `${path}: ${message}`,
+  };
+}
+
+function isIdConflictError(error: unknown): error is ConfigurationError {
+  return (
+    error instanceof ConfigurationError &&
+    error.details["code"] === IDENTITY_IMPORT_ID_CONFLICT_CODE
+  );
+}
+
+function touchesRef(
+  assertion: InterchangeIdentityAssertion,
+  ref: Readonly<{ kind: string; id: string }>,
+): boolean {
+  return (
+    (assertion.a.kind === ref.kind && assertion.a.id === ref.id) ||
+    (assertion.b.kind === ref.kind && assertion.b.id === ref.id)
+  );
+}
+
+/**
+ * Converts a per-document identity failure into an {@link ImportError}, or
+ * returns `undefined` for anything that is not one — a configuration or
+ * programming fault must still propagate.
+ */
+function asIdentityImportError(
+  assertions: readonly InterchangeIdentityAssertion[],
+  graphId: string,
+  error: unknown,
+): ImportError | undefined {
+  // The coordinator tags the error with the id of the assertion it was
+  // APPLYING — exact attribution. The endpoint heuristics below are only the
+  // fallback for an untagged error: they pick the first assertion touching
+  // the endpoints, which is wrong whenever an earlier assertion over the same
+  // pair succeeded.
+  const tagged = taggedAssertion(assertions, error);
+  if (error instanceof NodeNotFoundError) {
+    const ref = error.details;
+    const assertion =
+      tagged ?? assertions.find((candidate) => touchesRef(candidate, ref));
+    return identityImportError(assertion, graphId, error.message);
+  }
+  if (error instanceof IdentityContradictionError) {
+    const { a, b } = error.details;
+    const assertion =
+      tagged ??
+      assertions.find(
+        (candidate) => touchesRef(candidate, a) && touchesRef(candidate, b),
+      );
+    return identityImportError(assertion, graphId, error.message);
+  }
+  if (isIdConflictError(error)) {
+    const assertion = assertions.find(
+      (candidate) => candidate.id === error.details["assertionId"],
+    );
+    return identityImportError(assertion, graphId, error.message);
+  }
+  if (isIdentityAssertionValidationError(error)) {
+    const issue = error.details.issues[0];
+    const message =
+      issue === undefined ?
+        error.message
+      : `${error.message} (${issue.message})`;
+    return identityImportError(
+      assertions.find((candidate) => candidate.id === issue?.assertionId),
+      graphId,
+      message,
+    );
+  }
+  return undefined;
+}
+
+/**
+ * The assertion the coordinator tagged onto the error via
+ * `IDENTITY_IMPORT_FAILED_ASSERTION` — exact, structural attribution for any
+ * error shape.
+ */
+function taggedAssertion(
+  assertions: readonly InterchangeIdentityAssertion[],
+  error: unknown,
+): InterchangeIdentityAssertion | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const id = (error as Record<PropertyKey, unknown>)[
+    IDENTITY_IMPORT_FAILED_ASSERTION
+  ];
+  if (typeof id !== "string") return undefined;
+  return assertions.find((candidate) => candidate.id === id);
+}
+
+/**
+ * A `ValidationError` the identity import coordinator raised about assertion
+ * CONTENT (ended rows in state mode, out-of-bounds validity windows, unknown
+ * kinds, unnormalized pairs, self-assertions). Every issue it emits is pathed
+ * at `identity.assertions` and carries the offending assertion's id
+ * structurally in `assertionId` — attribution never parses the
+ * human-readable message. A validation error shaped any other way is a
+ * document-shape or programming fault and must still propagate.
+ */
+function isIdentityAssertionValidationError(
+  error: unknown,
+): error is ValidationError {
+  return (
+    error instanceof ValidationError &&
+    error.details.issues.length > 0 &&
+    error.details.issues.every(
+      (issue) =>
+        issue.path === "identity.assertions" && issue.assertionId !== undefined,
+    )
+  );
+}
+
+/**
+ * Applies the identity section, recording a per-document failure in
+ * `result.errors` instead of aborting the whole import.
+ *
+ * {@link importGraph} promises `{ success: false, errors }` for content the
+ * target rejects, and the node and edge paths honor that by recording the
+ * offending row and moving on. The identity coordinator instead throws, so a
+ * missing endpoint, a contradiction against the target graph, or a reused
+ * assertion id escaped the transaction and turned a rejected assertion into a
+ * thrown import — discarding the valid node and edge work alongside it.
+ *
+ * Assertions the coordinator applied before the failing one stay committed,
+ * exactly as rows accepted before a failing node do. They are not reflected in
+ * `result.identity.created`: the coordinator reports counts only on success, so
+ * the counts under-report rather than invent a number.
+ */
+async function importIdentitySection<G extends GraphDef>(
+  runtime: ReturnType<typeof storeRuntime<G>>,
+  target: GraphBackend | TransactionBackend,
+  graphId: string,
+  identity: NonNullable<GraphData["identity"]>,
+  result: ImportResult,
+  errors: ImportError[],
+): Promise<void> {
+  try {
+    const summary = await runtime.importIdentityAssertionsAtTarget(
+      target,
+      identity.assertions,
+      identity.mode,
+    );
+    result.identity.created += summary.created;
+    result.identity.skipped += summary.skipped;
+  } catch (error) {
+    const entry = asIdentityImportError(identity.assertions, graphId, error);
+    if (entry === undefined) throw error;
+    errors.push(entry);
+  }
+}
+
+function validateStreamHeader(header: GraphDataHeader): void {
+  const parsed = GraphDataHeaderSchema.safeParse(header);
+  if (parsed.success) return;
+  throw new ValidationError(
+    `Invalid graph interchange stream header: ${parsed.error.message}`,
+    {
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+        code: issue.code,
+      })),
+    },
+    { cause: parsed.error },
+  );
+}
+
 function emptyImportResult(): ImportResult {
   return {
     success: true,
     nodes: { created: 0, updated: 0, skipped: 0 },
     edges: { created: 0, updated: 0, skipped: 0 },
+    identity: { created: 0, skipped: 0 },
     errors: [],
   };
 }
@@ -269,8 +595,19 @@ function graphDataForChunk(
   header: GraphDataHeader,
   nodes: GraphData["nodes"],
   edges: GraphData["edges"],
+  assertions: readonly InterchangeIdentityAssertion[],
 ): GraphData {
-  return { ...header, nodes, edges };
+  const { identity, ...headerWithoutIdentity } = header;
+  return {
+    ...headerWithoutIdentity,
+    nodes,
+    edges,
+    ...(identity === undefined ?
+      {}
+    : {
+        identity: { ...identity, assertions: [...assertions] },
+      }),
+  };
 }
 function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.nodes.created += source.nodes.created;
@@ -279,6 +616,8 @@ function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.edges.created += source.edges.created;
   target.edges.updated += source.edges.updated;
   target.edges.skipped += source.edges.skipped;
+  target.identity.created += source.identity.created;
+  target.identity.skipped += source.identity.skipped;
   target.errors.push(...source.errors);
 }
 
@@ -292,7 +631,8 @@ async function refreshStatisticsAfterImport<G extends GraphDef>(
     result.nodes.created +
     result.nodes.updated +
     result.edges.created +
-    result.edges.updated;
+    result.edges.updated +
+    result.identity.created;
   if ((options.refreshStatistics ?? true) && mutationCount > 0) {
     try {
       await store.refreshStatistics();
@@ -507,6 +847,8 @@ async function processNodeSlice(
       draft: {
         kind: node.kind,
         id: node.id,
+        // Interchange rows always carry an explicit id.
+        idProvided: true,
         nodeKind: schemaEntry.registration.type,
         uniqueConstraints: schemaEntry.registration.unique ?? [],
         validatedProps: propsResult.data,

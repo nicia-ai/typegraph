@@ -15,6 +15,7 @@ import {
   type PostgresTables,
 } from "../../src/backend/drizzle/schema/postgres";
 import type { Embedder } from "../../src/graph-merge/types";
+import type { importGraph } from "../../src/interchange";
 import { storeBackend } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 
@@ -157,6 +158,9 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     recordedEdges: `${prefix}_recorded_edges`,
     recordedClock: `${prefix}_recorded_clock`,
     revisionOrigins: `${prefix}_revision_origins`,
+    identityAssertions: `${prefix}_identity_assertions`,
+    recordedIdentityAssertions: `${prefix}_recorded_identity_assertions`,
+    identityClosure: `${prefix}_identity_closure`,
     uniques: `${prefix}_uniques`,
     schemaVersions: `${prefix}_schema_versions`,
     fulltext: `${prefix}_fulltext`,
@@ -299,6 +303,47 @@ export async function fakeEmbeddings(
   for (const [index, key] of keys.entries())
     lookup.set(key, requireDefined(vectors[index]));
   return lookup;
+}
+
+/** The identity profile the merge suites' interchange fixtures declare. */
+const IDENTITY_PROFILE = "typegraph-identity-v1" as const;
+
+/**
+ * A minimal interchange document carrying ONE `same` assertion between two
+ * nodes of `kind` — how a merge test stages identity truth into a branch
+ * through `importGraph`. The endpoints are emitted in code-point order because
+ * the import path rejects a non-normalized pair.
+ */
+export function identityAssertionDocument(
+  kind: string,
+  id: string,
+  a: string,
+  b: string,
+  validFrom = "2024-01-01T00:00:00.000Z",
+): Parameters<typeof importGraph>[1] {
+  const refA = { kind, id: a };
+  const refB = { kind, id: b };
+  const [left, right] = a < b ? [refA, refB] : [refB, refA];
+  return {
+    formatVersion: "2.0",
+    exportedAt: "2024-01-01T00:00:00.000Z",
+    source: { type: "external" },
+    nodes: [],
+    edges: [],
+    identity: {
+      profile: IDENTITY_PROFILE,
+      mode: "state",
+      assertions: [
+        {
+          id,
+          relation: "same",
+          a: left,
+          b: right,
+          validFrom,
+        },
+      ],
+    },
+  };
 }
 
 /**

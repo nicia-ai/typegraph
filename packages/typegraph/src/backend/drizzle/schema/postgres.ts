@@ -57,6 +57,9 @@ export type PostgresTableNames = Readonly<{
   recordedEdges: string;
   recordedClock: string;
   revisionOrigins: string;
+  identityAssertions: string;
+  recordedIdentityAssertions: string;
+  identityClosure: string;
   uniques: string;
   schemaVersions: string;
   fulltext: string;
@@ -83,6 +86,9 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
   revisionOrigins: "typegraph_revision_origins",
+  identityAssertions: "typegraph_identity_assertions",
+  recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
+  identityClosure: "typegraph_identity_closure",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
@@ -225,6 +231,109 @@ export function createPostgresTables(
       origin: text("origin").notNull(),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
+  const identityAssertions = pgTable(
+    n.identityAssertions,
+    {
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      relation: text("rel").notNull(),
+      aKind: text("a_kind").notNull(),
+      aId: text("a_id").notNull(),
+      bKind: text("b_kind").notNull(),
+      bId: text("b_id").notNull(),
+      validFrom: timestamp("valid_from", { withTimezone: true }).notNull(),
+      validTo: timestamp("valid_to", { withTimezone: true }),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+      deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.id] }),
+      index(`${n.identityAssertions}_a_idx`).on(
+        t.graphId,
+        t.aKind,
+        t.aId,
+        t.validTo,
+      ),
+      index(`${n.identityAssertions}_b_idx`).on(
+        t.graphId,
+        t.bKind,
+        t.bId,
+        t.validTo,
+      ),
+      uniqueIndex(`${n.identityAssertions}_current_pair_idx`)
+        .on(t.graphId, t.relation, t.aKind, t.aId, t.bKind, t.bId)
+        .where(sql`${t.validTo} IS NULL`),
+    ],
+  );
+
+  const recordedIdentityAssertions = pgTable(
+    n.recordedIdentityAssertions,
+    {
+      historyId: text("history_id").notNull(),
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      relation: text("rel").notNull(),
+      aKind: text("a_kind").notNull(),
+      aId: text("a_id").notNull(),
+      bKind: text("b_kind").notNull(),
+      bId: text("b_id").notNull(),
+      validFrom: timestamp("valid_from", { withTimezone: true }).notNull(),
+      validTo: timestamp("valid_to", { withTimezone: true }),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+      deletedAt: timestamp("deleted_at", { withTimezone: true }),
+      recordedFrom: bigint("recorded_from", { mode: "number" }).notNull(),
+      recordedTo: bigint("recorded_to", { mode: "number" }).notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version"),
+      txId: text("tx_id"),
+      meta: jsonb("meta"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.historyId] }),
+      index(`${n.recordedIdentityAssertions}_entity_idx`).on(
+        t.graphId,
+        t.id,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedIdentityAssertions}_a_idx`).on(
+        t.graphId,
+        t.aKind,
+        t.aId,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedIdentityAssertions}_b_idx`).on(
+        t.graphId,
+        t.bKind,
+        t.bId,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+    ],
+  );
+
+  const identityClosure = pgTable(
+    n.identityClosure,
+    {
+      graphId: text("graph_id").notNull(),
+      memberKind: text("member_kind").notNull(),
+      memberId: text("member_id").notNull(),
+      classKind: text("class_kind").notNull(),
+      classId: text("class_id").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.memberKind, t.memberId] }),
+      index(`${n.identityClosure}_class_idx`).on(
+        t.graphId,
+        t.classKind,
+        t.classId,
+      ),
+    ],
   );
 
   const uniques = pgTable(
@@ -436,6 +545,9 @@ export function createPostgresTables(
     recordedEdges,
     recordedClock,
     revisionOrigins,
+    identityAssertions,
+    recordedIdentityAssertions,
+    identityClosure,
     uniques,
     schemaVersions,
     indexMaterializations,

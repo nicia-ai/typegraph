@@ -45,11 +45,12 @@ import { enumerateAllEdges, enumerateAllNodes } from "./state-diff";
 import type {
   GraphBackend,
   GraphDef,
+  IdentityTransferAssertion,
   Store,
   TransactionBackend,
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
-import { storeBackend } from "./typegraph-internal";
+import { storeBackend, storeRuntime } from "./typegraph-internal";
 import { computeSchemaHash, serializeSchema } from "./typegraph-internal";
 import type { BaseVersion } from "./types";
 import { asBaseVersion } from "./types";
@@ -60,6 +61,9 @@ import { asBaseVersion } from "./types";
  * two components.
  */
 const TOKEN_SEPARATOR = "\0";
+
+/** Separates the schema hash from the monotonic active schema version. */
+const SCHEMA_VERSION_TAG = "#s";
 const REVISION_COMPONENT_PREFIX = "revision:";
 const REVISION_COMPONENT_SEPARATOR = ":";
 const INITIAL_REVISION = "initial";
@@ -142,11 +146,17 @@ const CONTENT_FINGERPRINT_BYTES = 16;
  * re-computed inside a commit transaction (via the tx-scoped backend) for the
  * in-transaction `base@V` re-validation — the reads then observe the
  * transaction's snapshot, not whatever a concurrent writer has since committed.
+ *
+ * `identityAssertions` is REQUIRED (never defaulted): a caller that forgot to
+ * read the ledger would silently mint a pre-identity token, so an identity-only
+ * divergence would pass the `base@V` precondition. Pass an empty array only when
+ * the store genuinely holds no current assertions.
  */
 export async function computeContentComponent<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
   graph: G,
+  identityAssertions: readonly IdentityTransferAssertion[],
 ): Promise<string> {
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
@@ -203,10 +213,18 @@ export async function computeContentComponent<G extends GraphDef>(
     }
   }
 
+  // Omit the `identity` key entirely when the assertion list is empty, mirroring
+  // the serializer's omit-when-empty convention (schema/serializer.ts). This keeps
+  // the content token byte-identical to the pre-identity shape for identity-disabled
+  // graphs and stores that carry identity config but zero live assertions — so a
+  // pre-upgrade branch does not spuriously fail the base@V precondition.
   return sha256Hex(
     canonicalizeProps({
       nodes: nodeDigest.sort((left, right) => byDigestEntry(left, right)),
       edges: edgeDigest.sort((left, right) => byDigestEntry(left, right)),
+      ...(identityAssertions.length === 0 ?
+        {}
+      : { identity: identityAssertions }),
     }),
     CONTENT_FINGERPRINT_BYTES,
   );
@@ -225,21 +243,52 @@ export async function computeBaseVersion<G extends GraphDef>(
   store: Store<G>,
 ): Promise<BaseVersion> {
   if (store.revisionTrackingEnabled) {
-    const [schemaComponent, origin, revision] = await Promise.all([
-      computeSchemaComponent(store),
-      store.revisionOriginNow(),
-      store.revisionNow(),
-    ]);
+    const [schemaComponent, origin, revision, activeVersion] =
+      await Promise.all([
+        computeSchemaComponent(store),
+        store.revisionOriginNow(),
+        store.revisionNow(),
+        readActiveSchemaVersion(storeBackend(store), store.graphId),
+      ]);
+    // The document hash is deliberately version-blind, and the revision
+    // clock does not advance on schema commits — so a schema ROUND-TRIP
+    // (migrate away and back) would otherwise restore the exact token while
+    // its preflights mutated identity rows. The active schema version is
+    // monotonic, so baking it into the schema half fences the round-trip.
+    // The legacy branch below needs no equivalent: its content fingerprint
+    // covers the mutated rows directly.
     return asBaseVersion(
-      `${schemaComponent}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
+      `${schemaComponent}${SCHEMA_VERSION_TAG}${activeVersion}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
     );
   }
   const [schemaComponent, contentComponent] = await Promise.all([
     computeSchemaComponent(store),
-    computeContentComponent(storeBackend(store), store.graphId, store.graph),
+    computeStoreContentComponent(store),
   ]);
   return asBaseVersion(
     `${schemaComponent}${TOKEN_SEPARATOR}${contentComponent}`,
+  );
+}
+
+/**
+ * The content component of a live {@link Store}: reads the store's current
+ * identity assertions, then fingerprints its live rows alongside them.
+ *
+ * Exists so {@link computeBaseVersion} can run the schema half and the content
+ * half CONCURRENTLY. The identity read must precede the fingerprint (it is an
+ * input to it), but that ordering is internal to this half and must not serialize
+ * the independent schema hash behind it.
+ */
+async function computeStoreContentComponent<G extends GraphDef>(
+  store: Store<G>,
+): Promise<string> {
+  const identityAssertions =
+    await storeRuntime(store).readCurrentIdentityAssertions("state");
+  return computeContentComponent(
+    storeBackend(store),
+    store.graphId,
+    store.graph,
+    identityAssertions,
   );
 }
 

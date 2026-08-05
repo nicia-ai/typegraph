@@ -48,7 +48,7 @@ const jsonSchema = toJSONSchema(GraphDataSchema);
 
 ```typescript
 interface GraphData {
-  formatVersion: "1.0";
+  formatVersion: "2.0";
   exportedAt: string; // ISO datetime
   source: {
     type: "typegraph-export" | "external";
@@ -79,6 +79,18 @@ interface GraphData {
       updatedAt?: string;
     };
   }>;
+  identity?: {
+    profile: "typegraph-identity-v1";
+    mode: "state" | "archival";
+    assertions: Array<{
+      id: string;
+      relation: "same" | "different";
+      a: { kind: string; id: string };
+      b: { kind: string; id: string };
+      validFrom: string;
+      validTo?: string;
+    }>;
+  };
 }
 ```
 
@@ -88,6 +100,15 @@ import's own creation timestamp. An **explicit `null`** means the source
 row is confirmed to have no lower bound (open-left validity) — import
 preserves that instead of re-stamping it. A **string** is an explicit
 value, carried through unchanged.
+
+### Format Version Compatibility
+
+Exports always write `formatVersion: "2.0"`. The read side — both
+`importGraph`/`importGraphStream` and `GraphDataSchema.parse` — additionally
+accepts `"1.0"`. A 1.0 document is structurally a valid 2.0 document: the only
+2.0 change is the additive optional `identity` section, so pre-existing 1.0
+exports validate and import unchanged. You never need to rewrite the version
+field of an older backup; validation and import handle both.
 
 ## Exporting Data
 
@@ -123,7 +144,43 @@ const withTemporal = await exportGraph(store, {
 const withDeleted = await exportGraph(store, {
   includeDeleted: true,
 });
+
+// Identity-enabled graphs export current assertions by default.
+// Include ended assertion history explicitly:
+const archival = await exportGraph(store, {
+  identityMode: "archival",
+});
+
+// A self-contained archive pairs archival identity with includeDeleted:
+const selfContainedArchive = await exportGraph(store, {
+  identityMode: "archival",
+  includeDeleted: true,
+});
 ```
+
+**Archival identity and soft-deleted endpoints:** `identityMode: "archival"`
+also exports *ended* assertions, and an ended assertion can reference an
+endpoint that was later soft-deleted. A default export (`includeDeleted:
+false`) joins every assertion against its endpoints' live rows, so an
+assertion touching a soft-deleted endpoint is silently **dropped from the
+export** — not carried with a dangling reference. This is silent archive
+loss, not a dangling-endpoint problem. When the archive must stand alone
+(backup, cold storage), pair it with `includeDeleted: true` so those
+assertions and their endpoints travel with it.
+
+That pairing has its own honest trade-off: the interchange format has no
+`deletedAt` field, so a node included only because of `includeDeleted: true`
+carries no record that it was deleted. Re-importing that archive resurrects
+the node as **live**. Choose deliberately: without `includeDeleted`, a
+backup silently loses soft-deleted endpoints and the assertions referencing
+them; with it, those nodes come back alive on restore.
+
+On import, every ended assertion's endpoints must exist as node rows in the
+target (soft-deleted rows qualify) — historical reads conduct identity
+through ended assertions, so an endpoint that never existed would become a
+phantom bridge joining real nodes at past coordinates. The store's own
+exports satisfy this by construction; a hand-built document that fails it is
+recorded as an `entityType: "identity"` entry in `result.errors`.
 
 ### Export Options
 
@@ -134,6 +191,7 @@ const withDeleted = await exportGraph(store, {
 | `includeMeta` | `boolean` | `false` | Include version and timestamps |
 | `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields |
 | `includeDeleted` | `boolean` | `false` | Include soft-deleted records |
+| `identityMode` | `"state" \| "archival"` | `"state"` | Export current identity assertions, or current plus ended assertions |
 
 **Round-trip caveat:** with the default `includeTemporal: false`, exported
 records carry no `validFrom`/`validTo`. On import, an omitted `validFrom`
@@ -162,10 +220,30 @@ if (result.success) {
   console.log(`Created: ${result.nodes.created} nodes, ${result.edges.created} edges`);
   console.log(`Updated: ${result.nodes.updated} nodes, ${result.edges.updated} edges`);
   console.log(`Skipped: ${result.nodes.skipped} nodes, ${result.edges.skipped} edges`);
+  console.log(`Identity: ${result.identity.created} created, ${result.identity.skipped} skipped`);
 } else {
   console.error("Import had errors:", result.errors);
 }
 ```
+
+When the document carries an `identity` section, `result.identity` reports
+`{ created, skipped }` counts for imported assertions (skipped covers an
+exact re-import of an assertion that already exists under the same id).
+A rejected assertion — an unknown endpoint, a contradiction against the
+target's existing identity truth, or a reused assertion id that names
+different truth — is recorded in `result.errors` with `entityType:
+"identity"`, `kind` set to the assertion's relation (`"same"` or
+`"different"`), and `id` set to the assertion id, mirroring how node/edge
+errors carry `kind`/`id`.
+
+**Partial-commit caveat:** identity assertions are applied one at a time, and
+a mid-batch failure (a contradiction or id conflict partway through the
+`identity.assertions` array) stops the identity import but does not roll back
+the assertions already applied before it — they remain committed. They are
+**not** reflected in `result.identity.created`, since that count is only
+reported on success; the count under-reports rather than invents a number for
+committed-but-unaccounted work. The failure that stopped the batch is the one
+error entry you see in `result.errors`.
 
 ### Import Options
 
@@ -213,6 +291,13 @@ The contract is deliberately narrow:
 - Recorded-time history, revision tracking, node uniqueness constraints,
   `searchable()` fields, and `embedding()` fields are rejected in this first
   version because their sidecar writes would otherwise be skipped.
+- Identity-enabled target stores are rejected with
+  `details.reason === "identity_unsupported"`; identity-bearing input is
+  rejected with `details.reason === "invalid_stream"`. The trusted session
+  writes only the node and edge relations, so it cannot persist assertions or
+  materialize the derived closure — refusing both cases keeps identity truth
+  from being silently dropped. Use `importGraphStream` for an export that
+  carries identity.
 - Nodes must precede edges. The `meta` timestamps and node version in an
   interchange row are not restored; the import creates new storage metadata.
 - The complete stream is one transaction. Data insertion, temporary secondary
@@ -388,7 +473,7 @@ function transformExternalData(externalRecords: ExternalRecord[]): GraphData {
   const validatedNodes = nodes.map((node) => InterchangeNodeSchema.parse(node));
 
   return {
-    formatVersion: "1.0",
+    formatVersion: "2.0",
     exportedAt: new Date().toISOString(),
     source: {
       type: "external",
@@ -477,6 +562,8 @@ logger.info("Import completed", {
   edgesCreated: result.edges.created,
   edgesUpdated: result.edges.updated,
   edgesSkipped: result.edges.skipped,
+  identityCreated: result.identity.created,
+  identitySkipped: result.identity.skipped,
   errorCount: result.errors.length,
 });
 ```

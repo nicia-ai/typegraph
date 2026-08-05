@@ -19,6 +19,7 @@ export const MERGE_ERROR_CODES = {
   branch: "GRAPH_MERGE_BRANCH_ERROR",
   similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE",
   conflict: "GRAPH_MERGE_CONFLICT",
+  identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT",
   baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH",
 } as const;
 
@@ -116,6 +117,16 @@ export class MergeConflictError extends MergeError {
   }
 }
 
+/** Raised when identity branches contain opposing or retract/reassert truth. */
+export class IdentityMergeConflictError extends MergeError {
+  override readonly code = MERGE_ERROR_CODES.identityConflict;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "IdentityMergeConflictError";
+  }
+}
+
 /**
  * Raised by the `merge()` precondition check when a branch's `base@V` token
  * does not match the merge target's current base version (the branch forked
@@ -133,4 +144,14 @@ export class BaseVersionMismatchError extends MergeError {
     });
     this.name = "BaseVersionMismatchError";
   }
+}
+
+/**
+ * One-line human description of an unknown thrown value, for wrapping into
+ * typed error messages.
+ *
+ * @internal
+ */
+export function describeCause(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }

@@ -66,6 +66,37 @@ export function normalizePath(value: unknown): readonly string[] {
 }
 
 /**
+ * Separator woven into the composite `kind || SEP || id` path tokens that
+ * identity-expanded traversals use for cycle detection, so folded peers (same
+ * id, different kind) stay distinct. U+001F (unit separator) is a control
+ * character that cannot occur in a node kind, so `kind || SEP || id` never
+ * collides across distinct (kind, id) pairs the way a printable delimiter
+ * could.
+ */
+export const IDENTITY_PATH_TOKEN_SEPARATOR = "\u001F";
+
+/**
+ * Strips the composite wrapper from identity-expanded traversal path tokens,
+ * restoring the bare node ids that the public path contract promises.
+ *
+ * Splits at the FIRST separator: node kinds are identifier-like and cannot
+ * contain U+001F, so the first occurrence is always the (kind, id) boundary and
+ * everything after it is the id verbatim — including an id that itself contains
+ * the separator. Tokens with no separator are returned unchanged.
+ */
+export function stripIdentityPathTokens(
+  path: readonly string[],
+): readonly string[] {
+  return path.map((token) => stripIdentityPathToken(token));
+}
+
+function stripIdentityPathToken(token: string): string {
+  const separatorIndex = token.indexOf(IDENTITY_PATH_TOKEN_SEPARATOR);
+  if (separatorIndex === -1) return token;
+  return token.slice(separatorIndex + IDENTITY_PATH_TOKEN_SEPARATOR.length);
+}
+
+/**
  * Type guard for PostgreSQL text array format: {id1,id2,id3}
  */
 function isPostgresTextArray(value: unknown): value is string {

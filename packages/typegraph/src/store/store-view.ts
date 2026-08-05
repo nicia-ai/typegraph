@@ -39,6 +39,7 @@ import {
   type TemporalMode,
 } from "../core/types";
 import { ConfigurationError } from "../errors";
+import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { requireDefined } from "../utils/presence";
 import {
@@ -75,7 +76,7 @@ import {
 } from "./collections/temporal-read-params";
 import { storeRuntime } from "./runtime-port";
 import { type StoreSearch } from "./search-facade";
-import { type Store } from "./store";
+import { type Store, type ViewIdentityAccess } from "./store";
 import {
   type InternalSubgraphOptions,
   type SubgraphOptions,
@@ -828,6 +829,18 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   constructor(store: Store<G>, coordinate: ReadCoordinate) {
     this.store = store;
     this.coordinate = coordinate;
+
+    // `identity` is typed by {@link ViewIdentityAccess} on the view aliases, so
+    // it is present only for graphs that declared `identity: { ... }` — a class
+    // member could not be conditional that way. Installing it here keeps the
+    // runtime accessor (and its IDENTITY_NOT_ENABLED refusal for JS callers)
+    // while leaving the class type free of an always-present member. Mirrors
+    // the `search` backstop on RecordedStoreView.
+    Object.defineProperty(this, "identity", {
+      enumerable: false,
+      get: (): IdentityReadFacade<G> =>
+        storeRuntime(this.store).identityAtCoordinate(this.coordinate),
+    });
   }
 
   /** The temporal mode this view reads in. */
@@ -1008,20 +1021,10 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
 // StoreView
 // ============================================================
 
-/**
- * A read-only `(mode, asOf)` lens over a {@link Store}. Construct one via
- * {@link Store.asOf} (valid-time) or {@link Store.view} (any public
- * mode), never directly.
- *
- * @example
- * ```typescript
- * const past = store.asOf("2026-01-01T00:00:00.000Z");
- * const alice = await past.nodes.Person.getById(aliceId);
- * const jobs = await past.edges.worksAt.findFrom(alice!);
- * const reach = await past.reachable(alice!, { edges: ["knows"] });
- * ```
- */
-export class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
+/** The runtime half of {@link StoreView}; see that alias for the contract. */
+class StoreViewImplementation<
+  G extends GraphDef,
+> extends CoordinatePinnedView<G> {
   #nodes: StoreViewNodeCollections<G> | undefined;
   #edges: StoreViewEdgeCollections<G> | undefined;
   #search: StoreSearch<G> | undefined;
@@ -1101,13 +1104,39 @@ export class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
 }
 
 /**
- * A narrow recorded-time read lens. It preserves the valid-time coordinate
- * carried by the source view and adds a recorded/system-time pin. Collection
- * reads expose point reconstruction and bounded scans; broad collection
- * predicates, endpoint reads, search, and further coordinate changes are absent
- * from the typed surface and refused by the runtime proxies for JS callers.
+ * A read-only `(mode, asOf)` lens over a {@link Store}. Construct one via
+ * {@link Store.asOf} (valid-time) or {@link Store.view} (any public
+ * mode), never directly.
+ *
+ * Carries `identity` — pinned identity reads — only when the graph declared
+ * `identity: { ... }`. That conditional presence is why this is a type alias
+ * over an implementation class plus {@link ViewIdentityAccess} rather than a
+ * class declaration, which would put the member on every graph's view.
+ * `instanceof StoreView` still works.
+ *
+ * @example
+ * ```typescript
+ * const past = store.asOf("2026-01-01T00:00:00.000Z");
+ * const alice = await past.nodes.Person.getById(aliceId);
+ * const jobs = await past.edges.worksAt.findFrom(alice!);
+ * const reach = await past.reachable(alice!, { edges: ["knows"] });
+ * ```
  */
-export class RecordedStoreView<
+export type StoreView<G extends GraphDef> = StoreViewImplementation<G> &
+  ViewIdentityAccess<G>;
+
+export const StoreView = StoreViewImplementation as unknown as new <
+  G extends GraphDef,
+>(
+  store: Store<G>,
+  coordinate: StoreViewCoordinate | ReadCoordinate,
+) => StoreView<G>;
+
+/**
+ * The runtime half of {@link RecordedStoreView}; see that alias for the
+ * contract.
+ */
+class RecordedStoreViewImplementation<
   G extends GraphDef,
 > extends CoordinatePinnedView<G> {
   #nodes: RecordedStoreViewNodeCollections<G> | undefined;
@@ -1186,3 +1215,22 @@ export class RecordedStoreView<
     return this.#edges;
   }
 }
+
+/**
+ * A narrow recorded-time read lens. It preserves the valid-time coordinate
+ * carried by the source view and adds a recorded/system-time pin. Collection
+ * reads expose point reconstruction and bounded scans; broad collection
+ * predicates, endpoint reads, search, and further coordinate changes are absent
+ * from the typed surface and refused by the runtime proxies for JS callers.
+ *
+ * Like {@link StoreView}, an alias over an implementation class so `identity`
+ * is present only for identity-enabled graphs.
+ */
+export type RecordedStoreView<G extends GraphDef> =
+  RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
+
+export const RecordedStoreView =
+  RecordedStoreViewImplementation as unknown as new <G extends GraphDef>(
+    store: Store<G>,
+    coordinate: ReadCoordinate,
+  ) => RecordedStoreView<G>;

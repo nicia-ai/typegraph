@@ -297,6 +297,7 @@ export type DeserializedSchema = Readonly<{
     getRelations: () => readonly SerializedOntologyRelation[];
     getClosures: () => SerializedClosures;
     getDefaults: () => SerializedSchema["defaults"];
+    getIdentity: () => SerializedSchema["identity"];
     getRaw: () => SerializedSchema;
     buildRegistry: () => KindRegistry;
 }>;
@@ -781,6 +782,7 @@ type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
+    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: TransactionBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
@@ -805,6 +807,13 @@ type GraphBackend = Readonly<{
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+    ensureIdentityTables?: (this: void, tableNames: Readonly<{
+        identityAssertions: string;
+        recordedIdentityAssertions: string;
+        identityClosure: string;
+    }>, options: Readonly<{
+        provisionMissing: boolean;
+    }>) => Promise<readonly string[]>;
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -859,12 +868,13 @@ type GraphBackend = Readonly<{
 }>;
 
 // @public
-type GraphDef<TNodes extends Record<string, NodeRegistration> = Record<string, NodeRegistration>, TEdges extends Record<string, EdgeRegistration> = Record<string, EdgeRegistration>, TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[]> = Readonly<{
+type GraphDef<TNodes extends Record<string, NodeRegistration> = Record<string, NodeRegistration>, TEdges extends Record<string, EdgeRegistration> = Record<string, EdgeRegistration>, TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[], TIdentity extends GraphIdentityConfig | undefined = GraphIdentityConfig | undefined> = Readonly<{
     [GRAPH_DEF_BRAND]: true;
     id: string;
     nodes: TNodes;
     edges: TEdges;
     ontology: TOntology;
+    identity: TIdentity;
     defaults: Readonly<{
         onNodeDelete: DeleteBehavior;
         temporalMode: TemporalMode;
@@ -891,6 +901,11 @@ type GraphExtension = Readonly<{
 
 // @public
 type GraphExtensionVersion = number;
+
+// @public
+export type GraphIdentityConfig = Readonly<{
+    sameIdAcrossKinds: "fold" | "ignore";
+}>;
 
 // @public (undocumented)
 type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
@@ -956,6 +971,13 @@ type HybridSearchRow = Readonly<{
     fulltextRank?: number;
     fulltextScore?: number;
     snippet?: string;
+}>;
+
+// @public
+export type IdentityChange = Readonly<{
+    type: ChangeType;
+    severity: ChangeSeverity;
+    details: string;
 }>;
 
 // @public
@@ -1072,7 +1094,9 @@ type IndexWhereOperand = Readonly<{
 type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
 // @public
-export function initializeSchema<G extends GraphDef>(backend: GraphBackend, graph: G): Promise<SchemaVersionRow>;
+export function initializeSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: Readonly<{
+    schema?: SqlSchema;
+}>): Promise<SchemaVersionRow>;
 
 // @public
 type InsertEdgeParams = Readonly<{
@@ -1169,13 +1193,14 @@ class KindRegistry {
         narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
         equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
         iriToKind: ReadonlyMap<string, string>;
+        relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
         disjointPairs: ReadonlySet<string>;
         partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
         hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
         edgeInverses: ReadonlyMap<string, string>;
         edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
         edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
-    });
+    }, identity?: GraphIdentityConfig);
     areDisjoint(a: string, b: string): boolean;
     areEquivalent(a: string, b: string): boolean;
     // (undocumented)
@@ -1206,11 +1231,13 @@ class KindRegistry {
     getInverseEdge(edgeKind: string): string | undefined;
     getNodeType(name: string): NodeType | undefined;
     getParts(whole: string): readonly string[];
+    getRelatedKinds(kind: string): readonly string[];
     getWholes(part: string): readonly string[];
     hasEdgeType(name: string): boolean;
     hasNodeType(name: string): boolean;
     // (undocumented)
     readonly hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    readonly identity: GraphIdentityConfig | undefined;
     // (undocumented)
     readonly iriToKind: ReadonlyMap<string, string>;
     isAssignableTo(concreteKind: string, targetKind: string): boolean;
@@ -1225,6 +1252,8 @@ class KindRegistry {
     readonly nodeKinds: ReadonlyMap<string, NodeType>;
     // (undocumented)
     readonly partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    // (undocumented)
+    readonly relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
     resolveIri(iri: string): string | undefined;
     // (undocumented)
     readonly subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
@@ -1282,6 +1311,7 @@ export function migrateSchema<G extends GraphDef>(backend: GraphBackend, graph: 
 // @public (undocumented)
 export type MigrateSchemaOptions = Readonly<{
     discardDroppedKindRows?: boolean;
+    schema?: SqlSchema;
 }>;
 
 // @public
@@ -1445,6 +1475,21 @@ type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable
 // @public
 export function requiresMigration<G extends GraphDef>(backend: GraphBackend, graph: G): Promise<boolean>;
 
+// @public (undocumented)
+type ResolvedSqlTableNames = Readonly<{
+    nodes: string;
+    edges: string;
+    recordedNodes: string;
+    recordedEdges: string;
+    recordedClock: string;
+    revisionOrigins: string;
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    fulltext: string;
+    uniques: string;
+}>;
+
 // @public
 export function rollbackSchema(backend: GraphBackend, graphId: string, targetVersion: number): Promise<void>;
 
@@ -1461,6 +1506,7 @@ export type SchemaDiff = Readonly<{
     nodes: readonly NodeChange[];
     edges: readonly EdgeChange[];
     ontology: readonly OntologyChange[];
+    identity?: IdentityChange;
     indexes: readonly IndexChange[];
     extension?: ExtensionChange;
     deprecatedKinds?: DeprecatedKindsChange;
@@ -1480,6 +1526,7 @@ export type SchemaManagerOptions = Readonly<{
     systemIndexes?: "materialize" | "skip";
     onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
     onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
+    schema?: SqlSchema;
 }>;
 
 // @public (undocumented)
@@ -1601,6 +1648,7 @@ export type SerializedSchema = Readonly<{
         onNodeDelete: DeleteBehavior;
         temporalMode: TemporalMode;
     }>;
+    identity?: GraphIdentityConfig;
     indexes?: readonly IndexDeclaration[];
     extension?: GraphExtension;
     deprecatedKinds?: readonly string[];
@@ -1669,6 +1717,47 @@ type SqlPlaceholderChunk = Readonly<{
 }>;
 
 // @public
+abstract class SqlSchema implements SqlSchemaFields {
+    // (undocumented)
+    abstract readonly edgesTable: SqlFragment;
+    // (undocumented)
+    abstract readonly fulltextTable: SqlFragment;
+    // (undocumented)
+    abstract readonly identityAssertionsTable: SqlFragment;
+    // (undocumented)
+    abstract readonly identityClosureTable: SqlFragment;
+    // (undocumented)
+    abstract readonly nodesTable: SqlFragment;
+    // (undocumented)
+    abstract readonly recordedClockTable: SqlFragment;
+    // (undocumented)
+    abstract readonly recordedEdgesTable: SqlFragment;
+    // (undocumented)
+    abstract readonly recordedIdentityAssertionsTable: SqlFragment;
+    // (undocumented)
+    abstract readonly recordedNodesTable: SqlFragment;
+    // (undocumented)
+    abstract readonly revisionOriginsTable: SqlFragment;
+    // (undocumented)
+    abstract readonly tables: ResolvedSqlTableNames;
+}
+
+// @public (undocumented)
+type SqlSchemaFields = Readonly<{
+    tables: ResolvedSqlTableNames;
+    nodesTable: SqlFragment;
+    edgesTable: SqlFragment;
+    recordedNodesTable: SqlFragment;
+    recordedEdgesTable: SqlFragment;
+    recordedClockTable: SqlFragment;
+    revisionOriginsTable: SqlFragment;
+    identityAssertionsTable: SqlFragment;
+    recordedIdentityAssertionsTable: SqlFragment;
+    identityClosureTable: SqlFragment;
+    fulltextTable: SqlFragment;
+}>;
+
+// @public
 type SqlTableNames = Readonly<{
     nodes: string;
     edges: string;
@@ -1676,6 +1765,9 @@ type SqlTableNames = Readonly<{
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
     revisionOrigins?: string | undefined;
+    identityAssertions?: string | undefined;
+    recordedIdentityAssertions?: string | undefined;
+    identityClosure?: string | undefined;
     fulltext: string;
     uniques: string;
 }>;
@@ -1794,6 +1886,7 @@ type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
     props: Readonly<Record<string, unknown>>;
+    validFrom?: string | null;
     validTo?: string;
     clearDeleted?: boolean;
 }>;
@@ -1804,6 +1897,7 @@ type UpdateNodeParams = Readonly<{
     kind: string;
     id: string;
     props: Readonly<Record<string, unknown>>;
+    validFrom?: string | null;
     validTo?: string;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
@@ -1919,6 +2013,7 @@ type ValidationIssue = Readonly<{
     path: string;
     message: string;
     code?: string;
+    assertionId?: string;
 }>;
 
 // @public

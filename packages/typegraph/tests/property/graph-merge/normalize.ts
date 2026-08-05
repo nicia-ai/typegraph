@@ -32,7 +32,11 @@ import {
   enumerateAllEdges,
   enumerateAllNodes,
 } from "../../../src/graph-merge/state-diff";
-import type { BranchId, MergeReport } from "../../../src/graph-merge/types";
+import type {
+  BranchId,
+  DroppedItem,
+  MergeReport,
+} from "../../../src/graph-merge/types";
 import { storeBackend } from "../../../src/store/runtime-port";
 
 /** Lexicographic comparator over two strings (ids, kinds, properties). */
@@ -90,7 +94,7 @@ type NormalizedTypeReconciliation = Readonly<{
 
 /** A dropped item in canonical form. */
 type NormalizedDropped = Readonly<{
-  kind: "edge" | "node";
+  kind: DroppedItem["kind"];
   id: string;
   reason: string;
 }>;

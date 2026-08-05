@@ -6,7 +6,8 @@
  * the declared meta-edges as `{ metaEdge, from, to, origin }` records. This
  * module is therefore THIN GLUE: it projects the introspected ontology onto the
  * `[child, parent]` relation pairs the public closure builder expects, folds in
- * `equivalentTo` equivalence classes, and exposes the {@link isReachable}
+ * type-level equivalence classes (`equivalentTo` and its deprecated `sameAs`
+ * alias), and exposes the {@link isReachable}
  * accessor reconcileTypes (T10) consumes. There is deliberately NO local Warshall
  * reimplementation — the transitive work is done entirely by the public
  * `computeTransitiveClosure`.
@@ -23,6 +24,8 @@ import type { OntologyIntrospection } from "./typegraph-internal";
 import {
   computeTransitiveClosure,
   isReachable as isReachablePublic,
+  META_EDGE_EQUIVALENT_TO,
+  META_EDGE_SAME_AS,
 } from "./typegraph-internal";
 import { UnionFind } from "./union-find";
 
@@ -32,12 +35,21 @@ import { UnionFind } from "./union-find";
 export const SUB_CLASS_OF_META_EDGE = "subClassOf";
 
 /**
- * The meta-edge name identifying an equivalence relation in
- * `introspect().ontology`. `equivalentTo` edges are folded into symmetric
- * equivalence classes so that equivalent types share each other's ancestors and
- * descendants.
+ * The meta-edge names identifying a type-level equivalence relation in
+ * `introspect().ontology`. These edges are folded into symmetric equivalence
+ * classes so that equivalent types share each other's ancestors and descendants.
+ *
+ * `sameAs` is the deprecated alias of `equivalentTo` and MUST be treated
+ * identically here: `introspect()` reports the declared meta-edge name verbatim,
+ * and both the kind registry (`kind-registry.ts`) and ontology validation collapse
+ * the two into one case. Recognizing only `equivalentTo` would silently give a
+ * `sameAs` ontology a different type-reconciliation outcome from an otherwise
+ * identical `equivalentTo` one.
  */
-const EQUIVALENT_TO_META_EDGE = "equivalentTo";
+const EQUIVALENCE_META_EDGES: ReadonlySet<string> = new Set([
+  META_EDGE_EQUIVALENT_TO,
+  META_EDGE_SAME_AS,
+]);
 
 /**
  * An immutable subclass closure plus the equivalence-class canonicalization used
@@ -59,8 +71,9 @@ export type SubClassClosure = Readonly<{
  * Builds the subclass closure from an introspected ontology.
  *
  * Steps:
- *   1. Fold every `equivalentTo` relation into a union-find so equivalent types
- *      collapse to a single deterministic representative.
+ *   1. Fold every equivalence relation ({@link EQUIVALENCE_META_EDGES}) into a
+ *      union-find so equivalent types collapse to a single deterministic
+ *      representative.
  *   2. Project every `subClassOf` relation onto a `[childRep, parentRep]` pair
  *      (each endpoint canonicalized to its equivalence representative). Self
  *      loops introduced by equivalence are dropped — a type is never its own
@@ -82,7 +95,7 @@ export function buildSubClassClosure(
   for (const relation of ontology) {
     unionFind.add(relation.from);
     unionFind.add(relation.to);
-    if (relation.metaEdge === EQUIVALENT_TO_META_EDGE) {
+    if (EQUIVALENCE_META_EDGES.has(relation.metaEdge)) {
       unionFind.union(relation.from, relation.to);
     }
   }

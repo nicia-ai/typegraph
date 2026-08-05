@@ -469,6 +469,8 @@ export type PredicateCompilerContext = Readonly<{
    * builder's template cache. Absent means `"literal"`.
    */
   readInstant?: ReadInstantMode;
+  /** Equal-id behavior for historical identity traversal reconstruction. */
+  identitySameIdAcrossKinds?: "fold" | "ignore";
 }>;
 
 /**

@@ -173,7 +173,12 @@ export function buildUpdateNode(
     );
   }
 
-  if (params.validTo !== undefined) {
+  if (params.clearDeleted) {
+    setParts.push(
+      sql`${quotedColumn(nodes.validFrom)} = ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}`,
+      sql`${quotedColumn(nodes.validTo)} = ${sqlNull(params.validTo)}`,
+    );
+  } else if (params.validTo !== undefined) {
     setParts.push(sql`${quotedColumn(nodes.validTo)} = ${params.validTo}`);
   }
 
@@ -190,6 +195,7 @@ export function buildUpdateNode(
       WHERE ${nodes.graphId} = ${params.graphId}
         AND ${nodes.kind} = ${params.kind}
         AND ${nodes.id} = ${params.id}
+        AND ${nodes.deletedAt} IS NOT NULL
       RETURNING *
     `;
   }

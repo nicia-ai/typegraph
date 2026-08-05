@@ -63,6 +63,7 @@ export type {
   EmptyEdgeAliasMap,
   EmptyRecursiveAliasMap,
   FieldAccessor,
+  IdentityTraversalOption,
   InitialQueryBuilder,
   NodeAccessor,
   NodeAlias,

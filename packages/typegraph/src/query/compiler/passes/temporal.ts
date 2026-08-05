@@ -9,6 +9,14 @@ import {
 
 export type TemporalFilterPass = Readonly<{
   forAlias: (tableAlias?: string) => SqlFragment;
+  /**
+   * The bound "current" valid-time read instant, sampled once when this pass is
+   * created — the same value {@link forAlias} compares against. Exposed so
+   * point-in-time predicates that must NOT widen with the node-visibility mode
+   * (e.g. identity-assertion validity) can pin to the identical instant instead
+   * of resampling the clock, which would break the single-snapshot invariant.
+   */
+  currentInstant: SqlFragment;
 }>;
 
 /**
@@ -32,5 +40,6 @@ export function createTemporalFilterPass(
         currentTimestamp,
       });
     },
+    currentInstant: currentTimestamp,
   };
 }

@@ -170,6 +170,12 @@ export type ValidationIssue = Readonly<{
   message: string;
   /** Zod error code if from Zod validation */
   code?: string;
+  /**
+   * The identity assertion the issue is about, carried structurally so
+   * consumers (e.g. interchange import error reporting) never have to parse
+   * the human-readable message for it.
+   */
+  assertionId?: string;
 }>;
 
 /**
@@ -581,6 +587,38 @@ export class DisjointError extends TypeGraphError {
       },
     );
     this.name = "DisjointError";
+  }
+}
+
+export type IdentityContradictionErrorDetails = Readonly<{
+  operation: "assertSame" | "assertDifferent" | "fold" | "import";
+  a: Readonly<{ kind: string; id: string }>;
+  b: Readonly<{ kind: string; id: string }>;
+  reason: "different-assertion" | "same-class" | "disjoint-kinds";
+  conflictingAssertionId?: string;
+  conflictingKinds?: readonly [string, string];
+}>;
+
+/** Thrown when an identity mutation would make the ledger contradictory. */
+export class IdentityContradictionError extends TypeGraphError {
+  declare readonly details: IdentityContradictionErrorDetails;
+
+  constructor(
+    details: IdentityContradictionErrorDetails,
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    super(
+      `Identity contradiction: ${details.a.kind}/${details.a.id} and ${details.b.kind}/${details.b.id} cannot satisfy ${details.operation}.`,
+      "IDENTITY_CONTRADICTION",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Retract the conflicting identity assertion or correct the graph ontology before retrying.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "IdentityContradictionError";
   }
 }
 
@@ -1125,6 +1163,7 @@ export type TrustedImportErrorReason =
   | "database_not_empty"
   | "fulltext_unsupported"
   | "history_unsupported"
+  | "identity_unsupported"
   | "invalid_stream"
   | "revision_tracking_unsupported"
   | "uniqueness_unsupported"
@@ -1395,6 +1434,7 @@ function storageLabelFromLogicalName(logicalName: unknown): string {
 export type DatabaseOperationErrorDetails = Readonly<{
   operation: string;
   entity: string;
+  reason?: "no_row_returned";
 }>;
 
 /**

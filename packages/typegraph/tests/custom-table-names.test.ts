@@ -38,6 +38,7 @@ const graph = defineGraph({
       cardinality: "many",
     },
   },
+  identity: { sameIdAcrossKinds: "fold" },
 });
 
 // ============================================================
@@ -54,6 +55,9 @@ describe("custom table names", () => {
     revisionOrigins: "app_revision_origins",
     fulltext: "app_fulltext",
     uniques: "app_uniques",
+    identityAssertions: "app_identity_assertions",
+    recordedIdentityAssertions: "app_recorded_identity_assertions",
+    identityClosure: "app_identity_closure",
   } as const;
 
   let backend: GraphBackend;
@@ -68,6 +72,9 @@ describe("custom table names", () => {
       revisionOrigins: CUSTOM_NAMES.revisionOrigins,
       fulltext: CUSTOM_NAMES.fulltext,
       uniques: CUSTOM_NAMES.uniques,
+      identityAssertions: CUSTOM_NAMES.identityAssertions,
+      recordedIdentityAssertions: CUSTOM_NAMES.recordedIdentityAssertions,
+      identityClosure: CUSTOM_NAMES.identityClosure,
     });
     backend = createTestBackend(tables);
   });
@@ -137,6 +144,25 @@ describe("custom table names", () => {
     expect(requireDefined(results[0]).edge.since).toBe("2024");
   });
 
+  it("round-trips identity through custom assertion and closure tables", async () => {
+    const store = createStore(graph, backend);
+    const first = await store.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Alicia" },
+      { id: "alicia" },
+    );
+
+    await store.identity.assertSame(first, second);
+
+    expect(await store.identity.membersOf(first)).toEqual([
+      { kind: "Person", id: first.id },
+      { kind: "Person", id: second.id },
+    ]);
+  });
+
   it("explicit schema option takes precedence over backend.tableNames", () => {
     const explicitSchema = createSqlSchema({
       nodes: "override_nodes",
@@ -165,6 +191,9 @@ describe("custom table names", () => {
       revisionOrigins: "typegraph_revision_origins",
       fulltext: "typegraph_node_fulltext",
       uniques: "typegraph_node_uniques",
+      identityAssertions: "typegraph_identity_assertions",
+      recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
+      identityClosure: "typegraph_identity_closure",
     });
   });
 });
