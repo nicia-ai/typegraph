@@ -177,6 +177,106 @@ type RawSeparationRow = Readonly<{
   class_key_high: string;
 }>;
 
+/**
+ * Whether the relation records two CURRENT classes as separated.
+ *
+ * One primary-key probe against `(graph_id, class_key_low, class_key_high)`,
+ * standing in for resolving both classes' `different` assertions out of the
+ * ledger and scanning them for one that spans the pair. Callers pass the class
+ * keys in any order; putting them in the relation's `low < high` order is this
+ * module's business, since it is the same ordering the writer applies.
+ *
+ * Valid only for a current-mode read: the relation projects CURRENT assertions
+ * onto CURRENT classes, so a valid-time or recorded coordinate has to
+ * reconstruct from the ledger instead.
+ *
+ * @throws {ConfigurationError} `IDENTITY_STORAGE_MISSING` when the probe cannot
+ * be answered.
+ */
+export async function isSeparated(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+  firstClassKey: string,
+  secondClassKey: string,
+): Promise<boolean> {
+  // A class is never separated from itself: `low = high` is what the relation's
+  // CHECK exists to reject, so the probe is a guaranteed miss and the round
+  // trip buys nothing.
+  if (firstClassKey === secondClassKey) return false;
+  const rows = await probeSeparationPair(
+    target,
+    schema,
+    graphId,
+    orderedPair(firstClassKey, secondClassKey),
+  );
+  return rows.length > 0;
+}
+
+async function probeSeparationPair(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+  pair: SeparationPair,
+): Promise<readonly RawSeparationRow[]> {
+  try {
+    return await target.execute<RawSeparationRow>(
+      asCompiledRowsSql(sql`
+        SELECT class_key_low, class_key_high
+        FROM ${schema.identitySeparationTable}
+        WHERE graph_id = ${graphId}
+          AND class_key_low = ${pair.low}
+          AND class_key_high = ${pair.high}
+      `),
+    );
+  } catch (error) {
+    // Never degrade to "not separated". A caller that cannot read the relation
+    // has no basis for an answer, and the wrong answer here is the one that
+    // lets a contradiction through. Any failure of a single-table equality
+    // probe on an identity-enabled graph means the relation is unreadable;
+    // rather than pattern-match each driver's wording for a missing table —
+    // which silently degrades the moment a driver rephrases it — every failure
+    // is reported as such, with the driver error preserved as the cause.
+    throw separationUnreadableError(graphId, schema, error);
+  }
+}
+
+function separationUnreadableError(
+  graphId: string,
+  schema: SqlSchema,
+  cause: unknown,
+): ConfigurationError {
+  return new ConfigurationError(
+    "Operational Identity could not read the materialized separation relation.",
+    {
+      code: "IDENTITY_STORAGE_MISSING",
+      graphId,
+      tables: [schema.tables.identitySeparation],
+    },
+    {
+      cause,
+      suggestion:
+        "Recreate the identity separation relation with the standard TypeGraph DDL, open the Store, and run rebuildIdentityClosure(store) before serving traffic.",
+    },
+  );
+}
+
+/**
+ * The persisted relation holds a separated pair the assertion ledger does not
+ * project — the same `rebuild != recompute(ledger)` divergence
+ * {@link assertSeparationMatchesProjection} refuses, discovered by a probe
+ * whose answer the ledger could not corroborate.
+ */
+export function unexpectedSeparationError(
+  graphId: string,
+  firstClassKey: string,
+  secondClassKey: string,
+): ConfigurationError {
+  return separationMismatchError(graphId, {
+    unexpected: orderedPair(firstClassKey, secondClassKey),
+  });
+}
+
 /** Every persisted separation pair for the graph. */
 export async function readSeparationForGraph(
   target: IdentityTarget,

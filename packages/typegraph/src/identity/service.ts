@@ -35,7 +35,9 @@ import {
   deleteSeparationForGraph,
   identityClassKey,
   insertSeparationRows,
+  isSeparated,
   readSeparationForGraph,
+  unexpectedSeparationError,
 } from "./separation";
 import {
   executeIdentityStatement,
@@ -1328,14 +1330,25 @@ async function validateCurrentRelation(
     });
   }
 
-  const different = await loadSpanningDifferentAssertion(
-    target,
-    ctx.schema,
-    ctx.graphId,
-    aClass,
-    bClass,
-  );
-  if (different !== undefined) {
+  // Whether the two classes are held apart is a single index probe on the
+  // derived separation relation. Every caller reaches here with the relation in
+  // step with the ledger: each one repairs it inside the same transaction as
+  // the write it validates, before the next validation runs.
+  const aKey = currentClassKey(aClass);
+  const bKey = currentClassKey(bClass);
+  if (await isSeparated(target, ctx.schema, ctx.graphId, aKey, bKey)) {
+    // The relation records THAT the classes are separated, not which assertion
+    // separates them, and the typed error names one — so the ledger answers
+    // that single question, on the refusal path only.
+    const different = await loadSpanningDifferentAssertion(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      aClass,
+      bClass,
+    );
+    if (different === undefined)
+      throw unexpectedSeparationError(ctx.graphId, aKey, bKey);
     throw new IdentityContradictionError({
       operation,
       a,
@@ -1541,6 +1554,21 @@ async function loadCurrentClassAnchors(
     }
   }
   return anchors;
+}
+
+/**
+ * The separation class key of an already-RESOLVED current class.
+ *
+ * A class is labelled by its code-point-least member: `insertClosureComponents`
+ * and `mergeCurrentClasses` both anchor a class on the first member of its
+ * `compareReferences` ordering, and {@link loadCurrentStructuralClasses}
+ * returns members in that same ordering — so `members[0]` is the anchor
+ * {@link loadCurrentClassAnchors} hands the separation writer, without a second
+ * round trip to fetch it. {@link snapshotClassKey} reads a snapshot the same
+ * way.
+ */
+function currentClassKey(members: readonly PlainNodeRef[]): string {
+  return identityClassKey(requireDefined(members[0]));
 }
 
 /** The class key a full snapshot assigns to a reference. */
@@ -2352,15 +2380,18 @@ export function createIdentityReadFacade<G extends GraphDef>(
         );
         const firstClass = requireDefined(classes.get(refKey(first)));
         const secondClass = requireDefined(classes.get(refKey(second)));
-        const different = await loadSpanningDifferentAssertion(
+        // A boolean is the whole answer here, and the separation relation holds
+        // exactly that boolean for a pair of current classes — no assertion has
+        // to be named, so the ledger is not read at all.
+        const separated = await isSeparated(
           ctx.backend,
           ctx.schema,
           ctx.graphId,
-          firstClass,
-          secondClass,
+          currentClassKey(firstClass),
+          currentClassKey(secondClass),
         );
         return (
-          different !== undefined ||
+          separated ||
           classHasDisjointKinds(ctx.registry, firstClass, secondClass) !==
             undefined
         );
