@@ -31,8 +31,11 @@ import {
 import { type PlainNodeRef } from "../../src/identity/sql-target";
 import { asIdentityAssertionId } from "../../src/identity/types";
 import { createSqlSchema } from "../../src/query/compiler/schema";
-import { sql } from "../../src/query/sql-fragment";
-import { asCompiledRowsSql } from "../../src/query/sql-intent";
+import { sql, type SqlFragment } from "../../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  type CompiledRowsSql,
+} from "../../src/query/sql-intent";
 import { storeRuntime } from "../../src/store/runtime-port";
 import { type Store } from "../../src/store/store";
 import { compareCodePoints } from "../../src/utils/compare";
@@ -415,5 +418,97 @@ describe("separation probe versus the assertion ledger", () => {
       { type: "retract", index: 0 },
       { type: "delete", ref: personTwo },
     ]);
+  });
+});
+
+/**
+ * A driver error the probe raised, whose SQLSTATE says what it was.
+ *
+ * `40001` is a serialization failure — transient, and the code graph-merge's
+ * commit retry looks for. `42P01` is `undefined_table`, the one failure the
+ * probe can describe better than the driver can.
+ */
+function driverFailure(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+/** Fails the separation probe — and only the separation probe — with `error`. */
+function probeFailingBackend(error: Error): Readonly<{
+  backend: GraphBackend;
+  arm: () => void;
+}> {
+  const base = createTestBackend();
+  const table = createSqlSchema(base.tableNames).tables.identitySeparation;
+  let armed = false;
+  const namesSeparation = (compiled: CompiledRowsSql): boolean =>
+    (compiled as SqlFragment).chunks.some(
+      (chunk) => chunk.kind === "identifier" && chunk.value === table,
+    );
+  return {
+    backend: {
+      ...base,
+      execute: async <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+        if (armed && namesSeparation(query)) throw error;
+        return base.execute<T>(query);
+      },
+    },
+    arm: () => {
+      armed = true;
+    },
+  };
+}
+
+describe("a separation probe that cannot read the relation", () => {
+  it("translates a missing relation and passes every other failure through", async () => {
+    const missing = driverFailure(
+      "42P01",
+      'relation "typegraph_identity_separation" does not exist',
+    );
+    const missingProbe = probeFailingBackend(missing);
+    const missingStore = await createInitializedStore(
+      graph,
+      missingProbe.backend,
+    );
+    const first = await missingStore.nodes.Person.create(
+      { name: "First" },
+      { id: "n0" },
+    );
+    const second = await missingStore.nodes.Person.create(
+      { name: "Second" },
+      { id: "n1" },
+    );
+    missingProbe.arm();
+    await expect(
+      missingStore.identity.areDifferent(first, second),
+    ).rejects.toMatchObject({
+      details: { code: "IDENTITY_STORAGE_MISSING" },
+      cause: missing,
+    });
+
+    // A serialization failure is neither missing storage nor corruption: it is
+    // the transaction asking to be re-run, and relabelling it would both send
+    // an operator to rebuild an intact relation and hide the SQLSTATE from the
+    // callers that retry on it.
+    const conflict = driverFailure(
+      "40001",
+      "could not serialize access due to read/write dependencies among transactions",
+    );
+    const conflictProbe = probeFailingBackend(conflict);
+    const conflictStore = await createInitializedStore(
+      graph,
+      conflictProbe.backend,
+    );
+    const third = await conflictStore.nodes.Person.create(
+      { name: "Third" },
+      { id: "n0" },
+    );
+    const fourth = await conflictStore.nodes.Person.create(
+      { name: "Fourth" },
+      { id: "n1" },
+    );
+    conflictProbe.arm();
+    await expect(
+      conflictStore.identity.areDifferent(third, fourth),
+    ).rejects.toBe(conflict);
   });
 });

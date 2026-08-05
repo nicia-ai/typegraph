@@ -1275,9 +1275,11 @@ const IDENTITY_ENVIRONMENT_CODES: ReadonlySet<string> = new Set([
   "IDENTITY_REQUIRES_ATOMIC_BACKEND",
   "IDENTITY_REQUIRES_STATEMENT_EXECUTION",
   "IDENTITY_BIND_BUDGET_TOO_SMALL",
-  // Unreachable from the applier today, but environment/corruption
-  // statements all the same — translating one into "re-plan against the
-  // current target" would be advice that can never succeed.
+  // Environment/corruption statements — translating one into "re-plan against
+  // the current target" would be advice that can never succeed. The applier
+  // reaches the last two through the current different-ness probe (see
+  // `identity/separation`), which refuses rather than guessing when the derived
+  // separation relation is missing or disagrees with the ledger.
   "IDENTITY_NOT_ENABLED",
   "IDENTITY_STORAGE_MISSING",
   "IDENTITY_SCHEMA_CONTRADICTION",

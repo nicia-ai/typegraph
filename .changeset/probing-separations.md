@@ -15,6 +15,7 @@ conflicting assertion in the typed error it is already about to throw.
 
 Results and typed errors are unchanged. Reads at a valid-time `asOf` or a
 recorded coordinate still reconstruct from the ledger, since the separation
-relation projects current assertions onto current classes. A probe that cannot
-read the relation refuses with `IDENTITY_STORAGE_MISSING` rather than answering
-"not separated".
+relation projects current assertions onto current classes. A probe never
+answers "not separated" when it could not read: a missing relation refuses with
+`IDENTITY_STORAGE_MISSING`, and any other driver failure propagates unchanged so
+transient conflicts stay classifiable.

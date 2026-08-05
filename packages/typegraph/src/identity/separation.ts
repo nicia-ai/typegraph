@@ -35,6 +35,7 @@ import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
+import { isMissingTableError } from "../utils/sql-errors";
 import {
   executeIdentityStatement,
   identityChunkSize,
@@ -190,8 +191,12 @@ type RawSeparationRow = Readonly<{
  * onto CURRENT classes, so a valid-time or recorded coordinate has to
  * reconstruct from the ledger instead.
  *
- * @throws {ConfigurationError} `IDENTITY_STORAGE_MISSING` when the probe cannot
- * be answered.
+ * Never answers "not separated" when it could not read: a missing relation
+ * raises `IDENTITY_STORAGE_MISSING` and any other driver failure propagates
+ * unchanged.
+ *
+ * @throws {ConfigurationError} `IDENTITY_STORAGE_MISSING` when the relation the
+ * probe reads does not exist.
  */
 export async function isSeparated(
   target: IdentityTarget,
@@ -230,13 +235,19 @@ async function probeSeparationPair(
       `),
     );
   } catch (error) {
-    // Never degrade to "not separated". A caller that cannot read the relation
+    // Never degrade to "not separated": a caller that cannot read the relation
     // has no basis for an answer, and the wrong answer here is the one that
-    // lets a contradiction through. Any failure of a single-table equality
-    // probe on an identity-enabled graph means the relation is unreadable;
-    // rather than pattern-match each driver's wording for a missing table —
-    // which silently degrades the moment a driver rephrases it — every failure
-    // is reported as such, with the driver error preserved as the cause.
+    // lets a contradiction through. Both branches below therefore throw.
+    //
+    // A missing relation is the one failure this seam can describe better than
+    // the driver can, so it is translated — through the shared structural
+    // classifier (SQLSTATE 42P01, SQLite `no such table`), never this module's
+    // own wording match. Everything else — a deadlock, a serialization failure,
+    // a lock timeout, a dropped connection — is transient or unrelated, and
+    // relabelling it "storage missing" would send an operator to rebuild a
+    // relation that is intact and would hide a retryable conflict from callers
+    // that classify it (graph-merge's commit retry reads the driver SQLSTATE).
+    if (!isMissingTableError(error)) throw error;
     throw separationUnreadableError(graphId, schema, error);
   }
 }
