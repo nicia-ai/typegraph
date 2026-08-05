@@ -880,9 +880,17 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `transactions`                                                             | Atomic transactions available (see note below)                                                      |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
-| `graphAnalytics?.{supported,mathFunctions}`                                | Whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
+| `graphAnalytics?.{supported,mathFunctions}`                                | Static support for whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions`         | Vector strategy capabilities (present once a vector strategy is configured)                         |
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
+
+`graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
+session state. A hot standby or a role without the database `TEMP` privilege can
+still reject the working-table transaction that the iterative graph algorithms
+open: a standby refuses the read-write transaction itself, and a role without
+`TEMP` refuses the `CREATE TEMP TABLE` inside it. Both refusals reach the caller
+as `UnsupportedBackendCapabilityError`, with the PostgreSQL error retained as
+its `cause`.
 
 ### SQLite ↔ PostgreSQL parity
 

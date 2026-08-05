@@ -8,6 +8,7 @@ import {
   CompilerInvariantError,
   ConfigurationError,
   GraphAlgorithmConvergenceError,
+  UnsupportedBackendCapabilityError,
 } from "../../errors";
 import {
   compileKindFilter,
@@ -27,6 +28,12 @@ import {
 import { compareCodePoints, compareStrings } from "../../utils/compare";
 import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
+import {
+  type PostgresReadWriteRefusedSqlState,
+  postgresReadWriteRefusedSqlState,
+  type PostgresTemporaryTableUnavailableSqlState,
+  postgresTemporaryTableUnavailableSqlState,
+} from "../../utils/sql-errors";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { resolveReadSchema, resolveTemporalOptions } from "./context";
 import type { PathNode, TraversalDirection } from "./types";
@@ -274,77 +281,142 @@ export async function runIterativeGraphOperation<
     temporaryWrites: INTERNAL_TEMPORARY_WRITES,
   } satisfies InternalTransactionOptions;
 
-  return ctx.backend.transaction(async (backend) => {
-    const temporaryBackend = requireTemporaryStatements(backend);
-    const runId = generateId();
-    const workingTable = sql.identifier(
-      `typegraph_iterative_${runId.replaceAll("-", "_")}`,
-    );
-    const context: IterativeGraphRunContext = {
-      operation: createOperation(ctx, options, temporaryBackend),
-      backend: temporaryBackend,
-      workingTable,
-      graphId: ctx.graphId,
-      runId,
-      executeTemporary: async (query) => {
-        await temporaryBackend.executeTemporaryStatement(
-          asCompiledTemporaryStatementSql(query),
-        );
-      },
-    };
+  // A standby refuses the read-write access mode in the `BEGIN` itself, so on
+  // a replica the working-table seam below never executes. A failure raised
+  // before the callback started is that refusal and nothing else.
+  const rounds = { started: false };
+  try {
+    return await ctx.backend.transaction(async (backend) => {
+      rounds.started = true;
+      return runWorkingTableRounds(ctx, options, plan, backend);
+    }, transactionOptions);
+  } catch (error) {
+    if (rounds.started || ctx.backend.dialect !== "postgres") throw error;
+    const sqlState = postgresReadWriteRefusedSqlState(error);
+    if (sqlState === undefined) throw error;
+    throw temporaryTableCapabilityError(ctx, plan.algorithm, sqlState, error);
+  }
+}
 
-    // Opt-in only: without an explicit workingMemory the rounds inherit
-    // the engine's configured setting. When requested, the override is
-    // transaction-scoped — `set_config(..., is_local => true)` reverts
-    // when this transaction ends, so the session/server setting is never
-    // touched. SQLite returns no statement here.
-    if (context.operation.workingMemory !== undefined) {
-      const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
-        context.operation.workingMemory,
+/**
+ * The typed failure for a PostgreSQL execution environment that refuses the
+ * transaction-local temporary tables its static `graphAnalytics` capability
+ * advertises — a replica, or a role without the database `TEMP` privilege.
+ */
+function temporaryTableCapabilityError(
+  ctx: AlgorithmContext,
+  algorithm: string,
+  sqlState:
+    | PostgresReadWriteRefusedSqlState
+    | PostgresTemporaryTableUnavailableSqlState,
+  cause: unknown,
+): UnsupportedBackendCapabilityError {
+  const error = new UnsupportedBackendCapabilityError(
+    algorithm,
+    "graphAnalytics",
+    {
+      dialect: ctx.backend.dialect,
+      supported: false,
+      requirement: "transaction-local temporary tables",
+      sqlState,
+    },
+    "Run graph analytics on a writable PostgreSQL primary with a role that has the TEMP privilege.",
+  );
+  // Match the non-enumerable Error.cause property created by the native
+  // Error constructor without widening the public capability-error API.
+  Object.defineProperty(error, "cause", {
+    configurable: true,
+    value: cause,
+    writable: true,
+  });
+  return error;
+}
+
+/** Runs the plan's rounds against a working table inside an open transaction. */
+async function runWorkingTableRounds<State extends IterativeGraphState, Result>(
+  ctx: AlgorithmContext,
+  options: InternalTraversalOptions,
+  plan: IterativeGraphPlan<State, Result>,
+  backend: TransactionBackend,
+): Promise<Result> {
+  const temporaryBackend = requireTemporaryStatements(backend);
+  const runId = generateId();
+  const workingTable = sql.identifier(
+    `typegraph_iterative_${runId.replaceAll("-", "_")}`,
+  );
+  const context: IterativeGraphRunContext = {
+    operation: createOperation(ctx, options, temporaryBackend),
+    backend: temporaryBackend,
+    workingTable,
+    graphId: ctx.graphId,
+    runId,
+    executeTemporary: async (query) => {
+      await temporaryBackend.executeTemporaryStatement(
+        asCompiledTemporaryStatementSql(query),
       );
-      if (workingMemoryStatement !== undefined) {
-        await context.executeTemporary(workingMemoryStatement);
-      }
+    },
+  };
+
+  // Opt-in only: without an explicit workingMemory the rounds inherit
+  // the engine's configured setting. When requested, the override is
+  // transaction-scoped — `set_config(..., is_local => true)` reverts
+  // when this transaction ends, so the session/server setting is never
+  // touched. SQLite returns no statement here.
+  if (context.operation.workingMemory !== undefined) {
+    const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
+      context.operation.workingMemory,
+    );
+    if (workingMemoryStatement !== undefined) {
+      await context.executeTemporary(workingMemoryStatement);
     }
+  }
+  try {
     await context.executeTemporary(plan.createWorkingTable(context));
-    let operationFailure: CapturedFailure | undefined;
-    try {
-      let state = await plan.initialize(context);
-      let analyzedRowCount = await refreshWorkingTableStatistics(
-        context,
-        state.workingTableSize,
-      );
-      for (
-        let iteration = 1;
-        iteration <= plan.maxIterations && !plan.hasConverged(state);
-        iteration++
-      ) {
-        state = await plan.runRound(context, state, iteration);
-        // Statistics only pay off in a subsequent round: skip the refresh
-        // when the operation just converged or the iteration budget is
-        // spent — no further round will read the working table.
-        if (iteration < plan.maxIterations && !plan.hasConverged(state)) {
-          analyzedRowCount = await refreshWorkingTableStatistics(
-            context,
-            state.workingTableSize,
-            analyzedRowCount,
-          );
-        }
-      }
-      if (!plan.hasConverged(state)) {
-        throw new GraphAlgorithmConvergenceError(
-          plan.algorithm,
-          plan.maxIterations,
+  } catch (error) {
+    const sqlState =
+      ctx.backend.dialect === "postgres" ?
+        postgresTemporaryTableUnavailableSqlState(error)
+      : undefined;
+    if (sqlState === undefined) throw error;
+    throw temporaryTableCapabilityError(ctx, plan.algorithm, sqlState, error);
+  }
+  let operationFailure: CapturedFailure | undefined;
+  try {
+    let state = await plan.initialize(context);
+    let analyzedRowCount = await refreshWorkingTableStatistics(
+      context,
+      state.workingTableSize,
+    );
+    for (
+      let iteration = 1;
+      iteration <= plan.maxIterations && !plan.hasConverged(state);
+      iteration++
+    ) {
+      state = await plan.runRound(context, state, iteration);
+      // Statistics only pay off in a subsequent round: skip the refresh
+      // when the operation just converged or the iteration budget is
+      // spent — no further round will read the working table.
+      if (iteration < plan.maxIterations && !plan.hasConverged(state)) {
+        analyzedRowCount = await refreshWorkingTableStatistics(
+          context,
+          state.workingTableSize,
+          analyzedRowCount,
         );
       }
-      return await plan.extractResult(context, state);
-    } catch (error) {
-      operationFailure = { error };
-      throw error;
-    } finally {
-      await cleanupWorkingTables(context, plan.cleanup, operationFailure);
     }
-  }, transactionOptions);
+    if (!plan.hasConverged(state)) {
+      throw new GraphAlgorithmConvergenceError(
+        plan.algorithm,
+        plan.maxIterations,
+      );
+    }
+    return await plan.extractResult(context, state);
+  } catch (error) {
+    operationFailure = { error };
+    throw error;
+  } finally {
+    await cleanupWorkingTables(context, plan.cleanup, operationFailure);
+  }
 }
 
 export function shouldRefreshWorkingTableStatistics(
