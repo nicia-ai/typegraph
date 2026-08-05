@@ -28,16 +28,22 @@
  *      invalidated by an endpoint deletion/replacement. Silent loss of a
  *      branch's belief is a law violation, not a quiet no-op.
  *   6. WINDOW-PRESERVATION  The valid-time analogues of 3 and 5, since a
- *      branch can also stop a NODE from being true by ending its validity
- *      rather than deleting it (issue #369): an end exactly one side
- *      claimed is applied; a window nobody ended is left alone; and a row
- *      the merge ended is not readable as of its own end instant.
+ *      branch can also stop a row from being true by ending its validity
+ *      rather than deleting it (issue #369). Stated as the FULL least-claim
+ *      rule over both populations — nodes AND edges: an end nobody claimed
+ *      leaves the target's window alone; a set of branch claims resolves to
+ *      the EARLIEST; a committed incremental target that moved the end itself
+ *      takes precedence over any branch claim; every committed end is
+ *      reported (and only committed ends are); and a row the merge ended is
+ *      not readable as of its own end instant.
  *
  * Scenarios are identity histories (assert same/different, retract, delete a
- * node, END A NODE'S VALIDITY, hard-delete + recreate a node, import an
- * assertion under a CHOSEN id) over a fixed four-node universe, applied through
- * the public store API with only the expected semantic refusals skipped.
- * Chosen-id imports matter: they
+ * node, END A NODE'S OR EDGE'S VALIDITY, create an edge, hard-delete + recreate
+ * a node, import an assertion under a CHOSEN id) over a fixed four-node,
+ * three-edge universe, applied through the public store API with only the
+ * expected semantic refusals skipped, plus a WINDOW FOCUS stage that lets every
+ * side claim an end on one shared row so arbitration is generated on purpose
+ * rather than by coincidence. Chosen-id imports matter: they
  * are the only way two independent lineages mint the SAME assertion id — the
  * collision class every hand-built review repro lived in. Hard-delete /
  * recreate matters for the same reason within ONE lineage: it physically
@@ -53,6 +59,7 @@
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
@@ -60,7 +67,10 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { asEdgeId, asNodeId } from "../../../src/core/types";
 import {
+  EdgeNotFoundError,
+  EndpointNotFoundError,
   IdentityContradictionError,
   NodeNotFoundError,
 } from "../../../src/errors";
@@ -75,7 +85,7 @@ import {
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
 } from "../../../src/graph-merge/merge-identity";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
-import type { MergeReport } from "../../../src/graph-merge/types";
+import type { BranchId, MergeReport } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { asIdentityAssertionId } from "../../../src/identity/types";
 import { importGraph } from "../../../src/interchange";
@@ -90,12 +100,30 @@ const Agent = defineNode("Agent", {
 const Robot = defineNode("Robot", {
   schema: z.object({ name: z.string() }),
 });
+/**
+ * An Agent→Agent edge, so the merge's EDGE population is not empty. Declared
+ * `edges: {}`, this suite could never reach the edge half of anything the merge
+ * decides — window reconciliation, the report's `entity: "edge"` channel, edge
+ * staging under an identity merge — no matter how the scenarios were widened.
+ */
+const relatesTo = defineEdge("relatesTo", {
+  schema: z.object({ label: z.string() }),
+  from: [Agent],
+  to: [Agent],
+});
 
 function defineLawGraph(id: string, profile: "fold" | "ignore") {
   return defineGraph({
     id,
-    nodes: { Agent: { type: Agent }, Robot: { type: Robot } },
-    edges: {},
+    // `cascade`, not the default `restrict`: the alphabet deletes and
+    // hard-deletes Agents that now carry seeded edges, and a delete refused for
+    // having live edges would quietly take the endpoint-invalidation half of
+    // laws 3 and 5 out of the suite.
+    nodes: {
+      Agent: { type: Agent, onDelete: "cascade" },
+      Robot: { type: Robot },
+    },
+    edges: { relatesTo: { type: relatesTo, from: [Agent], to: [Agent] } },
     identity: { sameIdAcrossKinds: profile },
   });
 }
@@ -103,6 +131,23 @@ function defineLawGraph(id: string, profile: "fold" | "ignore") {
 type LawGraph = ReturnType<typeof defineLawGraph>;
 
 const NODE_IDS = ["n1", "n2", "n3", "n4"] as const;
+
+/**
+ * The INHERITED edge population, seeded at every fork point. Window
+ * reconciliation only ever sees a row live in BOTH the base and the fork, so the
+ * edges the window laws quantify over must exist before the branches are cut.
+ *
+ * Their endpoint pairs are what {@link EDGE_CREATE_OP} keeps clear of: three
+ * distinct pairs, each the sole occupant of its `(from, kind, to)` dedupe group.
+ */
+const SEED_EDGES = [
+  { id: "seed-e1", from: 0, to: 1 },
+  { id: "seed-e2", from: 1, to: 2 },
+  { id: "seed-e3", from: 2, to: 3 },
+] as const;
+const SEED_EDGE_IDS: readonly string[] = SEED_EDGES.map((edge) => edge.id);
+const SEED_EDGE_LABEL = "seed";
+const BRANCH_EDGE_LABEL = "branch";
 const BRANCH_A = asBranchId("identity-law-a");
 const BRANCH_B = asBranchId("identity-law-b");
 const TARGET_CLONE = asBranchId("identity-law-target");
@@ -124,6 +169,12 @@ type IdentityOp =
   // Ends a node's validity WITHOUT deleting it — the weaker sibling of
   // deletion, and the only window delta a branch can author on a live row.
   | Readonly<{ op: "endValidity"; node: number; endPick: number }>
+  // The same statement on the EDGE population, which the merge resolves through
+  // the same least-claim rule and reports on its own channel.
+  | Readonly<{ op: "endEdgeValidity"; edge: number; endPick: number }>
+  // Creates an Agent→Agent edge under a DERIVED id, so two branches authoring
+  // the same edge collide on one identity instead of minting two.
+  | Readonly<{ op: "createEdge"; from: number; to: number }>
   // Physically removes the node's assertion rows, then recreates the node —
   // the one legal path to same-id truth replacement inside one lineage.
   | Readonly<{ op: "hardDeleteRecreate"; node: number }>
@@ -143,14 +194,16 @@ type IdentityOp =
 
 const IMPORT_ID_POOL = ["shared-x1", "shared-x2"] as const;
 /**
- * End instants for `endValidity`, both in the FUTURE: a row's `validFrom`
- * defaults to its creation instant and the store refuses an inverted window, so
- * a past end is not authorable at all. Two distinct values so branches can
- * disagree and exercise the least-claim tie-break.
+ * End instants for `endValidity` / `endEdgeValidity`, all in the FUTURE: a row's
+ * `validFrom` defaults to its creation instant and the store refuses an inverted
+ * window, so a past end is not authorable at all. THREE distinct values so a
+ * tie-break between two disagreeing branches is a real choice among several
+ * instants rather than a coin flip between the only two available.
  */
 const VALIDITY_ENDS = [
   "2100-01-01T00:00:00.000Z",
   "2100-06-01T00:00:00.000Z",
+  "2100-09-01T00:00:00.000Z",
 ] as const;
 const IMPORT_VALID_FROMS = [
   "2024-01-01T00:00:00.000Z",
@@ -158,6 +211,8 @@ const IMPORT_VALID_FROMS = [
 ] as const;
 
 const nodeIndexArb = fc.integer({ min: 0, max: NODE_IDS.length - 1 });
+const edgeIndexArb = fc.integer({ min: 0, max: SEED_EDGES.length - 1 });
+const endPickArb = fc.nat({ max: VALIDITY_ENDS.length - 1 });
 const pairArb = fc
   .tuple(nodeIndexArb, nodeIndexArb)
   .filter(([left, right]) => left !== right);
@@ -195,9 +250,18 @@ const ASSERTION_OPS: readonly WeightedOp[] = [
   {
     weight: 2,
     arbitrary: fc
-      .tuple(nodeIndexArb, fc.nat({ max: VALIDITY_ENDS.length - 1 }))
+      .tuple(nodeIndexArb, endPickArb)
       .map(
         ([node, endPick]) => ({ op: "endValidity", node, endPick }) as const,
+      ),
+  },
+  {
+    weight: 2,
+    arbitrary: fc
+      .tuple(edgeIndexArb, endPickArb)
+      .map(
+        ([edge, endPick]) =>
+          ({ op: "endEdgeValidity", edge, endPick }) as const,
       ),
   },
   {
@@ -228,6 +292,32 @@ const HARD_DELETE_OP: WeightedOp = {
   ),
 };
 
+/** The directed endpoint pairs the seeded edges already occupy. */
+const SEEDED_EDGE_PAIRS = new Set(
+  SEED_EDGES.map((edge) => `${edge.from}-${edge.to}`),
+);
+
+/**
+ * Edge creation, held OUT of the incremental lane's BRANCH alphabet for exactly
+ * the reason {@link HARD_DELETE_OP} is: a branch row staged onto an id the target
+ * already committed is refused by the incremental existing-id write guard — a
+ * legitimate but non-identity refusal that would only add noise to these laws.
+ *
+ * The endpoint pair is never one a SEEDED edge occupies. Repoint/dedupe groups
+ * staged edges by `(from, kind, to)` — differing props make a property conflict,
+ * NOT a separate group — so a branch edge onto a seeded pair folds with the
+ * seeded row and the min-id survivor absorbs its claimed end. That relocation is
+ * real behavior, pinned by the deterministic suite's fold cases; the window laws
+ * below judge the row a claim was MADE on, so the generator keeps the two apart
+ * rather than guarding after the fact.
+ */
+const EDGE_CREATE_OP: WeightedOp = {
+  weight: 2,
+  arbitrary: pairArb
+    .filter(([from, to]) => !SEEDED_EDGE_PAIRS.has(`${from}-${to}`))
+    .map(([from, to]) => ({ op: "createEdge", from, to }) as const),
+};
+
 const ROBOT_OPS: readonly WeightedOp[] = [
   {
     weight: 1,
@@ -245,10 +335,90 @@ function opArb(extra: readonly WeightedOp[]): fc.Arbitrary<IdentityOp> {
   return fc.oneof(...ASSERTION_OPS, ...extra);
 }
 
+/**
+ * ONE row every side may independently end, drawn as its own scenario stage.
+ *
+ * Left to the random alphabet alone, two branches essentially never end the SAME
+ * row at DIFFERENT instants: with four nodes, three edges, three instants and a
+ * couple of operations per branch, the collision probability is a fraction of a
+ * percent, so the multi-claim half of the least-claim rule — the earliest-end
+ * tie-break and the committed target's precedence over a branch — was generated
+ * with probability near zero and law 6 only ever exercised its single-claim arm.
+ * The focus names one row up front and lets each side claim on it independently,
+ * which makes arbitration the common case rather than a coincidence.
+ */
+type WindowFocus = Readonly<{
+  entity: "edge" | "node";
+  /** Index into {@link NODE_IDS} or {@link SEED_EDGES}, per `entity` (modulo). */
+  index: number;
+  /**
+   * An end the FORK POINT already holds, so re-statement of the ancestor's own
+   * end (which is NOT a claim) and extension to a later instant are reachable.
+   */
+  fork: number | undefined;
+  /**
+   * The incremental target's own claim — rule 3's committed-target precedence.
+   * Ignored on the snapshot lanes, where the target IS the fork point.
+   */
+  target: number | undefined;
+  branchA: number | undefined;
+  branchB: number | undefined;
+}>;
+
+/**
+ * A focus claim, USUALLY made: the arms this stage exists for need several sides
+ * claiming at once, so abstaining is the minority draw.
+ */
+const focusEndArb: fc.Arbitrary<number | undefined> = fc.oneof(
+  { weight: 1, arbitrary: fc.constant(undefined) },
+  { weight: 3, arbitrary: endPickArb },
+);
+
+const windowFocusArb: fc.Arbitrary<WindowFocus> = fc.record({
+  entity: fc.constantFrom<"edge" | "node">("node", "edge"),
+  index: nodeIndexArb,
+  fork: focusEndArb,
+  target: focusEndArb,
+  branchA: focusEndArb,
+  branchB: focusEndArb,
+});
+
+/** A focus that claims nothing, for examples whose subject is not the window. */
+const NO_WINDOW_FOCUS: WindowFocus = {
+  entity: "node",
+  index: 0,
+  fork: undefined,
+  target: undefined,
+  branchA: undefined,
+  branchB: undefined,
+};
+
+/**
+ * One side's focus claim, expressed as an operation the alphabet already knows
+ * how to apply — so a claim goes through the same refusal handling as every
+ * other write and a focus row an earlier operation deleted simply claims nothing.
+ */
+function focusOps(
+  focus: WindowFocus,
+  endPick: number | undefined,
+): readonly IdentityOp[] {
+  if (endPick === undefined) return [];
+  return focus.entity === "node" ?
+      [{ op: "endValidity", node: focus.index % NODE_IDS.length, endPick }]
+    : [
+        {
+          op: "endEdgeValidity",
+          edge: focus.index % SEED_EDGES.length,
+          endPick,
+        },
+      ];
+}
+
 type SnapshotScenario = Readonly<{
   baseOps: readonly IdentityOp[];
   branchAOps: readonly IdentityOp[];
   branchBOps: readonly IdentityOp[];
+  focus: WindowFocus;
 }>;
 
 type IncrementalScenario = SnapshotScenario &
@@ -261,6 +431,7 @@ function snapshotScenarioArb(
     baseOps: fc.array(ops, { maxLength: 2 }),
     branchAOps: fc.array(ops, { minLength: 1, maxLength: 3 }),
     branchBOps: fc.array(ops, { minLength: 1, maxLength: 3 }),
+    focus: windowFocusArb,
   });
 }
 
@@ -273,10 +444,13 @@ function snapshotScenarioArb(
  * reuse comes from), branches keep the full assertion alphabet.
  */
 const incrementalScenarioArb: fc.Arbitrary<IncrementalScenario> = fc.record({
-  baseOps: fc.array(opArb([]), { maxLength: 2 }),
-  targetOps: fc.array(opArb([HARD_DELETE_OP]), { maxLength: 2 }),
+  baseOps: fc.array(opArb([EDGE_CREATE_OP]), { maxLength: 2 }),
+  targetOps: fc.array(opArb([HARD_DELETE_OP, EDGE_CREATE_OP]), {
+    maxLength: 2,
+  }),
   branchAOps: fc.array(opArb([]), { minLength: 1, maxLength: 3 }),
   branchBOps: fc.array(opArb([]), { minLength: 1, maxLength: 3 }),
+  focus: windowFocusArb,
 });
 
 /**
@@ -293,6 +467,7 @@ const VALIDITY_COLLISION_EXAMPLE: SnapshotScenario = {
   branchBOps: [
     { op: "importAssertion", idPick: 0, left: 0, right: 1, validFromPick: 1 },
   ],
+  focus: NO_WINDOW_FOCUS,
 };
 
 /**
@@ -311,6 +486,46 @@ const TRUTH_REPLACEMENT_EXAMPLE: SnapshotScenario = {
     { op: "importAssertion", idPick: 0, left: 2, right: 3, validFromPick: 0 },
   ],
   branchBOps: [{ op: "same", left: 2, right: 3 }],
+  focus: NO_WINDOW_FOCUS,
+};
+
+/**
+ * The earliest-end tie-break on a NODE as a pinned example: two branches end the
+ * same inherited row at different instants, with the LATER claim on the branch
+ * `branchOrder` prefers — so a branch-rank tie-break would commit the later end
+ * and only a least-claim rule yields the earlier one. The fork already holds a
+ * MIDDLE end, so neither claim can pass by matching the ancestor.
+ */
+const NODE_END_TIE_BREAK_EXAMPLE: SnapshotScenario = {
+  baseOps: [],
+  branchAOps: [{ op: "same", left: 0, right: 1 }],
+  branchBOps: [{ op: "different", left: 2, right: 3 }],
+  focus: {
+    entity: "node",
+    index: 0,
+    fork: 1,
+    target: undefined,
+    branchA: 2,
+    branchB: 0,
+  },
+};
+
+/**
+ * The same tie-break on an EDGE — the population the law suite could not reach
+ * at all before this file declared an edge kind.
+ */
+const EDGE_END_TIE_BREAK_EXAMPLE: SnapshotScenario = {
+  baseOps: [],
+  branchAOps: [{ op: "same", left: 0, right: 1 }],
+  branchBOps: [{ op: "different", left: 2, right: 3 }],
+  focus: {
+    entity: "edge",
+    index: 0,
+    fork: 1,
+    target: undefined,
+    branchA: 2,
+    branchB: 0,
+  },
 };
 
 /**
@@ -335,6 +550,45 @@ const RETRACTION_MISMATCH_EXAMPLE: IncrementalScenario = {
   ],
   branchAOps: [{ op: "retract", pick: 0 }],
   branchBOps: [{ op: "same", left: 1, right: 2 }],
+  focus: NO_WINDOW_FOCUS,
+};
+
+/**
+ * Committed-target precedence as a pinned incremental example: the TARGET ends
+ * the row itself while a branch claims an EARLIER end, which would otherwise win
+ * the least-claim tie-break. The target's own end must stand and the merge must
+ * report no end at all — it decided nothing, and writing the row back at itself
+ * would bump a version no branch touched.
+ */
+const TARGET_WINDOW_PRECEDENCE_EXAMPLE: IncrementalScenario = {
+  baseOps: [],
+  targetOps: [],
+  branchAOps: [{ op: "same", left: 2, right: 3 }],
+  branchBOps: [{ op: "different", left: 0, right: 1 }],
+  focus: {
+    entity: "node",
+    index: 1,
+    fork: undefined,
+    target: 2,
+    branchA: 0,
+    branchB: undefined,
+  },
+};
+
+/** The same committed-target precedence on the EDGE population. */
+const TARGET_EDGE_WINDOW_PRECEDENCE_EXAMPLE: IncrementalScenario = {
+  baseOps: [],
+  targetOps: [],
+  branchAOps: [{ op: "same", left: 2, right: 3 }],
+  branchBOps: [{ op: "different", left: 0, right: 1 }],
+  focus: {
+    entity: "edge",
+    index: 1,
+    fork: undefined,
+    target: 2,
+    branchA: 0,
+    branchB: 1,
+  },
 };
 
 /**
@@ -402,6 +656,41 @@ function nodeRef(index: number): Readonly<{ kind: "Agent"; id: string }> {
   return { kind: "Agent", id: requireDefined(NODE_IDS[index]) };
 }
 
+/** {@link nodeRef}'s branded form, for the edge collection's endpoints. */
+function agentRef(index: number) {
+  return {
+    kind: "Agent",
+    id: asNodeId<typeof Agent>(requireDefined(NODE_IDS[index])),
+  } as const;
+}
+
+/**
+ * The id a branch-authored edge between two nodes gets. DERIVED from the
+ * endpoints rather than minted, so two branches authoring the same edge stage ONE
+ * identity — the collision that matters — instead of two unrelated rows.
+ */
+function branchEdgeId(from: number, to: number): string {
+  return `branch-e${from}${to}`;
+}
+
+/**
+ * The fixed universe every fork point starts from: four Agents and the three
+ * inherited edges among them.
+ */
+async function seedUniverse(store: Store<LawGraph>): Promise<void> {
+  for (const id of NODE_IDS) {
+    await store.nodes.Agent.create({ name: id }, { id });
+  }
+  for (const edge of SEED_EDGES) {
+    await store.edges.relatesTo.create(
+      agentRef(edge.from),
+      agentRef(edge.to),
+      { label: SEED_EDGE_LABEL },
+      { id: edge.id },
+    );
+  }
+}
+
 /**
  * Applies one op through the public API, skipping ONLY the expected semantic
  * refusals (a contradiction, a missing node/row) exactly as an interactive
@@ -454,6 +743,33 @@ async function applyOp(
           id as never,
           {},
           { validTo: requireDefined(VALIDITY_ENDS[op.endPick]) },
+        );
+        break;
+      }
+      case "endEdgeValidity": {
+        const id = requireDefined(SEED_EDGE_IDS[op.edge]);
+        await store.edges.relatesTo.update(
+          asEdgeId<typeof relatesTo>(id),
+          {},
+          { validTo: requireDefined(VALIDITY_ENDS[op.endPick]) },
+        );
+        break;
+      }
+      case "createEdge": {
+        const id = branchEdgeId(op.from, op.to);
+        // A row under this id — live OR soft-deleted — makes `create` a duplicate
+        // -id failure rather than an authoring act, so the op is a no-op instead
+        // (the same shape as `robotPeer`'s existence check).
+        if (
+          (await storeBackend(store).getEdge(store.graphId, id)) !== undefined
+        ) {
+          break;
+        }
+        await store.edges.relatesTo.create(
+          agentRef(op.from),
+          agentRef(op.to),
+          { label: BRANCH_EDGE_LABEL },
+          { id },
         );
         break;
       }
@@ -534,7 +850,13 @@ async function applyOp(
   } catch (error) {
     const expectedRefusal =
       error instanceof IdentityContradictionError ||
-      error instanceof NodeNotFoundError;
+      error instanceof NodeNotFoundError ||
+      // A missing row on the edge side: the target of an ending is gone
+      // (`EdgeNotFoundError`), or an endpoint an earlier op deleted
+      // (`EndpointNotFoundError`) — the edge analogues of the missing-node
+      // refusal an interactive caller already absorbs.
+      error instanceof EdgeNotFoundError ||
+      error instanceof EndpointNotFoundError;
     if (!expectedRefusal) throw error;
   }
 }
@@ -558,18 +880,18 @@ async function currentLedger(
 }
 
 /**
- * A node's END-OF-VALIDITY as a canonical instant, for every node the store
- * holds LIVE. An id ABSENT from the map has no live row (deleted or gone); an id
- * present with `undefined` has a live row with an open window — the two cases
- * are distinguished by `.has()`, and the laws depend on the difference.
+ * A row's END-OF-VALIDITY as a canonical instant, for every row of one population
+ * the store holds LIVE. An id ABSENT from the map has no live row (deleted or
+ * gone); an id present with `undefined` has a live row with an open window — the
+ * two cases are distinguished by `.has()`, and the laws depend on the difference.
  *
  * Read straight off the row: the window is exactly what the collection API's
  * temporal filter reads, and only `validTo` is decided by the merge (a live
  * row's lower bound is immutable outside resurrection).
  */
-type NodeEnds = ReadonlyMap<string, string | undefined>;
+type WindowEnds = ReadonlyMap<string, string | undefined>;
 
-async function nodeWindows(store: Store<LawGraph>): Promise<NodeEnds> {
+async function nodeWindows(store: Store<LawGraph>): Promise<WindowEnds> {
   const ends = new Map<string, string | undefined>();
   for (const id of NODE_IDS) {
     const row = await storeBackend(store).getNode(store.graphId, "Agent", id);
@@ -579,77 +901,199 @@ async function nodeWindows(store: Store<LawGraph>): Promise<NodeEnds> {
   return ends;
 }
 
+async function edgeWindows(store: Store<LawGraph>): Promise<WindowEnds> {
+  const ends = new Map<string, string | undefined>();
+  for (const id of SEED_EDGE_IDS) {
+    const row = await storeBackend(store).getEdge(store.graphId, id);
+    if (row === undefined || row.deleted_at !== undefined) continue;
+    ends.set(id, canonicalizeDatabaseTimestamp(row.valid_to));
+  }
+  return ends;
+}
+
+/** Both populations' windows for one store, read together. */
+type EntityWindows = Readonly<{ node: WindowEnds; edge: WindowEnds }>;
+
+async function entityWindows(store: Store<LawGraph>): Promise<EntityWindows> {
+  return { node: await nodeWindows(store), edge: await edgeWindows(store) };
+}
+
 /**
- * Law 6, in three parts, over the INHERITED node population.
+ * Canonical ISO 8601 UTC is fixed-width, so lexicographic order IS chronological
+ * order — the same property the merge's own `earliestEnd` relies on, which is
+ * what keeps the expected choice identical on SQLite and PostgreSQL despite
+ * their different raw timestamp text. Also orders branch ids for `claimedBy`.
+ */
+function compareStrings(left: string, right: string): number {
+  return (
+    left < right ? -1
+    : left > right ? 1
+    : 0
+  );
+}
+
+/** One entity population the window laws quantify over. */
+type WindowPopulation = Readonly<{
+  entity: "edge" | "node";
+  kind: string;
+  /** The INHERITED ids of this population — the rows a window claim can reach. */
+  ids: readonly string[];
+  read: (store: Store<LawGraph>) => Promise<WindowEnds>;
+  /** Is the row readable as CURRENT as of an instant? */
+  readableAsOf: (
+    store: Store<LawGraph>,
+    id: string,
+    asOf: string,
+  ) => Promise<boolean>;
+}>;
+
+const WINDOW_POPULATIONS: readonly WindowPopulation[] = [
+  {
+    entity: "node",
+    kind: "Agent",
+    ids: NODE_IDS,
+    read: (store) => nodeWindows(store),
+    readableAsOf: async (store, id, asOf) =>
+      (await store.nodes.Agent.getById(asNodeId<typeof Agent>(id), {
+        temporalMode: "asOf",
+        asOf,
+      })) !== undefined,
+  },
+  {
+    entity: "edge",
+    kind: "relatesTo",
+    ids: SEED_EDGE_IDS,
+    read: (store) => edgeWindows(store),
+    readableAsOf: async (store, id, asOf) =>
+      (await store.edges.relatesTo.getById(asEdgeId<typeof relatesTo>(id), {
+        temporalMode: "asOf",
+        asOf,
+      })) !== undefined,
+  },
+];
+
+/**
+ * Law 6 over BOTH inherited populations: the full least-claim rule, stated as a
+ * property rather than as the single-claim slice the deterministic suite's cases
+ * happen to enumerate.
  *
- * A branch can stop a node from being true by ending its validity instead of
+ * A branch can stop a row from being true by ending its validity instead of
  * deleting it, and the merge used to discard that statement silently — so the
- * valid-time analogues of laws 3 and 5 are stated here:
+ * valid-time analogues of laws 3 and 5 are:
  *
- *   - NO SILENT LOSS: when exactly ONE end is claimed for a row that every
- *     side still holds live, that end is what the merge commits. (Several
- *     differing claims are arbitrated by a least-claim rule, so they are not a
- *     single expected value and are excluded.)
- *   - NO UNASKED SHORTENING: when NO side claimed an end, the target's window
- *     is exactly the one it already held.
+ *   - NO UNASKED SHORTENING: when NO branch claimed an end, the target's window
+ *     is exactly the one it already held, and the report names no end.
+ *   - COMMITTED-TARGET PRECEDENCE: when the incremental target moved the end
+ *     ITSELF, its own end stands over every branch claim, and the merge reports
+ *     nothing — it decided nothing.
+ *   - LEAST CLAIM, NO SILENT LOSS: otherwise the EARLIEST branch claim is what
+ *     the merge commits — including a lone claim that EXTENDS the ancestor's end
+ *     to a later instant — and it is reported with every claiming branch named.
  *   - NO RESURRECTION: a row the merge ended is not readable AS OF its own end
  *     instant — an ending that does not end anything is not an ending.
  *
  * @param baseWindows The FORK POINT's windows, read before the merge — the
  *   shared ancestor every claim is measured against.
  * @param preMergeWindows The TARGET's windows, read before the merge. Identical
- *   to `baseWindows` on the snapshot lane, where the target IS the fork point.
+ *   to `baseWindows` on the snapshot lane, where the target IS the fork point,
+ *   so the committed-target arm is unreachable there by construction.
  */
 async function expectLawfulWindows(args: {
   target: Store<LawGraph>;
-  branchStores: readonly Store<LawGraph>[];
-  baseWindows: NodeEnds;
-  preMergeWindows: NodeEnds;
+  report: MergeReport<LawGraph>;
+  branches: readonly Readonly<{ id: BranchId; store: Store<LawGraph> }>[];
+  baseWindows: EntityWindows;
+  preMergeWindows: EntityWindows;
 }): Promise<void> {
-  const { target, branchStores, baseWindows, preMergeWindows } = args;
-  const postWindows = await nodeWindows(target);
-  const contributors = [
-    ...(await Promise.all(branchStores.map((store) => nodeWindows(store)))),
-    preMergeWindows,
-  ];
+  const { target, report, branches, baseWindows, preMergeWindows } = args;
 
-  for (const id of NODE_IDS) {
-    if (!postWindows.has(id)) continue; // finally deleted — no window to judge
-    const postEnd = postWindows.get(id);
-    const baseEnd = baseWindows.get(id);
-    const heldLiveEverywhere = contributors.every((ends) => ends.has(id));
-    // A CLAIM is an end that differs from the ancestor's. A side that cleared
-    // the end (only reachable by delete + resurrect) claims nothing: the update
-    // SQL cannot clear `valid_to` on a live row, so that delta is unapplicable.
-    const claims = new Set(
-      contributors
-        .map((ends) => ends.get(id))
-        .filter(
-          (validTo): validTo is string =>
-            validTo !== undefined && validTo !== baseEnd,
-        ),
+  for (const population of WINDOW_POPULATIONS) {
+    const postWindows = await population.read(target);
+    const baseEnds = baseWindows[population.entity];
+    const targetEnds = preMergeWindows[population.entity];
+    const branchEnds = await Promise.all(
+      branches.map(async (entry) => ({
+        id: entry.id,
+        ends: await population.read(entry.store),
+      })),
     );
 
-    if (heldLiveEverywhere && claims.size === 1) {
-      expect(
-        postEnd,
-        `node ${id}: the single claimed end was not committed`,
-      ).toBe(requireDefined([...claims][0]));
-    }
-    if (claims.size === 0) {
-      expect(
-        postEnd,
-        `node ${id}: the merge moved a window no side ended`,
-      ).toBe(preMergeWindows.get(id));
-    }
-    if (postEnd !== undefined) {
-      expect(
-        await target.nodes.Agent.getById(id as never, {
-          temporalMode: "asOf",
-          asOf: postEnd,
-        }),
-        `node ${id}: readable as current as of its own end instant`,
-      ).toBeUndefined();
+    for (const id of population.ids) {
+      if (!postWindows.has(id)) continue; // finally deleted — no window to judge
+      const label = `${population.entity} ${id}`;
+      const postEnd = postWindows.get(id);
+      const baseEnd = baseEnds.get(id);
+      const targetEnd = targetEnds.get(id);
+      // A CLAIM is an end that differs from the ancestor's. A side that cleared
+      // the end (only reachable by delete + resurrect) claims nothing: the update
+      // SQL cannot clear `valid_to` on a live row, so that delta is unapplicable.
+      const claimants = branchEnds.filter((entry) => {
+        const end = entry.ends.get(id);
+        return end !== undefined && end !== baseEnd;
+      });
+      const claims = [
+        ...new Set(
+          claimants.map((entry) => requireDefined(entry.ends.get(id))),
+        ),
+      ].sort((left, right) => compareStrings(left, right));
+      // The COMMITTED TARGET's own end is not a claim staged against it: its row
+      // IS the destination, so a target that moved this end takes the row out of
+      // the resolution entirely rather than being resolved to.
+      const targetMovedEnd = targetEnd !== undefined && targetEnd !== baseEnd;
+      const heldLiveEverywhere = [
+        ...branchEnds.map((entry) => entry.ends),
+        targetEnds,
+      ].every((ends) => ends.has(id));
+      const reported = report.validityEnds.find(
+        (entry) =>
+          entry.entity === population.entity &&
+          entry.kind === population.kind &&
+          entry.id === id,
+      );
+
+      if (claims.length === 0) {
+        expect(
+          postEnd,
+          `${label}: the merge moved a window no branch ended`,
+        ).toBe(targetEnd);
+        expect(
+          reported,
+          `${label}: reported an end no branch claimed`,
+        ).toBeUndefined();
+      } else if (heldLiveEverywhere && targetMovedEnd) {
+        expect(
+          postEnd,
+          `${label}: a branch re-windowed an end the committed target itself moved`,
+        ).toBe(targetEnd);
+        expect(
+          reported,
+          `${label}: reported an end the merge never decided`,
+        ).toBeUndefined();
+      } else if (heldLiveEverywhere) {
+        const earliest = requireDefined(claims[0]);
+        expect(
+          postEnd,
+          `${label}: the least claimed end of ${claims.join(", ")} was not committed`,
+        ).toBe(earliest);
+        expect(
+          reported,
+          `${label}: the committed end was not reported faithfully`,
+        ).toEqual({
+          entity: population.entity,
+          kind: population.kind,
+          id,
+          validTo: earliest,
+          claimedBy: claimants
+            .map((entry) => entry.id as string)
+            .toSorted((left, right) => compareStrings(left, right)),
+        });
+      }
+      if (postEnd !== undefined) {
+        expect(
+          await population.readableAsOf(target, id, postEnd),
+          `${label}: readable as current as of its own end instant`,
+        ).toBe(false);
+      }
     }
   }
 }
@@ -796,11 +1240,12 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
     makeBackend: () => Promise<GraphBackend>,
   ): Promise<Fixture> {
     const [forkPoint] = await createStoreWithSchema(graph, await makeBackend());
-    for (const id of NODE_IDS) {
-      await forkPoint.nodes.Agent.create({ name: id }, { id });
-    }
+    await seedUniverse(forkPoint);
     const baseHistory = emptyHistory();
-    for (const op of scenario.baseOps) {
+    for (const op of [
+      ...scenario.baseOps,
+      ...focusOps(scenario.focus, scenario.focus.fork),
+    ]) {
       await applyOp(forkPoint, op, baseHistory);
     }
     const { branchA, branchB } = await makeBranches(forkPoint, makeBackend);
@@ -808,14 +1253,20 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
       [branchA.store, copyHistory(baseHistory)],
       [branchB.store, copyHistory(baseHistory)],
     ]);
-    for (const op of scenario.branchAOps) {
+    for (const op of [
+      ...scenario.branchAOps,
+      ...focusOps(scenario.focus, scenario.focus.branchA),
+    ]) {
       await applyOp(
         branchA.store,
         op,
         requireDefined(histories.get(branchA.store)),
       );
     }
-    for (const op of scenario.branchBOps) {
+    for (const op of [
+      ...scenario.branchBOps,
+      ...focusOps(scenario.focus, scenario.focus.branchB),
+    ]) {
       await applyOp(
         branchB.store,
         op,
@@ -834,12 +1285,12 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
     {
       name: "ignore",
       graph: defineLawGraph("identity-law-ignore", "ignore"),
-      ops: opArb([HARD_DELETE_OP]),
+      ops: opArb([HARD_DELETE_OP, EDGE_CREATE_OP]),
     },
     {
       name: "fold",
       graph: defineLawGraph("identity-law-fold", "fold"),
-      ops: opArb([HARD_DELETE_OP, ...ROBOT_OPS]),
+      ops: opArb([HARD_DELETE_OP, EDGE_CREATE_OP, ...ROBOT_OPS]),
     },
   ] as const;
 
@@ -865,7 +1316,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
             );
             // The snapshot target IS the fork point, so one read serves as both
             // the ancestor and the pre-merge target state.
-            const baseWindows = await nodeWindows(fixture.forkPoint);
+            const baseWindows = await entityWindows(fixture.forkPoint);
             const result = await merge(
               fixture.forkPoint,
               [fixture.branchA, fixture.branchB],
@@ -885,7 +1336,11 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
             });
             await expectLawfulWindows({
               target: fixture.forkPoint,
-              branchStores: [fixture.branchA.store, fixture.branchB.store],
+              report: result.data,
+              branches: [
+                { id: BRANCH_A, store: fixture.branchA.store },
+                { id: BRANCH_B, store: fixture.branchB.store },
+              ],
               baseWindows,
               preMergeWindows: baseWindows,
             });
@@ -894,7 +1349,12 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
           }
         }),
         {
-          examples: [[VALIDITY_COLLISION_EXAMPLE], [TRUTH_REPLACEMENT_EXAMPLE]],
+          examples: [
+            [VALIDITY_COLLISION_EXAMPLE],
+            [TRUTH_REPLACEMENT_EXAMPLE],
+            [NODE_END_TIE_BREAK_EXAMPLE],
+            [EDGE_END_TIE_BREAK_EXAMPLE],
+          ],
           numRuns: LAW_RUNS,
         },
       );
@@ -920,11 +1380,12 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
             graph,
             await makeBackend(),
           );
-          for (const id of NODE_IDS) {
-            await forkPoint.nodes.Agent.create({ name: id }, { id });
-          }
+          await seedUniverse(forkPoint);
           const baseHistory = emptyHistory();
-          for (const op of scenario.baseOps) {
+          for (const op of [
+            ...scenario.baseOps,
+            ...focusOps(scenario.focus, scenario.focus.fork),
+          ]) {
             await applyOp(forkPoint, op, baseHistory);
           }
           // The target CLONES the fork point, then advances independently —
@@ -936,7 +1397,10 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
             }),
           ).store;
           const targetHistory = copyHistory(baseHistory);
-          for (const op of scenario.targetOps) {
+          for (const op of [
+            ...scenario.targetOps,
+            ...focusOps(scenario.focus, scenario.focus.target),
+          ]) {
             await applyOp(target, op, targetHistory);
           }
           const { branchA, branchB } = await makeBranches(
@@ -945,10 +1409,16 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
           );
           const branchAHistory = copyHistory(baseHistory);
           const branchBHistory = copyHistory(baseHistory);
-          for (const op of scenario.branchAOps) {
+          for (const op of [
+            ...scenario.branchAOps,
+            ...focusOps(scenario.focus, scenario.focus.branchA),
+          ]) {
             await applyOp(branchA.store, op, branchAHistory);
           }
-          for (const op of scenario.branchBOps) {
+          for (const op of [
+            ...scenario.branchBOps,
+            ...focusOps(scenario.focus, scenario.focus.branchB),
+          ]) {
             await applyOp(branchB.store, op, branchBHistory);
           }
           const histories = [branchAHistory, branchBHistory, targetHistory];
@@ -956,8 +1426,8 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
             ...new Set(histories.flatMap((history) => history.assertionIds)),
           ];
           const preMerge = await currentLedger(target, trackedIds);
-          const baseWindows = await nodeWindows(forkPoint);
-          const preMergeWindows = await nodeWindows(target);
+          const baseWindows = await entityWindows(forkPoint);
+          const preMergeWindows = await entityWindows(target);
 
           const result = await mergeIncremental({
             forkPoint,
@@ -979,7 +1449,11 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
           });
           await expectLawfulWindows({
             target,
-            branchStores: [branchA.store, branchB.store],
+            report: result.data,
+            branches: [
+              { id: BRANCH_A, store: branchA.store },
+              { id: BRANCH_B, store: branchB.store },
+            ],
             baseWindows,
             preMergeWindows,
           });
@@ -987,7 +1461,14 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
           for (const cleanup of cleanups.reverse()) await cleanup();
         }
       }),
-      { examples: [[RETRACTION_MISMATCH_EXAMPLE]], numRuns: LAW_RUNS },
+      {
+        examples: [
+          [RETRACTION_MISMATCH_EXAMPLE],
+          [TARGET_WINDOW_PRECEDENCE_EXAMPLE],
+          [TARGET_EDGE_WINDOW_PRECEDENCE_EXAMPLE],
+        ],
+        numRuns: LAW_RUNS,
+      },
     );
   }, 300_000);
 });
