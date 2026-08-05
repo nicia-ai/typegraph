@@ -191,13 +191,23 @@ export function resolveMaxIterations(
   algorithm: string,
 ): number {
   const maxIterations = value ?? fallback;
-  if (!Number.isSafeInteger(maxIterations) || maxIterations < 1) {
+  assertPositiveSafeIntegerOption(maxIterations, algorithm, "maxIterations");
+  return maxIterations;
+}
+
+/** Validates an optional positive safe-integer algorithm option. */
+export function assertPositiveSafeIntegerOption(
+  value: number | undefined,
+  algorithm: string,
+  optionName: string,
+): void {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new ConfigurationError(
-      `${algorithm} maxIterations must be a positive safe integer, got ${String(maxIterations)}.`,
-      { maxIterations },
+      `${algorithm} ${optionName} must be a positive safe integer, got ${String(value)}.`,
+      { [optionName]: value },
     );
   }
-  return maxIterations;
 }
 
 export function assertEdgeKinds(edges: readonly string[]): void {

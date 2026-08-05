@@ -5,6 +5,7 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
+  assertPositiveSafeIntegerOption,
   type InternalTraversalOptions,
   pickTemporalOptions,
   resolveMaxIterations,
@@ -51,6 +52,11 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
     DEFAULT_WCC_MAX_ITERATIONS,
     "weaklyConnectedComponents",
   );
+  assertPositiveSafeIntegerOption(
+    options.minComponentSize,
+    "weaklyConnectedComponents",
+    "minComponentSize",
+  );
   const traversalOptions: InternalTraversalOptions = {
     edges: options.edges,
     direction: "both",
@@ -69,7 +75,8 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
     hasConverged(state) {
       return state.changedCount === 0;
     },
-    extractResult: extractMemberships,
+    extractResult: (context) =>
+      extractMemberships(context, options.minComponentSize),
   });
 }
 
@@ -232,24 +239,36 @@ function applyNextLabels(
 
 async function extractMemberships(
   context: IterativeGraphRunContext,
+  minComponentSize: number | undefined,
 ): Promise<readonly WeaklyConnectedComponentMembership[]> {
   const { operation } = context;
-  const componentId = operation.ctx.dialect.binaryText(sql`label_id`);
-  const componentKind = operation.ctx.dialect.binaryText(sql`label_kind`);
+  const labelId = operation.ctx.dialect.binaryText(sql`label_id`);
+  const labelKind = operation.ctx.dialect.binaryText(sql`label_kind`);
+  const componentId = operation.ctx.dialect.binaryText(sql`component_id`);
+  const componentKind = operation.ctx.dialect.binaryText(sql`component_kind`);
   const nodeId = operation.ctx.dialect.binaryText(sql`node_id`);
   const nodeKind = operation.ctx.dialect.binaryText(sql`node_kind`);
+  const componentSizeFilter =
+    minComponentSize === undefined ?
+      sql.empty()
+    : sql`WHERE component_size >= ${minComponentSize}`;
   const rows = await context.backend.execute<MembershipRow>(
     asCompiledRowsSql(sql`
-      SELECT
-        node_id,
-        node_kind,
-        label_id AS component_id,
-        label_kind AS component_kind,
-        COUNT(*) OVER (
-          PARTITION BY ${componentKind}, ${componentId}
-        ) AS component_size
-      FROM ${context.workingTable}
-      WHERE graph_id = ${context.graphId} AND run_id = ${context.runId}
+      WITH memberships AS (
+        SELECT
+          node_id,
+          node_kind,
+          label_id AS component_id,
+          label_kind AS component_kind,
+          COUNT(*) OVER (
+            PARTITION BY ${labelKind}, ${labelId}
+          ) AS component_size
+        FROM ${context.workingTable}
+        WHERE graph_id = ${context.graphId} AND run_id = ${context.runId}
+      )
+      SELECT node_id, node_kind, component_id, component_kind, component_size
+      FROM memberships
+      ${componentSizeFilter}
       ORDER BY ${componentId}, ${componentKind}, ${nodeId}, ${nodeKind}
     `),
   );
