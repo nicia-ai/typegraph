@@ -292,6 +292,25 @@ const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
 const UNIQUE_DELETE_FIXED_PARAM_COUNT = 2;
 const UNIQUE_INSERT_PARAM_COUNT = 6;
 
+/**
+ * Attempts the schema write fence makes to observe the active schema row.
+ *
+ * At `read committed` a `FOR SHARE` read that blocks behind an in-flight schema
+ * commit rechecks only the row versions its own statement snapshot saw. When
+ * that commit lands, the row the fence was waiting on no longer satisfies
+ * `is_active = TRUE` and the freshly inserted active row was never in the
+ * snapshot, so the statement returns nothing even though the graph does have an
+ * active version. Re-running the read starts a new statement with a new
+ * snapshot, which sees the committed winner.
+ *
+ * A single retry covers that ordering. The bound exists for the case where a
+ * further schema commit slips into the gap — the per-graph advisory lock
+ * serializes schema commits, so a chain long enough to exhaust the attempts is
+ * pathological, and exhausting them reports the absent row honestly as version
+ * `0` rather than spinning.
+ */
+const SCHEMA_FENCE_ACTIVE_READ_ATTEMPTS = 3;
+
 type PostgresBatchChunkSizes = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
@@ -1978,6 +1997,35 @@ function createPostgresOperationBackend(
         : {}),
       };
 
+  /**
+   * Takes the transaction-scoped share lock on the graph's active schema row
+   * and returns the version it locked, or `0` when the graph genuinely has no
+   * active schema.
+   *
+   * Re-reads rather than trusting a single empty result: see
+   * {@link SCHEMA_FENCE_ACTIVE_READ_ATTEMPTS} for why an empty result can mean
+   * "a concurrent schema commit just landed" instead of "no active schema", and
+   * why the retry observes the winner. The re-read keeps the `FOR SHARE` clause
+   * so the fence still holds a lock on whichever row it ultimately reports.
+   */
+  async function lockActiveSchemaVersion(graphId: string): Promise<number> {
+    for (
+      let attempt = 1;
+      attempt <= SCHEMA_FENCE_ACTIVE_READ_ATTEMPTS;
+      attempt += 1
+    ) {
+      const active = await execGet<{ version: number }>(sql`
+        SELECT ${schemaVersionsTable.version} AS version
+        FROM ${schemaVersionsTable}
+        WHERE ${schemaVersionsTable.graphId} = ${graphId}
+          AND ${schemaVersionsTable.isActive} = TRUE
+        FOR SHARE
+      `);
+      if (active !== undefined) return active.version;
+    }
+    return 0;
+  }
+
   const operationBackend: InternalOperationBackend = {
     ...commonBackend,
     ...executeRawMethod,
@@ -2016,17 +2064,10 @@ function createPostgresOperationBackend(
           },
         );
       }
-      const active = await execGet<{ version: number }>(sql`
-        SELECT ${schemaVersionsTable.version} AS version
-        FROM ${schemaVersionsTable}
-        WHERE ${schemaVersionsTable.graphId} = ${params.graphId}
-          AND ${schemaVersionsTable.isActive} = TRUE
-        FOR SHARE
-      `);
       assertActiveSchemaVersion(
         params.graphId,
         params.expectedVersion,
-        active?.version ?? 0,
+        await lockActiveSchemaVersion(params.graphId),
       );
     },
 
