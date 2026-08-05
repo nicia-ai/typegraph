@@ -561,6 +561,14 @@ export class TraversalBuilder<
     alias: string,
     kinds: readonly string[],
   ): QueryBuilderState {
+    // The `direction` ternaries here and in the compiler's traversal emitters
+    // test for `"out"` and treat everything else as inbound. That is exhaustive
+    // because a query AST's `TraversalDirection` is `"out" | "in"`: the store's
+    // algorithm APIs have a three-valued union of the same name that includes
+    // `"both"`, but no public builder path can put it here, and an undirected
+    // query traversal is expressed with `inverseEdgeKinds` instead. Widening the
+    // AST union without revisiting these ternaries would silently compile
+    // `"both"` as inbound-only.
     const traversalBase: Traversal = {
       edgeAlias: this.#edgeAlias,
       edgeKinds: this.#edgeKinds,
