@@ -32,6 +32,7 @@ import type {
   InsertNodeParams,
   InsertSchemaParams,
   InsertUniqueParams,
+  RecordContributionMaterializationParams,
   SqlDialect,
   UpdateEdgeParams,
   UpdateNodeParams,
@@ -98,6 +99,15 @@ import {
   buildInsertUnique,
   buildInsertUniqueBatch,
 } from "./uniques";
+
+/**
+ * Binds an absent value as a SQL `NULL` literal rather than as a bound
+ * parameter, so the column's own type drives the insert instead of the
+ * driver having to infer a type for a null placeholder.
+ */
+function nullableText(value: string | undefined): SQL {
+  return value === undefined ? sql`NULL` : sql`${value}`;
+}
 
 export type CommonOperationStrategy = Readonly<{
   buildUpsertFulltext: (
@@ -212,6 +222,14 @@ export type CommonOperationStrategy = Readonly<{
     graphId: string,
     version: number,
   ) => Readonly<{ activateVersion: SQL; deactivateAll: SQL }>;
+  /**
+   * Write one contribution marker row outright (no conflict clause), for
+   * the transaction-scoped stamp a destructive rebuild commits alongside
+   * the DDL that produced it.
+   */
+  buildInsertContributionMaterialization: (
+    params: RecordContributionMaterializationParams,
+  ) => SQL;
   buildDeleteContributionMaterialization: (
     identity: ContributionMaterializationIdentity,
   ) => SQL;
@@ -426,6 +444,38 @@ function createCommonOperationStrategy(
     },
   };
 
+  /**
+   * Writes one contribution marker row outright, with no conflict clause.
+   *
+   * Deliberately not the upsert the top-level backend uses. That one
+   * COALESCEs `materialized_at` so a failed re-attempt cannot erase an
+   * earlier success — the right rule when the attempt may have failed. A
+   * caller reaching for this pairs it with
+   * {@link buildDeleteContributionMaterialization} to state the row
+   * outright, which is what a completed destructive rebuild needs: the
+   * storage was just recreated, so nothing about the previous row is
+   * worth preserving and preserving it would misdate the rebuild.
+   *
+   * Dialect-shared: the ISO timestamps bind straight into SQLite's TEXT
+   * and Postgres' TIMESTAMPTZ columns, the same way every other write
+   * builder here passes `nowIso()` through.
+   */
+  function buildInsertContributionMaterialization(
+    params: RecordContributionMaterializationParams,
+  ): SQL {
+    return sql`
+      INSERT INTO ${contributionMaterializations}
+        (graph_id, logical_name, owner, table_name, signature,
+         materialized_at, last_attempted_at, last_error)
+      VALUES (
+        ${params.graphId}, ${params.logicalName}, ${params.owner},
+        ${params.tableName}, ${params.signature},
+        ${nullableText(params.materializedAt)}, ${params.attemptedAt},
+        ${nullableText(params.error)}
+      )
+    `;
+  }
+
   function buildDeleteContributionMaterialization(
     identity: ContributionMaterializationIdentity,
   ): SQL {
@@ -445,6 +495,7 @@ function createCommonOperationStrategy(
       return buildUpdateNodeSet(tables, dialect, params, timestamp);
     },
     buildDeleteContributionMaterialization,
+    buildInsertContributionMaterialization,
     buildInsertUnique(params: InsertUniqueParams): SQL {
       return buildInsertUnique(tables, dialect, params);
     },

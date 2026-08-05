@@ -17,6 +17,8 @@
 import { sql } from "drizzle-orm";
 
 import {
+  ConfigurationError,
+  ContributionRebuildUnsupportedError,
   StoreNotInitializedError,
   type StoreNotInitializedReason,
 } from "../../errors";
@@ -36,10 +38,16 @@ import {
   type ContributionDiagnosticState,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
+  type ContributionProbeContribution,
+  type ContributionProbeEntry,
+  type ContributionRebuildResult,
+  type ContributionRebuildScope,
   type ContributionRepairEntry,
   type ContributionRepairResult,
+  type ContributionRepopulationStats,
   createBackendOverlay,
   type RecordContributionMaterializationParams,
+  type SchemaWriteTransactionBackend,
   type TransactionBackend,
 } from "../types";
 import { runtimeStrategyContributions } from "./ddl";
@@ -291,9 +299,16 @@ function diagnoseContribution(
  * A contribution `verifyContributions` will check, tagged with the
  * vector-slot coordinates that produced it. Both tags are absent for the
  * runtime (fulltext) contributions, which are not per-`(kind, field)`.
+ *
+ * `projection` records which enumeration loop produced the target rather
+ * than being re-derived from the contribution's `logicalName` later. The
+ * probe groups by it, and reconstructing the grouping from a name
+ * convention would put a second, silently divergent classifier next to
+ * the one that actually built the set.
  */
 type VerificationTarget = Readonly<{
   contribution: StrategyTableContribution;
+  projection: ContributionProbeContribution;
   kind?: string;
   fieldPath?: string;
 }>;
@@ -301,8 +316,45 @@ type VerificationTarget = Readonly<{
 type DiagnosedContribution = Readonly<{
   graphId: string;
   contribution: StrategyTableContribution;
+  projection: ContributionProbeContribution;
   diagnostic: ContributionDiagnostic;
 }>;
+
+/**
+ * Order probe entries are reported in. Fixed rather than derived from
+ * declaration order so a result is stable enough to assert on and to
+ * diff between two probes of the same store.
+ */
+const PROBE_PROJECTION_ORDER: readonly ContributionProbeContribution[] = [
+  "fulltext",
+  "vector",
+] as const;
+
+/** Why the projection is unusable, in one operator-facing clause. */
+const PROBE_DETAIL_PHRASE: Readonly<Record<ContributionDiagnosticState, string>> =
+  {
+    "orphaned-marker": "storage is missing",
+    "missing-marker": "storage is not attested by a durable marker",
+    "failed-materialization": "provisioning failed and produced no storage",
+    stale: "storage exists at a different shape than the current declaration",
+  };
+
+/**
+ * Names the affected contribution the way an operator would look for it:
+ * a vector slot by its `(kind, field)` coordinates, fulltext by the
+ * physical table, since fulltext has exactly one table per graph and its
+ * name is what a caller would have dropped or renamed.
+ */
+function describeProbeDiagnostic(diagnostic: ContributionDiagnostic): string {
+  const subject =
+    diagnostic.kind === undefined || diagnostic.fieldPath === undefined ?
+      `table "${diagnostic.physicalName}"`
+    : `${diagnostic.kind}.${diagnostic.fieldPath}`;
+  return (
+    `${subject}: ${PROBE_DETAIL_PHRASE[diagnostic.state]} ` +
+    `(${diagnostic.state})`
+  );
+}
 
 function identityOf(
   graphId: string,
@@ -467,6 +519,20 @@ export type ContributionMaterializerDeps = Readonly<{
    * diagnostic has to re-check.
    */
   tableExists: (tableName: string) => Promise<boolean>;
+  /**
+   * Run an administrative callback under the same per-graph fence as a
+   * schema commit, with transaction-scoped DDL available. The destructive
+   * rebuild's only seam: it makes drop → recreate → refill → stamp one
+   * atomic unit, so an interrupted rebuild rolls back to the state it
+   * started from instead of leaving storage attested but empty.
+   *
+   * Absent on a backend with no transactional schema fence, which
+   * declines the rebuild rather than running it unfenced.
+   */
+  schemaWriteTransaction?: <T>(
+    graphId: string,
+    fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
+  ) => Promise<T>;
 }>;
 
 export type ContributionMaterializer = Readonly<{
@@ -539,7 +605,51 @@ export type ContributionMaterializer = Readonly<{
     graphId: string,
     vectorSlots: readonly VectorSlot[],
   ) => Promise<ContributionRepairResult>;
+  /**
+   * Read-only readiness projection over the same audit
+   * `verifyContributions` runs, one entry per search projection.
+   */
+  probeContributions: (
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<readonly ContributionProbeEntry[]>;
+  /**
+   * Destructive rebuild of one projection's storage: drop, recreate from
+   * the current `createDdl`, refill through `repopulate`, stamp the
+   * marker. Atomic under the backend's schema fence. Refuses rather than
+   * destroying anything it cannot reconstruct.
+   */
+  rebuildContribution: (
+    graphId: string,
+    scope: ContributionRebuildScope,
+    repopulate: (
+      target: TransactionBackend,
+    ) => Promise<ContributionRepopulationStats>,
+  ) => Promise<ContributionRebuildResult>;
 }>;
+
+/**
+ * Whether a fulltext rebuild can be served, given the active strategy and
+ * whether the backend has a transactional schema fence to run it under.
+ *
+ * Exported so `capabilities.contributions.rebuild` and the runtime
+ * refusal inside `rebuildContribution` are two readings of one predicate
+ * rather than two predicates that have to be kept in step. A backend
+ * whose advertised capability disagrees with what the call actually does
+ * is worse than one that declines.
+ */
+export function contributionRebuildSupported(
+  fulltextStrategy: FulltextStrategy,
+  fulltextTableName: string,
+  transactional: boolean,
+): boolean {
+  return (
+    transactional &&
+    runtimeStrategyContributions(fulltextStrategy, fulltextTableName).every(
+      (contribution) => contribution.dropDdl !== undefined,
+    )
+  );
+}
 
 // NUL separator for the per-instance contribution cache key: collision-safe
 // across arbitrary graph ids / names (a printable delimiter could appear in a
@@ -983,7 +1093,7 @@ export function createContributionMaterializer(
     }
 
     for (const contribution of runtimeContributions()) {
-      addTarget(graphId, { contribution });
+      addTarget(graphId, { contribution, projection: "fulltext" });
     }
     const { vectorStrategy } = deps;
     if (vectorStrategy !== undefined) {
@@ -991,6 +1101,7 @@ export function createContributionMaterializer(
         for (const contribution of vectorStrategy.ownedTables(slot)) {
           addTarget(slot.graphId, {
             contribution,
+            projection: "vector",
             kind: slot.nodeKind,
             fieldPath: slot.fieldPath,
           });
@@ -1000,14 +1111,16 @@ export function createContributionMaterializer(
     return targets;
   }
 
-  async function diagnoseContributions(
-    graphId: string,
-    vectorSlots: readonly VectorSlot[],
+  /**
+   * The single detection pass every rung of the health ladder consults.
+   * Takes the resolved target map rather than re-enumerating, so the
+   * probe can group by the same declaration set this diagnosed — a second
+   * enumeration would be free to disagree with the one that produced the
+   * verdicts.
+   */
+  async function diagnoseTargets(
+    targetsByGraph: ReadonlyMap<string, readonly VerificationTarget[]>,
   ): Promise<readonly DiagnosedContribution[]> {
-    // Vector slots carry their own graph id, exactly as `ensureVectorSlots`
-    // reads them, so the marker read stays one query per distinct graph.
-    const targetsByGraph = verificationTargetsByGraph(graphId, vectorSlots);
-
     // One probe per distinct physical table, scoped to THIS call: a
     // strategy may own several contributions over one table, and paying a
     // round trip per contribution would be waste. Deliberately not the
@@ -1032,7 +1145,7 @@ export function createContributionMaterializer(
         read.kind === "rows" ? read.rows : (
           new Map<string, ContributionMaterializationRow>()
         );
-      for (const { contribution, kind, fieldPath } of targets) {
+      for (const { contribution, projection, kind, fieldPath } of targets) {
         const key = contributionKey(id, contribution);
         const row = rows.get(key);
         const state = diagnoseContribution(
@@ -1044,6 +1157,7 @@ export function createContributionMaterializer(
         diagnosed.push({
           graphId: id,
           contribution,
+          projection,
           diagnostic: {
             owner: contribution.owner,
             logicalName: contribution.logicalName,
@@ -1065,12 +1179,59 @@ export function createContributionMaterializer(
     return diagnosed;
   }
 
+  /**
+   * Vector slots carry their own graph id, exactly as `ensureVectorSlots`
+   * reads them, so the marker read stays one query per distinct graph.
+   */
+  async function diagnoseContributions(
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ): Promise<readonly DiagnosedContribution[]> {
+    return diagnoseTargets(verificationTargetsByGraph(graphId, vectorSlots));
+  }
+
   async function verifyContributions(
     graphId: string,
     vectorSlots: readonly VectorSlot[],
   ): Promise<readonly ContributionDiagnostic[]> {
     const diagnosed = await diagnoseContributions(graphId, vectorSlots);
     return diagnosed.map((entry) => entry.diagnostic);
+  }
+
+  async function probeContributions(
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ): Promise<readonly ContributionProbeEntry[]> {
+    // One target enumeration shared with the diagnosis: a projection is
+    // reported only when this graph actually declares contributions for
+    // it, so an empty result reads as "nothing to assess" and never as
+    // "assessed and healthy".
+    const targetsByGraph = verificationTargetsByGraph(graphId, vectorSlots);
+    const declared = new Set<ContributionProbeContribution>();
+    for (const targets of targetsByGraph.values()) {
+      for (const target of targets) declared.add(target.projection);
+    }
+
+    const diagnosed = await diagnoseTargets(targetsByGraph);
+    const entries: ContributionProbeEntry[] = [];
+    for (const projection of PROBE_PROJECTION_ORDER) {
+      if (!declared.has(projection)) continue;
+      const problems = diagnosed.filter(
+        (entry) => entry.projection === projection,
+      );
+      if (problems.length === 0) {
+        entries.push({ contribution: projection, state: "ready" });
+        continue;
+      }
+      entries.push({
+        contribution: projection,
+        state: "degraded",
+        detail: problems
+          .map((entry) => describeProbeDiagnostic(entry.diagnostic))
+          .join("; "),
+      });
+    }
+    return entries;
   }
 
   async function repairContributions(
@@ -1113,6 +1274,115 @@ export function createContributionMaterializer(
     };
   }
 
+  async function rebuildContribution(
+    graphId: string,
+    scope: ContributionRebuildScope,
+    repopulate: (
+      target: TransactionBackend,
+    ) => Promise<ContributionRepopulationStats>,
+  ): Promise<ContributionRebuildResult> {
+    // Refuse before anything is dropped. Every precondition is checked
+    // here rather than inside the fence so a refusal can never be
+    // confused with a half-finished rebuild.
+    if (scope === "vector") {
+      throw new ContributionRebuildUnsupportedError(
+        "vector-source-unavailable",
+        { graphId, contribution: scope },
+      );
+    }
+    const contributions = runtimeContributions();
+    const withoutTeardown = contributions.find(
+      (contribution) => contribution.dropDdl === undefined,
+    );
+    if (withoutTeardown !== undefined) {
+      throw new ContributionRebuildUnsupportedError("no-drop-ddl", {
+        graphId,
+        contribution: scope,
+        owner: withoutTeardown.owner,
+        logicalName: withoutTeardown.logicalName,
+        physicalName: withoutTeardown.tableName,
+      });
+    }
+    const fence = deps.schemaWriteTransaction;
+    if (fence === undefined) {
+      throw new ContributionRebuildUnsupportedError("no-schema-fence", {
+        graphId,
+        contribution: scope,
+        backend: dialect,
+      });
+    }
+
+    // Hashing is async WebCrypto and independent of the fence, so the
+    // signatures the stamps will carry are resolved before the schema
+    // lock is taken rather than while it is held.
+    const stamps = await Promise.all(
+      contributions.map(async (contribution) => {
+        const key = contributionKey(graphId, contribution);
+        return {
+          contribution,
+          key,
+          signature: await resolveContributionSignature(key, contribution),
+        };
+      }),
+    );
+    // The stamp below writes to the marker table; a database that has
+    // never bootstrapped it would fail after the drop had already run.
+    await deps.ensureMarkerTable();
+
+    const rebuilt = await fence(graphId, async (tx) => {
+      const record = tx.recordContributionMaterialization;
+      if (record === undefined) {
+        throw new ConfigurationError(
+          "rebuildContribution requires a transaction-scoped backend that " +
+            "can write contribution markers; without it the drop, recreate, " +
+            "and stamp could not commit together.",
+          { backend: dialect, capability: "contributions", operation: "rebuild" },
+        );
+      }
+
+      for (const { contribution } of stamps) {
+        // `dropDdl` is present on every entry — the refusal above
+        // rejected the whole rebuild otherwise.
+        for (const statement of contribution.dropDdl ?? []) {
+          await tx.executeSchemaDdl(statement);
+        }
+        for (const statement of contribution.createDdl) {
+          await tx.executeSchemaDdl(statement);
+        }
+      }
+
+      // Refill before stamping, inside the same transaction. The order is
+      // not cosmetic: a stamp that committed ahead of the content would
+      // publish storage the hot-path gate considers healthy and that
+      // answers every query with nothing.
+      const stats = await repopulate(tx);
+
+      const now = nowIso();
+      for (const { contribution, signature } of stamps) {
+        await record({
+          ...identityOf(graphId, contribution),
+          signature,
+          attemptedAt: now,
+          materializedAt: now,
+          error: undefined,
+        });
+      }
+      return {
+        rebuilt: stamps.map(({ contribution }) => contribution.tableName),
+        processed: stats.processed,
+        repopulated: stats.repopulated,
+        skipped: stats.skipped,
+      } satisfies ContributionRebuildResult;
+    });
+
+    // Only after the fence commits: a positive cache entry written for a
+    // rebuild that rolled back would bless a shape that is not on disk.
+    for (const { key, signature } of stamps) {
+      cacheInitializedSignature(key, signature);
+    }
+    return rebuilt;
+  }
+
   function evictVectorSlot(slot: VectorSlot): void {
     if (deps.vectorStrategy === undefined) return;
     for (const contribution of deps.vectorStrategy.ownedTables(slot)) {
@@ -1148,5 +1418,7 @@ export function createContributionMaterializer(
     evictVectorSlot,
     verifyContributions,
     repairContributions,
+    probeContributions,
+    rebuildContribution,
   };
 }

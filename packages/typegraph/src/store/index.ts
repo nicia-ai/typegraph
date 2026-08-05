@@ -118,6 +118,7 @@ export type {
   AdapterStore,
   HistoryStore,
   MeasurableAdapterHistoryTransactionContext,
+  RebuildContributionOptions,
   ReconciledSchema,
   RecordedReadStore,
   ReembedFunction,

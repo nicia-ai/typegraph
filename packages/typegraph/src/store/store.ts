@@ -27,6 +27,9 @@ import {
   type AdapterBackend,
   type BackendCapabilities,
   type ContributionDiagnostic,
+  type ContributionProbeResult,
+  type ContributionRebuildResult,
+  type ContributionRebuildScope,
   type ContributionRepairResult,
   createTransactionReadBackend,
   type FindEdgesByHeterogeneousEndpointSetParams,
@@ -173,6 +176,7 @@ import {
   type NodeOperations,
 } from "./collection-factory";
 import { resolveTemporalReadParams } from "./collections/temporal-read-params";
+import { repopulateFulltextInTransaction } from "./fulltext-rebuild";
 import {
   createHistoryStoreBackendProjection,
   type HistoryStoreBackend,
@@ -325,7 +329,8 @@ type CaughtUpVerb =
   | "undeprecate"
   | "remove"
   | "reembed"
-  | "repair";
+  | "repair"
+  | "rebuild";
 
 /** Default page size for the {@link Store.reembedVectorField} re-embed loop. */
 const DEFAULT_REEMBED_BATCH_SIZE = 200;
@@ -354,6 +359,10 @@ const CAUGHT_UP_VERB_DETAILS: Readonly<
   repair: {
     phrase: "repair contributions for",
     code: "REPAIR_CONTRIBUTIONS_BEFORE_INITIALIZE",
+  },
+  rebuild: {
+    phrase: "rebuild a contribution for",
+    code: "REBUILD_CONTRIBUTION_BEFORE_INITIALIZE",
   },
 };
 
@@ -435,6 +444,18 @@ export type ReembedVectorFieldResult = Readonly<{
   recreated: boolean;
   /** Number of nodes whose embedding was re-written (0 without `embed`). */
   reembedded: number;
+}>;
+
+/** Options for {@link Store.rebuildContribution}. */
+export type RebuildContributionOptions = Readonly<{
+  /**
+   * Page size for the content reconstruction pass. Default 500.
+   *
+   * Every page runs inside the rebuild's single transaction, so this
+   * trades statement count against per-statement size rather than
+   * bounding how long the transaction is held — that is set by the graph.
+   */
+  pageSize?: number;
 }>;
 
 /** One place for the hooks' error normalization. */
@@ -601,6 +622,11 @@ type StoreCore<G extends GraphDef> = Readonly<{
   ) => Promise<ReembedVectorFieldResult>;
   verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
   repairContributions: () => Promise<ContributionRepairResult>;
+  probeContributions: () => Promise<ContributionProbeResult>;
+  rebuildContribution: (
+    scope: ContributionRebuildScope,
+    options?: RebuildContributionOptions,
+  ) => Promise<ContributionRebuildResult>;
   materializeRemovals: (
     options?: MaterializeRemovalsOptions,
   ) => Promise<MaterializeRemovalsResult>;
@@ -4161,6 +4187,157 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         resolveGraphVectorSlots(baseline)
       : [];
     return repair(this.graphId, vectorSlots);
+  }
+
+  /**
+   * Read-only readiness check for the search projections: is search
+   * coherent with the graph right now, or is a query about to hit a
+   * degraded index?
+   *
+   * The read-only half of {@link Store.repairContributions}, and the
+   * bottom rung of the contribution health ladder — probe (read) →
+   * `repairContributions()` (incremental, non-destructive) →
+   * {@link Store.rebuildContribution} (destructive full reset). It shares
+   * the detection logic of the other two exactly: a second implementation
+   * would be free to disagree with the one the hot-path gate consults,
+   * and a health check that disagrees with the gate is worse than none.
+   *
+   * Writes nothing — no DDL, no marker writes, no effect on the
+   * per-instance caches the hot path relies on — so it is safe on a read
+   * path, on a replica, and under a least-privilege role. That is the
+   * whole reason it exists: the alternative for a caller who wants to
+   * know whether search is ready was to run `repairContributions()`, a
+   * write with repair side effects, and hope.
+   *
+   * One entry per search projection that this graph actually declares
+   * contributions for. A projection with none is omitted rather than
+   * reported `ready`, so an empty `entries` array means "nothing to
+   * assess" — never "assessed and healthy". Use
+   * {@link Store.verifyContributions} for the structured per-table
+   * diagnostics behind a `degraded` entry.
+   *
+   * @throws {ConfigurationError} when the backend provisions
+   *   contributions but cannot probe its own catalog. Answering `ready`
+   *   without having looked is the one answer this method must never
+   *   give. A backend with no contribution machinery at all has nothing
+   *   to assess and resolves to empty entries instead.
+   */
+  async probeContributions(): Promise<ContributionProbeResult> {
+    const backend = this.#baseBackend;
+    const probe = backend.probeContributions;
+    if (probe === undefined) {
+      if (backend.capabilities.contributions?.supported !== true) {
+        return { entries: [] };
+      }
+      throw new ConfigurationError(
+        "probeContributions requires a backend that can probe its catalog " +
+          "for contribution tables.",
+        {
+          backend: backend.dialect,
+          capability: "contributions",
+          operation: "probe",
+        },
+      );
+    }
+
+    // The graph snapshot this Store holds, deliberately not a catch-up
+    // read: the probe must stay read-only, and `#loadCaughtUp` commits
+    // schema work. A Store whose in-memory graph has fallen behind
+    // reports on the slots it believes are declared, which is the same
+    // set its own reads and writes will use.
+    const vectorSlots =
+      backend.capabilities.vector?.supported === true ?
+        resolveGraphVectorSlots(this.#graph)
+      : [];
+    const entries = await probe(this.graphId, vectorSlots);
+    const revision = await this.revisionNow();
+    return {
+      ...(revision === undefined ? {} : { graphRevision: revision }),
+      entries,
+    };
+  }
+
+  /**
+   * Destructively rebuilds one search projection's storage: drops it,
+   * recreates it from the current DDL, reconstructs its content from the
+   * node rows, and stamps the durable marker at the current signature.
+   *
+   * The top rung of the health ladder, and the repair
+   * {@link Store.repairContributions} deliberately refuses to perform.
+   * Never reachable from that method — a `stale` contribution's table
+   * exists at the *old* shape, so the ordinary ensure path's idempotent
+   * `CREATE ... IF NOT EXISTS` no-ops and re-stamping the marker there
+   * would leave it blessing a table whose shape is wrong, which is
+   * exactly what the drift guard exists to prevent. Only a drop makes
+   * the recreate meaningful, and dropping is a decision stated at the
+   * call site rather than reached through a flag named `force`.
+   *
+   * **This drops storage.** For `"fulltext"` nothing is permanently lost:
+   * the searchable content is derived from node properties TypeGraph
+   * already stores, so the refill reconstructs it in the same
+   * transaction. Nodes whose stored `props` cannot be read as an object
+   * are counted in `skipped` and are absent from the rebuilt index —
+   * `store.search.rebuildFulltext()` reports their ids individually.
+   *
+   * Atomic: the drop, recreate, refill, and stamp all run inside one
+   * transaction under the same per-graph fence as a schema commit, so an
+   * interrupted rebuild leaves the contribution exactly as it was rather
+   * than attested-but-empty. The cost is that the transaction is held for
+   * the whole refill and Postgres holds an exclusive lock on the table
+   * throughout, so this is a maintenance-window operation on a large
+   * graph. `store.search.rebuildFulltext()` remains the incremental,
+   * resumable way to refresh content when the storage shape is fine.
+   *
+   * @throws {ContributionRebuildUnsupportedError} for `"vector"`, always:
+   *   TypeGraph stores the vectors callers supply and never the inputs
+   *   that produced them, so embeddings exist only in the storage a
+   *   rebuild would drop and there is nothing to reconstruct them from.
+   *   `store.reembedVectorField(kind, fieldPath, { embed })` is the
+   *   sanctioned destructive path — it takes the callback that can
+   *   regenerate what the drop destroys. Also thrown when the active
+   *   strategy declares no teardown DDL, or the backend has no
+   *   transactional schema fence to make the sequence atomic. Every one
+   *   of these refuses before anything is dropped.
+   * @throws {ConfigurationError} when the backend cannot rebuild
+   *   strategy-owned contributions at all.
+   */
+  async rebuildContribution(
+    scope: ContributionRebuildScope,
+    options?: RebuildContributionOptions,
+  ): Promise<ContributionRebuildResult> {
+    const backend = this.#baseBackend;
+    const rebuild = backend.rebuildContribution;
+    if (rebuild === undefined) {
+      throw new ConfigurationError(
+        "rebuildContribution requires a backend that can drop, recreate, " +
+          "and re-stamp strategy-owned contribution tables.",
+        {
+          backend: backend.dialect,
+          capability: "contributions",
+          operation: "rebuild",
+        },
+      );
+    }
+
+    // Catch up first: a rebuild recreates storage from the CURRENT
+    // declarations, so running it against a stale in-memory graph would
+    // provision the shape this Store remembers rather than the one the
+    // committed schema asks for.
+    await this.#loadCaughtUp("rebuild");
+    const registry = this.#registry;
+    const graphId = this.graphId;
+    return rebuild(graphId, scope, async (target) => {
+      const result = await repopulateFulltextInTransaction(
+        { graphId, registry },
+        target,
+        options?.pageSize === undefined ? {} : { pageSize: options.pageSize },
+      );
+      return {
+        processed: result.processed,
+        repopulated: result.upserted,
+        skipped: result.skipped,
+      };
+    });
   }
 
   /**

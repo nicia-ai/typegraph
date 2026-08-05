@@ -1091,6 +1091,93 @@ export class ConfigurationError extends TypeGraphError {
 }
 
 /**
+ * Why a destructive contribution rebuild is refused.
+ *
+ * - `vector-source-unavailable` — the projection is vector storage.
+ *   TypeGraph stores caller-supplied embeddings and nothing else: the
+ *   vectors exist only in the table a rebuild would drop, so there is no
+ *   source to reconstruct them from. Dropping anyway would silently
+ *   destroy the embeddings and hand back storage that looks healthy and
+ *   returns nothing. `store.reembedVectorField(kind, fieldPath, {
+ *   embed })` is the sanctioned destructive path — it takes the callback
+ *   that can regenerate what the drop destroys.
+ * - `no-drop-ddl` — the active strategy declares no `dropDdl` for the
+ *   contribution, so TypeGraph does not know how to tear its storage
+ *   down. Synthesizing a `DROP TABLE` from the resolved name would
+ *   guess at a teardown the strategy never sanctioned.
+ * - `no-schema-fence` — the backend exposes no transactional schema
+ *   fence (`schemaWriteTransaction`), so the drop, recreate, refill, and
+ *   stamp could not be made atomic. Running them unfenced could leave
+ *   storage attested but empty, or a concurrent schema writer
+ *   interleaved with the drop.
+ */
+export type ContributionRebuildRefusal =
+  "vector-source-unavailable" | "no-drop-ddl" | "no-schema-fence";
+
+const CONTRIBUTION_REBUILD_REFUSAL_MESSAGE: Readonly<
+  Record<ContributionRebuildRefusal, string>
+> = {
+  "vector-source-unavailable":
+    "Vector contributions cannot be rebuilt: TypeGraph stores the vectors " +
+    "callers supply and never the inputs that produced them, so the " +
+    "embeddings exist only in the storage a rebuild would drop.",
+  "no-drop-ddl":
+    "The active strategy declares no teardown DDL for this contribution, so " +
+    "its storage cannot be dropped and recreated.",
+  "no-schema-fence":
+    "This backend exposes no transactional schema fence, so a rebuild's " +
+    "drop, recreate, refill, and marker stamp cannot be made atomic.",
+};
+
+const CONTRIBUTION_REBUILD_REFUSAL_SUGGESTION: Readonly<
+  Record<ContributionRebuildRefusal, string>
+> = {
+  "vector-source-unavailable":
+    "Run store.reembedVectorField(kind, fieldPath, { embed }) instead: it " +
+    "recreates the field's storage and takes the callback that regenerates " +
+    "the embeddings the recreate discards.",
+  "no-drop-ddl":
+    "Declare dropDdl on the contribution returned from the strategy's " +
+    "ownedTables(), or drop and recreate the table out of band and then run " +
+    "store.repairContributions() to re-stamp its marker.",
+  "no-schema-fence":
+    "Use a backend that implements schemaWriteTransaction, or perform the " +
+    "drop and recreate out of band during a maintenance window and then run " +
+    "store.repairContributions() followed by store.search.rebuildFulltext().",
+};
+
+/**
+ * Thrown when `store.rebuildContribution()` cannot honor a rebuild.
+ *
+ * A refusal, never a partial attempt: nothing has been dropped when this
+ * throws. The point is that the alternative — proceeding — destroys data
+ * that cannot be reconstructed, so the operation declines instead of
+ * quietly doing less than its name promises.
+ */
+export class ContributionRebuildUnsupportedError extends TypeGraphError {
+  readonly reason: ContributionRebuildRefusal;
+
+  constructor(
+    reason: ContributionRebuildRefusal,
+    details: Readonly<Record<string, unknown>> = {},
+    options?: { cause?: unknown },
+  ) {
+    super(
+      CONTRIBUTION_REBUILD_REFUSAL_MESSAGE[reason],
+      "CONTRIBUTION_REBUILD_UNSUPPORTED",
+      {
+        details: { ...details, reason },
+        category: "user",
+        suggestion: CONTRIBUTION_REBUILD_REFUSAL_SUGGESTION[reason],
+        cause: options?.cause,
+      },
+    );
+    this.name = "ContributionRebuildUnsupportedError";
+    this.reason = reason;
+  }
+}
+
+/**
  * Thrown when an iterative graph algorithm exhausts its caller-visible round
  * budget before reaching its convergence predicate.
  */
