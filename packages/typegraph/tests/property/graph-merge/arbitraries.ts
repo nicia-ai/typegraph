@@ -27,6 +27,10 @@
  *     cluster collapses, the edges repoint onto the single canonical and dedupe.
  *   - ONTOLOGY — a cluster mixes `Doctor` and `SpecialistDoctor` so
  *     `reconcileTypes: "ontology"` collapses to the most-specific type.
+ *   - VALID-TIME WINDOWS — both branches may end an INHERITED node's and an
+ *     INHERITED edge's validity at different instants, so the earliest-end
+ *     arbitration runs and the committed `valid_to` the normalizer compares is
+ *     actually decided by the merge.
  */
 import fc from "fast-check";
 
@@ -72,6 +76,33 @@ const DOCTOR_NAME_PAIRS: readonly DuplicateNamePair[] = [
 ];
 
 /**
+ * End instants a branch may claim on the inherited window rows, all in the
+ * FUTURE: a row's `validFrom` defaults to its creation instant and the store
+ * refuses an inverted window, so a past end is not authorable at all. THREE
+ * distinct values so two branches can disagree and the earliest-end arbitration —
+ * the order-sensitive half of window reconciliation — actually runs.
+ */
+const WINDOW_ENDS: readonly string[] = [
+  "2100-01-01T00:00:00.000Z",
+  "2100-06-01T00:00:00.000Z",
+  "2100-09-01T00:00:00.000Z",
+];
+
+/**
+ * One branch's optional endings on the inherited window node and window edge.
+ * `undefined` abstains, which is how the "no side ended it" case is generated.
+ */
+export type WindowClaim = Readonly<{
+  node: string | undefined;
+  edge: string | undefined;
+}>;
+
+const windowClaimArb: fc.Arbitrary<WindowClaim> = fc.record({
+  node: fc.option(fc.constantFrom(...WINDOW_ENDS), { nil: undefined }),
+  edge: fc.option(fc.constantFrom(...WINDOW_ENDS), { nil: undefined }),
+});
+
+/**
  * The full scenario the property materializes. Every field is pure data; the
  * property body turns it into a base store + branches with concrete ids.
  */
@@ -106,6 +137,15 @@ export type DeterminismScenario = Readonly<{
    * `reconcileTypes: "ontology"` collapses them to `SpecialistDoctor`.
    */
   ontology: Readonly<{ pair: DuplicateNamePair }>;
+  /**
+   * Per-branch endings on an INHERITED patient and an INHERITED edge the base
+   * carries for this purpose alone. Window reconciliation only ever sees a row
+   * live in both the base and the fork, so a claim has to be made on inherited
+   * content — and without one the normalizer's `valid_to` comparison is
+   * decorative: every committed window is `undefined` on both sides of the
+   * deep-equal no matter what the merge decided.
+   */
+  window: Readonly<{ branchA: WindowClaim; branchB: WindowClaim }>;
 }>;
 
 /** A non-empty alphanumeric token usable as an mrn / reason / code value. */
@@ -147,6 +187,7 @@ export const determinismScenarioArb: fc.Arbitrary<DeterminismScenario> =
     ontology: fc.record({
       pair: fc.constantFrom(...DOCTOR_NAME_PAIRS),
     }),
+    window: fc.record({ branchA: windowClaimArb, branchB: windowClaimArb }),
   });
 
 /** What a law-scenario branch does to the inherited (edge-free) base patient. */
