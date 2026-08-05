@@ -1066,6 +1066,54 @@ describe("verifyContributions audits currently declared contributions", () => {
     expect(spies.recordMarker).not.toHaveBeenCalled();
   });
 
+  it("keeps a contribution stale after the drift guard has recorded its own refusal", async () => {
+    // The guard records the failed attempt on its way out, and that record
+    // must not move the signature. The recorded signature is the only
+    // evidence of the shape the table actually has: stamping the shape we
+    // failed to provision leaves a row that matches the current
+    // declaration and carries an error, which reads as `missing-marker` —
+    // routing the operator at the idempotent re-stamp repair that blesses
+    // the unchanged old-shape table, and letting the next boot skip the
+    // guard entirely. This is the state a real deployment reaches by
+    // restarting once on upgraded code, so `stale` has to survive it.
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+    const catalog = new Set([...runtimeTables(), vectorTableOf(changed)]);
+    await expect(
+      createMockMaterializer(
+        markers,
+        undefined,
+        pgvectorStrategy,
+      ).materializer.ensureVectorSlot(changed),
+    ).rejects.toThrow(/different signature/);
+
+    // A second boot of the same upgraded code refuses again rather than
+    // finding a signature that now matches and blessing the old table.
+    await expect(
+      createMockMaterializer(
+        markers,
+        undefined,
+        pgvectorStrategy,
+      ).materializer.ensureVectorSlot(changed),
+    ).rejects.toThrow(/different signature/);
+
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+      catalog,
+    );
+    await expect(
+      materializer.verifyContributions(GRAPH_ID, [changed]),
+    ).resolves.toMatchObject([{ state: "stale" }]);
+    // And the repair keeps pointing at the destructive rung instead of
+    // reporting a success that would leave the shape wrong.
+    const repair = await materializer.repairContributions(GRAPH_ID, [changed]);
+    expect(repair.results).toMatchObject([{ status: "requires-rebuild" }]);
+    expect(repair.remaining).toMatchObject([{ state: "stale" }]);
+  });
+
   it("reports a failed attempt that produced no table as failed-materialization", async () => {
     // The state a contribution lands in when provisioning genuinely broke:
     // `fts5` module absent, no CREATE privilege, extension never loaded.

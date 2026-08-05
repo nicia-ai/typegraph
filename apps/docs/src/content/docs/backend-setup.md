@@ -1137,7 +1137,10 @@ reopen it through a managed factory before resuming version-fenced writes.
   embeddings exist only in the table it would drop. Run rebuilds through
   the DDL-capable migration role, in a maintenance window: the
   transaction is held for the whole refill, and on PostgreSQL the drop's
-  exclusive lock blocks concurrent searches until it commits. See
+  `ACCESS EXCLUSIVE` lock blocks both searches and writes to any kind with
+  `searchable()` fields until it commits. Reach it from a `createStore()`
+  Store — the managed factory's boot step refuses to open while a
+  contribution is `stale`. See
   [Contribution health: probe, repair, rebuild](/troubleshooting#contribution-health-probe-repair-rebuild).
 
 ### Contribution capability parity

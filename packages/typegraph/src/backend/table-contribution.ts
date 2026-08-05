@@ -105,6 +105,11 @@ export type TableContribution = Readonly<{
    * as not rebuildable rather than silently rebuilt through a
    * synthesized `DROP`. Backends surface the resulting gap as
    * `capabilities.contributions.rebuild`.
+   *
+   * The rebuild visits a strategy's `runtimeEnsure` contributions, the
+   * same set the boot ensure provisions — so a companion table a strategy
+   * declares outside that set is neither dropped nor recreated, and must
+   * not be something the recreated storage depends on.
    */
   dropDdl?: readonly string[];
   /**

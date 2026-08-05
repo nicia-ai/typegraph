@@ -445,18 +445,24 @@ function createCommonOperationStrategy(
   };
 
   /**
-   * Writes one contribution marker row outright, with no conflict clause.
+   * States one contribution marker row outright: every column takes the
+   * supplied value whether or not a row already exists.
    *
-   * Deliberately not the upsert the top-level backend uses. That one
-   * COALESCEs `materialized_at` so a failed re-attempt cannot erase an
-   * earlier success — the right rule when the attempt may have failed. A
-   * caller reaching for this pairs it with
-   * {@link buildDeleteContributionMaterialization} to state the row
-   * outright, which is what a completed destructive rebuild needs: the
-   * storage was just recreated, so nothing about the previous row is
-   * worth preserving and preserving it would misdate the rebuild.
+   * Deliberately not the top-level backend's upsert, which COALESCEs
+   * `materialized_at` so a *failed* re-attempt cannot erase an earlier
+   * success. That rule is right when the attempt may have failed and
+   * wrong for a completed destructive rebuild, whose whole point is that
+   * the storage is new — the recorded timestamp must be the rebuild's,
+   * not the shape it replaced.
    *
-   * Dialect-shared: the ISO timestamps bind straight into SQLite's TEXT
+   * One statement rather than a delete/insert pair so the row is never
+   * momentarily absent inside the transaction, and so a concurrent
+   * `repairContributions()` racing the same identity resolves as a
+   * conflict rather than a primary-key violation that would roll the
+   * whole rebuild back.
+   *
+   * Dialect-shared: the composite primary key is the conflict target on
+   * both engines, and the ISO timestamps bind straight into SQLite's TEXT
    * and Postgres' TIMESTAMPTZ columns, the same way every other write
    * builder here passes `nowIso()` through.
    */
@@ -473,6 +479,11 @@ function createCommonOperationStrategy(
         ${nullableText(params.materializedAt)}, ${params.attemptedAt},
         ${nullableText(params.error)}
       )
+      ON CONFLICT (graph_id, logical_name, owner, table_name) DO UPDATE SET
+        signature = excluded.signature,
+        materialized_at = excluded.materialized_at,
+        last_attempted_at = excluded.last_attempted_at,
+        last_error = excluded.last_error
     `;
   }
 

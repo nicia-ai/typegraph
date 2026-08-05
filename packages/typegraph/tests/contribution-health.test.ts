@@ -345,6 +345,36 @@ describe("probeContributions on a backend that cannot probe", () => {
     });
   });
 
+  it("refuses to refill a scope the store cannot reconstruct, even if the backend accepted it", async () => {
+    // The port's contract is that implementations refuse `"vector"` before
+    // anything is dropped. A backend that ignored it would reach the
+    // store's refill callback, which only knows how to reconstruct
+    // fulltext — writing fulltext rows over storage just dropped for
+    // another projection is worse than the refusal that was skipped, so
+    // the store restates the invariant instead of trusting it.
+    const base = createTestBackend();
+    const dropped: string[] = [];
+    const backend = createBackendOverlay(base, {
+      rebuildContribution: async (_graphId, scope, refill) => {
+        dropped.push(scope);
+        // The refill target is never read: the store's guard throws first.
+        const stats = await refill(base);
+        return { rebuilt: [], ...stats };
+      },
+    });
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const error = await captureRejection(store.rebuildContribution("vector"));
+    expect(error).toBeInstanceOf(ContributionRebuildUnsupportedError);
+    expect(error).toMatchObject({
+      reason: "vector-source-unavailable",
+      details: { contribution: "vector" },
+    });
+    // The refusal came from the refill, so the port really was entered —
+    // this is the mid-operation discovery, not the upfront gate.
+    expect(dropped).toEqual(["vector"]);
+  });
+
   it("still probes projections it can assess when a probe is available", async () => {
     const probeContributions = vi.fn(
       (): Promise<readonly ContributionProbeEntry[]> =>

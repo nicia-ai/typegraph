@@ -41,5 +41,17 @@ backend with no transactional schema fence; all three refuse before anything is
 dropped, and all three are declared ahead of time on the new
 `backend.capabilities.contributions` capability.
 
+Fixes the drift guard so the ladder can actually be climbed: when the guard
+refused a shape change it recorded the failed attempt at the *new* signature,
+overwriting the only evidence of the shape the table really had. The verdict
+then read as `missing-marker` rather than `stale`, so `repairContributions()`
+reported it repaired — re-stamping the marker over the unchanged old-shape table
+— and the next boot skipped the guard entirely. The guard now preserves the
+recorded signature, so a `stale` contribution stays `stale` across restarts,
+`repairContributions()` keeps reporting `requires-rebuild`, and the refusal
+persists until `rebuildContribution("fulltext")` fixes the shape. Reach that
+call from a `createStore()` / `createVerifiedStore()` Store: the managed
+factory's boot step is what the guard refuses.
+
 Also adds optional `dropDdl` to `TableContribution` — declared by both bundled
 fulltext strategies — which is what opts a strategy into the rebuild.

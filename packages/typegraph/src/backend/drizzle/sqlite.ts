@@ -932,21 +932,14 @@ function createSqliteOperationBackend(
      * produced it; without it the stamp would land outside the
      * transaction and could survive a rolled-back drop.
      *
-     * Delete-then-insert rather than the top-level upsert: a completed
-     * rebuild states the row outright, and the upsert's COALESCE would
-     * carry a previous `materialized_at` forward and misdate it.
+     * States the row outright rather than reusing the top-level upsert,
+     * whose `materialized_at` COALESCE preserves an earlier success so a
+     * failed re-attempt cannot erase it. A completed rebuild replaced the
+     * storage, so the recorded timestamp must be the rebuild's.
      */
     async recordContributionMaterialization(
       params: RecordContributionMaterializationParams,
     ): Promise<void> {
-      await execRun(
-        operationStrategy.buildDeleteContributionMaterialization({
-          graphId: params.graphId,
-          logicalName: params.logicalName,
-          owner: params.owner,
-          tableName: params.tableName,
-        }),
-      );
       await execRun(
         operationStrategy.buildInsertContributionMaterialization(params),
       );

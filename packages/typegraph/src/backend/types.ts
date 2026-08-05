@@ -203,6 +203,12 @@ export type ContributionCapabilities = Readonly<{
    * repopulate → stamp rebuild (`store.rebuildContribution()`). Requires
    * both a strategy that declares `dropDdl` and a transactional schema
    * fence to run it under; false means `rebuildContribution` refuses.
+   *
+   * Describes the fulltext projection only. `rebuildContribution("vector")`
+   * refuses on every backend regardless of this flag — embeddings exist
+   * only in the storage a rebuild would drop, so there is nothing to
+   * reconstruct them from — and `reembedVectorField` is the sanctioned
+   * destructive path there.
    */
   rebuild: boolean;
 }>;
@@ -1274,7 +1280,12 @@ export type ContributionProbeEntry = Readonly<{
 export type ContributionProbeResult = Readonly<{
   /**
    * The durable graph revision the assessment was taken at, so a caller
-   * can order this probe against its own writes.
+   * can place this probe in the graph's committed history.
+   *
+   * Graph-global, like the clock it reads: it advances on every committed
+   * capture from any writer, so an advance between two probes means
+   * "something committed in between", never "the write this caller just
+   * made landed". Confirm a specific write by observing the write itself.
    *
    * Absent unless the Store is revision-tracked (`revisionTracking:
    * true` or `history: true`) — the same condition under which

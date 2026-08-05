@@ -527,8 +527,10 @@ is a human-readable summary and not a stable format, so call
 `verifyContributions()` for the structured per-table findings behind it.
 
 `graphRevision` stamps the durable revision the assessment was taken at,
-so a caller can order the probe against its own writes. It is absent
-unless the Store is revision-tracked (`revisionTracking: true` or
+placing the probe in the graph's committed history. It is graph-global
+like the clock it reads: an advance between two probes means something
+committed in between, not that a particular caller's write landed. It is
+absent unless the Store is revision-tracked (`revisionTracking: true` or
 `history: true`) and a tracked write has already anchored the clock. A
 store with no revision clock has no revision to stamp, and substituting a
 wall-clock timestamp or the schema version would be a weaker guarantee
@@ -552,6 +554,23 @@ const result = await adminStore.rebuildContribution("fulltext");
 // { rebuilt: ["typegraph_node_fulltext"], processed, repopulated, skipped }
 ```
 
+**Opening a Store to run it.** A `stale` contribution makes
+`createStoreWithSchema()` refuse: its boot step materializes runtime
+contributions, and the drift guard will not run the current DDL against a
+table provisioned at another shape. That refusal is deliberate and
+persistent — it repeats on every restart until the shape is fixed, and it
+leaves the `stale` verdict intact rather than downgrading it to a state
+whose repair would bless the wrong shape. Reach the rebuild from a Store
+opened without that boot step, which `createStore()` and
+`createVerifiedStore()` are (they run no DDL by contract):
+
+```typescript
+const adminStore = createStore(graph, backend);
+await adminStore.probeContributions(); // degraded, detail names `stale`
+await adminStore.rebuildContribution("fulltext");
+// createStoreWithSchema() now opens normally again.
+```
+
 It drops the storage, recreates it from the current `createDdl`,
 reconstructs the content from the node rows, and stamps the marker — all
 in one transaction under the same per-graph fence as a schema commit. An
@@ -560,8 +579,12 @@ rather than leaving storage attested but empty.
 
 What that costs, and why it is still the right trade: the transaction is
 held for the whole refill, and on PostgreSQL the `DROP TABLE` takes an
-exclusive lock the rebuild keeps until commit, so concurrent searches
-block for the duration. Run it in a maintenance window on a large graph.
+`ACCESS EXCLUSIVE` lock the rebuild keeps until commit. That blocks more
+than searches — every write to a kind with `searchable()` fields
+maintains the same table, so those block too. On SQLite the rebuild holds
+the write lock for the same span, so concurrent writers wait out their
+busy timeout and then fail. Run it in a maintenance window on a large
+graph.
 When the storage *shape* is fine and only the content is stale — a field
 gained `searchable()` after data was written, or a `language` changed —
 `store.search.rebuildFulltext()` is the incremental, resumable pass that

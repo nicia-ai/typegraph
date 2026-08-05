@@ -808,9 +808,17 @@ export function createContributionMaterializer(
           `migrate or drop the table and retry, or restore the original ` +
           `strategy.`,
       );
+      // Record the failed attempt but keep the RECORDED signature: it is
+      // the only evidence of the shape the table actually has. Stamping
+      // the shape we just refused to provision would leave a row matching
+      // the current declaration with `last_error` set, which
+      // `diagnoseContribution` reads as `missing-marker` — pointing the
+      // operator at the idempotent re-stamp repair that blesses the
+      // unchanged old-shape table, and letting the next attempt skip this
+      // guard. Staying `stale` points at `store.rebuildContribution()`.
       await deps.recordMarker({
         ...identity,
-        signature,
+        signature: existing.signature,
         attemptedAt: nowIso(),
         materializedAt: undefined,
         error: error.message,

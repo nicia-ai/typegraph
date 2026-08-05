@@ -306,6 +306,26 @@ describe("#135 signature drift is a loud error, never silently re-blessed", () =
     });
     await createStoreWithSchema(FtGraph, bootBackend);
 
+    function readMarkers(): readonly {
+      signature: string;
+      materialized_at: string | null;
+      last_error: string | null;
+    }[] {
+      return sqlite
+        .prepare(
+          `SELECT signature, materialized_at, last_error FROM ` +
+            `${CONTRIB_MAT_TABLE} WHERE graph_id = '${FtGraph.id}'`,
+        )
+        .all() as readonly {
+        signature: string;
+        materialized_at: string | null;
+        last_error: string | null;
+      }[];
+    }
+
+    const provisioned = readMarkers();
+    expect(provisioned).toHaveLength(1);
+
     const driftBackend = createSqliteBackend(db, {
       executionProfile: { isSync: true },
       tables: defaultTables,
@@ -317,19 +337,29 @@ describe("#135 signature drift is a loud error, never silently re-blessed", () =
     ).rejects.toThrow(/already materialized with a different signature/);
 
     // The recorded marker still reflects the original successful
-    // materialization — the drift attempt did not overwrite it as success.
-    const markers = sqlite
-      .prepare(
-        `SELECT materialized_at, last_error FROM ${CONTRIB_MAT_TABLE} ` +
-          `WHERE graph_id = '${FtGraph.id}'`,
-      )
-      .all() as readonly {
-      materialized_at: string | null;
-      last_error: string | null;
-    }[];
+    // materialization — the drift attempt did not overwrite it as success,
+    // and it did not move the SIGNATURE either. The recorded signature is
+    // the only evidence of the shape the table actually has: overwriting it
+    // with the shape that failed to provision would turn the `stale` verdict
+    // into `missing-marker`, whose repair is an idempotent re-stamp that
+    // blesses the unchanged old-shape table.
+    const markers = readMarkers();
     expect(markers).toHaveLength(1);
     expect(markers[0]?.materialized_at).not.toBeNull();
     expect(markers[0]?.last_error).not.toBeNull();
+    expect(markers[0]?.signature).toBe(provisioned[0]?.signature);
+
+    // So a second boot of the same upgraded code refuses again instead of
+    // finding a signature that now matches and blessing the old table.
+    await expect(
+      requireDefined(
+        createSqliteBackend(db, {
+          executionProfile: { isSync: true },
+          tables: defaultTables,
+          fulltext: driftStrategy,
+        }).ensureRuntimeContributions,
+      )(FtGraph.id),
+    ).rejects.toThrow(/already materialized with a different signature/);
 
     sqlite.close();
   });
@@ -354,6 +384,55 @@ describe("#135 signature drift is a loud error, never silently re-blessed", () =
       name: "StoreNotInitializedError",
       details: { reason: "stale" },
     });
+
+    sqlite.close();
+  });
+
+  it("rebuildContribution is reachable from the zero-DDL Store and clears the refusal", async () => {
+    // The route the troubleshooting docs publish, end to end. It matters
+    // that this is the ONLY route: the managed factory's boot step is what
+    // trips the drift guard, so the rebuild has to be reachable from a
+    // Store that runs no DDL on open — otherwise the ladder's top rung
+    // cannot be reached in the one state it exists for.
+    await createStoreWithSchema(
+      FtGraph,
+      createSqliteBackend(db, {
+        executionProfile: { isSync: true },
+        tables: defaultTables,
+      }),
+    );
+
+    function upgraded() {
+      return createSqliteBackend(db, {
+        executionProfile: { isSync: true },
+        tables: defaultTables,
+        fulltext: driftStrategy,
+      });
+    }
+
+    await expect(createStoreWithSchema(FtGraph, upgraded())).rejects.toThrow(
+      /already materialized with a different signature/,
+    );
+
+    const admin = createStore(FtGraph, upgraded());
+    const probed = await admin.probeContributions();
+    expect(probed.entries).toMatchObject([
+      { contribution: "fulltext", state: "degraded" },
+    ]);
+    expect(probed.entries[0]?.detail).toContain("stale");
+    expect(await admin.rebuildContribution("fulltext")).toMatchObject({
+      rebuilt: [defaultTables.fulltextTableName],
+    });
+
+    // The refusal is cleared, not merely bypassed: the managed factory
+    // opens again and the projection is usable.
+    const [store] = await createStoreWithSchema(FtGraph, upgraded());
+    await store.nodes.Doc.create({ title: "rebuilt" });
+    const hits = await store.search.fulltext("Doc", {
+      query: "rebuilt",
+      limit: 10,
+    });
+    expect(hits).toHaveLength(1);
 
     sqlite.close();
   });

@@ -68,6 +68,7 @@ import type {
 } from "../core/types";
 import {
   ConfigurationError,
+  ContributionRebuildUnsupportedError,
   EagerMaterializationError,
   KindNotFoundError,
   MigrationError,
@@ -4327,6 +4328,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const registry = this.#registry;
     const graphId = this.graphId;
     return rebuild(graphId, scope, async (target) => {
+      // This callback only knows how to reconstruct fulltext content, and
+      // the port's contract is that implementations refuse `"vector"`
+      // before reaching it. Restate that here rather than trusting it: a
+      // backend that accepted the scope anyway would have this write
+      // fulltext rows over storage it had just dropped for another
+      // projection, which is worse than the refusal it skipped.
+      if (scope !== "fulltext") {
+        throw new ContributionRebuildUnsupportedError(
+          "vector-source-unavailable",
+          { graphId, contribution: scope, backend: backend.dialect },
+        );
+      }
       const result = await repopulateFulltextInTransaction(
         { graphId, registry },
         target,

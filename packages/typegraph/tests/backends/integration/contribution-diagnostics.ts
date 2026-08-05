@@ -150,6 +150,15 @@ function requireRebuild(
 }
 
 /**
+ * Materialization instant `markStale` records. Far enough in the past that
+ * a rebuild's own stamp is unambiguously distinguishable from it, which is
+ * what pins the transaction-scoped writer's "state the row outright" rule:
+ * carrying this timestamp forward would misdate storage that was just
+ * recreated.
+ */
+const STALE_MATERIALIZED_AT = "2020-01-02T03:04:05.000Z";
+
+/**
  * Marks a contribution's marker at a signature the current `createDdl` can
  * never hash to, leaving the table itself untouched — the `stale` state,
  * which is the one incremental repair cannot finish.
@@ -158,7 +167,6 @@ async function markStale(
   context: IntegrationTestContext,
   contribution: StrategyTableContribution,
 ): Promise<void> {
-  const now = new Date().toISOString();
   await requireDefined(
     context.getBackend().recordContributionMaterialization,
     "backend must record contribution markers",
@@ -168,9 +176,25 @@ async function markStale(
     owner: contribution.owner,
     tableName: contribution.tableName,
     signature: IMPOSSIBLE_SIGNATURE,
-    attemptedAt: now,
-    materializedAt: now,
+    attemptedAt: new Date().toISOString(),
+    materializedAt: STALE_MATERIALIZED_AT,
     error: undefined,
+  });
+}
+
+/** The durable marker row for one contribution, or `undefined`. */
+async function markerFor(
+  context: IntegrationTestContext,
+  contribution: StrategyTableContribution,
+): Promise<ContributionMaterializationRow | undefined> {
+  return requireDefined(
+    context.getBackend().getContributionMaterialization,
+    "backend must read contribution markers",
+  )({
+    graphId: integrationTestGraph.id,
+    logicalName: contribution.logicalName,
+    owner: contribution.owner,
+    tableName: contribution.tableName,
   });
 }
 
@@ -928,6 +952,16 @@ export function registerContributionDiagnosticIntegrationTests(
         expect(result.repopulated).toBeGreaterThanOrEqual(1);
         expect(result.skipped).toBe(0);
 
+        // The transaction-scoped stamp states the row outright rather than
+        // preserving what was there: the storage is new, so a
+        // `materialized_at` carried forward from the shape it replaced
+        // would misdate it.
+        const stamped = await markerFor(context, contribution);
+        expect(stamped?.materializedAt).toBeDefined();
+        expect(stamped?.materializedAt).not.toBe(STALE_MATERIALIZED_AT);
+        expect(stamped?.signature).not.toBe(IMPOSSIBLE_SIGNATURE);
+        expect(stamped?.lastError).toBeUndefined();
+
         await expect(store.verifyContributions()).resolves.toEqual([]);
         expect(
           probeEntry(await store.probeContributions(), "fulltext"),
@@ -1042,6 +1076,57 @@ export function registerContributionDiagnosticIntegrationTests(
         expect(new Set(hits.map((hit) => hit.node.id))).toEqual(
           new Set(created.map((article) => article.id)),
         );
+      });
+
+      it("rolls the whole rebuild back when the refill fails part-way", async (ctx) => {
+        if (!requireRebuild(context, ctx)) return;
+        const store = context.getStore();
+        const contribution = fulltextContribution();
+
+        const article = await store.nodes.Article.create({
+          title: "Atomic rebuild",
+          body: "Must survive a refill that throws.",
+          category: "health",
+          published: true,
+        });
+        const rowsBefore = await countFulltextRows(store);
+        const markerBefore = await markerFor(context, contribution);
+        expect(rowsBefore).toBeGreaterThan(0);
+
+        // Driven through the port so the failure lands after the drop and
+        // recreate have already run — the window the single transaction
+        // exists to close. Nothing else can force it: the Store's own
+        // refill only fails on a database fault.
+        await expect(
+          requireDefined(
+            context.getBackend().rebuildContribution,
+            "backend must implement rebuildContribution",
+          )(integrationTestGraph.id, "fulltext", () => {
+            throw new Error("refill failed part-way through the rebuild");
+          }),
+        ).rejects.toThrow(/refill failed part-way/);
+
+        // Everything is exactly as it was: the storage the drop removed is
+        // back with its content, and the marker was never re-stamped. The
+        // state this rules out is the one the atomicity is for — storage
+        // attested by a fresh marker and answering every query with
+        // nothing.
+        expect(await countFulltextRows(store)).toBe(rowsBefore);
+        expect(await markerFor(context, contribution)).toEqual(markerBefore);
+        await expect(store.verifyContributions()).resolves.toEqual([]);
+        expect(
+          probeEntry(await store.probeContributions(), "fulltext"),
+        ).toEqual({ contribution: "fulltext", state: "ready" });
+        const hits = await store.search.fulltext("Article", {
+          query: "Atomic",
+          limit: 10,
+        });
+        expect(hits.map((hit) => hit.node.id)).toContain(article.id);
+
+        // And the rollback left nothing that blocks a retry.
+        await expect(
+          store.rebuildContribution("fulltext"),
+        ).resolves.toMatchObject({ rebuilt: [contribution.tableName] });
       });
 
       it("advertises the rebuild capability it can actually serve", () => {
