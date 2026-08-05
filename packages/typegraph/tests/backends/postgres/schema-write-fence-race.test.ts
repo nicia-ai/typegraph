@@ -9,17 +9,15 @@
  * The statement therefore returns no row even though the graph does have an
  * active version — which the fence used to report as `actual: 0`.
  *
- * The winning schema commit is driven through raw SQL on a dedicated pool
- * client rather than through `migrateSchema`, because the test needs the flip
- * held open (uncommitted) while the loser's fence blocks on it. The statements
- * mirror `commitSchemaVersion`'s fresh-insert path exactly: deactivate the
- * prior active row, then insert the new version as active.
- *
- * The second suite is the read-path audit that accompanies the fix: the
+ * The last case is the read-path audit that accompanies the fix: the
  * non-locking `getActiveSchema` seam — which `computeBaseVersion` reads through
  * to stamp the active version into a merge base token — must never observe the
  * same "no active schema" transient, because the flip is atomic within the
  * winner's transaction and a non-locking read has no post-wait recheck.
+ *
+ * Server Postgres only, and not just for the usual `POSTGRES_URL` reason: the
+ * anomaly needs a second connection holding an uncommitted flip, which the
+ * single-connection PGlite lane cannot provide.
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool, type PoolClient } from "pg";
@@ -111,11 +109,23 @@ afterAll(async () => {
   if (pool !== undefined) await pool.end();
 });
 
+/** Locking reads the fence issues against the active schema row. */
+function lockingReadCount(statements: readonly string[]): number {
+  return statements.filter((statement) => /for share/i.test(statement)).length;
+}
+
 /**
  * Holds an uncommitted schema flip to `version` open on its own connection,
  * reproducing the row states a real `commitSchemaVersion` reaches just before
  * it commits: the previously active row already marked inactive, the new
  * active row inserted but not yet visible to anyone else.
+ *
+ * The statement pair mirrors `commitSchemaVersion`'s fresh-insert path in
+ * `operation-backend-core.ts` by hand, because the flip has to stay uncommitted
+ * while the loser blocks on it and no seam in `migrateSchema` can hold that
+ * position. Keep the two in step: a `commitSchemaVersion` that stopped
+ * deactivating the prior row before inserting the new one would no longer
+ * produce the row states this suite reasons about.
  */
 async function beginHeldSchemaFlip(
   graphId: string,
@@ -206,6 +216,50 @@ describe.runIf(process.env["POSTGRES_URL"])(
       // The version the fence reported is the one a fresh read sees.
       const active = await backend.getActiveSchema(FENCE_GRAPH_ID);
       expect(requireDefined(active).version).toBe(2);
+    });
+
+    /**
+     * The empty read must be resolved without waiting on the schema rows a
+     * second time. The dropped row keeps the share lock the first read took on
+     * it, so a second `FOR SHARE` waits on the row the next schema commit has
+     * already taken `FOR UPDATE` while that commit waits on the dropped row in
+     * its deactivate-all — a cycle PostgreSQL breaks by killing one of them,
+     * and the schema commit waits first and so times out first. Two migrations
+     * applied back to back (the second released the instant the first commits,
+     * exactly when the fence wakes) is enough to hit it.
+     */
+    it("resolves the empty locked read without locking the row again", async () => {
+      const statements: string[] = [];
+      const backend = createPostgresBackend(
+        drizzle(requirePool(), {
+          logger: {
+            logQuery(query: string) {
+              statements.push(query);
+            },
+          },
+        }),
+      );
+      const [store] = await createStoreWithSchema(
+        makeGraph(FENCE_GRAPH_ID),
+        backend,
+      );
+
+      flipHolder = await beginHeldSchemaFlip(FENCE_GRAPH_ID, 2);
+
+      statements.length = 0;
+      const rejection = store.nodes.Person.create({ name: "Alice" }).catch(
+        (error: unknown) => error,
+      );
+      expect(await raceTimeout(rejection, BLOCKED_WAIT_MS)).toBe(
+        TIMEOUT_SENTINEL,
+      );
+
+      await requireDefined(flipHolder).query("COMMIT");
+      requireDefined(flipHolder).release();
+      flipHolder = undefined;
+
+      expect(await rejection).toBeInstanceOf(StaleVersionError);
+      expect(lockingReadCount(statements)).toBe(1);
     });
 
     it("still reports actual 0 when the graph genuinely has no active schema", async () => {
