@@ -12,7 +12,6 @@ import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { chunk } from "../../utils/array";
-import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import { getNodeRowsByIds } from "../node-fetch";
@@ -20,8 +19,8 @@ import { allocateRecordedCommit } from "./clock";
 import { executeStatement } from "./guards";
 import {
   insertRecordedEdgeRows,
+  insertRecordedIdentityAssertionRows,
   insertRecordedNodeRows,
-  RECORDED_IDENTITY_ASSERTION_COLUMN_LIST,
   recordedEdgeChunkSize,
   recordedIdentityAssertionChunkSize,
   type RecordedInsert,
@@ -254,29 +253,14 @@ export async function flushIdentityAssertions(
     const afterById = await resolveAfterImages(entityChunk, (missing) =>
       getIdentityAssertionRowsByIds(target, schema, graphId, missing),
     );
-    const values = recordedInsertsFor(afterById, closed).map(
-      ({ row, operation }) => sql`
-        (
-                ${generateId()}, ${row.graph_id}, ${row.id}, ${row.rel},
-                ${row.a_kind}, ${row.a_id}, ${row.b_kind}, ${row.b_id},
-                ${row.valid_from}, ${row.valid_to ?? sql.raw("NULL")},
-                ${row.created_at}, ${row.updated_at},
-                ${row.deleted_at ?? sql.raw("NULL")},
-                ${row.ended_by_kind ?? sql.raw("NULL")},
-                ${row.ended_by_id ?? sql.raw("NULL")}, ${recordedRevision},
-                ${RECORDED_MAX_REVISION}, ${operation}
-              )
-      `,
-    );
     // A hard deletion closes the prior recorded row without leaving a current
-    // after-image. In that case the UPDATE above is the complete capture.
-    if (values.length === 0) continue;
-    await executeStatement(
+    // after-image; the insert below is then empty and the UPDATE above is the
+    // complete capture.
+    await insertRecordedIdentityAssertionRows(
       target,
-      sql`
-        INSERT INTO ${schema.recordedIdentityAssertionsTable} (${RECORDED_IDENTITY_ASSERTION_COLUMN_LIST})
-        VALUES ${sql.join(values, sql`, `)}
-      `,
+      schema.recordedIdentityAssertionsTable,
+      recordedInsertsFor(afterById, closed),
+      recordedRevision,
     );
   }
 }

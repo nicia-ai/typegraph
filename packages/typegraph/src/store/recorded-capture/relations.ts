@@ -6,6 +6,7 @@ import {
 } from "../../backend/types";
 import { RECORDED_MAX_REVISION } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
+import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { generateId } from "../../utils/id";
 import { executeStatement } from "./guards";
@@ -28,8 +29,9 @@ const RECORDED_HISTORY_META = "{}";
 
 /**
  * Recorded-relation column order. The same list builds each INSERT's column
- * clause and derives the per-statement chunk size, so adding a column updates
- * both in lockstep instead of relying on a hand-counted bind-parameter count.
+ * clause, projects its VALUES tuple through the relation's cell builders, and
+ * derives the per-statement chunk size, so adding a column updates all three in
+ * lockstep instead of relying on a hand-counted bind-parameter count.
  */
 export const RECORDED_NODE_COLUMNS = [
   "history_id",
@@ -74,13 +76,7 @@ export const RECORDED_EDGE_COLUMNS = [
   "meta",
 ] as const;
 
-/**
- * The recorded identity-assertion relation's columns. Unlike nodes and edges,
- * its VALUES tuples are built by `flushIdentityAssertions` rather than by the
- * cell-builder machinery below (its after-image is a storage row, not a
- * `NodeRow` / `EdgeRow`), so only the column clause and the chunk size are
- * derived here — from this one list, in lockstep.
- */
+/** The recorded identity-assertion relation's columns, same contract. */
 const RECORDED_IDENTITY_ASSERTION_COLUMNS = [
   "history_id",
   "graph_id",
@@ -104,7 +100,7 @@ const RECORDED_IDENTITY_ASSERTION_COLUMNS = [
 
 const RECORDED_NODE_COLUMN_LIST = sql.raw(RECORDED_NODE_COLUMNS.join(", "));
 const RECORDED_EDGE_COLUMN_LIST = sql.raw(RECORDED_EDGE_COLUMNS.join(", "));
-export const RECORDED_IDENTITY_ASSERTION_COLUMN_LIST: SqlFragment = sql.raw(
+const RECORDED_IDENTITY_ASSERTION_COLUMN_LIST = sql.raw(
   RECORDED_IDENTITY_ASSERTION_COLUMNS.join(", "),
 );
 
@@ -220,6 +216,39 @@ const recordedEdgeCells: Record<
   to_id: (row) => sql`${row.to_id}`,
 };
 
+/**
+ * The identity assertion after-image is a storage row rather than a `NodeRow` /
+ * `EdgeRow`, so it shares no cells with {@link recordedCommonCells} — but it
+ * projects through the same column list, which is what keeps its VALUES tuple
+ * and its INSERT column clause in the order the relation actually declares.
+ *
+ * The fallback after-image read is an un-normalized row, so a nullable column
+ * can arrive as SQL `null` rather than `undefined`; `??` covers both.
+ */
+const recordedIdentityAssertionCells: Record<
+  (typeof RECORDED_IDENTITY_ASSERTION_COLUMNS)[number],
+  RecordedCellBuilder<IdentityAssertionStorageRow>
+> = {
+  history_id: () => sql`${generateId()}`,
+  graph_id: (row) => sql`${row.graph_id}`,
+  id: (row) => sql`${row.id}`,
+  rel: (row) => sql`${row.rel}`,
+  a_kind: (row) => sql`${row.a_kind}`,
+  a_id: (row) => sql`${row.a_id}`,
+  b_kind: (row) => sql`${row.b_kind}`,
+  b_id: (row) => sql`${row.b_id}`,
+  valid_from: (row) => sql`${row.valid_from}`,
+  valid_to: (row) => sql`${row.valid_to ?? sql.raw("NULL")}`,
+  created_at: (row) => sql`${row.created_at}`,
+  updated_at: (row) => sql`${row.updated_at}`,
+  deleted_at: (row) => sql`${row.deleted_at ?? sql.raw("NULL")}`,
+  ended_by_kind: (row) => sql`${row.ended_by_kind ?? sql.raw("NULL")}`,
+  ended_by_id: (row) => sql`${row.ended_by_id ?? sql.raw("NULL")}`,
+  recorded_from: (_row, recordedRevision) => sql`${recordedRevision}`,
+  recorded_to: () => sql`${RECORDED_MAX_REVISION}`,
+  op: (_row, _recordedRevision, operation) => sql`${operation}`,
+};
+
 function recordedValuesTuple<Row, Column extends string>(
   columns: readonly Column[],
   cells: Record<Column, RecordedCellBuilder<Row>>,
@@ -304,6 +333,23 @@ export function insertRecordedEdgeRows(
     RECORDED_EDGE_COLUMN_LIST,
     RECORDED_EDGE_COLUMNS,
     recordedEdgeCells,
+    inserts,
+    recordedRevision,
+  );
+}
+
+export function insertRecordedIdentityAssertionRows(
+  target: TransactionBackend,
+  table: SqlFragment,
+  inserts: readonly RecordedInsert<IdentityAssertionStorageRow>[],
+  recordedRevision: number,
+): Promise<void> {
+  return insertRecordedRows(
+    target,
+    table,
+    RECORDED_IDENTITY_ASSERTION_COLUMN_LIST,
+    RECORDED_IDENTITY_ASSERTION_COLUMNS,
+    recordedIdentityAssertionCells,
     inserts,
     recordedRevision,
   );
