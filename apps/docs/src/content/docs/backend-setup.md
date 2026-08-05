@@ -886,10 +886,11 @@ can inspect the same object as `backend.capabilities`. The shape is:
 
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can
-still reject working-table creation. WCC, label propagation, PageRank, and
-Personalized PageRank translate those execution-time failures to
-`UnsupportedBackendCapabilityError` while retaining the PostgreSQL error as its
-`cause`.
+still reject the working-table transaction that the iterative graph algorithms
+open: a standby refuses the read-write transaction itself, and a role without
+`TEMP` refuses the `CREATE TEMP TABLE` inside it. Both refusals reach the caller
+as `UnsupportedBackendCapabilityError`, with the PostgreSQL error retained as
+its `cause`.
 
 ### SQLite ↔ PostgreSQL parity
 

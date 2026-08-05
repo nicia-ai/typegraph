@@ -38,14 +38,32 @@ const POSTGRES_UNDEFINED_RELATION_PATTERN =
 const POSTGRES_UNDEFINED_TABLE_CODE = "42P01";
 const POSTGRES_UNIQUE_VIOLATION_CODE = "23505";
 
-/** PostgreSQL failures that mean a temporary table cannot be created here. */
-export type PostgresTemporaryTableUnavailableSqlState = "25006" | "42501";
+/**
+ * PostgreSQL failures that mean a temporary table cannot be created here:
+ * `read_only_sql_transaction` (a replica or otherwise read-only execution
+ * context) and `insufficient_privilege` (a role without the database `TEMP`
+ * privilege).
+ */
+const POSTGRES_TEMPORARY_TABLE_UNAVAILABLE_SQL_STATES = [
+  "25006",
+  "42501",
+] as const;
 
-function isPostgresTemporaryTableUnavailableSqlState(
-  value: unknown,
-): value is PostgresTemporaryTableUnavailableSqlState {
-  return value === "25006" || value === "42501";
-}
+/**
+ * PostgreSQL failures that mean the read-write transaction hosting temporary
+ * tables cannot even start. A standby rejects the read-write access mode in
+ * the `BEGIN` itself with `feature_not_supported` ("cannot set transaction
+ * read-write mode during recovery"), so the failure never reaches a
+ * `CREATE TEMP TABLE`; a session pinned read-only by a proxy or by
+ * `default_transaction_read_only` reports `read_only_sql_transaction`.
+ */
+const POSTGRES_READ_WRITE_REFUSED_SQL_STATES = ["0A000", "25006"] as const;
+
+export type PostgresTemporaryTableUnavailableSqlState =
+  (typeof POSTGRES_TEMPORARY_TABLE_UNAVAILABLE_SQL_STATES)[number];
+
+export type PostgresReadWriteRefusedSqlState =
+  (typeof POSTGRES_READ_WRITE_REFUSED_SQL_STATES)[number];
 
 /**
  * Yields an error and each error reachable by following `.cause`,
@@ -212,23 +230,56 @@ export function isPostgresUniqueViolationError(error: unknown): boolean {
   return false;
 }
 
+function isSqlStateIn<SqlState extends string>(
+  code: unknown,
+  states: readonly SqlState[],
+): code is SqlState {
+  const known: readonly string[] = states;
+  return typeof code === "string" && known.includes(code);
+}
+
+/**
+ * The first SQLSTATE in the error's cause chain that belongs to `states`. The
+ * walk handles both direct driver errors and wrappers such as
+ * DrizzleQueryError, which keeps the SQLSTATE-bearing error on `.cause`.
+ */
+function matchSqlState<SqlState extends string>(
+  error: unknown,
+  states: readonly SqlState[],
+): SqlState | undefined {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (isSqlStateIn(code, states)) return code;
+  }
+  return undefined;
+}
+
 /**
  * Returns the PostgreSQL SQLSTATE that prevented temporary-table creation.
  *
  * Callers must use this only at a `CREATE TEMP TABLE` execution seam: 42501
  * is otherwise a generic permission failure, and translating it elsewhere
- * would hide a different authorization problem. The cause walk handles both
- * direct driver errors and wrappers such as DrizzleQueryError.
+ * would hide a different authorization problem.
  */
 export function postgresTemporaryTableUnavailableSqlState(
   error: unknown,
 ): PostgresTemporaryTableUnavailableSqlState | undefined {
-  for (const link of errorChain(error)) {
-    if (!canReadProperty(link)) continue;
-    const code: unknown = Reflect.get(link, "code");
-    if (isPostgresTemporaryTableUnavailableSqlState(code)) return code;
-  }
-  return undefined;
+  return matchSqlState(error, POSTGRES_TEMPORARY_TABLE_UNAVAILABLE_SQL_STATES);
+}
+
+/**
+ * Returns the PostgreSQL SQLSTATE with which the server refused to open a
+ * read-write transaction.
+ *
+ * Callers must use this only for a failure raised while opening such a
+ * transaction — 0A000 is otherwise a generic "unsupported feature" report
+ * that any statement can raise.
+ */
+export function postgresReadWriteRefusedSqlState(
+  error: unknown,
+): PostgresReadWriteRefusedSqlState | undefined {
+  return matchSqlState(error, POSTGRES_READ_WRITE_REFUSED_SQL_STATES);
 }
 
 /**

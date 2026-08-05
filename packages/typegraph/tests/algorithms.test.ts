@@ -229,6 +229,23 @@ function createPostgresTemporaryStatementFailureBackend(
   };
 }
 
+/**
+ * A standby rejects the read-write access mode in the `BEGIN` itself, so the
+ * transaction callback never runs and no temporary statement is ever issued.
+ */
+function createPostgresTransactionOpenFailureBackend(
+  backend: GraphBackend,
+  failure: Error,
+): GraphBackend {
+  return {
+    ...backend,
+    dialect: "postgres",
+    transaction<T>(): Promise<T> {
+      return Promise.reject(failure);
+    },
+  };
+}
+
 function postgresError(message: string, code: string): Error {
   return Object.assign(new Error(message), { code });
 }
@@ -391,6 +408,92 @@ describe("store.algorithms", () => {
         failingStore.algorithms.pageRank({
           edges: ["knows"],
           workingMemory: "64MB",
+        }),
+      ).rejects.toBe(failure);
+    });
+
+    const transactionOpenFailureCases = [
+      {
+        environment: "a standby refusing read-write mode",
+        sqlState: "0A000",
+        createFailure: () =>
+          postgresError(
+            "cannot set transaction read-write mode during recovery",
+            "0A000",
+          ),
+      },
+      {
+        environment:
+          "a standby refusing read-write mode behind a driver wrapper",
+        sqlState: "0A000",
+        createFailure: () =>
+          Object.assign(new Error("Failed query: begin"), {
+            cause: postgresError(
+              "cannot set transaction read-write mode during recovery",
+              "0A000",
+            ),
+          }),
+      },
+      {
+        environment: "a session pinned read-only",
+        sqlState: "25006",
+        createFailure: () =>
+          postgresError("cannot start a read-write transaction", "25006"),
+      },
+    ] as const;
+
+    for (const failureCase of transactionOpenFailureCases) {
+      for (const algorithmCase of algorithmCases) {
+        it(`translates ${failureCase.environment} for ${algorithmCase.operation}`, async () => {
+          const failure = failureCase.createFailure();
+          const failingStore = createStore(
+            testGraph,
+            createPostgresTransactionOpenFailureBackend(backend, failure),
+          );
+
+          await expect(algorithmCase.run(failingStore)).rejects.toMatchObject({
+            code: "UNSUPPORTED_BACKEND_CAPABILITY",
+            cause: failure,
+            details: {
+              operation: algorithmCase.operation,
+              capability: "graphAnalytics",
+              dialect: "postgres",
+              supported: false,
+              requirement: "transaction-local temporary tables",
+              sqlState: failureCase.sqlState,
+            },
+          });
+        });
+      }
+    }
+
+    it("preserves unrelated failures while opening the transaction", async () => {
+      const failure = postgresError("connection terminated", "08006");
+      const failingStore = createStore(
+        testGraph,
+        createPostgresTransactionOpenFailureBackend(backend, failure),
+      );
+
+      await expect(
+        failingStore.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+        }),
+      ).rejects.toBe(failure);
+    });
+
+    it("preserves unsupported-feature failures raised inside the transaction", async () => {
+      const failure = postgresError(
+        "RETURNING is not supported in this context",
+        "0A000",
+      );
+      const failingStore = createStore(
+        testGraph,
+        createPostgresTemporaryStatementFailureBackend(backend, failure),
+      );
+
+      await expect(
+        failingStore.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
         }),
       ).rejects.toBe(failure);
     });
