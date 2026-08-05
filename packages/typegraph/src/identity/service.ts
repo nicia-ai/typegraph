@@ -2494,6 +2494,269 @@ export async function validateIdentityForContext<G extends GraphDef>(
 }
 
 /**
+ * The context slice the affected-class assertion reads. Narrower than the full
+ * {@link IdentityServiceContext} because the assertion runs inside a
+ * caller-owned write transaction and therefore takes its target explicitly
+ * instead of opening one from `backend`.
+ */
+export type IdentityConsistencyContext<G extends GraphDef> = Pick<
+  IdentityServiceContext<G>,
+  "graphId" | "registry" | "schema" | "sameIdAcrossKinds"
+>;
+
+/** The affected identity classes, indexed for the assertion's three scans. */
+type AffectedIdentityClasses = Readonly<{
+  /** Each distinct affected class, keyed by its code-point-least member. */
+  byClassKey: ReadonlyMap<string, readonly PlainNodeRef[]>;
+  /** The class key of every affected member, for endpoint lookups. */
+  classKeyByMember: ReadonlyMap<string, string>;
+  /** Every member of every affected class, deduplicated. */
+  members: readonly PlainNodeRef[];
+}>;
+
+/**
+ * The identity classes the seeds belong to, read through the SAME materialized
+ * closure every current identity read resolves through
+ * ({@link loadCurrentStructuralClasses}), so the assertion judges the state
+ * readers will actually see rather than a private reconstruction of it.
+ */
+async function loadAffectedIdentityClasses<G extends GraphDef>(
+  ctx: IdentityConsistencyContext<G>,
+  target: Backend,
+  seeds: readonly PlainNodeRef[],
+): Promise<AffectedIdentityClasses> {
+  const classes = await loadCurrentStructuralClasses(
+    target,
+    ctx.schema,
+    ctx.graphId,
+    seeds,
+  );
+  const byClassKey = new Map<string, readonly PlainNodeRef[]>();
+  const classKeyByMember = new Map<string, string>();
+  const members = new Map<string, PlainNodeRef>();
+  for (const classMembers of classes.values()) {
+    // Members come back in {@link compareReferences} order, so the first is
+    // the class's code-point-least member — the same canonical label
+    // {@link insertClosureComponents} writes, which makes two seeds of one
+    // class collapse onto one entry here.
+    const classKey = refKey(requireDefined(classMembers[0]));
+    byClassKey.set(classKey, classMembers);
+    for (const member of classMembers) {
+      const memberKey = refKey(member);
+      classKeyByMember.set(memberKey, classKey);
+      members.set(memberKey, member);
+    }
+  }
+  return { byClassKey, classKeyByMember, members: [...members.values()] };
+}
+
+/**
+ * What an affected-class scan found: a genuine identity contradiction, or
+ * evidence that the materialized closure lags the ledger it is derived from.
+ * The two are indistinguishable to a caller reading a stale closure, which is
+ * why {@link assertAffectedIdentityClassesConsistent} rebuilds before it
+ * believes either.
+ */
+type AffectedClassInconsistency =
+  | Readonly<{ kind: "contradiction"; error: IdentityContradictionError }>
+  | Readonly<{
+      kind: "stale-closure";
+      detail: Readonly<Record<string, unknown>>;
+    }>;
+
+function firstMemberOfKind(
+  members: readonly PlainNodeRef[],
+  kind: string,
+): PlainNodeRef {
+  return requireDefined(
+    members.find((member) => member.kind === kind),
+    `Identity class carries no ${kind} member`,
+  );
+}
+
+/**
+ * The first inconsistency in the affected classes, or `undefined` when they
+ * are consistent. Three scans, all scoped to the affected members:
+ *
+ *  - a class whose member kinds the ontology declares disjoint;
+ *  - a CURRENT `different` assertion whose endpoints share one class;
+ *  - closure lag, as a current `same` assertion (or, under `"fold"`, a live
+ *    same-id row) whose endpoints the closure has NOT merged — the one shape
+ *    that could hide a contradiction from the two scans above, because both
+ *    resolve classes through that same closure.
+ */
+async function findAffectedClassInconsistency<G extends GraphDef>(
+  ctx: IdentityConsistencyContext<G>,
+  target: Backend,
+  seeds: readonly PlainNodeRef[],
+): Promise<AffectedClassInconsistency | undefined> {
+  const classes = await loadAffectedIdentityClasses(ctx, target, seeds);
+  for (const members of classes.byClassKey.values()) {
+    // Self-pairs are safe: `areDisjoint(kind, kind)` is false by construction.
+    const conflictingKinds = classHasDisjointKinds(
+      ctx.registry,
+      members,
+      members,
+    );
+    if (conflictingKinds === undefined) continue;
+    const [leftKind, rightKind] = conflictingKinds;
+    return {
+      kind: "contradiction",
+      error: new IdentityContradictionError({
+        operation: "merge",
+        a: firstMemberOfKind(members, leftKind),
+        b: firstMemberOfKind(members, rightKind),
+        reason: "disjoint-kinds",
+        conflictingKinds,
+      }),
+    };
+  }
+
+  const assertions = await loadAssertionsTouching(
+    target,
+    ctx.schema,
+    ctx.graphId,
+    classes.members,
+    undefined,
+  );
+  // Current `same` rows the closure has NOT merged into one class. An endpoint
+  // outside every affected class is only evidence of lag when its node is
+  // live — a class legitimately excludes a deleted member — so the liveness of
+  // those endpoints is read once, after the scan, instead of per row.
+  const unmerged: Readonly<{
+    assertionId: string;
+    a: PlainNodeRef;
+    b: PlainNodeRef;
+    outside: PlainNodeRef;
+  }>[] = [];
+  for (const assertion of assertions) {
+    const a = { kind: assertion.a_kind, id: assertion.a_id };
+    const b = { kind: assertion.b_kind, id: assertion.b_id };
+    const aClassKey = classes.classKeyByMember.get(refKey(a));
+    const bClassKey = classes.classKeyByMember.get(refKey(b));
+    if (assertion.rel === "different") {
+      if (aClassKey === undefined || aClassKey !== bClassKey) continue;
+      return {
+        kind: "contradiction",
+        error: new IdentityContradictionError({
+          operation: "merge",
+          a,
+          b,
+          reason: "same-class",
+          conflictingAssertionId: assertion.id,
+        }),
+      };
+    }
+    if (aClassKey !== undefined && bClassKey !== undefined) {
+      if (aClassKey === bClassKey) continue;
+      return {
+        kind: "stale-closure",
+        detail: { assertionId: assertion.id, a, b },
+      };
+    }
+    // The row reached this scan by touching an affected member, so exactly one
+    // endpoint can be outside the affected classes.
+    unmerged.push({
+      assertionId: assertion.id,
+      a,
+      b,
+      outside: aClassKey === undefined ? a : b,
+    });
+  }
+  if (unmerged.length > 0) {
+    const liveOutside = await loadLiveReferences(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      unmerged.map((row) => row.outside),
+    );
+    const liveKeys = new Set(liveOutside.map((ref) => refKey(ref)));
+    const lagging = unmerged.find((row) => liveKeys.has(refKey(row.outside)));
+    if (lagging !== undefined) {
+      return {
+        kind: "stale-closure",
+        detail: {
+          assertionId: lagging.assertionId,
+          a: lagging.a,
+          b: lagging.b,
+        },
+      };
+    }
+  }
+
+  if (ctx.sameIdAcrossKinds !== "fold") return undefined;
+  // The structural half of closure truth: under `"fold"` every live row
+  // sharing an affected member's id belongs to that member's class. A row the
+  // closure never folded reads as `undefined` here, which is the lag this
+  // scan exists to catch.
+  const liveKindsById = await liveNodeKindsSharingIds(
+    ctx,
+    target,
+    classes.members.map((member) => member.id),
+  );
+  for (const [id, kinds] of liveKindsById) {
+    const classKeys = new Set<string | undefined>();
+    for (const kind of kinds) {
+      classKeys.add(classes.classKeyByMember.get(refKey({ kind, id })));
+    }
+    if (classKeys.size > 1) {
+      return {
+        kind: "stale-closure",
+        detail: { sharedId: id, kinds: [...kinds] },
+      };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Asserts that the identity classes a write TOUCHED are contradiction-free, in
+ * the caller's write transaction and against the state the write just left
+ * behind. Scoped to the affected classes — the seeds plus everything the
+ * closure links them to — so the cost is O(affected classes), not O(graph).
+ *
+ * This is the applier-owned half of identity correctness: unlike a caller's
+ * plan-time simulation, it reads the post-write database, so a plan validated
+ * against state that has since moved cannot commit a contradictory ledger. Any
+ * refusal propagates out of the caller's transaction, which rolls the whole
+ * write back — there is no partial commit.
+ *
+ * Both failure kinds go through ONE rebuild-and-recheck: the scans resolve
+ * classes through the materialized closure, so a lagging closure can invent a
+ * contradiction as easily as it can hide one. On any inconsistency the closure
+ * is rebuilt from the base relations INSIDE the caller's transaction and the
+ * scans re-run against it. A clean second pass means the closure was stale and
+ * is now repaired (atomically with the caller's write); a repeated
+ * contradiction is real and aborts; a repeated lag means the closure and the
+ * ledger disagree in a way a rebuild cannot fix, which is corruption.
+ */
+export async function assertAffectedIdentityClassesConsistent<
+  G extends GraphDef,
+>(
+  ctx: IdentityConsistencyContext<G>,
+  target: Backend,
+  seeds: readonly PlainNodeRef[],
+): Promise<void> {
+  if (seeds.length === 0) return;
+  await lockIdentityGraph(target, ctx.graphId);
+  const observed = await findAffectedClassInconsistency(ctx, target, seeds);
+  if (observed === undefined) return;
+  await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+    await replaceClosure(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+      new Set(ctx.registry.nodeKinds.keys()),
+      ctx.sameIdAcrossKinds,
+    );
+  });
+  const rebuilt = await findAffectedClassInconsistency(ctx, target, seeds);
+  if (rebuilt === undefined) return;
+  if (rebuilt.kind === "contradiction") throw rebuilt.error;
+  throw closureMismatchError(ctx.graphId, rebuilt.detail);
+}
+
+/**
  * Hard-deletes every assertion row (current AND ended) touching any of the
  * given node kinds, touching each removed row for recorded capture. Shared by
  * {@link removeIdentityKindsForContext} (Store.removeKinds) and the schema

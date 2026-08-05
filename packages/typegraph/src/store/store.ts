@@ -85,6 +85,7 @@ import {
 } from "../identity/schema-transition";
 import {
   applyIdentityChangesForContext,
+  assertAffectedIdentityClassesConsistent,
   createIdentityFacade,
   createIdentityReadFacade,
   detachIdentityForNode,
@@ -1018,6 +1019,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
       applyIdentityMergeAtTarget: (target, retractionIds, assertions) =>
         this.applyIdentityMergeAtTarget(target, retractionIds, assertions),
+      assertIdentityClassesConsistentAtTarget: (target, seeds) =>
+        this.assertIdentityClassesConsistentAtTarget(target, seeds),
     };
     Object.defineProperty(this, STORE_RUNTIME, {
       configurable: false,
@@ -1253,6 +1256,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       target,
       assertions,
       mode,
+    );
+  }
+
+  /**
+   * @internal Post-write identity validation for a graph-merge commit: proves
+   * the identity classes the merge touched carry no contradiction in the state
+   * the merge just wrote, inside the merge's own transaction.
+   */
+  assertIdentityClassesConsistentAtTarget(
+    target: GraphBackend | TransactionBackend,
+    seeds: readonly Readonly<{ kind: string; id: string }>[],
+  ): Promise<void> {
+    if (this.#graph.identity === undefined || seeds.length === 0) {
+      return Promise.resolve();
+    }
+    return assertAffectedIdentityClassesConsistent(
+      this.#identityContext(target),
+      target,
+      seeds,
     );
   }
 

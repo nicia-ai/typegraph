@@ -78,6 +78,7 @@ import { BaseVersionMismatchError, describeCause, MergeError } from "./errors";
 import {
   assertIdentityEndpointsNotDeleted,
   assertIdentityPeersStable,
+  assertMergedIdentityClassesConsistent,
   assertNoContradictoryIdentityClosure,
   assertOneIdOneTruth,
   assertPlannedIdentityIdsFresh,
@@ -1482,6 +1483,13 @@ async function applyMergePlan<G extends GraphDef>(
   // identity statement by construction, so it is translated into the typed
   // conflict error here — the completeness backstop for applier invariants
   // the plan-time simulation does not (yet) mirror.
+  //
+  // The post-write assertion shares the boundary because it is the same kind
+  // of statement, made one step later: with every node, edge and identity
+  // write of this merge in place, the affected identity classes must carry no
+  // contradiction. It is what makes the committed ledger correct independently
+  // of the plan-time simulation, and it runs for BOTH commit modes because
+  // both commit through here.
   let appliedIdentity: Readonly<{ created: number; retracted: number }>;
   try {
     appliedIdentity = await storeRuntime(target).applyIdentityMergeAtTarget(
@@ -1489,6 +1497,7 @@ async function applyMergePlan<G extends GraphDef>(
       plan.identityRetractions.map((retraction) => retraction.id),
       plan.identityAssertions,
     );
+    await assertMergedIdentityClassesConsistent(target, txBackend, plan);
   } catch (error) {
     throw translateIdentityCommitError(error);
   }

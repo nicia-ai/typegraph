@@ -314,6 +314,15 @@ and the plan→commit window. The contract is by ID, on complete truth:
   whose row another writer already ended is accepted as a no-op, not drift.
   `MergeReport.merged.identity` reports the rows the applier actually
   created and ended; idempotent skips are excluded.
+- **The commit proves the result, not the plan.** After its identity writes,
+  and still inside the same transaction, a merge re-derives the identity
+  classes it touched from the written state and refuses a contradiction there
+  as `IdentityMergeConflictError` — so a plan validated against state that has
+  since moved cannot leave a contradictory ledger behind. The whole merge rolls
+  back; there is no partial commit. If the derived classes disagree with the
+  materialized closure, the closure is rebuilt inside the same transaction and
+  the check re-runs, which repairs a lagging closure atomically with a merge
+  that is otherwise sound.
 
 ## Operational notes
 

@@ -2731,7 +2731,7 @@ export class IdentityContradictionError extends TypeGraphError {
 
 // @public (undocumented)
 export type IdentityContradictionErrorDetails = Readonly<{
-    operation: "assertSame" | "assertDifferent" | "fold" | "import";
+    operation: "assertSame" | "assertDifferent" | "fold" | "import" | "merge";
     a: Readonly<{
         kind: string;
         id: string;
@@ -5559,6 +5559,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         created: number;
         retracted: number;
     }>>;
+    assertIdentityClassesConsistentAtTarget: (target: GraphBackend | TransactionBackend, seeds: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[]) => Promise<void>;
 }>;
 
 // @public
