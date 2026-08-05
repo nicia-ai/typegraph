@@ -47,6 +47,7 @@ import { type GraphBackend } from "../src/backend/types";
 import { embedding } from "../src/core/embedding";
 import { createStoreWithSchema } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
+import { provisionPostgresTestDatabase } from "./postgres-test-database";
 
 // ============================================================
 // Scenario graph & fixed corpus
@@ -313,15 +314,16 @@ async function runParityScenario(
 // Suite
 // ============================================================
 
+// Resolving this suite's own Postgres database needs a top-level await, so it
+// lives at module scope and the suite body closes over it.
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
+
 describe("cross-backend vector + hybrid parity", () => {
   const libsql = libsqlDescriptor();
 
   // Postgres joins the matrix only when POSTGRES_URL is set, mirroring
   // the other Postgres suites. The pool is opened once and the
   // descriptor's create() resets schema + per-field tables per use.
-  const TEST_DATABASE_URL =
-    process.env["POSTGRES_URL"] ??
-    "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
   let postgresPool: Pool | undefined;
 
   beforeAll(async () => {

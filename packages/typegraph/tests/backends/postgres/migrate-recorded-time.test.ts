@@ -12,10 +12,9 @@ import {
   createPostgresBackend,
   createPostgresTables,
 } from "../../../src/backend/postgres";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 const RECORDED_NODES = "tg_mrt_recorded_nodes";
 const RECORDED_EDGES = "tg_mrt_recorded_edges";
 const RECORDED_CLOCK = "tg_mrt_recorded_clock";

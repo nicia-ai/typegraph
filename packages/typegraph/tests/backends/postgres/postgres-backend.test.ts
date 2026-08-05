@@ -52,6 +52,7 @@ import {
   raceTimeout,
   TIMEOUT_SENTINEL,
 } from "../../concurrency-utils";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 
@@ -60,9 +61,7 @@ import { createIntegrationTestSuite } from "../integration-test-suite";
 // ============================================================
 
 // Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 // ============================================================
 // Connection State
@@ -194,7 +193,7 @@ async function clearTestData(): Promise<void> {
   // each test starts genuinely un-provisioned and the integration suite's
   // per-test createStoreWithSchema re-materializes every per-field vector
   // table + marker in lockstep. Otherwise a marker could outlive a dropped
-  // table on this shared database and a later boot would skip the CREATE.
+  // table and a later boot in this database would skip the CREATE.
   await sharedPool.query(
     `TRUNCATE typegraph_index_materializations,
               typegraph_contribution_materializations,
@@ -244,8 +243,7 @@ beforeAll(async () => {
   // Only attempt to connect when POSTGRES_URL is explicitly set (i.e. via
   // `scripts/test-postgres.sh`). Without the gate, a developer with a
   // stray Docker Postgres container running would trigger the
-  // DROP+CREATE schema setup below during `pnpm test:unit` and race with
-  // other postgres test files sharing the same database.
+  // DROP+CREATE schema setup below during `pnpm test:unit`.
   if (!process.env["POSTGRES_URL"]) return;
   isPostgresAvailable = await initializePostgres();
   if (isPostgresAvailable) {

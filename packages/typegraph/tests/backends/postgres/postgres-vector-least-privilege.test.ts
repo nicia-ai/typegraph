@@ -42,10 +42,9 @@ import {
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const LEAST_PRIV_ROLE = `tg_vec_lp_runtime_${randomUUID().replaceAll("-", "")}`;
 const LEAST_PRIV_ROLE_IDENTIFIER = `"${LEAST_PRIV_ROLE}"`;
@@ -93,7 +92,7 @@ beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
   ownerPool = new Pool({ connectionString: TEST_DATABASE_URL });
   await ownerPool.query("SELECT 1");
-  // Base typegraph_* tables for the shared test database.
+  // Base typegraph_* tables for this suite's database.
   await ownerPool.query(generatePostgresMigrationSQL());
 
   // The role name is unique per test process because PostgreSQL roles are
@@ -146,8 +145,8 @@ afterAll(async () => {
   if (leastPrivPool) await leastPrivPool.end();
   if (ownerPool) {
     if (publicCreateRevoked) {
-      // Restore PUBLIC's CREATE so we don't leave the shared test database
-      // more restrictive than other suites expect.
+      // Restore PUBLIC's CREATE so the database is left as provisioned, in
+      // case an operator inspects or reuses it after the run.
       await ownerPool.query(`GRANT CREATE ON SCHEMA public TO PUBLIC`);
     }
     if (leastPrivRoleCreated) {
