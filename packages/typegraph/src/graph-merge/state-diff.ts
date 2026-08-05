@@ -161,7 +161,7 @@ export type RetractionCause =
   | Readonly<{ kind: "cascade"; deletedNode: CascadeCauseNode }>;
 
 /** An assertion the fork stopped asserting, with the cause of its ending. */
-export type RetractedAssertion = Readonly<{
+type RetractedAssertion = Readonly<{
   assertion: IdentityTransferAssertion;
   cause: RetractionCause;
 }>;
