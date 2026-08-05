@@ -58,6 +58,18 @@ vitest_args+=(
   tests/backends/integration/
   tests/graph-merge/
   tests/property/graph-merge/
+  # Mixed-backend suites. These run the SQLite family in the default lane and
+  # ADD a server-Postgres leg when POSTGRES_URL is set, so they live outside
+  # tests/backends/postgres/ and have to be named one by one. Omitting one
+  # costs nothing visible — its Postgres leg just never executes anywhere
+  # (#386) — so `tests/postgres-lane-coverage.test.ts` fails when a suite that
+  # resolves its URL through `provisionPostgresTestDatabase` is missing here.
+  tests/backends/l2-score-scale-parity.test.ts
+  tests/hybrid-single-statement.test.ts
+  tests/search-filter-pushdown.test.ts
+  tests/search-liveness.test.ts
+  tests/similar-to-approximate.test.ts
+  tests/vector-cross-backend-parity.test.ts
 )
 
 POSTGRES_URL="$POSTGRES_URL" vitest "${vitest_args[@]}"
