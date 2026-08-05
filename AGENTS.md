@@ -90,6 +90,12 @@ backend tests are **skipped** unless `POSTGRES_URL` is set. Always run
 changes that touch backend, store, or collection code. The script handles
 Docker lifecycle automatically — no manual setup required.
 
+Each server-PostgreSQL suite runs against its own database, provisioned from
+`POSTGRES_URL` by `tests/postgres-test-database.ts`. A new suite therefore
+resolves its URL with `await provisionPostgresTestDatabase(import.meta.url)`
+and creates its own tables in `beforeAll` — it cannot inherit them from
+another suite. See [Per-suite PostgreSQL databases](docs/TESTING.md#per-suite-postgresql-databases).
+
 # Core Principles
 
 - **TypeScript strict mode** with readonly types by default
