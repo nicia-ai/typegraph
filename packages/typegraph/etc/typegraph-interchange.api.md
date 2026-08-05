@@ -1457,6 +1457,7 @@ type GraphBackend = Readonly<{
         identityAssertions: string;
         recordedIdentityAssertions: string;
         identityClosure: string;
+        identitySeparation: string;
     }>, options: Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
@@ -3485,6 +3486,7 @@ type ResolvedSqlTableNames = Readonly<{
     identityAssertions: string;
     recordedIdentityAssertions: string;
     identityClosure: string;
+    identitySeparation: string;
     fulltext: string;
     uniques: string;
 }>;
@@ -3813,6 +3815,8 @@ abstract class SqlSchema implements SqlSchemaFields {
     // (undocumented)
     abstract readonly identityClosureTable: SqlFragment;
     // (undocumented)
+    abstract readonly identitySeparationTable: SqlFragment;
+    // (undocumented)
     abstract readonly nodesTable: SqlFragment;
     // (undocumented)
     abstract readonly recordedClockTable: SqlFragment;
@@ -3840,6 +3844,7 @@ type SqlSchemaFields = Readonly<{
     identityAssertionsTable: SqlFragment;
     recordedIdentityAssertionsTable: SqlFragment;
     identityClosureTable: SqlFragment;
+    identitySeparationTable: SqlFragment;
     fulltextTable: SqlFragment;
 }>;
 
@@ -3854,6 +3859,7 @@ type SqlTableNames = Readonly<{
     identityAssertions?: string | undefined;
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
+    identitySeparation?: string | undefined;
     fulltext: string;
     uniques: string;
 }>;

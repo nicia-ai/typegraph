@@ -28,6 +28,7 @@ import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -60,6 +61,7 @@ export type PostgresTableNames = Readonly<{
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
+  identitySeparation: string;
   uniques: string;
   schemaVersions: string;
   fulltext: string;
@@ -89,6 +91,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   identityAssertions: "typegraph_identity_assertions",
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
+  identitySeparation: "typegraph_identity_separation",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
@@ -336,6 +339,32 @@ export function createPostgresTables(
     ],
   );
 
+  // The identity separation relation: the `different` ledger lifted to whole
+  // identity classes, one row per separated class pair. `class_key_low` /
+  // `class_key_high` hold the persisted class-key encoding (see
+  // `identity/separation.ts`), ordered by code point. The CHECK pins `COLLATE
+  // "C"` because a database whose default collation is linguistic orders text
+  // differently from the writer, which would reject legitimate pairs; under
+  // `C` the comparison is byte order, which is exactly code-point order.
+  // Fusing two separated classes relabels both sides of their shared row to
+  // one key, so the contradiction cannot commit.
+  const identitySeparation = pgTable(
+    n.identitySeparation,
+    {
+      graphId: text("graph_id").notNull(),
+      classKeyLow: text("class_key_low").notNull(),
+      classKeyHigh: text("class_key_high").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.classKeyLow, t.classKeyHigh] }),
+      index(`${n.identitySeparation}_high_idx`).on(t.graphId, t.classKeyHigh),
+      check(
+        `${n.identitySeparation}_ordered_pair_check`,
+        sql`class_key_low COLLATE "C" < class_key_high COLLATE "C"`,
+      ),
+    ],
+  );
+
   const uniques = pgTable(
     n.uniques,
     {
@@ -548,6 +577,7 @@ export function createPostgresTables(
     identityAssertions,
     recordedIdentityAssertions,
     identityClosure,
+    identitySeparation,
     uniques,
     schemaVersions,
     indexMaterializations,

@@ -1,4 +1,3 @@
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { type ReadCoordinate } from "../core/temporal";
 import {
@@ -11,11 +10,10 @@ import {
 } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
-import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
-import { recordedBindParamBudget } from "../store/recorded-capture/relations";
 import { type GraphNodeReference } from "../store/types";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
@@ -30,6 +28,22 @@ import {
   identityNodeVisibilitySql,
   identitySqlCoordinate,
 } from "./historical-sql";
+import {
+  assertSeparationMatchesProjection,
+  buildSeparationProjection,
+  deleteSeparationForClassKeys,
+  deleteSeparationForGraph,
+  identityClassKey,
+  insertSeparationRows,
+  readSeparationForGraph,
+} from "./separation";
+import {
+  executeIdentityStatement,
+  identityChunkSize,
+  type IdentityTarget,
+  MAX_REFERENCE_CHUNK_SIZE,
+  type PlainNodeRef,
+} from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
   type IdentityAssertion,
@@ -42,43 +56,15 @@ import {
   type IdentityRelation,
 } from "./types";
 
-type Backend = GraphBackend | TransactionBackend;
-type PlainNodeRef = Readonly<{ kind: string; id: string }>;
+type Backend = IdentityTarget;
 type IdentityTouch = (
   graphId: string,
   id: string,
   afterImage?: IdentityAssertionStorageRow,
 ) => void;
 
-const MAX_REFERENCE_CHUNK_SIZE = 200;
 const MAX_CLOSURE_INSERT_CHUNK_SIZE = 100;
 const MAX_ASSERTION_INSERT_CHUNK_SIZE = 50;
-
-function identityChunkSize(
-  target: Backend,
-  input: Readonly<{
-    fixedParameters: number;
-    maxItems: number;
-    parametersPerItem: number;
-  }>,
-): number {
-  const parameterLimit = recordedBindParamBudget(target);
-  const chunkSize = Math.floor(
-    (parameterLimit - input.fixedParameters) / input.parametersPerItem,
-  );
-  if (chunkSize < 1) {
-    throw new ConfigurationError(
-      "Operational Identity cannot fit this statement within the backend bind-parameter limit.",
-      {
-        code: "IDENTITY_BIND_BUDGET_TOO_SMALL",
-        parameterLimit,
-        fixedParameters: input.fixedParameters,
-        parametersPerItem: input.parametersPerItem,
-      },
-    );
-  }
-  return Math.min(input.maxItems, chunkSize);
-}
 
 export type IdentityServiceContext<G extends GraphDef> = Readonly<{
   graph: G;
@@ -143,6 +129,13 @@ type RawNodeSnapshotRow = Readonly<{
 type RawClosureClassRow = Readonly<{
   member_kind: string;
   member_id: string;
+}>;
+
+type RawSeedClassAnchorRow = Readonly<{
+  seed_kind: string;
+  seed_id: string;
+  class_kind: string;
+  class_id: string;
 }>;
 
 type RawSeedClassMemberRow = RawClosureClassRow &
@@ -327,29 +320,6 @@ function publicNodeRef<G extends GraphDef>(
   return ref as GraphNodeReference<G>;
 }
 
-function requireStatementTarget(target: Backend): asserts target is Backend & {
-  executeStatement: NonNullable<GraphBackend["executeStatement"]>;
-} {
-  if (target.executeStatement === undefined) {
-    throw new ConfigurationError(
-      "Operational Identity requires statement execution support.",
-      { code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION" },
-      {
-        suggestion:
-          "Use a built-in transactional SQLite or PostgreSQL backend.",
-      },
-    );
-  }
-}
-
-async function executeStatement(
-  target: Backend,
-  statement: SqlFragment,
-): Promise<void> {
-  requireStatementTarget(target);
-  await target.executeStatement(asCompiledStatementSql(statement));
-}
-
 /**
  * Serializes identity-affecting writers on one graph (Postgres only; SQLite
  * writers are already serialized by its single-writer lock).
@@ -386,7 +356,7 @@ export async function lockIdentityEnablementNodes(
   schema: SqlSchema,
 ): Promise<void> {
   if (target.dialect !== "postgres") return;
-  await executeStatement(
+  await executeIdentityStatement(
     target,
     sql`LOCK TABLE ${schema.nodesTable} IN SHARE MODE`,
   );
@@ -1477,7 +1447,7 @@ async function insertAssertionRows(
               )
       `;
     });
-    await executeStatement(
+    await executeIdentityStatement(
       target,
       sql`
         INSERT INTO ${schema.identityAssertionsTable} (${IDENTITY_ASSERTION_COLUMNS}) VALUES ${sql.join(values, sql`, `)}
@@ -1519,6 +1489,147 @@ export async function loadAssertionsByIds(
   return byId;
 }
 
+/**
+ * The class REPRESENTATIVE of each reference — the closure anchor row, or the
+ * reference itself when it is a singleton.
+ *
+ * {@link loadCurrentStructuralClasses} answers the same question but also
+ * materializes every member of every class; the separation projection needs
+ * only the label, so this stops at the anchor join.
+ */
+async function loadCurrentClassAnchors(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  references: readonly PlainNodeRef[],
+): Promise<ReadonlyMap<string, PlainNodeRef>> {
+  const uniqueByKey = new Map<string, PlainNodeRef>();
+  for (const ref of references) uniqueByKey.set(refKey(ref), ref);
+  const uniqueReferences = [...uniqueByKey.values()];
+  const anchors = new Map<string, PlainNodeRef>();
+  if (uniqueReferences.length === 0) return anchors;
+  const chunkSize = identityChunkSize(target, {
+    fixedParameters: 1,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  for (const refChunk of chunk(uniqueReferences, chunkSize)) {
+    const seedRows = sql.join(
+      refChunk.map((ref) => sql`(${ref.kind}, ${ref.id})`),
+      sql`, `,
+    );
+    const rows = await target.execute<RawSeedClassAnchorRow>(
+      asCompiledRowsSql(sql`
+        WITH seeds(seed_kind, seed_id) AS (
+          VALUES ${seedRows}
+        )
+        SELECT seeds.seed_kind, seeds.seed_id,
+               COALESCE(anchor.class_kind, seeds.seed_kind) AS class_kind,
+               COALESCE(anchor.class_id, seeds.seed_id) AS class_id
+        FROM seeds
+        LEFT JOIN ${schema.identityClosureTable} anchor
+          ON anchor.graph_id = ${graphId}
+         AND anchor.member_kind = seeds.seed_kind
+         AND anchor.member_id = seeds.seed_id
+      `),
+    );
+    for (const row of rows) {
+      anchors.set(refKey({ kind: row.seed_kind, id: row.seed_id }), {
+        kind: row.class_kind,
+        id: row.class_id,
+      });
+    }
+  }
+  return anchors;
+}
+
+/** The class key a full snapshot assigns to a reference. */
+function snapshotClassKey(
+  snapshot: IdentitySnapshot,
+  ref: PlainNodeRef,
+): string {
+  return identityClassKey(requireDefined(componentFor(snapshot, ref)[0]));
+}
+
+/**
+ * Rewrites every separation row whose class pair could have moved, given the
+ * members of the classes a mutation touched.
+ *
+ * Deleting by MEMBER key rather than by class key is what makes this complete:
+ * a fuse retires one of the two class keys, and rows carrying the retired key
+ * are reachable only through the member it used to label.
+ */
+async function replaceSeparationForMembers(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  members: readonly PlainNodeRef[],
+): Promise<void> {
+  const uniqueByKey = new Map<string, PlainNodeRef>();
+  for (const member of members) uniqueByKey.set(refKey(member), member);
+  const unique = [...uniqueByKey.values()];
+  if (unique.length === 0) return;
+  await deleteSeparationForClassKeys(
+    target,
+    schema,
+    graphId,
+    unique.map((member) => identityClassKey(member)),
+  );
+  const assertions = await loadAssertionsTouching(
+    target,
+    schema,
+    graphId,
+    unique,
+    undefined,
+    "different",
+  );
+  if (assertions.length === 0) return;
+  const endpoints = assertions.flatMap((assertion) => [
+    { kind: assertion.a_kind, id: assertion.a_id },
+    { kind: assertion.b_kind, id: assertion.b_id },
+  ]);
+  const anchors = await loadCurrentClassAnchors(
+    target,
+    schema,
+    graphId,
+    endpoints,
+  );
+  await insertSeparationRows(
+    target,
+    schema,
+    graphId,
+    buildSeparationProjection(assertions, (ref) =>
+      identityClassKey(requireDefined(anchors.get(refKey(ref)))),
+    ),
+  );
+}
+
+/**
+ * The separation repair for a mutation that changed no identity class — a
+ * `different` assertion arriving or ending. The classes stay put, so the
+ * affected members are simply the members of the endpoints' current classes.
+ */
+async function replaceSeparationForReferences(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  references: readonly PlainNodeRef[],
+): Promise<void> {
+  if (references.length === 0) return;
+  const classes = await loadCurrentStructuralClasses(
+    target,
+    schema,
+    graphId,
+    references,
+  );
+  await replaceSeparationForMembers(
+    target,
+    schema,
+    graphId,
+    [...classes.values()].flat(),
+  );
+}
+
 async function replaceClosure(
   target: Backend,
   schema: SqlSchema,
@@ -1534,11 +1645,20 @@ async function replaceClosure(
     allowedKinds,
     sameIdAcrossKinds,
   );
-  await executeStatement(
+  await executeIdentityStatement(
     target,
     sql`DELETE FROM ${schema.identityClosureTable} WHERE graph_id = ${graphId}`,
   );
   await insertClosureComponents(target, schema, graphId, snapshot.components);
+  await deleteSeparationForGraph(target, schema, graphId);
+  await insertSeparationRows(
+    target,
+    schema,
+    graphId,
+    buildSeparationProjection(snapshot.assertions, (ref) =>
+      snapshotClassKey(snapshot, ref),
+    ),
+  );
 }
 
 async function insertClosureComponents(
@@ -1566,7 +1686,7 @@ async function insertClosureComponents(
     parametersPerItem: 5,
   });
   for (const valueChunk of chunk(values, chunkSize)) {
-    await executeStatement(
+    await executeIdentityStatement(
       target,
       sql`
         INSERT INTO ${schema.identityClosureTable} (
@@ -1623,7 +1743,7 @@ async function replaceAffectedClosure(
       sql`member_id`,
       affectedChunk,
     );
-    await executeStatement(
+    await executeIdentityStatement(
       target,
       sql`
         DELETE FROM ${schema.identityClosureTable}
@@ -1631,12 +1751,18 @@ async function replaceAffectedClosure(
       `,
     );
   }
-  await insertClosureComponents(
-    target,
-    schema,
-    graphId,
-    buildComponents(structuralNodes, assertions, sameIdAcrossKinds),
+  const components = buildComponents(
+    structuralNodes,
+    assertions,
+    sameIdAcrossKinds,
   );
+  await insertClosureComponents(target, schema, graphId, components);
+  // A recomputed component can ABSORB a member that was outside the affected
+  // set — only when the ledger disagrees with the materialized closure, which
+  // is exactly the state the separation relation exists to catch. Its old
+  // singleton class is gone, so its rows must be rewritten too.
+  const separationMembers = [...affected, ...[...components.values()].flat()];
+  await replaceSeparationForMembers(target, schema, graphId, separationMembers);
 }
 
 async function mergeCurrentClasses(
@@ -1654,6 +1780,7 @@ async function mergeCurrentClasses(
   const bClass = requireDefined(classes.get(refKey(b)));
   if (containsRef(aClass, b)) return;
 
+  const fusedMembers = [...aClass, ...bClass];
   const [smaller, larger] =
     aClass.length <= bClass.length ? [aClass, bClass] : [bClass, aClass];
   const canonical = requireDefined(
@@ -1668,7 +1795,7 @@ async function mergeCurrentClasses(
     if (members.length < 2) return;
     const previousCanonical = requireDefined(members[0]);
     if (refKey(previousCanonical) === refKey(canonical)) return;
-    await executeStatement(
+    await executeIdentityStatement(
       target,
       sql`
         UPDATE ${schema.identityClosureTable}
@@ -1685,19 +1812,24 @@ async function mergeCurrentClasses(
   const singletonMembers = [smaller, larger].flatMap((members) =>
     members.length === 1 ? members : [],
   );
-  if (singletonMembers.length === 0) return;
-  const values = singletonMembers.map(
-    (member) =>
-      sql`(${graphId}, ${member.kind}, ${member.id}, ${canonical.kind}, ${canonical.id})`,
-  );
-  await executeStatement(
-    target,
-    sql`
-      INSERT INTO ${schema.identityClosureTable} (
-        graph_id, member_kind, member_id, class_kind, class_id
-      ) VALUES ${sql.join(values, sql`, `)}
-    `,
-  );
+  if (singletonMembers.length > 0) {
+    const values = singletonMembers.map(
+      (member) =>
+        sql`(${graphId}, ${member.kind}, ${member.id}, ${canonical.kind}, ${canonical.id})`,
+    );
+    await executeIdentityStatement(
+      target,
+      sql`
+        INSERT INTO ${schema.identityClosureTable} (
+          graph_id, member_kind, member_id, class_kind, class_id
+        ) VALUES ${sql.join(values, sql`, `)}
+      `,
+    );
+  }
+  // Relabelled in the SAME statement batch as the closure: if the two fused
+  // classes were separated, both sides of their row become `canonical` and the
+  // relation's CHECK aborts the transaction.
+  await replaceSeparationForMembers(target, schema, graphId, fusedMembers);
 }
 
 async function assertPair<G extends GraphDef>(
@@ -1748,6 +1880,11 @@ async function assertPair<G extends GraphDef>(
   );
   if (relation === "same") {
     await mergeCurrentClasses(target, ctx.schema, ctx.graphId, a, b);
+  } else {
+    await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
+      a,
+      b,
+    ]);
   }
   return assertionResult(publicAssertion(row), "created");
 }
@@ -1951,6 +2088,16 @@ async function bulkAssertPairs<G extends GraphDef>(
       closureReferences,
       ctx.sameIdAcrossKinds,
     );
+  } else {
+    await replaceSeparationForReferences(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      createdRows.flatMap((row) => [
+        { kind: row.a_kind, id: row.a_id },
+        { kind: row.b_kind, id: row.b_id },
+      ]),
+    );
   }
   return results;
 }
@@ -1996,7 +2143,7 @@ async function retractById(
   const now = nowIso();
   const validTo = clampValidTo(now, existing.valid_from);
   const ended = { ...existing, valid_to: validTo, updated_at: now };
-  await executeStatement(
+  await executeIdentityStatement(
     target,
     sql`
       UPDATE ${ctx.schema.identityAssertionsTable}
@@ -2066,7 +2213,7 @@ async function retractByIds(
         idChunk.map((id) => sql`${id}`),
         sql`, `,
       );
-      await executeStatement(
+      await executeIdentityStatement(
         target,
         sql`
           UPDATE ${ctx.schema.identityAssertionsTable}
@@ -2271,6 +2418,33 @@ export function createIdentityReadFacade<G extends GraphDef>(
   };
 }
 
+/**
+ * Splits ended assertions by which derived relation their repair belongs to: a
+ * `same` retraction splits identity classes (closure repair, which carries the
+ * separation repair with it), a `different` retraction removes a separation.
+ */
+function partitionRetractedEndpoints(
+  retracted: readonly IdentityAssertionStorageRow[],
+): Readonly<{
+  closureReferences: readonly PlainNodeRef[];
+  separationReferences: readonly PlainNodeRef[];
+}> {
+  const closureReferences: PlainNodeRef[] = [];
+  const separationReferences: PlainNodeRef[] = [];
+  for (const ended of retracted) {
+    const endpoints = [
+      { kind: ended.a_kind, id: ended.a_id },
+      { kind: ended.b_kind, id: ended.b_id },
+    ];
+    if (ended.rel === "same") {
+      closureReferences.push(...endpoints);
+    } else {
+      separationReferences.push(...endpoints);
+    }
+  }
+  return { closureReferences, separationReferences };
+}
+
 export function createIdentityFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
 ): IdentityFacade<G> {
@@ -2304,17 +2478,27 @@ export function createIdentityFacade<G extends GraphDef>(
     retractAssertion(id) {
       return runIdentityMutation(ctx, async (target, touch) => {
         const ended = await retractById(ctx, target, id, touch);
-        if (ended?.rel === "same") {
-          await replaceAffectedClosure(
-            target,
-            ctx.schema,
-            ctx.graphId,
-            [
-              { kind: ended.a_kind, id: ended.a_id },
-              { kind: ended.b_kind, id: ended.b_id },
-            ],
-            ctx.sameIdAcrossKinds,
-          );
+        if (ended !== undefined) {
+          const endpoints = [
+            { kind: ended.a_kind, id: ended.a_id },
+            { kind: ended.b_kind, id: ended.b_id },
+          ];
+          if (ended.rel === "same") {
+            await replaceAffectedClosure(
+              target,
+              ctx.schema,
+              ctx.graphId,
+              endpoints,
+              ctx.sameIdAcrossKinds,
+            );
+          } else {
+            await replaceSeparationForReferences(
+              target,
+              ctx.schema,
+              ctx.graphId,
+              endpoints,
+            );
+          }
         }
         return ended === undefined ? undefined : publicAssertion<G>(ended);
       });
@@ -2363,6 +2547,10 @@ export function createIdentityFacade<G extends GraphDef>(
         );
         if (existing === undefined) return;
         const ended = await retractById(ctx, target, existing.id, touch);
+        await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
+          a,
+          b,
+        ]);
         return ended === undefined ? undefined : publicAssertion<G>(ended);
       });
     },
@@ -2370,15 +2558,8 @@ export function createIdentityFacade<G extends GraphDef>(
     bulkRetractAssertions(ids) {
       return runIdentityMutation(ctx, async (target, touch) => {
         const retracted = await retractByIds(ctx, target, ids, touch);
-        const closureReferences: PlainNodeRef[] = [];
-        for (const existing of retracted) {
-          if (existing.rel === "same") {
-            closureReferences.push(
-              { kind: existing.a_kind, id: existing.a_id },
-              { kind: existing.b_kind, id: existing.b_id },
-            );
-          }
-        }
+        const { closureReferences, separationReferences } =
+          partitionRetractedEndpoints(retracted);
         if (closureReferences.length > 0) {
           await replaceAffectedClosure(
             target,
@@ -2388,6 +2569,12 @@ export function createIdentityFacade<G extends GraphDef>(
             ctx.sameIdAcrossKinds,
           );
         }
+        await replaceSeparationForReferences(
+          target,
+          ctx.schema,
+          ctx.graphId,
+          separationReferences,
+        );
         return retracted.map((assertion) => publicAssertion<G>(assertion));
       });
     },
@@ -2485,6 +2672,13 @@ export async function validateIdentityForContext<G extends GraphDef>(
       ctx.schema,
       ctx.graphId,
       snapshot.components,
+    );
+    assertSeparationMatchesProjection(
+      ctx.graphId,
+      await readSeparationForGraph(target, ctx.schema, ctx.graphId),
+      buildSeparationProjection(snapshot.assertions, (ref) =>
+        snapshotClassKey(snapshot, ref),
+      ),
     );
   }
 
@@ -2812,7 +3006,7 @@ export async function deleteAssertionsTouchingKinds(
         idChunk.map((id) => sql`${id}`),
         sql`, `,
       );
-      await executeStatement(
+      await executeIdentityStatement(
         target,
         sql`
           DELETE FROM ${schema.identityAssertionsTable}
@@ -3171,7 +3365,7 @@ export async function detachIdentityForNode(
     for (const rawRow of rows) {
       const row = normalizeAssertionRow(rawRow);
       if (mode === "hard") {
-        await executeStatement(
+        await executeIdentityStatement(
           rawTarget,
           sql`
             DELETE FROM ${ctx.schema.identityAssertionsTable}
@@ -3182,7 +3376,7 @@ export async function detachIdentityForNode(
       } else {
         const validTo = clampValidTo(cascadeInstant, row.valid_from);
         const ended = { ...row, valid_to: validTo, updated_at: now };
-        await executeStatement(
+        await executeIdentityStatement(
           rawTarget,
           sql`
             UPDATE ${ctx.schema.identityAssertionsTable}
@@ -3618,6 +3812,13 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
         // sees the merge instead of validating against a stale materialized class.
         if (assertion.relation === "same") {
           await mergeCurrentClasses(rawTarget, ctx.schema, ctx.graphId, a, b);
+        } else {
+          await replaceSeparationForReferences(
+            rawTarget,
+            ctx.schema,
+            ctx.graphId,
+            [a, b],
+          );
         }
       } catch (error) {
         rethrowTaggedWithAssertion(error, assertion.id);
@@ -3637,15 +3838,8 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
   }
   return runIdentityMutation(ctx, async (target, touch, markWritten) => {
     const retracted = await retractByIds(ctx, target, retractionIds, touch);
-    const closureReferences: PlainNodeRef[] = [];
-    for (const ended of retracted) {
-      if (ended.rel === "same") {
-        closureReferences.push(
-          { kind: ended.a_kind, id: ended.a_id },
-          { kind: ended.b_kind, id: ended.b_id },
-        );
-      }
-    }
+    const { closureReferences, separationReferences } =
+      partitionRetractedEndpoints(retracted);
     // Repair the closure from the retractions BEFORE importing: a batch that
     // retracts same(a,b) and then asserts different(a,b) must validate the new
     // assertion against a closure that already reflects the split, not the
@@ -3659,6 +3853,12 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
         ctx.sameIdAcrossKinds,
       );
     }
+    await replaceSeparationForReferences(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      separationReferences,
+    );
     const summary = await importIdentityAssertionsIntoTarget(
       ctx,
       target,

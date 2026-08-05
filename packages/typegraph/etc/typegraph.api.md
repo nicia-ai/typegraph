@@ -2308,6 +2308,7 @@ export type GraphBackend = Readonly<{
         identityAssertions: string;
         recordedIdentityAssertions: string;
         identityClosure: string;
+        identitySeparation: string;
     }>, options: Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
@@ -2783,6 +2784,31 @@ export type IdentityReadFacade<G extends GraphDef> = Readonly<{
 
 // @public
 export type IdentityRelation = "same" | "different";
+
+// @public
+export class IdentitySeparationViolationError extends TypeGraphError {
+    constructor(details: IdentitySeparationViolationErrorDetails, options?: Readonly<{
+        cause?: unknown;
+    }>);
+    // (undocumented)
+    readonly details: IdentitySeparationViolationErrorDetails;
+}
+
+// @public (undocumented)
+export type IdentitySeparationViolationErrorDetails = Readonly<{
+    graphId: string;
+    enforcedBy: "database" | "writer";
+    classKey: string;
+    assertionId: string;
+    a: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    b: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+}>;
 
 // @public
 export type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
@@ -4749,6 +4775,7 @@ export type ResolvedSqlTableNames = Readonly<{
     identityAssertions: string;
     recordedIdentityAssertions: string;
     identityClosure: string;
+    identitySeparation: string;
     fulltext: string;
     uniques: string;
 }>;
@@ -5231,6 +5258,8 @@ export abstract class SqlSchema implements SqlSchemaFields {
     // (undocumented)
     abstract readonly identityClosureTable: SqlFragment;
     // (undocumented)
+    abstract readonly identitySeparationTable: SqlFragment;
+    // (undocumented)
     abstract readonly nodesTable: SqlFragment;
     // (undocumented)
     abstract readonly recordedClockTable: SqlFragment;
@@ -5258,6 +5287,7 @@ type SqlSchemaFields = Readonly<{
     identityAssertionsTable: SqlFragment;
     recordedIdentityAssertionsTable: SqlFragment;
     identityClosureTable: SqlFragment;
+    identitySeparationTable: SqlFragment;
     fulltextTable: SqlFragment;
 }>;
 
@@ -5272,6 +5302,7 @@ export type SqlTableNames = Readonly<{
     identityAssertions?: string | undefined;
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
+    identitySeparation?: string | undefined;
     fulltext: string;
     uniques: string;
 }>;

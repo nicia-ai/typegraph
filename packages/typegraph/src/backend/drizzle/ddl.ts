@@ -117,7 +117,31 @@ export function generateSqliteCreateTableSQL(
     columnDefs.push(`PRIMARY KEY (${pkColumns})`);
   }
 
+  columnDefs.push(...renderTableChecks(config.checks, config.name));
+
   return `CREATE TABLE IF NOT EXISTS "${config.name}" (\n  ${columnDefs.join(",\n  ")}\n);`;
+}
+
+/**
+ * Renders a Drizzle table's CHECK constraints as CREATE TABLE clauses.
+ *
+ * A CHECK is a correctness barrier, not a hint: the identity separation
+ * relation relies on one to abort a contradictory transaction. Dropping it
+ * from the emitted DDL would leave the barrier declared in the Drizzle schema
+ * and absent from every runtime-provisioned database, so an unrenderable
+ * expression throws rather than degrading to a table without it.
+ */
+function renderTableChecks(
+  checks: readonly Readonly<{ name: string; value: unknown }>[],
+  tableName: string,
+): readonly string[] {
+  return checks.map(
+    (check) =>
+      `CONSTRAINT "${check.name}" CHECK (${inlineSqlOrThrow(
+        check.value,
+        `table "${tableName}" CHECK constraint "${check.name}"`,
+      )})`,
+  );
 }
 
 /**
@@ -418,6 +442,8 @@ export function generatePgCreateTableSQL(
     const pkColumns = pk.columns.map((c) => `"${c.name}"`).join(", ");
     columnDefs.push(`PRIMARY KEY (${pkColumns})`);
   }
+
+  columnDefs.push(...renderTableChecks(config.checks, config.name));
 
   return `CREATE TABLE IF NOT EXISTS "${config.name}" (\n  ${columnDefs.join(",\n  ")}\n);`;
 }
