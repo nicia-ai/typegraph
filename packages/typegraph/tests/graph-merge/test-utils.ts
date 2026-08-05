@@ -161,6 +161,7 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     identityAssertions: `${prefix}_identity_assertions`,
     recordedIdentityAssertions: `${prefix}_recorded_identity_assertions`,
     identityClosure: `${prefix}_identity_closure`,
+    identitySeparation: `${prefix}_identity_separation`,
     uniques: `${prefix}_uniques`,
     schemaVersions: `${prefix}_schema_versions`,
     fulltext: `${prefix}_fulltext`,

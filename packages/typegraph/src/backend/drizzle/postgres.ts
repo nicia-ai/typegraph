@@ -358,16 +358,17 @@ function computePostgresBatchChunkSizes(
 }
 
 /**
- * Barrel keys (contribution logical names) of the three relations that hold
+ * Barrel keys (contribution logical names) of the four relations that hold
  * Operational Identity state: current assertions, recorded-time assertions,
- * and the derived closure. `ensureIdentityTables()` scopes its idempotent
- * CREATE TABLE / CREATE INDEX to exactly these when identity is first enabled
- * on an existing database.
+ * the derived closure, and the derived separation relation.
+ * `ensureIdentityTables()` scopes its idempotent CREATE TABLE / CREATE INDEX
+ * to exactly these when identity is first enabled on an existing database.
  */
 const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
   "identityAssertions",
   "recordedIdentityAssertions",
   "identityClosure",
+  "identitySeparation",
 ]);
 
 // ============================================================
@@ -481,6 +482,7 @@ export function createPostgresBackend(
     identityAssertions: getTableName(tables.identityAssertions),
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
+    identitySeparation: getTableName(tables.identitySeparation),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
@@ -520,6 +522,7 @@ export function createPostgresBackend(
     tableNames.recordedIdentityAssertions,
     tableNames.identityAssertions,
     tableNames.identityClosure,
+    tableNames.identitySeparation,
   ] as const;
   const operationStrategy = createPostgresOperationStrategy(
     tables,
@@ -863,9 +866,9 @@ export function createPostgresBackend(
     ): Promise<readonly string[]> {
       // First enablement of Operational Identity on an existing populated
       // database: createStore / createPostgresBackend run no DDL, so the
-      // three identity relations the enablement preflight reads/writes may
-      // not exist yet. Ensure them (and their indexes) idempotently — CREATE
-      // TABLE / CREATE INDEX IF NOT EXISTS — reusing the same contribution
+      // four identity relations the enablement preflight reads/writes may
+      // not exist yet. Ensure them (and their indexes and CHECK constraints)
+      // idempotently — CREATE TABLE / CREATE INDEX IF NOT EXISTS — reusing the same contribution
       // DDL bootstrapTables emits, scoped to the identity relations. Stores
       // run this before opening the schema-commit transaction so DDL does not
       // re-enter its per-graph write lock.
@@ -874,6 +877,7 @@ export function createPostgresBackend(
         recordedIdentityAssertions:
           identityTableNames.recordedIdentityAssertions,
         identityClosure: identityTableNames.identityClosure,
+        identitySeparation: identityTableNames.identitySeparation,
       });
       const identityContributions = postgresContributions(
         identityTables,

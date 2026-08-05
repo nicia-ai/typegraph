@@ -123,6 +123,18 @@ function existingIdentityTables(
   return rows.map((row) => row.name);
 }
 
+const SEPARATION_TABLE = "typegraph_identity_separation";
+
+function readSeparationRows(
+  result: LocalSqliteBackendResult,
+): readonly Readonly<{ class_key_low: string; class_key_high: string }>[] {
+  return rawClient(result)
+    .prepare(
+      `SELECT class_key_low, class_key_high FROM ${SEPARATION_TABLE} ORDER BY class_key_low`,
+    )
+    .all() as { class_key_low: string; class_key_high: string }[];
+}
+
 describe("Operational Identity provisioning + enablement gating", () => {
   it("provisions identity tables and folds same-id pairs when enabling on an existing DB", async () => {
     const result = createLocalSqliteBackend();
@@ -289,6 +301,45 @@ describe("Operational Identity provisioning + enablement gating", () => {
           details: matchingObject({ code: "IDENTITY_STORAGE_MISSING" }),
         }),
       );
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("provisions and backfills a derived relation a newer version added", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const [seeded] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      const first = await seeded.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const second = await seeded.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      await seeded.identity.assertDifferent(first, second);
+      const expected = readSeparationRows(result);
+      expect(expected).toHaveLength(1);
+
+      // A database provisioned before the separation relation existed: the
+      // ledger and closure are intact, only the newer derived relation is
+      // absent. That is an upgrade, not the data loss the refusal above
+      // guards — the open must provision it AND recompute it from the ledger.
+      rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
+
+      const [reopened] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+
+      expect(readSeparationRows(result)).toEqual(expected);
+      await expect(
+        storeRuntime(reopened).validateIdentity(),
+      ).resolves.toBeUndefined();
     } finally {
       await result.backend.close();
     }

@@ -3682,6 +3682,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // re-enter the per-graph write lock the commit holds. Idempotent, so a
     // no-op when identity is already enabled (the common evolve case).
     if (identityCandidate !== undefined) {
+      // Any derived relation this provisions is rebuilt by the commit
+      // preflight below, so the recompute it reports is already owed.
       await ensureIdentitySchemaStorage(this.#baseBackend, this.#sqlSchema(), {
         graphId: this.graphId,
         enablement: false,
@@ -5717,17 +5719,21 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   // (CREATE TABLE / CREATE INDEX IF NOT EXISTS), so it is a harmless no-op
   // when the schema turns out to be pending (finding: enablement requires an
   // applied migration) or the tables already exist.
+  let identitySchema: SqlSchema | undefined;
+  let recomputeIdentityDerivedRelations = false;
   if (merged.identity !== undefined) {
     // Brand-validate BEFORE the DDL: a counterfeit schema-shaped object must
     // reject with INVALID_SQL_SCHEMA and leave no tables behind — and must
     // not surface as IDENTITY_STORAGE_MISSING on an already enabled graph.
-    await ensureIdentitySchemaStorage(
-      backend,
+    identitySchema =
       options?.schema === undefined ?
         createSqlSchema(backend.tableNames)
-      : requireSqlSchema(options.schema, "store schema"),
-      { graphId: merged.id, enablement: identityEnablement },
-    );
+      : requireSqlSchema(options.schema, "store schema");
+    ({ recomputeDerivedRelations: recomputeIdentityDerivedRelations } =
+      await ensureIdentitySchemaStorage(backend, identitySchema, {
+        graphId: merged.id,
+        enablement: identityEnablement,
+      }));
   }
 
   const identityGate: IdentitySchemaGate | undefined =
@@ -5789,6 +5795,27 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   // for deployments that must not run index builds inline at boot.
   if (options?.systemIndexes !== "skip") {
     await materializeSystemIndexesOnBoot(backend, merged.id, result);
+  }
+
+  // A derived identity relation this library version added, created empty
+  // above on a database that predates it: recompute it from the assertion
+  // ledger before anything reads or validates it. Once per database — the
+  // relation exists on every later open. An enablement or identity-semantics
+  // change already rebuilds inside its own schema-commit preflight, and a
+  // breaking gate leaves the schema unusable, so neither needs this.
+  if (
+    recomputeIdentityDerivedRelations &&
+    identitySchema !== undefined &&
+    merged.identity !== undefined &&
+    result.status !== "breaking"
+  ) {
+    await rebuildIdentityClosureForContext({
+      backend,
+      graphId: merged.id,
+      registry: buildKindRegistry(merged),
+      schema: identitySchema,
+      sameIdAcrossKinds: merged.identity.sameIdAcrossKinds,
+    });
   }
 
   return {

@@ -28,6 +28,14 @@
  * sound. Never add a NEW invariant as a fingerprint or a simulation arm alone:
  * make the applier or the post-write assertion enforce it against real state,
  * then simulate it for the error message if useful.
+ *
+ * Beneath all of it sits a layer that is not code at all: the derived identity
+ * separation relation (`identity/separation.ts`) carries a CHECK constraint
+ * that no plan, simulation, or applier can satisfy while a `different`
+ * assertion sits inside one identity class. A plan that slips past every guard
+ * above still aborts in the engine, and its
+ * `IdentitySeparationViolationError` — an `IDENTITY_`-coded refusal — is
+ * translated here like any other applier refusal.
  */
 import { requireDefined } from "../utils/presence";
 import type { CanonicalEntity } from "./canonicalize";

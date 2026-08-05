@@ -1695,8 +1695,8 @@ export type GraphBackend = Readonly<{
   /**
    * Idempotently ensure ONLY the three Operational Identity relations exist —
    * the current-assertions table, the recorded-time assertions table, and the
-   * derived closure table — with their indexes (CREATE TABLE / CREATE INDEX IF
-   * NOT EXISTS).
+   * derived closure and separation tables — with their indexes and CHECK
+   * constraints (CREATE TABLE / CREATE INDEX IF NOT EXISTS).
    *
    * First enablement of identity on an existing populated deployment attaches
    * via `createStore` / `createSqliteBackend` / `createPostgresBackend`, none
@@ -1719,6 +1719,7 @@ export type GraphBackend = Readonly<{
       identityAssertions: string;
       recordedIdentityAssertions: string;
       identityClosure: string;
+      identitySeparation: string;
     }>,
     options: Readonly<{ provisionMissing: boolean }>,
   ) => Promise<readonly string[]>;

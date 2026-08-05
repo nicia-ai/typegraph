@@ -629,6 +629,54 @@ export class IdentityContradictionError extends TypeGraphError {
   }
 }
 
+export type IdentitySeparationViolationErrorDetails = Readonly<{
+  graphId: string;
+  /**
+   * `"database"` when the CHECK constraint on the separation relation aborted
+   * the write — the backstop firing as designed. `"writer"` when the write was
+   * accepted, which means the relation was provisioned without its constraint
+   * and only the writer's own re-check caught the contradiction.
+   */
+  enforcedBy: "database" | "writer";
+  /** The single class key both endpoints collapsed onto. */
+  classKey: string;
+  /** The `different` assertion whose endpoints landed in one class. */
+  assertionId: string;
+  a: Readonly<{ kind: string; id: string }>;
+  b: Readonly<{ kind: string; id: string }>;
+}>;
+
+/**
+ * Thrown when the derived separation relation refuses a write that would place
+ * both endpoints of a current `different` assertion in one identity class.
+ *
+ * This is the database-level backstop beneath the plan-time simulation and the
+ * applier's validation. Reaching it means an earlier layer let a contradiction
+ * through: the transaction is aborted rather than committed, but the layer that
+ * should have refused it typed and early is worth investigating.
+ */
+export class IdentitySeparationViolationError extends TypeGraphError {
+  declare readonly details: IdentitySeparationViolationErrorDetails;
+
+  constructor(
+    details: IdentitySeparationViolationErrorDetails,
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    super(
+      `Identity separation violated: ${details.a.kind}/${details.a.id} and ${details.b.kind}/${details.b.id} are held apart by assertion ${details.assertionId}, but this write would put both in identity class ${details.classKey}.`,
+      "IDENTITY_SEPARATION_VIOLATION",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Retract the conflicting different assertion before merging these identity classes. If no application call requested this merge, the write reached the ledger through a path that skipped identity validation.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "IdentitySeparationViolationError";
+  }
+}
+
 /**
  * Details for RestrictedDeleteError.
  */

@@ -43,6 +43,8 @@ export type SqlTableNames = Readonly<{
   recordedIdentityAssertions?: string | undefined;
   /** Derived current identity closure */
   identityClosure?: string | undefined;
+  /** Derived separation relation over identity classes */
+  identitySeparation?: string | undefined;
   /** Node fulltext table name (default: "typegraph_node_fulltext") */
   fulltext: string;
   /** Node uniques table name (default: "typegraph_node_uniques") */
@@ -65,6 +67,7 @@ export type ResolvedSqlTableNames = Readonly<{
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
+  identitySeparation: string;
   /** Node fulltext table name */
   fulltext: string;
   /** Node uniques table name */
@@ -92,6 +95,8 @@ type SqlSchemaFields = Readonly<{
   recordedIdentityAssertionsTable: SqlFragment;
   /** Get a `SqlFragment` reference to the derived identity closure. */
   identityClosureTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the derived identity separation relation. */
+  identitySeparationTable: SqlFragment;
   /** Get a `SqlFragment` reference to the fulltext table. */
   fulltextTable: SqlFragment;
 }>;
@@ -115,6 +120,7 @@ export abstract class SqlSchema implements SqlSchemaFields {
   abstract readonly identityAssertionsTable: SqlFragment;
   abstract readonly recordedIdentityAssertionsTable: SqlFragment;
   abstract readonly identityClosureTable: SqlFragment;
+  abstract readonly identitySeparationTable: SqlFragment;
   abstract readonly fulltextTable: SqlFragment;
 }
 
@@ -130,6 +136,7 @@ class SqlSchemaDescriptor extends SqlSchema {
   readonly identityAssertionsTable: SqlFragment;
   readonly recordedIdentityAssertionsTable: SqlFragment;
   readonly identityClosureTable: SqlFragment;
+  readonly identitySeparationTable: SqlFragment;
   readonly fulltextTable: SqlFragment;
 
   constructor(fields: SqlSchemaFields) {
@@ -151,6 +158,7 @@ class SqlSchemaDescriptor extends SqlSchema {
     this.recordedIdentityAssertionsTable =
       fields.recordedIdentityAssertionsTable;
     this.identityClosureTable = fields.identityClosureTable;
+    this.identitySeparationTable = fields.identitySeparationTable;
     this.fulltextTable = fields.fulltextTable;
     Object.freeze(this);
   }
@@ -169,6 +177,7 @@ const DEFAULT_TABLE_NAMES: ResolvedSqlTableNames = {
   identityAssertions: "typegraph_identity_assertions",
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
+  identitySeparation: "typegraph_identity_separation",
   fulltext: "typegraph_node_fulltext",
   uniques: "typegraph_node_uniques",
 };
@@ -191,6 +200,8 @@ function resolveTableNames(
       DEFAULT_TABLE_NAMES.recordedIdentityAssertions,
     identityClosure:
       names.identityClosure ?? DEFAULT_TABLE_NAMES.identityClosure,
+    identitySeparation:
+      names.identitySeparation ?? DEFAULT_TABLE_NAMES.identitySeparation,
     fulltext: names.fulltext ?? DEFAULT_TABLE_NAMES.fulltext,
     uniques: names.uniques ?? DEFAULT_TABLE_NAMES.uniques,
   };
@@ -303,6 +314,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
     "recordedIdentityAssertions",
   );
   validateTableName(tables.identityClosure, "identityClosure");
+  validateTableName(tables.identitySeparation, "identitySeparation");
   validateTableName(tables.fulltext, "fulltext");
   validateTableName(tables.uniques, "uniques");
 
@@ -319,6 +331,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
       tables.recordedIdentityAssertions,
     ),
     identityClosureTable: sql.identifier(tables.identityClosure),
+    identitySeparationTable: sql.identifier(tables.identitySeparation),
     fulltextTable: sql.identifier(tables.fulltext),
   });
 }
@@ -493,6 +506,7 @@ export function recordedReadSqlSchema(binding: RecordedReadBinding): SqlSchema {
     identityAssertionsTable: schema.identityAssertionsTable,
     recordedIdentityAssertionsTable: schema.recordedIdentityAssertionsTable,
     identityClosureTable: schema.identityClosureTable,
+    identitySeparationTable: schema.identitySeparationTable,
     fulltextTable: schema.fulltextTable,
   });
 }

@@ -138,6 +138,28 @@ disjointness is rejected when it would make a persisted class contradictory.
 nodes and current assertions. It validates integrity and never advances the
 content revision.
 
+### The database-level backstop
+
+The checks above are code deciding whether a write is legal, and code can be
+wrong. Underneath them TypeGraph maintains a second derived relation — the
+**separation relation** — that holds one row per pair of identity classes a
+current `different` assertion keeps apart, keyed by the two class keys under a
+`CHECK (class_key_low < class_key_high)` constraint.
+
+Every transaction that fuses two identity classes relabels the affected
+separation rows in the same statement batch. Fusing two classes that were
+separated relabels both sides of their shared row to one key, the constraint
+rejects it, and the transaction aborts — in the engine, with no application
+code in the way. A write that reaches the ledger through a path that skipped
+identity validation therefore still cannot commit a contradictory graph; it
+fails with an `IdentitySeparationViolationError` naming the `different`
+assertion it contradicts.
+
+Nothing about the identity API changes. The relation is derived and
+maintained wherever the closure is, `rebuildIdentityClosure(store)` recomputes
+it from the ledger, and store-open validation checks it against that
+recomputation the same way it checks the closure.
+
 ## Temporal identity
 
 Integrity is **structural**; reads are **coordinate-visible**.

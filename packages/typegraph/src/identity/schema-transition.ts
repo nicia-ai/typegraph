@@ -21,13 +21,25 @@ function identityTableNames(schema: SqlSchema): Readonly<{
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
+  identitySeparation: string;
 }> {
   return {
     identityAssertions: schema.tables.identityAssertions,
     recordedIdentityAssertions: schema.tables.recordedIdentityAssertions,
     identityClosure: schema.tables.identityClosure,
+    identitySeparation: schema.tables.identitySeparation,
   };
 }
+
+/**
+ * Identity relations added AFTER the profile shipped. On an already-enabled
+ * graph their absence is an upgrade, not data loss: they are derived, so they
+ * can be provisioned empty and recomputed from the ledger, while a missing
+ * ledger or closure relation stays a refusal.
+ */
+const UPGRADEABLE_DERIVED_RELATIONS: ReadonlySet<string> = new Set([
+  "identitySeparation",
+]);
 
 /**
  * Ensures the identity relations exist before a schema-commit transaction
@@ -36,20 +48,38 @@ function identityTableNames(schema: SqlSchema): Readonly<{
  * the commit already holds.
  *
  * `enablement` (the target schema turns identity on for the first time) is the
- * only case allowed to provision missing tables. On an already-enabled graph a
- * missing relation is data loss, not a provisioning gap, so it is refused.
+ * only case allowed to provision a missing LEDGER or closure relation. On an
+ * already-enabled graph those going missing is data loss, not a provisioning
+ * gap, so it is refused.
+ *
+ * Reports whether a derived relation had to be created — the caller owes it a
+ * recompute, because an empty derived relation disagrees with the ledger.
  */
 export async function ensureIdentitySchemaStorage(
   backend: GraphBackend,
   schema: SqlSchema,
   options: Readonly<{ graphId: string; enablement: boolean }>,
-): Promise<void> {
-  const missingTables =
-    (await backend.ensureIdentityTables?.(identityTableNames(schema), {
-      provisionMissing: options.enablement,
-    })) ?? [];
-  if (options.enablement) return;
-  assertIdentityStoragePresent(options.graphId, missingTables);
+): Promise<Readonly<{ recomputeDerivedRelations: boolean }>> {
+  const ensureIdentityTables = backend.ensureIdentityTables;
+  if (ensureIdentityTables === undefined) {
+    return { recomputeDerivedRelations: false };
+  }
+  const tableNames = identityTableNames(schema);
+  const missingTables = await ensureIdentityTables(tableNames, {
+    provisionMissing: options.enablement,
+  });
+  if (options.enablement || missingTables.length === 0) {
+    return { recomputeDerivedRelations: false };
+  }
+  assertIdentityStoragePresent(
+    options.graphId,
+    missingTables.filter((name) => !UPGRADEABLE_DERIVED_RELATIONS.has(name)),
+  );
+  // Every missing relation is an upgradeable derived one: the first call
+  // withheld its DDL (that withholding is what protects a lost ledger), so
+  // ask again now that the refusal above has cleared it.
+  await ensureIdentityTables(tableNames, { provisionMissing: true });
+  return { recomputeDerivedRelations: true };
 }
 
 /**
@@ -98,7 +128,7 @@ function assertIdentityStoragePresent(
     },
     {
       suggestion:
-        "Restore missing assertion-ledger tables from backup. If only the derived closure is missing, recreate that relation with the standard TypeGraph DDL, open the Store, and run rebuildIdentityClosure() before serving traffic.",
+        "Restore missing assertion-ledger tables from backup. If only the derived relations (closure, separation) are missing, recreate them with the standard TypeGraph DDL, open the Store, and run rebuildIdentityClosure() before serving traffic.",
     },
   );
 }

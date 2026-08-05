@@ -20,6 +20,7 @@
  */
 import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   primaryKey,
@@ -49,6 +50,7 @@ export type SqliteTableNames = Readonly<{
   identityAssertions: string;
   recordedIdentityAssertions: string;
   identityClosure: string;
+  identitySeparation: string;
   uniques: string;
   schemaVersions: string;
   fulltext: string;
@@ -86,6 +88,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   identityAssertions: "typegraph_identity_assertions",
   recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
   identityClosure: "typegraph_identity_closure",
+  identitySeparation: "typegraph_identity_separation",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
@@ -333,6 +336,30 @@ export function createSqliteTables(
     ],
   );
 
+  // The identity separation relation: the `different` ledger lifted to whole
+  // identity classes, one row per separated class pair. `class_key_low` /
+  // `class_key_high` hold the persisted class-key encoding (see
+  // `identity/separation.ts`), ordered by code point so the CHECK below —
+  // SQLite compares TEXT with the BINARY collation, which is code-point order
+  // — rejects `low = high`. Fusing two separated classes relabels both sides
+  // of their shared row to one key, so the contradiction cannot commit.
+  const identitySeparation = sqliteTable(
+    n.identitySeparation,
+    {
+      graphId: text("graph_id").notNull(),
+      classKeyLow: text("class_key_low").notNull(),
+      classKeyHigh: text("class_key_high").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.classKeyLow, t.classKeyHigh] }),
+      index(`${n.identitySeparation}_high_idx`).on(t.graphId, t.classKeyHigh),
+      check(
+        `${n.identitySeparation}_ordered_pair_check`,
+        sql`class_key_low < class_key_high`,
+      ),
+    ],
+  );
+
   const uniques = sqliteTable(
     n.uniques,
     {
@@ -488,6 +515,7 @@ export function createSqliteTables(
     identityAssertions,
     recordedIdentityAssertions,
     identityClosure,
+    identitySeparation,
     uniques,
     schemaVersions,
     indexMaterializations,

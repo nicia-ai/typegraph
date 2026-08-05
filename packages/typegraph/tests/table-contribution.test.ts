@@ -18,6 +18,7 @@ import {
 import { createPostgresTables } from "../src/backend/drizzle/schema/postgres";
 import { createSqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { type FulltextStrategy, tsvectorStrategy } from "../src/query/dialect";
+import { requireDefined } from "../src/utils/presence";
 
 function fulltextContribution(
   contributions: ReturnType<typeof postgresContributions>,
@@ -148,5 +149,57 @@ describe("TableContribution — custom strategy via the ownedTables API", () => 
     expect(ddl).toContain(
       'CREATE TABLE IF NOT EXISTS "typegraph_node_fulltext" (id TEXT);',
     );
+  });
+});
+
+/**
+ * The separation relation's ordered-pair CHECK is the database-level identity
+ * contradiction backstop. It is declared once, in the Drizzle table, and must
+ * survive BOTH consumers of that declaration: drizzle-kit migrations and the
+ * runtime DDL the column-walker emits. A walker that silently dropped checks
+ * would leave every runtime-provisioned database without the barrier.
+ */
+function separationCreateTableDdl(
+  contributions: ReturnType<typeof sqliteContributions>,
+): string {
+  const found = contributions.find(
+    (contribution) => contribution.logicalName === "identitySeparation",
+  );
+  if (found === undefined) throw new Error("no identitySeparation table");
+  return requireDefined(found.createDdl[0]);
+}
+
+describe("identity separation ordered-pair constraint", () => {
+  it("emits the CHECK in the SQLite create statement", () => {
+    const ddl = separationCreateTableDdl(
+      sqliteContributions(createSqliteTables()),
+    );
+
+    expect(ddl).toContain(
+      'CONSTRAINT "typegraph_identity_separation_ordered_pair_check" CHECK (class_key_low < class_key_high)',
+    );
+  });
+
+  it("pins the C collation in the PostgreSQL create statement", () => {
+    const ddl = separationCreateTableDdl(
+      postgresContributions(createPostgresTables()),
+    );
+
+    // Without an explicit collation the CHECK would use the database default,
+    // which on a linguistic collation orders text differently from the writer
+    // and would reject legitimate pairs.
+    expect(ddl).toContain(
+      'CHECK (class_key_low COLLATE "C" < class_key_high COLLATE "C")',
+    );
+  });
+
+  it("derives the constraint name from a custom table name", () => {
+    const ddl = separationCreateTableDdl(
+      sqliteContributions(
+        createSqliteTables({ identitySeparation: "app_separation" }),
+      ),
+    );
+
+    expect(ddl).toContain('CONSTRAINT "app_separation_ordered_pair_check"');
   });
 });

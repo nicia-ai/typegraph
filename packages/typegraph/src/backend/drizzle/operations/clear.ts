@@ -54,6 +54,11 @@ export function buildClearGraph(
       requiredTableName: getTableName(tables.recordedClock),
     },
     {
+      query: sql`DELETE FROM ${tables.identitySeparation} WHERE ${tables.identitySeparation.graphId} = ${graphId}`,
+      ignoreMissingTable: true,
+      requiredTableName: getTableName(tables.identitySeparation),
+    },
+    {
       query: sql`DELETE FROM ${tables.identityClosure} WHERE ${tables.identityClosure.graphId} = ${graphId}`,
       ignoreMissingTable: true,
       requiredTableName: getTableName(tables.identityClosure),

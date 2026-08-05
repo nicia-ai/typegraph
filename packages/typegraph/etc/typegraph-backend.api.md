@@ -808,6 +808,7 @@ export type GraphBackend = Readonly<{
         identityAssertions: string;
         recordedIdentityAssertions: string;
         identityClosure: string;
+        identitySeparation: string;
     }>, options: Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
@@ -1376,6 +1377,7 @@ export type ResolvedSqlTableNames = Readonly<{
     identityAssertions: string;
     recordedIdentityAssertions: string;
     identityClosure: string;
+    identitySeparation: string;
     fulltext: string;
     uniques: string;
 }>;
@@ -1580,6 +1582,7 @@ export type SqlTableNames = Readonly<{
     identityAssertions?: string | undefined;
     recordedIdentityAssertions?: string | undefined;
     identityClosure?: string | undefined;
+    identitySeparation?: string | undefined;
     fulltext: string;
     uniques: string;
 }>;
