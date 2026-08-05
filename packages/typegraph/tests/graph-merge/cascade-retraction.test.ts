@@ -405,4 +405,79 @@ describe.each(backendMatrix())("cascade retraction [$name]", (entry) => {
       false,
     );
   });
+
+  it("hands the cause on to the merge target, so a second diff still reads it", async () => {
+    // The stored cause has to COMPOSE, or it only survives one merge. A merge
+    // commits its node deletions BEFORE the identity applier, so the target's
+    // own cascade stamps the row and the applier's retraction finds nothing
+    // open left to end. Flip that order and the applier would close the row
+    // unstamped, the later cascade would skip it (it only ends OPEN rows), and
+    // every merged-through cascade would degrade to `explicit` — the exact
+    // misclassification this ledger column exists to prevent, reintroduced one
+    // merge downstream.
+    const forkPoint = await anchoredForkPoint();
+    const imported = await importGraph(
+      forkPoint,
+      assertionDocument("cascade-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(imported.success).toBe(true);
+    // Taken BEFORE the merge, so it can serve as the base the merged target is
+    // diffed against afterwards.
+    const preMerge = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_C }),
+    );
+    const deleteBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await deleteBranch.store.nodes.Anchor.delete("b" as never);
+
+    const result = await merge(forkPoint, [deleteBranch], {
+      branchOrder: [BRANCH_A],
+    });
+    if (isErr(result)) throw result.error;
+    const rows = await storeRuntime(forkPoint).identityAssertionRowsByIds([
+      "cascade-id",
+    ]);
+    expect(rows.get("cascade-id")?.endedBy).toEqual({
+      kind: "Anchor",
+      id: "b",
+    });
+    // And the target now diffs the way the branch did.
+    const secondDiff = await diffAgainstBase(preMerge.store, forkPoint);
+    expect(requireDefined(secondDiff.identity.retracted[0])).toMatchObject({
+      assertion: { id: "cascade-id" },
+      cause: { kind: "cascade", deletedNode: { kind: "Anchor", id: "b" } },
+    });
+  });
+
+  it("hands on an EXPLICIT retraction with no cause attached", async () => {
+    // The contrast that makes the case above mean something: the applier ends
+    // the target's row itself here, and an applier ending is nobody's cascade.
+    const forkPoint = await anchoredForkPoint();
+    const imported = await importGraph(
+      forkPoint,
+      assertionDocument("cascade-id", "a", "b"),
+      { onConflict: "skip" },
+    );
+    expect(imported.success).toBe(true);
+    const retractBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await retractBranch.store.identity.retractAssertion(
+      asIdentityAssertionId("cascade-id"),
+    );
+
+    const result = await merge(forkPoint, [retractBranch], {
+      branchOrder: [BRANCH_A],
+    });
+    if (isErr(result)) throw result.error;
+    const row = requireDefined(
+      (
+        await storeRuntime(forkPoint).identityAssertionRowsByIds(["cascade-id"])
+      ).get("cascade-id"),
+    );
+    expect(row.validTo).toBeDefined();
+    expect(row.endedBy).toBeUndefined();
+  });
 });
