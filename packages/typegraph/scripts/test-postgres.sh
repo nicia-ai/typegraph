@@ -53,9 +53,11 @@ if [[ -n "${VITEST_SHARD:-}" ]]; then
   vitest_args+=("--shard=$VITEST_SHARD")
 fi
 
+# tests/backends/integration/ is deliberately absent: it holds suite
+# definitions registered via createIntegrationTestSuite, not *.test.ts files,
+# so listing it matches nothing and reads as coverage that is not there.
 vitest_args+=(
   tests/backends/postgres/
-  tests/backends/integration/
   tests/graph-merge/
   tests/property/graph-merge/
   # Mixed-backend suites. These run the SQLite family in the default lane and
