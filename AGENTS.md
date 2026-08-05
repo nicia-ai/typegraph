@@ -96,6 +96,22 @@ resolves its URL with `await provisionPostgresTestDatabase(import.meta.url)`
 and creates its own tables in `beforeAll` — it cannot inherit them from
 another suite. See [Per-suite PostgreSQL databases](docs/TESTING.md#per-suite-postgresql-databases).
 
+# Pull Requests
+
+Squash merges use the PR description as the commit message, so the body is
+permanent history, not review chatter:
+
+- **Keep the description accurate to the final state of the branch.** When
+  review rounds change behavior or invalidate a design rationale, update the
+  body — a stale explanation in the commit message is worse than none.
+- **No hard line-wrapping in the body.** Write single-line paragraphs and let
+  GitHub wrap; hard-wrapped markdown renders ragged in the squash commit.
+- **No gates / verification / tests-run sections.** CI is the record of what
+  ran. The description says what changed and why. Measurement tables,
+  benchmark results, and design rationale are content and belong; test
+  inventories are not.
+- **End with a `Closes #NNN` line for every issue the PR resolves.**
+
 # Core Principles
 
 - **TypeScript strict mode** with readonly types by default
