@@ -755,7 +755,11 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
           numRuns: LAW_RUNS,
         },
       );
-    });
+      // Coverage-instrumented CI shards run each PGlite boot several times
+      // slower than a bare run; the default 60s test timeout is not sized
+      // for LAW_RUNS × per-iteration store fixtures (same allowance as
+      // merge-laws.test.ts).
+    }, 300_000);
   }
 
   it("merges random target-advanced incremental histories lawfully", async () => {
@@ -834,5 +838,5 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
       }),
       { examples: [[RETRACTION_MISMATCH_EXAMPLE]], numRuns: LAW_RUNS },
     );
-  });
+  }, 300_000);
 });

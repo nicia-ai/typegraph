@@ -59,7 +59,9 @@ import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import {
+  assertEffectiveValidityLowerBound,
   assertOrderedValidityWindow,
+  nowIso,
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
@@ -834,6 +836,17 @@ async function performNodeUpdate<G extends GraphDef>(
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
   assertOrderedValidityWindow(`${kind} "${id}"`, validFrom, validTo);
+  // The EFFECTIVE lower bound: an explicit validFrom, else — resurrection —
+  // the write instant the backend will stamp, else the live row's stored
+  // bound. A lone past validTo must not be born inverted.
+  assertEffectiveValidityLowerBound(
+    `${kind} "${id}"`,
+    validFrom ??
+      (options?.clearDeleted && existing.deleted_at !== undefined ?
+        nowIso()
+      : existing.valid_from),
+    validTo,
+  );
 
   const writeContext = createNodeWriteContext(ctx.graphId, ctx.registry, lock);
   // `validFrom` reaches the backend only through a resurrecting write (see

@@ -920,6 +920,7 @@ export async function migrateSchema<G extends GraphDef>(
       // staging still see them.
       await prepareIdentityKindCascade(backend, target, {
         droppedNodeKinds,
+        probeBeforeCascade: storedSchema?.identity === undefined,
         ...(options?.schema === undefined ? {} : { schema: options.schema }),
       })
     : await prepareIdentitySchemaCommit(backend, target, {
@@ -976,6 +977,11 @@ async function prepareIdentityKindCascade<G extends GraphDef>(
   options: Readonly<{
     droppedNodeKinds: readonly string[];
     schema?: SqlSchema;
+    // False when THIS commit is the one disabling identity: writers on the
+    // still-enabled prior schema can commit assertions until the commit
+    // transaction takes its locks, so the outside-transaction emptiness
+    // probe is not sound and the locked cascade must always run.
+    probeBeforeCascade: boolean;
   }>,
 ): Promise<
   ((transactionBackend: TransactionBackend) => Promise<void>) | undefined
@@ -985,13 +991,15 @@ async function prepareIdentityKindCascade<G extends GraphDef>(
     options.schema === undefined ?
       createSqlSchema(backend.tableNames)
     : requireSqlSchema(options.schema, "The schema option");
-  const needed = await identityKindCascadeNeeded(
-    backend,
-    schema,
-    target.id,
-    options.droppedNodeKinds,
-  );
-  if (!needed) return undefined;
+  if (options.probeBeforeCascade) {
+    const needed = await identityKindCascadeNeeded(
+      backend,
+      schema,
+      target.id,
+      options.droppedNodeKinds,
+    );
+    if (!needed) return undefined;
+  }
   return identityKindCascadePreflight(
     { graphId: target.id, schema },
     options.droppedNodeKinds,

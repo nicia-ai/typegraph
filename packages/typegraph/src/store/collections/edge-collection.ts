@@ -807,11 +807,19 @@ export function createEdgeCollection<
             }
           }
 
+          // An explicit window blocks coalescing ONLY when it would change
+          // the stored window: merge commits pass the staged survivor's
+          // window on every edge write, so a target edge staged back at
+          // itself (identical props AND identical window) must still
+          // coalesce instead of rewriting history and revision state.
+          const windowChanges =
+            (item.validFrom !== undefined &&
+              item.validFrom !== original?.valid_from) ||
+            (item.validTo !== undefined && item.validTo !== original?.valid_to);
           const coalesce =
             dirty?.unchanged === true &&
             deletedAt === undefined &&
-            item.validFrom === undefined &&
-            item.validTo === undefined;
+            !windowChanges;
 
           if (coalesce) {
             if (pendingEntry === undefined) {

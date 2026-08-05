@@ -731,6 +731,12 @@ async function performEdgeUpdate<G extends GraphDef>(
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
   assertOrderedValidityWindow(`edge "${id}"`, validFrom, validTo);
+  // Deliberately NO effective-lower-bound check here (nodes have one): edge
+  // resurrection with a lone past `validTo` is sanctioned public behavior —
+  // `getOrCreateByEndpoints` resurrects an ended employment directly into the
+  // inactive state and counts it against cardinality accordingly. Edges also
+  // RETAIN their stored lower bound on resurrection, so the "born inverted"
+  // corruption the node check closes cannot silently arise from a merge here.
 
   // `validFrom` reaches the backend only through a resurrecting write (see
   // UpdateEdgeParams): a live edge's lower bound is history and stays put.

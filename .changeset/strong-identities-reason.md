@@ -397,3 +397,19 @@ re-window. Canonicalization that would move a COMMITTED assertion's own
 endpoints refuses with a specific typed conflict (committed rows cannot
 be rewritten), and window-identical upserts coalesce again instead of
 rewriting version and history state.
+
+**Final pre-merge pass.** A last scoped external review of the previous
+hardening commit returned three refinements, all applied: the
+disabled-identity cascade's outside-transaction emptiness probe is
+skipped when THIS commit is the one disabling identity (writers on the
+still-enabled prior schema could otherwise slip an assertion in between
+probe and lock — the locked cascade always runs for that shape); node
+writes validate the EFFECTIVE validity lower bound, so a lone historical
+`validTo` on a resurrecting upsert refuses typed instead of persisting a
+born-inverted, permanently invisible window (edge resurrection keeps its
+sanctioned resurrect-as-ended contract — edges retain their stored lower
+bound, so the node-side corruption cannot arise there); and bulk edge
+coalescing compares explicit windows against the stored window, so
+no-op incremental merges stop rewriting byte-identical target edges.
+The property law lanes carry explicit five-minute test budgets sized
+for coverage-instrumented CI shards.

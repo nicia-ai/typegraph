@@ -207,6 +207,38 @@ export function validateOptionalCanonicalIsoDate(
  *   (e.g. `Person "01H..."`).
  * @throws ValidationError if both endpoints are present and out of order
  */
+/**
+ * Refuses a `validTo` whose EFFECTIVE lower bound would invert the window.
+ * On a resurrecting write the backend stamps the write instant as the new
+ * lower bound when no `validFrom` accompanies the write, so a lone past
+ * `validTo` would be born inverted — permanently invisible at every
+ * coordinate. On a live-row update the stored lower bound is the effective
+ * one and must stay <= the new `validTo`.
+ */
+export function assertEffectiveValidityLowerBound(
+  subject: string,
+  effectiveValidFrom: string | undefined,
+  validTo: string | undefined,
+): void {
+  if (validTo === undefined || effectiveValidFrom === undefined) return;
+  if (effectiveValidFrom <= validTo) return;
+  throw new ValidationError(
+    `Inverted validity window for ${subject}: the effective validFrom "${effectiveValidFrom}" is after validTo "${validTo}".`,
+    {
+      issues: [
+        {
+          path: "validTo",
+          message: `Expected the effective validFrom <= validTo, got "${effectiveValidFrom}" > "${validTo}". On a resurrecting write, pass an explicit validFrom alongside a historical validTo.`,
+        },
+      ],
+    },
+    {
+      suggestion:
+        "Provide both validFrom and validTo for a historical window, or drop validTo to keep the row current.",
+    },
+  );
+}
+
 export function assertOrderedValidityWindow(
   subject: string,
   validFrom: string | undefined,

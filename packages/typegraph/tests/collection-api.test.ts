@@ -950,6 +950,37 @@ describe("Bulk Operations (SQLite)", () => {
       expect(resurrected.meta.deletedAt).toBeUndefined();
     });
 
+    it("refuses a lone past validTo on a resurrecting upsert", async () => {
+      // A resurrection resets the lower bound to the write instant when no
+      // validFrom accompanies it, so a lone historical validTo would be born
+      // INVERTED — permanently invisible at every coordinate. The effective
+      // window is validated instead of silently persisting the corruption.
+      const person = await store.nodes.Person.createFromRecord(
+        { name: "Windowed" },
+        { id: "person-window" },
+      );
+      await store.nodes.Person.delete(person.id);
+
+      await expect(
+        store.nodes.Person.upsertByIdFromRecord(
+          "person-window",
+          { name: "Windowed Reborn" },
+          { validTo: "2021-01-01T00:00:00.000Z" },
+        ),
+      ).rejects.toThrow(ValidationError);
+
+      // The full historical window is the sanctioned form.
+      const resurrected = await store.nodes.Person.upsertByIdFromRecord(
+        "person-window",
+        { name: "Windowed Reborn" },
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      );
+      expect(resurrected.id).toBe("person-window");
+    });
+
     it("rejects invalid data at runtime via Zod validation", async () => {
       const data: Record<string, unknown> = { wrongField: true };
       await expect(
