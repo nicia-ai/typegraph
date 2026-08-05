@@ -228,23 +228,47 @@ traversal supports the same option.
 TypeGraph does not perform automatic graph-wide expansion and collection reads
 such as `getById` have no identity option.
 
+The two coordinates reach membership differently, and they cost differently.
+
 At the current coordinate the hop reads the materialized closure through its
-indexes, but the edge join remains a correlated predicate. On broad edge kinds,
-the planner may scan matching edges per source row; track that optimization in
-[typegraph#270](https://github.com/nicia-ai/typegraph/issues/270). A
-**historical** hop — one under `asOf`, `asOfRecorded`, or a non-current `view()`
-— cannot use the materialized closure, because it represents only the present.
-It instead embeds a recursive class rebuild inside the correlated edge
-predicate. Under `sameIdAcrossKinds: "fold"` that rebuild also has to
-consider the structural same-id relation, which is proportional to the number
-of live nodes in the graph. On the narrow-edge fixture used to isolate this
-term, a historical expanded hop costs roughly *source rows × graph size*:
-SQLite end-to-end query time was 45 ms at *n* = 250, 172 ms at 500, 671 ms at
-1000 and 2.8 s at 2000 — quadratic. Broad edge kinds additionally pay the
-candidate-edge correlation tracked in #270. Keep identity-expanded traversals
-narrowly filtered until the current and historical planner work tracked in
-[typegraph#270](https://github.com/nicia-ai/typegraph/issues/270) and
-[typegraph#310](https://github.com/nicia-ai/typegraph/issues/310) lands.
+indexes, but it does so from inside a correlated predicate, so the edge join
+stays correlated too. On broad edge kinds the planner may scan matching edges
+per source row; keep current-coordinate expanded traversals narrowly filtered
+until the de-correlation tracked in
+[typegraph#270](https://github.com/nicia-ai/typegraph/issues/270) lands.
+
+A **historical** hop — one under `asOf`, `asOfRecorded`, or a non-current
+`view()` — cannot use the materialized closure, because the closure represents
+only the present. It rebuilds identity classes from the assertion ledger, and
+under `sameIdAcrossKinds: "fold"` that rebuild also has to consider the
+structural same-id relation, which is proportional to the number of live nodes
+in the graph. That rebuild is now hoisted to a single materialized relation
+evaluated **once per query** — keyed by the nodes that have identity peers at
+all, not by the frontier — which each traversal step joins. The cost is
+therefore one reconstruction plus an ordinary indexed edge join per expanded
+member, rather than a reconstruction per candidate *(source row, edge)* pair.
+Measured on the narrow-edge fixture that isolates the term (SQLite, *n* Person
+nodes each folded with a Company peer, all *n* acting as source rows, fan-out 1):
+
+| *n* | before | after |
+| --- | --- | --- |
+| 250 | 122 ms | 7 ms |
+| 500 | 486 ms | 7 ms |
+| 1000 | 1984 ms | 14 ms |
+| 2000 | 8261 ms | 28 ms |
+
+Growth is linear in graph size where it used to quadruple per doubling. Because
+the step now joins the class relation instead of testing membership per
+candidate row, a historical hop no longer pays the correlated candidate-edge
+scan either — that residual cost applies to the current coordinate only, and
+remains #270's subject.
+
+One caveat is worth planning around: the hoisted relation is built for the whole
+graph at that coordinate, so a historical expanded traversal from a handful of
+nodes still pays for one reconstruction over the identity ledger and the
+folded-id population. It is cheap in absolute terms on small and mid-sized
+graphs and no longer grows with the number of source rows, but it is not
+proportional to how little you asked for.
 
 ## Interchange and branch merge
 
