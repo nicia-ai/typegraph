@@ -1441,6 +1441,15 @@ function buildAssertionRow(
   };
 }
 
+/**
+ * A nullable assertion column. An absent value inlines a literal `NULL` rather
+ * than binding one, so the tuple's worst-case bind count is what
+ * `parametersPerItem` below assumes.
+ */
+function nullableAssertionValue(value: string | undefined): SqlFragment {
+  return value === undefined ? sql`NULL` : sql`${value}`;
+}
+
 async function insertAssertionRows(
   target: Backend,
   schema: SqlSchema,
@@ -1453,24 +1462,21 @@ async function insertAssertionRows(
     parametersPerItem: 14,
   });
   for (const rowChunk of chunk(rows, chunkSize)) {
-    const values = rowChunk.map((row) => {
-      const validTo =
-        row.valid_to === undefined ? sql`NULL` : sql`${row.valid_to}`;
-      const deletedAt =
-        row.deleted_at === undefined ? sql`NULL` : sql`${row.deleted_at}`;
-      const endedByKind =
-        row.ended_by_kind === undefined ? sql`NULL` : sql`${row.ended_by_kind}`;
-      const endedById =
-        row.ended_by_id === undefined ? sql`NULL` : sql`${row.ended_by_id}`;
-      return sql`
+    // Tuple order follows IDENTITY_ASSERTION_COLUMNS, which is also the INSERT's
+    // column clause below.
+    const values = rowChunk.map(
+      (row) => sql`
         (
                 ${row.graph_id}, ${row.id}, ${row.rel}, ${row.a_kind}, ${row.a_id},
-                ${row.b_kind}, ${row.b_id}, ${row.valid_from}, ${validTo},
-                ${row.created_at}, ${row.updated_at}, ${deletedAt},
-                ${endedByKind}, ${endedById}
+                ${row.b_kind}, ${row.b_id}, ${row.valid_from},
+                ${nullableAssertionValue(row.valid_to)},
+                ${row.created_at}, ${row.updated_at},
+                ${nullableAssertionValue(row.deleted_at)},
+                ${nullableAssertionValue(row.ended_by_kind)},
+                ${nullableAssertionValue(row.ended_by_id)}
               )
-      `;
-    });
+      `,
+    );
     await executeIdentityStatement(
       target,
       sql`
