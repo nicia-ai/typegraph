@@ -198,6 +198,120 @@ export function registerIdentityImportIntegrationTests(
       ).resolves.toBeUndefined();
     });
 
+    it("carries a cascade cause through an archival round-trip", async () => {
+      // An archival export exists to preserve endings, and an ending is not
+      // fully described by WHEN it happened: a merge treats a cascade and an
+      // explicit retraction differently. Dropping the cause on export would
+      // silently downgrade every cascade in the document to an explicit
+      // retraction, so it travels with the row.
+      const { store: source, alice, author, bob } = await seedSource(context);
+      const cascaded = await source.identity.assertSame(alice, author);
+      const explicit = await source.identity.assertSame(alice, bob);
+      await source.identity.retractAssertion(explicit.assertion.id);
+      await source.nodes.Author.delete(author.id);
+
+      const archive = await exportGraph(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      const exported = archive.identity?.assertions ?? [];
+      expect(
+        exported.find((assertion) => assertion.id === cascaded.assertion.id)
+          ?.endedBy,
+      ).toEqual({ kind: "Author", id: "author" });
+      expect(
+        exported.find((assertion) => assertion.id === explicit.assertion.id)
+          ?.endedBy,
+      ).toBeUndefined();
+
+      const target = await context.createStore(identityInterchangeTargetGraph);
+      const result = await importGraph(target, archive, {
+        onConflict: "skip",
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.identity).toEqual({ created: 2, skipped: 0 });
+
+      const restored = await exportGraph(target, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      expect(restored.identity).toEqual(archive.identity);
+
+      // A re-import still recognizes the row as already present, which it can
+      // only do if the stored cause matches the document's.
+      const again = await importGraph(target, archive, { onConflict: "skip" });
+      expect(again.errors).toEqual([]);
+      expect(again.identity).toEqual({ created: 0, skipped: 2 });
+    });
+
+    it("rejects an ending cause that no ending or endpoint supports", async () => {
+      const {
+        store: source,
+        alice,
+        aliceRef,
+        authorRef,
+      } = await seedSource(context);
+      const bobRef: Ref = { kind: "Person", id: "bob" };
+
+      // A cause without an ending describes nothing.
+      await expect(
+        storeRuntime(source).importIdentityAssertionsAtTarget(
+          source.backend,
+          [
+            {
+              ...transfer("open-cause", aliceRef, authorRef, isoAt(-HOUR_MS)),
+              endedBy: aliceRef,
+            },
+          ],
+          "archival",
+        ),
+      ).rejects.toMatchObject({
+        name: "ValidationError",
+        details: matchingObject({
+          issues: matchingArray([
+            expect.objectContaining({
+              code: "IDENTITY_IMPORT_ENDED_BY_WITHOUT_END",
+            }),
+          ]),
+        }),
+      });
+
+      // A cascade only ever ends assertions that TOUCH the deleted node, so a
+      // cause naming a stranger describes an ending that cannot have happened.
+      await expect(
+        storeRuntime(source).importIdentityAssertionsAtTarget(
+          source.backend,
+          [
+            {
+              ...transfer(
+                "stranger-cause",
+                aliceRef,
+                authorRef,
+                isoAt(-HOUR_MS),
+                isoAt(-HOUR_MS / 2),
+              ),
+              endedBy: bobRef,
+            },
+          ],
+          "archival",
+        ),
+      ).rejects.toMatchObject({
+        name: "ValidationError",
+        details: matchingObject({
+          issues: matchingArray([
+            expect.objectContaining({
+              code: "IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT",
+            }),
+          ]),
+        }),
+      });
+
+      expect(await source.identity.membersOf(alice)).toEqual([aliceRef]);
+      await expect(
+        storeRuntime(source).validateIdentity(),
+      ).resolves.toBeUndefined();
+    });
+
     it("rejects an archival assertion that ends in the future", async () => {
       const {
         store: source,

@@ -18,6 +18,7 @@ import {
   asCompiledRowsSql,
   asCompiledStatementSql,
 } from "../../../src/query/sql-intent";
+import { storeRuntime } from "../../../src/store/runtime-port";
 import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
@@ -994,6 +995,130 @@ export function registerIdentityIntegrationTests(
       expect(await store.identity.membersOf(company)).toEqual([
         { kind: "Company", id: "erased-company" },
       ]);
+    });
+
+    it("stamps the deleting node on the assertions its soft delete ends", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "cause-alice" },
+      );
+      const aliceCo = await store.nodes.Company.create(
+        { name: "Alice LLC" },
+        { id: "cause-alice-co" },
+      );
+      const bob = await store.nodes.Person.create(
+        { name: "Bob" },
+        { id: "cause-bob" },
+      );
+      const bobCo = await store.nodes.Company.create(
+        { name: "Bob LLC" },
+        { id: "cause-bob-co" },
+      );
+      const cascaded = await store.identity.assertSame(alice, aliceCo);
+      const retracted = await store.identity.assertSame(bob, bobCo);
+
+      await store.identity.retractAssertion(retracted.assertion.id);
+      await store.nodes.Person.delete(alice.id);
+
+      const rows = await storeRuntime(store).identityAssertionRowsByIds([
+        cascaded.assertion.id,
+        retracted.assertion.id,
+      ]);
+      // The cascade names the node that caused it — one of the row's own
+      // endpoints, never the surviving one.
+      expect(rows.get(cascaded.assertion.id)?.endedBy).toEqual({
+        kind: "Person",
+        id: "cause-alice",
+      });
+      // An explicit retraction ended nothing on anyone's behalf.
+      expect(rows.get(retracted.assertion.id)?.validTo).toBeDefined();
+      expect(rows.get(retracted.assertion.id)?.endedBy).toBeUndefined();
+    });
+
+    it("leaves no cause on a retraction issued in the deletion's own instant", async () => {
+      // The residue the stored cause exists to remove: at millisecond
+      // resolution these two acts are one instant, so nothing about the stored
+      // WINDOW can tell them apart. Only the absent stamp can.
+      const instant = new Date();
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(instant);
+      try {
+        const store = context.getStore();
+        const person = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "tie-person" },
+        );
+        const company = await store.nodes.Company.create(
+          { name: "Alice LLC" },
+          { id: "tie-company" },
+        );
+        const assertion = await store.identity.assertSame(person, company);
+        await store.identity.retractAssertion(assertion.assertion.id);
+        await store.nodes.Person.delete(person.id);
+
+        const rows = await readAssertionRows(store, {
+          kind: "Person",
+          id: "tie-person",
+        });
+        const row = requireDefined(rows[0]);
+        const deleted = requireDefined(
+          await store
+            .view({ mode: "includeTombstones" })
+            .nodes.Person.getById(person.id),
+        );
+        // Same stored instant on both sides — the equality the superseded
+        // derivation read as proof of a cascade.
+        expect(toInstant(row.valid_to)).toBe(deleted.meta.deletedAt);
+        const stored = await storeRuntime(store).identityAssertionRowsByIds([
+          assertion.assertion.id,
+        ]);
+        expect(stored.get(assertion.assertion.id)?.endedBy).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("mirrors the stored cause into recorded time", async () => {
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(
+        context.getStore().graph,
+        backend,
+        { history: true },
+      );
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "recorded-cause-person" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Alice LLC" },
+        { id: "recorded-cause-company" },
+      );
+      const assertion = await store.identity.assertSame(person, company);
+
+      await store.nodes.Person.delete(person.id);
+
+      const schema = createSqlSchema(backend.tableNames);
+      const recorded = await backend.execute<
+        Readonly<{ op: string; ended_by_kind: unknown; ended_by_id: unknown }>
+      >(
+        asCompiledRowsSql(sql`
+          SELECT op, ended_by_kind, ended_by_id
+          FROM ${schema.recordedIdentityAssertionsTable}
+          WHERE graph_id = ${store.graphId} AND id = ${assertion.assertion.id}
+          ORDER BY recorded_from
+        `),
+      );
+      // The mirror carries the cause with the ending it recorded: the creating
+      // image has none, the updating image names the deleted endpoint.
+      expect(recorded.map((row) => row.op)).toEqual(["create", "update"]);
+      expect(requireDefined(recorded[0]).ended_by_kind ?? undefined).toBe(
+        undefined,
+      );
+      expect(requireDefined(recorded[1]).ended_by_kind).toBe("Person");
+      expect(requireDefined(recorded[1]).ended_by_id).toBe(
+        "recorded-cause-person",
+      );
     });
 
     it("persists a zero-width window when the clock skews backward", async () => {
