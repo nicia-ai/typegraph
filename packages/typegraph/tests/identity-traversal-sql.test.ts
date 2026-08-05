@@ -150,6 +150,25 @@ describe("identity traversal SQL shape", () => {
               expect(
                 countOccurrences(sqlText, `COALESCE("identity_peer".id,`),
               ).toBe(EXPANDED_STEPS[shape]);
+
+              // The relation's source, counted per shape rather than asserted
+              // once: only the historical relation walks the assertion ledger,
+              // and only a recursive traversal adds a second fixed point of its
+              // own. Pinning both numbers together is what distinguishes "the
+              // current coordinate reads the closure" from "its reconstruction
+              // silently reappeared inside a recursive step".
+              expect({
+                recursions: countOccurrences(sqlText, "WITH RECURSIVE"),
+                seeds: countOccurrences(
+                  sqlText,
+                  "seeds(seed_kind, seed_id) AS (",
+                ),
+              }).toEqual({
+                recursions:
+                  (coordinate === "historical" ? 1 : 0) +
+                  (shape === "recursive" ? 1 : 0),
+                seeds: coordinate === "historical" ? 1 : 0,
+              });
             });
           }
 
