@@ -1,3 +1,5 @@
+import { canonicalizeDatabaseTimestamp } from "../../utils/date";
+
 /**
  * Coalesce dirty-check shared by `upsertById` / `bulkUpsertById`.
  *
@@ -44,6 +46,23 @@ export type UpsertDirtyCheckFunction = (
  * `onError` wiring (matching flag-off) — the error is re-raised there, not
  * swallowed.
  */
+/**
+ * Whether one requested window endpoint differs from the stored one, compared as
+ * instants rather than as driver text. An omitted request never changes anything.
+ */
+function windowFieldChanges(
+  requested: string | undefined,
+  stored: string | undefined,
+): boolean {
+  if (requested === undefined) {
+    return false;
+  }
+  return (
+    canonicalizeDatabaseTimestamp(requested) !==
+    canonicalizeDatabaseTimestamp(stored)
+  );
+}
+
 export function shouldCoalesceUpsert(
   existing: Readonly<{
     deleted_at: string | undefined;
@@ -54,14 +73,20 @@ export function shouldCoalesceUpsert(
   runDirtyCheck: (() => UpsertDirtyCheck) | undefined,
 ): boolean {
   // An explicit temporal override blocks coalescing ONLY when it would
-  // change the stored window: merge commits pass the staged survivor's
-  // window on every canonical write, so a target row staged back at itself
-  // (identical props AND identical window) must still coalesce instead of
-  // rewriting version, history, and revision state.
+  // change the stored window: merge commits pass the staged survivor's window
+  // on every canonical write, and a graph merge passes an inherited row's
+  // reconciled end-of-validity, so a row written back with the window it
+  // already holds (identical props AND identical window) must still coalesce
+  // instead of rewriting version, history, and revision state.
+  //
+  // Both sides are canonicalized before comparison: the STORED value is raw
+  // driver text (postgres-js renders `timestamptz` its own way) while the
+  // caller's is an ISO 8601 instant, so a raw string compare would report a
+  // change on PostgreSQL that SQLite reports as none — the same write
+  // coalescing on one backend and not the other.
   const windowChanges =
-    (options?.validFrom !== undefined &&
-      options.validFrom !== existing.valid_from) ||
-    (options?.validTo !== undefined && options.validTo !== existing.valid_to);
+    windowFieldChanges(options?.validFrom, existing.valid_from) ||
+    windowFieldChanges(options?.validTo, existing.valid_to);
   if (
     runDirtyCheck === undefined ||
     existing.deleted_at !== undefined ||

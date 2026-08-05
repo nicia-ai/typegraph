@@ -14,6 +14,9 @@
  *     independent commits even when the logical result is identical. These are
  *     STRIPPED, and every props bag is re-serialized through the same canonical,
  *     recursively key-sorted JSON form so key-ordering noise cannot leak in.
+ *     The bitemporal `valid_from` / `valid_to` are NOT stripped: the merge
+ *     resolves a row's end-of-validity, so they are decided output, not noise —
+ *     comparing ids and props alone would certify a window divergence as lawful.
  *   - Every array in the report and the graph is sorted by a stable key so two
  *     orderings that produce the same SET produce the same SEQUENCE.
  *
@@ -38,6 +41,7 @@ import type {
   MergeReport,
 } from "../../../src/graph-merge/types";
 import { storeBackend } from "../../../src/store/runtime-port";
+import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 
 /** Lexicographic comparator over two strings (ids, kinds, properties). */
 function compareStrings(left: string, right: string): number {
@@ -99,6 +103,15 @@ type NormalizedDropped = Readonly<{
   reason: string;
 }>;
 
+/** A resolved end-of-validity in canonical form. */
+type NormalizedValidityEnd = Readonly<{
+  entity: string;
+  kind: string;
+  id: string;
+  validTo: string;
+  claimedBy: readonly string[];
+}>;
+
 /** Per-branch provenance materialized from the report closure, sorted. */
 type NormalizedProvenance = Readonly<{
   branchId: string;
@@ -124,18 +137,33 @@ export type NormalizedReport = Readonly<{
   deleteModifyConflicts: readonly NormalizedDeleteModify[];
   typeReconciliations: readonly NormalizedTypeReconciliation[];
   dropped: readonly NormalizedDropped[];
+  validityEnds: readonly NormalizedValidityEnd[];
   baseAmbiguities: readonly NormalizedBaseAmbiguity[];
   provenance: readonly NormalizedProvenance[];
 }>;
 
-/** A committed node reduced to id + kind + canonical props (meta stripped). */
+/**
+ * A committed row's valid-time window, canonicalized to instants.
+ *
+ * Part of the compared form, not stripped meta: the merge decides a row's
+ * end-of-validity (issue #369), so two orderings that resolve to DIFFERENT ends
+ * must fail the determinism gate rather than compare equal on props alone.
+ * Canonicalized because the raw column text differs per driver.
+ */
+type NormalizedWindow = Readonly<{
+  validFrom: string | undefined;
+  validTo: string | undefined;
+}>;
+
+/** A committed node reduced to id + kind + canonical props + window. */
 type NormalizedNode = Readonly<{
   id: string;
   kind: string;
   props: string;
+  window: NormalizedWindow;
 }>;
 
-/** A committed edge reduced to its structural identity (meta stripped). */
+/** A committed edge reduced to its structural identity + window. */
 type NormalizedEdge = Readonly<{
   id: string;
   kind: string;
@@ -144,7 +172,21 @@ type NormalizedEdge = Readonly<{
   fromKind: string;
   toKind: string;
   props: string;
+  window: NormalizedWindow;
 }>;
+
+/** Reads a row's window as canonical instants. */
+function normalizeWindow(
+  row: Readonly<{
+    valid_from: string | undefined;
+    valid_to: string | undefined;
+  }>,
+): NormalizedWindow {
+  return {
+    validFrom: canonicalizeDatabaseTimestamp(row.valid_from),
+    validTo: canonicalizeDatabaseTimestamp(row.valid_to),
+  };
+}
 
 /** The fully canonical, deep-equal-comparable form of a committed graph. */
 export type NormalizedGraph = Readonly<{
@@ -248,6 +290,23 @@ export function normalizeReport<G extends GraphDef>(
       compareStrings(`${left.kind}|${left.id}`, `${right.kind}|${right.id}`),
     );
 
+  const validityEnds: readonly NormalizedValidityEnd[] = report.validityEnds
+    .map((entry) => ({
+      entity: entry.entity,
+      kind: entry.kind,
+      id: entry.id,
+      validTo: entry.validTo,
+      claimedBy: [...entry.claimedBy]
+        .map((branchId) => branchId as string)
+        .sort((left, right) => compareStrings(left, right)),
+    }))
+    .sort((left, right) =>
+      compareStrings(
+        `${left.entity}|${left.kind}|${left.id}`,
+        `${right.entity}|${right.kind}|${right.id}`,
+      ),
+    );
+
   const baseAmbiguities: readonly NormalizedBaseAmbiguity[] =
     report.baseAmbiguities
       .map((ambiguity) => ({
@@ -284,6 +343,7 @@ export function normalizeReport<G extends GraphDef>(
     deleteModifyConflicts,
     typeReconciliations,
     dropped,
+    validityEnds,
     baseAmbiguities,
     provenance,
   };
@@ -317,7 +377,12 @@ export async function normalizeGraph<G extends GraphDef>(
         continue;
       }
       const props = rowPropsToObject(row.props);
-      nodes.push({ id: row.id, kind: row.kind, props: canonicalProps(props) });
+      nodes.push({
+        id: row.id,
+        kind: row.kind,
+        props: canonicalProps(props),
+        window: normalizeWindow(row),
+      });
     }
   }
 
@@ -341,6 +406,7 @@ export async function normalizeGraph<G extends GraphDef>(
         fromKind: row.from_kind,
         toKind: row.to_kind,
         props: canonicalProps(props),
+        window: normalizeWindow(row),
       });
     }
   }

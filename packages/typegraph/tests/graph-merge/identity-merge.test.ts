@@ -694,6 +694,8 @@ function stagingWithIdentityChanges(
     newEdgesByKind: new Map(),
     modifiedEdges: [],
     deletedEdges: [],
+    windowedNodes: [],
+    windowedEdges: [],
     newIdentityAssertions: newAssertions,
     // These fixtures stage no node deletion, so every retraction in them is a
     // branch's own act — the cause a real diff would derive for it.

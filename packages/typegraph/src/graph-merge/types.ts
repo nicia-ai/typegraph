@@ -435,6 +435,24 @@ export type DroppedItem =
   | Readonly<{ kind: "identity"; id: string; reason: string }>;
 
 /**
+ * One inherited row whose end-of-validity the merge changed: the instant it
+ * applied and every branch that claimed an end for that row (including the ones
+ * whose claim lost the least-claim tie-break).
+ *
+ * `id` is bare because `entity` + `kind` already disambiguate it — a node and an
+ * edge, or two kinds, that share an id string are distinct entries.
+ */
+export type ValidityEndResolution = Readonly<{
+  entity: "node" | "edge";
+  kind: string;
+  id: string;
+  /** The instant the commit wrote, as a canonical UTC ISO 8601 string. */
+  validTo: string;
+  /** Every branch that claimed an end, sorted; length > 1 means arbitration. */
+  claimedBy: readonly BranchId[];
+}>;
+
+/**
  * A `(kind, id)` node identity as surfaced in the merge report. Node identity is the
  * PAIR, never the bare id (a `Doctor` and a `SpecialistDoctor` can share an id string),
  * so report shapes that name nodes carry both halves.
@@ -522,6 +540,18 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
   deleteModifyConflicts: readonly DeleteModifyConflict[];
   typeReconciliations: readonly TypeReconciliation[];
   dropped: readonly DroppedItem[];
+  /**
+   * Every inherited row whose END-OF-VALIDITY the merge changed, with the instant
+   * applied and the branches that claimed an end.
+   *
+   * Reported because the resolution is silent by design: two branches ending the
+   * same row at different instants are not in conflict (an ending is a monotone
+   * claim, like a deletion), so the earliest end is taken without a
+   * `PropertyConflict`. This list is how a caller sees that arbitration happened.
+   * Window deltas the commit CANNOT apply appear in {@link MergeReport.dropped}
+   * instead, with reason `"window-not-applicable"`.
+   */
+  validityEnds: readonly ValidityEndResolution[];
   /**
    * Ambiguous new-vs-base matches (§6.4-A): components that bridged ≥2 committed
    * base entities. Empty on the staged-vs-staged snapshot path.

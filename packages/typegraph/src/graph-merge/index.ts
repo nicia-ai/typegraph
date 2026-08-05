@@ -71,6 +71,7 @@ export type {
   ResolveMap,
   SimilarityStrategy,
   TypeReconciliation,
+  ValidityEndResolution,
 } from "./types";
 export { asBaseVersion, asBranchId } from "./types";
 export type { MakeBackend, WorkingCopyStrategy } from "./working-copy";
