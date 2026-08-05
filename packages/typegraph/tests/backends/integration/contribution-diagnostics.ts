@@ -1,13 +1,23 @@
 /**
- * Cross-backend contract for `store.verifyContributions()` (#324).
+ * Cross-backend contract for the whole contribution health ladder:
+ * `store.probeContributions()` (#377), `store.verifyContributions()` /
+ * `store.repairContributions()` (#324), and
+ * `store.rebuildContribution()` (#337).
  *
  * A durable contribution marker that says "initialized" is trusted by
  * every hot path without the catalog ever being consulted, so a database
  * whose strategy-owned tables were dropped out of band opens completely
- * clean and fails at the first read. These tests pin the diagnostic that
- * closes that gap — and they belong in the shared suite because the
- * verdicts are query-layer semantics, not per-dialect wiring: only the
- * same case run on both backends proves the catalog probe agrees.
+ * clean and fails at the first read. These tests pin the diagnostics and
+ * repairs that close that gap — and they belong in the shared suite
+ * because the verdicts are query-layer semantics, not per-dialect wiring:
+ * only the same case run on both backends proves the catalog probe, the
+ * repair, and the rebuild agree.
+ *
+ * All three rungs live in one file because they share one detection pass
+ * and one restore contract. The escalation tests are the point: a probe
+ * that reports `degraded` is only useful if the rung it points at
+ * actually resolves it, and that is a claim about two operations
+ * together.
  *
  * The fulltext contribution carries the cross-backend cases (every
  * backend in the suite owns one). The vector cases run only where the
@@ -20,16 +30,24 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { resolveGraphVectorSlots } from "../../../src";
+import {
+  ContributionRebuildUnsupportedError,
+  resolveGraphVectorSlots,
+} from "../../../src";
 import type { StrategyTableContribution } from "../../../src/backend/table-contribution";
 import type {
   AdapterBackend,
   ContributionDiagnostic,
   ContributionMaterializationRow,
+  ContributionProbeContribution,
+  ContributionProbeEntry,
+  ContributionProbeResult,
   GraphBackend,
 } from "../../../src/backend/types";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
-import { integrationTestGraph } from "./fixtures";
+import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
 const ARTICLE_KIND = "Article";
@@ -68,6 +86,92 @@ function entryFor(
   physicalName: string,
 ): ContributionDiagnostic | undefined {
   return diagnostics.find((entry) => entry.physicalName === physicalName);
+}
+
+/** One projection's probe entry, or `undefined` when it was not assessed. */
+function probeEntry(
+  result: ContributionProbeResult,
+  contribution: ContributionProbeContribution,
+): ContributionProbeEntry | undefined {
+  return result.entries.find((entry) => entry.contribution === contribution);
+}
+
+/** The error a rejected promise carries, or `undefined` when it resolves. */
+async function captureRejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
+
+// Postgres returns COUNT(*) as a string/bigint, SQLite as a number, so the
+// value is genuinely not statically a number.
+type CountRow = Readonly<{ cnt: unknown }>;
+
+/**
+ * Content rows in the fulltext table right now. The probe's read-only
+ * claim and the rebuild's refill claim are both about this number, and
+ * neither can be checked through the search API alone: an empty index and
+ * a refused one look the same from the outside.
+ */
+async function countFulltextRows(store: IntegrationStore): Promise<number> {
+  const backend = store.backend;
+  const table = requireDefined(
+    backend.tableNames?.fulltext,
+    "backend must resolve a fulltext table name",
+  );
+  const rows = await backend.execute<CountRow>(
+    asCompiledRowsSql(sql`
+      SELECT COUNT(*) AS cnt
+      FROM ${sql.identifier(table)}
+      WHERE graph_id = ${store.graphId}
+    `),
+  );
+  return Number(rows[0]?.cnt ?? 0);
+}
+
+/**
+ * Whether this backend can serve a destructive rebuild, skipping the test
+ * when it cannot. A skip rather than a conditional assertion: a backend
+ * with no schema fence has nothing to verify here, and the refusal it
+ * gives instead is pinned by the dialect-free unit suite.
+ */
+function requireRebuild(
+  context: IntegrationTestContext,
+  ctx: Readonly<{ skip: () => void }>,
+): boolean {
+  if (context.getStore().backend.capabilities.contributions?.rebuild === true) {
+    return true;
+  }
+  ctx.skip();
+  return false;
+}
+
+/**
+ * Marks a contribution's marker at a signature the current `createDdl` can
+ * never hash to, leaving the table itself untouched — the `stale` state,
+ * which is the one incremental repair cannot finish.
+ */
+async function markStale(
+  context: IntegrationTestContext,
+  contribution: StrategyTableContribution,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await requireDefined(
+    context.getBackend().recordContributionMaterialization,
+    "backend must record contribution markers",
+  )({
+    graphId: integrationTestGraph.id,
+    logicalName: contribution.logicalName,
+    owner: contribution.owner,
+    tableName: contribution.tableName,
+    signature: IMPOSSIBLE_SIGNATURE,
+    attemptedAt: now,
+    materializedAt: now,
+    error: undefined,
+  });
 }
 
 /** Run one raw DDL statement, refusing on a backend that cannot. */
@@ -504,6 +608,450 @@ export function registerContributionDiagnosticIntegrationTests(
       // one, so there is nothing to disagree about. Reporting it would be
       // a false positive on every store this backend ever opens.
       await expect(store.verifyContributions()).resolves.toEqual([]);
+    });
+
+    /**
+     * `store.probeContributions()` — the read-only bottom rung of the
+     * ladder. Nested here so these share the diagnostics suite's restore
+     * hook: the fulltext table is database-global, and one backend in the
+     * lane reuses a single engine across tests.
+     */
+    describe("readiness probe", () => {
+      it("reports every declared projection as ready on a healthy database", async () => {
+        const store = context.getStore();
+        const result = await store.probeContributions();
+
+        // The fixture declares searchable fields, so fulltext is always
+        // assessed; the vector projection appears only where the backend
+        // materialized the declared embedding slot.
+        const expected =
+          store.backend.capabilities.vector?.supported === true ?
+            [
+              { contribution: "fulltext", state: "ready" },
+              { contribution: "vector", state: "ready" },
+            ]
+          : [{ contribution: "fulltext", state: "ready" }];
+        expect(result.entries).toEqual(expected);
+      });
+
+      it("escalates a dropped fulltext table through repair to rebuild", async (ctx) => {
+        const store = context.getStore();
+        const backend = context.getBackend();
+        const contribution = fulltextContribution();
+
+        // Boot cached this contribution as initialized on this backend
+        // instance — the probe must not ride that cache.
+        expect(
+          probeEntry(await store.probeContributions(), "fulltext"),
+        ).toEqual({ contribution: "fulltext", state: "ready" });
+
+        const article = await store.nodes.Article.create({
+          title: "Probe escalation",
+          body: "Content that must survive the ladder.",
+          category: "health",
+          published: true,
+        });
+        await executeDdl(
+          backend,
+          `DROP TABLE IF EXISTS ${contribution.tableName}`,
+        );
+
+        const degraded = await store.probeContributions();
+        const fulltextEntry = degraded.entries.find(
+          (entry) => entry.contribution === "fulltext",
+        );
+        expect(fulltextEntry?.state).toBe("degraded");
+        // The detail names the table an operator would go looking for and
+        // the diagnostic state that decides which repair applies.
+        expect(fulltextEntry?.detail).toContain(contribution.tableName);
+        expect(fulltextEntry?.detail).toContain("orphaned-marker");
+
+        // The middle rung cannot finish this one, and says so rather than
+        // re-stamping a marker over storage that is gone.
+        const repair = await store.repairContributions();
+        expect(repair.results).toMatchObject([
+          {
+            diagnostic: {
+              physicalName: contribution.tableName,
+              state: "orphaned-marker",
+            },
+            status: "requires-rebuild",
+          },
+        ]);
+        expect(
+          probeEntry(await store.probeContributions(), "fulltext")?.state,
+        ).toBe("degraded");
+
+        if (store.backend.capabilities.contributions?.rebuild !== true) {
+          ctx.skip();
+          return;
+        }
+
+        // The top rung: recreate the storage and reconstruct its content
+        // from the node rows that were never lost.
+        const rebuilt = await store.rebuildContribution("fulltext");
+        expect(rebuilt.rebuilt).toEqual([contribution.tableName]);
+        expect(rebuilt.repopulated).toBeGreaterThanOrEqual(1);
+
+        expect(
+          probeEntry(await store.probeContributions(), "fulltext"),
+        ).toEqual({ contribution: "fulltext", state: "ready" });
+        await expect(store.verifyContributions()).resolves.toEqual([]);
+
+        // Ready means usable, not merely attested.
+        const hits = await store.search.fulltext("Article", {
+          query: "escalation",
+          limit: 10,
+        });
+        expect(hits.map((hit) => hit.node.id)).toContain(article.id);
+      });
+
+      it("reports a repairable marker failure as degraded and ready again after repair", async () => {
+        const store = context.getStore();
+        const contribution = fulltextContribution();
+        const snapshot = requireDefined(
+          snapshots[0],
+          "boot must record the fulltext contribution marker",
+        );
+
+        // Storage intact, bookkeeping wrong — the state the middle rung
+        // exists for. The projection is still degraded, because the
+        // hot-path gate refuses every fulltext read while it holds.
+        await requireDefined(
+          context.getBackend().recordContributionMaterialization,
+          "backend must record contribution markers",
+        )({
+          graphId: snapshot.graphId,
+          logicalName: snapshot.logicalName,
+          owner: snapshot.owner,
+          tableName: snapshot.tableName,
+          signature: snapshot.signature,
+          attemptedAt: new Date().toISOString(),
+          materializedAt: undefined,
+          error: "simulated marker failure",
+        });
+
+        const before = await store.probeContributions();
+        const entry = before.entries.find(
+          (candidate) => candidate.contribution === "fulltext",
+        );
+        expect(entry?.state).toBe("degraded");
+        expect(entry?.detail).toContain("missing-marker");
+
+        const repair = await store.repairContributions();
+        expect(repair.remaining).toEqual([]);
+        expect(
+          probeEntry(await store.probeContributions(), "fulltext"),
+        ).toEqual({ contribution: "fulltext", state: "ready" });
+        expect(contribution.tableName).toBe(snapshot.tableName);
+      });
+
+      it("reports a dropped vector slot as degraded and names its coordinates", async (ctx) => {
+        const store = context.getStore();
+        const strategy = store.backend.vectorStrategy;
+        if (
+          store.backend.capabilities.vector?.supported !== true ||
+          strategy === undefined
+        ) {
+          ctx.skip();
+          return;
+        }
+
+        const tableName = strategy.tableName(
+          integrationTestGraph.id,
+          ARTICLE_KIND,
+          ARTICLE_EMBEDDING_FIELD,
+        );
+        await executeDdl(
+          context.getBackend(),
+          `DROP TABLE IF EXISTS ${tableName}`,
+        );
+
+        const degraded = await store.probeContributions();
+        const vectorEntry = degraded.entries.find(
+          (entry) => entry.contribution === "vector",
+        );
+        expect(vectorEntry?.state).toBe("degraded");
+        // A vector slot is named by the coordinates a caller declared it
+        // with, not by the physical table they never chose.
+        expect(vectorEntry?.detail).toContain(
+          `${ARTICLE_KIND}.${ARTICLE_EMBEDDING_FIELD}`,
+        );
+        // Fulltext is a separate projection and is unaffected.
+        expect(
+          degraded.entries.find((entry) => entry.contribution === "fulltext"),
+        ).toEqual({ contribution: "fulltext", state: "ready" });
+
+        // The sanctioned repair for vector storage: recreate it and
+        // re-stamp. Not a rebuild — see the rebuild refusal below.
+        await store.reembedVectorField(ARTICLE_KIND, ARTICLE_EMBEDDING_FIELD);
+        expect(probeEntry(await store.probeContributions(), "vector")).toEqual({
+          contribution: "vector",
+          state: "ready",
+        });
+      });
+
+      it("writes nothing — marker rows and content are byte-identical across probes", async () => {
+        const store = context.getStore();
+        const backend = context.getBackend();
+        const read = requireDefined(
+          backend.getContributionMaterialization,
+          "backend must read contribution markers",
+        );
+
+        await store.nodes.Article.create({
+          title: "Read-only probe",
+          body: "Probing must not touch a single row.",
+          category: "health",
+          published: true,
+        });
+
+        async function markerRows(): Promise<
+          readonly (ContributionMaterializationRow | undefined)[]
+        > {
+          return Promise.all(
+            contributions.map((contribution) =>
+              read({
+                graphId: integrationTestGraph.id,
+                logicalName: contribution.logicalName,
+                owner: contribution.owner,
+                tableName: contribution.tableName,
+              }),
+            ),
+          );
+        }
+
+        const markersBefore = await markerRows();
+        const fulltextBefore = await countFulltextRows(store);
+        expect(fulltextBefore).toBeGreaterThan(0);
+
+        // Repeat, because a single call could plausibly be read-only while
+        // an "ensure on first use" path fires once.
+        const first = await store.probeContributions();
+        const second = await store.probeContributions();
+        const third = await store.probeContributions();
+
+        // `last_attempted_at` moves on any marker write, so equality here
+        // rules out a re-stamp as well as a state change.
+        expect(await markerRows()).toEqual(markersBefore);
+        expect(await countFulltextRows(store)).toBe(fulltextBefore);
+        expect(second).toEqual(first);
+        expect(third).toEqual(first);
+      });
+
+      it("keeps reporting ready while graph writes interleave with probes", async () => {
+        const store = context.getStore();
+
+        for (let round = 0; round < 3; round += 1) {
+          await store.nodes.Article.create({
+            title: `Interleaved ${round}`,
+            body: `Body for round ${round}.`,
+            category: "health",
+            published: true,
+          });
+          const probed = await store.probeContributions();
+          expect(
+            probed.entries.find((entry) => entry.contribution === "fulltext"),
+          ).toEqual({ contribution: "fulltext", state: "ready" });
+        }
+
+        // The writes are all searchable, so "ready" was not a claim about
+        // an index that had quietly stopped tracking them.
+        const hits = await store.search.fulltext("Article", {
+          query: "Interleaved",
+          limit: 10,
+        });
+        expect(hits.length).toBe(3);
+      });
+
+      it("stamps the graph revision only on a revision-tracked store", async () => {
+        const store = context.getStore();
+        // The suite's store is not revision-tracked, so there is no durable
+        // revision to stamp — and inventing one would be a weaker
+        // guarantee wearing a stronger name.
+        expect(store.revisionTrackingEnabled).toBe(false);
+        expect(await store.probeContributions()).not.toHaveProperty(
+          "graphRevision",
+        );
+
+        const tracked = await context.createStore(integrationTestGraph, {
+          revisionTracking: true,
+        });
+        // The revision clock has no anchor until the first tracked write,
+        // so a probe before one honestly has nothing to stamp.
+        expect(await tracked.probeContributions()).not.toHaveProperty(
+          "graphRevision",
+        );
+
+        await tracked.nodes.Person.create({ name: "Revision anchor" });
+        const probed = await tracked.probeContributions();
+        expect(typeof probed.graphRevision).toBe("string");
+        expect(probed.graphRevision).toBe(await tracked.revisionNow());
+      });
+    });
+
+    /**
+     * `store.rebuildContribution()` — the destructive top rung, and the
+     * only repair for storage provisioned at a shape the current DDL no
+     * longer produces.
+     */
+    describe("destructive rebuild", () => {
+      it("finishes a stale fulltext contribution that incremental repair cannot", async (ctx) => {
+        if (!requireRebuild(context, ctx)) return;
+        const store = context.getStore();
+        const contribution = fulltextContribution();
+
+        const article = await store.nodes.Article.create({
+          title: "Stale rebuild",
+          body: "Reconstructed from the node row, not from the index.",
+          category: "health",
+          published: true,
+        });
+        await markStale(context, contribution);
+
+        // The state #337 opened for: the table exists at the old shape, so
+        // the ordinary ensure path's idempotent CREATE is a no-op and
+        // re-stamping would bless the wrong shape.
+        expect(
+          entryFor(await store.verifyContributions(), contribution.tableName)
+            ?.state,
+        ).toBe("stale");
+        const repair = await store.repairContributions();
+        expect(repair.results).toMatchObject([{ status: "requires-rebuild" }]);
+        expect(entryFor(repair.remaining, contribution.tableName)?.state).toBe(
+          "stale",
+        );
+
+        const result = await store.rebuildContribution("fulltext");
+        expect(result.rebuilt).toEqual([contribution.tableName]);
+        expect(result.processed).toBeGreaterThanOrEqual(1);
+        expect(result.repopulated).toBeGreaterThanOrEqual(1);
+        expect(result.skipped).toBe(0);
+
+        await expect(store.verifyContributions()).resolves.toEqual([]);
+        expect(
+          probeEntry(await store.probeContributions(), "fulltext"),
+        ).toEqual({ contribution: "fulltext", state: "ready" });
+
+        // Content reconstructed, not merely storage recreated.
+        const hits = await store.search.fulltext("Article", {
+          query: "Reconstructed",
+          limit: 10,
+        });
+        expect(hits.map((hit) => hit.node.id)).toEqual([article.id]);
+      });
+
+      it("refuses a vector rebuild with the exact typed error and drops nothing", async (ctx) => {
+        const store = context.getStore();
+        const strategy = store.backend.vectorStrategy;
+        if (
+          store.backend.capabilities.vector?.supported !== true ||
+          strategy === undefined
+        ) {
+          ctx.skip();
+          return;
+        }
+
+        const before = await store.probeContributions();
+        const error = await captureRejection(
+          store.rebuildContribution("vector"),
+        );
+
+        expect(error).toBeInstanceOf(ContributionRebuildUnsupportedError);
+        expect(error).toMatchObject({
+          code: "CONTRIBUTION_REBUILD_UNSUPPORTED",
+          reason: "vector-source-unavailable",
+        });
+        // The suggestion is the whole point of refusing: there IS a
+        // destructive path for vectors, and it takes the callback that can
+        // regenerate what the drop destroys.
+        expect((error as Error & { suggestion?: string }).suggestion).toContain(
+          "reembedVectorField",
+        );
+
+        // A refusal, not a partial attempt.
+        expect(await store.probeContributions()).toEqual(before);
+        await expect(store.verifyContributions()).resolves.toEqual([]);
+      });
+
+      it("is not reachable from repairContributions", async (ctx) => {
+        if (!requireRebuild(context, ctx)) return;
+        const store = context.getStore();
+        const contribution = fulltextContribution();
+
+        const article = await store.nodes.Article.create({
+          title: "Untouched by repair",
+          body: "Repair must not drop this index.",
+          category: "health",
+          published: true,
+        });
+        await markStale(context, contribution);
+
+        // Repair reports the rebuild as required and then does nothing
+        // destructive: the existing rows are still in the existing table.
+        const rowsBefore = await countFulltextRows(store);
+        await store.repairContributions();
+        expect(await countFulltextRows(store)).toBe(rowsBefore);
+
+        // And the marker still records the stale shape — repair did not
+        // quietly re-stamp it at the current signature.
+        expect(
+          entryFor(await store.verifyContributions(), contribution.tableName)
+            ?.state,
+        ).toBe("stale");
+        expect(article.id).toBeTruthy();
+      });
+
+      it("reconstructs content the drop destroys", async (ctx) => {
+        if (!requireRebuild(context, ctx)) return;
+        const store = context.getStore();
+        const backend = context.getBackend();
+        const contribution = fulltextContribution();
+
+        const created = await Promise.all([
+          store.nodes.Article.create({
+            title: "Alpha reconstruction",
+            body: "First body.",
+            category: "health",
+            published: true,
+          }),
+          store.nodes.Article.create({
+            title: "Beta reconstruction",
+            body: "Second body.",
+            category: "health",
+            published: true,
+          }),
+        ]);
+
+        // Lose every content row, the way a partial restore would.
+        await executeDdl(
+          backend,
+          `DROP TABLE IF EXISTS ${contribution.tableName}`,
+        );
+
+        const result = await store.rebuildContribution("fulltext", {
+          pageSize: 1,
+        });
+        expect(result.repopulated).toBe(created.length);
+        expect(await countFulltextRows(store)).toBe(created.length);
+
+        const hits = await store.search.fulltext("Article", {
+          query: "reconstruction",
+          limit: 10,
+        });
+        expect(new Set(hits.map((hit) => hit.node.id))).toEqual(
+          new Set(created.map((article) => article.id)),
+        );
+      });
+
+      it("advertises the rebuild capability it can actually serve", () => {
+        const capabilities =
+          context.getStore().backend.capabilities.contributions;
+        expect(capabilities).toMatchObject({ supported: true, probe: true });
+        // Every backend in this lane has both a transactional schema fence
+        // and a fulltext strategy declaring teardown DDL.
+        expect(capabilities?.rebuild).toBe(true);
+      });
     });
   });
 }
