@@ -34,19 +34,6 @@ export type UpsertDirtyCheckFunction = (
 ) => UpsertDirtyCheck;
 
 /**
- * Whether a single upsert may be coalesced: coalescing is enabled
- * (`runDirtyCheck` present), the row is live, no explicit temporal override was
- * requested, and the props are unchanged. The dirty check runs last (only when
- * the cheap preconditions pass).
- *
- * A throw from the dirty check is treated as "do not coalesce". The check
- * validates the input, so it can throw a `ValidationError`; that must not fail
- * HERE, ahead of the operation hooks. Falling through to the normal write path
- * re-validates inside the hooked pipeline, which raises the error with correct
- * `onError` wiring (matching flag-off) — the error is re-raised there, not
- * swallowed.
- */
-/**
  * Whether one requested window endpoint differs from the stored one, compared as
  * instants rather than as driver text. An omitted request never changes anything.
  */
@@ -63,6 +50,19 @@ function windowFieldChanges(
   );
 }
 
+/**
+ * Whether a single upsert may be coalesced: coalescing is enabled
+ * (`runDirtyCheck` present), the row is live, no explicit temporal override was
+ * requested, and the props are unchanged. The dirty check runs last (only when
+ * the cheap preconditions pass).
+ *
+ * A throw from the dirty check is treated as "do not coalesce". The check
+ * validates the input, so it can throw a `ValidationError`; that must not fail
+ * HERE, ahead of the operation hooks. Falling through to the normal write path
+ * re-validates inside the hooked pipeline, which raises the error with correct
+ * `onError` wiring (matching flag-off) — the error is re-raised there, not
+ * swallowed.
+ */
 export function shouldCoalesceUpsert(
   existing: Readonly<{
     deleted_at: string | undefined;

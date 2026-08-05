@@ -36,7 +36,8 @@
  * Scenarios are identity histories (assert same/different, retract, delete a
  * node, END A NODE'S VALIDITY, hard-delete + recreate a node, import an
  * assertion under a CHOSEN id) over a fixed four-node universe, applied through
- * the public store API with only the expected semantic refusals skipped. Chosen-id imports matter: they
+ * the public store API with only the expected semantic refusals skipped.
+ * Chosen-id imports matter: they
  * are the only way two independent lineages mint the SAME assertion id — the
  * collision class every hand-built review repro lived in. Hard-delete /
  * recreate matters for the same reason within ONE lineage: it physically
