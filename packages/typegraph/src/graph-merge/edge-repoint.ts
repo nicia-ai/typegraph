@@ -23,23 +23,27 @@ import { requireDefined } from "../utils/presence";
  *      whose `entityId` is the surviving edge's id.
  *
  * SCOPE OF THE FOLD (issue #393). Steps 3 and 4 apply ONLY to a collision the
- * repointing INDUCED — a group whose members did not all start from the same
- * `(from, to)` endpoint pair, so two originally-distinct relationships became one
- * identity. The store is a MULTIGRAPH: nothing enforces uniqueness on
+ * repointing INDUCED. The store is a MULTIGRAPH: nothing enforces uniqueness on
  * `(from, type, to)`, `create()` makes a parallel edge, and
- * `getOrCreateByEndpoints()` is the opt-in set-semantics accessor. Folding an
- * ALREADY-colliding pair would therefore destroy authored multigraph intent and
- * break branch-effect commutativity — a merge must produce what the operation
- * would have produced applied directly to the target, and `create(x, y, props)`
- * on the target yields a parallel edge.
+ * `getOrCreateByEndpoints()` is the opt-in set-semantics accessor. Folding edges
+ * that ALREADY named the same endpoints would therefore destroy authored
+ * multigraph intent and break branch-effect commutativity — a merge must produce
+ * what the operation would have produced applied directly to the target, and
+ * `create(x, y, props)` on the target yields a parallel edge.
  *
- * So when every member of a group named the same endpoints before repointing, the
- * group is partitioned by EDGE ID and each id commits as its own row. Keying on
- * ID rather than props is the deciding line: re-staging one INHERITED row from
- * several branches is the same row (it folds, so concurrent property edits still
- * reconcile into one write), while a branch-CREATED row carries a fresh id and is
- * a new parallel edge even when its props happen to coincide with an inherited
- * one's. Consequently a window claim lands on the row its author touched.
+ * So the fold groups by PRE-REPOINT endpoint pair ({@link foldSets}): one row per
+ * pair collapses into a single set — that is the `x → a` / `x → b` case above —
+ * and every further row a pair authored commits as its own parallel row. A group
+ * that MIXES the two folds only across the pairs: a repointed `x → b` joining two
+ * parallel `x → a` rows collapses into the lower-id one of them and the other
+ * still commits, because repointing said nothing about the rows already there.
+ *
+ * What makes two staged edges one ROW is their EDGE ID, not equal props:
+ * re-staging one INHERITED row from several branches is the same row (it folds, so
+ * concurrent property edits still reconcile into one write), while a
+ * branch-CREATED row carries a fresh id and is a new parallel edge even when its
+ * props happen to coincide with an inherited one's. Consequently a window claim
+ * lands on the row its author touched.
  *
  * Determinism: the dedupe is a pure function of the (unordered) staged-edge SET.
  * Group membership derives only from the staged endpoints and {@link canonicalOf} —
@@ -133,7 +137,7 @@ export type StagedEdge = Readonly<{
 
 /**
  * A surviving merged edge after repoint + dedupe. `id` is the canonical survivor
- * of its collision group (the lexicographically-minimal contributing edge id);
+ * of its fold set (the lexicographically-minimal contributing edge id);
  * `mergedIds` is every staged edge id that collapsed into it (always includes
  * `id`), so the commit phase (T11) knows which inherited edges to fold away.
  */
@@ -230,12 +234,13 @@ function groupKey(fromKey: MergeKey, type: string, toKey: MergeKey): string {
 }
 
 /**
- * The PRE-repoint endpoint identity pair of a staged edge. Comparing these across a
- * collision group is what distinguishes a repoint-INDUCED collapse (members started
- * from different pairs) from ordinary multigraph multiplicity (they did not) — see
- * the module header. Direction-sensitive, so the reversed intra-cluster pair
- * `a → b` / `b → a` reads as two source pairs and still folds once `{a, b}` collapse.
- * JSON-encoded (see {@link dedupeKey}) so a separator-bearing id cannot fuse pairs.
+ * The PRE-repoint endpoint identity pair of a staged edge — the relationship the
+ * author named. {@link foldSets} partitions a collision group by it: distinct pairs
+ * are distinct relationships that repointing collapsed (so they fold), one pair is
+ * ordinary multigraph multiplicity (so it does not). Direction-sensitive, so the
+ * reversed intra-cluster pair `a → b` / `b → a` reads as two source pairs and still
+ * folds once `{a, b}` collapse. JSON-encoded (see {@link dedupeKey}) so a
+ * separator-bearing id cannot fuse pairs.
  */
 function sourcePairKey(fromKey: MergeKey, toKey: MergeKey): string {
   return JSON.stringify([fromKey, toKey]);
@@ -258,44 +263,105 @@ type RepointedEdge = Readonly<{
 }>;
 
 /**
+ * Groups a collision group's members into ROWS: one row per edge id, holding every
+ * staged copy of it. Two branches that both staged one inherited edge contribute two
+ * members of the SAME row — the id is what makes them the same row.
+ */
+function rowsById(
+  groupEdges: readonly RepointedEdge[],
+): ReadonlyMap<EdgeId, readonly RepointedEdge[]> {
+  const rows = new Map<EdgeId, RepointedEdge[]>();
+  for (const edge of groupEdges) {
+    const row = rows.get(edge.staged.id);
+    if (row === undefined) {
+      rows.set(edge.staged.id, [edge]);
+    } else {
+      row.push(edge);
+    }
+  }
+  return rows;
+}
+
+/**
+ * The pre-repoint relationship of each ROW: the minimal {@link sourcePairKey} its
+ * members named. A row normally names exactly one pair; the minimum keeps the choice
+ * total (and order-independent) for the chosen-id case where two branches staged the
+ * same edge id from different endpoints, which is still ONE row and so must land in
+ * exactly one fold set.
+ */
+function sourcePairByRow(
+  rows: ReadonlyMap<EdgeId, readonly RepointedEdge[]>,
+): ReadonlyMap<EdgeId, string> {
+  const pairs = new Map<EdgeId, string>();
+  for (const [id, members] of rows) {
+    const sorted = members
+      .map((member) => member.sourcePair)
+      .sort((left, right) => compareStrings(left, right));
+    pairs.set(id, requireDefined(sorted[0]));
+  }
+  return pairs;
+}
+
+/**
  * Partitions one `(from', type, to')` collision group into the member sets that each
  * commit as a SINGLE row.
  *
- * The whole group is one set when repointing induced the collision — its members do
- * not all share a pre-repoint endpoint pair, so originally-distinct relationships
- * became one identity and the §6.3 set-collapse applies. (A group that gains a
- * repointed member folds in FULL, including any member that was already there: once
- * repointing defines the group's identity, that identity is the collapsed one.)
+ * Two staged edges are the same ROW when they share an edge id; two rows are the same
+ * pre-repoint RELATIONSHIP when they named the same `(from, to)` pair before
+ * repointing. Repointing can collapse distinct relationships onto one identity, and
+ * that is the collision the §6.3 set-collapse exists for — so ONE row per pre-repoint
+ * pair (its minimum-id row, mirroring the min-id survivor rule) folds into a single
+ * set. Every FURTHER row a pair authored is ordinary multigraph multiplicity and
+ * commits as its own parallel row: nothing enforces uniqueness on `(from, type, to)`,
+ * so a merge that collapsed them would destroy multiplicity the branch author's
+ * operation would have produced applied straight to the target.
  *
- * Otherwise the members already named the same endpoints, so the collision is
- * multigraph multiplicity and the partition is by EDGE ID. Ids are returned in
- * lexicographic order for a stable emission order; neither the partition itself nor
- * the survivor within a set depends on input order.
+ * The two ends of that rule are the cases the module exists to get right:
+ *   - `x → a` and `x → b` both landing on `x → c*` are two pairs of one row each, so
+ *     they fold to one edge as before;
+ *   - two parallel `x → y` edges are one pair of two rows, so neither is folded away.
+ *
+ * A group that mixes them folds only ACROSS the pairs: a repointed `x → b` joining two
+ * parallel `x → a` rows collapses into the lower-id one of them and the other still
+ * commits, because repointing said nothing about the rows that were already there.
+ *
+ * Determinism: the partition derives only from the staged ids and their pre-repoint
+ * pairs — never from input order — and the sets are emitted in id order.
  */
 function foldSets(
   groupEdges: readonly RepointedEdge[],
 ): readonly (readonly RepointedEdge[])[] {
-  const sourcePairs = new Set(groupEdges.map((edge) => edge.sourcePair));
-  if (sourcePairs.size > 1) {
-    return [groupEdges];
-  }
-
-  const byId = new Map<EdgeId, RepointedEdge[]>();
-  for (const edge of groupEdges) {
-    const bucket = byId.get(edge.staged.id);
-    if (bucket === undefined) {
-      byId.set(edge.staged.id, [edge]);
-    } else {
-      bucket.push(edge);
+  const rows = rowsById(groupEdges);
+  const sourcePairs = sourcePairByRow(rows);
+  const representatives = new Map<string, EdgeId>();
+  for (const [id, pair] of sourcePairs) {
+    const representative = representatives.get(pair);
+    if (
+      representative === undefined ||
+      compareStrings(id, representative) < 0
+    ) {
+      representatives.set(pair, id);
     }
   }
-  return [...byId.keys()]
-    .sort((left, right) => compareStrings(left, right))
-    .map((id) => requireDefined(byId.get(id)));
+
+  const collapsed: RepointedEdge[] = [];
+  const parallel: (readonly RepointedEdge[])[] = [];
+  for (const id of [...rows.keys()].sort((left, right) =>
+    compareStrings(left, right),
+  )) {
+    const members = requireDefined(rows.get(id));
+    const pair = requireDefined(sourcePairs.get(id));
+    if (representatives.get(pair) === id) {
+      collapsed.push(...members);
+    } else {
+      parallel.push(members);
+    }
+  }
+  return [collapsed, ...parallel];
 }
 
 /**
- * Picks the canonical survivor edge of a collision group: the member with the
+ * Picks the canonical survivor edge of a fold set: the member with the
  * lexicographically-minimal edge id. Mirrors the node min-id canonical rule (T8)
  * so the surviving id is independent of input edge order. (`generateId()` is
  * nanoid — random, not time-prefixed — so min-id never leaks creation order.)
@@ -319,7 +385,7 @@ function pickSurvivor(
 }
 
 /**
- * Unions the props of one collision group's edges, resolving any per-property
+ * Unions the props of one fold set's edges, resolving any per-property
  * disagreement via the shared T8 conflict policy. Returns the surviving prop bag
  * plus an edge-level {@link PropertyConflict} for every property that genuinely
  * differed (its `entityId` is the surviving edge id).
@@ -504,14 +570,14 @@ function foldEdgeSet(
  * repointing brought together as a pure set operation keyed by
  * `(from' | type | to' | propsKey)`.
  *
- * Within a REPOINT-INDUCED collision group sharing `(from', type, to')` — one whose
- * members did not all name the same endpoints before repointing:
+ * Within each folded set — one row per PRE-REPOINT endpoint pair of a group sharing
+ * `(from', type, to')`:
  *   - identical props collapse silently to one edge,
  *   - DIFFERING props are reconciled by `policy` on the captured `branchRank`,
  *     recording one edge-level {@link PropertyConflict} per disagreeing property.
  *
- * Edges that already shared their endpoints are NOT folded together: the store is a
- * multigraph, so each distinct edge id commits as its own parallel row (see the
+ * The parallel rows a pair authored beyond that one are NOT folded together: the store
+ * is a multigraph, so each of them commits as its own row (see {@link foldSets} and the
  * module header for the full rule and why identity, not props equality, decides it).
  *
  * The surviving edge of every folded set is the lexicographically-minimal
@@ -581,8 +647,8 @@ export function repointEdges<G extends GraphDef = GraphDef>(
   }
 
   // Phase 2: partition every `(from', type, to')` group into the sets that commit as
-  // one row ({@link foldSets} — a repoint-induced collapse folds whole, ordinary
-  // multigraph multiplicity splits per edge id) and fold each set onto its survivor.
+  // one row ({@link foldSets} — one row per pre-repoint endpoint pair collapses,
+  // further parallel rows commit on their own) and fold each set onto its survivor.
   // A set whose members share one dedupe key is an exact-equal collapse (no conflict
   // is possible); several dedupe keys means props differ, so the union runs the
   // conflict policy.

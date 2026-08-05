@@ -35,6 +35,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  defineNodeIndex,
 } from "@nicia-ai/typegraph";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -42,10 +43,10 @@ import { z } from "zod";
 import { rowPropsToObject } from "../../src/backend/types";
 import { asEdgeId } from "../../src/core/types";
 import { branch } from "../../src/graph-merge/branch";
-import { merge } from "../../src/graph-merge/merge";
+import { merge, mergeIncremental } from "../../src/graph-merge/merge";
 import { unwrap } from "../../src/graph-merge/result";
 import { enumerateAllEdges } from "../../src/graph-merge/state-diff";
-import type { GraphBranch } from "../../src/graph-merge/types";
+import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
 import { canonicalizeDatabaseTimestamp } from "../../src/utils/date";
 import { backendMatrix, getStoreBackend } from "./test-utils";
@@ -54,12 +55,22 @@ const Patient = defineNode("Patient", {
   schema: z.object({ name: z.string() }),
 });
 const Encounter = defineNode("Encounter", {
-  schema: z.object({ reason: z.string() }),
+  schema: z.object({ reason: z.string(), code: z.string() }),
 });
 const hadEncounter = defineEdge("hadEncounter", {
   schema: z.object({ on: z.string() }),
   from: [Patient],
   to: [Encounter],
+});
+
+/**
+ * The new-vs-base block key the MIXED case resolves on: a declared, non-unique index
+ * over `code`, so a branch may stage a near-duplicate encounter carrying the committed
+ * one's code (a unique constraint would refuse it in the branch store itself).
+ */
+const encounterCode = defineNodeIndex(Encounter, {
+  name: "encounter_code_idx",
+  fields: ["code"],
 });
 
 const careGraph = defineGraph({
@@ -68,26 +79,62 @@ const careGraph = defineGraph({
   edges: {
     hadEncounter: { type: hadEncounter, from: [Patient], to: [Encounter] },
   },
+  indexes: [encounterCode],
 });
 type CareGraph = typeof careGraph;
 type CareStore = Store<CareGraph>;
 
 const PATIENT = { kind: "Patient", id: "pat-1" } as const;
 const ENCOUNTER = { kind: "Encounter", id: "enc-1" } as const;
+/** The near-duplicate encounter a branch stages in the MIXED case. */
+const DUPLICATE_ENCOUNTER = { kind: "Encounter", id: "enc-2" } as const;
 /** The inherited edge present at the fork point. */
 const INHERITED_EDGE = "edge-5";
 const INHERITED = asEdgeId<typeof hadEncounter>(INHERITED_EDGE);
+/** A SECOND inherited edge on the same endpoints, for the MIXED case. */
+const SECOND_INHERITED_EDGE = "edge-7";
+const SECOND_INHERITED = asEdgeId<typeof hadEncounter>(SECOND_INHERITED_EDGE);
 const BRANCH_A = asBranchId("parallel-branch-a");
+const TARGET_BRANCH = asBranchId("parallel-target");
 const BRANCH_ORDER = [BRANCH_A];
 
+/** The committed encounter's block key + reason, and the branch's near-duplicate of
+ *  it (Dice trigram ≈ 0.96 ≥ the case's threshold, so the two resolve as one). */
+const ENCOUNTER_CODE = "code-1";
+const ENCOUNTER_REASON = "routine annual physical examination";
+const DUPLICATE_REASON = "routine annual physical examinations";
+
 const INHERITED_DATE = "2026-01-05";
+/** What the SECOND inherited edge says at the fork point. */
+const SECOND_INHERITED_DATE = "2026-01-19";
 /** What a branch edits the INHERITED edge's `on` to. */
 const EDITED_DATE = "2026-02-02";
+/** What a branch edits the SECOND inherited edge's `on` to. */
+const SECOND_EDITED_DATE = "2026-02-16";
 /** What a branch's own, newly created parallel edge says. */
 const BRANCH_DATE = "2026-03-11";
 /** In the FUTURE: a row's `validFrom` defaults to creation, and an inverted
  *  window is refused, so an authorable end must be after that instant. */
 const END = "2100-01-01T00:00:00.000Z";
+
+/**
+ * Merge options for the MIXED case: the branch's near-duplicate encounter resolves
+ * against the committed one through the declared block index, so its edge repoints
+ * onto endpoints the inherited parallel rows already occupy.
+ */
+function resolveDuplicateEncounters(): MergeOptions<CareGraph> {
+  return {
+    resolve: {
+      Encounter: {
+        blockIndex: "encounter_code_idx",
+        similarity: { kind: "fulltext", fields: ["reason"] },
+        threshold: 0.85,
+      },
+    },
+    onPropertyConflict: "flag",
+    branchOrder: BRANCH_ORDER,
+  };
+}
 
 /** One committed `hadEncounter` row, reduced to what multiplicity cases assert. */
 type CommittedEdge = Readonly<{
@@ -121,7 +168,10 @@ describe.each(backendMatrix())("merging parallel edges [$name]", (entry) => {
   async function seededForkPoint(): Promise<CareStore> {
     const [store] = await createStoreWithSchema(careGraph, await makeBackend());
     await store.nodes.Patient.create({ name: "Ana Rivera" }, { id: "pat-1" });
-    await store.nodes.Encounter.create({ reason: "checkup" }, { id: "enc-1" });
+    await store.nodes.Encounter.create(
+      { reason: ENCOUNTER_REASON, code: ENCOUNTER_CODE },
+      { id: "enc-1" },
+    );
     await store.edges.hadEncounter.create(
       PATIENT,
       ENCOUNTER,
@@ -131,9 +181,12 @@ describe.each(backendMatrix())("merging parallel edges [$name]", (entry) => {
     return store;
   }
 
-  async function forkOf(forkPoint: CareStore): Promise<GraphBranch<CareGraph>> {
+  async function forkOf(
+    forkPoint: CareStore,
+    id = BRANCH_A,
+  ): Promise<GraphBranch<CareGraph>> {
     return unwrap(
-      await branch<CareGraph>(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      await branch<CareGraph>(forkPoint, () => makeBackend(), { id }),
     );
   }
 
@@ -272,7 +325,9 @@ describe.each(backendMatrix())("merging parallel edges [$name]", (entry) => {
       { id: "edge-1" },
     );
 
-    unwrap(await merge(forkPoint, [branchA], { branchOrder: BRANCH_ORDER }));
+    const report = unwrap(
+      await merge(forkPoint, [branchA], { branchOrder: BRANCH_ORDER }),
+    );
 
     expect(
       (await liveEdges(forkPoint)).map((edge) => ({
@@ -282,6 +337,87 @@ describe.each(backendMatrix())("merging parallel edges [$name]", (entry) => {
     ).toEqual([
       { id: "edge-1", validTo: undefined },
       { id: INHERITED_EDGE, validTo: END },
+    ]);
+    // The report describes the same two rows: the window resolution names the row it
+    // landed on, and each parallel row counts once.
+    expect(
+      report.validityEnds.map((resolution) => ({
+        id: resolution.id,
+        validTo: resolution.validTo,
+      })),
+    ).toEqual([{ id: INHERITED_EDGE, validTo: END }]);
+    expect(report.merged.edges).toBe(2);
+  });
+
+  it("keeps a parallel row's own edit when a repointed edge joins its endpoints", async () => {
+    // The MIXED group: identity resolution collapses the branch's near-duplicate
+    // encounter onto the committed one, so the branch's edge repoints onto endpoints
+    // two parallel rows already occupy. The collapse is ACROSS the pre-repoint pairs —
+    // it merges the repointed edge into ONE of those rows — and says nothing about the
+    // rows that were already there. Folding the whole group instead left the other
+    // row's edit unwritten (a folded-away committed row is never rewritten) and
+    // reported a property conflict between rows that were never the same row.
+    const forkPoint = await seededForkPoint();
+    await forkPoint.edges.hadEncounter.create(
+      PATIENT,
+      ENCOUNTER,
+      { on: SECOND_INHERITED_DATE },
+      { id: SECOND_INHERITED_EDGE },
+    );
+    const target = (await forkOf(forkPoint, TARGET_BRANCH)).store;
+    const branchA = await forkOf(forkPoint);
+    await branchA.store.edges.hadEncounter.update(INHERITED, {
+      on: EDITED_DATE,
+    });
+    await branchA.store.edges.hadEncounter.update(SECOND_INHERITED, {
+      on: SECOND_EDITED_DATE,
+    });
+    await branchA.store.nodes.Encounter.create(
+      { reason: DUPLICATE_REASON, code: ENCOUNTER_CODE },
+      { id: DUPLICATE_ENCOUNTER.id },
+    );
+    await branchA.store.edges.hadEncounter.create(
+      PATIENT,
+      DUPLICATE_ENCOUNTER,
+      { on: BRANCH_DATE },
+      { id: "edge-9" },
+    );
+
+    const report = unwrap(
+      await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [branchA],
+        options: resolveDuplicateEncounters(),
+      }),
+    );
+
+    // The duplicate encounter resolved onto the committed one...
+    expect(
+      report.resolutions.map((resolution) => resolution.canonicalId),
+    ).toEqual(["enc-1"]);
+    // ...the repointed edge folded into the min-id row of the pair it landed on, and
+    // the other row committed the edit its author made.
+    expect(
+      (await liveEdges(target)).map((edge) => ({
+        id: edge.id,
+        toId: edge.toId,
+        on: edge.on,
+      })),
+    ).toEqual([
+      { id: INHERITED_EDGE, toId: "enc-1", on: EDITED_DATE },
+      { id: SECOND_INHERITED_EDGE, toId: "enc-1", on: SECOND_EDITED_DATE },
+    ]);
+    // The only edge-level disagreement is between the two rows the collapse merged.
+    expect(
+      report.conflicts
+        .filter((conflict) => conflict.kind === "hadEncounter")
+        .map((conflict) => ({
+          entityId: conflict.entityId,
+          values: conflict.values.map((value) => value.value),
+        })),
+    ).toEqual([
+      { entityId: INHERITED_EDGE, values: [EDITED_DATE, BRANCH_DATE] },
     ]);
   });
 

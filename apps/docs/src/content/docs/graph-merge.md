@@ -336,11 +336,14 @@ When nodes collapse, their edges must too. After clustering, Graph Merge:
 4. **Reconciles** edges that collapse that way but disagree on properties, via
    the same conflict policy as nodes.
 
-Steps 3 and 4 are scoped to collisions **repointing caused**. A TypeGraph store is
-a multigraph — nothing enforces uniqueness on `(from, kind, to)`, `create()` makes
-a parallel edge, and `getOrCreateByEndpoints()` is the opt-in set-semantics
-accessor — so a branch that created a parallel edge merges as a parallel edge, and
-a window claim lands on the row its author touched. What makes two staged edges
+Steps 3 and 4 are scoped to collisions **repointing caused**: edges are grouped by
+the endpoint pair they named *before* repointing, and one row per pair collapses. A
+TypeGraph store is a multigraph — nothing enforces uniqueness on `(from, kind, to)`,
+`create()` makes a parallel edge, and `getOrCreateByEndpoints()` is the opt-in
+set-semantics accessor — so a branch that created a parallel edge merges as a
+parallel edge, and a window claim lands on the row its author touched. A repointed
+edge landing on endpoints that already have several parallel rows merges into one of
+them; the rest keep their own properties and windows. What makes two staged edges
 "the same row" is their **edge id**, not equal properties: one inherited edge
 staged by several branches folds into a single write, while a branch-created edge
 is a new row even when its properties happen to match an existing one's.
