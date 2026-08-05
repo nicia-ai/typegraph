@@ -16,7 +16,11 @@ import {
 } from "../dialect";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { emitRecursiveQuerySql } from "./emitter";
-import { compileIdentitySourcePredicate } from "./identity-traversal";
+import {
+  compileHistoricalIdentityClassCte,
+  compileIdentitySourcePredicate,
+  planHistoricalIdentityFrontierExpansion,
+} from "./identity-traversal";
 import {
   createTemporalFilterPass,
   runCompilerPass,
@@ -270,6 +274,16 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
     temporalFilterPass,
   );
 
+  // Identity expansion under a historical coordinate reads a reconstruction
+  // relation hoisted out of the recursive term, so it is evaluated once for the
+  // whole traversal rather than per expanded (frontier row, edge) pair.
+  const historicalIdentityCte = compileHistoricalIdentityClassCte({
+    ast,
+    ctx,
+    graphId,
+    temporalFilterPass,
+  });
+
   // Build projection
   const projection = compileRecursiveProjection(ast, vlTraversal, dialect);
 
@@ -287,6 +301,9 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
     ...(limitOffset === undefined ? {} : { limitOffset }),
     logicalPlan,
     ...(orderBy === undefined ? {} : { orderBy }),
+    ...(historicalIdentityCte === undefined ?
+      {}
+    : { precedingCtes: [historicalIdentityCte] }),
     projection,
     recursiveCte,
   });
@@ -442,6 +459,18 @@ function compileRecursiveCte(
     ...startPredicates,
   ];
 
+  const previousIdColumn = sql`r.${sql.raw(nodeAlias)}_id`;
+  const previousKindColumn = sql`r.${sql.raw(nodeAlias)}_kind`;
+  const identityFrontierExpansion =
+    traversal.includeIdentityMembers === true ?
+      planHistoricalIdentityFrontierExpansion({
+        ast,
+        previousId: previousIdColumn,
+        previousKind: previousKindColumn,
+        temporalFilterPass,
+      })
+    : undefined;
+
   const recursiveBaseWhereClauses: SqlFragment[] = [
     sql`e.graph_id = ${graphId}`,
     nodeKindFilter,
@@ -453,6 +482,46 @@ function compileRecursiveCte(
     recursiveBaseWhereClauses.push(cycleCheck);
   }
   recursiveBaseWhereClauses.push(...edgePredicates, ...targetNodePredicates);
+
+  /**
+   * Connects a candidate edge to the row the worktable is expanding from. A
+   * widened frontier and a plain one join the edge the same way — on the
+   * worktable row's (kind, id) or on the class member's — leaving the correlated
+   * membership test to the current coordinate alone.
+   */
+  function compileWorktableJoinClauses(
+    branch: Readonly<{
+      joinField: "from_id" | "to_id";
+      joinKindField: "from_kind" | "to_kind";
+    }>,
+  ): SqlFragment[] {
+    const edgeId = sql`e.${sql.raw(branch.joinField)}`;
+    const edgeKind = sql`e.${sql.raw(branch.joinKindField)}`;
+    if (identityFrontierExpansion !== undefined) {
+      return [
+        sql`${edgeId} = ${identityFrontierExpansion.memberId}`,
+        sql`${edgeKind} = ${identityFrontierExpansion.memberKind}`,
+      ];
+    }
+    if (traversal.includeIdentityMembers === true) {
+      return [
+        compileIdentitySourcePredicate({
+          ctx,
+          edgeId,
+          edgeKind,
+          graphId,
+          previousId: previousIdColumn,
+          previousKind: previousKindColumn,
+          temporalFilterPass,
+        }),
+      ];
+    }
+    const clauses = [sql`${edgeId} = ${previousIdColumn}`];
+    if (previousNodeKinds.length > 1) {
+      clauses.push(sql`${edgeKind} = ${previousKindColumn}`);
+    }
+    return clauses;
+  }
 
   function compileRecursiveBranch(
     branch: Readonly<{
@@ -487,29 +556,8 @@ function compileRecursiveCte(
     if (pathExtension !== undefined) {
       recursiveSelectColumns.push(sql`${pathExtension} AS path`);
     }
-    const recursiveJoinClauses: SqlFragment[] =
-      traversal.includeIdentityMembers === true ?
-        [
-          compileIdentitySourcePredicate({
-            ast,
-            ctx,
-            edgeId: sql`e.${sql.raw(branch.joinField)}`,
-            edgeKind: sql`e.${sql.raw(branch.joinKindField)}`,
-            graphId,
-            previousId: sql`r.${sql.raw(nodeAlias)}_id`,
-            previousKind: sql`r.${sql.raw(nodeAlias)}_kind`,
-            temporalFilterPass,
-          }),
-        ]
-      : [sql`e.${sql.raw(branch.joinField)} = r.${sql.raw(nodeAlias)}_id`];
-    if (
-      traversal.includeIdentityMembers !== true &&
-      previousNodeKinds.length > 1
-    ) {
-      recursiveJoinClauses.push(
-        sql`e.${sql.raw(branch.joinKindField)} = r.${sql.raw(nodeAlias)}_kind`,
-      );
-    }
+    const recursiveJoinClauses = compileWorktableJoinClauses(branch);
+    const frontierJoin = identityFrontierExpansion?.frontierJoin ?? sql``;
 
     if (forceWorktableOuterJoinOrder) {
       const recursiveWhereClauses = [
@@ -520,6 +568,7 @@ function compileRecursiveCte(
       return sql`
         SELECT ${sql.join(recursiveSelectColumns, sql`, `)}
         FROM recursive_cte r
+        ${frontierJoin}
         CROSS JOIN ${ctx.schema.edgesTable} e
         JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
           AND n.id = e.${sql.raw(branch.targetField)}
@@ -531,6 +580,7 @@ function compileRecursiveCte(
     return sql`
       SELECT ${sql.join(recursiveSelectColumns, sql`, `)}
       FROM recursive_cte r
+      ${frontierJoin}
       JOIN ${ctx.schema.edgesTable} e ON ${sql.join(recursiveJoinClauses, sql` AND `)}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}

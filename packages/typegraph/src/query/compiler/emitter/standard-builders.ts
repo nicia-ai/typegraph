@@ -18,7 +18,10 @@ import {
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
 import { sql, type SqlFragment } from "../../sql-fragment";
-import { compileIdentitySourcePredicate } from "../identity-traversal";
+import {
+  compileIdentitySourcePredicate,
+  planHistoricalIdentityFrontierExpansion,
+} from "../identity-traversal";
 import { type TemporalFilterPass } from "../passes";
 import {
   compileKindFilter,
@@ -382,6 +385,55 @@ export function buildStandardTraversalCte(
     : ctx.dialect.capabilities.emitNotMaterializedHint ? sql`NOT MATERIALIZED `
     : sql``;
 
+  const previousIdColumn = sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_id`)}`;
+  const previousKindColumn = sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_kind`)}`;
+  const identityFrontierExpansion =
+    traversal.includeIdentityMembers === true ?
+      planHistoricalIdentityFrontierExpansion({
+        ast,
+        previousId: previousIdColumn,
+        previousKind: previousKindColumn,
+        temporalFilterPass,
+      })
+    : undefined;
+
+  /**
+   * Connects a candidate edge to the frontier. A widened frontier and a plain
+   * one join the edge the same way — on the frontier row's (kind, id) or on the
+   * class member's — leaving the correlated membership test to the current
+   * coordinate alone.
+   */
+  function compileSourceJoin(
+    branch: Readonly<{
+      joinField: "from_id" | "to_id";
+      joinKindField: "from_kind" | "to_kind";
+    }>,
+  ): SqlFragment {
+    const edgeId = sql`e.${sql.raw(branch.joinField)}`;
+    const edgeKind = sql`e.${sql.raw(branch.joinKindField)}`;
+    if (identityFrontierExpansion !== undefined) {
+      return sql`
+        ${identityFrontierExpansion.memberId} = ${edgeId}
+        AND ${identityFrontierExpansion.memberKind} = ${edgeKind}
+      `;
+    }
+    if (traversal.includeIdentityMembers === true) {
+      return compileIdentitySourcePredicate({
+        ctx,
+        edgeId,
+        edgeKind,
+        graphId,
+        previousId: previousIdColumn,
+        previousKind: previousKindColumn,
+        temporalFilterPass,
+      });
+    }
+    return sql`
+      ${previousIdColumn} = ${edgeId}
+      AND ${previousKindColumn} = ${edgeKind}
+    `;
+  }
+
   function compileTraversalBranch(
     branch: Readonly<{
       duplicateGuard?: SqlFragment | undefined;
@@ -411,26 +463,13 @@ export function buildStandardTraversalCte(
       whereClauses.push(branch.duplicateGuard);
     }
 
-    const sourceJoin =
-      traversal.includeIdentityMembers === true ?
-        compileIdentitySourcePredicate({
-          ast,
-          ctx,
-          edgeId: sql`e.${sql.raw(branch.joinField)}`,
-          edgeKind: sql`e.${sql.raw(branch.joinKindField)}`,
-          graphId,
-          previousId: sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_id`)}`,
-          previousKind: sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_kind`)}`,
-          temporalFilterPass,
-        })
-      : sql`
-        cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_id`)} = e.${sql.raw(branch.joinField)}
-        AND cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_kind`)} = e.${sql.raw(branch.joinKindField)}
-      `;
+    const sourceJoin = compileSourceJoin(branch);
+    const frontierJoin = identityFrontierExpansion?.frontierJoin ?? sql``;
 
     return sql`
       SELECT ${sql.join(selectColumns, sql`, `)}
       FROM cte_${sql.raw(previousAlias)}
+      ${frontierJoin}
       JOIN ${ctx.schema.edgesTable} e ON ${sourceJoin}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}

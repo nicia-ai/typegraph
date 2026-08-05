@@ -8,6 +8,11 @@ export type RecursiveQueryEmitterInput = Readonly<{
   limitOffset?: SqlFragment;
   logicalPlan: LogicalPlan;
   orderBy?: SqlFragment;
+  /**
+   * Non-recursive CTE definitions the recursive CTE reads, in dependency order.
+   * They join the same `WITH RECURSIVE` list — both dialects accept a mix.
+   */
+  precedingCtes?: readonly SqlFragment[];
   projection: SqlFragment;
   recursiveCte: SqlFragment;
 }>;
@@ -48,9 +53,13 @@ export function emitRecursiveQuerySql(
 ): SqlFragment {
   assertRecursiveEmitterClauseAlignment(input.logicalPlan, input);
 
+  const cteList = sql.join(
+    [...(input.precedingCtes ?? []), input.recursiveCte],
+    sql`, `,
+  );
   const parts: SqlFragment[] = [
     sql`WITH RECURSIVE`,
-    input.recursiveCte,
+    cteList,
     sql`SELECT ${input.projection}`,
     sql`FROM recursive_cte`,
     input.depthFilter,
