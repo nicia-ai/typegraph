@@ -196,6 +196,42 @@ export function validateOptionalCanonicalIsoDate(
 }
 
 /**
+ * Rejects an inverted validity window. `validFrom > validTo` describes a row
+ * that stopped being true before it started, so NO `asOf` coordinate can ever
+ * observe it — the write succeeds and the row is then invisible everywhere,
+ * which reads as data loss rather than as the error it is. Call this wherever
+ * both endpoints are supplied together; both are canonical ISO 8601 by then, so
+ * a lexicographic compare is a chronological compare.
+ *
+ * @param subject - Human-readable identification of the row, for the message
+ *   (e.g. `Person "01H..."`).
+ * @throws ValidationError if both endpoints are present and out of order
+ */
+export function assertOrderedValidityWindow(
+  subject: string,
+  validFrom: string | undefined,
+  validTo: string | undefined,
+): void {
+  if (validFrom === undefined || validTo === undefined) return;
+  if (validFrom <= validTo) return;
+  throw new ValidationError(
+    `Inverted validity window for ${subject}: validFrom "${validFrom}" is after validTo "${validTo}".`,
+    {
+      issues: [
+        {
+          path: "validFrom",
+          message: `Expected validFrom <= validTo, got "${validFrom}" > "${validTo}"`,
+        },
+      ],
+    },
+    {
+      suggestion:
+        "Pass a validFrom at or before validTo, or omit validTo to leave the window open.",
+    },
+  );
+}
+
+/**
  * Encodes a Date to an ISO 8601 string for storage.
  */
 export function encodeDate(date: Date): string {

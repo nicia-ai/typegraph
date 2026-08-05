@@ -64,6 +64,18 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
   id: BranchId;
   base: BaseVersion;
   store: Store<G>;
+  /**
+   * The branch store's committed schema row `(version, hash)` captured AT
+   * FORK. The merge requires the branch's CURRENT committed schema to still
+   * equal this anchor: any schema operation on the branch after forking —
+   * including a round-trip that restores the original document hash —
+   * advances the version and is refused, so its row side effects can never
+   * be projected into a merge as bare data changes. `undefined` inside the
+   * tuple-less field means the clone committed no schema row (unmanaged
+   * stores); absent entirely on hand-built branch objects, where the merge
+   * falls back to comparing the branch's hash against the fork source's.
+   */
+  schemaAnchor?: Readonly<{ version: number; hash: string }> | undefined;
 }>;
 
 /**

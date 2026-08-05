@@ -13,6 +13,7 @@
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   disjointWith,
@@ -137,6 +138,29 @@ const anchoredIgnoreGraph = defineGraph({
   ontology: [disjointWith(Person, Robot)],
   identity: { sameIdAcrossKinds: "ignore" },
 });
+
+/** An Anchor-to-Anchor edge, so a merge can carry an edge validity window. */
+const linkedTo = defineEdge("linkedTo", {
+  schema: z.object({ label: z.string() }),
+  from: [Anchor],
+  to: [Anchor],
+});
+
+/** The anchored shape with an edge, for the edge valid-time window test. */
+const windowedEdgeGraph = defineGraph({
+  id: "identity_universe_edge_window",
+  nodes: { Anchor: { type: Anchor } },
+  edges: { linkedTo: { type: linkedTo, from: [Anchor], to: [Anchor] } },
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+
+/** A closed valid-time window entirely in the past, well before any merge. */
+const HISTORICAL_FROM = "2020-01-01T00:00:00.000Z";
+const HISTORICAL_TO = "2021-01-01T00:00:00.000Z";
+/** Inside {@link HISTORICAL_FROM}..{@link HISTORICAL_TO}. */
+const DURING_HISTORICAL = "2020-06-01T00:00:00.000Z";
+/** After {@link HISTORICAL_TO}, still before any merge. */
+const AFTER_HISTORICAL = "2022-01-01T00:00:00.000Z";
 
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
@@ -1536,6 +1560,88 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     expect(result.error.message).toContain("schema");
   });
 
+  it("refuses a branch schema round-trip that restores the document hash", async () => {
+    // Migrating away and back restores the schema document hash while the
+    // migrations' preflights mutated identity rows. The at-fork anchor
+    // includes the monotonic VERSION, so the round-trip is still refused.
+    const forkPoint = await anchoredForkPoint();
+    const branchBackend = await makeBackend();
+    const roundTripBranch = unwrap(
+      await branch(forkPoint, () => Promise.resolve(branchBackend), {
+        id: BRANCH_A,
+      }),
+    );
+    const foldVariant = defineGraph({
+      id: "identity_universe_ignore",
+      nodes: {
+        Person: { type: Person },
+        Robot: { type: Robot },
+        Anchor: { type: Anchor },
+      },
+      edges: {},
+      ontology: [disjointWith(Person, Robot)],
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    await migrateSchema(
+      branchBackend,
+      foldVariant,
+      requireDefined(
+        await getCommittedSchemaVersion(branchBackend, foldVariant.id),
+      ),
+    );
+    await migrateSchema(
+      branchBackend,
+      anchoredIgnoreGraph,
+      requireDefined(
+        await getCommittedSchemaVersion(branchBackend, foldVariant.id),
+      ),
+    );
+
+    const result = await merge(forkPoint, [roundTripBranch], {
+      branchOrder: [BRANCH_A],
+    });
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected schema-drift refusal");
+    expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    expect(result.error.message).toContain("schema");
+  });
+
+  it("keeps the committed target's window when a branch re-window collides", async () => {
+    // Target and branch independently create Anchor:w — the target LIVE, the
+    // branch with an already-ended window. The target-contributed member's
+    // window must win the survivor pick (mirroring committed-first assertion
+    // precedence): a user branch's window must not end a row the target
+    // already holds.
+    const forkPoint = await anchoredForkPoint();
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), {
+        id: asBranchId("target-clone"),
+      }),
+    ).store;
+    await target.nodes.Anchor.create({ name: "target-w" }, { id: "w" });
+    const windowBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await windowBranch.store.nodes.Anchor.create(
+      { name: "branch-w" },
+      {
+        id: "w",
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2021-01-01T00:00:00.000Z",
+      },
+    );
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [windowBranch],
+      options: { branchOrder: [BRANCH_A] },
+    });
+    if (isErr(result)) throw result.error;
+    // The committed target row is still CURRENT.
+    expect(await target.nodes.Anchor.getById("w" as never)).toBeDefined();
+  });
+
   it("preserves a branch-authored validity window through the merge", async () => {
     // The branch recreates a tombstoned Person:x with an already-ENDED
     // valid-time window. The commit's resurrection upsert must carry that
@@ -1555,8 +1661,8 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
       { name: "anchor-historical" },
       {
         id: "x",
-        validFrom: "2020-01-01T00:00:00.000Z",
-        validTo: "2021-01-01T00:00:00.000Z",
+        validFrom: HISTORICAL_FROM,
+        validTo: HISTORICAL_TO,
       },
     );
 
@@ -1569,6 +1675,69 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     expect(
       await forkPoint.identity.membersOf({ kind: "Robot", id: "x" }),
     ).toEqual([{ kind: "Robot", id: "x" }]);
+
+    // Current-invisibility alone does not prove the window survived: an
+    // INVERTED window (validFrom defaulted to merge time while validTo stayed
+    // in 2021) is invisible at every coordinate and would pass the assertion
+    // above. Read the window itself — visible inside it, gone after it.
+    const during = await forkPoint
+      .asOf(DURING_HISTORICAL)
+      .nodes.Anchor.getById("x" as never);
+    expect(during?.name).toBe("anchor-historical");
+    expect(during?.meta.validFrom).toBe(HISTORICAL_FROM);
+    expect(during?.meta.validTo).toBe(HISTORICAL_TO);
+    expect(
+      await forkPoint.asOf(AFTER_HISTORICAL).nodes.Anchor.getById("x" as never),
+    ).toBeUndefined();
+  });
+
+  it("preserves a branch-authored EDGE validity window through the merge", async () => {
+    // A branch authors two endpoints and the edge between them over an
+    // already-ENDED window. Committing the edge without that window makes it
+    // CURRENT at merge time — a live edge between endpoints that are
+    // themselves no longer valid.
+    const [forkPoint] = await createStoreWithSchema(
+      windowedEdgeGraph,
+      await makeBackend(),
+    );
+    const edgeBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const historicalWindow = {
+      validFrom: HISTORICAL_FROM,
+      validTo: HISTORICAL_TO,
+    };
+    const left = await edgeBranch.store.nodes.Anchor.create(
+      { name: "left" },
+      { id: "l", ...historicalWindow },
+    );
+    const right = await edgeBranch.store.nodes.Anchor.create(
+      { name: "right" },
+      { id: "r", ...historicalWindow },
+    );
+    const edge = await edgeBranch.store.edges.linkedTo.create(
+      left,
+      right,
+      { label: "historical" },
+      historicalWindow,
+    );
+
+    const result = await merge(forkPoint, [edgeBranch], {
+      branchOrder: [BRANCH_A],
+    });
+    expect(isOk(result)).toBe(true);
+    if (isErr(result)) throw result.error;
+
+    expect(await forkPoint.edges.linkedTo.getById(edge.id)).toBeUndefined();
+    const during = await forkPoint
+      .asOf(DURING_HISTORICAL)
+      .edges.linkedTo.getById(edge.id);
+    expect(during?.label).toBe("historical");
+    expect(during?.meta.validFrom).toBe(HISTORICAL_FROM);
+    expect(during?.meta.validTo).toBe(HISTORICAL_TO);
+    expect(
+      await forkPoint.asOf(AFTER_HISTORICAL).edges.linkedTo.getById(edge.id),
+    ).toBeUndefined();
   });
 
   it("counts applied ledger effects, not planned intents", async () => {

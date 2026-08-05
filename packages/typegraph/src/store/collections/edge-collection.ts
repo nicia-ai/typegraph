@@ -95,11 +95,7 @@ export type EdgeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
   executeUpsertUpdate: (
-    input: {
-      id: string;
-      props: Partial<Record<string, unknown>>;
-      validTo?: string;
-    },
+    input: UpsertUpdateEdgeInput,
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Edge>;
@@ -206,6 +202,22 @@ type EdgeUpdateInput = Readonly<{
   validTo?: string;
 }>;
 
+/**
+ * Update input for the internal upsert path, which owns the WHOLE validity
+ * window: a resurrecting upsert rewrites both endpoints, so it must be able to
+ * carry `validFrom` as well as `validTo`. Dropping `validFrom` here would leave
+ * the backend defaulting the lower bound to the resurrection instant while the
+ * caller's (possibly already past) `validTo` stayed — an inverted window that
+ * no read coordinate can observe.
+ *
+ * The public `update()` API cannot reach this member: its options type exposes
+ * `validTo` only, and it builds its input through {@link buildUpdateEdgeInput}.
+ * Only `bulkUpsertById`, which accepts `validFrom` by contract, routes through
+ * {@link buildUpsertUpdateEdgeInput}.
+ */
+export type UpsertUpdateEdgeInput = EdgeUpdateInput &
+  Readonly<{ validFrom?: string }>;
+
 function buildUpdateEdgeInput(
   id: string,
   props: Record<string, unknown>,
@@ -216,6 +228,23 @@ function buildUpdateEdgeInput(
     props: Partial<Record<string, unknown>>;
     validTo?: string;
   } = { id, props };
+  if (options?.validTo !== undefined) input.validTo = options.validTo;
+  return input;
+}
+
+/** Builds an {@link UpsertUpdateEdgeInput} — see that type for why upsert alone carries `validFrom`. */
+function buildUpsertUpdateEdgeInput(
+  id: string,
+  props: Record<string, unknown>,
+  options?: Readonly<{ validFrom?: string; validTo?: string }>,
+): UpsertUpdateEdgeInput {
+  const input: {
+    id: string;
+    props: Partial<Record<string, unknown>>;
+    validFrom?: string;
+    validTo?: string;
+  } = { id, props };
+  if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
   if (options?.validTo !== undefined) input.validTo = options.validTo;
   return input;
 }
@@ -720,7 +749,7 @@ export function createEdgeCollection<
         const toCreate: { index: number; input: CreateEdgeInput }[] = [];
         const toUpdate: {
           index: number;
-          input: EdgeUpdateInput;
+          input: UpsertUpdateEdgeInput;
           clearDeleted: boolean;
         }[] = [];
 
@@ -798,7 +827,7 @@ export function createEdgeCollection<
           } else {
             toUpdate.push({
               index: itemIndex,
-              input: buildUpdateEdgeInput(item.id, inputProps, item),
+              input: buildUpsertUpdateEdgeInput(item.id, inputProps, item),
               clearDeleted: deletedAt !== undefined,
             });
             if (dirty !== undefined) {

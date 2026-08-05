@@ -857,8 +857,10 @@ export type NodeCollection<
    * If a node with the given ID exists, updates it with the provided props.
    * Otherwise, creates a new node with that ID.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. It has no effect on an update to a live
+   * row, whose lower bound is already history.
    */
   upsertById: (
     id: string,
@@ -873,8 +875,10 @@ export type NodeCollection<
    * the data shape is determined at runtime, not compile time.
    * The return type is fully typed — only the input gate is relaxed.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. It has no effect on an update to a live
+   * row, whose lower bound is already history.
    */
   upsertByIdFromRecord: (
     id: string,
@@ -905,8 +909,10 @@ export type NodeCollection<
    * For each item, if a node with the given ID exists, updates it.
    * Otherwise, creates a new node with that ID.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. It has no effect on an update to a live
+   * row, whose lower bound is already history.
    */
   bulkUpsertById: (
     items: readonly Readonly<{
@@ -1291,8 +1297,10 @@ export type EdgeCollection<
    * For each item, if an edge with the given ID exists, updates it.
    * Otherwise, creates a new edge with that ID.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. It has no effect on an update to a live
+   * row, whose lower bound is already history.
    */
   bulkUpsertById: (
     items: readonly Readonly<{

@@ -375,3 +375,25 @@ and ended (idempotent skips excluded) instead of planned intents, and
 the replan-vs-conflict error suggestions are path-specific. Temporal
 windows on MODIFIED inherited nodes remain outside merge state — a
 documented boundary.
+
+**Second cross-model pass: the fixes' own compositions.** A follow-up
+external review of the previous round's fixes produced seven more
+verified corrections. The schema-drift guard now anchors on the branch's
+AT-FORK `(version, hash)` row — a round-trip migration that restores the
+document hash still advances the monotonic version and is refused, and
+unmanaged fork sources are no longer falsely rejected; revision-anchored
+`base@V` tokens bake in the active schema version, fencing the same
+round-trip on the target side (the legacy content fingerprint already
+covered it). Kind-dropping schema operations cascade the assertion
+ledger even when identity is DISABLED at drop time (the ledger, not the
+schema profile, is the signal), and first enablement purges assertions
+naming unregistered kinds, so historical orphans cannot be adopted into
+a fresh closure. Node resurrection carries `validFrom` through the
+internal update path (a branch-authored ended window no longer inverts
+into merge-time-start), merged edges carry their staged windows exactly
+as nodes do, and when the live incremental target itself contributed the
+surviving member, the TARGET's committed window wins over a branch
+re-window. Canonicalization that would move a COMMITTED assertion's own
+endpoints refuses with a specific typed conflict (committed rows cannot
+be rewritten), and window-identical upserts coalesce again instead of
+rewriting version and history state.

@@ -494,7 +494,28 @@ export function remapIdentityAssertionEndpoints(
       compareIdentityEndpoints(remappedA, remappedB) <= 0 ?
         [remappedA, remappedB]
       : [remappedB, remappedA];
-    remapped.push({ ...assertion, a, b });
+    const result = { ...assertion, a, b };
+    // A COMMITTED row's endpoints must never be canonicalized away: the
+    // applier cannot rewrite a stored row, so a plan carrying its id with
+    // moved endpoints could only end as a false one-truth refusal or —
+    // worse, if the challenger won the dedupe — a report/ledger divergence.
+    // Refuse early with the specific cause instead.
+    const stored = storedRowsById.get(assertion.id);
+    if (
+      stored !== undefined &&
+      assertionTruthKey(stored) === assertionTruthKey(assertion) &&
+      assertionTruthKey(result) !== assertionTruthKey(assertion)
+    ) {
+      throw new IdentityMergeConflictError(
+        "Node reconciliation moved the endpoints of an assertion already committed on the target; committed identity rows cannot be rewritten by a merge.",
+        {
+          details: { assertionId: assertion.id, stored, remapped: result },
+          suggestion:
+            "Exclude the colliding nodes from entity resolution, or manually retract the committed assertion and re-assert the canonical pair under a new id before merging.",
+        },
+      );
+    }
+    remapped.push(result);
   }
   // Committed-id precedence must be RE-DERIVED post-remap: node
   // reconciliation can collapse two previously distinct pairs onto one

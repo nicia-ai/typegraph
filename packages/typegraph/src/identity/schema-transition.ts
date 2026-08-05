@@ -8,9 +8,11 @@ import {
 } from "../store/recorded-capture";
 import {
   deleteAssertionsTouchingKinds,
+  hasAssertionsTouchingKinds,
   type IdentityRebuildContext,
   lockIdentityEnablementNodes,
   lockIdentityGraph,
+  purgeAssertionsWithUnregisteredKinds,
   rebuildIdentityClosureForContext,
 } from "./service";
 
@@ -48,6 +50,38 @@ export async function ensureIdentitySchemaStorage(
     })) ?? [];
   if (options.enablement) return;
   assertIdentityStoragePresent(options.graphId, missingTables);
+}
+
+/**
+ * Whether dropping `droppedNodeKinds` from a graph whose schema carries NO
+ * identity profile still leaves assertion rows behind. Disabling identity
+ * retains the ledger, so "no profile" does not mean "no assertions" — a drop
+ * committed afterwards strands every assertion naming the kind.
+ *
+ * Answering `false` keeps the commit on its ordinary path, which matters: that
+ * path carries the emptiness fence and its capability requirements. Only a
+ * database that genuinely holds affected rows is worth moving to the
+ * preflight-carrying primitive, and with no profile nothing can be writing new
+ * assertions for this graph while the answer is in flight.
+ *
+ * Partial storage answers `false` too: an enabled graph treats a missing
+ * relation as data loss ({@link assertIdentityStoragePresent}), but a disabled
+ * graph must not have its migration refused over a relation nothing reads.
+ */
+export async function identityKindCascadeNeeded(
+  backend: GraphBackend,
+  schema: SqlSchema,
+  graphId: string,
+  droppedNodeKinds: readonly string[],
+): Promise<boolean> {
+  if (droppedNodeKinds.length === 0) return false;
+  const ensureIdentityTables = backend.ensureIdentityTables;
+  if (ensureIdentityTables === undefined) return false;
+  const missingTables = await ensureIdentityTables(identityTableNames(schema), {
+    provisionMissing: false,
+  });
+  if (missingTables.length > 0) return false;
+  return hasAssertionsTouchingKinds(backend, schema, graphId, droppedNodeKinds);
 }
 
 function assertIdentityStoragePresent(
@@ -95,6 +129,20 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     await lockIdentityGraph(target, ctx.graphId);
     if (options.enablement) {
       await lockIdentityEnablementNodes(target, ctx.schema);
+      // Enablement must not ADOPT rows the rebuild below cannot see. A database
+      // that was identity-enabled before, disabled, and then evolved can hold
+      // assertions for kinds this schema never registers; they would stay
+      // current and invisible for exactly the reasons the drop cascade exists.
+      // On a true first enablement the ledger is empty and this is one scan.
+      await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
+        purgeAssertionsWithUnregisteredKinds(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          new Set(ctx.registry.nodeKinds.keys()),
+          touch,
+        ),
+      );
     }
     // A commit that DROPS node kinds cascades the assertion ledger exactly as
     // Store.removeKinds() does. The rebuild below silently FILTERS rows
@@ -115,5 +163,34 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
       );
     }
     await rebuildIdentityClosureForContext({ ...ctx, backend: target });
+  };
+}
+
+/**
+ * The kind-drop cascade alone, for a schema commit whose target graph has NO
+ * identity profile while the assertion ledger still exists. Disabling identity
+ * retains the ledger deliberately, so the rows survive the profile going away —
+ * and a later drop that skipped this would strand them exactly as it would on
+ * an enabled graph, until a re-enablement or a "no-op" merge tripped over them.
+ *
+ * No closure rebuild: without a profile there is no closure contract to
+ * restore, and the enablement preflight rebuilds it from scratch anyway.
+ */
+export function identityKindCascadePreflight(
+  ctx: Readonly<{ graphId: string; schema: SqlSchema }>,
+  droppedNodeKinds: readonly string[],
+): (target: TransactionBackend) => Promise<void> {
+  return async (target: TransactionBackend) => {
+    await lockRecordedGraphWrite(target, ctx.graphId);
+    await lockIdentityGraph(target, ctx.graphId);
+    await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
+      deleteAssertionsTouchingKinds(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        droppedNodeKinds,
+        touch,
+      ),
+    );
   };
 }

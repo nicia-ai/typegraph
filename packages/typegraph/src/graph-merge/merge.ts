@@ -52,7 +52,11 @@ import {
 import { blockNodes } from "./blocking";
 import { canonicalizeProps, edgeStateSignature } from "./canonical-props";
 import type { CanonicalEntity, ClusterMember } from "./canonicalize";
-import { BASE_PROVENANCE_BRANCH, canonicalizeCluster } from "./canonicalize";
+import {
+  BASE_PROVENANCE_BRANCH,
+  canonicalizeCluster,
+  COMMITTED_TARGET_BRANCH,
+} from "./canonicalize";
 import { buildSubClassClosure } from "./closures";
 import type { ClusterResult } from "./clustering";
 import {
@@ -171,13 +175,11 @@ import type {
   SimilarityStrategy,
   TypeReconciliation,
 } from "./types";
-import { asBranchId } from "./types";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
 
 /** Reserved synthetic branch id for the live target in `mergeIncremental()`. */
-const COMMITTED_TARGET_BRANCH: BranchId = asBranchId("__committed_target__");
 
 /**
  * Materializes a {@link Node}-shaped object from a staged new node's parsed
@@ -614,7 +616,14 @@ function buildStagedEdges(
   return staged;
 }
 
-/** Projects a {@link StagedNewEdge} onto the repoint-phase {@link StagedEdge}. */
+/**
+ * Projects a {@link StagedNewEdge} onto the repoint-phase {@link StagedEdge}.
+ *
+ * A new edge's valid-time window travels with it, exactly as a staged new
+ * node's does: without it a branch edge authored over an ENDED window would
+ * commit as CURRENT at merge time, leaving a live edge between endpoints that
+ * are themselves no longer valid.
+ */
 function toStagedEdge(branchId: BranchId, item: StagedNewEdge): StagedEdge {
   return {
     id: item.edge.id,
@@ -625,6 +634,12 @@ function toStagedEdge(branchId: BranchId, item: StagedNewEdge): StagedEdge {
     toKind: item.edge.toKind,
     props: item.edge.props as Readonly<Record<string, JsonValue>>,
     branchId,
+    ...(item.edge.row.valid_from === undefined ?
+      {}
+    : { validFrom: item.edge.row.valid_from }),
+    ...(item.edge.row.valid_to === undefined ?
+      {}
+    : { validTo: item.edge.row.valid_to }),
   };
 }
 
@@ -1437,11 +1452,18 @@ async function applyMergePlan<G extends GraphDef>(
       edgeBaseProps === undefined ?
         edge.props
       : commitModificationProps(edgeBaseProps, edge.props);
+    // A staged NEW edge's valid-time window travels with the write, mirroring
+    // the canonical-entity upsert above: on a fresh insert it IS the branch's
+    // window, and on a resurrection it stops the upsert from resetting a
+    // branch-authored (possibly already ENDED) window to merge time. Inherited
+    // edges carry no window, so their committed one stays untouched.
     const item: EdgeUpsert = {
       id: edge.id,
       from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
       to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
       props,
+      ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
+      ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
     };
     const existing = edgesByKind.get(edge.kind);
     if (existing === undefined) {
@@ -1685,6 +1707,8 @@ type EdgeCollectionLike = Readonly<{
       from: Readonly<{ kind: string; id: string }>;
       to: Readonly<{ kind: string; id: string }>;
       props?: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
     }>[],
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
@@ -1806,25 +1830,40 @@ async function resolveMerge<G extends GraphDef>(
   // into the merge as ordinary data changes detached from the schema change
   // that caused them — e.g. a kind removal's cascaded assertion cleanup
   // arriving as bare identity retractions against a target that still has the
-  // kind. Refuse typed when any branch's committed schema differs from the
-  // fork source's. (The incremental path separately proves forkPoint and
-  // target agree, so one comparison basis covers both modes.)
-  const sourceSchemaRow = await storeBackend(store).getActiveSchema(
-    store.graphId,
-  );
+  // kind. The check compares the branch's CURRENT committed schema row to the
+  // (version, hash) anchor `branch()` captured at fork — version included, so
+  // a ROUND-TRIP migration that restores the original document hash while
+  // its preflights mutated rows is still refused. Hand-built branch objects
+  // without an anchor fall back to hash equality against the fork source
+  // (which also keeps unmanaged, row-less sources mergeable).
   for (const branch of branches) {
     const branchSchemaRow = await storeBackend(branch.store).getActiveSchema(
       branch.store.graphId,
     );
-    if (branchSchemaRow?.schema_hash !== sourceSchemaRow?.schema_hash) {
+    let drifted: boolean;
+    if ("schemaAnchor" in branch) {
+      const anchor = branch.schemaAnchor;
+      drifted =
+        anchor === undefined ?
+          branchSchemaRow !== undefined
+        : branchSchemaRow?.version !== anchor.version ||
+          branchSchemaRow.schema_hash !== anchor.hash;
+    } else {
+      const sourceSchemaRow = await storeBackend(store).getActiveSchema(
+        store.graphId,
+      );
+      drifted = branchSchemaRow?.schema_hash !== sourceSchemaRow?.schema_hash;
+    }
+    if (drifted) {
       return err(
         new BaseVersionMismatchError(
-          `Branch "${branch.id}"'s store has a committed schema different from the fork source's — a schema operation ran on the branch after forking. Merge carries data changes only; apply the schema change to the target first (or re-fork), then merge.`,
+          `Branch "${branch.id}"'s store has a committed schema different from its at-fork state — a schema operation ran on the branch after forking. Merge carries data changes only; apply the schema change to the target first (or re-fork), then merge.`,
           {
             details: {
               branchId: branch.id,
+              branchSchemaVersion: branchSchemaRow?.version,
               branchSchemaHash: branchSchemaRow?.schema_hash,
-              sourceSchemaHash: sourceSchemaRow?.schema_hash,
+              anchor: "schemaAnchor" in branch ? branch.schemaAnchor : "absent",
             },
           },
         ),

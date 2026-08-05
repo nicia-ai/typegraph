@@ -4261,6 +4261,7 @@ type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
     props: Readonly<Record<string, unknown>>;
+    validFrom?: string | null;
     validTo?: string;
     clearDeleted?: boolean;
 }>;

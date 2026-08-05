@@ -58,10 +58,14 @@ import type { CompiledSelectSql } from "../../query/sql-intent";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
-import { validateOptionalCanonicalIsoDate } from "../../utils/date";
+import {
+  assertOrderedValidityWindow,
+  validateOptionalCanonicalIsoDate,
+} from "../../utils/date";
 import { generateId } from "../../utils/id";
 import { requireDefined } from "../../utils/presence";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
+import { type UpsertUpdateNodeInput } from "../collections/node-collection";
 import {
   checkDisjointnessConstraint,
   type ConstraintContext,
@@ -807,7 +811,7 @@ export function nodeUpsertDirtyCheck<G extends GraphDef>(
 
 async function performNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  input: UpdateNodeInput,
+  input: UpsertUpdateNodeInput,
   backend: GraphBackend | TransactionBackend,
   lock: GraphWriteLock,
   options?: Readonly<{ clearDeleted?: boolean }>,
@@ -824,13 +828,21 @@ async function performNodeUpdate<G extends GraphDef>(
   );
   const nodeKind = registration.type;
 
+  const validFrom = validateOptionalCanonicalIsoDate(
+    input.validFrom,
+    "validFrom",
+  );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+  assertOrderedValidityWindow(`${kind} "${id}"`, validFrom, validTo);
 
   const writeContext = createNodeWriteContext(ctx.graphId, ctx.registry, lock);
+  // `validFrom` reaches the backend only through a resurrecting write (see
+  // UpdateNodeParams): a live row's lower bound is history and stays put.
   const shared = {
     schema: nodeKind.schema,
     validatedProps,
     uniqueConstraints: registration.unique ?? [],
+    ...(validFrom !== undefined && { validFrom }),
     ...(validTo !== undefined && { validTo }),
   };
 
@@ -856,7 +868,7 @@ async function performNodeUpdate<G extends GraphDef>(
 
 async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  input: UpdateNodeInput,
+  input: UpsertUpdateNodeInput,
   target: GraphBackend | TransactionBackend,
   lock: GraphWriteLock,
   options?: Readonly<{ clearDeleted?: boolean }>,
@@ -1388,7 +1400,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 
 export async function executeNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  input: UpdateNodeInput,
+  input: UpsertUpdateNodeInput,
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
@@ -1716,7 +1728,7 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
  */
 export async function executeNodeUpsertUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  input: UpdateNodeInput,
+  input: UpsertUpdateNodeInput,
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {

@@ -2561,9 +2561,99 @@ export async function deleteAssertionsTouchingKinds(
   for (const row of matched.values()) touch(graphId, row.id);
 }
 
+/**
+ * Whether the ledger holds any assertion — current or ended — touching one of
+ * the given node kinds. Lets a caller decide whether a cascade is needed at all
+ * before it commits to a code path that can run one.
+ *
+ * @internal
+ */
+export async function hasAssertionsTouchingKinds(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  kinds: readonly string[],
+): Promise<boolean> {
+  const probedKinds = [...new Set(kinds)];
+  if (probedKinds.length === 0) return false;
+  const kindChunkSize = identityChunkSize(target, {
+    fixedParameters: 1,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  for (const kindChunk of chunk(probedKinds, kindChunkSize)) {
+    const kindList = sql.join(
+      kindChunk.map((kind) => sql`${kind}`),
+      sql`, `,
+    );
+    const rows = await target.execute<Readonly<{ id: string }>>(
+      asCompiledRowsSql(sql`
+        SELECT id
+        FROM ${schema.identityAssertionsTable}
+        WHERE graph_id = ${graphId}
+          AND (a_kind IN (${kindList}) OR b_kind IN (${kindList}))
+        LIMIT 1
+      `),
+    );
+    if (rows.length > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Hard-deletes every assertion row touching a node kind that is not registered
+ * on the graph, so a first enablement (or a profile re-enablement) never adopts
+ * orphans it cannot see. The closure rebuild that follows FILTERS unregistered
+ * kinds, which would leave such rows current but invisible — the same stranding
+ * {@link deleteAssertionsTouchingKinds} prevents on the drop path, arriving
+ * instead from a database that already contained strays.
+ *
+ * @internal
+ */
+export async function purgeAssertionsWithUnregisteredKinds(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  registeredKinds: ReadonlySet<string>,
+  touch: (graphId: string, id: string) => void,
+): Promise<void> {
+  const pairs = await target.execute<
+    Readonly<{ a_kind: string; b_kind: string }>
+  >(
+    asCompiledRowsSql(sql`
+      SELECT DISTINCT a_kind, b_kind
+      FROM ${schema.identityAssertionsTable}
+      WHERE graph_id = ${graphId}
+    `),
+  );
+  const unregistered = new Set<string>();
+  for (const pair of pairs) {
+    if (!registeredKinds.has(pair.a_kind)) unregistered.add(pair.a_kind);
+    if (!registeredKinds.has(pair.b_kind)) unregistered.add(pair.b_kind);
+  }
+  if (unregistered.size === 0) return;
+  await deleteAssertionsTouchingKinds(
+    target,
+    schema,
+    graphId,
+    [...unregistered],
+    touch,
+  );
+}
+
+/**
+ * Cascades removed node kinds through the assertion ledger.
+ *
+ * `repairClosure: false` is for a graph whose identity profile is absent while
+ * the ledger storage still exists (identity was disabled without dropping the
+ * rows). There is no closure contract to restore without a profile, so the
+ * cascade runs alone — the ledger must not keep rows for a kind the schema no
+ * longer registers, whether or not identity is currently switched on.
+ */
 export async function removeIdentityKindsForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   kinds: readonly string[],
+  options?: Readonly<{ repairClosure?: boolean }>,
 ): Promise<void> {
   if (kinds.length === 0) return;
   const removedKinds = [...new Set(kinds)];
@@ -2575,6 +2665,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
       removedKinds,
       touch,
     );
+    if (options?.repairClosure === false) return;
     await replaceClosure(
       target,
       ctx.schema,

@@ -33,6 +33,8 @@ import { mergeGraphExtension } from "../graph-extension/merge";
 import { stripGraphExtension } from "../graph-extension/remove";
 import {
   ensureIdentitySchemaStorage,
+  identityKindCascadeNeeded,
+  identityKindCascadePreflight,
   identitySchemaCommitPreflight,
 } from "../identity/schema-transition";
 import {
@@ -900,19 +902,29 @@ export async function migrateSchema<G extends GraphDef>(
   // reflects the previous schema. Explicit `migrateSchema()` is the path the
   // MigrationError message points operators at, so it cannot be the one path
   // that skips it.
+  // Node kinds this commit REMOVES cascade the assertion ledger inside the
+  // commit transaction (edge kinds carry no assertions). This uses the full
+  // `dropped` list, not `guardedDrops`: with `discardDroppedKindRows` the rows
+  // are reclaimed later by materializeRemovals, which never touches identity
+  // tables.
+  const droppedNodeKinds = dropped
+    .filter((drop) => drop.entity === "node")
+    .map((drop) => drop.kind);
   const identityPreflight =
-    activeRow === undefined || target.identity === undefined ?
-      undefined
+    activeRow === undefined ? undefined
+    : target.identity === undefined ?
+      // Identity being OFF in the target is not evidence the ledger is empty:
+      // disabling retains the assertion rows. A drop committed here would
+      // strand every assertion touching the kind — a later re-enablement
+      // filters them out of the closure while raw ledger reads and merge
+      // staging still see them.
+      await prepareIdentityKindCascade(backend, target, {
+        droppedNodeKinds,
+        ...(options?.schema === undefined ? {} : { schema: options.schema }),
+      })
     : await prepareIdentitySchemaCommit(backend, target, {
         enablement: storedSchema?.identity === undefined,
-        // Node kinds this commit REMOVES cascade the assertion ledger inside
-        // the commit transaction (edge kinds carry no assertions). This uses
-        // the full `dropped` list, not `guardedDrops`: with
-        // `discardDroppedKindRows` the rows are reclaimed later by
-        // materializeRemovals, which never touches identity tables.
-        droppedNodeKinds: dropped
-          .filter((drop) => drop.entity === "node")
-          .map((drop) => drop.kind),
+        droppedNodeKinds,
         ...(options?.schema === undefined ? {} : { schema: options.schema }),
       });
 
@@ -945,6 +957,45 @@ export async function migrateSchema<G extends GraphDef>(
         },
       );
   return committed.version;
+}
+
+/**
+ * Builds the ledger-cleanup preflight for a kind-dropping commit whose target
+ * graph has no identity profile. Returns `undefined` when there is nothing to
+ * cascade — the ordinary case, which pays one probe and then commits through
+ * exactly the primitive it always did, emptiness fence included.
+ *
+ * The prior schema's profile is deliberately NOT the test. The stranding case
+ * is a drop committed one or more versions AFTER identity was switched off, so
+ * the immediately-preceding schema has no profile either; only the ledger
+ * answers whether rows are there.
+ */
+async function prepareIdentityKindCascade<G extends GraphDef>(
+  backend: GraphBackend,
+  target: G,
+  options: Readonly<{
+    droppedNodeKinds: readonly string[];
+    schema?: SqlSchema;
+  }>,
+): Promise<
+  ((transactionBackend: TransactionBackend) => Promise<void>) | undefined
+> {
+  if (options.droppedNodeKinds.length === 0) return undefined;
+  const schema =
+    options.schema === undefined ?
+      createSqlSchema(backend.tableNames)
+    : requireSqlSchema(options.schema, "The schema option");
+  const needed = await identityKindCascadeNeeded(
+    backend,
+    schema,
+    target.id,
+    options.droppedNodeKinds,
+  );
+  if (!needed) return undefined;
+  return identityKindCascadePreflight(
+    { graphId: target.id, schema },
+    options.droppedNodeKinds,
+  );
 }
 
 /**

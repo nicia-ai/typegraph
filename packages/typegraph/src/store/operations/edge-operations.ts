@@ -31,10 +31,14 @@ import { validateEdgeProps } from "../../errors/validation";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
-import { validateOptionalCanonicalIsoDate } from "../../utils/date";
+import {
+  assertOrderedValidityWindow,
+  validateOptionalCanonicalIsoDate,
+} from "../../utils/date";
 import { generateId } from "../../utils/id";
 import { requireDefined } from "../../utils/presence";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
+import { type UpsertUpdateEdgeInput } from "../collections/edge-collection";
 import {
   checkCardinalityConstraint,
   type ConstraintContext,
@@ -708,11 +712,7 @@ export function edgeUpsertDirtyCheck<G extends GraphDef>(
  */
 async function performEdgeUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
-  input: {
-    id: string;
-    props: Partial<Record<string, unknown>>;
-    validTo?: string;
-  },
+  input: UpsertUpdateEdgeInput,
   target: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Edge> {
@@ -725,12 +725,20 @@ async function performEdgeUpdate<G extends GraphDef>(
 
   const { validatedProps } = resolveEdgeUpdateProps(ctx, existing, input.props);
 
+  const validFrom = validateOptionalCanonicalIsoDate(
+    input.validFrom,
+    "validFrom",
+  );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+  assertOrderedValidityWindow(`edge "${id}"`, validFrom, validTo);
 
+  // `validFrom` reaches the backend only through a resurrecting write (see
+  // UpdateEdgeParams): a live edge's lower bound is history and stays put.
   const updateParams: {
     graphId: string;
     id: string;
     props: Record<string, unknown>;
+    validFrom?: string;
     validTo?: string;
     clearDeleted?: boolean;
   } = {
@@ -738,6 +746,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     id,
     props: validatedProps,
   };
+  if (validFrom !== undefined) updateParams.validFrom = validFrom;
   if (validTo !== undefined) updateParams.validTo = validTo;
   if (options?.clearDeleted) updateParams.clearDeleted = true;
 
@@ -785,11 +794,7 @@ export async function executeEdgeUpdate<G extends GraphDef>(
  */
 export async function executeEdgeUpsertUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
-  input: {
-    id: string;
-    props: Partial<Record<string, unknown>>;
-    validTo?: string;
-  },
+  input: UpsertUpdateEdgeInput,
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Edge> {

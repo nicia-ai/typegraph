@@ -115,6 +115,22 @@ function evaluateNodePredicate<N extends NodeType>(
 }
 
 /**
+ * Update input for the internal upsert path, which owns the WHOLE validity
+ * window: a resurrecting upsert rewrites both endpoints, so it must be able to
+ * carry `validFrom` as well as `validTo`. Dropping `validFrom` here would leave
+ * the backend defaulting the lower bound to the resurrection instant while the
+ * caller's (possibly already past) `validTo` stayed — an inverted window that
+ * no read coordinate can observe.
+ *
+ * The public `update()` API cannot reach this member: its options type exposes
+ * `validTo` only, and it builds its input through {@link buildUpdateInput}. Only
+ * `upsertById` / `bulkUpsertById`, which accept `validFrom` by contract, route
+ * through {@link buildUpsertUpdateInput}.
+ */
+export type UpsertUpdateNodeInput = UpdateNodeInput &
+  Readonly<{ validFrom?: string }>;
+
+/**
  * Config for creating a NodeCollection.
  */
 export type NodeCollectionConfig = Readonly<{
@@ -139,7 +155,7 @@ export type NodeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<readonly Node[]>;
   executeUpdate: (
-    input: UpdateNodeInput,
+    input: UpsertUpdateNodeInput,
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
@@ -151,7 +167,7 @@ export type NodeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdate: (
-    input: UpdateNodeInput,
+    input: UpsertUpdateNodeInput,
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
@@ -236,6 +252,25 @@ function buildUpdateInput(
   } = { kind, id, props };
   if (options?.validTo !== undefined) input.validTo = options.validTo;
   return input as UpdateNodeInput;
+}
+
+/** Builds an {@link UpsertUpdateNodeInput} — see that type for why upsert alone carries `validFrom`. */
+function buildUpsertUpdateInput(
+  kind: string,
+  id: string,
+  props: Record<string, unknown>,
+  options?: Readonly<{ validFrom?: string; validTo?: string }>,
+): UpsertUpdateNodeInput {
+  const input: {
+    kind: string;
+    id: string;
+    props: Partial<Record<string, unknown>>;
+    validFrom?: string;
+    validTo?: string;
+  } = { kind, id, props };
+  if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
+  if (options?.validTo !== undefined) input.validTo = options.validTo;
+  return input as UpsertUpdateNodeInput;
 }
 
 function mapBulkNodeInputs(
@@ -540,7 +575,7 @@ export function createNodeCollection<
           return narrowNode<N>(rowToNode(existing));
         }
         const result = await executeNodeUpdate(
-          buildUpdateInput(kind, id, data, options),
+          buildUpsertUpdateInput(kind, id, data, options),
           backend,
           { clearDeleted: existing.deleted_at !== undefined },
         );
@@ -617,7 +652,7 @@ export function createNodeCollection<
         const toCreate: { index: number; input: CreateNodeInput }[] = [];
         const toUpdate: {
           index: number;
-          input: UpdateNodeInput;
+          input: UpsertUpdateNodeInput;
           clearDeleted: boolean;
         }[] = [];
 
@@ -695,7 +730,7 @@ export function createNodeCollection<
           } else {
             toUpdate.push({
               index: itemIndex,
-              input: buildUpdateInput(kind, item.id, item.props, item),
+              input: buildUpsertUpdateInput(kind, item.id, item.props, item),
               clearDeleted: deletedAt !== undefined,
             });
             if (dirty !== undefined) {

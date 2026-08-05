@@ -80,6 +80,7 @@ import { mergeGraphExtension } from "../graph-extension/merge";
 import { planRemovals, stripGraphExtension } from "../graph-extension/remove";
 import {
   ensureIdentitySchemaStorage,
+  identityKindCascadeNeeded,
   identitySchemaCommitPreflight,
 } from "../identity/schema-transition";
 import {
@@ -1148,9 +1149,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async removeIdentityKindsInSchemaPreflight(
     target: TransactionBackend,
     kinds: readonly string[],
+    options?: Readonly<{ repairClosure?: boolean }>,
   ): Promise<void> {
     if (!this.#captureEnabled) {
-      await removeIdentityKindsForContext(this.#identityContext(target), kinds);
+      await removeIdentityKindsForContext(
+        this.#identityContext(target),
+        kinds,
+        options,
+      );
       return;
     }
     const scope = createRecordedTransactionScope(
@@ -1161,6 +1167,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await removeIdentityKindsForContext(
       this.#identityContext(scope.backend),
       kinds,
+      options,
     );
     await scope.flush();
   }
@@ -4207,12 +4214,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // destructive by design; that's why removeKinds is a separate
     // verb. Concurrent commits surface as `StaleVersionError` from
     // `commitSchemaVersion` (CAS check).
-    const identityCandidate =
-      finalGraph.identity === undefined || plan.removedNodeKinds.length === 0 ?
-        undefined
-      : this.#cloneWithGraph(finalGraph, undefined);
+    const identityCascade = await this.#identityRemovalPreflight(
+      finalGraph,
+      plan.removedNodeKinds,
+    );
     const committedRow =
-      identityCandidate === undefined ?
+      identityCascade === undefined ?
         await commitNewSchemaVersion(
           this.#backend,
           finalGraph,
@@ -4222,11 +4229,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#backend,
           finalGraph,
           activeRow.version,
-          async (target) =>
-            identityCandidate.removeIdentityKindsInSchemaPreflight(
-              target,
-              plan.removedNodeKinds,
-            ),
+          identityCascade,
         );
 
     // Queue per-deployment data-cleanup status — one row per removed
@@ -4276,6 +4279,43 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       });
     }
     return evolved;
+  }
+
+  /**
+   * The identity cascade `removeKinds()` commits with, or `undefined` when the
+   * removal cannot touch the assertion ledger.
+   *
+   * Identity being switched OFF is not that case: disabling identity retains
+   * the assertion rows, so a graph with no profile can still hold assertions
+   * naming the kinds being removed. Those rows are cascaded too — otherwise
+   * they survive as current orphans that a later re-enablement filters out of
+   * the closure while raw ledger reads and merge staging still see them. What
+   * the profile's absence does remove is the closure contract, so the repair
+   * pass is skipped and the ledger cleanup runs alone — and a graph that has no
+   * such rows keeps committing through the plain schema-commit primitive.
+   */
+  async #identityRemovalPreflight(
+    finalGraph: G,
+    removedNodeKinds: readonly string[],
+  ): Promise<((target: TransactionBackend) => Promise<void>) | undefined> {
+    if (removedNodeKinds.length === 0) return undefined;
+    const repairClosure = finalGraph.identity !== undefined;
+    if (
+      !repairClosure &&
+      !(await identityKindCascadeNeeded(
+        this.#backend,
+        this.#sqlSchema(),
+        this.graphId,
+        removedNodeKinds,
+      ))
+    ) {
+      return undefined;
+    }
+    const candidate = this.#cloneWithGraph(finalGraph, undefined);
+    return async (target: TransactionBackend) =>
+      candidate.removeIdentityKindsInSchemaPreflight(target, removedNodeKinds, {
+        repairClosure,
+      });
   }
 
   /**

@@ -93,6 +93,14 @@ export type StagedEdge = Readonly<{
   toKind: string;
   props: Readonly<Record<string, JsonValue>>;
   branchId: BranchId;
+  /**
+   * The branch-authored valid-time window, carried only by NEW edges (an
+   * inherited edge already holds its committed window in the target and must
+   * not have it rewritten). Windows take no part in the dedupe key or the
+   * conflict union — they simply ride along with whichever edge survives.
+   */
+  validFrom?: string;
+  validTo?: string;
 }>;
 
 /**
@@ -110,6 +118,9 @@ export type MergedEdge = Readonly<{
   toKind: string;
   props: Readonly<Record<string, JsonValue>>;
   mergedIds: readonly EdgeId[];
+  /** The survivor's {@link StagedEdge} window, if it carried one. */
+  validFrom?: string;
+  validTo?: string;
 }>;
 
 /**
@@ -415,6 +426,17 @@ export function repointEdges<G extends GraphDef = GraphDef>(
     const fromKind = kindOf(survivor.fromKey);
     const toId = idOf(survivor.toKey);
     const toKind = kindOf(survivor.toKey);
+    // The survivor's window rides along unchanged — it is not unioned across
+    // the group, because the group's members are the SAME edge as seen by
+    // different branches, and the survivor is the one whose row we commit.
+    const window = {
+      ...(survivor.staged.validFrom === undefined ?
+        {}
+      : { validFrom: survivor.staged.validFrom }),
+      ...(survivor.staged.validTo === undefined ?
+        {}
+      : { validTo: survivor.staged.validTo }),
+    };
 
     if (dedupeKeys.length === 1) {
       // Exact-equal collapse: every member shares identical props, so no
@@ -428,6 +450,7 @@ export function repointEdges<G extends GraphDef = GraphDef>(
         toKind,
         props: survivor.staged.props,
         mergedIds,
+        ...window,
       });
       continue;
     }
@@ -453,6 +476,7 @@ export function repointEdges<G extends GraphDef = GraphDef>(
       toKind,
       props,
       mergedIds,
+      ...window,
     });
   }
 

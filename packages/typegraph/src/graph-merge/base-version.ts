@@ -61,6 +61,9 @@ import { asBaseVersion } from "./types";
  * two components.
  */
 const TOKEN_SEPARATOR = "\0";
+
+/** Separates the schema hash from the monotonic active schema version. */
+const SCHEMA_VERSION_TAG = "#s";
 const REVISION_COMPONENT_PREFIX = "revision:";
 const REVISION_COMPONENT_SEPARATOR = ":";
 const INITIAL_REVISION = "initial";
@@ -240,13 +243,22 @@ export async function computeBaseVersion<G extends GraphDef>(
   store: Store<G>,
 ): Promise<BaseVersion> {
   if (store.revisionTrackingEnabled) {
-    const [schemaComponent, origin, revision] = await Promise.all([
-      computeSchemaComponent(store),
-      store.revisionOriginNow(),
-      store.revisionNow(),
-    ]);
+    const [schemaComponent, origin, revision, activeVersion] =
+      await Promise.all([
+        computeSchemaComponent(store),
+        store.revisionOriginNow(),
+        store.revisionNow(),
+        readActiveSchemaVersion(storeBackend(store), store.graphId),
+      ]);
+    // The document hash is deliberately version-blind, and the revision
+    // clock does not advance on schema commits — so a schema ROUND-TRIP
+    // (migrate away and back) would otherwise restore the exact token while
+    // its preflights mutated identity rows. The active schema version is
+    // monotonic, so baking it into the schema half fences the round-trip.
+    // The legacy branch below needs no equivalent: its content fingerprint
+    // covers the mutated rows directly.
     return asBaseVersion(
-      `${schemaComponent}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
+      `${schemaComponent}${SCHEMA_VERSION_TAG}${activeVersion}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
     );
   }
   const [schemaComponent, contentComponent] = await Promise.all([

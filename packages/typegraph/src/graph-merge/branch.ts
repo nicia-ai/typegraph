@@ -19,7 +19,7 @@ import { BranchError } from "./errors";
 import type { Result } from "./result";
 import { err, ok } from "./result";
 import type { GraphDef } from "./typegraph-internal";
-import { generateId } from "./typegraph-internal";
+import { generateId, storeBackend } from "./typegraph-internal";
 import type { BranchOptions, GraphBranch } from "./types";
 import { asBranchId } from "./types";
 import type { MakeBackend, WorkingCopyStrategy } from "./working-copy";
@@ -59,7 +59,24 @@ export async function branch<G extends GraphDef>(
     const workingCopyStrategy =
       strategy ?? cloneWorkingCopyStrategy<G>(makeBackend);
     const store = await workingCopyStrategy.create(baseStore);
-    return ok({ id, base, store });
+    // Capture the clone's committed schema row as the merge-time drift
+    // anchor. Version participates so a schema ROUND-TRIP (migrate away and
+    // back, restoring the document hash while its preflights mutated rows)
+    // is still detected.
+    const schemaRow = await storeBackend(store).getActiveSchema(store.graphId);
+    return ok({
+      id,
+      base,
+      store,
+      ...(schemaRow === undefined ?
+        { schemaAnchor: undefined }
+      : {
+          schemaAnchor: {
+            version: schemaRow.version,
+            hash: schemaRow.schema_hash,
+          },
+        }),
+    });
   } catch (error) {
     return err(
       new BranchError("Failed to create working-copy branch of base store", {

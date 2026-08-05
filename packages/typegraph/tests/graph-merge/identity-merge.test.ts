@@ -947,6 +947,30 @@ describe("remapIdentityAssertionEndpoints committed precedence", () => {
   });
 });
 
+describe("remapIdentityAssertionEndpoints committed endpoints", () => {
+  it("refuses when canonicalization moves a committed row's own endpoints", () => {
+    // The applier cannot rewrite a stored row, so a plan carrying committed
+    // z-target with canonicalized endpoints could only end as a confusing
+    // one-truth refusal — or, if a challenger won the dedupe, a report/ledger
+    // divergence. The remap must refuse with the specific cause.
+    const committed: IdentityTransferAssertion = {
+      id: "z-target",
+      relation: "same",
+      a: { kind: "Person", id: "x" },
+      b: { kind: "Person", id: "z" },
+      validFrom: "2024-01-01T00:00:00.000Z",
+    };
+    expect(() =>
+      remapIdentityAssertionEndpoints(
+        [committed],
+        new Map([[mergeKey("Person", "x"), mergeKey("Person", "y")]]),
+        new Map<MergeKey, string>(),
+        new Map([["z-target", committed]]),
+      ),
+    ).toThrow(IdentityMergeConflictError);
+  });
+});
+
 describe("translateIdentityCommitError", () => {
   it("translates identity refusals into the typed conflict, cause preserved", () => {
     const contradiction = new IdentityContradictionError({

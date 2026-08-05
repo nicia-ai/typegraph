@@ -488,6 +488,12 @@ export type UpdateEdgeParams = Readonly<{
   graphId: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
+  /**
+   * Applied when resurrecting a tombstone, where it asserts a COMPLETE window:
+   * `validTo` is rewritten alongside it (omitted `validTo` reopens the window).
+   * Omitting `validFrom` on a resurrection leaves the stored window in place.
+   */
+  validFrom?: string | null;
   validTo?: string;
   clearDeleted?: boolean;
 }>;

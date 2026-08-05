@@ -27,6 +27,13 @@ import {
   StaleVersionError,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { type GraphBackend } from "../src/backend/types";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import { sql } from "../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  asCompiledStatementSql,
+} from "../src/query/sql-intent";
 import { getActiveSchema, migrateSchema } from "../src/schema";
 import { storeRuntime } from "../src/store/runtime-port";
 
@@ -69,6 +76,56 @@ async function activeVersion(
 ): Promise<number> {
   const row = await getActiveSchema(backend, GRAPH_ID);
   return row?.version ?? 0;
+}
+
+/**
+ * Reads the assertion ledger directly. `identityAssertionRowsByIds` answers an
+ * empty map for an identity-disabled Store, which is exactly the state these
+ * tests need to observe — so they go to the table.
+ */
+async function rawAssertionIds(
+  backend: GraphBackend,
+): Promise<readonly string[]> {
+  const schema = createSqlSchema(backend.tableNames);
+  const rows = await backend.execute<Readonly<{ id: string }>>(
+    asCompiledRowsSql(sql`
+      SELECT id
+      FROM ${schema.identityAssertionsTable}
+      WHERE graph_id = ${GRAPH_ID}
+      ORDER BY id
+    `),
+  );
+  return rows.map((row) => row.id);
+}
+
+/** Plants a ledger row the public API cannot produce (an unregistered kind). */
+async function insertRawAssertion(
+  backend: GraphBackend,
+  assertion: Readonly<{
+    id: string;
+    a: Readonly<{ kind: string; id: string }>;
+    b: Readonly<{ kind: string; id: string }>;
+  }>,
+): Promise<void> {
+  const executeStatement = backend.executeStatement;
+  if (executeStatement === undefined) {
+    throw new Error("backend must support statement execution");
+  }
+  const schema = createSqlSchema(backend.tableNames);
+  const now = new Date().toISOString();
+  await executeStatement(
+    asCompiledStatementSql(sql`
+      INSERT INTO ${schema.identityAssertionsTable}
+        (graph_id, id, rel, a_kind, a_id, b_kind, b_id,
+         valid_from, created_at, updated_at)
+      VALUES (
+        ${GRAPH_ID}, ${assertion.id}, ${"same"},
+        ${assertion.a.kind}, ${assertion.a.id},
+        ${assertion.b.kind}, ${assertion.b.id},
+        ${now}, ${now}, ${now}
+      )
+    `),
+  );
 }
 
 describe("identity across Store lifecycle operations", () => {
@@ -226,5 +283,130 @@ describe("migrateSchema() identity preflight", () => {
     ]);
     expect(rows.size).toBe(0);
     await migrated.close();
+  });
+});
+
+/**
+ * Turning identity off retains the assertion ledger deliberately. So "the
+ * target schema has no identity profile" is not evidence that there is nothing
+ * to cascade — and every lifecycle verb that drops a node kind has to cascade
+ * it anyway, or the rows survive as current orphans: filtered out of the
+ * closure the next enablement builds, yet still visible to raw ledger reads and
+ * to merge staging, where a later "no-op" merge stages them as retractions.
+ */
+describe("identity ledger cascade while identity is disabled", () => {
+  const disabledPersonOnlyGraph = defineGraph({
+    id: GRAPH_ID,
+    nodes: { Person: { type: Person } },
+    edges: {},
+  });
+  const enabledPersonOnlyGraph = defineGraph({
+    id: GRAPH_ID,
+    nodes: { Person: { type: Person } },
+    edges: {},
+    identity: { sameIdAcrossKinds: "ignore" },
+  });
+
+  it("cascades a kind dropped by migrateSchema while identity is off", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const [store] = await createStoreWithSchema(ignoreGraph, backend);
+    await store.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+    await store.nodes.Author.create({ penName: "A." }, { id: "alias" });
+    const asserted = await store.identity.assertSame(alice, {
+      kind: "Author",
+      id: "alias",
+    });
+
+    // Identity off. The ledger row is retained on purpose — re-enabling later
+    // is meant to find the graph's identity truth still there.
+    await migrateSchema(backend, disabledGraph, await activeVersion(backend));
+    expect(await rawAssertionIds(backend)).toEqual([asserted.assertion.id]);
+
+    // Author goes away while identity is still off. The commit carries no
+    // closure rebuild (there is no profile), but it must still take the row.
+    await migrateSchema(
+      backend,
+      disabledPersonOnlyGraph,
+      await activeVersion(backend),
+      { discardDroppedKindRows: true },
+    );
+    expect(await rawAssertionIds(backend)).toEqual([]);
+
+    // Re-enabling without Author therefore adopts nothing.
+    await migrateSchema(
+      backend,
+      enabledPersonOnlyGraph,
+      await activeVersion(backend),
+    );
+    const [reenabled] = await createStoreWithSchema(
+      enabledPersonOnlyGraph,
+      backend,
+    );
+    const rows = await storeRuntime(reenabled).identityAssertionRowsByIds([
+      asserted.assertion.id,
+    ]);
+    expect(rows.size).toBe(0);
+    await reenabled.close();
+  });
+
+  it("cascades a kind dropped by removeKinds() while identity is off", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const [store] = await createStoreWithSchema(
+      enabledPersonOnlyGraph,
+      backend,
+    );
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    const person = await evolved.nodes.Person.create({ name: "Alice" });
+    const tag = await evolved
+      .getNodeCollectionOrThrow("Tag")
+      .create({ label: "author" });
+    const asserted = await evolved.identity.assertSame(person, tag as never);
+
+    await migrateSchema(
+      backend,
+      disabledPersonOnlyGraph,
+      await activeVersion(backend),
+    );
+    expect(await rawAssertionIds(backend)).toEqual([asserted.assertion.id]);
+
+    // The extension kind folds back in when the disabled Store opens, so
+    // removeKinds still owns Tag — and still owns Tag's assertions.
+    const [disabled] = await createStoreWithSchema(
+      disabledPersonOnlyGraph,
+      backend,
+    );
+    const removed = await disabled.removeKinds(["Tag"]);
+    expect(await rawAssertionIds(backend)).toEqual([]);
+    await removed.close();
+  });
+
+  it("purges assertions naming unregistered kinds when identity is enabled", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const [store] = await createStoreWithSchema(ignoreGraph, backend);
+    await store.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+    await migrateSchema(backend, disabledGraph, await activeVersion(backend));
+
+    // A database that already contains a stray: an assertion naming a kind the
+    // schema does not register. The enablement rebuild filters it, so without
+    // an explicit purge it would be adopted as an invisible current row.
+    await insertRawAssertion(backend, {
+      id: "orphan-assertion",
+      a: alice,
+      b: { kind: "Ghost", id: "ghost" },
+    });
+    expect(await rawAssertionIds(backend)).toEqual(["orphan-assertion"]);
+
+    await migrateSchema(backend, ignoreGraph, await activeVersion(backend));
+
+    expect(await rawAssertionIds(backend)).toEqual([]);
+    const [enabled] = await createStoreWithSchema(ignoreGraph, backend);
+    expect(await enabled.identity.membersOf(alice)).toEqual([
+      { kind: "Person", id: "alice" },
+    ]);
+    await enabled.close();
   });
 });

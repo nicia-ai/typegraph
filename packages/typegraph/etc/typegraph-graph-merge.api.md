@@ -1660,6 +1660,10 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
     id: BranchId;
     base: BaseVersion;
     store: Store<G>;
+    schemaAnchor?: Readonly<{
+        version: number;
+        hash: string;
+    }> | undefined;
 }>;
 
 // @public
@@ -4673,6 +4677,7 @@ type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
     props: Readonly<Record<string, unknown>>;
+    validFrom?: string | null;
     validTo?: string;
     clearDeleted?: boolean;
 }>;
