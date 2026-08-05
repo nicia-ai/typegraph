@@ -74,8 +74,39 @@ export const RECORDED_EDGE_COLUMNS = [
   "meta",
 ] as const;
 
+/**
+ * The recorded identity-assertion relation's columns. Unlike nodes and edges,
+ * its VALUES tuples are built by `flushIdentityAssertions` rather than by the
+ * cell-builder machinery below (its after-image is a storage row, not a
+ * `NodeRow` / `EdgeRow`), so only the column clause and the chunk size are
+ * derived here — from this one list, in lockstep.
+ */
+const RECORDED_IDENTITY_ASSERTION_COLUMNS = [
+  "history_id",
+  "graph_id",
+  "id",
+  "rel",
+  "a_kind",
+  "a_id",
+  "b_kind",
+  "b_id",
+  "valid_from",
+  "valid_to",
+  "created_at",
+  "updated_at",
+  "deleted_at",
+  "ended_by_kind",
+  "ended_by_id",
+  "recorded_from",
+  "recorded_to",
+  "op",
+] as const;
+
 const RECORDED_NODE_COLUMN_LIST = sql.raw(RECORDED_NODE_COLUMNS.join(", "));
 const RECORDED_EDGE_COLUMN_LIST = sql.raw(RECORDED_EDGE_COLUMNS.join(", "));
+export const RECORDED_IDENTITY_ASSERTION_COLUMN_LIST: SqlFragment = sql.raw(
+  RECORDED_IDENTITY_ASSERTION_COLUMNS.join(", "),
+);
 
 /**
  * Conservative per-statement bound-parameter budget, used only as the fallback
@@ -236,6 +267,12 @@ export function recordedNodeChunkSize(target: TransactionBackend): number {
 
 export function recordedEdgeChunkSize(target: TransactionBackend): number {
   return recordedChunkSize(target, RECORDED_EDGE_COLUMNS.length);
+}
+
+export function recordedIdentityAssertionChunkSize(
+  target: TransactionBackend,
+): number {
+  return recordedChunkSize(target, RECORDED_IDENTITY_ASSERTION_COLUMNS.length);
 }
 
 export function insertRecordedNodeRows(

@@ -90,6 +90,16 @@ export type IdentityTransferAssertion = Readonly<{
   b: PlainNodeRef;
   validFrom: string;
   validTo?: string | undefined;
+  /**
+   * The node whose soft-delete cascade ended this assertion. Present only on
+   * an ended row (`validTo` set) that a node deletion closed; an explicitly
+   * retracted row carries none. It names one of `a` / `b`.
+   *
+   * This is provenance ABOUT the ending, not part of the claim: assertion
+   * truth keys deliberately exclude it, so two captures of one row still
+   * compare equal whether or not the cause travelled with them.
+   */
+  endedBy?: PlainNodeRef | undefined;
 }>;
 
 export type IdentityImportSummary = Readonly<{
@@ -115,6 +125,8 @@ type RawIdentityAssertionRow = Readonly<{
   created_at: unknown;
   updated_at: unknown;
   deleted_at: unknown;
+  ended_by_kind: string | null | undefined;
+  ended_by_id: string | null | undefined;
 }>;
 
 type RawNodeSnapshotRow = Readonly<{
@@ -206,6 +218,9 @@ export function toTransferAssertion(
     b: { kind: row.b_kind, id: row.b_id },
     validFrom: row.valid_from,
     ...(row.valid_to === undefined ? {} : { validTo: row.valid_to }),
+    ...(row.ended_by_kind === undefined || row.ended_by_id === undefined ?
+      {}
+    : { endedBy: { kind: row.ended_by_kind, id: row.ended_by_id } }),
   };
 }
 
@@ -288,6 +303,8 @@ function normalizeAssertionRow(
     created_at: toCanonicalIso(row.created_at),
     updated_at: toCanonicalIso(row.updated_at),
     deleted_at: optionalTimestamp(row.deleted_at),
+    ended_by_kind: row.ended_by_kind ?? undefined,
+    ended_by_id: row.ended_by_id ?? undefined,
   };
 }
 
@@ -1419,6 +1436,8 @@ function buildAssertionRow(
     created_at: timestamp,
     updated_at: timestamp,
     deleted_at: undefined,
+    ended_by_kind: undefined,
+    ended_by_id: undefined,
   };
 }
 
@@ -1431,7 +1450,7 @@ async function insertAssertionRows(
   const chunkSize = identityChunkSize(target, {
     fixedParameters: 0,
     maxItems: MAX_ASSERTION_INSERT_CHUNK_SIZE,
-    parametersPerItem: 12,
+    parametersPerItem: 14,
   });
   for (const rowChunk of chunk(rows, chunkSize)) {
     const values = rowChunk.map((row) => {
@@ -1439,11 +1458,16 @@ async function insertAssertionRows(
         row.valid_to === undefined ? sql`NULL` : sql`${row.valid_to}`;
       const deletedAt =
         row.deleted_at === undefined ? sql`NULL` : sql`${row.deleted_at}`;
+      const endedByKind =
+        row.ended_by_kind === undefined ? sql`NULL` : sql`${row.ended_by_kind}`;
+      const endedById =
+        row.ended_by_id === undefined ? sql`NULL` : sql`${row.ended_by_id}`;
       return sql`
         (
                 ${row.graph_id}, ${row.id}, ${row.rel}, ${row.a_kind}, ${row.a_id},
                 ${row.b_kind}, ${row.b_id}, ${row.valid_from}, ${validTo},
-                ${row.created_at}, ${row.updated_at}, ${deletedAt}
+                ${row.created_at}, ${row.updated_at}, ${deletedAt},
+                ${endedByKind}, ${endedById}
               )
       `;
     });
@@ -3266,13 +3290,11 @@ async function hasMaterializedIdentityClass(
  * Reads the instant a node was soft-deleted, as stored on its own row.
  *
  * The soft-delete cascade ends the node's open assertions AT THIS INSTANT
- * rather than at a second wall-clock read, which makes "this assertion ended
- * because its endpoint died" a derivable fact: a consumer comparing an ended
- * assertion's `valid_to` to the endpoint's `deleted_at` sees equality exactly
- * for cascade endings (graph-merge's state-diff does precisely this to tell a
- * cascade apart from an explicit retraction). Two `nowIso()` reads inside one
- * transaction can straddle a millisecond boundary, so the equality has to come
- * from the stored value, not from a fresh clock read.
+ * rather than at a second wall-clock read, so the assertion stops holding at
+ * exactly the moment its endpoint stopped existing: a valid-time read at any
+ * instant sees the node and its assertions agree. Two `nowIso()` reads inside
+ * one transaction can straddle a millisecond boundary, so the instant has to
+ * come from the stored value, not from a fresh clock read.
  *
  * Returns `undefined` when the row is gone or still live; callers fall back to
  * their own instant.
@@ -3350,9 +3372,9 @@ export async function detachIdentityForNode(
     const now = nowIso();
     // A soft delete ends its node's open assertions at the node's OWN deletion
     // instant (see readNodeDeletionInstant): the caller has already written
-    // `deleted_at` inside this transaction, and reusing it is what makes a
-    // cascade ending distinguishable from an explicit retraction downstream.
-    // The read is skipped when there is nothing to end.
+    // `deleted_at` inside this transaction, and reusing it keeps the node and
+    // its assertions agreeing at every valid-time instant. The read is skipped
+    // when there is nothing to end.
     const cascadeInstant =
       mode === "hard" || rows.length === 0 ?
         now
@@ -3375,12 +3397,27 @@ export async function detachIdentityForNode(
         touch(ctx.graphId, row.id);
       } else {
         const validTo = clampValidTo(cascadeInstant, row.valid_from);
-        const ended = { ...row, valid_to: validTo, updated_at: now };
+        // Stamp the CAUSE of the ending alongside it, in the same statement:
+        // this row stopped holding because `ref` was deleted, not because
+        // anyone retracted it. Downstream (graph-merge's state-diff) reads the
+        // stamp instead of trying to infer the cause from timestamps, which
+        // cannot separate a retraction issued in the delete's own millisecond
+        // from the cascade itself.
+        const ended = {
+          ...row,
+          valid_to: validTo,
+          updated_at: now,
+          ended_by_kind: ref.kind,
+          ended_by_id: ref.id,
+        };
         await executeIdentityStatement(
           rawTarget,
           sql`
             UPDATE ${ctx.schema.identityAssertionsTable}
-            SET valid_to = ${validTo}, updated_at = ${now}
+            SET valid_to = ${validTo},
+                updated_at = ${now},
+                ended_by_kind = ${ref.kind},
+                ended_by_id = ${ref.id}
             WHERE graph_id = ${ctx.graphId} AND id = ${row.id}
           `,
         );
@@ -3458,7 +3495,9 @@ export async function readIdentityAssertionsForInterchange<G extends GraphDef>(
              identity_assertions.valid_to AS valid_to,
              identity_assertions.created_at AS created_at,
              identity_assertions.updated_at AS updated_at,
-             identity_assertions.deleted_at AS deleted_at
+             identity_assertions.deleted_at AS deleted_at,
+             identity_assertions.ended_by_kind AS ended_by_kind,
+             identity_assertions.ended_by_id AS ended_by_id
       FROM ${ctx.schema.identityAssertionsTable} identity_assertions
       ${liveEndpointJoins}
       WHERE identity_assertions.graph_id = ${ctx.graphId}
@@ -3591,6 +3630,36 @@ function validateTransferShape<G extends GraphDef>(
         code: "IDENTITY_IMPORT_INVALID_WINDOW",
       },
     );
+  }
+  // A cascade cause is only meaningful on an ENDED row, and only ever names
+  // that row's own endpoint — the cascade ends assertions BECAUSE they touch
+  // the deleted node. The relation carries the same rule as a CHECK; rejecting
+  // it here turns an opaque constraint violation into an attributed one.
+  if (assertion.endedBy !== undefined) {
+    if (assertion.validTo === undefined) {
+      throw transferShapeError(
+        assertion,
+        "Identity import cannot name an ending cause on an open assertion.",
+        {
+          message: `Assertion ${assertion.id} carries endedBy without validTo`,
+          code: "IDENTITY_IMPORT_ENDED_BY_WITHOUT_END",
+        },
+      );
+    }
+    const endedByKey = refKey(assertion.endedBy);
+    if (
+      endedByKey !== refKey(assertion.a) &&
+      endedByKey !== refKey(assertion.b)
+    ) {
+      throw transferShapeError(
+        assertion,
+        "Identity import ending cause must name one of the assertion's endpoints.",
+        {
+          message: `Assertion ${assertion.id} endedBy is not an endpoint of the assertion`,
+          code: "IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT",
+        },
+      );
+    }
   }
   // An ended row takes the raw-INSERT branch of the importer, which skips
   // endpoint-liveness validation, contradiction validation and closure
@@ -3736,7 +3805,9 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
             sameId.b_kind === b.kind &&
             sameId.b_id === b.id &&
             sameId.valid_from === assertion.validFrom &&
-            sameId.valid_to === assertion.validTo;
+            sameId.valid_to === assertion.validTo &&
+            sameId.ended_by_kind === assertion.endedBy?.kind &&
+            sameId.ended_by_id === assertion.endedBy?.id;
           if (exact) {
             skipped += 1;
             continue;
@@ -3766,6 +3837,8 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
             created_at: timestamp,
             updated_at: assertion.validTo,
             deleted_at: undefined,
+            ended_by_kind: assertion.endedBy?.kind,
+            ended_by_id: assertion.endedBy?.id,
           };
           await insertAssertionRows(rawTarget, ctx.schema, [row]);
           touch(ctx.graphId, row.id, row);

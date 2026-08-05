@@ -5,6 +5,7 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { RECORDED_MAX_REVISION } from "../../core/temporal";
+import { IDENTITY_ASSERTION_COLUMNS } from "../../identity/historical-sql";
 import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import { type SqlSchema } from "../../query/compiler/schema";
@@ -20,7 +21,9 @@ import { executeStatement } from "./guards";
 import {
   insertRecordedEdgeRows,
   insertRecordedNodeRows,
+  RECORDED_IDENTITY_ASSERTION_COLUMN_LIST,
   recordedEdgeChunkSize,
+  recordedIdentityAssertionChunkSize,
   type RecordedInsert,
   recordedNodeChunkSize,
   type RecordedOperation,
@@ -221,8 +224,7 @@ async function getIdentityAssertionRowsByIds(
   if (ids.length === 0) return new Map();
   const rows = await target.execute<IdentityAssertionStorageRow>(
     asCompiledRowsSql(sql`
-      SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-             valid_from, valid_to, created_at, updated_at, deleted_at
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
       FROM ${schema.identityAssertionsTable}
       WHERE graph_id = ${graphId}
         AND id IN (${sqlValueList(ids)})
@@ -239,9 +241,7 @@ export async function flushIdentityAssertions(
   recordedRevision: number,
 ): Promise<void> {
   if (entities.length === 0) return;
-  // The identity recorded row has one fewer column than a recorded node, so the
-  // node chunk size safely bounds the UPDATE, fallback SELECT, and INSERT.
-  const chunkSize = recordedNodeChunkSize(target);
+  const chunkSize = recordedIdentityAssertionChunkSize(target);
   for (const entityChunk of chunk(entities, chunkSize)) {
     const ids = entityChunk.map((entity) => entity.id);
     const closed = await closeOpenReturning(
@@ -261,7 +261,9 @@ export async function flushIdentityAssertions(
                 ${row.a_kind}, ${row.a_id}, ${row.b_kind}, ${row.b_id},
                 ${row.valid_from}, ${row.valid_to ?? sql.raw("NULL")},
                 ${row.created_at}, ${row.updated_at},
-                ${row.deleted_at ?? sql.raw("NULL")}, ${recordedRevision},
+                ${row.deleted_at ?? sql.raw("NULL")},
+                ${row.ended_by_kind ?? sql.raw("NULL")},
+                ${row.ended_by_id ?? sql.raw("NULL")}, ${recordedRevision},
                 ${RECORDED_MAX_REVISION}, ${operation}
               )
       `,
@@ -272,11 +274,8 @@ export async function flushIdentityAssertions(
     await executeStatement(
       target,
       sql`
-        INSERT INTO ${schema.recordedIdentityAssertionsTable} (
-          history_id, graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-          valid_from, valid_to, created_at, updated_at, deleted_at,
-          recorded_from, recorded_to, op
-        ) VALUES ${sql.join(values, sql`, `)}
+        INSERT INTO ${schema.recordedIdentityAssertionsTable} (${RECORDED_IDENTITY_ASSERTION_COLUMN_LIST})
+        VALUES ${sql.join(values, sql`, `)}
       `,
     );
   }
