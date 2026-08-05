@@ -24,7 +24,13 @@
  *   - set-dedupe edges (both branches' collapsing edges onto one canonical),
  *   - node delete/modify conflicts (T8a — one branch deletes, another modifies),
  *   - ontology type reconciliation (T10 — a shared id staged under Doctor and
- *     SpecialistDoctor collapses to the most-specific kind).
+ *     SpecialistDoctor collapses to the most-specific kind),
+ *   - valid-time window reconciliation (#369 — both branches may end an
+ *     inherited node's and an inherited edge's validity at different instants,
+ *     so the earliest-end arbitration is part of what must commute). The
+ *     normalizers COMPARE `valid_to` on committed nodes and edges; until a
+ *     scenario actually moved a window, that comparison could not fail and the
+ *     window half of the gate was decorative.
  */
 import type { GraphBackend, Node, Store } from "@nicia-ai/typegraph";
 import {
@@ -54,7 +60,7 @@ import {
   setupSharedPgliteMergeEngine,
   type SharedPgliteMergeEngine,
 } from "../../graph-merge/test-utils";
-import type { DeterminismScenario } from "./arbitraries";
+import type { DeterminismScenario, WindowClaim } from "./arbitraries";
 import { determinismScenarioArb } from "./arbitraries";
 import { normalizeGraph, normalizeReport } from "./normalize";
 
@@ -108,6 +114,23 @@ type CareGraph = typeof careGraph;
 const DEMO_THRESHOLD = 0.85;
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
+
+/**
+ * The inherited rows the branches' end-of-validity claims are made on. Ids are
+ * explicit like every other fixture row, so the two materializations of a
+ * scenario carry the same identities.
+ */
+const WINDOW_PATIENT_ID = "pat-window";
+const WINDOW_ENCOUNTER_ID = "enc-window";
+const WINDOW_EDGE_ID = "edge-window";
+/**
+ * The window patient's name and blocking key sit OUTSIDE the generated pools, so
+ * it can never co-block with a generated patient and can never be pulled into a
+ * cluster: its only role in the merge is to carry the branches' window claims,
+ * and a resolution would move the claim onto a different canonical row.
+ */
+const WINDOW_PATIENT_NAME = "Ingeborg Lindqvist";
+const WINDOW_PATIENT_BIRTH_DATE = "1949-08-30";
 
 /** Stable, non-wall-clock branch order — held FIXED across both merge runs. */
 const FIXED_BRANCH_ORDER: readonly BranchId[] = [BRANCH_A, BRANCH_B];
@@ -257,6 +280,32 @@ describe.each(backendMatrix())(
       ]);
       const inheritedNodeId = requireDefined(inherited).id;
 
+      // The inherited node + edge the branches' window claims land on. Both are
+      // seeded with OPEN windows, so every end a scenario authors is the merge's
+      // only window input for that row.
+      const [windowPatient] = await base.nodes.Patient.bulkCreate([
+        {
+          id: WINDOW_PATIENT_ID,
+          props: {
+            name: WINDOW_PATIENT_NAME,
+            birthDate: WINDOW_PATIENT_BIRTH_DATE,
+          },
+        },
+      ]);
+      const windowPatientId = requireDefined(windowPatient).id;
+      await base.nodes.Encounter.bulkCreate([
+        { id: WINDOW_ENCOUNTER_ID, props: { reason: "window-anchor" } },
+      ]);
+      const [windowEdge] = await base.edges.hadEncounter.bulkCreate([
+        {
+          id: WINDOW_EDGE_ID,
+          from: { kind: "Patient", id: WINDOW_PATIENT_ID },
+          to: { kind: "Encounter", id: WINDOW_ENCOUNTER_ID },
+          props: { on: WINDOW_PATIENT_BIRTH_DATE },
+        },
+      ]);
+      const windowEdgeId = requireDefined(windowEdge).id;
+
       const branchA = unwrap(
         await branch<CareGraph>(base, () => makeBackend(disposers), {
           id: BRANCH_A,
@@ -267,6 +316,31 @@ describe.each(backendMatrix())(
           id: BRANCH_B,
         }),
       );
+
+      /**
+       * Applies one branch's endings. `update(id, {}, { validTo })` is an
+       * ordinary write, so a window-only claim reaches the merge exactly as a
+       * props edit does — through the branch's diff.
+       */
+      async function claimWindows(
+        store: Store<CareGraph>,
+        claim: WindowClaim,
+      ): Promise<void> {
+        if (claim.node !== undefined) {
+          await store.nodes.Patient.update(
+            windowPatientId,
+            {},
+            { validTo: claim.node },
+          );
+        }
+        if (claim.edge !== undefined) {
+          await store.edges.hadEncounter.update(
+            windowEdgeId,
+            {},
+            { validTo: claim.edge },
+          );
+        }
+      }
 
       // --- branch A ---------------------------------------------------------
       // Delete the inherited patient (the delete side of the delete/modify pair).
@@ -310,6 +384,7 @@ describe.each(backendMatrix())(
       await branchA.store.nodes.Doctor.bulkCreate([
         { id: sharedOntologyId, props: { name: scenario.ontology.pair.left } },
       ]);
+      await claimWindows(branchA.store, scenario.window.branchA);
 
       // --- branch B ---------------------------------------------------------
       // Modify the inherited patient's mrn (the modify side of the pair).
@@ -347,6 +422,7 @@ describe.each(backendMatrix())(
       await branchB.store.nodes.SpecialistDoctor.bulkCreate([
         { id: sharedOntologyId, props: { name: scenario.ontology.pair.right } },
       ]);
+      await claimWindows(branchB.store, scenario.window.branchB);
 
       return { base, branches: [branchA, branchB] };
     }
@@ -420,6 +496,17 @@ describe.each(backendMatrix())(
                 expect(
                   naturalReport.typeReconciliations.length,
                 ).toBeGreaterThanOrEqual(1);
+                // ...and one resolved end per row a branch actually ended, so
+                // the window axis of both normalizers is non-vacuous. An exact
+                // count, not a lower bound: a merge that stopped carrying the
+                // EDGE half would still satisfy `>= 1` on the node half alone.
+                const endedRows = [
+                  scenario.window.branchA.node ?? scenario.window.branchB.node,
+                  scenario.window.branchA.edge ?? scenario.window.branchB.edge,
+                ].filter((end) => end !== undefined);
+                expect(naturalReport.validityEnds.length).toBe(
+                  endedRows.length,
+                );
               } finally {
                 for (const dispose of disposers) {
                   await dispose();
