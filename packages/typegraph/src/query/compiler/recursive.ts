@@ -17,9 +17,8 @@ import {
 import { sql, type SqlFragment } from "../sql-fragment";
 import { emitRecursiveQuerySql } from "./emitter";
 import {
-  compileHistoricalIdentityClassCte,
-  compileIdentitySourcePredicate,
-  planHistoricalIdentityFrontierExpansion,
+  compileIdentityClassCte,
+  planIdentityFrontierExpansion,
 } from "./identity-traversal";
 import {
   createTemporalFilterPass,
@@ -274,10 +273,10 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
     temporalFilterPass,
   );
 
-  // Identity expansion under a historical coordinate reads a reconstruction
-  // relation hoisted out of the recursive term, so it is evaluated once for the
-  // whole traversal rather than per expanded (frontier row, edge) pair.
-  const historicalIdentityCte = compileHistoricalIdentityClassCte({
+  // Identity expansion reads its class relation from outside the recursive term,
+  // so it is evaluated once for the whole traversal rather than per expanded
+  // (frontier row, edge) pair.
+  const identityClassCte = compileIdentityClassCte({
     ast,
     ctx,
     graphId,
@@ -301,9 +300,9 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
     ...(limitOffset === undefined ? {} : { limitOffset }),
     logicalPlan,
     ...(orderBy === undefined ? {} : { orderBy }),
-    ...(historicalIdentityCte === undefined ?
+    ...(identityClassCte === undefined ?
       {}
-    : { precedingCtes: [historicalIdentityCte] }),
+    : { precedingCtes: [identityClassCte] }),
     projection,
     recursiveCte,
   });
@@ -463,11 +462,9 @@ function compileRecursiveCte(
   const previousKindColumn = sql`r.${sql.raw(nodeAlias)}_kind`;
   const identityFrontierExpansion =
     traversal.includeIdentityMembers === true ?
-      planHistoricalIdentityFrontierExpansion({
-        ast,
+      planIdentityFrontierExpansion({
         previousId: previousIdColumn,
         previousKind: previousKindColumn,
-        temporalFilterPass,
       })
     : undefined;
 
@@ -486,8 +483,8 @@ function compileRecursiveCte(
   /**
    * Connects a candidate edge to the row the worktable is expanding from. A
    * widened frontier and a plain one join the edge the same way — on the
-   * worktable row's (kind, id) or on the class member's — leaving the correlated
-   * membership test to the current coordinate alone.
+   * worktable row's (kind, id) or on the class member's — so no traversal reaches
+   * an edge through a correlated membership test.
    */
   function compileWorktableJoinClauses(
     branch: Readonly<{
@@ -501,19 +498,6 @@ function compileRecursiveCte(
       return [
         sql`${edgeId} = ${identityFrontierExpansion.memberId}`,
         sql`${edgeKind} = ${identityFrontierExpansion.memberKind}`,
-      ];
-    }
-    if (traversal.includeIdentityMembers === true) {
-      return [
-        compileIdentitySourcePredicate({
-          ctx,
-          edgeId,
-          edgeKind,
-          graphId,
-          previousId: previousIdColumn,
-          previousKind: previousKindColumn,
-          temporalFilterPass,
-        }),
       ];
     }
     const clauses = [sql`${edgeId} = ${previousIdColumn}`];

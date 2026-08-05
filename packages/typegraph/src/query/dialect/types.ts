@@ -61,7 +61,17 @@ export type DialectCapabilities = Readonly<{
   emitNotMaterializedHint: boolean;
 
   /**
-   * Whether recursive CTEs should enforce worktable-first join ordering.
+   * Whether a traversal must pin its frontier ahead of the edge table with
+   * `CROSS JOIN`, because the engine reads FROM order as a join-order directive
+   * rather than costing the orderings itself.
+   *
+   * Set for engines whose planner has no useful statistics for the driving
+   * relation and can therefore choose to enumerate candidate edges instead —
+   * once per frontier row. Two traversal shapes need the pin: a recursive term,
+   * whose driving relation is the worktable, and an identity-expanded step,
+   * which reaches the edge through `COALESCE` over an outer join and so exposes
+   * no direct frontier-to-edge equality. Every other traversal joins on the
+   * frontier's own columns and is left to the planner.
    */
   forceRecursiveWorktableOuterJoinOrder: boolean;
 

@@ -96,7 +96,7 @@ import {
   lateMaterializedPhysicalAlias,
   lateMaterializedProjectedNodeAliases,
 } from "./emitter";
-import { compileHistoricalIdentityClassCte } from "./identity-traversal";
+import { compileIdentityClassCte } from "./identity-traversal";
 import { type TemporalFilterPass } from "./passes";
 import { type LogicalPlan, type LogicalPlanNode } from "./plan";
 import {
@@ -890,7 +890,7 @@ function stripLimitOffsetFromPlanNode(node: LogicalPlanNode): LogicalPlanNode {
 }
 
 /**
- * The historical identity-class relation (when the query needs one), the start
+ * The identity-class relation (when the query needs one), the start
  * CTE, then one CTE per traversal — the candidate-set prefix shared by the flat
  * plan and the late-materialization plan (which feeds it a lean AST/column set
  * and no per-traversal limit).
@@ -917,14 +917,14 @@ function buildStandardStartAndTraversalCtes(
     temporalFilterPass,
     traversalLimit,
   } = input;
-  const historicalIdentityCte = compileHistoricalIdentityClassCte({
+  const identityClassCte = compileIdentityClassCte({
     ast,
     ctx,
     graphId,
     temporalFilterPass,
   });
   const ctes: SqlFragment[] = [
-    ...(historicalIdentityCte === undefined ? [] : [historicalIdentityCte]),
+    ...(identityClassCte === undefined ? [] : [identityClassCte]),
     buildStandardStartCte({
       ast,
       ctx,

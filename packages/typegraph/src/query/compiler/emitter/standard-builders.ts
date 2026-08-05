@@ -18,10 +18,7 @@ import {
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
 import { sql, type SqlFragment } from "../../sql-fragment";
-import {
-  compileIdentitySourcePredicate,
-  planHistoricalIdentityFrontierExpansion,
-} from "../identity-traversal";
+import { planIdentityFrontierExpansion } from "../identity-traversal";
 import { type TemporalFilterPass } from "../passes";
 import {
   compileKindFilter,
@@ -389,19 +386,31 @@ export function buildStandardTraversalCte(
   const previousKindColumn = sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_kind`)}`;
   const identityFrontierExpansion =
     traversal.includeIdentityMembers === true ?
-      planHistoricalIdentityFrontierExpansion({
-        ast,
+      planIdentityFrontierExpansion({
         previousId: previousIdColumn,
         previousKind: previousKindColumn,
-        temporalFilterPass,
       })
     : undefined;
+
+  // A widened frontier reaches the edge through COALESCE over an outer join, so
+  // the engine sees no plain frontier-to-edge equality to plan from and may drive
+  // the nested loop from the edge table instead — a rescan of every candidate
+  // edge per frontier row, which is the cost typegraph#270 removes. Pinning the
+  // frontier ahead of the edge table restores the indexed
+  // (graph_id, from_kind, from_id) seek on engines that read FROM order as a
+  // directive; the same planner control the recursive emitter applies to its
+  // worktable, so it rides the same capability. A traversal without identity
+  // expansion joins on the frontier's own columns and needs no pin, so its SQL is
+  // left untouched.
+  const pinFrontierAheadOfEdges =
+    identityFrontierExpansion !== undefined &&
+    ctx.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
 
   /**
    * Connects a candidate edge to the frontier. A widened frontier and a plain
    * one join the edge the same way — on the frontier row's (kind, id) or on the
-   * class member's — leaving the correlated membership test to the current
-   * coordinate alone.
+   * class member's — so no traversal reaches an edge through a correlated
+   * membership test.
    */
   function compileSourceJoin(
     branch: Readonly<{
@@ -416,17 +425,6 @@ export function buildStandardTraversalCte(
         ${identityFrontierExpansion.memberId} = ${edgeId}
         AND ${identityFrontierExpansion.memberKind} = ${edgeKind}
       `;
-    }
-    if (traversal.includeIdentityMembers === true) {
-      return compileIdentitySourcePredicate({
-        ctx,
-        edgeId,
-        edgeKind,
-        graphId,
-        previousId: previousIdColumn,
-        previousKind: previousKindColumn,
-        temporalFilterPass,
-      });
     }
     return sql`
       ${previousIdColumn} = ${edgeId}
@@ -465,15 +463,29 @@ export function buildStandardTraversalCte(
 
     const sourceJoin = compileSourceJoin(branch);
     const frontierJoin = identityFrontierExpansion?.frontierJoin ?? sql``;
+    const targetJoin = sql`
+      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
+        AND n.id = e.${sql.raw(branch.targetField)}
+        AND n.kind = e.${sql.raw(branch.targetKindField)}
+    `;
+
+    if (pinFrontierAheadOfEdges) {
+      return sql`
+        SELECT ${sql.join(selectColumns, sql`, `)}
+        FROM cte_${sql.raw(previousAlias)}
+        ${frontierJoin}
+        CROSS JOIN ${ctx.schema.edgesTable} e
+        ${targetJoin}
+        WHERE ${sql.join([sourceJoin, ...whereClauses], sql` AND `)}
+      `;
+    }
 
     return sql`
       SELECT ${sql.join(selectColumns, sql`, `)}
       FROM cte_${sql.raw(previousAlias)}
       ${frontierJoin}
       JOIN ${ctx.schema.edgesTable} e ON ${sourceJoin}
-      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
-        AND n.id = e.${sql.raw(branch.targetField)}
-        AND n.kind = e.${sql.raw(branch.targetKindField)}
+      ${targetJoin}
       WHERE ${sql.join(whereClauses, sql` AND `)}
     `;
   }
