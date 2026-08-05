@@ -121,7 +121,14 @@ ledger; when recorded history is enabled, earlier recorded coordinates remain
 queryable. On every graph, a `create()` or `upsertById()` for a soft-deleted
 same-`(kind, id)` row **resurrects** that row rather than erroring:
 its properties are replaced and its validity window is reset, so `validFrom`
-becomes the resurrection instant. This graph-wide rule does not depend on the
+becomes the resurrection instant — unless the write carries an explicit
+window, which is honored as given (this is how merge preserves
+branch-authored windows). A resurrecting node write that supplies only a
+historical `validTo` is refused as a `ValidationError` rather than
+persisting a window that ends before it begins; pass both bounds for a
+historical window. (Edge resurrection instead keeps its stored lower bound,
+so `getOrCreateByEndpoints` can resurrect an edge directly into the ended
+state.) This graph-wide rule does not depend on the
 identity profile. Resurrection does not revive ended assertions, but folding
 runs again over the resurrected node when configured. Kind removal
 cascades assertion and closure rows for the removed kinds. Tightening ontology

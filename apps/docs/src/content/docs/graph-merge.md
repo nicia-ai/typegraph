@@ -516,6 +516,22 @@ For a custom isolation mechanism (e.g. a future copy-on-write namespace), pass a
 `WorkingCopyStrategy` as the fourth argument to `branch()` — its single `create`
 method returns an independently-mutable store over the same graph definition.
 
+**A branch is a data fork.** `branch()` records the clone's committed schema
+`(version, hash)` at fork time, and the merge refuses (typed, as
+`BaseVersionMismatchError`) any branch whose store ran a schema operation
+afterwards — `evolve()`, `migrateSchema()`, or `removeKinds()` — even a
+round-trip migration that restores the original document hash. Those
+operations mutate rows through their own preflights, and projecting the side
+effects into a merge would detach them from the schema change that caused
+them. Apply schema changes to the target first (or re-fork), then merge.
+
+**Valid-time windows travel with the merge.** A branch-authored node or edge
+window — including a deliberately ended one on a resurrection — is written
+as-is by the commit rather than reset to merge time. When the incremental
+target itself also created the surviving row, the target's committed window
+wins. Windows on *modified inherited* rows are not merged (a documented
+boundary): modification detection compares properties only.
+
 ## Determinism
 
 Graph Merge is built to be reproducible, which is what lets you retry, cache,
