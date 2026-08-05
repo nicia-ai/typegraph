@@ -2805,6 +2805,41 @@ async function hasMaterializedIdentityClass(
   return rows.length > 0;
 }
 
+/**
+ * Reads the instant a node was soft-deleted, as stored on its own row.
+ *
+ * The soft-delete cascade ends the node's open assertions AT THIS INSTANT
+ * rather than at a second wall-clock read, which makes "this assertion ended
+ * because its endpoint died" a derivable fact: a consumer comparing an ended
+ * assertion's `valid_to` to the endpoint's `deleted_at` sees equality exactly
+ * for cascade endings (graph-merge's state-diff does precisely this to tell a
+ * cascade apart from an explicit retraction). Two `nowIso()` reads inside one
+ * transaction can straddle a millisecond boundary, so the equality has to come
+ * from the stored value, not from a fresh clock read.
+ *
+ * Returns `undefined` when the row is gone or still live; callers fall back to
+ * their own instant.
+ */
+async function readNodeDeletionInstant(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  ref: PlainNodeRef,
+): Promise<string | undefined> {
+  const rows = await target.execute<Readonly<{ deleted_at: unknown }>>(
+    asCompiledRowsSql(sql`
+      SELECT deleted_at
+      FROM ${schema.nodesTable}
+      WHERE graph_id = ${graphId}
+        AND kind = ${ref.kind}
+        AND id = ${ref.id}
+      LIMIT 1
+    `),
+  );
+  const row = rows.at(0);
+  return row === undefined ? undefined : optionalTimestamp(row.deleted_at);
+}
+
 export async function detachIdentityForNode(
   ctx: Pick<
     IdentityServiceContext<GraphDef>,
@@ -2856,6 +2891,20 @@ export async function detachIdentityForNode(
       return;
     }
     const now = nowIso();
+    // A soft delete ends its node's open assertions at the node's OWN deletion
+    // instant (see readNodeDeletionInstant): the caller has already written
+    // `deleted_at` inside this transaction, and reusing it is what makes a
+    // cascade ending distinguishable from an explicit retraction downstream.
+    // The read is skipped when there is nothing to end.
+    const cascadeInstant =
+      mode === "hard" || rows.length === 0 ?
+        now
+      : ((await readNodeDeletionInstant(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          ref,
+        )) ?? now);
     for (const rawRow of rows) {
       const row = normalizeAssertionRow(rawRow);
       if (mode === "hard") {
@@ -2868,7 +2917,7 @@ export async function detachIdentityForNode(
         );
         touch(ctx.graphId, row.id);
       } else {
-        const validTo = clampValidTo(now, row.valid_from);
+        const validTo = clampValidTo(cascadeInstant, row.valid_from);
         const ended = { ...row, valid_to: validTo, updated_at: now };
         await executeStatement(
           rawTarget,

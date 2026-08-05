@@ -35,6 +35,7 @@ import type {
   DeletedNode,
   ModifiedEdge,
   ModifiedNode,
+  RetractionCause,
 } from "./state-diff";
 import { diffAgainstBase } from "./state-diff";
 import type {
@@ -87,6 +88,19 @@ export type StagedIdentityAssertion = Readonly<{
 }>;
 
 /**
+ * A retracted assertion tagged with the branch that stopped asserting it AND
+ * with WHY it stopped ({@link RetractionCause}).
+ *
+ * A `cascade` entry is the staged form of "branch X's deletion of node N ended
+ * this assertion" — its fate belongs to that deletion, so delete/modify
+ * resolution decides it: applied when the deletion survives, dropped with the
+ * deletion when it is overruled. An `explicit` entry is the branch's own intent
+ * and outlives any deletion decision.
+ */
+export type StagedRetraction = StagedIdentityAssertion &
+  Readonly<{ cause: RetractionCause }>;
+
+/**
  * The provenance-tagged union of every branch's state-diff against the base.
  *
  * New items are bucketed by kind so downstream blocking/candidate-gen (T5/T6)
@@ -107,7 +121,7 @@ export type StagingSet = Readonly<{
   /** Deleted inherited edges (one entry per (id, branch) deletion). */
   deletedEdges: readonly StagedDeletedEdge[];
   newIdentityAssertions: readonly StagedIdentityAssertion[];
-  retractedIdentityAssertions: readonly StagedIdentityAssertion[];
+  retractedIdentityAssertions: readonly StagedRetraction[];
   /**
    * Every assertion CURRENT in the base store at staging time — the inherited
    * truth the branches forked from. Untagged (it belongs to no branch). The
@@ -220,7 +234,7 @@ export async function stageBranches<G extends GraphDef>(
     [];
   const deletedEdges: (StagedDeletedEdge & { kind: string; id: string })[] = [];
   const newIdentityAssertions: StagedIdentityAssertion[] = [];
-  const retractedIdentityAssertions: StagedIdentityAssertion[] = [];
+  const retractedIdentityAssertions: StagedRetraction[] = [];
 
   const baseIdentityAssertions =
     await storeRuntime(baseStore).readCurrentIdentityAssertions("state");
@@ -260,8 +274,12 @@ export async function stageBranches<G extends GraphDef>(
     for (const assertion of diff.identity.new) {
       newIdentityAssertions.push({ branchId, assertion });
     }
-    for (const assertion of diff.identity.retracted) {
-      retractedIdentityAssertions.push({ branchId, assertion });
+    for (const retraction of diff.identity.retracted) {
+      retractedIdentityAssertions.push({
+        branchId,
+        assertion: retraction.assertion,
+        cause: retraction.cause,
+      });
     }
   }
 

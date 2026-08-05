@@ -271,13 +271,17 @@ export const RETRACTION_TARGET_MISMATCH_DROP_REASON =
   "identity:retraction-target-mismatch";
 
 /**
- * Reason recorded when a staged retraction touched a node whose deletion the
- * delete/modify resolution OVERRULED. A node soft-delete cascades — it ends
- * every open assertion touching the node — so the deleting branch's diff
- * stages those endings as retractions indistinguishable from intent. When the
- * modification wins and the node survives, applying the cascaded retraction
- * would end the resurrected node's assertions anyway; dropping it (visibly)
- * keeps the node's identity truth alongside the node.
+ * Reason recorded when EVERY branch that staged a retraction staged it as the
+ * cascade of a node deletion the delete/modify resolution then OVERRULED.
+ *
+ * A node soft-delete ends every open assertion touching the node, so the
+ * deleting branch's diff stages those endings as retractions — but it stages
+ * them with their derived cause (the deleted node), not as bare retractions.
+ * When the modification wins and the node survives, the cause is gone: applying
+ * the ending would strip the resurrected node's identity truth, so it is
+ * dropped (visibly) along with the deletion that caused it. A retraction any
+ * branch made EXPLICITLY, or whose cause deletion survived, is never dropped
+ * here.
  */
 export const RETRACTION_DELETION_OVERRULED_DROP_REASON =
   "identity:deletion-overruled";

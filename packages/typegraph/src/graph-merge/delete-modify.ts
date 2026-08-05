@@ -39,7 +39,7 @@ import type {
   StagedModifiedNode,
   StagingSet,
 } from "./staging";
-import type { DeletedEdge, DeletedNode } from "./state-diff";
+import type { DeletedEdge } from "./state-diff";
 import type {
   EdgeId,
   GraphDef,
@@ -58,6 +58,8 @@ import type {
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
+/** The `(kind, id)` of a node the delete/modify resolution finally deletes. */
+type DeletedNodeRef = Readonly<{ id: AnyNodeId; kind: string }>;
 type BranchTagged = Readonly<{ branchId: BranchId }>;
 
 /** Reason recorded on a {@link DroppedItem} for a finally-deleted node. */
@@ -74,6 +76,9 @@ export const DELETED_NODE_DROP_REASON = "delete-modify:deleteWins" as const;
  * - `nodeDeletions`: the AUTHORITATIVE set of inherited nodes that are finally
  *   deleted — pure deletions (no branch modified them) plus delete/modify
  *   conflicts resolved `"deleteWins"`. T9 reads this as the endpoint liveness.
+ *   Entries are the surviving deletion's `(kind, id)` only: a staged deletion
+ *   additionally records WHEN its branch removed the node, which is per-branch
+ *   evidence rather than a merge outcome.
  * - `conflicts`: one {@link DeleteModifyConflict} per inherited node that was
  *   both deleted and modified.
  * - `dropped`: a `{ kind: "node" }` {@link DroppedItem} for every finally-deleted
@@ -81,7 +86,7 @@ export const DELETED_NODE_DROP_REASON = "delete-modify:deleteWins" as const;
  */
 export type DeleteModifyResolution = Readonly<{
   survivingModifications: readonly StagedModifiedNode[];
-  nodeDeletions: readonly DeletedNode[];
+  nodeDeletions: readonly DeletedNodeRef[];
   conflicts: readonly DeleteModifyConflict[];
   dropped: readonly DroppedItem[];
 }>;

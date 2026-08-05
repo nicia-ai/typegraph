@@ -260,11 +260,16 @@ Duplicate current assertions use the earliest `validFrom`, then the
 code-point-smallest assertion ID — unless one candidate is already committed
 on the target with the exact staged truth, which always wins: the applier is
 idempotent per semantic pair, so a challenger could never actually be
-written. A node deletion cascades into ending the assertions touching it;
-when a delete/modify conflict resolution keeps the node, cascaded
-retractions whose every contributing branch is explained by the overruled
-deletion are dropped with it (reported as `identity:deletion-overruled`),
-while a branch that retracted independently keeps its effect. `merge()` detects identity conflicts at plan
+written. A node deletion cascades into ending the assertions touching it, at
+the node's own deletion instant — so the diff can tell which endings that
+deletion caused and stages each one with its cause. When a delete/modify
+conflict resolution keeps the node, an ending is dropped along with the
+overruled deletion that caused it (reported as
+`identity:deletion-overruled`), while a retraction a branch made itself
+survives the deletion being overruled — including one the deleting branch
+made before deleting the node. A hard delete removes the assertion rows
+outright, leaving nothing to separate cause from intent, so those endings
+count as cascades. `merge()` detects identity conflicts at plan
 time and returns them as a typed `IdentityMergeConflictError` — direct
 opposing relations on one endpoint pair, transitive contradictions reached
 through a chain of `same` assertions no single branch wrote, retract/reassert
