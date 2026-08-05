@@ -195,6 +195,17 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       validTo?: string | undefined;
     }>[],
   ) => Promise<Readonly<{ created: number; retracted: number }>>;
+  /**
+   * Proves the identity classes of `seeds` carry no contradiction in the state
+   * the caller's transaction has just written — the post-write half of
+   * graph-merge's identity correctness, scoped to the classes the merge
+   * touched. A refusal aborts the caller's transaction; identity-disabled
+   * graphs resolve immediately.
+   */
+  assertIdentityClassesConsistentAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    seeds: readonly Readonly<{ kind: string; id: string }>[],
+  ) => Promise<void>;
 }>;
 
 export function storeRuntime<G extends GraphDef>(

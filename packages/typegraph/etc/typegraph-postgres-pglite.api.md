@@ -3764,6 +3764,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         created: number;
         retracted: number;
     }>>;
+    assertIdentityClassesConsistentAtTarget: (target: GraphBackend | TransactionBackend, seeds: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[]) => Promise<void>;
 }>;
 
 // @public

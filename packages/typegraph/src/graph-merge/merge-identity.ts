@@ -9,19 +9,25 @@
  * {@link IdentityPlanSlice} — a structural subset of `MergePlan` — so this
  * module never names the full plan type.
  *
- * COMMIT-GUARD LAYERING. The in-transaction guard is deliberately redundant.
- * Correctness needs only two layers: the by-id freshness check
- * ({@link assertPlannedIdentityIdsFresh} — ended rows included, which no
- * ledger slice or class fingerprint can see) and the FULL simulation re-run
- * on transaction reads (re-deriving legality is the only complete window
- * guard), with the identity applier's own refusals — translated typed at the
- * apply boundary by {@link translateIdentityCommitError} — as the final
- * backstop. The earlier layers (direct-peer arrivals, per-seed
- * class/liveness fingerprints, the negative-ledger fingerprint) exist to
- * refuse EARLY with a message naming exactly what drifted; removing them
- * would lose diagnosability, not soundness. Never add a NEW invariant as a
- * fingerprint alone: make the simulation or the applier enforce it, then
- * fingerprint it for the error message if useful.
+ * COMMIT-GUARD LAYERING. Correctness rests on what runs INSIDE the commit
+ * transaction: the by-id freshness check ({@link assertPlannedIdentityIdsFresh}
+ * — ended rows included, which no ledger slice or class fingerprint can see),
+ * the identity applier's own refusals, and — after the identity DML — the
+ * post-write affected-class assertion
+ * ({@link assertMergedIdentityClassesConsistent}), which re-derives the
+ * touched identity classes from the state the merge just wrote and refuses a
+ * contradiction there. All of them translate typed at the apply boundary
+ * through {@link translateIdentityCommitError}.
+ *
+ * Every layer ABOVE that is diagnosability. The plan-time simulation
+ * ({@link assertNoContradictoryIdentityClosure}) and the window fingerprints
+ * (direct-peer arrivals, per-seed class/liveness fingerprints, the
+ * negative-ledger fingerprint, and the simulation re-run inside
+ * {@link assertIdentityPeersStable}) exist to refuse EARLY — before any write,
+ * with a message naming exactly what drifted — rather than to make the commit
+ * sound. Never add a NEW invariant as a fingerprint or a simulation arm alone:
+ * make the applier or the post-write assertion enforce it against real state,
+ * then simulate it for the error message if useful.
  */
 import { requireDefined } from "../utils/presence";
 import type { CanonicalEntity } from "./canonicalize";
@@ -591,9 +597,19 @@ export function assertIdentityEndpointsNotDeleted(
 }
 
 /**
- * Refuses a merge whose committed ledger would claim two nodes are BOTH the same
- * and different — including through a chain of `same` assertions no single branch
- * ever wrote.
+ * Refuses — BEFORE any write — a merge whose committed ledger would claim two
+ * nodes are BOTH the same and different, including through a chain of `same`
+ * assertions no single branch ever wrote.
+ *
+ * This is the DIAGNOSABILITY layer, not the correctness one. It simulates the
+ * post-merge ledger from reads taken before the commit, so it can name the
+ * exact branch assertion and identity class at fault while nothing has been
+ * written yet — but a target that moves between this simulation and the commit
+ * makes its verdict stale. What the committed state is actually held to is
+ * {@link assertMergedIdentityClassesConsistent}, which re-derives the affected
+ * classes from the written state inside the commit transaction. Keep the two
+ * in agreement: a simulation arm with no post-write counterpart is a message,
+ * not a guarantee.
  *
  * {@link assertNoOpposingIdentityRelations} only sees a DIRECT collision (one
  * endpoint pair carrying both relations). The common shape is transitive: base
@@ -1165,6 +1181,79 @@ export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
       );
     }
   }
+}
+
+/**
+ * The identity classes a commit can move, as the `(kind, id)` seeds the
+ * post-write assertion expands through the closure. Three sources, all minus
+ * the plan's node deletions (a deleted identity carries no class, and seeding
+ * one would ask the assertion to reason about a row the commit removed):
+ *
+ *  - both endpoints of every planned assertion — the classes the commit
+ *    MERGES, and the pairs it constrains;
+ *  - both endpoints of every planned retraction — the classes it SPLITS,
+ *    where the closure repair must have landed;
+ *  - under `sameIdAcrossKinds: "fold"`, every node identity the commit writes,
+ *    at the kind it is written under (the retype cascade's kind when the
+ *    ontology reconciled one). A written row folds with every live row sharing
+ *    its id, so a node write alone can move a class. Under `"ignore"` it
+ *    cannot: folding is off and a node write creates no assertion, so a
+ *    written identity that no planned assertion names stays a singleton.
+ */
+export function affectedIdentityClassSeeds(
+  plan: IdentityPlanSlice,
+  profile: "fold" | "ignore" | undefined,
+): readonly Readonly<{ kind: string; id: string }>[] {
+  const seedsByKey = new Map<
+    MergeKey,
+    Readonly<{ kind: string; id: string }>
+  >();
+  const addSeed = (kind: string, id: string): void => {
+    const key = mergeKey(kind, id);
+    if (plan.nodeDeletions.has(key)) return;
+    seedsByKey.set(key, { kind, id });
+  };
+  for (const assertion of [
+    ...plan.identityAssertions,
+    ...plan.identityRetractions,
+  ]) {
+    addSeed(assertion.a.kind, assertion.a.id);
+    addSeed(assertion.b.kind, assertion.b.id);
+  }
+  if (profile === "fold") {
+    for (const entity of plan.canonicalEntities) {
+      const sourceKey = mergeKey(entity.kind, entity.canonicalId);
+      if (plan.nodeDeletions.has(sourceKey)) continue;
+      addSeed(plan.retypeMap.get(sourceKey) ?? entity.kind, entity.canonicalId);
+    }
+  }
+  return [...seedsByKey.values()];
+}
+
+/**
+ * The correctness-bearing identity guard: after the commit's identity DML, the
+ * applier re-derives the affected identity classes FROM THE WRITTEN STATE and
+ * refuses a contradiction, inside the commit transaction. Every earlier
+ * identity guard reasons about a simulated post-merge universe assembled from
+ * reads taken before the writes; this one reads the database the merge is
+ * about to leave behind, so it holds whatever the plan assumed and however the
+ * target moved underneath it. A refusal aborts the transaction, so the merge
+ * is never partially applied.
+ *
+ * Shared by BOTH commit modes through {@link applyMergePlan}, and raised
+ * inside the identity-applier boundary so
+ * {@link translateIdentityCommitError} gives it the same typed conflict
+ * surface as the applier's own refusals.
+ */
+export async function assertMergedIdentityClassesConsistent<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  plan: IdentityPlanSlice,
+): Promise<void> {
+  await storeRuntime(target).assertIdentityClassesConsistentAtTarget(
+    txBackend,
+    affectedIdentityClassSeeds(plan, target.graph.identity?.sameIdAcrossKinds),
+  );
 }
 
 /**

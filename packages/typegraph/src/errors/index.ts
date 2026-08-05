@@ -591,7 +591,14 @@ export class DisjointError extends TypeGraphError {
 }
 
 export type IdentityContradictionErrorDetails = Readonly<{
-  operation: "assertSame" | "assertDifferent" | "fold" | "import";
+  /**
+   * The identity write that could not stand. `merge` is the post-write
+   * affected-class assertion a graph merge runs inside its commit
+   * transaction, which names the whole merge rather than a single assertion
+   * because the contradiction is a property of the state the merge would
+   * leave behind.
+   */
+  operation: "assertSame" | "assertDifferent" | "fold" | "import" | "merge";
   a: Readonly<{ kind: string; id: string }>;
   b: Readonly<{ kind: string; id: string }>;
   reason: "different-assertion" | "same-class" | "disjoint-kinds";
