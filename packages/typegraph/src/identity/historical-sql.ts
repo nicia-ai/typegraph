@@ -207,10 +207,10 @@ export function historicalIdentityReconstructionCtes(
           AND ${structuralFoldVisibilitySql(input.coordinate, "right_node")}
       `
     : sql``;
+  // `seeds` is declared after `identity_edges` so a seed source may itself read
+  // the edge relation (see {@link historicalIdentityPeerClassQuery}); every
+  // entry still references only entries declared before it.
   return sql`
-    seeds(seed_kind, seed_id) AS (
-      ${input.seedSource}
-    ),
     node_snapshot(kind, id, valid_from, valid_to, created_at, deleted_at) AS (
       ${nodes}
     ),
@@ -222,6 +222,9 @@ export function historicalIdentityReconstructionCtes(
       UNION ALL
       SELECT b_kind, b_id, a_kind, a_id FROM same_assertions
       ${sameIdEdges}
+    ),
+    seeds(seed_kind, seed_id) AS (
+      ${input.seedSource}
     ),
     identity_members(seed_kind, seed_id, kind, id) AS (
       SELECT seeds.seed_kind, seeds.seed_id, seeds.seed_kind, seeds.seed_id
@@ -236,5 +239,59 @@ export function historicalIdentityReconstructionCtes(
         ON edge.a_kind = member.kind
        AND edge.a_id = member.id
     )
+  `;
+}
+
+/**
+ * Column contract of the peer-class relation built by
+ * {@link historicalIdentityPeerClassQuery}, in projection order. A consumer names
+ * the relation itself, so it declares these columns on the name it chooses.
+ */
+export const IDENTITY_PEER_CLASS_COLUMNS: SqlFragment = sql.raw(
+  ["seed_kind", "seed_id", "kind", "id"].join(", "),
+);
+
+/**
+ * A self-contained query for the *visible* identity classes of every node that
+ * has at least one identity peer at `coordinate`, as
+ * `(seed_kind, seed_id, kind, id)` rows.
+ *
+ * Unlike {@link historicalIdentityReconstructionCtes}, nothing here depends on
+ * which nodes a caller is asking about: the seeds are the endpoints of the
+ * identity-edge relation itself. That is what makes the result hoistable to a
+ * query-level CTE evaluated once, rather than a correlated subquery a planner
+ * may re-evaluate per candidate row (typegraph#310). Nodes with no peer are
+ * absent by construction, leaving the "member is the seed itself" case to the
+ * consumer; that is what keeps this relation proportional to the identity ledger
+ * and the folded-id population rather than to the whole graph.
+ *
+ * Members are filtered to those visible at `coordinate`, matching the
+ * point-in-time node check a membership consumer would otherwise apply itself.
+ * The filter sits in the projection, not in the recursion, so a class may still
+ * be held together through a member that is not visible.
+ *
+ * The returned fragment is a complete `SELECT` carrying its own
+ * `WITH RECURSIVE`, so the inner relation names stay scoped to it and multiple
+ * consumers in one statement cannot collide.
+ */
+export function historicalIdentityPeerClassQuery(
+  input: Readonly<{
+    schema: SqlSchema;
+    graphId: string;
+    coordinate: HistoricalIdentitySqlCoordinate;
+    sameIdAcrossKinds: "fold" | "ignore";
+  }>,
+): SqlFragment {
+  const reconstruction = historicalIdentityReconstructionCtes({
+    ...input,
+    seedSource: sql`SELECT DISTINCT a_kind, a_id FROM identity_edges`,
+  });
+  return sql`
+    WITH RECURSIVE
+    ${reconstruction}
+    SELECT member.seed_kind, member.seed_id, member.kind, member.id
+    FROM identity_members member
+    JOIN node_snapshot n ON n.kind = member.kind AND n.id = member.id
+    WHERE ${identityNodeVisibilitySql(input.coordinate, "n")}
   `;
 }
