@@ -348,6 +348,14 @@ them; the rest keep their own properties and windows. What makes two staged edge
 staged by several branches folds into a single write, while a branch-created edge
 is a new row even when its properties happen to match an existing one's.
 
+When such a collapse mixes an **inherited** edge with a branch-created one, the
+inherited row is the one kept: a collapse rewrites the row it keeps and does not end
+the rows folded into it, so writing onto the row the target already holds is what
+keeps a committed edge from being left beside the row that replaced it. This mirrors
+the node rule below, and it is also what the surviving edge id in `PropertyConflict`,
+window resolutions, and provenance names. A collapse of branch-created edges alone
+keeps the lexicographically-minimal edge id.
+
 Inherited edges that a branch **deleted** are removed from the target, and
 inherited edges **modified** by multiple branches go through the same base-aware
 three-way merge as nodes — so an edge's `since` edited by one branch and `note`
