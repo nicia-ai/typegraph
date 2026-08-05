@@ -45,15 +45,25 @@ import { requireDefined } from "../utils/presence";
  * props happen to coincide with an inherited one's. Consequently a window claim
  * lands on the row its author touched.
  *
+ * SURVIVOR OF A FOLD (issue #395). A fold REWRITES the row it keeps and never
+ * deletes the rows that folded into it, so which member survives is a matter of
+ * commit correctness rather than taste: a survivor the target does not already hold
+ * would leave every committed member of the set live BESIDE its own replacement,
+ * carrying the props it had before the merge and never receiving the edit staged for
+ * it. So an INHERITED member wins survivorship whenever the set holds one — the edge
+ * analog of the node path's base-id-wins (design §6.4-C) — and only a set that is
+ * entirely branch-created falls back to the minimum edge id (see
+ * {@link pickSurvivor}). This is why {@link StagedEdge} carries its
+ * {@link StagedEdgeOrigin}.
+ *
  * Determinism: the dedupe is a pure function of the (unordered) staged-edge SET.
  * Group membership derives only from the staged endpoints and {@link canonicalOf} —
- * never from id sort order. Within a folded group the surviving edge id is the
- * lexicographically-minimal member id, property resolution uses only the captured
- * `branchRank`, and the output is sorted by dedupe key with the edge id as the
- * final tiebreaker (parallel edges can share every other component) — so
- * shuffling the input edges yields an identical result. Clusters are computed once
- * upstream (T8) and passed in as {@link canonicalOf}; this module never
- * re-clusters.
+ * never from id sort order. Within a folded group the survivor is chosen by origin
+ * and edge id alone, property resolution uses only the captured `branchRank`, and
+ * the output is sorted by dedupe key with the edge id as the final tiebreaker
+ * (parallel edges can share every other component) — so shuffling the input edges
+ * yields an identical result. Clusters are computed once upstream (T8) and passed in
+ * as {@link canonicalOf}; this module never re-clusters.
  */
 import { canonicalizeProps } from "./canonical-props";
 import type { ClusterResult } from "./clustering";
@@ -100,12 +110,33 @@ type DroppedEdge = Readonly<{
   reason: string;
 }>;
 
+/** {@link StagedEdgeOrigin} of a row the merge base already holds. */
+export const INHERITED_EDGE_ORIGIN = "inherited" as const;
+
+/** {@link StagedEdgeOrigin} of a row a branch created after the fork point. */
+export const BRANCH_CREATED_EDGE_ORIGIN = "branch-created" as const;
+
+/**
+ * Whether a staged edge's ROW already exists in the merge base, or was created on a
+ * branch. It is the diff BUCKET the staging phase (T7) put the edge in — a modified
+ * or re-windowed inherited edge is {@link INHERITED_EDGE_ORIGIN}, a new fork edge is
+ * {@link BRANCH_CREATED_EDGE_ORIGIN} — threaded through as data because nothing about
+ * an edge id reveals its origin (ids are opaque and may be caller-chosen, so
+ * re-deriving one from the id is not possible, not merely unwise).
+ *
+ * Survivor selection is the consumer: an inherited row is one the merge target
+ * already holds, and a fold must land on it (see {@link pickSurvivor}).
+ */
+type StagedEdgeOrigin =
+  typeof INHERITED_EDGE_ORIGIN | typeof BRANCH_CREATED_EDGE_ORIGIN;
+
 /**
  * One staged edge fed into the repoint phase: a new fork edge or a surviving
  * inherited edge. Carries the parsed props (NOT a JSON string) so the dedupe key
- * and the conflict union both operate on the canonical structure, and the
+ * and the conflict union both operate on the canonical structure, the
  * {@link BranchId} that contributed it so edge-property conflicts resolve on the
- * same stable branch order as node-property conflicts.
+ * same stable branch order as node-property conflicts, and its
+ * {@link StagedEdgeOrigin} so a fold survives onto a row the target already holds.
  *
  * The orchestrator (T11) builds these from `StagedNewEdge` / surviving
  * `StagedModifiedEdge` items (T7); this module needs no knowledge of the diff
@@ -114,6 +145,7 @@ type DroppedEdge = Readonly<{
 export type StagedEdge = Readonly<{
   id: EdgeId;
   kind: string;
+  origin: StagedEdgeOrigin;
   fromId: AnyNodeId;
   toId: AnyNodeId;
   fromKind: string;
@@ -129,7 +161,7 @@ export type StagedEdge = Readonly<{
    * Windows take no part in the dedupe key or the conflict union. `validFrom`
    * rides along with whichever edge survives a fold; `validTo` is instead
    * resolved across the folded set (see {@link repointEdges}), because an end is
-   * a monotone claim that must not be lost to an arbitrary min-id survivor pick.
+   * a monotone claim that must not be lost to the survivor pick.
    */
   validFrom?: string;
   validTo?: string;
@@ -137,9 +169,10 @@ export type StagedEdge = Readonly<{
 
 /**
  * A surviving merged edge after repoint + dedupe. `id` is the canonical survivor
- * of its fold set (the lexicographically-minimal contributing edge id);
- * `mergedIds` is every staged edge id that collapsed into it (always includes
- * `id`), so the commit phase (T11) knows which inherited edges to fold away.
+ * of its fold set (its inherited member, else its minimum contributing edge id — see
+ * {@link pickSurvivor}); `mergedIds` is every staged edge id that collapsed into it
+ * (always includes `id`), so the commit phase (T11) knows which inherited edges to
+ * fold away.
  */
 export type MergedEdge = Readonly<{
   id: EdgeId;
@@ -310,8 +343,11 @@ function sourcePairByRow(
  * pre-repoint RELATIONSHIP when they named the same `(from, to)` pair before
  * repointing. Repointing can collapse distinct relationships onto one identity, and
  * that is the collision the §6.3 set-collapse exists for — so ONE row per pre-repoint
- * pair (its minimum-id row, mirroring the min-id survivor rule) folds into a single
- * set. Every FURTHER row a pair authored is ordinary multigraph multiplicity and
+ * pair (its minimum-id row: which of a pair's rows REPRESENTS it needs only to be
+ * total and order-independent, since every row a pair authored commits either way)
+ * folds into a single set. Whether that set then lands on a committed row is
+ * {@link pickSurvivor}'s decision, not this partition's. Every FURTHER row a pair
+ * authored is ordinary multigraph multiplicity and
  * commits as its own parallel row: nothing enforces uniqueness on `(from, type, to)`,
  * so a merge that collapsed them would destroy multiplicity the branch author's
  * operation would have produced applied straight to the target.
@@ -361,27 +397,76 @@ function foldSets(
 }
 
 /**
- * Picks the canonical survivor edge of a fold set: the member with the
- * lexicographically-minimal edge id. Mirrors the node min-id canonical rule (T8)
- * so the surviving id is independent of input edge order. (`generateId()` is
- * nanoid — random, not time-prefixed — so min-id never leaks creation order.)
+ * Orders two members of one fold set for the survivor pick: by edge id, then toward
+ * the preferred branch, then by branch id.
+ *
+ * Members that tie on the edge id are the SAME ROW staged by several branches, so the
+ * row that survives is settled either way and the remaining choice is only WHICH
+ * branch's staged copy of it the fold reads its kind, window and survivor prop values
+ * from. Preferring the preferred branch's copy is what lets {@link foldEdgeSet}
+ * recognize a survivor as the incremental target's own row and keep its end verbatim;
+ * the branch id then makes the order total, so the pick cannot depend on which copy
+ * the caller listed first.
+ */
+function compareMembers(
+  left: RepointedEdge,
+  right: RepointedEdge,
+  preferredBranchId: BranchId | undefined,
+): number {
+  const byId = compareStrings(left.staged.id, right.staged.id);
+  if (byId !== 0) {
+    return byId;
+  }
+  const leftPreferred = left.staged.branchId === preferredBranchId;
+  const rightPreferred = right.staged.branchId === preferredBranchId;
+  if (leftPreferred !== rightPreferred) {
+    return leftPreferred ? -1 : 1;
+  }
+  return compareStrings(left.staged.branchId, right.staged.branchId);
+}
+
+/**
+ * Picks the canonical survivor edge of a fold set, enforcing INHERITED-WINS (issue
+ * #395) — the edge analog of the node path's base-id-wins (§6.4-C,
+ * `pickClusterSurvivor`), and a commit-correctness invariant for the same reason.
+ *
+ *   - an INHERITED member wins outright (the minimum-id one, for the rare set the
+ *     repoint built from several committed rows). A fold rewrites its survivor and
+ *     ends none of the rows folded into it, so a survivor the target does not hold
+ *     would leave the committed row live beside the new one that was meant to replace
+ *     it, with the edit staged for that committed row never written. Writing onto the
+ *     row the target already holds is what makes that outcome unreachable, so this
+ *     outranks the preferred-branch pick below: the incremental target's own new row
+ *     is equally live, but preferring it is precisely what let a committed row lose.
+ *   - otherwise every member is branch-created, nothing committed can be stranded,
+ *     and the minimum edge id survives — restricted to the preferred (incremental
+ *     target) branch's members when the set has any, so an incremental merge still
+ *     writes onto the target's row rather than beside it.
+ *
+ * Order-independent: origin and edge id are intrinsic to the staged set, and
+ * {@link compareMembers} is total. (`generateId()` is nanoid — random, not
+ * time-prefixed — so min-id never leaks creation order.)
  */
 function pickSurvivor(
   edges: readonly RepointedEdge[],
   preferredBranchId?: BranchId,
 ): RepointedEdge {
+  const inherited = edges.filter(
+    (edge) => edge.staged.origin === INHERITED_EDGE_ORIGIN,
+  );
   const preferred =
     preferredBranchId === undefined ?
       []
     : edges.filter((edge) => edge.staged.branchId === preferredBranchId);
-  const candidates = preferred.length > 0 ? preferred : edges;
-  let survivor = requireDefined(candidates[0]);
-  for (const candidate of candidates.slice(1)) {
-    if (candidate.staged.id < survivor.staged.id) {
-      survivor = candidate;
-    }
-  }
-  return survivor;
+  const candidates =
+    inherited.length > 0 ? inherited
+    : preferred.length > 0 ? preferred
+    : edges;
+  return requireDefined(
+    [...candidates].sort((left, right) =>
+      compareMembers(left, right, preferredBranchId),
+    )[0],
+  );
 }
 
 /**
@@ -482,14 +567,16 @@ function foldEdgeSet(
   const toId = idOf(survivor.toKey);
   const toKind = kindOf(survivor.toKey);
   // The survivor's lower bound rides along unchanged — a `validFrom` is the
-  // branch's authored start for the row we commit, and the set's members are
-  // the same edge as seen by different branches.
+  // branch's authored start for the row we commit. An INHERITED survivor carries
+  // none (its start is already committed and a merge never restates it), so a
+  // branch-created member's authored start does not migrate onto the committed row
+  // the fold lands on; only its END does, below.
   //
   // The END is folded across the set. When repoint/dedupe collapses several
   // DISTINCT edges into one survivor, an end claimed by a non-survivor would
-  // otherwise be discarded by the arbitrary min-id pick — a silent window
-  // loss — so the earliest claimed end wins, the same least-claim rule the
-  // inherited-window reconciler uses.
+  // otherwise be discarded by the survivor pick — a silent window loss — so the
+  // earliest claimed end wins, the same least-claim rule the inherited-window
+  // reconciler uses.
   //
   // A survivor from the PREFERRED branch keeps its own end verbatim when it
   // HAS one: that member is the live incremental target's row, and a user
@@ -580,10 +667,12 @@ function foldEdgeSet(
  * is a multigraph, so each of them commits as its own row (see {@link foldSets} and the
  * module header for the full rule and why identity, not props equality, decides it).
  *
- * The surviving edge of every folded set is the lexicographically-minimal
- * contributing edge id; its `mergedIds` lists every collapsed edge id. Output is
- * sorted by the full dedupe key plus the edge id, so the result is a pure function
- * of the unordered input set.
+ * The surviving edge of every folded set is its INHERITED member — the row the target
+ * already holds, so the fold writes onto it instead of beside it — falling back to the
+ * lexicographically-minimal contributing edge id for a set that is entirely
+ * branch-created ({@link pickSurvivor}). Its `mergedIds` lists every collapsed edge id.
+ * Output is sorted by the full dedupe key plus the edge id, so the result is a pure
+ * function of the unordered input set.
  *
  * @param stagedEdges The new + surviving-inherited edges to merge. Order does not
  *   affect the result. Props MUST already be parsed objects.
