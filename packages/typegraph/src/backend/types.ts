@@ -1511,6 +1511,11 @@ export type GraphBackend = Readonly<{
    * transaction-scoped backend. PostgreSQL locks the active schema row, so a
    * concurrent change either becomes visible at read committed or raises the
    * database's native serialization failure at stronger isolation.
+   *
+   * On rejection the thrown `StaleVersionError` reports the active
+   * version this transaction can observe after the conflict resolves, so
+   * `details.actual` names the version that won rather than the absence the
+   * blocked read momentarily saw.
    */
   lockSchemaVersionForWrite?: (
     this: void,

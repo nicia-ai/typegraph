@@ -953,6 +953,12 @@ function createSqliteOperationBackend(
           },
         );
       }
+      // An ordinary read suffices, unlike Postgres' `FOR SHARE` fence: SQLite
+      // serializes writers through BEGIN IMMEDIATE, so no schema commit can be
+      // mid-flight while this transaction holds the writer slot, and a SQLite
+      // read has no post-wait row recheck that could drop the active row from
+      // its own snapshot. An absent row here therefore always means the graph
+      // genuinely has no active schema.
       const active = await commonBackend.getActiveSchema(params.graphId);
       assertActiveSchemaVersion(
         params.graphId,

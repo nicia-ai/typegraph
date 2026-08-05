@@ -40,7 +40,11 @@ import {
 } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
 
-import { CompilerInvariantError, ConfigurationError } from "../../errors";
+import {
+  CompilerInvariantError,
+  ConfigurationError,
+  StaleVersionError,
+} from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
   buildFulltextCapabilities,
@@ -1978,6 +1982,25 @@ function createPostgresOperationBackend(
         : {}),
       };
 
+  /**
+   * Takes the transaction-scoped share lock on the graph's active schema row,
+   * returning the version it locked — or `undefined` when the statement found
+   * no active row to lock, which at `read committed` does not by itself mean the
+   * graph has no active version — see the fence that calls this.
+   */
+  async function lockActiveSchemaVersion(
+    graphId: string,
+  ): Promise<number | undefined> {
+    const active = await execGet<{ version: number }>(sql`
+      SELECT ${schemaVersionsTable.version} AS version
+      FROM ${schemaVersionsTable}
+      WHERE ${schemaVersionsTable.graphId} = ${graphId}
+        AND ${schemaVersionsTable.isActive} = TRUE
+      FOR SHARE
+    `);
+    return active?.version;
+  }
+
   const operationBackend: InternalOperationBackend = {
     ...commonBackend,
     ...executeRawMethod,
@@ -2016,18 +2039,46 @@ function createPostgresOperationBackend(
           },
         );
       }
-      const active = await execGet<{ version: number }>(sql`
-        SELECT ${schemaVersionsTable.version} AS version
-        FROM ${schemaVersionsTable}
-        WHERE ${schemaVersionsTable.graphId} = ${params.graphId}
-          AND ${schemaVersionsTable.isActive} = TRUE
-        FOR SHARE
-      `);
-      assertActiveSchemaVersion(
-        params.graphId,
-        params.expectedVersion,
-        active?.version ?? 0,
-      );
+      const locked = await lockActiveSchemaVersion(params.graphId);
+      if (locked !== undefined) {
+        assertActiveSchemaVersion(
+          params.graphId,
+          params.expectedVersion,
+          locked,
+        );
+        return;
+      }
+
+      // An empty locked read is not evidence of an absent active version. At
+      // `read committed`, a `FOR SHARE` read that blocks behind an in-flight
+      // schema commit rechecks only the row versions its own statement snapshot
+      // saw: once that commit lands, the row this statement waited on no longer
+      // satisfies `is_active = TRUE`, and the winner's freshly inserted active
+      // row was never in the snapshot to be substituted in.
+      //
+      // Either way this transaction holds no share lock on an active row, so the
+      // write is rejected. That is why the version reported below needs no lock
+      // of its own — and why the fence must NOT retry the locked read: the
+      // dropped row keeps the share lock the first read took on it, so a second
+      // `FOR SHARE` waits on the row the *next* schema commit has already taken
+      // `FOR UPDATE` while that commit waits on the dropped row in its
+      // deactivate-all. PostgreSQL breaks the cycle by killing one of the two,
+      // and the schema commit — waiting first, so timing out first — is the one
+      // that dies.
+      //
+      // A non-locking read names the version honestly: a schema commit's
+      // deactivate-then-insert pair is atomic, so no committed state has zero
+      // active rows for a graph that has one, and an ordinary read never waits
+      // and so has no recheck to be fooled by. It yields `0` only for a graph
+      // that genuinely has no active version. A rollback landing back on
+      // `expectedVersion` reports `expected === actual`; the rejection stands,
+      // because nothing is holding the fence.
+      const settled = await commonBackend.getActiveSchema(params.graphId);
+      throw new StaleVersionError({
+        graphId: params.graphId,
+        expected: params.expectedVersion,
+        actual: settled?.version ?? 0,
+      });
     },
 
     // === Vector Index Operations ===

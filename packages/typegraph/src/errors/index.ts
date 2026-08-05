@@ -978,8 +978,12 @@ function collectFailedIndexNames(
 }
 
 /**
- * Details for StaleVersionError. `actual` is `0` when no active version
- * exists yet (initial-commit race where another writer initialized first).
+ * Details for StaleVersionError. `actual` is the active version the rejecting
+ * read observed, and is `0` only when the graph genuinely has no active version
+ * (an initial-commit race where another writer initialized first, or a graph
+ * whose schema rows were removed out of band). A concurrent advance always
+ * reports the newly active version, so `0` is a reliable signal of absence
+ * rather than of contention.
  */
 export type StaleVersionErrorDetails = Readonly<{
   graphId: string;
@@ -988,9 +992,10 @@ export type StaleVersionErrorDetails = Readonly<{
 }>;
 
 /**
- * Thrown by `commitSchemaVersion` and `setActiveVersion` when the
- * caller's view of the active schema version is out of date — another
- * writer has already advanced it.
+ * Thrown by `commitSchemaVersion`, `setActiveVersion`, and the schema write
+ * fence a schema-managed Store write takes, when the caller's view of the
+ * active schema version is out of date — another writer has already advanced
+ * it.
  *
  * Recovery: re-read the active version with `getActiveSchema(graphId)`,
  * recompute against the new baseline, and retry. This is a routine

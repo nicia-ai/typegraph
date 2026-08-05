@@ -958,6 +958,10 @@ export function createCommonOperationBackend(
       // the prior active row first so the partial unique index (one
       // active per graph) is satisfied at every statement boundary.
       // The "initial" case has no prior active, so skip.
+      //
+      // `tests/backends/postgres/schema-write-fence-race.test.ts` reproduces
+      // this ordering by hand to hold a flip uncommitted; changing it there
+      // too keeps the Postgres write fence's race coverage honest.
       if (params.expected.kind === "active") {
         const flip = operationStrategy.buildSetActiveSchema(
           params.graphId,
