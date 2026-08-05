@@ -464,15 +464,12 @@ export function buildStandardTraversalCte(
     }
 
     const sourceJoin = compileSourceJoin(branch);
-    const frontierJoins = sql.join(
-      identityFrontierExpansion?.joins ?? [],
-      sql` `,
-    );
+    const frontierJoin = identityFrontierExpansion?.frontierJoin ?? sql``;
 
     return sql`
       SELECT ${sql.join(selectColumns, sql`, `)}
       FROM cte_${sql.raw(previousAlias)}
-      ${frontierJoins}
+      ${frontierJoin}
       JOIN ${ctx.schema.edgesTable} e ON ${sourceJoin}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}

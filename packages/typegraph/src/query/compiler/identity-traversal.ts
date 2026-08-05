@@ -95,13 +95,13 @@ export function compileHistoricalIdentityClassCte(
 /**
  * How a traversal step reaches the identity class of its frontier rows.
  *
- * `joins` widens the step's FROM list from "the frontier" to "the frontier's
- * class members"; `memberKind`/`memberId` then name the member a candidate edge
- * must attach to, so the edge join is an ordinary equality — the same shape a
- * traversal without identity expansion uses.
+ * `frontierJoin` widens the step's FROM list from "the frontier" to "the
+ * frontier's class members"; `memberKind`/`memberId` then name the member a
+ * candidate edge must attach to, so the edge join is an ordinary equality — the
+ * same shape a traversal without identity expansion uses.
  */
 export type IdentityFrontierExpansion = Readonly<{
-  joins: readonly SqlFragment[];
+  frontierJoin: SqlFragment;
   memberId: SqlFragment;
   memberKind: SqlFragment;
 }>;
@@ -138,13 +138,11 @@ export function planHistoricalIdentityFrontierExpansion(
   }
   const peer = sql.identifier(PEER_CLASS_ALIAS);
   return {
-    joins: [
-      sql`
-        LEFT JOIN ${sql.identifier(HISTORICAL_IDENTITY_CLASS_CTE_ALIAS)} ${peer}
-          ON ${peer}.seed_kind = ${previousKind}
-         AND ${peer}.seed_id = ${previousId}
-      `,
-    ],
+    frontierJoin: sql`
+      LEFT JOIN ${sql.identifier(HISTORICAL_IDENTITY_CLASS_CTE_ALIAS)} ${peer}
+        ON ${peer}.seed_kind = ${previousKind}
+       AND ${peer}.seed_id = ${previousId}
+    `,
     memberId: sql`COALESCE(${peer}.id, ${previousId})`,
     memberKind: sql`COALESCE(${peer}.kind, ${previousKind})`,
   };

@@ -23,6 +23,8 @@
  *   same-id fold together at an instant before its deletion;
  * - an assertion that is valid at some coordinates and retracted at later ones;
  * - two start rows that share one class, which must not duplicate a step;
+ * - a cyclic class, and two of its members carrying an edge to the same target,
+ *   the two shapes where a hop could multiply rows per identity path;
  * - a two-hop chain and a recursive traversal, where the frontier — and so the
  *   set of classes to reconstruct — changes per step.
  */
@@ -497,6 +499,15 @@ async function provisionHistoricalFixture(
   const ghostClaimPerson = await person("ghost-claim", {
     validTo: timeline.late,
   });
+  // A cyclic class whose members share one target. Two rules that each look
+  // right in isolation can still multiply rows here: the class walk reaches
+  // `cycle-c` both directly and the long way round, and two distinct members
+  // carry an edge to the *same* physical target. An expanded hop must yield one
+  // row per traversed edge — not one per identity path, and not one per member
+  // pairing.
+  const cycleA = await person("cycle-a");
+  const cycleB = await person("cycle-b");
+  const cycleC = await person("cycle-c");
   // Windowed nodes: ended by `late`, and not yet valid at `early`.
   const endedPerson = await person("ended", { validTo: timeline.late });
   const latePerson = await person("late", { validFrom: timeline.late });
@@ -526,6 +537,9 @@ async function provisionHistoricalFixture(
   await link(ghostClaimPerson, targetB, "ghost-claim-b");
   // A direct edge that needs no expansion at all, as a control.
   await link(sharedPerson, targetC, "shared-person-c");
+  // Two members of the cyclic class, one shared target.
+  await link(cycleB, targetA, "cycle-b-a");
+  await link(cycleC, targetA, "cycle-c-a");
 
   const coordinates: Readonly<{ asOf: string; label: string }>[] = [
     {
@@ -545,6 +559,9 @@ async function provisionHistoricalFixture(
   await store.identity.assertSame(chainPerson, bridgePerson);
   await store.identity.assertSame(twinPerson, ghostClaimPerson);
   await store.identity.assertSame(ghostPerson, ghostCompany);
+  await store.identity.assertSame(cycleA, cycleB);
+  await store.identity.assertSame(cycleB, cycleC);
+  await store.identity.assertSame(cycleC, cycleA);
   await settle();
   sample("assertions in force");
   await settle();
@@ -701,5 +718,51 @@ export function registerHistoricalIdentityTraversalTests(
         });
       });
     }
+
+    /**
+     * `includeEnded` and `includeTombstones` drop node validity but keep
+     * assertion validity, so the class relation still binds the "current" read
+     * instant — for the assertion window alone. That is the one historical mode
+     * where the reconstruction depends on the wall clock, and the compiled
+     * template cache's freshness guard does not cover it: the guard only fires
+     * for `mode: "current"` reads, so nothing but this test stands between the
+     * relation and the frozen-`now` regression of typegraph#246. Re-executing a
+     * reused query has to see an assertion made after the first execution.
+     */
+    it("binds a fresh read instant per execution under includeEnded", async () => {
+      const store = await context.createStore(IGNORE_GRAPH);
+      const alice = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "instant-alice" },
+      );
+      const peer = await store.nodes.Person.create(
+        { name: "Peer" },
+        { id: "instant-peer" },
+      );
+      const target = await store.nodes.Person.create(
+        { name: "Target" },
+        { id: "instant-target" },
+      );
+      // The edge leaves the peer, so only the expansion can reach the target.
+      await store.edges.link.create(peer, target, {}, { id: "instant-peer-t" });
+
+      const query = store
+        .view({ mode: "includeEnded" })
+        .query()
+        .from("Person", "person")
+        .whereNode("person", (node) => node.name.eq("Alice"))
+        .traverse("link", "edge", {
+          expand: "none",
+          includeIdentityMembers: true,
+        })
+        .to("Person", "friend")
+        .select((queryContext) => queryContext.friend.id);
+
+      expect(await query.execute()).toEqual([]);
+      await settle();
+      await store.identity.assertSame(alice, peer);
+      await settle();
+      expect(await query.execute()).toEqual([target.id]);
+    });
   });
 }

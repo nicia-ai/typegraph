@@ -557,11 +557,7 @@ function compileRecursiveCte(
       recursiveSelectColumns.push(sql`${pathExtension} AS path`);
     }
     const recursiveJoinClauses = compileWorktableJoinClauses(branch);
-
-    const frontierJoins = sql.join(
-      identityFrontierExpansion?.joins ?? [],
-      sql` `,
-    );
+    const frontierJoin = identityFrontierExpansion?.frontierJoin ?? sql``;
 
     if (forceWorktableOuterJoinOrder) {
       const recursiveWhereClauses = [
@@ -572,7 +568,7 @@ function compileRecursiveCte(
       return sql`
         SELECT ${sql.join(recursiveSelectColumns, sql`, `)}
         FROM recursive_cte r
-        ${frontierJoins}
+        ${frontierJoin}
         CROSS JOIN ${ctx.schema.edgesTable} e
         JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
           AND n.id = e.${sql.raw(branch.targetField)}
@@ -584,7 +580,7 @@ function compileRecursiveCte(
     return sql`
       SELECT ${sql.join(recursiveSelectColumns, sql`, `)}
       FROM recursive_cte r
-      ${frontierJoins}
+      ${frontierJoin}
       JOIN ${ctx.schema.edgesTable} e ON ${sql.join(recursiveJoinClauses, sql` AND `)}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}
