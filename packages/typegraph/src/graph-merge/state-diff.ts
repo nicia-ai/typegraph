@@ -246,7 +246,10 @@ export type WindowedEdge = Readonly<{
 
 /** Reads a row's window as canonical instants. */
 function validWindowOf(
-  row: Readonly<{ valid_from: string | undefined; valid_to: string | undefined }>,
+  row: Readonly<{
+    valid_from: string | undefined;
+    valid_to: string | undefined;
+  }>,
 ): ValidWindow {
   return {
     validFrom: canonicalizeDatabaseTimestamp(row.valid_from),
@@ -256,9 +259,7 @@ function validWindowOf(
 
 /** True when two canonicalized windows differ in either endpoint. */
 function windowsDiffer(left: ValidWindow, right: ValidWindow): boolean {
-  return (
-    left.validFrom !== right.validFrom || left.validTo !== right.validTo
-  );
+  return left.validFrom !== right.validFrom || left.validTo !== right.validTo;
 }
 
 /**

@@ -1456,15 +1456,16 @@ function plannedNodeWrites<G extends GraphDef>(
     // including the committed-target precedence that module applies — so it
     // takes priority. The reconciled inherited end fills in only where the
     // survivor claims no end of its own.
-    const validTo =
-      entity.validTo ?? plan.nodeValidityEnds.get(sourceIdentity);
+    const validTo = entity.validTo ?? plan.nodeValidityEnds.get(sourceIdentity);
     writes.push({
       identity: mergeKey(kind, entity.canonicalId),
       kind,
       id: entity.canonicalId,
       entity,
       ...(modification === undefined ? {} : { modification }),
-      ...(entity.validFrom === undefined ? {} : { validFrom: entity.validFrom }),
+      ...(entity.validFrom === undefined ?
+        {}
+      : { validFrom: entity.validFrom }),
       ...(validTo === undefined ? {} : { validTo }),
     });
   }

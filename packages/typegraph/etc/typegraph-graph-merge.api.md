@@ -2538,6 +2538,7 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
     deleteModifyConflicts: readonly DeleteModifyConflict[];
     typeReconciliations: readonly TypeReconciliation[];
     dropped: readonly DroppedItem[];
+    validityEnds: readonly ValidityEndResolution[];
     baseAmbiguities: readonly BaseAmbiguity[];
     provenance: ProvenanceIndex;
     warnings: readonly string[];
@@ -4788,6 +4789,15 @@ type UpsertFulltextParams = Readonly<{
 
 // @public
 type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, Dir extends TraversalDirection> = G["edges"][EK] extends EdgeRegistration ? Dir extends "out" ? G["edges"][EK]["to"][number]["kind"] : G["edges"][EK]["from"][number]["kind"] : never;
+
+// @public
+export type ValidityEndResolution = Readonly<{
+    entity: "node" | "edge";
+    kind: string;
+    id: string;
+    validTo: string;
+    claimedBy: readonly BranchId[];
+}>;
 
 // @public
 type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" | "embedding" | "unknown";

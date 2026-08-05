@@ -58,11 +58,7 @@ import { compareStrings, type MergeKey, mergeKey } from "./node-key";
 import type { StagedWindowedEdge, StagedWindowedNode } from "./staging";
 import type { ValidWindow } from "./state-diff";
 import type { EdgeId, NodeId, NodeType } from "./typegraph-internal";
-import type {
-  BranchId,
-  DroppedItem,
-  ValidityEndResolution,
-} from "./types";
+import type { BranchId, DroppedItem, ValidityEndResolution } from "./types";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
@@ -72,7 +68,8 @@ type AnyNodeId = NodeId<NodeType>;
  * apply to a live inherited row — a fork `validFrom` divergence, or a `validTo`
  * cleared back to none. Reported rather than silently ignored.
  */
-export const WINDOW_NOT_APPLICABLE_DROP_REASON = "window-not-applicable" as const;
+export const WINDOW_NOT_APPLICABLE_DROP_REASON =
+  "window-not-applicable" as const;
 
 /**
  * The outcome of window reconciliation over the whole staging set: the end each

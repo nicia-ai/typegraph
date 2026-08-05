@@ -14,9 +14,12 @@
  *     independent commits even when the logical result is identical. These are
  *     STRIPPED, and every props bag is re-serialized through the same canonical,
  *     recursively key-sorted JSON form so key-ordering noise cannot leak in.
- *     The bitemporal `valid_from` / `valid_to` are NOT stripped: the merge
- *     resolves a row's end-of-validity, so they are decided output, not noise —
- *     comparing ids and props alone would certify a window divergence as lawful.
+ *     `valid_to` is the one temporal column that is COMPARED, because the merge
+ *     decides it: it resolves a row's end-of-validity, so two orderings that end
+ *     a row differently must fail this gate — ids and props alone would certify
+ *     a window divergence as lawful. `valid_from` stays stripped, with
+ *     `created_at`: it defaults to the row's creation instant, so two
+ *     independent commits of the same logical result carry different values.
  *   - Every array in the report and the graph is sorted by a stable key so two
  *     orderings that produce the same SET produce the same SEQUENCE.
  *
@@ -142,28 +145,15 @@ export type NormalizedReport = Readonly<{
   provenance: readonly NormalizedProvenance[];
 }>;
 
-/**
- * A committed row's valid-time window, canonicalized to instants.
- *
- * Part of the compared form, not stripped meta: the merge decides a row's
- * end-of-validity (issue #369), so two orderings that resolve to DIFFERENT ends
- * must fail the determinism gate rather than compare equal on props alone.
- * Canonicalized because the raw column text differs per driver.
- */
-type NormalizedWindow = Readonly<{
-  validFrom: string | undefined;
-  validTo: string | undefined;
-}>;
-
-/** A committed node reduced to id + kind + canonical props + window. */
+/** A committed node reduced to id + kind + canonical props + end-of-validity. */
 type NormalizedNode = Readonly<{
   id: string;
   kind: string;
   props: string;
-  window: NormalizedWindow;
+  validTo: string | undefined;
 }>;
 
-/** A committed edge reduced to its structural identity + window. */
+/** A committed edge reduced to its structural identity + end-of-validity. */
 type NormalizedEdge = Readonly<{
   id: string;
   kind: string;
@@ -172,21 +162,8 @@ type NormalizedEdge = Readonly<{
   fromKind: string;
   toKind: string;
   props: string;
-  window: NormalizedWindow;
+  validTo: string | undefined;
 }>;
-
-/** Reads a row's window as canonical instants. */
-function normalizeWindow(
-  row: Readonly<{
-    valid_from: string | undefined;
-    valid_to: string | undefined;
-  }>,
-): NormalizedWindow {
-  return {
-    validFrom: canonicalizeDatabaseTimestamp(row.valid_from),
-    validTo: canonicalizeDatabaseTimestamp(row.valid_to),
-  };
-}
 
 /** The fully canonical, deep-equal-comparable form of a committed graph. */
 export type NormalizedGraph = Readonly<{
@@ -381,7 +358,7 @@ export async function normalizeGraph<G extends GraphDef>(
         id: row.id,
         kind: row.kind,
         props: canonicalProps(props),
-        window: normalizeWindow(row),
+        validTo: canonicalizeDatabaseTimestamp(row.valid_to),
       });
     }
   }
@@ -406,7 +383,7 @@ export async function normalizeGraph<G extends GraphDef>(
         fromKind: row.from_kind,
         toKind: row.to_kind,
         props: canonicalProps(props),
-        window: normalizeWindow(row),
+        validTo: canonicalizeDatabaseTimestamp(row.valid_to),
       });
     }
   }
