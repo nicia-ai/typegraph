@@ -140,6 +140,15 @@ Consequences worth knowing:
 - **A new PostgreSQL suite must bootstrap its own tables** (usually
   `await pool.query(generatePostgresMigrationSQL())` in `beforeAll`). It cannot
   inherit them from whichever suite happened to run first.
+- **A suite outside `tests/backends/postgres/` must be named in
+  `scripts/test-postgres.sh`.** The lane picks up that directory wholesale, but
+  mixed-backend suites — the SQLite family in the default lane plus a
+  PostgreSQL leg when `POSTGRES_URL` is set — live elsewhere and are listed
+  file by file. Forgetting one is invisible: the default lane skips the
+  PostgreSQL leg for want of `POSTGRES_URL` and the PostgreSQL lane never loads
+  the file, so the leg runs nowhere and the suite still reports green.
+  `tests/postgres-lane-coverage.test.ts` fails when a suite that imports
+  `provisionPostgresTestDatabase` is missing from the script.
 - **The `POSTGRES_URL` role needs `CREATEDB`.** Set
   `TYPEGRAPH_TEST_SHARED_DATABASE=1` to opt out and run every suite against the
   base database — the pre-isolation behaviour, including its cross-suite
