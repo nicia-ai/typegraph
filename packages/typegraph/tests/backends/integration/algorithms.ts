@@ -258,6 +258,9 @@ export function registerAlgorithmIntegrationTests(
       const boundaryDuplicateKind = requireDefined(
         nodeKindInitializationKinds[NODE_KIND_INITIALIZATION_CHUNK_SIZE - 1],
       );
+      // The duplicated kind needs a node of its own: the straddling chunks
+      // only collide on the working table's primary key if the repeated kind
+      // actually selects a row.
       const [firstNode] = await Promise.all([
         requireDefined(store.nodes[firstKind]).create({ name: "First" }),
         requireDefined(store.nodes[lastKind]).create({ name: "Last" }),

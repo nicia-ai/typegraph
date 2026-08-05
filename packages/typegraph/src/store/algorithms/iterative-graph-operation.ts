@@ -136,16 +136,17 @@ export async function seedWorkingTableFromNodes(
   nodeKinds: readonly string[] | undefined,
   seedColumns: readonly WorkingTableNodeSeedColumn[],
 ): Promise<void> {
+  if (nodeKinds?.length === 0) return;
   const additionalColumns =
     seedColumns.length === 0 ?
-      sql``
+      sql.empty()
     : sql`, ${sql.join(
         seedColumns.map((column) => sql.identifier(column.name)),
         sql`, `,
       )}`;
   const additionalValues =
     seedColumns.length === 0 ?
-      sql``
+      sql.empty()
     : sql`, ${sql.join(
         seedColumns.map((column) => column.value),
         sql`, `,
@@ -167,12 +168,17 @@ export async function seedWorkingTableFromNodes(
     context.operation.backend.capabilities.maxBindParameters ??
     DEFAULT_MAX_BIND_PARAMETERS;
   const fixedParameterCount = countBindParameters(fixedStatement);
-  const kindChunkSize = parameterLimit - fixedParameterCount;
+  // The full-graph seed carries no kind binds and only has to fit; a scoped
+  // seed also needs room for at least one kind bind before it can be chunked.
+  const kindBindBudget = parameterLimit - fixedParameterCount;
+  if (kindBindBudget < (nodeKinds === undefined ? 0 : 1)) {
+    throw new ConfigurationError(
+      "An iterative graph operation cannot fit its node-kind initialization within the backend bind-parameter limit.",
+      { fixedParameterCount, parameterLimit },
+    );
+  }
 
   if (nodeKinds === undefined) {
-    if (kindChunkSize < 0) {
-      throw nodeKindBindBudgetError(fixedParameterCount, parameterLimit);
-    }
     await context.executeTemporary(fixedStatement);
     return;
   }
@@ -180,26 +186,11 @@ export async function seedWorkingTableFromNodes(
   const normalizedKinds = [...new Set(nodeKinds)].toSorted((left, right) =>
     compareCodePoints(left, right),
   );
-  if (normalizedKinds.length === 0) return;
-  if (kindChunkSize < 1) {
-    throw nodeKindBindBudgetError(fixedParameterCount, parameterLimit);
-  }
-
-  for (const kindChunk of chunkValues(normalizedKinds, kindChunkSize)) {
+  for (const kindChunk of chunkValues(normalizedKinds, kindBindBudget)) {
     await context.executeTemporary(
       compileSeedStatement(compileKindFilter(sql.raw("n.kind"), kindChunk)),
     );
   }
-}
-
-function nodeKindBindBudgetError(
-  fixedParameterCount: number,
-  parameterLimit: number,
-): ConfigurationError {
-  return new ConfigurationError(
-    "An iterative graph operation cannot fit its node-kind initialization within the backend bind-parameter limit.",
-    { fixedParameterCount, parameterLimit },
-  );
 }
 
 function countBindParameters(fragment: SqlFragment): number {
