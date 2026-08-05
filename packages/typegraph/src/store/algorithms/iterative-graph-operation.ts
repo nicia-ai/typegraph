@@ -155,10 +155,18 @@ export async function seedWorkingTableFromNodes(
     `;
   };
 
+  const fixedStatement = compileSeedStatement(sql`TRUE`);
+  const parameterLimit =
+    context.operation.backend.capabilities.maxBindParameters ??
+    DEFAULT_MAX_BIND_PARAMETERS;
+  const fixedParameterCount = countBindParameters(fixedStatement);
+  const kindChunkSize = parameterLimit - fixedParameterCount;
+
   if (nodeKinds === undefined) {
-    const statement = compileSeedStatement(sql`TRUE`);
-    assertStatementFitsBindBudget(context, statement);
-    await context.executeTemporary(statement);
+    if (kindChunkSize < 0) {
+      throw nodeKindBindBudgetError(fixedParameterCount, parameterLimit);
+    }
+    await context.executeTemporary(fixedStatement);
     return;
   }
 
@@ -166,18 +174,8 @@ export async function seedWorkingTableFromNodes(
     compareCodePoints(left, right),
   );
   if (normalizedKinds.length === 0) return;
-
-  const fixedStatement = compileSeedStatement(sql`TRUE`);
-  const parameterLimit =
-    context.operation.backend.capabilities.maxBindParameters ??
-    DEFAULT_MAX_BIND_PARAMETERS;
-  const fixedParameterCount = countBindParameters(fixedStatement);
-  const kindChunkSize = parameterLimit - fixedParameterCount;
   if (kindChunkSize < 1) {
-    throw new ConfigurationError(
-      "An iterative graph operation cannot fit its node-kind initialization within the backend bind-parameter limit.",
-      { fixedParameterCount, parameterLimit },
-    );
+    throw nodeKindBindBudgetError(fixedParameterCount, parameterLimit);
   }
 
   for (const kindChunk of chunkValues(normalizedKinds, kindChunkSize)) {
@@ -187,16 +185,11 @@ export async function seedWorkingTableFromNodes(
   }
 }
 
-function assertStatementFitsBindBudget(
-  context: IterativeGraphRunContext,
-  statement: SqlFragment,
-): void {
-  const parameterLimit =
-    context.operation.backend.capabilities.maxBindParameters ??
-    DEFAULT_MAX_BIND_PARAMETERS;
-  const fixedParameterCount = countBindParameters(statement);
-  if (fixedParameterCount <= parameterLimit) return;
-  throw new ConfigurationError(
+function nodeKindBindBudgetError(
+  fixedParameterCount: number,
+  parameterLimit: number,
+): ConfigurationError {
+  return new ConfigurationError(
     "An iterative graph operation cannot fit its node-kind initialization within the backend bind-parameter limit.",
     { fixedParameterCount, parameterLimit },
   );

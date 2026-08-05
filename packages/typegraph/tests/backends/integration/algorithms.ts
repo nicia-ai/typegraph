@@ -63,7 +63,17 @@ const nodeKindInitializationGraph = defineGraph({
 const nodeKindInitializationKinds = Object.keys(
   nodeKindInitializationNodes,
 ).toSorted();
+const nodeKindInitializationKindSet = new Set(nodeKindInitializationKinds);
 type NodeKindInitializationStore = Store<typeof nodeKindInitializationGraph>;
+
+/**
+ * The seed statement binds three identifiers plus its two temporal bounds, so
+ * a 28-parameter ceiling leaves room for exactly 23 node kinds per statement.
+ */
+const NODE_KIND_INITIALIZATION_BIND_LIMIT = 28;
+const NODE_KIND_INITIALIZATION_CHUNK_SIZE = 23;
+const NODE_KIND_SEED_STATEMENT =
+  /^\s*INSERT INTO "typegraph_iterative_[^"]+"\s+\(graph_id, run_id, node_id, node_kind/u;
 
 async function resolveAlgorithmFixture(
   store: IntegrationStore,
@@ -138,10 +148,15 @@ async function seedWeightedTriangle(store: IntegrationStore) {
   return { anna, bruno, clara };
 }
 
+type CompiledStatement = Readonly<{
+  sql: string;
+  params: readonly unknown[];
+}>;
+
 function withBindLimit(
   backend: GraphBackend,
   maxBindParameters: number,
-  onTemporaryStatement?: (sqlText: string) => void,
+  onTemporaryStatement?: (statement: CompiledStatement) => void,
 ) {
   return {
     ...backend,
@@ -161,12 +176,12 @@ function withBindLimit(
           async executeTemporaryStatement(
             query: CompiledTemporaryStatementSql,
           ): Promise<void> {
-            const sqlText = assertWithinBindLimit(
+            const compiled = assertWithinBindLimit(
               backend,
               query,
               maxBindParameters,
             );
-            onTemporaryStatement?.(sqlText);
+            onTemporaryStatement?.(compiled);
             await requireDefined(tx.executeTemporaryStatement)(query);
           },
         };
@@ -180,36 +195,50 @@ function assertWithinBindLimit(
   backend: GraphBackend,
   query: CompiledRowsSql | CompiledTemporaryStatementSql,
   maxBindParameters: number,
-): string {
+): CompiledStatement {
   const compiled = requireDefined(backend.compileSql)(query);
   if (compiled.params.length > maxBindParameters) {
     throw new Error(
       `Statement used ${compiled.params.length} bind parameters; limit is ${maxBindParameters}.`,
     );
   }
-  return compiled.sql;
+  return compiled;
 }
 
+/**
+ * Runs one iterative algorithm under a bind ceiling that forces the node-kind
+ * initializer to split, and asserts both that it split and that the caller's
+ * duplicated kind still lands on the first chunk's boundary — the only
+ * arrangement in which the duplicate can prove that kinds are deduplicated
+ * before they are chunked.
+ */
 async function expectChunkedNodeKindInitialization(
   backend: GraphBackend,
+  boundaryKind: string,
   run: (store: NodeKindInitializationStore) => Promise<unknown>,
 ): Promise<void> {
-  let initializationStatementCount = 0;
+  const initializationChunks: (readonly string[])[] = [];
   const constrainedStore = createStore(
     nodeKindInitializationGraph,
-    withBindLimit(backend, 28, (sqlText) => {
-      if (
-        /^\s*INSERT INTO "typegraph_iterative_[^"]+"\s+\(graph_id, run_id, node_id, node_kind/u.test(
-          sqlText,
-        )
-      ) {
-        initializationStatementCount += 1;
-      }
+    withBindLimit(backend, NODE_KIND_INITIALIZATION_BIND_LIMIT, (statement) => {
+      if (!NODE_KIND_SEED_STATEMENT.test(statement.sql)) return;
+      initializationChunks.push(
+        statement.params.filter(
+          (parameter): parameter is string =>
+            typeof parameter === "string" &&
+            nodeKindInitializationKindSet.has(parameter),
+        ),
+      );
     }),
   );
 
   await run(constrainedStore);
-  expect(initializationStatementCount).toBeGreaterThan(1);
+
+  expect(initializationChunks.length).toBeGreaterThan(1);
+  expect(requireDefined(initializationChunks[0])).toHaveLength(
+    NODE_KIND_INITIALIZATION_CHUNK_SIZE,
+  );
+  expect(requireDefined(initializationChunks[0]).at(-1)).toBe(boundaryKind);
 }
 
 function withoutTemporaryStatements(backend: GraphBackend): GraphBackend {
@@ -227,24 +256,32 @@ export function registerAlgorithmIntegrationTests(
       const firstKind = requireDefined(nodeKindInitializationKinds[0]);
       const lastKind = requireDefined(nodeKindInitializationKinds.at(-1));
       const boundaryDuplicateKind = requireDefined(
-        nodeKindInitializationKinds[22],
+        nodeKindInitializationKinds[NODE_KIND_INITIALIZATION_CHUNK_SIZE - 1],
       );
       const [firstNode] = await Promise.all([
         requireDefined(store.nodes[firstKind]).create({ name: "First" }),
         requireDefined(store.nodes[lastKind]).create({ name: "Last" }),
+        requireDefined(store.nodes[boundaryDuplicateKind]).create({
+          name: "Boundary",
+        }),
       ]);
 
-      // With a 28-bind ceiling, the current initializer fits 23 kind binds.
-      // Repeating index 22 straddles that boundary unless normalization happens
-      // before chunking, which would violate the working table's primary key.
+      // The last kind of the first chunk is repeated, so without deduplication
+      // ahead of chunking it lands in two chunks and its node is seeded twice,
+      // violating the working table's primary key.
       const selectedKinds = [
         ...nodeKindInitializationKinds,
         boundaryDuplicateKind,
       ];
-      const expectedKinds = [firstKind, lastKind].toSorted();
+      const expectedKinds = [
+        firstKind,
+        lastKind,
+        boundaryDuplicateKind,
+      ].toSorted();
 
       await expectChunkedNodeKindInitialization(
         store.backend,
+        boundaryDuplicateKind,
         async (scoped) => {
           const memberships = await scoped.algorithms.weaklyConnectedComponents(
             {
@@ -260,6 +297,7 @@ export function registerAlgorithmIntegrationTests(
 
       await expectChunkedNodeKindInitialization(
         store.backend,
+        boundaryDuplicateKind,
         async (scoped) => {
           const memberships = await scoped.algorithms.labelPropagation({
             edges: ["connects"],
@@ -273,6 +311,7 @@ export function registerAlgorithmIntegrationTests(
 
       await expectChunkedNodeKindInitialization(
         store.backend,
+        boundaryDuplicateKind,
         async (scoped) => {
           const scores = await scoped.algorithms.pageRank({
             edges: ["connects"],
@@ -286,6 +325,7 @@ export function registerAlgorithmIntegrationTests(
 
       await expectChunkedNodeKindInitialization(
         store.backend,
+        boundaryDuplicateKind,
         async (scoped) => {
           const scores = await scoped.algorithms.personalizedPageRank({
             dampingFactor: 0,
