@@ -137,8 +137,8 @@ const NODE_IDS = ["n1", "n2", "n3", "n4"] as const;
  * reconciliation only ever sees a row live in BOTH the base and the fork, so the
  * edges the window laws quantify over must exist before the branches are cut.
  *
- * Their endpoint pairs are what {@link EDGE_CREATE_OP} keeps clear of: three
- * distinct pairs, each the sole occupant of its `(from, kind, to)` dedupe group.
+ * Three distinct pairs, which {@link EDGE_CREATE_OP} is free to create edges onto:
+ * a branch edge sharing a seeded pair is a parallel row, not a fold partner.
  */
 const SEED_EDGES = [
   { id: "seed-e1", from: 0, to: 1 },
@@ -292,30 +292,25 @@ const HARD_DELETE_OP: WeightedOp = {
   ),
 };
 
-/** The directed endpoint pairs the seeded edges already occupy. */
-const SEEDED_EDGE_PAIRS = new Set(
-  SEED_EDGES.map((edge) => `${edge.from}-${edge.to}`),
-);
-
 /**
  * Edge creation, held OUT of the incremental lane's BRANCH alphabet for exactly
  * the reason {@link HARD_DELETE_OP} is: a branch row staged onto an id the target
  * already committed is refused by the incremental existing-id write guard — a
  * legitimate but non-identity refusal that would only add noise to these laws.
  *
- * The endpoint pair is never one a SEEDED edge occupies. Repoint/dedupe groups
- * staged edges by `(from, kind, to)` — differing props make a property conflict,
- * NOT a separate group — so a branch edge onto a seeded pair folds with the
- * seeded row and the min-id survivor absorbs its claimed end. That relocation is
- * real behavior, pinned by the deterministic suite's fold cases; the window laws
- * below judge the row a claim was MADE on, so the generator keeps the two apart
- * rather than guarding after the fact.
+ * The endpoint pair is unconstrained, INCLUDING the pairs the seeded edges occupy.
+ * That is the regression marker for #393: the store is a multigraph, so a branch
+ * edge onto a seeded pair is a parallel row rather than a member of the seeded
+ * row's dedupe group, and the window laws below — which judge the row a claim was
+ * MADE on — hold without keeping the two apart. While the fold grouped every
+ * staged edge by `(from, kind, to)`, such an edge folded with the seeded row and
+ * the min-id survivor absorbed its claimed end.
  */
 const EDGE_CREATE_OP: WeightedOp = {
   weight: 2,
-  arbitrary: pairArb
-    .filter(([from, to]) => !SEEDED_EDGE_PAIRS.has(`${from}-${to}`))
-    .map(([from, to]) => ({ op: "createEdge", from, to }) as const),
+  arbitrary: pairArb.map(
+    ([from, to]) => ({ op: "createEdge", from, to }) as const,
+  ),
 };
 
 const ROBOT_OPS: readonly WeightedOp[] = [

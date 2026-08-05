@@ -14,8 +14,14 @@
  *   6. the incremental target's own end wins over a branch's;
  *   7. re-writing the end the target already holds is not a write at all;
  *   8. a fork `validFrom` divergence is reported unapplicable, not applied;
- *   9. two inherited edges folded by repoint/dedupe take the earliest end;
+ *   9. PARALLEL edges of one kind each take the end claimed on THAT row;
  *  10. a single branch may EXTEND an end to a later instant.
+ *
+ * Case 9 is the window half of issue #393: the repoint/dedupe fold is scoped to
+ * collisions repointing INDUCED, so a window claim can no longer migrate between two
+ * rows that merely share endpoints. The window rules of the fold ITSELF — earliest
+ * end across a folded set, and a preferred-branch survivor keeping its own end —
+ * are pinned in `edge-repoint.test.ts`, which can construct a cluster directly.
  *
  * Runs on every backend in the matrix — SQLite and PGlite always, real server
  * Postgres under `POSTGRES_URL`. That is load-bearing rather than incidental:
@@ -442,10 +448,12 @@ describe.each(backendMatrix())(
       ).toBe(beforeFrom);
     });
 
-    it("takes the earliest end across edges folded by repoint/dedupe", async () => {
+    it("gives PARALLEL edges of one kind their own ends", async () => {
       const forkPoint = await seededForkPoint();
-      // A SECOND inherited edge with identical endpoints and props: repoint/dedupe
-      // folds the two into one survivor, so the fold must not lose either end.
+      // A SECOND inherited edge with identical endpoints and props. The store is a
+      // multigraph, so these are two rows, not one: each branch's end lands on the
+      // row that branch touched. Until #393 the repoint/dedupe fold grouped them by
+      // `(from, kind, to)` and moved both ends onto the min-id survivor.
       await forkPoint.edges.hadEncounter.create(
         { kind: "Patient", id: "pat-1" },
         { kind: "Encounter", id: "enc-1" },
@@ -471,12 +479,11 @@ describe.each(backendMatrix())(
         }),
       );
 
-      // "edge-1" is the min-id survivor of the fold; the end claimed on the
-      // folded-away "edge-2" must not silently outlive its row unresolved.
       expect(await edgeEnd(forkPoint, "edge-1")).toBe(EARLY);
+      expect(await edgeEnd(forkPoint, "edge-2")).toBe(LATE);
     });
 
-    it("keeps a folded-away edge's end when the target's edge survives", async () => {
+    it("keeps a parallel edge's end off the row the target edited", async () => {
       const forkPoint = await seededForkPoint();
       await forkPoint.edges.hadEncounter.create(
         { kind: "Patient", id: "pat-1" },
@@ -487,8 +494,9 @@ describe.each(backendMatrix())(
       const target = (await forkOf(forkPoint, asBranchId("window-target")))
         .store;
       const branchA = await forkOf(forkPoint, BRANCH_A);
-      // The target edits the SURVIVING edge's props and claims no end at all;
-      // the branch ends the other edge of the same dedupe group.
+      // The target edits one parallel edge's props and claims no end; the branch
+      // ends the OTHER one. On main "edge-1" was the min-id survivor of the fold,
+      // so it absorbed an end nobody had claimed on it.
       await target.edges.hadEncounter.update(EDGE_1, { on: "2026-02-02" });
       await branchA.store.edges.hadEncounter.update(
         EDGE_2,
@@ -505,10 +513,8 @@ describe.each(backendMatrix())(
         }),
       );
 
-      // A survivor from the preferred branch keeps its own end verbatim, but it
-      // has none here — so there is no committed-target window to protect, and
-      // swallowing the only claimed end would be a silent window loss.
-      expect(await edgeEnd(target, "edge-1")).toBe(EARLY);
+      expect(await edgeEnd(target, "edge-2")).toBe(EARLY);
+      expect(await edgeEnd(target, "edge-1")).toBeUndefined();
     });
 
     it("lets a single branch extend an end to a later instant", async () => {

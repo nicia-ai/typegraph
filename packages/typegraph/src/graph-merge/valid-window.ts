@@ -120,8 +120,10 @@ function earliestEnd(claims: readonly EndClaim[]): string | undefined {
 
 /**
  * Applies rule 3 to a set of end claims: the preferred branch's claim if it made
- * one, else {@link earliestEnd}. Order-independent — the preferred-branch lookup
- * is a set query and the fallback is a `min`.
+ * one, else {@link earliestEnd}. Order-independent — the preferred branch's claims
+ * are selected as a SET and reduced by the same `min`, so a fold set holding several
+ * preferred rows (distinct edges the repoint collapsed) cannot resolve on which of
+ * them the caller happened to list first.
  *
  * Only the edge FOLD needs this form. The inherited-row reconciler never sees a
  * preferred claim (the committed target's own end is already stored, so it is
@@ -132,10 +134,10 @@ export function resolveEndClaims(
   claims: readonly EndClaim[],
   preferredBranchId: BranchId | undefined,
 ): string | undefined {
-  const preferred = claims.find(
+  const preferred = claims.filter(
     (claim) => claim.branchId === preferredBranchId,
   );
-  return preferred === undefined ? earliestEnd(claims) : preferred.validTo;
+  return earliestEnd(preferred.length > 0 ? preferred : claims);
 }
 
 /** The claiming branches of a resolved end, deduped and sorted. */

@@ -330,10 +330,23 @@ When nodes collapse, their edges must too. After clustering, Graph Merge:
 
 1. **Repoints** every edge endpoint onto its cluster's canonical survivor.
 2. **Drops** any edge whose endpoint was finally deleted (recorded in `dropped`).
-3. **Dedupes** edges as a pure set keyed by `(from, type, to, props)`, so two
-   branches' "same" edge collapses to one.
-4. **Reconciles** edges that collapse to the same `(from, type, to)` but
-   disagree on properties, via the same conflict policy as nodes.
+3. **Dedupes** edges that repointing brought together, as a pure set keyed by
+   `(from, type, to, props)` — so `x → a` and `x → b` both landing on `x → c*`
+   collapse to one edge.
+4. **Reconciles** edges that collapse that way but disagree on properties, via
+   the same conflict policy as nodes.
+
+Steps 3 and 4 are scoped to collisions **repointing caused**: edges are grouped by
+the endpoint pair they named *before* repointing, and one row per pair collapses. A
+TypeGraph store is a multigraph — nothing enforces uniqueness on `(from, kind, to)`,
+`create()` makes a parallel edge, and `getOrCreateByEndpoints()` is the opt-in
+set-semantics accessor — so a branch that created a parallel edge merges as a
+parallel edge, and a window claim lands on the row its author touched. A repointed
+edge landing on endpoints that already have several parallel rows merges into one of
+them; the rest keep their own properties and windows. What makes two staged edges
+"the same row" is their **edge id**, not equal properties: one inherited edge
+staged by several branches folds into a single write, while a branch-created edge
+is a new row even when its properties happen to match an existing one's.
 
 Inherited edges that a branch **deleted** are removed from the target, and
 inherited edges **modified** by multiple branches go through the same base-aware
