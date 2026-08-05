@@ -21,6 +21,11 @@ compiler path serves both coordinates and both emitters. On SQLite a hop over
 `EXPLAIN QUERY PLAN` seeks `typegraph_edges_from_idx` where it used to scan every
 matching edge per source row; PostgreSQL drops from 9.2 s to 61 ms.
 
+A traversal at a **historical** coordinate reaches its candidate edge through the
+same step, so it gains the same join order: on SQLite an `asOf` hop over 100,000
+matching edges drops from 31.3 s to 241 ms. That coordinate's own remaining cost
+is the ledger reconstruction, still tracked in typegraph#310.
+
 Results are unchanged at every coordinate: physical edges stay deduplicated, and
 member visibility, the `sameIdAcrossKinds` profile and the read instant are all
 resolved exactly where they were. The relation covers the whole identity

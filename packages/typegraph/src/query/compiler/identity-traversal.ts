@@ -23,18 +23,16 @@ const PEER_CLASS_ALIAS = "identity_peer";
 /** Alias of the node row a current-coordinate member is checked visible through. */
 const CURRENT_MEMBER_NODE_ALIAS = "member_node";
 
-type IdentityCoordinateInput = Readonly<{
-  ast: QueryAst;
-  temporalFilterPass: TemporalFilterPass;
-}>;
-
 /**
  * Resolves the read coordinate an identity reconstruction must be evaluated at,
  * or `undefined` when the query reads the present and can therefore use the
  * materialized closure instead.
  */
 function historicalCoordinate(
-  input: IdentityCoordinateInput,
+  input: Readonly<{
+    ast: QueryAst;
+    temporalFilterPass: TemporalFilterPass;
+  }>,
 ): HistoricalIdentitySqlCoordinate | undefined {
   const { ast, temporalFilterPass } = input;
   const recorded = optionalRecordedInstantParts(

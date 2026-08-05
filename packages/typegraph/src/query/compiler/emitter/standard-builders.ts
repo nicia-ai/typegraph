@@ -463,19 +463,21 @@ export function buildStandardTraversalCte(
 
     const sourceJoin = compileSourceJoin(branch);
     const frontierJoin = identityFrontierExpansion?.frontierJoin ?? sql``;
-    const targetJoin = sql`
-      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
-        AND n.id = e.${sql.raw(branch.targetField)}
-        AND n.kind = e.${sql.raw(branch.targetKindField)}
-    `;
 
+    // The target join is spelled out in both orderings rather than hoisted into
+    // a shared fragment: interpolating one would surround it with the
+    // fragment's own leading and trailing newlines, and a traversal that needs
+    // no pin has to compile byte-identically to what it did before the pin
+    // existed. The recursive emitter repeats it for the same reason.
     if (pinFrontierAheadOfEdges) {
       return sql`
         SELECT ${sql.join(selectColumns, sql`, `)}
         FROM cte_${sql.raw(previousAlias)}
         ${frontierJoin}
         CROSS JOIN ${ctx.schema.edgesTable} e
-        ${targetJoin}
+        JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
+          AND n.id = e.${sql.raw(branch.targetField)}
+          AND n.kind = e.${sql.raw(branch.targetKindField)}
         WHERE ${sql.join([sourceJoin, ...whereClauses], sql` AND `)}
       `;
     }
@@ -485,7 +487,9 @@ export function buildStandardTraversalCte(
       FROM cte_${sql.raw(previousAlias)}
       ${frontierJoin}
       JOIN ${ctx.schema.edgesTable} e ON ${sourceJoin}
-      ${targetJoin}
+      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
+        AND n.id = e.${sql.raw(branch.targetField)}
+        AND n.kind = e.${sql.raw(branch.targetKindField)}
       WHERE ${sql.join(whereClauses, sql` AND `)}
     `;
   }

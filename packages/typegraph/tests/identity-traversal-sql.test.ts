@@ -231,6 +231,19 @@ describe("identity traversal SQL shape", () => {
           // A plain traversal joins on the frontier's own columns, so it keeps
           // the planner's freedom on every dialect.
           expect(sqlText).toContain(`JOIN "typegraph_edges" e ON`);
+          // ...and its statement is otherwise byte-for-byte what it was before
+          // identity expansion needed a second FROM ordering. The two orderings
+          // repeat the target join instead of interpolating one shared fragment,
+          // because a fragment's own leading and trailing newlines would leave
+          // stray whitespace-only lines around it here. Nothing downstream would
+          // fail on that, which is why the exact text is pinned rather than left
+          // to review.
+          expect(sqlText).toContain(
+            '\n      JOIN "typegraph_nodes" n ON n.graph_id = e.graph_id' +
+              "\n        AND n.id = e.to_id" +
+              "\n        AND n.kind = e.to_kind" +
+              "\n      WHERE ",
+          );
         }
       });
     });
