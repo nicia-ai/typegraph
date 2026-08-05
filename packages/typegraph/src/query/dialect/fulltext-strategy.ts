@@ -152,6 +152,14 @@ export type FulltextStrategy = Readonly<{
    * Replaces the former `generateDdl(tableName)`: DDL is now one field
    * of a contribution rather than the strategy's whole storage
    * surface. (Public API change — see #129.)
+   *
+   * Declare `dropDdl` on each contribution to opt the strategy into the
+   * destructive `store.rebuildContribution("fulltext")` path — the only
+   * repair for storage provisioned at a shape `createDdl` no longer
+   * produces. Fulltext content is reconstructed from the node rows, so a
+   * rebuild loses nothing; a strategy that omits `dropDdl` is reported
+   * as not rebuildable instead of being dropped through a synthesized
+   * statement.
    */
   ownedTables: (
     this: void,
@@ -371,6 +379,10 @@ export const tsvectorStrategy: FulltextStrategy = {
         owner: "tsvector",
         tableName: primaryTableName,
         createDdl,
+        // Both indexes belong to the table, so Postgres drops them with
+        // it; no separate DROP INDEX is needed or wanted (naming them
+        // would break the moment a future createDdl renames one).
+        dropDdl: [`DROP TABLE IF EXISTS ${name};`],
         runtimeEnsure: true,
       },
     ];
@@ -584,6 +596,10 @@ export const fts5Strategy: FulltextStrategy = {
   tokenize='porter unicode61 remove_diacritics 2'
 );`,
         ],
+        // `DROP TABLE` on an FTS5 virtual table also removes the shadow
+        // tables (`_data`, `_idx`, `_content`, …) the module created, so
+        // one statement is the whole teardown.
+        dropDdl: [`DROP TABLE IF EXISTS ${name};`],
         runtimeEnsure: true,
       },
     ];

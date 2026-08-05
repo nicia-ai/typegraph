@@ -32,6 +32,7 @@ import type {
   InsertNodeParams,
   InsertSchemaParams,
   InsertUniqueParams,
+  RecordContributionMaterializationParams,
   SqlDialect,
   UpdateEdgeParams,
   UpdateNodeParams,
@@ -98,6 +99,15 @@ import {
   buildInsertUnique,
   buildInsertUniqueBatch,
 } from "./uniques";
+
+/**
+ * Binds an absent value as a SQL `NULL` literal rather than as a bound
+ * parameter, so the column's own type drives the insert instead of the
+ * driver having to infer a type for a null placeholder.
+ */
+function nullableText(value: string | undefined): SQL {
+  return value === undefined ? sql`NULL` : sql`${value}`;
+}
 
 export type CommonOperationStrategy = Readonly<{
   buildUpsertFulltext: (
@@ -212,6 +222,14 @@ export type CommonOperationStrategy = Readonly<{
     graphId: string,
     version: number,
   ) => Readonly<{ activateVersion: SQL; deactivateAll: SQL }>;
+  /**
+   * Write one contribution marker row outright (no conflict clause), for
+   * the transaction-scoped stamp a destructive rebuild commits alongside
+   * the DDL that produced it.
+   */
+  buildInsertContributionMaterialization: (
+    params: RecordContributionMaterializationParams,
+  ) => SQL;
   buildDeleteContributionMaterialization: (
     identity: ContributionMaterializationIdentity,
   ) => SQL;
@@ -426,6 +444,49 @@ function createCommonOperationStrategy(
     },
   };
 
+  /**
+   * States one contribution marker row outright: every column takes the
+   * supplied value whether or not a row already exists.
+   *
+   * Deliberately not the top-level backend's upsert, which COALESCEs
+   * `materialized_at` so a *failed* re-attempt cannot erase an earlier
+   * success. That rule is right when the attempt may have failed and
+   * wrong for a completed destructive rebuild, whose whole point is that
+   * the storage is new — the recorded timestamp must be the rebuild's,
+   * not the shape it replaced.
+   *
+   * One statement rather than a delete/insert pair so the row is never
+   * momentarily absent inside the transaction, and so a concurrent
+   * `repairContributions()` racing the same identity resolves as a
+   * conflict rather than a primary-key violation that would roll the
+   * whole rebuild back.
+   *
+   * Dialect-shared: the composite primary key is the conflict target on
+   * both engines, and the ISO timestamps bind straight into SQLite's TEXT
+   * and Postgres' TIMESTAMPTZ columns, the same way every other write
+   * builder here passes `nowIso()` through.
+   */
+  function buildInsertContributionMaterialization(
+    params: RecordContributionMaterializationParams,
+  ): SQL {
+    return sql`
+      INSERT INTO ${contributionMaterializations}
+        (graph_id, logical_name, owner, table_name, signature,
+         materialized_at, last_attempted_at, last_error)
+      VALUES (
+        ${params.graphId}, ${params.logicalName}, ${params.owner},
+        ${params.tableName}, ${params.signature},
+        ${nullableText(params.materializedAt)}, ${params.attemptedAt},
+        ${nullableText(params.error)}
+      )
+      ON CONFLICT (graph_id, logical_name, owner, table_name) DO UPDATE SET
+        signature = excluded.signature,
+        materialized_at = excluded.materialized_at,
+        last_attempted_at = excluded.last_attempted_at,
+        last_error = excluded.last_error
+    `;
+  }
+
   function buildDeleteContributionMaterialization(
     identity: ContributionMaterializationIdentity,
   ): SQL {
@@ -445,6 +506,7 @@ function createCommonOperationStrategy(
       return buildUpdateNodeSet(tables, dialect, params, timestamp);
     },
     buildDeleteContributionMaterialization,
+    buildInsertContributionMaterialization,
     buildInsertUnique(params: InsertUniqueParams): SQL {
       return buildInsertUnique(tables, dialect, params);
     },

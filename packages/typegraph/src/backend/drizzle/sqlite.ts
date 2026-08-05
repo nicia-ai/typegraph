@@ -65,7 +65,11 @@ import {
   type ContributionDiagnostic,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
+  type ContributionProbeEntry,
+  type ContributionRebuildResult,
+  type ContributionRebuildScope,
   type ContributionRepairResult,
+  type ContributionRepopulationStats,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
@@ -132,6 +136,7 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
+  contributionRebuildSupported,
   createContributionMaterializer,
   gateFulltext,
   gateFulltextMethods,
@@ -921,6 +926,25 @@ function createSqliteOperationBackend(
     ...commonBackend,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
+    /**
+     * Transaction-scoped contribution marker stamp. Present so the
+     * destructive rebuild can commit its marker with the DDL that
+     * produced it; without it the stamp would land outside the
+     * transaction and could survive a rolled-back drop.
+     *
+     * States the row outright rather than reusing the top-level upsert,
+     * whose `materialized_at` COALESCE preserves an earlier success so a
+     * failed re-attempt cannot erase it. A completed rebuild replaced the
+     * storage, so the recorded timestamp must be the rebuild's.
+     */
+    async recordContributionMaterialization(
+      params: RecordContributionMaterializationParams,
+    ): Promise<void> {
+      await execRun(
+        operationStrategy.buildInsertContributionMaterialization(params),
+      );
+    },
+
     async deleteSchemaVectorSlotContribution(slot: VectorSlot): Promise<void> {
       if (vectorStrategy === undefined) return;
       for (const contribution of vectorStrategy.ownedTables(slot)) {
@@ -1108,7 +1132,7 @@ export function createSqliteBackend(
   // extension loads); absent for plain SQLite drivers with no extension.
   const vectorStrategy = options.vector;
   const capabilityOverrides = options.capabilities ?? {};
-  const capabilities = normalizeGraphAnalyticsCapabilities({
+  const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
     ...buildSqliteCapabilities({
       fulltextStrategy,
       vectorStrategy,
@@ -1125,6 +1149,23 @@ export function createSqliteBackend(
       capabilityOverrides.graphAnalytics,
     ),
   });
+  // Derived last and not overridable: how far up the contribution health
+  // ladder this backend goes is a structural fact about the wiring below
+  // (durable markers, a catalog probe, a strategy that declares teardown
+  // DDL, a transactional schema fence), and a caller who declared a
+  // rebuild this backend cannot perform would be advertising a lie.
+  const capabilities: BackendCapabilities = {
+    ...declaredCapabilities,
+    contributions: {
+      supported: true,
+      probe: true,
+      rebuild: contributionRebuildSupported(
+        fulltextStrategy,
+        tables.fulltextTableName,
+        declaredCapabilities.transactions,
+      ),
+    },
+  };
 
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -1296,6 +1337,19 @@ export function createSqliteBackend(
     recordMarker: recordContributionMaterializationRow,
     deleteMarker: deleteContributionMaterializationRow,
     tableExists: contributionTableExists,
+    // Withheld rather than wired-and-throwing when transactions are
+    // disabled: the rebuild must refuse with its own typed error naming
+    // the absent fence, matching `capabilities.contributions.rebuild`.
+    // The graph id the materializer passes is unused — this backend's
+    // schema lock is per connection, not per graph.
+    ...(capabilities.transactions ?
+      {
+        schemaWriteTransaction: <T,>(
+          _graphId: string,
+          fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
+        ) => runSchemaWriteTransaction((target) => fn(target)),
+      }
+    : {}),
   });
 
   const operations = createSqliteOperationBackend({
@@ -1720,6 +1774,27 @@ export function createSqliteBackend(
       vectorSlots: readonly VectorSlot[],
     ): Promise<ContributionRepairResult> {
       return contributionMaterializer.repairContributions(graphId, vectorSlots);
+    },
+
+    async probeContributions(
+      graphId: string,
+      vectorSlots: readonly VectorSlot[],
+    ): Promise<readonly ContributionProbeEntry[]> {
+      return contributionMaterializer.probeContributions(graphId, vectorSlots);
+    },
+
+    async rebuildContribution(
+      graphId: string,
+      scope: ContributionRebuildScope,
+      repopulate: (
+        target: TransactionBackend,
+      ) => Promise<ContributionRepopulationStats>,
+    ): Promise<ContributionRebuildResult> {
+      return contributionMaterializer.rebuildContribution(
+        graphId,
+        scope,
+        repopulate,
+      );
     },
 
     // Vector counterparts of the runtime-contribution methods. Present

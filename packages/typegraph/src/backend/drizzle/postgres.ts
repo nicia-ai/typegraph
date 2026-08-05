@@ -97,7 +97,11 @@ import {
   type ContributionDiagnostic,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
+  type ContributionProbeEntry,
+  type ContributionRebuildResult,
+  type ContributionRebuildScope,
   type ContributionRepairResult,
+  type ContributionRepopulationStats,
   createBackendOverlay,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
@@ -138,6 +142,7 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
+  contributionRebuildSupported,
   createContributionMaterializer,
   gateFulltext,
   gateFulltextMethods,
@@ -459,12 +464,31 @@ export function createPostgresBackend(
         ),
       }
     : {};
-  const capabilities = normalizeGraphAnalyticsCapabilities({
+  const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
     ...baseCapabilities,
     ...httpOnlyOverrides,
     ...options.capabilities,
     ...driverBindParameterOverrides,
   });
+  // Derived last and not overridable: how far up the contribution health
+  // ladder this backend goes is a structural fact about the wiring below
+  // (durable markers, a catalog probe, a strategy that declares teardown
+  // DDL, a transactional schema fence), and a caller who declared a
+  // rebuild this backend cannot perform would be advertising a lie. The
+  // HTTP-only drivers land on `rebuild: false` here because they cannot
+  // hold a session across statements, so there is no fence to run under.
+  const capabilities: BackendCapabilities = {
+    ...declaredCapabilities,
+    contributions: {
+      supported: true,
+      probe: true,
+      rebuild: contributionRebuildSupported(
+        fulltextStrategy,
+        tables.fulltextTableName,
+        declaredCapabilities.transactions,
+      ),
+    },
+  };
   const adapterOptions: PostgresExecutionAdapterOptions = {
     ...(options.prepareStatements === undefined ?
       {}
@@ -685,6 +709,17 @@ export function createPostgresBackend(
     recordMarker: recordContributionMaterializationRow,
     deleteMarker: deleteContributionMaterializationRow,
     tableExists: contributionTableExists,
+    // Withheld rather than wired-and-throwing when the driver cannot hold
+    // a session: the rebuild must refuse with its own typed error naming
+    // the absent fence, matching `capabilities.contributions.rebuild`.
+    ...(capabilities.transactions ?
+      {
+        schemaWriteTransaction: <T,>(
+          graphId: string,
+          fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
+        ) => runSchemaWriteTransaction(graphId, (target) => fn(target)),
+      }
+    : {}),
   });
 
   const operations = createPostgresOperationBackend({
@@ -1129,6 +1164,27 @@ export function createPostgresBackend(
       vectorSlots: readonly VectorSlot[],
     ): Promise<ContributionRepairResult> {
       return contributionMaterializer.repairContributions(graphId, vectorSlots);
+    },
+
+    async probeContributions(
+      graphId: string,
+      vectorSlots: readonly VectorSlot[],
+    ): Promise<readonly ContributionProbeEntry[]> {
+      return contributionMaterializer.probeContributions(graphId, vectorSlots);
+    },
+
+    async rebuildContribution(
+      graphId: string,
+      scope: ContributionRebuildScope,
+      repopulate: (
+        target: TransactionBackend,
+      ) => Promise<ContributionRepopulationStats>,
+    ): Promise<ContributionRebuildResult> {
+      return contributionMaterializer.rebuildContribution(
+        graphId,
+        scope,
+        repopulate,
+      );
     },
 
     // Vector counterparts of the runtime-contribution methods. Present
@@ -2005,6 +2061,25 @@ function createPostgresOperationBackend(
     ...commonBackend,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
+    /**
+     * Transaction-scoped contribution marker stamp. Present so the
+     * destructive rebuild can commit its marker with the DDL that
+     * produced it; without it the stamp would land outside the
+     * transaction and could survive a rolled-back drop.
+     *
+     * States the row outright rather than reusing the top-level upsert,
+     * whose `materialized_at` COALESCE preserves an earlier success so a
+     * failed re-attempt cannot erase it. A completed rebuild replaced the
+     * storage, so the recorded timestamp must be the rebuild's.
+     */
+    async recordContributionMaterialization(
+      params: RecordContributionMaterializationParams,
+    ): Promise<void> {
+      await execRun(
+        operationStrategy.buildInsertContributionMaterialization(params),
+      );
+    },
+
     async deleteSchemaVectorSlotContribution(slot: VectorSlot): Promise<void> {
       if (vectorStrategy === undefined) return;
       for (const contribution of vectorStrategy.ownedTables(slot)) {

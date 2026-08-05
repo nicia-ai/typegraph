@@ -88,6 +88,31 @@ export type TableContribution = Readonly<{
    */
   createDdl: readonly string[];
   /**
+   * Idempotent (`DROP ... IF EXISTS`) statements that tear this
+   * contribution's storage down, ordered so that running the list
+   * leaves nothing behind. Declaring it is what makes a contribution
+   * *rebuildable*: the destructive
+   * `store.rebuildContribution()` path drops through these statements
+   * before re-running {@link createDdl}, which is the only repair for a
+   * table provisioned at a shape the current `createDdl` no longer
+   * produces.
+   *
+   * Optional because it is a capability, not an invariant. A
+   * contribution whose content cannot be reconstructed from data
+   * TypeGraph already stores has no business advertising a rebuild —
+   * dropping it would destroy the only copy — and a third-party
+   * strategy that predates this field keeps compiling and is reported
+   * as not rebuildable rather than silently rebuilt through a
+   * synthesized `DROP`. Backends surface the resulting gap as
+   * `capabilities.contributions.rebuild`.
+   *
+   * The rebuild visits a strategy's `runtimeEnsure` contributions, the
+   * same set the boot ensure provisions — so a companion table a strategy
+   * declares outside that set is neither dropped nor recreated, and must
+   * not be something the recreated storage depends on.
+   */
+  dropDdl?: readonly string[];
+  /**
    * When `true`, the post-schema-load focused ensure
    * (`loadActiveSchemaWithBootstrap`) materializes this contribution
    * on every successful schema load.

@@ -172,6 +172,47 @@ export type GraphAnalyticsCapabilities = Readonly<{
   mathFunctions: boolean;
 }>;
 
+/**
+ * How much of the contribution health lifecycle a backend can serve.
+ *
+ * The three rungs escalate — probe (read-only) → repair
+ * (non-destructive) → rebuild (destructive) — and each is declared
+ * separately because a backend can genuinely stop at any of them. A
+ * backend that provisions contributions but cannot probe its own catalog
+ * is a real gap, and the honest answer to `store.probeContributions()`
+ * there is a refusal, not `ready`: "assessed and healthy" and "never
+ * looked" must never share a return value.
+ */
+export type ContributionCapabilities = Readonly<{
+  /**
+   * Whether strategy-owned contribution tables are provisioned and
+   * attested by durable markers on this backend at all. `false` means
+   * there is nothing to assess, and the probe reports no entries rather
+   * than refusing.
+   */
+  supported: boolean;
+  /**
+   * Whether the backend can cross its durable markers against the live
+   * catalog — `store.probeContributions()` and
+   * `store.verifyContributions()`. False with `supported: true` is the
+   * declared gap: both refuse with `ConfigurationError`.
+   */
+  probe: boolean;
+  /**
+   * Whether the backend can run the destructive drop → recreate →
+   * repopulate → stamp rebuild (`store.rebuildContribution()`). Requires
+   * both a strategy that declares `dropDdl` and a transactional schema
+   * fence to run it under; false means `rebuildContribution` refuses.
+   *
+   * Describes the fulltext projection only. `rebuildContribution("vector")`
+   * refuses on every backend regardless of this flag — embeddings exist
+   * only in the storage a rebuild would drop, so there is nothing to
+   * reconstruct them from — and `reembedVectorField` is the sanctioned
+   * destructive path there.
+   */
+  rebuild: boolean;
+}>;
+
 // ============================================================
 // SQL Dialect & Capabilities
 // ============================================================
@@ -218,6 +259,12 @@ export type BackendCapabilities = Readonly<{
   fulltext?: FulltextCapabilities | undefined;
   /** Whole-graph analytics capabilities (undefined when unavailable). */
   graphAnalytics?: GraphAnalyticsCapabilities | undefined;
+  /**
+   * How far up the contribution health ladder this backend goes
+   * (undefined on a backend with no contribution machinery at all,
+   * equivalent to every member `false`).
+   */
+  contributions?: ContributionCapabilities | undefined;
 }>;
 
 /** Keeps session-scoped analytics honest when a required SQL feature is absent. */
@@ -1167,6 +1214,137 @@ export type ContributionRepairResult = Readonly<{
 }>;
 
 // ============================================================
+// Contribution readiness probe (#377)
+// ============================================================
+
+/**
+ * The search projection a probe entry summarizes. Deliberately the
+ * logical *class* rather than one physical table: a caller asking "is
+ * search ready?" is deciding whether to issue a fulltext or a vector
+ * query, and a per-`(kind, field)` breakdown of pgvector tables answers
+ * a question they did not ask. The physical detail an operator needs to
+ * act is one `verifyContributions()` call away, and
+ * {@link ContributionProbeEntry.detail} names the affected slots.
+ */
+export type ContributionProbeContribution = "fulltext" | "vector";
+
+/**
+ * Readiness of one search projection.
+ *
+ * - `ready` — every contribution backing this projection is attested by
+ *   its durable marker and present in the catalog. Not a promise about
+ *   future coherence: a write that lands after the probe returns is
+ *   outside what any assessment can cover.
+ * - `degraded` — at least one contribution is unusable. Queries against
+ *   this projection will be refused (`StoreNotInitializedError`) or will
+ *   read incomplete storage.
+ *   {@link ContributionProbeEntry.detail} says which and why.
+ * - `building` — **reserved.** No shipped path publishes it. Recording
+ *   an in-flight marker would need a fifth
+ *   {@link ContributionDiagnosticState} and would widen the hot-path
+ *   gate's verdict set; the destructive rebuild instead runs inside one
+ *   transaction, so a concurrent probe observes the state before or
+ *   after it and never a partial one. Reserved rather than removed so a
+ *   future streaming/async materializer can populate it without a
+ *   breaking change — treat it as "not `ready`" today.
+ */
+export type ContributionProbeState = "ready" | "degraded" | "building";
+
+/**
+ * One search projection's readiness, from
+ * {@link GraphBackend.probeContributions}.
+ */
+export type ContributionProbeEntry = Readonly<{
+  contribution: ContributionProbeContribution;
+  state: ContributionProbeState;
+  /**
+   * Operator-facing summary of why the projection is not `ready` —
+   * e.g. `"fulltext table \"typegraph_node_fulltext\" is missing
+   * (orphaned-marker)"`. Absent on a `ready` entry.
+   *
+   * Human-readable and not a stable format: route on `state`, and call
+   * `store.verifyContributions()` for the structured per-table
+   * diagnostics this string is derived from.
+   */
+  detail?: string;
+}>;
+
+/**
+ * Result of {@link GraphBackend.probeContributions}.
+ *
+ * A projection with no declared contributions is omitted rather than
+ * reported `ready`, so an empty `entries` array means "nothing to
+ * assess" — a graph with no `searchable()` or `embedding()` fields, or a
+ * backend with no contribution support — never "assessed and healthy".
+ */
+export type ContributionProbeResult = Readonly<{
+  /**
+   * The durable graph revision the assessment was taken at, so a caller
+   * can place this probe in the graph's committed history.
+   *
+   * Graph-global, like the clock it reads: it advances on every committed
+   * capture from any writer, so an advance between two probes means
+   * "something committed in between", never "the write this caller just
+   * made landed". Confirm a specific write by observing the write itself.
+   *
+   * Absent unless the Store is revision-tracked (`revisionTracking:
+   * true` or `history: true`) — the same condition under which
+   * `store.revisionNow()` returns a value. This is the one honest shape:
+   * a store with no durable revision clock has no revision to stamp, and
+   * substituting a wall-clock timestamp or the schema version would be a
+   * materially weaker guarantee wearing the name of a stronger one. The
+   * schema version in particular does not advance on data writes, so it
+   * could not order a probe against a caller's write at all.
+   */
+  graphRevision?: string;
+  entries: readonly ContributionProbeEntry[];
+}>;
+
+// ============================================================
+// Destructive contribution rebuild (#337)
+// ============================================================
+
+/**
+ * Which search projection {@link GraphBackend.rebuildContribution}
+ * targets. Scoped explicitly at the call site rather than inferred from
+ * a diagnostic: the operation destroys storage, so which storage is the
+ * caller's decision to state, not TypeGraph's to guess.
+ */
+export type ContributionRebuildScope = ContributionProbeContribution;
+
+/**
+ * What a rebuild's `repopulate` callback reconstructed. Reported back so
+ * the rebuild result can distinguish "recreated empty storage" from
+ * "recreated and refilled", which is the difference between a finished
+ * repair and half of one.
+ */
+export type ContributionRepopulationStats = Readonly<{
+  /** Nodes scanned. */
+  processed: number;
+  /** Content rows written. */
+  repopulated: number;
+  /** Nodes whose stored `props` could not be read as an object. */
+  skipped: number;
+}>;
+
+/** Outcome of one destructive contribution rebuild. */
+export type ContributionRebuildResult = Readonly<{
+  /** Physical tables dropped and recreated, in the order rebuilt. */
+  rebuilt: readonly string[];
+  /** Nodes scanned while reconstructing content from stored rows. */
+  processed: number;
+  /** Content rows written into the recreated storage. */
+  repopulated: number;
+  /**
+   * Nodes whose stored `props` could not be read as an object, so no
+   * content row could be reconstructed for them. Non-zero means the
+   * rebuilt index is missing those nodes; the IDs come back from
+   * `store.search.rebuildFulltext()`, which reports them individually.
+   */
+  skipped: number;
+}>;
+
+// ============================================================
 // Kind Removals (data-cleanup status)
 // ============================================================
 
@@ -2017,6 +2195,65 @@ export type GraphBackend = Readonly<{
     graphId: string,
     vectorSlots: readonly VectorSlot[],
   ) => Promise<ContributionRepairResult>;
+
+  /**
+   * Read-only readiness probe: the same marker-versus-catalog audit
+   * `verifyContributions` performs, projected onto one entry per search
+   * projection. Shares that method's detection logic exactly — a second
+   * implementation would be free to disagree with the one the hot-path
+   * gate actually consults, and a health check that disagrees with the
+   * gate is worse than none.
+   *
+   * Writes nothing: no DDL, no marker writes, no effect on the
+   * per-instance caches the hot path relies on. Safe on a read path, on
+   * a replica, and under a least-privilege role.
+   *
+   * Present only on backends that can probe their catalog; a backend
+   * that provisions contributions without this method declares the gap
+   * as `capabilities.contributions.probe === false`.
+   */
+  probeContributions?: (
+    this: void,
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<readonly ContributionProbeEntry[]>;
+
+  /**
+   * Destructively rebuild one search projection's storage: drop it,
+   * recreate it from the current `createDdl`, reconstruct its content,
+   * and stamp the durable marker at the current signature.
+   *
+   * This is the repair `repairContributions` deliberately refuses to
+   * perform, and it must never be reachable from it. A `stale`
+   * contribution's table exists at the *old* physical shape, so the
+   * idempotent `CREATE ... IF NOT EXISTS` in the ordinary ensure path
+   * no-ops; re-stamping the marker there would leave it blessing a table
+   * whose shape is wrong, which is exactly what the drift guard exists
+   * to prevent. Only a drop makes the recreate meaningful, and dropping
+   * is a decision the caller states rather than one a flag named `force`
+   * implies.
+   *
+   * Runs the whole sequence inside one transaction under the same
+   * per-graph fence as a schema commit, so an interrupted rebuild leaves
+   * the contribution exactly as it was rather than attested-but-empty.
+   *
+   * `repopulate` receives that transaction and reconstructs content from
+   * rows TypeGraph already stores. The inversion exists because deciding
+   * *what* content a node contributes needs the schema registry, which
+   * is a Store-layer concern the backend must not reach into.
+   *
+   * @param scope which projection to rebuild. Implementations must
+   *   refuse `"vector"`: embeddings live only in the storage this would
+   *   drop, so there is nothing to reconstruct them from.
+   */
+  rebuildContribution?: (
+    this: void,
+    graphId: string,
+    scope: ContributionRebuildScope,
+    repopulate: (
+      target: TransactionBackend,
+    ) => Promise<ContributionRepopulationStats>,
+  ) => Promise<ContributionRebuildResult>;
 
   /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`

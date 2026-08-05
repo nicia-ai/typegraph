@@ -85,6 +85,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "insertNodesBatchReturning",
   "insertUnique",
   "insertUniqueBatch",
+  "probeContributions",
   "recordContributionMaterialization",
   "recordIndexMaterialization",
   "recordKindRemoval",
@@ -114,6 +115,7 @@ type UnsafeHistoryStoreBackendMember =
   | "executeRaw"
   | "executeStatement"
   | "ensureIdentityTables"
+  | "rebuildContribution"
   | "repairContributions"
   | "schemaWriteTransaction"
   | "transaction"
