@@ -129,6 +129,7 @@ import type {
   StagingSet,
 } from "./staging";
 import { stageBranches } from "./staging";
+import type { ModifiedNode } from "./state-diff";
 import { withTxConflictRetry } from "./tx-retry";
 import type { ReconcileClusterInput } from "./type-reconcile";
 import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
@@ -1321,6 +1322,108 @@ function finalEdgeEndpoint<G extends GraphDef>(
 }
 
 /**
+ * One node row a plan writes: the identity it lands on, the canonical cluster
+ * entity it came from (absent for a modification-only write), and the surviving
+ * inherited modification folded into it (absent when nothing modified the row).
+ * At least one of `entity` / `modification` is always present — a write with
+ * neither has no source props to write.
+ */
+type PlannedNodeWrite = Readonly<{
+  identity: MergeKey;
+  kind: string;
+  id: AnyNodeId;
+  entity?: CanonicalEntity;
+  modification?: ModifiedNode;
+}>;
+
+/**
+ * THE node-write enumeration: every node row a resolved plan writes, in commit
+ * order — surviving inherited modifications first, then canonical cluster
+ * survivors. Both the commit ({@link applyMergePlan}) and the incremental write
+ * guards consume this one function, so which rows a plan touches, which are
+ * skipped (finally deleted, or folded into a canonical write), and which kind
+ * the retype cascade lands them on are decided in exactly one place. The
+ * consumers differ only in how they derive the final props from each write; see
+ * {@link nodeWriteProps}.
+ *
+ * A canonical survivor can ALSO be an inherited modification. Its two writes are
+ * folded into one — the standalone modification write is skipped and the entity
+ * carries the modification — because the canonical upsert is built from the
+ * cluster union, which holds the OLDER base props and would otherwise clobber
+ * the fork's edit.
+ */
+function plannedNodeWrites<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly PlannedNodeWrite[] {
+  const canonicalIdentities = new Set<MergeKey>();
+  for (const entity of plan.canonicalEntities) {
+    canonicalIdentities.add(mergeKey(entity.kind, entity.canonicalId));
+  }
+  const modificationsByIdentity = new Map<MergeKey, ModifiedNode>();
+  for (const modification of plan.survivingModifications) {
+    modificationsByIdentity.set(
+      mergeKeyOf(modification.node),
+      modification.node,
+    );
+  }
+
+  const writes: PlannedNodeWrite[] = [];
+  for (const modification of plan.survivingModifications) {
+    const identity = mergeKeyOf(modification.node);
+    if (plan.nodeDeletions.has(identity) || canonicalIdentities.has(identity)) {
+      continue;
+    }
+    writes.push({
+      identity,
+      kind: modification.node.kind,
+      id: modification.node.id,
+      modification: modification.node,
+    });
+  }
+  for (const entity of plan.canonicalEntities) {
+    // The retype cascade is keyed on the PRE-retype identity, as is the
+    // modification fold: both index the entity as the plan staged it.
+    const sourceIdentity = mergeKey(entity.kind, entity.canonicalId);
+    if (plan.nodeDeletions.has(sourceIdentity)) {
+      continue;
+    }
+    const kind = plan.retypeMap.get(sourceIdentity) ?? entity.kind;
+    const modification = modificationsByIdentity.get(sourceIdentity);
+    writes.push({
+      identity: mergeKey(kind, entity.canonicalId),
+      kind,
+      id: entity.canonicalId,
+      entity,
+      ...(modification === undefined ? {} : { modification }),
+    });
+  }
+  return writes;
+}
+
+/**
+ * Folds a planned write's sources into the prop bag to write, with the caller
+ * supplying the only piece that differs between them: how a folded modification
+ * contributes. The commit honors the fork's property DELETIONS (see
+ * {@link commitModificationProps}); the incremental guard compares against the
+ * fork's raw intended state. Modification props land ON TOP of the cluster
+ * union so an explicit fork edit is never lost to the (older) base props the
+ * union carried.
+ */
+function nodeWriteProps(
+  write: PlannedNodeWrite,
+  modificationProps: (
+    modification: ModifiedNode,
+  ) => Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  return {
+    ...write.entity?.props,
+    ...(write.modification === undefined ?
+      undefined
+    : modificationProps(write.modification)),
+  };
+}
+
+/**
  * Applies a resolved {@link MergePlan} through a transaction's collection API.
  * Shared by `commitPlan()` and the guarded `mergeIncremental()` commit path so
  * both modes execute the same resolved semantics.
@@ -1349,87 +1452,34 @@ async function applyMergePlan<G extends GraphDef>(
     await collection.delete(idOf(identity));
   }
 
-  // Identities written as canonical cluster entities, and the fork props of every
-  // surviving inherited modification keyed by identity. On the new-vs-base path a
-  // committed node can be BOTH a base-member cluster survivor AND an inherited
-  // modification; without coordinating the two writes the canonical upsert (built
-  // from the cluster union, which carries the OLDER base props) would clobber the
-  // modification's fork edit. We therefore fold the fork props into the canonical
-  // write and skip the standalone modification write for that identity.
-  const canonicalIdentities = new Set<MergeKey>();
-  for (const entity of plan.canonicalEntities) {
-    canonicalIdentities.add(mergeKey(entity.kind, entity.canonicalId));
-  }
-  const survivingModProps = new Map<
-    MergeKey,
-    Readonly<{
-      baseProps: Readonly<Record<string, unknown>>;
-      forkProps: Readonly<Record<string, unknown>>;
-    }>
-  >();
-  for (const modification of plan.survivingModifications) {
-    survivingModProps.set(mergeKeyOf(modification.node), {
-      baseProps: modification.node.baseProps,
-      forkProps: modification.node.forkProps,
-    });
-  }
-
-  // Surviving inherited modifications, skipping any node finally deleted OR folded
-  // into a canonical cluster write below. Property deletions the fork made are
-  // honored via {@link commitModificationProps}.
-  for (const modification of plan.survivingModifications) {
-    const identity = mergeKeyOf(modification.node);
-    if (plan.nodeDeletions.has(identity) || canonicalIdentities.has(identity)) {
-      continue;
-    }
-    const collection = nodeCollection(nodesApi, modification.node.kind);
-    await collection.upsertByIdFromRecord(
-      modification.node.id,
-      commitModificationProps(
-        modification.node.baseProps,
-        modification.node.forkProps,
-      ),
-    );
-    committedNodeIds.add(identity);
-  }
-
-  // New canonical cluster nodes (survivors), with retype cascade. When the survivor
-  // is also an inherited modification, merge the fork edit's props ON TOP of the
-  // cluster union so the explicit fork edit is not lost to the (older) base props
-  // the union carried.
-  for (const entity of plan.canonicalEntities) {
-    const identity = mergeKey(entity.kind, entity.canonicalId);
-    if (plan.nodeDeletions.has(identity)) {
-      continue;
-    }
-    const kind = plan.retypeMap.get(identity) ?? entity.kind;
-    const modification = survivingModProps.get(identity);
-    // Fold the fork edit ON TOP of the cluster union, honoring the fork's property
-    // deletions (which surface as `undefined` and so override the union's value).
-    const props =
-      modification === undefined ?
-        entity.props
-      : {
-          ...entity.props,
-          ...commitModificationProps(
-            modification.baseProps,
-            modification.forkProps,
-          ),
-        };
-    const collection = nodeCollection(nodesApi, kind);
+  // Surviving inherited modifications, then canonical cluster survivors (with
+  // retype cascade), as enumerated by {@link plannedNodeWrites} — the same
+  // enumeration the incremental write guards check. Property deletions the fork
+  // made are honored via {@link commitModificationProps}.
+  for (const write of plannedNodeWrites(plan)) {
+    const collection = nodeCollection(nodesApi, write.kind);
     // A staged survivor's valid-time window travels with the write: for a
     // fresh insert it IS the branch's window, and for a resurrection it stops
     // the upsert from resetting a branch-authored (possibly already ENDED)
     // window to merge time — an ended member must not come back current and,
     // under `"fold"`, silently join a live fold class. Base-member survivors
-    // carry no window; their committed row's window stays untouched.
-    await collection.upsertByIdFromRecord(entity.canonicalId, props, {
-      ...(entity.validFrom === undefined ?
-        {}
-      : { validFrom: entity.validFrom }),
-      ...(entity.validTo === undefined ? {} : { validTo: entity.validTo }),
-    });
-    committedNodeIds.add(mergeKey(kind, entity.canonicalId));
+    // and modification-only writes carry no window; their committed row's
+    // window stays untouched.
+    await collection.upsertByIdFromRecord(
+      write.id,
+      nodeWriteProps(write, (modification) =>
+        commitModificationProps(modification.baseProps, modification.forkProps),
+      ),
+      {
+        ...(write.entity?.validFrom === undefined ?
+          {}
+        : { validFrom: write.entity.validFrom }),
+        ...(write.entity?.validTo === undefined ?
+          {}
+        : { validTo: write.entity.validTo }),
+      },
+    );
+    committedNodeIds.add(write.identity);
   }
 
   // Soft-delete every finally-deleted inherited edge. These ids are disjoint from
@@ -2447,64 +2497,6 @@ function assertValidRevalidatingWrite(
   }
 }
 
-type PlannedNodeWrite = Readonly<{
-  identity: MergeKey;
-  kind: string;
-  id: AnyNodeId;
-  props: Readonly<Record<string, unknown>>;
-}>;
-
-function plannedNodeWrites<G extends GraphDef>(
-  plan: MergePlan<G>,
-): readonly PlannedNodeWrite[] {
-  const canonicalIdentities = new Set<MergeKey>();
-  for (const entity of plan.canonicalEntities) {
-    canonicalIdentities.add(mergeKey(entity.kind, entity.canonicalId));
-  }
-  const survivingModProps = new Map<
-    MergeKey,
-    Readonly<Record<string, unknown>>
-  >();
-  for (const modification of plan.survivingModifications) {
-    survivingModProps.set(
-      mergeKeyOf(modification.node),
-      modification.node.forkProps,
-    );
-  }
-
-  const writes: PlannedNodeWrite[] = [];
-  for (const modification of plan.survivingModifications) {
-    const identity = mergeKeyOf(modification.node);
-    if (plan.nodeDeletions.has(identity) || canonicalIdentities.has(identity)) {
-      continue;
-    }
-    writes.push({
-      identity,
-      kind: modification.node.kind,
-      id: modification.node.id,
-      props: modification.node.forkProps,
-    });
-  }
-  for (const entity of plan.canonicalEntities) {
-    const sourceIdentity = mergeKey(entity.kind, entity.canonicalId);
-    if (plan.nodeDeletions.has(sourceIdentity)) {
-      continue;
-    }
-    const kind = plan.retypeMap.get(sourceIdentity) ?? entity.kind;
-    const forkProps = survivingModProps.get(sourceIdentity);
-    writes.push({
-      identity: mergeKey(kind, entity.canonicalId),
-      kind,
-      id: entity.canonicalId,
-      props:
-        forkProps === undefined ?
-          entity.props
-        : { ...entity.props, ...forkProps },
-    });
-  }
-  return writes;
-}
-
 function edgeWriteSignature<G extends GraphDef>(
   edge: MergedEdge,
   plan: MergePlan<G>,
@@ -2559,7 +2551,7 @@ async function validateIncrementalNodeWrites<G extends GraphDef>(
     const analysis = analyzeRevalidatingWrite(
       nodeSchemaFor(target, write.kind),
       nodeProps(current),
-      write.props,
+      nodeWriteProps(write, (modification) => modification.forkProps),
     );
     assertValidRevalidatingWrite(
       analysis,
