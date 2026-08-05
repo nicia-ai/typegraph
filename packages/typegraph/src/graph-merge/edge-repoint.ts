@@ -55,6 +55,7 @@ import type {
   PropertyConflict,
   PropertyConflictPolicy,
 } from "./types";
+import { resolveEndClaims } from "./valid-window";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
@@ -94,10 +95,15 @@ export type StagedEdge = Readonly<{
   props: Readonly<Record<string, JsonValue>>;
   branchId: BranchId;
   /**
-   * The branch-authored valid-time window, carried only by NEW edges (an
-   * inherited edge already holds its committed window in the target and must
-   * not have it rewritten). Windows take no part in the dedupe key or the
-   * conflict union — they simply ride along with whichever edge survives.
+   * The valid-time window the commit must write. A NEW edge carries the branch's
+   * authored window; an INHERITED edge carries `validTo` only, and only when the
+   * merge reconciled an end-of-validity for it (an unreconciled inherited window
+   * is absent, so the committed row's own window stays untouched).
+   *
+   * Windows take no part in the dedupe key or the conflict union. `validFrom`
+   * rides along with whichever edge survives a fold; `validTo` is instead
+   * resolved across the folded set (see {@link repointEdges}), because an end is
+   * a monotone claim that must not be lost to an arbitrary min-id survivor pick.
    */
   validFrom?: string;
   validTo?: string;
@@ -426,16 +432,42 @@ export function repointEdges<G extends GraphDef = GraphDef>(
     const fromKind = kindOf(survivor.fromKey);
     const toId = idOf(survivor.toKey);
     const toKind = kindOf(survivor.toKey);
-    // The survivor's window rides along unchanged — it is not unioned across
-    // the group, because the group's members are the SAME edge as seen by
-    // different branches, and the survivor is the one whose row we commit.
+    // The survivor's lower bound rides along unchanged — a `validFrom` is the
+    // branch's authored start for the row we commit, and the group's members are
+    // the same edge as seen by different branches.
+    //
+    // The END is folded across the group. When repoint/dedupe collapses several
+    // DISTINCT edges into one survivor, an end claimed by a non-survivor would
+    // otherwise be discarded by the arbitrary min-id pick — a silent window
+    // loss — so the earliest claimed end wins, the same least-claim rule the
+    // inherited-window reconciler uses.
+    //
+    // A survivor from the PREFERRED branch keeps its own end verbatim when it
+    // HAS one: that member is the live incremental target's row, and a user
+    // branch never re-windows what the target already holds. When it has none
+    // there is no target window to protect, so the fold still resolves across
+    // the group — otherwise a preferred survivor would silently swallow the
+    // only end any branch claimed.
+    const preferredSurvivorEnd =
+      survivor.staged.branchId === preferredBranchId ?
+        survivor.staged.validTo
+      : undefined;
+    const foldedEnd =
+      preferredSurvivorEnd ??
+      resolveEndClaims(
+        groupEdges
+          .filter((edge) => edge.staged.validTo !== undefined)
+          .map((edge) => ({
+            branchId: edge.staged.branchId,
+            validTo: requireDefined(edge.staged.validTo),
+          })),
+        preferredBranchId,
+      );
     const window = {
       ...(survivor.staged.validFrom === undefined ?
         {}
       : { validFrom: survivor.staged.validFrom }),
-      ...(survivor.staged.validTo === undefined ?
-        {}
-      : { validTo: survivor.staged.validTo }),
+      ...(foldedEnd === undefined ? {} : { validTo: foldedEnd }),
     };
 
     if (dedupeKeys.length === 1) {

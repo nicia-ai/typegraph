@@ -1,3 +1,5 @@
+import { canonicalizeDatabaseTimestamp } from "../../utils/date";
+
 /**
  * Coalesce dirty-check shared by `upsertById` / `bulkUpsertById`.
  *
@@ -32,6 +34,30 @@ export type UpsertDirtyCheckFunction = (
 ) => UpsertDirtyCheck;
 
 /**
+ * Whether one requested window endpoint differs from the stored one, compared as
+ * instants rather than as driver text. An omitted request never changes anything.
+ *
+ * An UNREPRESENTABLE request always counts as a change, so it reaches the write
+ * path that rejects it. Canonicalization maps both an unparseable string and an
+ * absent value to `undefined`, so comparing the canonical forms would read a
+ * garbage bound against an open window as "no change" and coalesce the write —
+ * swallowing a `ValidationError` the caller must see.
+ */
+function windowFieldChanges(
+  requested: string | undefined,
+  stored: string | undefined,
+): boolean {
+  if (requested === undefined) {
+    return false;
+  }
+  const canonicalRequested = canonicalizeDatabaseTimestamp(requested);
+  if (canonicalRequested === undefined) {
+    return true;
+  }
+  return canonicalRequested !== canonicalizeDatabaseTimestamp(stored);
+}
+
+/**
  * Whether a single upsert may be coalesced: coalescing is enabled
  * (`runDirtyCheck` present), the row is live, no explicit temporal override was
  * requested, and the props are unchanged. The dirty check runs last (only when
@@ -54,14 +80,20 @@ export function shouldCoalesceUpsert(
   runDirtyCheck: (() => UpsertDirtyCheck) | undefined,
 ): boolean {
   // An explicit temporal override blocks coalescing ONLY when it would
-  // change the stored window: merge commits pass the staged survivor's
-  // window on every canonical write, so a target row staged back at itself
-  // (identical props AND identical window) must still coalesce instead of
-  // rewriting version, history, and revision state.
+  // change the stored window: merge commits pass the staged survivor's window
+  // on every canonical write, and a graph merge passes an inherited row's
+  // reconciled end-of-validity, so a row written back with the window it
+  // already holds (identical props AND identical window) must still coalesce
+  // instead of rewriting version, history, and revision state.
+  //
+  // Both sides are canonicalized before comparison. The stored value reaches
+  // here as the driver rendered it, and the two dialects do not store a
+  // timestamp the same way (SQLite keeps the written text; a Postgres driver
+  // renders `timestamptz` its own way), so comparing as INSTANTS is what keeps
+  // one backend from writing where the other coalesces.
   const windowChanges =
-    (options?.validFrom !== undefined &&
-      options.validFrom !== existing.valid_from) ||
-    (options?.validTo !== undefined && options.validTo !== existing.valid_to);
+    windowFieldChanges(options?.validFrom, existing.valid_from) ||
+    windowFieldChanges(options?.validTo, existing.valid_to);
   if (
     runDirtyCheck === undefined ||
     existing.deleted_at !== undefined ||

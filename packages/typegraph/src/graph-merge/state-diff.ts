@@ -196,6 +196,73 @@ export type DeletedEdge = Readonly<{
 }>;
 
 /**
+ * A row's valid-time window, normalized to canonical UTC instants.
+ *
+ * The raw `valid_from` / `valid_to` columns are TEXT whose formatting differs
+ * per driver (postgres-js hands back `timestamptz` as its own raw rendering),
+ * so comparing or ordering the stored strings would resolve differently on
+ * SQLite and PostgreSQL. Every window the diff reports is canonicalized here
+ * once, and every downstream comparison operates on this shape.
+ */
+export type ValidWindow = Readonly<{
+  validFrom: string | undefined;
+  validTo: string | undefined;
+}>;
+
+/**
+ * An inherited node — live in BOTH base and fork — whose valid-time window the
+ * fork changed. Independent of {@link ModifiedNode}: modification detection
+ * compares props only, so a row can appear in one bucket, the other, or both.
+ *
+ * Keeping the two buckets separate is what makes an end-of-validity behave as a
+ * sibling of deletion rather than as a modification: a window-only change never
+ * enters delete/modify resolution, so a branch that ends a row another branch
+ * deleted raises no conflict — the deletion simply absorbs the weaker claim.
+ */
+export type WindowedNode = Readonly<{
+  id: NodeId<NodeType>;
+  kind: string;
+  base: ValidWindow;
+  fork: ValidWindow;
+}>;
+
+/**
+ * The edge analogue of {@link WindowedNode}. Carries the edge's endpoints and
+ * parsed props too, because an inherited edge whose ONLY change is its window is
+ * not otherwise staged — the repoint phase needs the full record to carry the
+ * ending through to the commit.
+ */
+export type WindowedEdge = Readonly<{
+  id: EdgeId;
+  kind: string;
+  fromId: NodeId<NodeType>;
+  toId: NodeId<NodeType>;
+  fromKind: string;
+  toKind: string;
+  props: Readonly<Record<string, unknown>>;
+  base: ValidWindow;
+  fork: ValidWindow;
+}>;
+
+/** Reads a row's window as canonical instants. */
+function validWindowOf(
+  row: Readonly<{
+    valid_from: string | undefined;
+    valid_to: string | undefined;
+  }>,
+): ValidWindow {
+  return {
+    validFrom: canonicalizeDatabaseTimestamp(row.valid_from),
+    validTo: canonicalizeDatabaseTimestamp(row.valid_to),
+  };
+}
+
+/** True when two canonicalized windows differ in either endpoint. */
+function windowsDiffer(left: ValidWindow, right: ValidWindow): boolean {
+  return left.validFrom !== right.validFrom || left.validTo !== right.validTo;
+}
+
+/**
  * The complete delta of a fork against the original base store.
  */
 export type StateDiff = Readonly<{
@@ -203,11 +270,15 @@ export type StateDiff = Readonly<{
     new: readonly ChangedNode[];
     modified: readonly ModifiedNode[];
     deleted: readonly DeletedNode[];
+    /** Inherited nodes whose valid-time window the fork changed. */
+    windowed: readonly WindowedNode[];
   }>;
   edges: Readonly<{
     new: readonly ChangedEdge[];
     modified: readonly ModifiedEdge[];
     deleted: readonly DeletedEdge[];
+    /** Inherited edges whose valid-time window the fork changed. */
+    windowed: readonly WindowedEdge[];
   }>;
   /**
    * Identity-ledger delta: assertions current in the fork but not the base
@@ -346,6 +417,7 @@ function diffNodeKind(
   new: ChangedNode[];
   modified: ModifiedNode[];
   deleted: DeletedNode[];
+  windowed: WindowedNode[];
 }> {
   const baseIndex = indexById(baseRows);
   const forkIndex = indexById(forkRows);
@@ -353,6 +425,7 @@ function diffNodeKind(
   const created: ChangedNode[] = [];
   const modified: ModifiedNode[] = [];
   const deleted: DeletedNode[] = [];
+  const windowed: WindowedNode[] = [];
 
   for (const forkRow of forkRows) {
     if (!isLive(forkRow)) {
@@ -377,6 +450,16 @@ function diffNodeKind(
         baseProps,
         forkProps,
         row: forkRow,
+      });
+    }
+    const baseWindow = validWindowOf(baseRow);
+    const forkWindow = validWindowOf(forkRow);
+    if (windowsDiffer(baseWindow, forkWindow)) {
+      windowed.push({
+        id: forkRow.id as NodeId<NodeType>,
+        kind,
+        base: baseWindow,
+        fork: forkWindow,
       });
     }
   }
@@ -398,7 +481,7 @@ function diffNodeKind(
     }
   }
 
-  return { new: created, modified, deleted };
+  return { new: created, modified, deleted, windowed };
 }
 
 /**
@@ -413,6 +496,7 @@ function diffEdgeKind(
   new: ChangedEdge[];
   modified: ModifiedEdge[];
   deleted: DeletedEdge[];
+  windowed: WindowedEdge[];
 }> {
   const baseIndex = indexById(baseRows);
   const forkIndex = indexById(forkRows);
@@ -420,6 +504,7 @@ function diffEdgeKind(
   const created: ChangedEdge[] = [];
   const modified: ModifiedEdge[] = [];
   const deleted: DeletedEdge[] = [];
+  const windowed: WindowedEdge[] = [];
 
   for (const forkRow of forkRows) {
     if (!isLive(forkRow)) {
@@ -454,6 +539,21 @@ function diffEdgeKind(
         row: forkRow,
       });
     }
+    const baseWindow = validWindowOf(baseRow);
+    const forkWindow = validWindowOf(forkRow);
+    if (windowsDiffer(baseWindow, forkWindow)) {
+      windowed.push({
+        id: forkRow.id as EdgeId,
+        kind,
+        fromId: forkRow.from_id as NodeId<NodeType>,
+        toId: forkRow.to_id as NodeId<NodeType>,
+        fromKind: forkRow.from_kind,
+        toKind: forkRow.to_kind,
+        props: forkProps,
+        base: baseWindow,
+        fork: forkWindow,
+      });
+    }
   }
 
   for (const baseRow of baseRows) {
@@ -466,7 +566,7 @@ function diffEdgeKind(
     }
   }
 
-  return { new: created, modified, deleted };
+  return { new: created, modified, deleted, windowed };
 }
 
 /**
@@ -596,6 +696,7 @@ export async function diffAgainstBase<G extends GraphDef>(
   const newNodes: ChangedNode[] = [];
   const modifiedNodes: ModifiedNode[] = [];
   const deletedNodes: DeletedNode[] = [];
+  const windowedNodes: WindowedNode[] = [];
   // Version snapshot of the fork store as observed by THIS diff's enumeration
   // (the same read the plan resolves against), keyed by merge identity.
   const forkNodeVersions = new Map<MergeKey, number>();
@@ -626,11 +727,15 @@ export async function diffAgainstBase<G extends GraphDef>(
     for (const entry of delta.deleted) {
       deletedNodes.push(entry);
     }
+    for (const entry of delta.windowed) {
+      windowedNodes.push(entry);
+    }
   }
 
   const newEdges: ChangedEdge[] = [];
   const modifiedEdges: ModifiedEdge[] = [];
   const deletedEdges: DeletedEdge[] = [];
+  const windowedEdges: WindowedEdge[] = [];
   // Content fingerprint of the fork store's edges as observed by THIS diff's
   // enumeration — the edge-half baseline for the commit-time lost-update guard
   // (edges have no version, so we key on mergeable content instead).
@@ -672,6 +777,9 @@ export async function diffAgainstBase<G extends GraphDef>(
     for (const entry of delta.deleted) {
       deletedEdges.push(entry);
     }
+    for (const entry of delta.windowed) {
+      windowedEdges.push(entry);
+    }
   }
 
   // Ids present on BOTH sides are compared by COMPLETE truth, not presence: a
@@ -701,11 +809,13 @@ export async function diffAgainstBase<G extends GraphDef>(
       new: newNodes.sort((left, right) => byId(left, right)),
       modified: modifiedNodes.sort((left, right) => byId(left, right)),
       deleted: deletedNodes.sort((left, right) => byId(left, right)),
+      windowed: windowedNodes.sort((left, right) => byId(left, right)),
     },
     edges: {
       new: newEdges.sort((left, right) => byId(left, right)),
       modified: modifiedEdges.sort((left, right) => byId(left, right)),
       deleted: deletedEdges.sort((left, right) => byId(left, right)),
+      windowed: windowedEdges.sort((left, right) => byId(left, right)),
     },
     identity: {
       // Ids present on BOTH sides are compared by COMPLETE truth, not

@@ -406,10 +406,12 @@ type MergeReport = {
   conflicts: PropertyConflict[]; // per-property disagreements + how they resolved
   deleteModifyConflicts: DeleteModifyConflict[]; // node/edge delete-vs-modify cases
   typeReconciliations: TypeReconciliation[]; // ontology kind collapses
-  // Node drops (deleted endpoints, incompatible members), edge drops, and
-  // identity drops (identity:duplicate-assertion, identity:endpoints-collapsed,
-  // identity:retraction-target-mismatch, identity:deletion-overruled)
+  // Node drops (deleted endpoints, incompatible members), edge drops, identity
+  // drops (identity:duplicate-assertion, identity:endpoints-collapsed,
+  // identity:retraction-target-mismatch, identity:deletion-overruled), and
+  // window deltas the commit cannot apply (window-not-applicable)
   dropped: DroppedItem[];
+  validityEnds: ValidityEndResolution[]; // inherited rows the merge ended, and who claimed each end
   baseAmbiguities: BaseAmbiguity[]; // new-vs-base matches that spanned >= 2 committed entities
   provenance: ProvenanceIndex; // byBranch(id) -> { nodeIds, edgeIds }
   warnings: string[]; // non-fatal advisories (ceiling skips, provenance-persist failures)
@@ -525,12 +527,72 @@ operations mutate rows through their own preflights, and projecting the side
 effects into a merge would detach them from the schema change that caused
 them. Apply schema changes to the target first (or re-fork), then merge.
 
-**Valid-time windows travel with the merge.** A branch-authored node or edge
+## Valid-time windows
+
+**A new row's window travels with the merge.** A branch-authored node or edge
 window — including a deliberately ended one on a resurrection — is written
 as-is by the commit rather than reset to merge time. When the incremental
 target itself also created the surviving row, the target's committed window
-wins. Windows on *modified inherited* rows are not merged (a documented
-boundary): modification detection compares properties only.
+wins.
+
+**An inherited row's end-of-validity is merged.** `update(id, {}, { validTo })`
+on a branch is an ordinary write, and the merge carries that ending to the
+target even when the row's properties are untouched:
+
+```typescript
+await fork.store.nodes.Patient.update(asNodeId("pat-1"), {}, { validTo: "2030-06-01T00:00:00.000Z" });
+const report = unwrap(await merge(base, [fork]));
+// base now holds pat-1 with valid_to = 2030-06-01, and:
+report.validityEnds;
+// [{ entity: "node", kind: "Patient", id: "pat-1",
+//    validTo: "2030-06-01T00:00:00.000Z", claimedBy: ["worker-1"] }]
+```
+
+An ending is treated as a **sibling of deletion**, not as a property, because it
+makes the same kind of statement: *this stopped being true*. That single choice
+explains the whole contract:
+
+| Situation | Outcome |
+| --------- | ------- |
+| One branch ends the row | That end is written — including a *later* end, which extends the window. |
+| Several branches end it differently | No conflict. The **earliest** end wins, and `report.validityEnds` names every claiming branch. |
+| The incremental target already ended it | The target's end stands. A branch never re-windows a row the target itself windowed, and the row is left out of the merge's writes entirely. |
+| One branch ends it, another deletes it | Deleted, with **no** `DeleteModifyConflict` — the stronger statement absorbs the weaker one. |
+| A branch re-states the end the target holds | No write at all — nothing is staged, so there is no version bump or history row even with `coalesceUnchangedUpserts` off. |
+| No branch touched the window | Untouched. A properties-only edit never passes a window, so the committed one stands. |
+
+The earliest-end rule is fixed, not a policy knob: it is commutative and
+associative, so the merge stays order-independent, and `onPropertyConflict`
+never sees a property your schema does not have.
+
+Because an ending is not a modification, `onDeleteModifyConflict` never sees
+one: a row whose *only* change is its window loses to a concurrent deletion even
+under `"prefer-modify"`, since there is no modification to prefer. A row with a
+properties edit *and* an ending keeps the usual delete/modify behavior on the
+properties, and its ending rides along only if that modification survives.
+
+**What is still NOT merged, and why.** On a row that is live in both the base
+and the branch, `validTo` is the only window field a branch can author *and* the
+commit can apply. A row's lower bound is immutable outside resurrection —
+`validFrom` is written only when a soft-deleted row is brought back — and
+`validTo` can be set or moved but never cleared back to open. So two window
+deltas are observable in a fork yet unapplicable:
+
+| Observed delta | Reachable how | Merged? |
+| -------------- | ------------- | ------- |
+| `validTo` set or moved | `update(id, {}, { validTo })` | **Yes** |
+| `validFrom` changed | soft-delete + resurrect inside the fork | No |
+| `validTo` cleared back to open | soft-delete + resurrect inside the fork | No |
+
+Rather than silently ignore those, the merge reports each one in
+`report.dropped` with reason `"window-not-applicable"`. Reconciling a value the
+commit would then drop is worse than not merging it: the report would claim a
+change that never happened.
+
+Full interval reconciliation (intersecting `[validFrom, validTo]` across
+branches) is deliberately out of scope — it needs a write path that moves a live
+row's lower bound, which contradicts the temporal model, and it would silently
+discard a branch's extension.
 
 ## Determinism
 

@@ -226,6 +226,28 @@ export function registerCoalesceUpsertIntegrationTests(
       expect(overridden.meta.version).toBe(created.meta.version + 1);
     });
 
+    it("rejects an unrepresentable validTo instead of coalescing it away", async () => {
+      const store = await createCoalesceStore(context);
+
+      await store.nodes.Person.upsertById("p4-invalid", {
+        name: "Dana",
+        age: 25,
+      });
+
+      // The coalesce check compares the requested bound with the stored one AS
+      // INSTANTS, and an unparseable string has no instant — neither does the
+      // open window it is written against. Treating those two absences as equal
+      // would report "no window change", coalesce the write, and swallow the
+      // ValidationError the write path owes the caller.
+      await expect(
+        store.nodes.Person.upsertById(
+          "p4-invalid",
+          { name: "Dana", age: 25 },
+          { validTo: "not-a-date" },
+        ),
+      ).rejects.toThrow(/validTo/);
+    });
+
     it("with the flag OFF, an identical re-upsert still writes (default behavior)", async () => {
       const store = context.getStore();
 

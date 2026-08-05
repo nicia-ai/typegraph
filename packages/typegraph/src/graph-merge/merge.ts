@@ -177,7 +177,9 @@ import type {
   ProvenanceRecord,
   SimilarityStrategy,
   TypeReconciliation,
+  ValidityEndResolution,
 } from "./types";
+import { resolveValidWindows } from "./valid-window";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
@@ -597,14 +599,20 @@ function indexNewNodesById(
 function buildStagedEdges(
   staging: StagingSet,
   modifiedEdges: readonly StagedModifiedEdge[],
+  edgeValidityEnds: ReadonlyMap<MergeKey, string>,
+  edgeDeletions: ReadonlyMap<MergeKey, string>,
 ): readonly StagedEdge[] {
   const staged: StagedEdge[] = [];
+  const stagedIdentities = new Set<MergeKey>();
   for (const items of staging.newEdgesByKind.values()) {
     for (const item of items) {
       staged.push(toStagedEdge(item.branchId, item));
     }
   }
   for (const item of modifiedEdges) {
+    const identity = mergeKeyOf(item.edge);
+    stagedIdentities.add(identity);
+    const validTo = edgeValidityEnds.get(identity);
     staged.push({
       id: item.edge.id,
       kind: item.edge.kind,
@@ -614,6 +622,35 @@ function buildStagedEdges(
       toKind: item.edge.toKind,
       props: item.edge.forkProps as Readonly<Record<string, JsonValue>>,
       branchId: item.branchId,
+      ...(validTo === undefined ? {} : { validTo }),
+    });
+  }
+  // An inherited edge whose ONLY change is its end-of-validity is in neither the
+  // new nor the modified bucket, so it must be staged here or the ending would
+  // have nothing to ride on. Its props are the fork's, which equal the base's by
+  // construction — the write carries the window and leaves the row's content
+  // alone. Finally-deleted edges are excluded: deletion absorbs the ending.
+  for (const item of staging.windowedEdges) {
+    const identity = mergeKeyOf(item.edge);
+    const validTo = edgeValidityEnds.get(identity);
+    if (
+      validTo === undefined ||
+      stagedIdentities.has(identity) ||
+      edgeDeletions.has(identity)
+    ) {
+      continue;
+    }
+    stagedIdentities.add(identity);
+    staged.push({
+      id: item.edge.id,
+      kind: item.edge.kind,
+      fromId: item.edge.fromId,
+      toId: item.edge.toId,
+      fromKind: item.edge.fromKind,
+      toKind: item.edge.toKind,
+      props: item.edge.props as Readonly<Record<string, JsonValue>>,
+      branchId: item.branchId,
+      validTo,
     });
   }
   return staged;
@@ -732,6 +769,19 @@ export type MergePlan<G extends GraphDef> = Readonly<{
   // the survivor's kind, so a reconstruction drops pure ontology-retype
   // clusters and mis-keys mixed-kind members.
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>;
+  /**
+   * `(kind, id) -> validTo` for every inherited NODE whose end-of-validity the
+   * merge itself decided — a branch's ending that differs from the base's, on a
+   * row the committed target did not already re-window. Keyed on the PRE-retype
+   * identity, exactly as the modification fold is. An identity absent here has
+   * no reconciled ending, and the commit passes no window for it at all — never
+   * the base value re-asserted, and never the target's own value written back at
+   * itself, which is what lets an unchanged window coalesce.
+   */
+  nodeValidityEnds: ReadonlyMap<MergeKey, string>;
+  /** The edge half of {@link nodeValidityEnds}, consumed by the repoint phase. */
+  edgeValidityEnds: ReadonlyMap<MergeKey, string>;
+  validityEnds: readonly ValidityEndResolution[];
   resolutions: readonly EntityResolution[];
   propertyConflicts: readonly PropertyConflict<G>[];
   deleteModifyConflicts: readonly DeleteModifyConflict[];
@@ -1055,6 +1105,17 @@ function planMerge<G extends GraphDef>(
     propertyConflicts.push(conflict as PropertyConflict<G>);
   }
 
+  // (6-window) reconcile the inherited valid-time windows the branches moved.
+  // Runs AFTER both delete/modify resolutions because a finally-deleted row
+  // absorbs its own ending: deleting and ending are both "no longer true", and
+  // the stronger statement wins without recording a conflict.
+  const validWindows = resolveValidWindows(
+    staging,
+    new Set(nodeDeletions.keys()),
+    new Set(edgeDeletions.keys()),
+    preferredBranchId,
+  );
+
   // (7) opt-in ontology type reconciliation over the public-closure glue. Inputs
   // (incl. base member kinds) were collected per cluster in the canonicalize loop.
   const reconciliation = reconcileTypes(
@@ -1124,6 +1185,8 @@ function planMerge<G extends GraphDef>(
   const stagedEdges = buildStagedEdges(
     staging,
     reconciledEdgeModifications.survivingModifications,
+    validWindows.edgeEnds,
+    edgeDeletions,
   );
   // An edge id can be staged by MORE THAN ONE branch (e.g. an inherited edge
   // modified by two branches), so map each id to the SET of contributing branches.
@@ -1163,6 +1226,7 @@ function planMerge<G extends GraphDef>(
     ...identity.dropped,
     ...overruledRetractionDrops,
     ...identityRemap.dropped,
+    ...validWindows.dropped,
   ].sort((left, right) =>
     compareStrings(`${left.kind}|${left.id}`, `${right.kind}|${right.id}`),
   );
@@ -1181,6 +1245,9 @@ function planMerge<G extends GraphDef>(
     ),
     retypeMap: reconciliation.retypeMap,
     canonicalOf,
+    nodeValidityEnds: validWindows.nodeEnds,
+    edgeValidityEnds: validWindows.edgeEnds,
+    validityEnds: validWindows.resolutions,
     // Order report arrays by the composite (kind, id) identity — never a bare id
     // or a `|`-joined string. A bare id ties two different-kind entities that
     // share an id, and a `|` separator collides on caller-supplied ids/property
@@ -1306,8 +1373,10 @@ function finalEdgeEndpoint<G extends GraphDef>(
  * One node row a plan writes: the identity it lands on, the canonical cluster
  * entity it came from (absent for a modification-only write), and the surviving
  * inherited modification folded into it (absent when nothing modified the row).
- * At least one of `entity` / `modification` is always present — a write with
- * neither has no source props to write.
+ *
+ * A write with NEITHER is a window-only write: an inherited row whose sole
+ * change is its reconciled end-of-validity. It carries no props, and the upsert
+ * patch-merges, so it moves the row's window and nothing else.
  */
 type PlannedNodeWrite = Readonly<{
   identity: MergeKey;
@@ -1315,6 +1384,16 @@ type PlannedNodeWrite = Readonly<{
   id: AnyNodeId;
   entity?: CanonicalEntity;
   modification?: ModifiedNode;
+  /**
+   * The valid-time window the write carries. `validFrom` comes only from a
+   * staged canonical survivor (the commit cannot move a live row's lower bound
+   * — see `valid-window.ts`); `validTo` is the survivor's authored end, or, for
+   * an inherited row, the reconciled end-of-validity. Absent means "do not touch
+   * the committed window", which is what lets an otherwise-unchanged write
+   * coalesce.
+   */
+  validFrom?: string;
+  validTo?: string;
 }>;
 
 /**
@@ -1349,16 +1428,20 @@ function plannedNodeWrites<G extends GraphDef>(
   }
 
   const writes: PlannedNodeWrite[] = [];
+  const written = new Set<MergeKey>();
   for (const modification of plan.survivingModifications) {
     const identity = mergeKeyOf(modification.node);
     if (plan.nodeDeletions.has(identity) || canonicalIdentities.has(identity)) {
       continue;
     }
+    written.add(identity);
+    const validTo = plan.nodeValidityEnds.get(identity);
     writes.push({
       identity,
       kind: modification.node.kind,
       id: modification.node.id,
       modification: modification.node,
+      ...(validTo === undefined ? {} : { validTo }),
     });
   }
   for (const entity of plan.canonicalEntities) {
@@ -1370,12 +1453,41 @@ function plannedNodeWrites<G extends GraphDef>(
     }
     const kind = plan.retypeMap.get(sourceIdentity) ?? entity.kind;
     const modification = modificationsByIdentity.get(sourceIdentity);
+    written.add(sourceIdentity);
+    // A staged survivor's own authored window is the canonicalize decision —
+    // including the committed-target precedence that module applies — so it
+    // takes priority. The reconciled inherited end fills in only where the
+    // survivor claims no end of its own.
+    const validTo = entity.validTo ?? plan.nodeValidityEnds.get(sourceIdentity);
     writes.push({
       identity: mergeKey(kind, entity.canonicalId),
       kind,
       id: entity.canonicalId,
       entity,
       ...(modification === undefined ? {} : { modification }),
+      ...(entity.validFrom === undefined ?
+        {}
+      : { validFrom: entity.validFrom }),
+      ...(validTo === undefined ? {} : { validTo }),
+    });
+  }
+  // An inherited row whose ONLY change is its end-of-validity has neither a
+  // surviving modification nor a canonical entity, so it has no write yet. It
+  // gets one carrying the ending and NO props: the upsert patch-merges, so an
+  // empty bag leaves the row's content exactly as committed. Sorted by identity
+  // so the enumeration stays a pure function of the plan.
+  for (const identity of [...plan.nodeValidityEnds.keys()].sort((left, right) =>
+    compareMergeKeys(left, right),
+  )) {
+    if (written.has(identity) || plan.nodeDeletions.has(identity)) {
+      continue;
+    }
+    const kind = plan.retypeMap.get(identity) ?? kindOf(identity);
+    writes.push({
+      identity: mergeKey(kind, idOf(identity)),
+      kind,
+      id: idOf(identity),
+      validTo: requireDefined(plan.nodeValidityEnds.get(identity)),
     });
   }
   return writes;
@@ -1439,25 +1551,23 @@ async function applyMergePlan<G extends GraphDef>(
   // made are honored via {@link commitModificationProps}.
   for (const write of plannedNodeWrites(plan)) {
     const collection = nodeCollection(nodesApi, write.kind);
-    // A staged survivor's valid-time window travels with the write: for a
-    // fresh insert it IS the branch's window, and for a resurrection it stops
-    // the upsert from resetting a branch-authored (possibly already ENDED)
-    // window to merge time — an ended member must not come back current and,
-    // under `"fold"`, silently join a live fold class. Base-member survivors
-    // and modification-only writes carry no window; their committed row's
-    // window stays untouched.
+    // The write's valid-time window travels with it: for a fresh insert it IS
+    // the branch's window, for a resurrection it stops the upsert from resetting
+    // a branch-authored (possibly already ENDED) window to merge time — an ended
+    // member must not come back current and, under `"fold"`, silently join a
+    // live fold class — and for an inherited row it is the reconciled
+    // end-of-validity a branch authored with `update(id, {}, { validTo })`. A
+    // write with no window leaves the committed row's window untouched.
     await collection.upsertByIdFromRecord(
       write.id,
       nodeWriteProps(write, (modification) =>
         commitModificationProps(modification.baseProps, modification.forkProps),
       ),
       {
-        ...(write.entity?.validFrom === undefined ?
+        ...(write.validFrom === undefined ?
           {}
-        : { validFrom: write.entity.validFrom }),
-        ...(write.entity?.validTo === undefined ?
-          {}
-        : { validTo: write.entity.validTo }),
+        : { validFrom: write.validFrom }),
+        ...(write.validTo === undefined ? {} : { validTo: write.validTo }),
       },
     );
     committedNodeIds.add(write.identity);
@@ -1483,11 +1593,12 @@ async function applyMergePlan<G extends GraphDef>(
       edgeBaseProps === undefined ?
         edge.props
       : commitModificationProps(edgeBaseProps, edge.props);
-    // A staged NEW edge's valid-time window travels with the write, mirroring
-    // the canonical-entity upsert above: on a fresh insert it IS the branch's
-    // window, and on a resurrection it stops the upsert from resetting a
-    // branch-authored (possibly already ENDED) window to merge time. Inherited
-    // edges carry no window, so their committed one stays untouched.
+    // A staged edge's valid-time window travels with the write, mirroring the
+    // canonical-entity upsert above: on a fresh insert it IS the branch's
+    // window, on a resurrection it stops the upsert from resetting a
+    // branch-authored (possibly already ENDED) window to merge time, and on an
+    // inherited edge it is the reconciled end-of-validity. An edge with no
+    // window leaves its committed one untouched.
     const item: EdgeUpsert = {
       id: edge.id,
       from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
@@ -2182,6 +2293,7 @@ async function resolveMerge<G extends GraphDef>(
       deleteModifyConflicts: plan.deleteModifyConflicts,
       typeReconciliations: plan.typeReconciliations,
       dropped: plan.dropped,
+      validityEnds: plan.validityEnds,
       baseAmbiguities: plan.baseAmbiguities,
       provenance,
       warnings,

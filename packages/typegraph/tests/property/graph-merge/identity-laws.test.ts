@@ -27,11 +27,17 @@
  *      truth, enumerated as dropped, retracted by some history, or
  *      invalidated by an endpoint deletion/replacement. Silent loss of a
  *      branch's belief is a law violation, not a quiet no-op.
+ *   6. WINDOW-PRESERVATION  The valid-time analogues of 3 and 5, since a
+ *      branch can also stop a NODE from being true by ending its validity
+ *      rather than deleting it (issue #369): an end exactly one side
+ *      claimed is applied; a window nobody ended is left alone; and a row
+ *      the merge ended is not readable as of its own end instant.
  *
  * Scenarios are identity histories (assert same/different, retract, delete a
- * node, hard-delete + recreate a node, import an assertion under a CHOSEN id)
- * over a fixed four-node universe, applied through the public store API with
- * only the expected semantic refusals skipped. Chosen-id imports matter: they
+ * node, END A NODE'S VALIDITY, hard-delete + recreate a node, import an
+ * assertion under a CHOSEN id) over a fixed four-node universe, applied through
+ * the public store API with only the expected semantic refusals skipped.
+ * Chosen-id imports matter: they
  * are the only way two independent lineages mint the SAME assertion id — the
  * collision class every hand-built review repro lived in. Hard-delete /
  * recreate matters for the same reason within ONE lineage: it physically
@@ -73,7 +79,8 @@ import type { MergeReport } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { asIdentityAssertionId } from "../../../src/identity/types";
 import { importGraph } from "../../../src/interchange";
-import { storeRuntime } from "../../../src/store/runtime-port";
+import { storeBackend, storeRuntime } from "../../../src/store/runtime-port";
+import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 import { requireDefined } from "../../../src/utils/presence";
 import { backendMatrix } from "../../graph-merge/test-utils";
 
@@ -114,6 +121,9 @@ type IdentityOp =
   | Readonly<{ op: "different"; left: number; right: number }>
   | Readonly<{ op: "retract"; pick: number }>
   | Readonly<{ op: "deleteNode"; node: number }>
+  // Ends a node's validity WITHOUT deleting it — the weaker sibling of
+  // deletion, and the only window delta a branch can author on a live row.
+  | Readonly<{ op: "endValidity"; node: number; endPick: number }>
   // Physically removes the node's assertion rows, then recreates the node —
   // the one legal path to same-id truth replacement inside one lineage.
   | Readonly<{ op: "hardDeleteRecreate"; node: number }>
@@ -132,6 +142,16 @@ type IdentityOp =
     }>;
 
 const IMPORT_ID_POOL = ["shared-x1", "shared-x2"] as const;
+/**
+ * End instants for `endValidity`, both in the FUTURE: a row's `validFrom`
+ * defaults to its creation instant and the store refuses an inverted window, so
+ * a past end is not authorable at all. Two distinct values so branches can
+ * disagree and exercise the least-claim tie-break.
+ */
+const VALIDITY_ENDS = [
+  "2100-01-01T00:00:00.000Z",
+  "2100-06-01T00:00:00.000Z",
+] as const;
 const IMPORT_VALID_FROMS = [
   "2024-01-01T00:00:00.000Z",
   "2024-02-01T00:00:00.000Z",
@@ -171,6 +191,14 @@ const ASSERTION_OPS: readonly WeightedOp[] = [
     arbitrary: nodeIndexArb.map(
       (node) => ({ op: "deleteNode", node }) as const,
     ),
+  },
+  {
+    weight: 2,
+    arbitrary: fc
+      .tuple(nodeIndexArb, fc.nat({ max: VALIDITY_ENDS.length - 1 }))
+      .map(
+        ([node, endPick]) => ({ op: "endValidity", node, endPick }) as const,
+      ),
   },
   {
     weight: 3,
@@ -420,6 +448,15 @@ async function applyOp(
         history.deletedNodes.add(id);
         break;
       }
+      case "endValidity": {
+        const id = requireDefined(NODE_IDS[op.node]);
+        await store.nodes.Agent.update(
+          id as never,
+          {},
+          { validTo: requireDefined(VALIDITY_ENDS[op.endPick]) },
+        );
+        break;
+      }
       case "hardDeleteRecreate": {
         const id = requireDefined(NODE_IDS[op.node]);
         // The physical delete kills exactly the rows CURRENTLY touching the
@@ -518,6 +555,103 @@ async function currentLedger(
   if (trackedIds.length === 0) return [];
   const rows = await storeRuntime(store).identityAssertionRowsByIds(trackedIds);
   return [...rows.values()].filter((row) => row.validTo === undefined);
+}
+
+/**
+ * A node's END-OF-VALIDITY as a canonical instant, for every node the store
+ * holds LIVE. An id ABSENT from the map has no live row (deleted or gone); an id
+ * present with `undefined` has a live row with an open window — the two cases
+ * are distinguished by `.has()`, and the laws depend on the difference.
+ *
+ * Read straight off the row: the window is exactly what the collection API's
+ * temporal filter reads, and only `validTo` is decided by the merge (a live
+ * row's lower bound is immutable outside resurrection).
+ */
+type NodeEnds = ReadonlyMap<string, string | undefined>;
+
+async function nodeWindows(store: Store<LawGraph>): Promise<NodeEnds> {
+  const ends = new Map<string, string | undefined>();
+  for (const id of NODE_IDS) {
+    const row = await storeBackend(store).getNode(store.graphId, "Agent", id);
+    if (row === undefined || row.deleted_at !== undefined) continue;
+    ends.set(id, canonicalizeDatabaseTimestamp(row.valid_to));
+  }
+  return ends;
+}
+
+/**
+ * Law 6, in three parts, over the INHERITED node population.
+ *
+ * A branch can stop a node from being true by ending its validity instead of
+ * deleting it, and the merge used to discard that statement silently — so the
+ * valid-time analogues of laws 3 and 5 are stated here:
+ *
+ *   - NO SILENT LOSS: when exactly ONE end is claimed for a row that every
+ *     side still holds live, that end is what the merge commits. (Several
+ *     differing claims are arbitrated by a least-claim rule, so they are not a
+ *     single expected value and are excluded.)
+ *   - NO UNASKED SHORTENING: when NO side claimed an end, the target's window
+ *     is exactly the one it already held.
+ *   - NO RESURRECTION: a row the merge ended is not readable AS OF its own end
+ *     instant — an ending that does not end anything is not an ending.
+ *
+ * @param baseWindows The FORK POINT's windows, read before the merge — the
+ *   shared ancestor every claim is measured against.
+ * @param preMergeWindows The TARGET's windows, read before the merge. Identical
+ *   to `baseWindows` on the snapshot lane, where the target IS the fork point.
+ */
+async function expectLawfulWindows(args: {
+  target: Store<LawGraph>;
+  branchStores: readonly Store<LawGraph>[];
+  baseWindows: NodeEnds;
+  preMergeWindows: NodeEnds;
+}): Promise<void> {
+  const { target, branchStores, baseWindows, preMergeWindows } = args;
+  const postWindows = await nodeWindows(target);
+  const contributors = [
+    ...(await Promise.all(branchStores.map((store) => nodeWindows(store)))),
+    preMergeWindows,
+  ];
+
+  for (const id of NODE_IDS) {
+    if (!postWindows.has(id)) continue; // finally deleted — no window to judge
+    const postEnd = postWindows.get(id);
+    const baseEnd = baseWindows.get(id);
+    const heldLiveEverywhere = contributors.every((ends) => ends.has(id));
+    // A CLAIM is an end that differs from the ancestor's. A side that cleared
+    // the end (only reachable by delete + resurrect) claims nothing: the update
+    // SQL cannot clear `valid_to` on a live row, so that delta is unapplicable.
+    const claims = new Set(
+      contributors
+        .map((ends) => ends.get(id))
+        .filter(
+          (validTo): validTo is string =>
+            validTo !== undefined && validTo !== baseEnd,
+        ),
+    );
+
+    if (heldLiveEverywhere && claims.size === 1) {
+      expect(
+        postEnd,
+        `node ${id}: the single claimed end was not committed`,
+      ).toBe(requireDefined([...claims][0]));
+    }
+    if (claims.size === 0) {
+      expect(
+        postEnd,
+        `node ${id}: the merge moved a window no side ended`,
+      ).toBe(preMergeWindows.get(id));
+    }
+    if (postEnd !== undefined) {
+      expect(
+        await target.nodes.Agent.getById(id as never, {
+          temporalMode: "asOf",
+          asOf: postEnd,
+        }),
+        `node ${id}: readable as current as of its own end instant`,
+      ).toBeUndefined();
+    }
+  }
 }
 
 /** Law 2: no `different` whose endpoints the `same` rows transitively join. */
@@ -729,6 +863,9 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
               fixture.forkPoint,
               fixture.trackedIds,
             );
+            // The snapshot target IS the fork point, so one read serves as both
+            // the ancestor and the pre-merge target state.
+            const baseWindows = await nodeWindows(fixture.forkPoint);
             const result = await merge(
               fixture.forkPoint,
               [fixture.branchA, fixture.branchB],
@@ -745,6 +882,12 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
               branchStores: [fixture.branchA.store, fixture.branchB.store],
               histories: [...fixture.histories.values()],
               trackedIds: fixture.trackedIds,
+            });
+            await expectLawfulWindows({
+              target: fixture.forkPoint,
+              branchStores: [fixture.branchA.store, fixture.branchB.store],
+              baseWindows,
+              preMergeWindows: baseWindows,
             });
           } finally {
             for (const cleanup of cleanups.reverse()) await cleanup();
@@ -813,6 +956,8 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
             ...new Set(histories.flatMap((history) => history.assertionIds)),
           ];
           const preMerge = await currentLedger(target, trackedIds);
+          const baseWindows = await nodeWindows(forkPoint);
+          const preMergeWindows = await nodeWindows(target);
 
           const result = await mergeIncremental({
             forkPoint,
@@ -831,6 +976,12 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
             branchStores: [branchA.store, branchB.store],
             histories,
             trackedIds,
+          });
+          await expectLawfulWindows({
+            target,
+            branchStores: [branchA.store, branchB.store],
+            baseWindows,
+            preMergeWindows,
           });
         } finally {
           for (const cleanup of cleanups.reverse()) await cleanup();

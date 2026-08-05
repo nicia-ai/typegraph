@@ -36,6 +36,8 @@ import type {
   ModifiedEdge,
   ModifiedNode,
   RetractionCause,
+  WindowedEdge,
+  WindowedNode,
 } from "./state-diff";
 import { diffAgainstBase } from "./state-diff";
 import type {
@@ -64,6 +66,12 @@ type StagedDeletedNode = Readonly<{
   node: DeletedNode;
 }>;
 
+/** An inherited node whose valid-time window one branch changed. */
+export type StagedWindowedNode = Readonly<{
+  branchId: BranchId;
+  node: WindowedNode;
+}>;
+
 /** A new fork edge tagged with the branch that introduced it. */
 export type StagedNewEdge = Readonly<{
   branchId: BranchId;
@@ -80,6 +88,12 @@ export type StagedModifiedEdge = Readonly<{
 type StagedDeletedEdge = Readonly<{
   branchId: BranchId;
   edge: DeletedEdge;
+}>;
+
+/** An inherited edge whose valid-time window one branch changed. */
+export type StagedWindowedEdge = Readonly<{
+  branchId: BranchId;
+  edge: WindowedEdge;
 }>;
 
 export type StagedIdentityAssertion = Readonly<{
@@ -114,12 +128,22 @@ export type StagingSet = Readonly<{
   modifiedNodes: readonly StagedModifiedNode[];
   /** Deleted inherited nodes (one entry per (id, branch) deletion). */
   deletedNodes: readonly StagedDeletedNode[];
+  /**
+   * Inherited nodes whose valid-time window a branch changed (one entry per
+   * (id, branch) change). Disjoint from {@link StagingSet.modifiedNodes} in
+   * MEANING, not in membership: a branch that edits props AND moves the end
+   * appears in both, and a window-only change appears here alone — which is
+   * exactly what keeps it out of delete/modify resolution.
+   */
+  windowedNodes: readonly StagedWindowedNode[];
   /** New fork edges, bucketed by kind. Map iterates in lexicographic kind order. */
   newEdgesByKind: ReadonlyMap<string, readonly StagedNewEdge[]>;
   /** Modified inherited edges (one entry per (id, branch) modification). */
   modifiedEdges: readonly StagedModifiedEdge[];
   /** Deleted inherited edges (one entry per (id, branch) deletion). */
   deletedEdges: readonly StagedDeletedEdge[];
+  /** The edge analogue of {@link StagingSet.windowedNodes}. */
+  windowedEdges: readonly StagedWindowedEdge[];
   newIdentityAssertions: readonly StagedIdentityAssertion[];
   retractedIdentityAssertions: readonly StagedRetraction[];
   /**
@@ -233,6 +257,10 @@ export async function stageBranches<G extends GraphDef>(
   const modifiedEdges: (StagedModifiedEdge & { kind: string; id: string })[] =
     [];
   const deletedEdges: (StagedDeletedEdge & { kind: string; id: string })[] = [];
+  const windowedNodes: (StagedWindowedNode & { kind: string; id: string })[] =
+    [];
+  const windowedEdges: (StagedWindowedEdge & { kind: string; id: string })[] =
+    [];
   const newIdentityAssertions: StagedIdentityAssertion[] = [];
   const retractedIdentityAssertions: StagedRetraction[] = [];
 
@@ -271,6 +299,12 @@ export async function stageBranches<G extends GraphDef>(
     for (const edge of diff.edges.deleted) {
       deletedEdges.push({ branchId, edge, kind: edge.kind, id: edge.id });
     }
+    for (const node of diff.nodes.windowed) {
+      windowedNodes.push({ branchId, node, kind: node.kind, id: node.id });
+    }
+    for (const edge of diff.edges.windowed) {
+      windowedEdges.push({ branchId, edge, kind: edge.kind, id: edge.id });
+    }
     for (const assertion of diff.identity.new) {
       newIdentityAssertions.push({ branchId, assertion });
     }
@@ -296,6 +330,12 @@ export async function stageBranches<G extends GraphDef>(
       compareByKindIdBranch(left, right),
     ),
     deletedEdges: [...deletedEdges].sort((left, right) =>
+      compareByKindIdBranch(left, right),
+    ),
+    windowedNodes: [...windowedNodes].sort((left, right) =>
+      compareByKindIdBranch(left, right),
+    ),
+    windowedEdges: [...windowedEdges].sort((left, right) =>
       compareByKindIdBranch(left, right),
     ),
     newIdentityAssertions: newIdentityAssertions.toSorted((left, right) => {
