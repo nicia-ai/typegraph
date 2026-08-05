@@ -442,23 +442,27 @@ export function repointEdges<G extends GraphDef = GraphDef>(
     // loss — so the earliest claimed end wins, the same least-claim rule the
     // inherited-window reconciler uses.
     //
-    // A survivor from the PREFERRED branch is the exception, and keeps its
-    // window verbatim: that member is the live incremental target's own row, and
-    // a user branch never re-windows what the target already holds. Because
-    // `pickSurvivor` prefers that branch, this is exactly the pre-fold behavior
-    // wherever the target contributed at all.
-    const foldedEnd =
+    // A survivor from the PREFERRED branch keeps its own end verbatim when it
+    // HAS one: that member is the live incremental target's row, and a user
+    // branch never re-windows what the target already holds. When it has none
+    // there is no target window to protect, so the fold still resolves across
+    // the group — otherwise a preferred survivor would silently swallow the
+    // only end any branch claimed.
+    const preferredSurvivorEnd =
       survivor.staged.branchId === preferredBranchId ?
         survivor.staged.validTo
-      : resolveEndClaims(
-          groupEdges
-            .filter((edge) => edge.staged.validTo !== undefined)
-            .map((edge) => ({
-              branchId: edge.staged.branchId,
-              validTo: requireDefined(edge.staged.validTo),
-            })),
-          preferredBranchId,
-        );
+      : undefined;
+    const foldedEnd =
+      preferredSurvivorEnd ??
+      resolveEndClaims(
+        groupEdges
+          .filter((edge) => edge.staged.validTo !== undefined)
+          .map((edge) => ({
+            branchId: edge.staged.branchId,
+            validTo: requireDefined(edge.staged.validTo),
+          })),
+        preferredBranchId,
+      );
     const window = {
       ...(survivor.staged.validFrom === undefined ?
         {}

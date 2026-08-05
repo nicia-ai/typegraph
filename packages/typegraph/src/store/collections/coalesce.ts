@@ -36,6 +36,12 @@ export type UpsertDirtyCheckFunction = (
 /**
  * Whether one requested window endpoint differs from the stored one, compared as
  * instants rather than as driver text. An omitted request never changes anything.
+ *
+ * An UNREPRESENTABLE request always counts as a change, so it reaches the write
+ * path that rejects it. Canonicalization maps both an unparseable string and an
+ * absent value to `undefined`, so comparing the canonical forms would read a
+ * garbage bound against an open window as "no change" and coalesce the write —
+ * swallowing a `ValidationError` the caller must see.
  */
 function windowFieldChanges(
   requested: string | undefined,
@@ -44,10 +50,11 @@ function windowFieldChanges(
   if (requested === undefined) {
     return false;
   }
-  return (
-    canonicalizeDatabaseTimestamp(requested) !==
-    canonicalizeDatabaseTimestamp(stored)
-  );
+  const canonicalRequested = canonicalizeDatabaseTimestamp(requested);
+  if (canonicalRequested === undefined) {
+    return true;
+  }
+  return canonicalRequested !== canonicalizeDatabaseTimestamp(stored);
 }
 
 /**
@@ -79,11 +86,11 @@ export function shouldCoalesceUpsert(
   // already holds (identical props AND identical window) must still coalesce
   // instead of rewriting version, history, and revision state.
   //
-  // Both sides are canonicalized before comparison: the STORED value is raw
-  // driver text (postgres-js renders `timestamptz` its own way) while the
-  // caller's is an ISO 8601 instant, so a raw string compare would report a
-  // change on PostgreSQL that SQLite reports as none — the same write
-  // coalescing on one backend and not the other.
+  // Both sides are canonicalized before comparison. The stored value reaches
+  // here as the driver rendered it, and the two dialects do not store a
+  // timestamp the same way (SQLite keeps the written text; a Postgres driver
+  // renders `timestamptz` its own way), so comparing as INSTANTS is what keeps
+  // one backend from writing where the other coalesces.
   const windowChanges =
     windowFieldChanges(options?.validFrom, existing.valid_from) ||
     windowFieldChanges(options?.validTo, existing.valid_to);

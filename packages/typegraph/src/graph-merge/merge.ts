@@ -771,10 +771,12 @@ export type MergePlan<G extends GraphDef> = Readonly<{
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>;
   /**
    * `(kind, id) -> validTo` for every inherited NODE whose end-of-validity the
-   * merge resolved to a value differing from the base's. Keyed on the PRE-retype
+   * merge itself decided — a branch's ending that differs from the base's, on a
+   * row the committed target did not already re-window. Keyed on the PRE-retype
    * identity, exactly as the modification fold is. An identity absent here has
    * no reconciled ending, and the commit passes no window for it at all — never
-   * the base value re-asserted, which is what lets an unchanged window coalesce.
+   * the base value re-asserted, and never the target's own value written back at
+   * itself, which is what lets an unchanged window coalesce.
    */
   nodeValidityEnds: ReadonlyMap<MergeKey, string>;
   /** The edge half of {@link nodeValidityEnds}, consumed by the repoint phase. */
@@ -1591,11 +1593,12 @@ async function applyMergePlan<G extends GraphDef>(
       edgeBaseProps === undefined ?
         edge.props
       : commitModificationProps(edgeBaseProps, edge.props);
-    // A staged NEW edge's valid-time window travels with the write, mirroring
-    // the canonical-entity upsert above: on a fresh insert it IS the branch's
-    // window, and on a resurrection it stops the upsert from resetting a
-    // branch-authored (possibly already ENDED) window to merge time. Inherited
-    // edges carry no window, so their committed one stays untouched.
+    // A staged edge's valid-time window travels with the write, mirroring the
+    // canonical-entity upsert above: on a fresh insert it IS the branch's
+    // window, on a resurrection it stops the upsert from resetting a
+    // branch-authored (possibly already ENDED) window to merge time, and on an
+    // inherited edge it is the reconciled end-of-validity. An edge with no
+    // window leaves its committed one untouched.
     const item: EdgeUpsert = {
       id: edge.id,
       from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),

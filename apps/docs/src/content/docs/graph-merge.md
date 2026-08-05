@@ -556,14 +556,20 @@ explains the whole contract:
 | --------- | ------- |
 | One branch ends the row | That end is written — including a *later* end, which extends the window. |
 | Several branches end it differently | No conflict. The **earliest** end wins, and `report.validityEnds` names every claiming branch. |
-| The incremental target already ended it | The target's end stands. A branch never re-windows a row the target itself windowed. |
+| The incremental target already ended it | The target's end stands. A branch never re-windows a row the target itself windowed, and the row is left out of the merge's writes entirely. |
 | One branch ends it, another deletes it | Deleted, with **no** `DeleteModifyConflict` — the stronger statement absorbs the weaker one. |
-| A branch re-states the end the target holds | No write at all under `coalesceUnchangedUpserts` — no version bump, no history row. |
+| A branch re-states the end the target holds | No write at all — nothing is staged, so there is no version bump or history row even with `coalesceUnchangedUpserts` off. |
 | No branch touched the window | Untouched. A properties-only edit never passes a window, so the committed one stands. |
 
 The earliest-end rule is fixed, not a policy knob: it is commutative and
 associative, so the merge stays order-independent, and `onPropertyConflict`
 never sees a property your schema does not have.
+
+Because an ending is not a modification, `onDeleteModifyConflict` never sees
+one: a row whose *only* change is its window loses to a concurrent deletion even
+under `"prefer-modify"`, since there is no modification to prefer. A row with a
+properties edit *and* an ending keeps the usual delete/modify behavior on the
+properties, and its ending rides along only if that modification survives.
 
 **What is still NOT merged, and why.** On a row that is live in both the base
 and the branch, `validTo` is the only window field a branch can author *and* the

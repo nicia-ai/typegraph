@@ -20,8 +20,8 @@ An end-of-validity is now treated as a **sibling of deletion**:
   same committed-target precedence identity survivors already get;
 - one branch ends it and another deletes it → deleted, with **no**
   `DeleteModifyConflict` — the stronger statement absorbs the weaker one;
-- a branch re-states the end the target holds → still coalesces under
-  `coalesceUnchangedUpserts`: no version bump, no history row.
+- a branch re-states the end the target holds → nothing is staged at all: no
+  write, no version bump, no history row.
 
 `MergeReport` gains `validityEnds`, listing every row whose end the merge
 changed and the branches that claimed it — the arbitration is silent by design,
@@ -37,7 +37,8 @@ a no-op used to be. There is no opt-out flag: a permanent knob for "does the
 merge lose data" is worse than this note. Nothing that previously succeeded now
 fails.
 
-Also fixes a cross-backend hazard in `coalesceUnchangedUpserts`: the requested
-and stored valid-time bounds are now compared as instants rather than as raw
-driver text, so the same upsert no longer coalesces on SQLite while writing on
-PostgreSQL.
+Also hardens `coalesceUnchangedUpserts`: the requested and stored valid-time
+bounds are compared as instants rather than as raw text, so the decision cannot
+come to depend on a dialect's timestamp rendering. A bound that is not a
+representable instant still counts as a change, so it reaches the write path
+that rejects it rather than being coalesced away.

@@ -349,6 +349,39 @@ describe.each(backendMatrix())(
       expect(await nodeEnd(target, "Patient", "pat-1")).toBe(LATE);
     });
 
+    it("leaves a row the TARGET alone windowed out of the merge entirely", async () => {
+      const forkPoint = await seededForkPoint();
+      const target = (await forkOf(forkPoint, asBranchId("window-target")))
+        .store;
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      // Only the committed target moves this end. No branch mentions the row.
+      await target.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
+      const versionBefore = (await nodeRow(target, "Patient", "pat-1")).version;
+      await branchA.store.nodes.Encounter.update(ENCOUNTER, {
+        reason: "follow-up",
+      });
+
+      const report = unwrap(
+        await mergeIncremental<CareGraph>({
+          forkPoint,
+          target,
+          branches: [branchA],
+          options: { branchOrder: BRANCH_ORDER },
+        }),
+      );
+
+      // The target's own delta describes the DESTINATION, not a claim staged
+      // against it, so there is nothing to apply and nothing to report. Writing
+      // the row back at itself would bump the version, the history row and the
+      // recorded-time entry of a row no branch touched — this store has
+      // coalescing OFF, so only the plan can keep the write from happening.
+      expect((await nodeRow(target, "Patient", "pat-1")).version).toBe(
+        versionBefore,
+      );
+      expect(await nodeEnd(target, "Patient", "pat-1")).toBe(LATE);
+      expect(report.validityEnds).toEqual([]);
+    });
+
     it("does not write when a branch re-states the end the target holds", async () => {
       const forkPoint = await seededForkPoint();
       // A hand-seeded target with coalescing on: `branch()` clones do not inherit
@@ -441,6 +474,41 @@ describe.each(backendMatrix())(
       // "edge-1" is the min-id survivor of the fold; the end claimed on the
       // folded-away "edge-2" must not silently outlive its row unresolved.
       expect(await edgeEnd(forkPoint, "edge-1")).toBe(EARLY);
+    });
+
+    it("keeps a folded-away edge's end when the target's edge survives", async () => {
+      const forkPoint = await seededForkPoint();
+      await forkPoint.edges.hadEncounter.create(
+        { kind: "Patient", id: "pat-1" },
+        { kind: "Encounter", id: "enc-1" },
+        { on: "2026-01-05" },
+        { id: "edge-2" },
+      );
+      const target = (await forkOf(forkPoint, asBranchId("window-target")))
+        .store;
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      // The target edits the SURVIVING edge's props and claims no end at all;
+      // the branch ends the other edge of the same dedupe group.
+      await target.edges.hadEncounter.update(EDGE_1, { on: "2026-02-02" });
+      await branchA.store.edges.hadEncounter.update(
+        EDGE_2,
+        {},
+        { validTo: EARLY },
+      );
+
+      unwrap(
+        await mergeIncremental<CareGraph>({
+          forkPoint,
+          target,
+          branches: [branchA],
+          options: { branchOrder: BRANCH_ORDER },
+        }),
+      );
+
+      // A survivor from the preferred branch keeps its own end verbatim, but it
+      // has none here — so there is no committed-target window to protect, and
+      // swallowing the only claimed end would be a silent window loss.
+      expect(await edgeEnd(target, "edge-1")).toBe(EARLY);
     });
 
     it("lets a single branch extend an end to a later instant", async () => {

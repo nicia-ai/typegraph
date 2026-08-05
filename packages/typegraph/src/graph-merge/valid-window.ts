@@ -45,6 +45,12 @@
  * Nothing here can raise a new conflict, so no previously-succeeding merge
  * starts failing.
  *
+ * Rule 3's preferred half is reached by NOT ACTING: the preferred branch is the
+ * committed target itself, so its own end is already the stored one. Resolving
+ * to it would write the row back at itself and report an end the merge never
+ * decided, which is why a target that moved the end takes this row out of the
+ * resolution entirely.
+ *
  * DELETION ABSORBS AN ENDING
  *
  * A window-only change is not a "modification" (it is staged in its own bucket),
@@ -94,14 +100,33 @@ export type ValidWindowResolution = Readonly<{
 export type EndClaim = Readonly<{ branchId: BranchId; validTo: string }>;
 
 /**
- * Applies rule 3 to a set of end claims: the preferred branch's claim if it made
- * one, else the earliest instant. Canonical ISO 8601 UTC is fixed-width, so its
+ * The least claim in a set: the earliest instant any branch claimed, or
+ * `undefined` for an empty set. Canonical ISO 8601 UTC is fixed-width, so its
  * lexicographic order IS chronological order (see `isCanonicalIsoDate`) — every
  * window the diff reports is canonicalized, which is also what keeps the choice
  * identical on SQLite and PostgreSQL despite their different raw timestamp text.
  *
- * Returns `undefined` for an empty claim set. Order-independent: `min` over a set
- * is commutative and associative, and the preferred-branch lookup is a set query.
+ * Order-independent: `min` over a set is commutative and associative.
+ */
+function earliestEnd(claims: readonly EndClaim[]): string | undefined {
+  let earliest: string | undefined;
+  for (const claim of claims) {
+    if (earliest === undefined || compareStrings(claim.validTo, earliest) < 0) {
+      earliest = claim.validTo;
+    }
+  }
+  return earliest;
+}
+
+/**
+ * Applies rule 3 to a set of end claims: the preferred branch's claim if it made
+ * one, else {@link earliestEnd}. Order-independent — the preferred-branch lookup
+ * is a set query and the fallback is a `min`.
+ *
+ * Only the edge FOLD needs this form. The inherited-row reconciler never sees a
+ * preferred claim (the committed target's own end is already stored, so it is
+ * taken out of the resolution rather than resolved to) and calls
+ * {@link earliestEnd} directly.
  */
 export function resolveEndClaims(
   claims: readonly EndClaim[],
@@ -110,16 +135,7 @@ export function resolveEndClaims(
   const preferred = claims.find(
     (claim) => claim.branchId === preferredBranchId,
   );
-  if (preferred !== undefined) {
-    return preferred.validTo;
-  }
-  let earliest: string | undefined;
-  for (const claim of claims) {
-    if (earliest === undefined || compareStrings(claim.validTo, earliest) < 0) {
-      earliest = claim.validTo;
-    }
-  }
-  return earliest;
+  return preferred === undefined ? earliestEnd(claims) : preferred.validTo;
 }
 
 /** The claiming branches of a resolved end, deduped and sorted. */
@@ -194,11 +210,23 @@ function resolvePopulation(
   for (const [identity, group] of byIdentity) {
     const claims: EndClaim[] = [];
     let reportedUnapplicable = false;
+    let targetMovedEnd = false;
     for (const delta of group) {
       const { applicableEnd, unapplicable } = classifyDelta(
         delta.base,
         delta.fork,
       );
+      // The preferred branch IS the committed incremental target: its delta
+      // describes the DESTINATION's own row, not a claim staged against it. A
+      // target that already moved this end leaves the merge nothing to apply —
+      // that is rule 3's committed-target precedence, reached without writing
+      // the row back at itself or reporting an end the merge did not decide.
+      // A target-side unapplicable delta is likewise not something the merge
+      // failed to carry: it is where the merge writes.
+      if (delta.branchId === preferredBranchId) {
+        targetMovedEnd ||= applicableEnd !== undefined;
+        continue;
+      }
       if (applicableEnd !== undefined) {
         claims.push({ branchId: delta.branchId, validTo: applicableEnd });
       }
@@ -210,7 +238,7 @@ function resolvePopulation(
         dropped.push(dropItem(delta.id));
       }
     }
-    const resolved = resolveEndClaims(claims, preferredBranchId);
+    const resolved = targetMovedEnd ? undefined : earliestEnd(claims);
     if (resolved === undefined) {
       continue;
     }
@@ -250,8 +278,9 @@ function resolvePopulation(
  * @param staging The provenance-tagged union staging set (T7).
  * @param nodeDeletions The AUTHORITATIVE finally-deleted node identities.
  * @param edgeDeletions The AUTHORITATIVE finally-deleted edge identities.
- * @param preferredBranchId The incremental merge's committed-target branch, whose
- *   claim wins rule 3 (absent on the snapshot path).
+ * @param preferredBranchId The incremental merge's committed-target branch,
+ *   whose own end already stands and so takes its row out of the resolution
+ *   (rule 3's preferred half). Absent on the snapshot path.
  */
 export function resolveValidWindows(
   staging: Readonly<{
