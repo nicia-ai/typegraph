@@ -436,21 +436,29 @@ export function repointEdges<G extends GraphDef = GraphDef>(
     // branch's authored start for the row we commit, and the group's members are
     // the same edge as seen by different branches.
     //
-    // The END is resolved across the whole group instead. When repoint/dedupe
-    // folds several edges into one survivor, an end claimed by a NON-survivor
-    // would otherwise be discarded by an arbitrary min-id pick — a silent window
-    // loss. The same least-claim rule the inherited-window reconciler uses
-    // applies here: the preferred (incremental target) branch's claim, else the
-    // earliest end.
-    const foldedEnd = resolveEndClaims(
-      groupEdges
-        .filter((edge) => edge.staged.validTo !== undefined)
-        .map((edge) => ({
-          branchId: edge.staged.branchId,
-          validTo: requireDefined(edge.staged.validTo),
-        })),
-      preferredBranchId,
-    );
+    // The END is folded across the group. When repoint/dedupe collapses several
+    // DISTINCT edges into one survivor, an end claimed by a non-survivor would
+    // otherwise be discarded by the arbitrary min-id pick — a silent window
+    // loss — so the earliest claimed end wins, the same least-claim rule the
+    // inherited-window reconciler uses.
+    //
+    // A survivor from the PREFERRED branch is the exception, and keeps its
+    // window verbatim: that member is the live incremental target's own row, and
+    // a user branch never re-windows what the target already holds. Because
+    // `pickSurvivor` prefers that branch, this is exactly the pre-fold behavior
+    // wherever the target contributed at all.
+    const foldedEnd =
+      survivor.staged.branchId === preferredBranchId ?
+        survivor.staged.validTo
+      : resolveEndClaims(
+          groupEdges
+            .filter((edge) => edge.staged.validTo !== undefined)
+            .map((edge) => ({
+              branchId: edge.staged.branchId,
+              validTo: requireDefined(edge.staged.validTo),
+            })),
+          preferredBranchId,
+        );
     const window = {
       ...(survivor.staged.validFrom === undefined ?
         {}
