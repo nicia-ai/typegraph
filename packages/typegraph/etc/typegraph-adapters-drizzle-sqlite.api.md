@@ -1681,6 +1681,44 @@ export function createSqliteTables(names?: Partial<SqliteTableNames>, options?: 
             }, {}, {
                 length: number | undefined;
             }>;
+            endedByKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedById: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
         };
         dialect: "sqlite";
     }>;
@@ -1918,6 +1956,44 @@ export function createSqliteTables(names?: Partial<SqliteTableNames>, options?: 
             }>;
             deletedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "deleted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedByKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedById: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_id";
                 tableName: string;
                 dataType: "string";
                 columnType: "SQLiteText";
@@ -7013,6 +7089,44 @@ export const tables: {
             }, {}, {
                 length: number | undefined;
             }>;
+            endedByKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedById: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
         };
         dialect: "sqlite";
     }>;
@@ -7250,6 +7364,44 @@ export const tables: {
             }>;
             deletedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
                 name: "deleted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedByKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedById: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_id";
                 tableName: string;
                 dataType: "string";
                 columnType: "SQLiteText";

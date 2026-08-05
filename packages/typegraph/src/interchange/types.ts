@@ -137,6 +137,16 @@ export const InterchangeIdentityAssertionSchema = z.object({
   b: z.object({ kind: z.string().min(1), id: z.string().min(1) }),
   validFrom: ValidityTimestampSchema,
   validTo: ValidityTimestampSchema.optional(),
+  /**
+   * The node whose soft-delete cascade ended this assertion — the ledger's
+   * stored cause, carried so an `archival` round-trip preserves WHY each
+   * ending happened and not merely that it did. Absent on open rows and on
+   * explicit retractions; when present it names one of `a` / `b` and requires
+   * `validTo`. Import rejects both violations with an attributed error.
+   */
+  endedBy: z
+    .object({ kind: z.string().min(1), id: z.string().min(1) })
+    .optional(),
 });
 export type InterchangeIdentityAssertion = z.infer<
   typeof InterchangeIdentityAssertionSchema

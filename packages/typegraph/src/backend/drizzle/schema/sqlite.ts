@@ -233,6 +233,12 @@ export function createSqliteTables(
     (t) => [primaryKey({ columns: [t.graphId] })],
   );
 
+  // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY
+  // an assertion stopped being current: NULL for an explicit retraction,
+  // populated with the deleted endpoint's `(kind, id)` when a node soft-delete
+  // cascaded onto it. The CHECK holds the two invariants the writers rely on —
+  // the pair is set or unset together, and a cause only ever names an ENDED
+  // row's own endpoint.
   const identityAssertions = sqliteTable(
     n.identityAssertions,
     {
@@ -248,6 +254,8 @@ export function createSqliteTables(
       createdAt: text("created_at").notNull(),
       updatedAt: text("updated_at").notNull(),
       deletedAt: text("deleted_at"),
+      endedByKind: text("ended_by_kind"),
+      endedById: text("ended_by_id"),
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.id] }),
@@ -266,6 +274,10 @@ export function createSqliteTables(
       uniqueIndex(`${n.identityAssertions}_current_pair_idx`)
         .on(t.graphId, t.relation, t.aKind, t.aId, t.bKind, t.bId)
         .where(sql`${t.validTo} IS NULL`),
+      check(
+        `${n.identityAssertions}_ended_by_check`,
+        sql`(ended_by_kind IS NULL) = (ended_by_id IS NULL) AND (ended_by_kind IS NULL OR (valid_to IS NOT NULL AND ((ended_by_kind = a_kind AND ended_by_id = a_id) OR (ended_by_kind = b_kind AND ended_by_id = b_id))))`,
+      ),
     ],
   );
 
@@ -285,6 +297,8 @@ export function createSqliteTables(
       createdAt: text("created_at").notNull(),
       updatedAt: text("updated_at").notNull(),
       deletedAt: text("deleted_at"),
+      endedByKind: text("ended_by_kind"),
+      endedById: text("ended_by_id"),
       recordedFrom: integer("recorded_from").notNull(),
       recordedTo: integer("recorded_to").notNull(),
       op: text("op").notNull(),

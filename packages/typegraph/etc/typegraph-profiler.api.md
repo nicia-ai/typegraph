@@ -3648,6 +3648,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>[]>;
     liveNodesSharingIds: (ids: readonly string[], target?: GraphBackend | TransactionBackend) => Promise<readonly Readonly<{
         kind: string;
@@ -3666,6 +3670,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>>>;
     structuralIdentityClasses: (references: readonly Readonly<{
         kind: string;
@@ -3687,6 +3695,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>[]>;
     lockIdentityImportTarget: (target: GraphBackend | TransactionBackend) => Promise<void>;
     foldImportedIdentityNodes: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
@@ -3706,6 +3718,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>[], mode: "state" | "archival") => Promise<Readonly<{
         created: number;
         skipped: number;
@@ -3723,6 +3739,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>[]) => Promise<Readonly<{
         created: number;
         retracted: number;

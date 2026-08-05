@@ -420,6 +420,8 @@ assertion's id structurally in `details.issues[].assertionId`, and
 | `IDENTITY_IMPORT_FUTURE_VALID_FROM` | An open (current) assertion's `validFrom` is in the future, in either import mode. |
 | `IDENTITY_IMPORT_FUTURE_VALID_TO` | An ended assertion's `validTo` is in the future. |
 | `IDENTITY_IMPORT_INVALID_WINDOW` | An assertion's `validTo` precedes its `validFrom`. |
+| `IDENTITY_IMPORT_ENDED_BY_WITHOUT_END` | An assertion names an `endedBy` cause but carries no `validTo`; only an ended assertion has a cause. |
+| `IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT` | An assertion's `endedBy` names a node that is not one of its own endpoints; a deletion cascade only ends assertions that touch the deleted node. |
 | `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
 
 #### Recorded-capture guard codes

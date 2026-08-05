@@ -104,6 +104,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       b: Readonly<{ kind: string; id: string }>;
       validFrom: string;
       validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
     }>[]
   >;
   /**
@@ -134,6 +135,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
         b: Readonly<{ kind: string; id: string }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{ kind: string; id: string }> | undefined;
       }>
     >
   >;
@@ -162,6 +164,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       b: Readonly<{ kind: string; id: string }>;
       validFrom: string;
       validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
     }>[]
   >;
   lockIdentityImportTarget: (
@@ -180,6 +183,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       b: Readonly<{ kind: string; id: string }>;
       validFrom: string;
       validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
     }>[],
     mode: "state" | "archival",
   ) => Promise<Readonly<{ created: number; skipped: number }>>;
@@ -193,6 +197,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       b: Readonly<{ kind: string; id: string }>;
       validFrom: string;
       validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
     }>[],
   ) => Promise<Readonly<{ created: number; retracted: number }>>;
   /**

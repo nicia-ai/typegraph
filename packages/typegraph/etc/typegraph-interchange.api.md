@@ -1612,6 +1612,10 @@ export const GraphDataSchema: z.ZodObject<{
             }, z.core.$strip>;
             validFrom: z.ZodISODateTime;
             validTo: z.ZodOptional<z.ZodISODateTime>;
+            endedBy: z.ZodOptional<z.ZodObject<{
+                kind: z.ZodString;
+                id: z.ZodString;
+            }, z.core.$strip>>;
         }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
@@ -1760,6 +1764,10 @@ export const GraphInterchangeChunkSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         }, z.core.$strip>;
         validFrom: z.ZodISODateTime;
         validTo: z.ZodOptional<z.ZodISODateTime>;
+        endedBy: z.ZodOptional<z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>], "type">;
 
@@ -2278,6 +2286,10 @@ export const InterchangeIdentityAssertionSchema: z.ZodObject<{
     }, z.core.$strip>;
     validFrom: z.ZodISODateTime;
     validTo: z.ZodOptional<z.ZodISODateTime>;
+    endedBy: z.ZodOptional<z.ZodObject<{
+        kind: z.ZodString;
+        id: z.ZodString;
+    }, z.core.$strip>>;
 }, z.core.$strip>;
 
 // @public (undocumented)
@@ -2303,6 +2315,10 @@ export const InterchangeIdentitySchema: z.ZodObject<{
         }, z.core.$strip>;
         validFrom: z.ZodISODateTime;
         validTo: z.ZodOptional<z.ZodISODateTime>;
+        endedBy: z.ZodOptional<z.ZodObject<{
+            kind: z.ZodString;
+            id: z.ZodString;
+        }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 
@@ -3992,6 +4008,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>[]>;
     liveNodesSharingIds: (ids: readonly string[], target?: GraphBackend | TransactionBackend) => Promise<readonly Readonly<{
         kind: string;
@@ -4010,6 +4030,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>>>;
     structuralIdentityClasses: (references: readonly Readonly<{
         kind: string;
@@ -4031,6 +4055,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>[]>;
     lockIdentityImportTarget: (target: GraphBackend | TransactionBackend) => Promise<void>;
     foldImportedIdentityNodes: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
@@ -4050,6 +4078,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>[], mode: "state" | "archival") => Promise<Readonly<{
         created: number;
         skipped: number;
@@ -4067,6 +4099,10 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         }>;
         validFrom: string;
         validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
     }>[]) => Promise<Readonly<{
         created: number;
         retracted: number;

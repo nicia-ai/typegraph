@@ -28,6 +28,8 @@ export const IDENTITY_ASSERTION_COLUMNS: SqlFragment = sql.raw(
     "created_at",
     "updated_at",
     "deleted_at",
+    "ended_by_kind",
+    "ended_by_id",
   ].join(", "),
 );
 

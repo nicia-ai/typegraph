@@ -5,13 +5,13 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { RECORDED_MAX_REVISION } from "../../core/temporal";
+import { IDENTITY_ASSERTION_COLUMNS } from "../../identity/historical-sql";
 import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { chunk } from "../../utils/array";
-import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import { getNodeRowsByIds } from "../node-fetch";
@@ -19,8 +19,10 @@ import { allocateRecordedCommit } from "./clock";
 import { executeStatement } from "./guards";
 import {
   insertRecordedEdgeRows,
+  insertRecordedIdentityAssertionRows,
   insertRecordedNodeRows,
   recordedEdgeChunkSize,
+  recordedIdentityAssertionChunkSize,
   type RecordedInsert,
   recordedNodeChunkSize,
   type RecordedOperation,
@@ -221,8 +223,7 @@ async function getIdentityAssertionRowsByIds(
   if (ids.length === 0) return new Map();
   const rows = await target.execute<IdentityAssertionStorageRow>(
     asCompiledRowsSql(sql`
-      SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-             valid_from, valid_to, created_at, updated_at, deleted_at
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
       FROM ${schema.identityAssertionsTable}
       WHERE graph_id = ${graphId}
         AND id IN (${sqlValueList(ids)})
@@ -239,9 +240,7 @@ export async function flushIdentityAssertions(
   recordedRevision: number,
 ): Promise<void> {
   if (entities.length === 0) return;
-  // The identity recorded row has one fewer column than a recorded node, so the
-  // node chunk size safely bounds the UPDATE, fallback SELECT, and INSERT.
-  const chunkSize = recordedNodeChunkSize(target);
+  const chunkSize = recordedIdentityAssertionChunkSize(target);
   for (const entityChunk of chunk(entities, chunkSize)) {
     const ids = entityChunk.map((entity) => entity.id);
     const closed = await closeOpenReturning(
@@ -254,30 +253,14 @@ export async function flushIdentityAssertions(
     const afterById = await resolveAfterImages(entityChunk, (missing) =>
       getIdentityAssertionRowsByIds(target, schema, graphId, missing),
     );
-    const values = recordedInsertsFor(afterById, closed).map(
-      ({ row, operation }) => sql`
-        (
-                ${generateId()}, ${row.graph_id}, ${row.id}, ${row.rel},
-                ${row.a_kind}, ${row.a_id}, ${row.b_kind}, ${row.b_id},
-                ${row.valid_from}, ${row.valid_to ?? sql.raw("NULL")},
-                ${row.created_at}, ${row.updated_at},
-                ${row.deleted_at ?? sql.raw("NULL")}, ${recordedRevision},
-                ${RECORDED_MAX_REVISION}, ${operation}
-              )
-      `,
-    );
     // A hard deletion closes the prior recorded row without leaving a current
-    // after-image. In that case the UPDATE above is the complete capture.
-    if (values.length === 0) continue;
-    await executeStatement(
+    // after-image; the insert below is then empty and the UPDATE above is the
+    // complete capture.
+    await insertRecordedIdentityAssertionRows(
       target,
-      sql`
-        INSERT INTO ${schema.recordedIdentityAssertionsTable} (
-          history_id, graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-          valid_from, valid_to, created_at, updated_at, deleted_at,
-          recorded_from, recorded_to, op
-        ) VALUES ${sql.join(values, sql`, `)}
-      `,
+      schema.recordedIdentityAssertionsTable,
+      recordedInsertsFor(afterById, closed),
+      recordedRevision,
     );
   }
 }
