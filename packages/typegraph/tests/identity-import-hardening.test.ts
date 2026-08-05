@@ -884,6 +884,72 @@ describe("importGraph identity failure reporting", () => {
     ).toBe(true);
   });
 
+  it("refuses a same assertion that an earlier assertion in the same batch forbids", async () => {
+    // The import applies a batch inside ONE transaction, repairing the derived
+    // identity relations after each accepted assertion so the next one
+    // validates against the batch's own effects. Both effects are load-bearing
+    // here: the fuse RE-KEYS the class onto `aaron` (the code-point-least
+    // member), and the separation that follows is recorded under that new key —
+    // so the third assertion is refused only if the validation reads both.
+    const store = await createInitializedStore(graph, createTestBackend());
+    const aaron = { kind: "Person", id: "batch-aaron" } as const;
+    const alice = { kind: "Person", id: "batch-alice" } as const;
+    const rival = { kind: "Person", id: "batch-rival" } as const;
+    const [fuseA, fuseB] = orderPair(alice, aaron);
+    const [separatorA, separatorB] = orderPair(alice, rival);
+    const [forbiddenA, forbiddenB] = orderPair(aaron, rival);
+
+    for (const ref of [aaron, alice, rival]) {
+      await store.nodes.Person.create({ name: ref.id }, { id: ref.id });
+    }
+
+    await expect(
+      storeRuntime(store).importIdentityAssertionsAtTarget(
+        store.backend,
+        [
+          {
+            id: "batch-fuse",
+            relation: "same",
+            a: fuseA,
+            b: fuseB,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+          {
+            id: "batch-separate",
+            relation: "different",
+            a: separatorA,
+            b: separatorB,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+          {
+            // `aaron` and `rival` carry no assertion between them; they are
+            // held apart only through the class `aaron` was fused into, so the
+            // refusal has to name the separation the batch itself wrote.
+            id: "batch-forbidden",
+            relation: "same",
+            a: forbiddenA,
+            b: forbiddenB,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+        ],
+        "state",
+      ),
+    ).rejects.toMatchObject({
+      name: "IdentityContradictionError",
+      details: {
+        operation: "import",
+        reason: "different-assertion",
+        conflictingAssertionId: "batch-separate",
+      },
+    });
+
+    expect(await store.identity.areSame(aaron, alice)).toBe(true);
+    expect(await store.identity.areDifferent(aaron, rival)).toBe(true);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
   it("attributes a missing endpoint to the open assertion that required it", async () => {
     const store = await createInitializedStore(graph, createTestBackend());
     const present = await store.nodes.Person.create(

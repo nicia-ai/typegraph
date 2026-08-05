@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { type GraphBackend } from "../../../src";
 import { IdentitySeparationViolationError } from "../../../src/errors";
 import { identityClassKey } from "../../../src/identity/separation";
+import {
+  loadCurrentStructuralClasses,
+  refKey,
+} from "../../../src/identity/service";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import {
@@ -98,6 +102,62 @@ async function readSeparationRows(
     class_key_low: row.class_key_low,
     class_key_high: row.class_key_high,
   }));
+}
+
+type RawLedgerAssertionRow = Readonly<{
+  id: string;
+  a_kind: string;
+  a_id: string;
+  b_kind: string;
+  b_id: string;
+}>;
+
+/**
+ * The computation the separation probe replaced, rebuilt here from the ledger:
+ * every CURRENT `different` assertion, scanned for one whose endpoints land on
+ * opposite sides of the two nodes' identity classes.
+ *
+ * It reads the assertion table and the closure and never touches the separation
+ * relation, so it is an independent oracle for what the probe now answers.
+ */
+async function ledgerSeparatingAssertionIds(
+  store: IntegrationStoreLike,
+  first: Ref,
+  second: Ref,
+): Promise<readonly string[]> {
+  const schema = createSqlSchema(store.backend.tableNames);
+  const classes = await loadCurrentStructuralClasses(
+    store.backend,
+    schema,
+    store.graphId,
+    [first, second],
+  );
+  const memberKeys = (ref: Ref): ReadonlySet<string> =>
+    new Set(
+      requireDefined(classes.get(refKey(ref))).map((member) => refKey(member)),
+    );
+  const firstKeys = memberKeys(first);
+  const secondKeys = memberKeys(second);
+  const rows = await store.backend.execute<RawLedgerAssertionRow>(
+    asCompiledRowsSql(sql`
+      SELECT id, a_kind, a_id, b_kind, b_id
+      FROM ${schema.identityAssertionsTable}
+      WHERE graph_id = ${store.graphId}
+        AND rel = ${"different"}
+        AND valid_to IS NULL
+        AND deleted_at IS NULL
+    `),
+  );
+  return rows
+    .filter((row) => {
+      const a = refKey({ kind: row.a_kind, id: row.a_id });
+      const b = refKey({ kind: row.b_kind, id: row.b_id });
+      return (
+        (firstKeys.has(a) && secondKeys.has(b)) ||
+        (firstKeys.has(b) && secondKeys.has(a))
+      );
+    })
+    .map((row) => row.id);
 }
 
 function separationPairOf(low: Ref, high: Ref): RawSeparationRow {
@@ -314,6 +374,160 @@ export function registerIdentitySeparationIntegrationTests(
       await storeRuntime(store).rebuildIdentityClosure();
 
       expect(await readSeparationRows(store)).toEqual(expected);
+      await expect(
+        storeRuntime(store).validateIdentity(),
+      ).resolves.toBeUndefined();
+    });
+
+    it("answers current different-ness from the relation, agreeing with the ledger throughout a lifecycle", async () => {
+      const store = context.getStore();
+      // `sameIdAcrossKinds: "fold"` makes the shared id a structural same
+      // assertion nobody wrote, so the walk below covers class formation by
+      // fold as well as by assertion.
+      const alice = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "shared" },
+      );
+      const acme = await store.nodes.Company.create(
+        { name: "Acme" },
+        { id: "shared" },
+      );
+      const bob = await store.nodes.Person.create({ name: "Bob" }, { id: "b" });
+      const carol = await store.nodes.Person.create(
+        { name: "Carol" },
+        { id: "c" },
+      );
+      const dave = await store.nodes.Person.create(
+        { name: "Dave" },
+        { id: "d" },
+      );
+      const references = [
+        { kind: "Person", id: "shared" },
+        { kind: "Company", id: "shared" },
+        { kind: "Person", id: "b" },
+        { kind: "Person", id: "c" },
+        { kind: "Person", id: "d" },
+      ] as const satisfies readonly Ref[];
+
+      async function expectProbeAgreesWithLedger(
+        live: readonly (typeof references)[number][],
+      ): Promise<void> {
+        for (const [index, first] of live.entries()) {
+          for (const second of live.slice(index + 1)) {
+            const separating = await ledgerSeparatingAssertionIds(
+              store,
+              first,
+              second,
+            );
+            expect({
+              first,
+              second,
+              different: await store.identity.areDifferent(first, second),
+            }).toEqual({ first, second, different: separating.length > 0 });
+          }
+        }
+      }
+
+      await expectProbeAgreesWithLedger(references);
+
+      const { assertion: separation } = await store.identity.assertDifferent(
+        alice,
+        bob,
+      );
+      await expectProbeAgreesWithLedger(references);
+
+      // The fused class inherits the separation: `acme` shares `alice`'s class
+      // through the fold, and `carol` joins it by assertion.
+      await store.identity.assertSame(alice, carol);
+      await expectProbeAgreesWithLedger(references);
+
+      // The precheck must refuse exactly what the ledger says it should, with
+      // the assertion the ledger names.
+      const conflict = await store.identity
+        .assertSame(acme, bob)
+        .catch((error: unknown) => error);
+      expect(conflict).toMatchObject({
+        details: {
+          operation: "assertSame",
+          reason: "different-assertion",
+          conflictingAssertionId: separation.id,
+        },
+      });
+      expect(
+        await ledgerSeparatingAssertionIds(store, acme, bob),
+      ).toStrictEqual([separation.id]);
+
+      // A second witness for the same class pair: the relation records one row
+      // for both, so retracting one must not clear the separation.
+      const { assertion: second } = await store.identity.assertDifferent(
+        carol,
+        bob,
+      );
+      await expectProbeAgreesWithLedger(references);
+      await store.identity.retractAssertion(second.id);
+      await expectProbeAgreesWithLedger(references);
+
+      await store.identity.retractAssertion(separation.id);
+      await expectProbeAgreesWithLedger(references);
+
+      // Deleting an endpoint retires the assertion and the relation row with it.
+      await store.identity.assertDifferent(dave, bob);
+      await expectProbeAgreesWithLedger(references);
+      await store.nodes.Person.delete(dave.id);
+      await expectProbeAgreesWithLedger(
+        references.filter((ref) => ref.id !== dave.id),
+      );
+
+      await expect(
+        storeRuntime(store).validateIdentity(),
+      ).resolves.toBeUndefined();
+    });
+
+    it("refuses a different-ness read when the separation relation is gone", async () => {
+      const store = context.getStore();
+      const schema = createSqlSchema(store.backend.tableNames);
+      const executeStatement = requireStatementBackend(store.backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      await store.identity.assertDifferent(alice, bob);
+
+      // Renamed rather than dropped, and put back in a `finally`: backends
+      // whose harness resets by TRUNCATE over a fixed table list cannot recover
+      // from a relation this test destroyed.
+      const stashed = `${schema.tables.identitySeparation}_stashed`;
+      await executeStatement(
+        asCompiledStatementSql(sql`
+          ALTER TABLE ${schema.identitySeparationTable}
+          RENAME TO ${sql.identifier(stashed)}
+        `),
+      );
+      try {
+        // Not `false`. The ledger still says these two are held apart, and a
+        // read that cannot consult the relation has no basis for any answer.
+        const missing = {
+          details: {
+            code: "IDENTITY_STORAGE_MISSING",
+            graphId: store.graphId,
+            tables: [schema.tables.identitySeparation],
+          },
+        };
+        await expect(
+          store.identity.areDifferent(alice, bob),
+        ).rejects.toMatchObject(missing);
+        await expect(
+          store.identity.assertSame(alice, bob),
+        ).rejects.toMatchObject(missing);
+      } finally {
+        await executeStatement(
+          asCompiledStatementSql(sql`
+            ALTER TABLE ${sql.identifier(stashed)}
+            RENAME TO ${schema.identitySeparationTable}
+          `),
+        );
+      }
+
+      // Restored, and the refused write left nothing behind.
+      expect(await store.identity.areDifferent(alice, bob)).toBe(true);
       await expect(
         storeRuntime(store).validateIdentity(),
       ).resolves.toBeUndefined();
