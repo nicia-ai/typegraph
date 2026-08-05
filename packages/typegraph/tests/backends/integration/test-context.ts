@@ -7,7 +7,7 @@ import type {
 } from "../../../src/store/types";
 import { type IntegrationStore } from "./fixtures";
 
-type InspectableStore<G extends GraphDef> = Store<G> &
+export type InspectableStore<G extends GraphDef> = Store<G> &
   Readonly<{ backend: GraphBackend }>;
 
 export type InspectableHistoryStore<G extends GraphDef> = HistoryStore<G> &
