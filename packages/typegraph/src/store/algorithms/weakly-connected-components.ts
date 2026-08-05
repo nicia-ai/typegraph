@@ -5,9 +5,7 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
-  compileNodeKindSeedFilter,
   type InternalTraversalOptions,
-  normalizeNodeKinds,
   pickTemporalOptions,
   resolveMaxIterations,
 } from "./context";
@@ -17,6 +15,7 @@ import {
   frontierIndexIdentifier,
   type IterativeGraphRunContext,
   runIterativeGraphOperation,
+  seedWorkingTableFromNodes,
 } from "./iterative-graph-operation";
 import type {
   InternalWeaklyConnectedComponentsOptions,
@@ -52,7 +51,6 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
     DEFAULT_WCC_MAX_ITERATIONS,
     "weaklyConnectedComponents",
   );
-  const nodeKinds = normalizeNodeKinds(options.nodeKinds);
   const traversalOptions: InternalTraversalOptions = {
     edges: options.edges,
     direction: "both",
@@ -66,7 +64,7 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
     algorithm: "weaklyConnectedComponents",
     maxIterations,
     createWorkingTable,
-    initialize: (context) => initializeWorkingTable(context, nodeKinds),
+    initialize: (context) => initializeWorkingTable(context, options.nodeKinds),
     runRound: runLabelPropagationRound,
     hasConverged(state) {
       return state.changedCount === 0;
@@ -96,22 +94,16 @@ async function initializeWorkingTable(
   context: IterativeGraphRunContext,
   nodeKinds: readonly string[] | undefined,
 ): Promise<IterationState> {
-  const { operation, workingTable, graphId, runId } = context;
-  const nodeKindFilter = compileNodeKindSeedFilter(nodeKinds);
-  await context.executeTemporary(sql`
-    INSERT INTO ${workingTable}
-      (graph_id, run_id, node_id, node_kind, label_id, label_kind,
-       next_label_id, next_label_kind, improved_round)
-    SELECT
-      ${graphId}, ${runId}, n.id, n.kind, n.id, n.kind, n.id, n.kind, 0
-    FROM ${operation.schema.nodesTable} n
-    WHERE n.graph_id = ${graphId}
-      AND ${nodeKindFilter}
-      AND ${operation.nodeTemporalFilter}
-  `);
+  await seedWorkingTableFromNodes(context, nodeKinds, [
+    { name: "label_id", value: sql.raw("n.id") },
+    { name: "label_kind", value: sql.raw("n.kind") },
+    { name: "next_label_id", value: sql.raw("n.id") },
+    { name: "next_label_kind", value: sql.raw("n.kind") },
+    { name: "improved_round", value: sql.raw("0") },
+  ]);
   await context.executeTemporary(sql`
     CREATE INDEX ${frontierIndexIdentifier(context)}
-    ON ${workingTable} (graph_id, run_id, improved_round)
+    ON ${context.workingTable} (graph_id, run_id, improved_round)
   `);
 
   const workingTableSize = await countWorkingTableRows(context);

@@ -6,9 +6,7 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
-  compileNodeKindSeedFilter,
   type InternalTraversalOptions,
-  normalizeNodeKinds,
   pickTemporalOptions,
   resolveMaxIterations,
 } from "./context";
@@ -20,6 +18,7 @@ import {
   type NodeIdentityKey,
   nodeIdentityKey,
   runIterativeGraphOperation,
+  seedWorkingTableFromNodes,
 } from "./iterative-graph-operation";
 import type {
   InternalLabelPropagationOptions,
@@ -73,7 +72,6 @@ export async function executeLabelPropagation<G extends GraphDef>(
     DEFAULT_LABEL_PROPAGATION_MAX_ITERATIONS,
     "labelPropagation",
   );
-  const nodeKinds = normalizeNodeKinds(options.nodeKinds);
   const policy: RoundPolicy = {
     detector: createOscillationDetector(),
     maxIterations,
@@ -92,7 +90,8 @@ export async function executeLabelPropagation<G extends GraphDef>(
     algorithm: "labelPropagation",
     maxIterations,
     createWorkingTable,
-    initialize: (context) => initializeWorkingTables(context, nodeKinds),
+    initialize: (context) =>
+      initializeWorkingTables(context, options.nodeKinds),
     runRound: (context, state, iteration) =>
       runLabelPropagationRound(context, state, iteration, policy),
     hasConverged(state) {
@@ -184,26 +183,21 @@ async function initializeWorkingTables(
   context: IterativeGraphRunContext,
   nodeKinds: readonly string[] | undefined,
 ): Promise<IterationState> {
-  const { operation, workingTable, graphId, runId } = context;
-  const nodeKindFilter = compileNodeKindSeedFilter(nodeKinds);
-  await context.executeTemporary(sql`
-    INSERT INTO ${workingTable}
-      (graph_id, run_id, node_id, node_kind, label_id, label_kind,
-       next_label_id, next_label_kind, changed_round, active_round)
-    SELECT
-      ${graphId}, ${runId}, n.id, n.kind, n.id, n.kind, n.id, n.kind, 0, 1
-    FROM ${operation.schema.nodesTable} n
-    WHERE n.graph_id = ${graphId}
-      AND ${nodeKindFilter}
-      AND ${operation.nodeTemporalFilter}
-  `);
+  await seedWorkingTableFromNodes(context, nodeKinds, [
+    { name: "label_id", value: sql.raw("n.id") },
+    { name: "label_kind", value: sql.raw("n.kind") },
+    { name: "next_label_id", value: sql.raw("n.id") },
+    { name: "next_label_kind", value: sql.raw("n.kind") },
+    { name: "changed_round", value: sql.raw("0") },
+    { name: "active_round", value: sql.raw("1") },
+  ]);
   await context.executeTemporary(sql`
     CREATE INDEX ${frontierIndexIdentifier(context)}
-    ON ${workingTable} (graph_id, run_id, changed_round)
+    ON ${context.workingTable} (graph_id, run_id, changed_round)
   `);
   await context.executeTemporary(sql`
     CREATE INDEX ${activeIndexIdentifier(context)}
-    ON ${workingTable} (graph_id, run_id, active_round)
+    ON ${context.workingTable} (graph_id, run_id, active_round)
   `);
   const neighborTable = neighborTableIdentifier(context);
   await context.executeTemporary(sql`
@@ -215,11 +209,11 @@ async function initializeWorkingTables(
       PRIMARY KEY (target_kind, target_id, neighbor_kind, neighbor_id)
     )
   `);
-  for (const edgeKinds of operation.edgeKindChunks) {
+  for (const edgeKinds of context.operation.edgeKindChunks) {
     await materializeChunkNeighbors(context, edgeKinds);
   }
   const analyzeNeighbors =
-    operation.ctx.dialect.analyzeTemporaryTable(neighborTable);
+    context.operation.ctx.dialect.analyzeTemporaryTable(neighborTable);
   if (analyzeNeighbors !== undefined) {
     await context.executeTemporary(analyzeNeighbors);
   }

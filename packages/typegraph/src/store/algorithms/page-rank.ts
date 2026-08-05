@@ -6,9 +6,7 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
-  compileNodeKindSeedFilter,
   type InternalTraversalOptions,
-  normalizeNodeKinds,
   pickTemporalOptions,
   resolveMaxIterations,
 } from "./context";
@@ -21,6 +19,7 @@ import {
   type NodeIdentityKey,
   nodeIdentityKey,
   runIterativeGraphOperation,
+  seedWorkingTableFromNodes,
 } from "./iterative-graph-operation";
 import type {
   InternalPageRankOptions,
@@ -151,7 +150,7 @@ function resolvePageRankOptions<G extends GraphDef>(
       DEFAULT_MAX_ITERATIONS,
       algorithm,
     ),
-    nodeKinds: normalizeNodeKinds(options.nodeKinds),
+    nodeKinds: options.nodeKinds,
   };
 }
 
@@ -246,17 +245,12 @@ async function initializeWorkingTable(
   seeds: readonly NormalizedSeed[] | undefined,
 ): Promise<IterationState> {
   const { operation, workingTable, graphId, runId } = context;
-  const nodeKindFilter = compileNodeKindSeedFilter(nodeKinds);
-  await context.executeTemporary(sql`
-    INSERT INTO ${workingTable}
-      (graph_id, run_id, node_id, node_kind, score, next_score,
-       personalization, out_weight)
-    SELECT ${graphId}, ${runId}, n.id, n.kind, 0.0, 0.0, 0.0, 0.0
-    FROM ${operation.schema.nodesTable} n
-    WHERE n.graph_id = ${graphId}
-      AND ${nodeKindFilter}
-      AND ${operation.nodeTemporalFilter}
-  `);
+  await seedWorkingTableFromNodes(context, nodeKinds, [
+    { name: "score", value: sql.raw("0.0") },
+    { name: "next_score", value: sql.raw("0.0") },
+    { name: "personalization", value: sql.raw("0.0") },
+    { name: "out_weight", value: sql.raw("0.0") },
+  ]);
 
   const workingTableSize = await countWorkingTableRows(context);
   if (workingTableSize === 0) {
