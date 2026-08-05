@@ -16,10 +16,9 @@ import type { createStore } from "../../../src/store";
 import { createStoreWithSchema } from "../../../src/store";
 import { type FulltextSearchHit } from "../../../src/store/search";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const Document = defineNode("Document", {
   schema: z.object({
@@ -54,11 +53,9 @@ let pool: Pool | undefined;
 let postgresAvailable = false;
 
 beforeAll(async () => {
-  // NOTE: do not DROP tables here — `postgres-backend.test.ts` runs in
-  // parallel against the same database and also owns the schema. The
-  // generated migration SQL uses `CREATE TABLE IF NOT EXISTS` so it's
-  // safe to run alongside; per-test isolation is handled by TRUNCATE in
-  // `beforeEach` below.
+  // The generated migration SQL uses `CREATE TABLE IF NOT EXISTS`, so it
+  // brings this suite's own database up to shape without dropping anything;
+  // per-test isolation is handled by TRUNCATE in `beforeEach` below.
   //
   // Gated on POSTGRES_URL so `pnpm test:unit` doesn't try to attach to a
   // stray Docker Postgres and race other postgres files.

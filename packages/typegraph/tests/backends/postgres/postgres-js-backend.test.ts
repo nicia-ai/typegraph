@@ -7,10 +7,9 @@
  * driver-agnostic behavior end-to-end.
  *
  * Skipped automatically unless `POSTGRES_URL` is set (or the
- * `scripts/test-postgres.sh` harness is used). Targets the same database
- * as `postgres-backend.test.ts`; both files use `CREATE TABLE IF NOT
- * EXISTS` DDL and per-test TRUNCATE, and the harness runs files
- * serially.
+ * `scripts/test-postgres.sh` harness is used). Runs against its own
+ * database (see `tests/postgres-test-database.ts`), so its schema setup
+ * cannot collide with `postgres-backend.test.ts`.
  */
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres, { type Sql } from "postgres";
@@ -32,12 +31,11 @@ import {
 } from "../../../src/query/sql-intent";
 import { createStore } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 let sharedSql: Sql | undefined;
 let sharedDb: PostgresJsDatabase | undefined;

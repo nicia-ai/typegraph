@@ -28,12 +28,17 @@ fi
 
 # Run all postgres tests (backend-specific, integration, and graph-merge).
 #
-# `--no-file-parallelism` serializes test-file execution: every PG test
-# suite targets the same `typegraph_test` database, and several files'
-# `beforeAll` hooks run schema-destructive DDL (DROP TABLE). Running
-# files in parallel is a recipe for flaky mid-test table disappearance.
-# (Graph-merge fixtures isolate per-fixture schemas, but each shard still keeps
-# its own database lane serialized for the same connection-budget reasons.)
+# Each suite provisions its own database off this URL (see
+# `tests/postgres-test-database.ts`), so the schema-destructive DDL in their
+# `beforeAll`/`beforeEach` hooks can no longer reach another suite's tables.
+# Isolation therefore holds by construction, and running any subset of these
+# files in parallel — the usual way to reproduce one failure — is safe.
+#
+# `--no-file-parallelism` stays for the CONNECTION BUDGET, not for isolation:
+# every worker holds at least one pool against the same server, the
+# graph-merge property fixtures keep several backends alive at once, and
+# `max_connections` is 100 ("sorry, too many clients already"). Graph-merge
+# fixtures additionally isolate per-fixture schemas.
 #
 # With POSTGRES_URL set, the graph-merge backendMatrix() gains its
 # server-Postgres entry, so those suites run on SQLite, PGlite, AND the

@@ -32,10 +32,9 @@ import { embedding } from "../../../src/core/embedding";
 import { defineGraph, defineNode } from "../../../src/index";
 import { createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const GRAPH_ID = "filtered_ann_recall";
 const FAN_SIZE = 200;

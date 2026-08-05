@@ -112,6 +112,51 @@ pnpm test:coverage
 PostgreSQL example runner intentionally uses `POSTGRES_URL` so it can exercise
 the same caller-supplied connection configuration shown to users.
 
+### Per-suite PostgreSQL databases
+
+Every server-PostgreSQL suite owns the graph tables it operates on: `beforeEach`
+hooks `TRUNCATE` them, `beforeAll` hooks re-run the migration SQL, and a few
+suites `DROP` them outright. To make that ownership true rather than assumed,
+each test *file* runs against its own database, named after the file and
+recreated on demand from the `POSTGRES_URL` database:
+
+```text
+POSTGRES_URL=…/typegraph_test  ->  typegraph_test__postgres_backend
+                                   typegraph_test__identity_enablement_lock
+                                   …
+```
+
+Suites opt in by resolving their connection URL through the shared helper
+instead of reading `POSTGRES_URL` directly:
+
+```typescript
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
+```
+
+Consequences worth knowing:
+
+- **A new PostgreSQL suite must bootstrap its own tables** (usually
+  `await pool.query(generatePostgresMigrationSQL())` in `beforeAll`). It cannot
+  inherit them from whichever suite happened to run first.
+- **The `POSTGRES_URL` role needs `CREATEDB`.** Set
+  `TYPEGRAPH_TEST_SHARED_DATABASE=1` to opt out and run every suite against the
+  base database — the pre-isolation behaviour, including its cross-suite
+  `TRUNCATE`/`DROP` hazards.
+- **One vitest invocation at a time per `POSTGRES_URL`.** Two invocations
+  resolve the same suite to the same database name, and provisioning drops it
+  with `WITH (FORCE)`. Concurrent lanes (for example one per worktree) must use
+  separate base databases.
+- The per-suite databases are deliberately left behind so a failure stays
+  inspectable; the next run recreates them. The Docker lane is ephemeral, so
+  this only accumulates on a long-lived external server.
+
+`scripts/test-postgres.sh` still passes `--no-file-parallelism`, now purely for
+the connection budget (`max_connections` is 100 and each worker holds pools),
+not for isolation. Reproducing a single failure with a parallel invocation of a
+few files is safe.
+
 ## Coverage
 
 We use [@vitest/coverage-v8](https://vitest.dev/guide/coverage) for coverage reporting.

@@ -39,6 +39,7 @@ import { embedding } from "../src/core/embedding";
 import { createStoreWithSchema } from "../src/store";
 import { type VectorSearchOptions } from "../src/store/search";
 import { requireDefined } from "../src/utils/presence";
+import { provisionPostgresTestDatabase } from "./postgres-test-database";
 
 const GRAPH_ID = "search_pushdown";
 const FIELD_PATH = "embedding";
@@ -278,12 +279,13 @@ async function assertFilteredLegs(store: Store): Promise<void> {
 // Suite
 // ============================================================
 
+// Resolving this suite's own Postgres database needs a top-level await, so it
+// lives at module scope and the suite body closes over it.
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
+
 describe("facade search filter pushdown", () => {
   const libsql = libsqlDescriptor();
 
-  const TEST_DATABASE_URL =
-    process.env["POSTGRES_URL"] ??
-    "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
   let postgresPool: Pool | undefined;
 
   beforeAll(async () => {

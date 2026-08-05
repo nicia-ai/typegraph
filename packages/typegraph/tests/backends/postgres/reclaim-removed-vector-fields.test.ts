@@ -18,10 +18,9 @@ import { createBackendOverlay } from "../../../src/backend/types";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const GRAPH_ID = "reclaim_vec_pg";
 
@@ -69,7 +68,7 @@ beforeEach(async () => {
   if (sharedPool === undefined) return;
   // Clear the durable contribution markers (#135) alongside dropping the
   // per-field tables below: this suite drops `tg_vec_*` tables directly
-  // (bypassing reclaim), so a marker left behind on this shared database
+  // (bypassing reclaim), so a marker left behind by an earlier test
   // would outlive its table and make a later evolve()/createStoreWithSchema
   // trust the marker and skip re-creating the table.
   await sharedPool.query(

@@ -33,6 +33,7 @@ import { type GraphBackend } from "../../src/backend/types";
 import { embedding } from "../../src/core/embedding";
 import { createStoreWithSchema } from "../../src/store";
 import { requireDefined } from "../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../postgres-test-database";
 
 const GRAPH_ID = "l2_score_scale_parity";
 const FIELD_PATH = "embedding";
@@ -114,10 +115,17 @@ async function collectSqliteVec(): Promise<BackendResult> {
   }
 }
 
+// Resolving this suite's own Postgres database needs a top-level await, so it
+// lives at module scope and the suite body closes over it. `undefined` keeps
+// the "Postgres not configured" leg of the matrix reporting a skip.
+const TEST_DATABASE_URL =
+  process.env["POSTGRES_URL"] ?
+    await provisionPostgresTestDatabase(import.meta.url)
+  : undefined;
+
 describe("cross-backend l2 score-scale parity", () => {
   const temporaryDir = mkdtempSync(path.join(tmpdir(), "tg-l2-parity-"));
 
-  const TEST_DATABASE_URL = process.env["POSTGRES_URL"];
   let postgresPool: Pool | undefined;
 
   beforeAll(async () => {

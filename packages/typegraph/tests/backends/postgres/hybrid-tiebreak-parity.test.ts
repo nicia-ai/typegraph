@@ -32,10 +32,9 @@ import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { type GraphBackend } from "../../../src/backend/types";
 import { embedding } from "../../../src/core/embedding";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const EMBEDDING_DIMENSIONS = 3;
 const TIED_EMBEDDING: readonly number[] = [1, 0, 0];
