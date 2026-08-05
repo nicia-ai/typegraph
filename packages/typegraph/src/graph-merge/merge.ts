@@ -126,6 +126,7 @@ import type {
   StagedModifiedNode,
   StagedNewEdge,
   StagedNewNode,
+  StagedRetraction,
   StagingSet,
 } from "./staging";
 import { stageBranches } from "./staging";
@@ -941,76 +942,55 @@ function planMerge<G extends GraphDef>(
     nodeDeletions.set(mergeKey(deletion.kind, deletion.id), deletion.kind);
   }
   // A node soft-delete CASCADES: it ends every open assertion touching the
-  // node, so the deleting branch's diff stages those endings as identity
-  // retractions with no marker distinguishing cascade from intent. When the
-  // delete/modify resolution OVERRULES the deletion ("flag"/"modifyWins"
-  // keep the modification), applying the cascaded retraction would end the
-  // resurrected node's assertions anyway — the losing deletion's side effect
-  // outliving the decision. Drop retractions touching an overruled deletion,
-  // visibly, so the node survives WITH its identity truth.
-  const overruledDeletions = new Set<MergeKey>(
-    staging.deletedNodes
-      .map((deletion) => mergeKey(deletion.node.kind, deletion.node.id))
-      .filter((key) => !nodeDeletions.has(key)),
+  // node, at the node's own deletion instant. The diff derives that cause and
+  // stages the ending as a `cascade` retraction naming the deleted node
+  // (StagedRetraction.cause); every other ending is the branch's own act and is
+  // staged `explicit`.
+  //
+  // A cascade's fate therefore belongs to the deletion that caused it. When the
+  // delete/modify resolution OVERRULES that deletion ("flag"/"modifyWins" keep
+  // the modification), applying the ending anyway would let the losing
+  // deletion's side effect outlive the decision and strip the resurrected
+  // node's identity truth — so the ending is dropped with its cause, visibly.
+  // A retraction survives as soon as ONE branch staged it explicitly, or one
+  // cause deletion survived: those are intents the deletion decision does not
+  // speak to.
+  const anyDeletionOverruled = staging.deletedNodes.some(
+    (deletion) =>
+      !nodeDeletions.has(mergeKey(deletion.node.kind, deletion.node.id)),
   );
-  // Provenance decides which retractions are cascade artifacts. A retraction
-  // is dropped ONLY when every branch that staged it can be explained as
-  // "cascade of an overruled deletion": that branch deleted an endpoint of
-  // the assertion, and every endpoint it deleted was overruled. A contributor
-  // that deleted NO endpoint retracted independently — its intent survives —
-  // and a contributor whose endpoint deletion SURVIVED has a legitimate
-  // cascade. (A branch that explicitly retracted and then deleted the same
-  // endpoint is indistinguishable from a pure cascade in a snapshot diff;
-  // the conservative drop-and-report stands for that narrower ambiguity.)
-  const deletionsByBranch = new Map<BranchId, Set<MergeKey>>();
-  for (const deletion of staging.deletedNodes) {
-    const key = mergeKey(deletion.node.kind, deletion.node.id);
-    const keys =
-      deletionsByBranch.get(deletion.branchId) ?? new Set<MergeKey>();
-    keys.add(key);
-    deletionsByBranch.set(deletion.branchId, keys);
-  }
-  const retractionContributors = new Map<string, Set<BranchId>>();
+  const stagedRetractionsById = new Map<string, StagedRetraction[]>();
   for (const staged of staging.retractedIdentityAssertions) {
-    const contributors =
-      retractionContributors.get(staged.assertion.id) ?? new Set<BranchId>();
-    contributors.add(staged.branchId);
-    retractionContributors.set(staged.assertion.id, contributors);
+    const contributions = stagedRetractionsById.get(staged.assertion.id) ?? [];
+    contributions.push(staged);
+    stagedRetractionsById.set(staged.assertion.id, contributions);
   }
   const overruledRetractionDrops: DroppedItem[] = [];
   const survivingRetractions =
-    overruledDeletions.size === 0 ?
-      identity.retractions
-    : identity.retractions.filter((retraction) => {
-        const endpointKeys = [
-          mergeKey(retraction.a.kind, retraction.a.id),
-          mergeKey(retraction.b.kind, retraction.b.id),
-        ];
-        if (!endpointKeys.some((key) => overruledDeletions.has(key))) {
-          return true;
-        }
-        const contributors = retractionContributors.get(retraction.id);
-        const cascadeOnly =
-          contributors !== undefined &&
-          [...contributors].every((branchId) => {
-            const deleted = deletionsByBranch.get(branchId);
-            if (deleted === undefined) return false;
-            const deletedEndpoints = endpointKeys.filter((key) =>
-              deleted.has(key),
-            );
-            return (
-              deletedEndpoints.length > 0 &&
-              deletedEndpoints.every((key) => !nodeDeletions.has(key))
-            );
-          });
-        if (!cascadeOnly) return true;
+    anyDeletionOverruled ?
+      identity.retractions.filter((retraction) => {
+        const contributions = stagedRetractionsById.get(retraction.id) ?? [];
+        const everyContributionOverruled =
+          contributions.length > 0 &&
+          contributions.every(
+            (staged) =>
+              staged.cause.kind === "cascade" &&
+              !nodeDeletions.has(
+                mergeKey(
+                  staged.cause.deletedNode.kind,
+                  staged.cause.deletedNode.id,
+                ),
+              ),
+          );
+        if (!everyContributionOverruled) return true;
         overruledRetractionDrops.push({
           kind: "identity",
           id: retraction.id,
           reason: RETRACTION_DELETION_OVERRULED_DROP_REASON,
         });
         return false;
-      });
+      })
+    : identity.retractions;
   for (const modification of deleteModify.survivingModifications) {
     recordProvenance(
       "node",

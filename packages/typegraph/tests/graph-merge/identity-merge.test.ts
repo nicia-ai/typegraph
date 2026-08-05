@@ -695,7 +695,12 @@ function stagingWithIdentityChanges(
     modifiedEdges: [],
     deletedEdges: [],
     newIdentityAssertions: newAssertions,
-    retractedIdentityAssertions: retractedAssertions,
+    // These fixtures stage no node deletion, so every retraction in them is a
+    // branch's own act — the cause a real diff would derive for it.
+    retractedIdentityAssertions: retractedAssertions.map((staged) => ({
+      ...staged,
+      cause: { kind: "explicit" } as const,
+    })),
     baseIdentityAssertions: retractedAssertions.map(
       (staged) => staged.assertion,
     ),

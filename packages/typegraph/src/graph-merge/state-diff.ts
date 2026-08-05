@@ -42,7 +42,11 @@ import type {
   Store,
   TransactionBackend,
 } from "./typegraph-internal";
-import { getEdgeKinds, getNodeKinds } from "./typegraph-internal";
+import {
+  canonicalizeDatabaseTimestamp,
+  getEdgeKinds,
+  getNodeKinds,
+} from "./typegraph-internal";
 import { storeBackend, storeRuntime } from "./typegraph-internal";
 
 /**
@@ -113,7 +117,57 @@ export type ChangedNode = Readonly<{
 export type DeletedNode = Readonly<{
   id: NodeId<NodeType>;
   kind: string;
+  /**
+   * The instant the fork soft-deleted the node, read from its own row, or
+   * `undefined` when the fork carries no row at all (a HARD delete, which
+   * removes the row rather than tombstoning it).
+   *
+   * This is the deleting event's instant, and the soft-delete cascade ends the
+   * node's open identity assertions at exactly it (see `detachIdentityForNode`),
+   * which is what lets {@link RetractionCause} tell a cascade ending apart from
+   * an explicit retraction.
+   */
+  deletedAt: string | undefined;
 }>;
+
+/** A node reference naming the endpoint whose deletion cascaded. */
+type CascadeCauseNode = Readonly<{ kind: string; id: string }>;
+
+/**
+ * Why an assertion stopped being current in the fork.
+ *
+ * `cascade` is DERIVED, not guessed: a node soft-delete ends every open
+ * assertion touching that node at the node's own `deleted_at`, so an ended
+ * assertion whose `valid_to` equals a deleted endpoint's `deleted_at` was ended
+ * BY that deletion. An assertion the fork retracted explicitly carries its own
+ * EARLIER end instant and does not match — including the same-branch
+ * retract-then-delete sequence, where the explicit retraction closed the row
+ * before the delete ran, so the cascade never touched it.
+ *
+ * Two cases are genuinely undecidable and resolve to `cascade`, the
+ * conservative side (a dropped ending keeps identity truth; a wrongly kept one
+ * destroys it):
+ *
+ *   - a HARD delete physically removes every assertion row touching the node,
+ *     erasing the end instant along with any earlier explicit retraction of the
+ *     same row — a hard delete is then the only thing that can have produced
+ *     the retraction;
+ *   - an explicit retraction in the SAME MILLISECOND as the delete that
+ *     followed it is indistinguishable from the cascade at the stored
+ *     timestamps' resolution.
+ */
+export type RetractionCause =
+  | Readonly<{ kind: "explicit" }>
+  | Readonly<{ kind: "cascade"; deletedNode: CascadeCauseNode }>;
+
+/** An assertion the fork stopped asserting, with the cause of its ending. */
+export type RetractedAssertion = Readonly<{
+  assertion: IdentityTransferAssertion;
+  cause: RetractionCause;
+}>;
+
+/** The `explicit` cause — a single shared value; the variant carries no data. */
+const EXPLICIT_RETRACTION: RetractionCause = { kind: "explicit" };
 
 /** An edge present and live only on one side of the diff. */
 export type ChangedEdge = Readonly<{
@@ -168,10 +222,14 @@ export type StateDiff = Readonly<{
    * the ledger's own {@link IdentityTransferAssertion} shape — the same
    * records the merge commit hands back to the identity import — so the diff
    * never re-declares (and can never drift from) the assertion contract.
+   *
+   * Each retraction additionally carries its {@link RetractionCause}, so the
+   * merge planner can tie a cascade ending's fate to the deletion that caused
+   * it instead of inferring intent from branch-level provenance.
    */
   identity: Readonly<{
     new: readonly IdentityTransferAssertion[];
-    retracted: readonly IdentityTransferAssertion[];
+    retracted: readonly RetractedAssertion[];
   }>;
   /**
    * `(kind, id) -> version` for every fork-store node observed during this diff
@@ -334,7 +392,14 @@ function diffNodeKind(
     }
     const forkRow = forkIndex.get(baseRow.id);
     if (forkRow === undefined || !isLive(forkRow)) {
-      deleted.push({ id: baseRow.id as NodeId<NodeType>, kind });
+      deleted.push({
+        id: baseRow.id as NodeId<NodeType>,
+        kind,
+        deletedAt:
+          forkRow === undefined ? undefined : (
+            canonicalizeDatabaseTimestamp(forkRow.deleted_at)
+          ),
+      });
     }
   }
 
@@ -407,6 +472,87 @@ function diffEdgeKind(
   }
 
   return { new: created, modified, deleted };
+}
+
+/**
+ * Classifies ONE retracted assertion against this fork's node deletions.
+ *
+ * The rule is the derivation documented on {@link RetractionCause}, evaluated
+ * endpoint-first in `(a, b)` order so a retraction whose BOTH endpoints were
+ * deleted at the same instant names a deterministic cause:
+ *
+ *   - a soft-deleted endpoint whose `deleted_at` equals the assertion's end
+ *     instant in the fork ended it — `cascade`. An end instant STRICTLY BEFORE
+ *     the deletion cannot have come from it, so it is the branch's own act;
+ *   - a hard-deleted endpoint (no fork row) with no surviving assertion row to
+ *     read an end instant from can only have ended it — `cascade`;
+ *   - anything else the fork did to the assertion was its own act —
+ *     `explicit`.
+ *
+ * @param forkEndInstants End instant per assertion id as stored in the FORK,
+ *   from the fork's archival ledger read. A missing entry means the fork has no
+ *   row for that id at all (hard-deleted, or replaced under the same id).
+ */
+function classifyRetraction(
+  assertion: IdentityTransferAssertion,
+  deletedByKey: ReadonlyMap<MergeKey, DeletedNode>,
+  forkEndInstants: ReadonlyMap<string, string | undefined>,
+): RetractionCause {
+  const forkEndInstant = forkEndInstants.get(assertion.id);
+  const hasForkRow = forkEndInstants.has(assertion.id);
+  for (const endpoint of [assertion.a, assertion.b]) {
+    const deletion = deletedByKey.get(mergeKey(endpoint.kind, endpoint.id));
+    if (deletion === undefined) {
+      continue;
+    }
+    const endedByThisDeletion =
+      deletion.deletedAt === undefined ?
+        !hasForkRow
+      : forkEndInstant === deletion.deletedAt;
+    if (endedByThisDeletion) {
+      return {
+        kind: "cascade",
+        deletedNode: { kind: deletion.kind, id: deletion.id },
+      };
+    }
+  }
+  return EXPLICIT_RETRACTION;
+}
+
+/**
+ * Classifies every retraction in one fork.
+ *
+ * The fork's ARCHIVAL ledger (current rows plus ended ones) is read only when a
+ * cascade is possible at all — a fork that deleted no node, or retracted
+ * nothing, cannot have produced one, and the read is a full table scan of the
+ * fork's assertions.
+ */
+async function classifyRetractions<G extends GraphDef>(
+  forkStore: Store<G>,
+  retracted: readonly IdentityTransferAssertion[],
+  deletedNodes: readonly DeletedNode[],
+): Promise<readonly RetractedAssertion[]> {
+  if (retracted.length === 0 || deletedNodes.length === 0) {
+    return retracted.map((assertion) => ({
+      assertion,
+      cause: EXPLICIT_RETRACTION,
+    }));
+  }
+  const deletedByKey = new Map<MergeKey, DeletedNode>(
+    deletedNodes.map((deletion) => [
+      mergeKey(deletion.kind, deletion.id),
+      deletion,
+    ]),
+  );
+  const forkArchival =
+    await storeRuntime(forkStore).readCurrentIdentityAssertions("archival");
+  const forkEndInstants = new Map<string, string | undefined>(
+    forkArchival.map((assertion) => [assertion.id, assertion.validTo]),
+  );
+  return retracted.map((assertion) => ({
+    assertion,
+    cause: classifyRetraction(assertion, deletedByKey, forkEndInstants),
+  }));
 }
 
 /** Stable id-ascending comparator over any `{ id: string }`. */
@@ -530,6 +676,28 @@ export async function diffAgainstBase<G extends GraphDef>(
     }
   }
 
+  // Ids present on BOTH sides are compared by COMPLETE truth, not presence: a
+  // fork can hard-delete an assertion's endpoint (physically removing the row),
+  // recreate it, and legally import the same id for different truth. Presence-
+  // only comparison would diff that replacement as empty and the merge would
+  // silently keep the base truth. A shared id with changed truth surfaces as
+  // BOTH retracted (the base row) and new (the fork row), so planning sees the
+  // replacement and can refuse unsupported id reuse as a typed conflict.
+  const retractedAssertions = baseIdentity
+    .filter((assertion) => {
+      const fork = forkIdentityById.get(assertion.id);
+      return (
+        fork === undefined ||
+        assertionTruthKey(fork) !== assertionTruthKey(assertion)
+      );
+    })
+    .toSorted((left, right) => compareStrings(left.id, right.id));
+  const classifiedRetractions = await classifyRetractions(
+    forkStore,
+    retractedAssertions,
+    deletedNodes,
+  );
+
   return {
     nodes: {
       new: newNodes.sort((left, right) => byId(left, right)),
@@ -559,15 +727,7 @@ export async function diffAgainstBase<G extends GraphDef>(
           );
         })
         .toSorted((left, right) => compareStrings(left.id, right.id)),
-      retracted: baseIdentity
-        .filter((assertion) => {
-          const fork = forkIdentityById.get(assertion.id);
-          return (
-            fork === undefined ||
-            assertionTruthKey(fork) !== assertionTruthKey(assertion)
-          );
-        })
-        .toSorted((left, right) => compareStrings(left.id, right.id)),
+      retracted: classifiedRetractions,
     },
     forkNodeVersions,
     forkEdgeSignatures,
