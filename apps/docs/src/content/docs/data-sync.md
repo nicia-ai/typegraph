@@ -119,6 +119,15 @@ const synced = await store.nodes.Document.bulkUpsertById(
 );
 ```
 
+A feed can deliver the same key twice in one page, so items are applied in
+order: the first item for an id creates or updates the row, and every later copy
+is an update over the value the earlier item wrote. The batch ends in the same
+state the equivalent sequence of `upsertById` calls would leave, whether or not
+the row existed before the batch. Because a later copy is an update, it merges
+over the earlier value — a field the last copy omits keeps what an earlier copy
+set. Edges follow the same rule, except that an update never repoints an edge:
+the endpoints of the first write stand.
+
 ### bulkDelete
 
 Deletes multiple nodes by ID. Silently ignores IDs that don't exist:

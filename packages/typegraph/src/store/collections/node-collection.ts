@@ -41,6 +41,7 @@ import {
   type UpdateNodeInput,
 } from "../types";
 import {
+  findRepeatedUpsertIds,
   shouldCoalesceUpsert,
   type UpsertDirtyCheck,
   type UpsertDirtyCheckFunction,
@@ -662,13 +663,52 @@ export function createNodeCollection<
         // once-prefetched row — otherwise [{x:B},{x:A}] on a row holding A would
         // coalesce the second item against the stale prefetched A and drop the
         // first item's write, breaking last-write-wins.
+        //
+        // A QUEUED CREATE is registered here too. Leaving it out queued a SECOND
+        // create for a repeated id whose row does not exist yet, and the create
+        // batch rejected it as "already exists". Registered, the later copy
+        // takes the update path against the queued create — creates run before
+        // updates, so the row is there by then — producing exactly the row that
+        // sequential `upsertById` calls produce.
+        //
+        // `props` is the running value the dirty check compares against. It is
+        // undefined when no value could be computed (coalescing off, or the
+        // check rejected the input): presence of the ENTRY is what routes a
+        // later copy away from a second create, while the props only decide
+        // coalescing, and an unknown running value simply never coalesces.
         const pending = new Map<
           string,
-          { props: Record<string, unknown>; sourceIndex: number }
+          { props: Record<string, unknown> | undefined; sourceIndex: number }
         >();
         // A coalesced item that matched an in-batch write resolves to that
         // write's result (filled once the writes run), not a fabricated row.
         const deferred: { index: number; sourceIndex: number }[] = [];
+
+        // A running value exists only to be dirty-checked, so a store without
+        // coalescing never needs to know which ids repeat.
+        const repeatedIds =
+          config.upsertDirtyCheck === undefined ?
+            new Set<string>()
+          : findRepeatedUpsertIds(items);
+
+        /**
+         * The dirty check for one item, or undefined when coalescing is off or
+         * the check rejected the input — a validation error must surface from
+         * the hooked write path, which re-validates and rejects the batch
+         * (matching flag-off), not from here.
+         */
+        function runDirtyCheck(
+          id: string,
+          currentProps: Record<string, unknown>,
+          inputProps: Record<string, unknown>,
+        ): UpsertDirtyCheck | undefined {
+          if (config.upsertDirtyCheck === undefined) return undefined;
+          try {
+            return config.upsertDirtyCheck(kind, id, currentProps, inputProps);
+          } catch {
+            return undefined;
+          }
+        }
 
         let itemIndex = 0;
         for (const item of items) {
@@ -679,6 +719,17 @@ export function createNodeCollection<
             toCreate.push({
               index: itemIndex,
               input: buildCreateInput(kind, item.props, item),
+            });
+            // A create merges over nothing, so the dirty check run against an
+            // EMPTY base is exactly the validated props the insert will store —
+            // the running value a later copy of this id compares against, and
+            // needed only when there IS a later copy.
+            pending.set(item.id, {
+              props:
+                repeatedIds.has(item.id) ?
+                  runDirtyCheck(item.id, {}, item.props)?.validatedProps
+                : undefined,
+              sourceIndex: itemIndex,
             });
             itemIndex++;
             continue;
@@ -691,24 +742,14 @@ export function createNodeCollection<
               requireDefined(original).deleted_at
             : undefined;
 
-          let dirty: UpsertDirtyCheck | undefined;
-          if (config.upsertDirtyCheck !== undefined) {
-            const currentProps =
-              pendingEntry?.props ??
-              rowPropsToObject(requireDefined(original).props);
-            try {
-              dirty = config.upsertDirtyCheck(
-                kind,
-                item.id,
-                currentProps,
-                item.props,
-              );
-            } catch {
-              // Validation error → fall through to the write path, which
-              // re-validates and rejects the batch (matching flag-off).
-              dirty = undefined;
-            }
-          }
+          const currentProps =
+            pendingEntry === undefined ?
+              rowPropsToObject(requireDefined(original).props)
+            : pendingEntry.props;
+          const dirty =
+            currentProps === undefined ? undefined : (
+              runDirtyCheck(item.id, currentProps, item.props)
+            );
 
           const coalesce =
             dirty?.unchanged === true &&
@@ -733,12 +774,10 @@ export function createNodeCollection<
               input: buildUpsertUpdateInput(kind, item.id, item.props, item),
               clearDeleted: deletedAt !== undefined,
             });
-            if (dirty !== undefined) {
-              pending.set(item.id, {
-                props: dirty.validatedProps,
-                sourceIndex: itemIndex,
-              });
-            }
+            pending.set(item.id, {
+              props: dirty?.validatedProps,
+              sourceIndex: itemIndex,
+            });
           }
           itemIndex++;
         }
@@ -762,7 +801,8 @@ export function createNodeCollection<
         }
 
         // Items that coalesced against an in-batch write take that write's
-        // result (now filled). Its sourceIndex is always a write slot.
+        // result (now filled). Its sourceIndex is always a write slot — a
+        // queued create or a queued update, both filled above.
         for (const { index, sourceIndex } of deferred) {
           results[index] = requireDefined(results[sourceIndex]);
         }

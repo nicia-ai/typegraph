@@ -34,6 +34,26 @@ export type UpsertDirtyCheckFunction = (
 ) => UpsertDirtyCheck;
 
 /**
+ * The ids that appear more than once in one bulk-upsert batch.
+ *
+ * A repeated id is the only case where a queued write's batch-local running
+ * value is ever read, and computing a queued CREATE's running value costs a Zod
+ * parse the insert will repeat. Batches with all-distinct ids — the common case —
+ * skip that parse entirely.
+ */
+export function findRepeatedUpsertIds(
+  items: readonly Readonly<{ id: string }>[],
+): Set<string> {
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item.id)) repeated.add(item.id);
+    seen.add(item.id);
+  }
+  return repeated;
+}
+
+/**
  * Whether one requested window endpoint differs from the stored one, compared as
  * instants rather than as driver text. An omitted request never changes anything.
  *
