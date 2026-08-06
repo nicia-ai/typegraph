@@ -417,6 +417,37 @@ function registerDuplicateIdentityTests(context: IntegrationTestContext): void {
         { entityType: "edge", kind: "knows", id: created.id },
       );
     });
+
+    it("names the refused insert, not a row, when it wrote more than one edge", async () => {
+      // The one shape whose `details.id` is absent, and it needs no race: a bulk
+      // edge create writes several rows in ONE statement, nothing probes the
+      // caller-supplied ids, and the engine reports that the statement collided
+      // without saying which row did. Same error, same code, `id` omitted rather
+      // than guessed.
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const taken = await store.edges.knows.create(alice, bob, {
+        since: "first",
+      });
+
+      const refused = store.edges.knows.bulkCreate([
+        { from: alice, to: bob, props: { since: "fresh" }, id: "bulk-fresh" },
+        { from: alice, to: bob, props: { since: "clash" }, id: taken.id },
+      ]);
+
+      const error = await refused.catch((error_: unknown) => error_);
+      expect(error).toBeInstanceOf(ValidationError);
+      const validation = error as ValidationError;
+      expect(validation.details.issues.map((issue) => issue.code)).toContain(
+        ENTITY_ALREADY_EXISTS_CODE,
+      );
+      expect(validation.details.entityType).toBe("edge");
+      expect(validation.details.kind).toBe("knows");
+      expect(validation.details.operation).toBe("create");
+      expect(validation.details.id).toBeUndefined();
+      expect(validation.message).toContain("one of the 2 knows ids");
+    });
   });
 }
 

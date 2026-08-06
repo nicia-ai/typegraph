@@ -23,6 +23,13 @@ export type Tables = SqliteTables | PostgresTables;
  * too. Accepting only these two — never
  * an arbitrary unique constraint on the relation — is what keeps a declared
  * `unique: true` index violation out of the duplicate-identity classification.
+ *
+ * One declared bound: PostgreSQL clips every identifier to 63 bytes, and clips
+ * the RELATION part to make room for the `_pkey` it appends, so a custom
+ * relation name long enough to overflow that (58+ bytes) is named something
+ * neither of these matches. Classification then simply does not happen and the
+ * driver failure surfaces as it did before — no misattribution, just no
+ * translation.
  */
 function primaryKeyConstraintNames(
   relation: string,

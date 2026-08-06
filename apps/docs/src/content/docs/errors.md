@@ -183,10 +183,12 @@ the engine's refusal is always what reports a taken edge id. All of these raise 
 same error, so a caller retrying a generated id needs one branch, not several.
 
 `details.id` names the taken id, and is present for every single-entity create.
-It is absent only when a BATCH create lost that race: the engine reports that the
-batch collided without saying which row did, and its transaction is already
-aborted, so there is nothing left to probe. Treat `details.id` as optional if you
-create in bulk.
+It is absent only when the refused statement inserted more than one row: the
+engine reports that the statement collided without saying which row did, and its
+transaction is already aborted, so there is nothing left to probe. No race is
+needed to reach that — a bulk create of edges, whose ids you supplied and which
+nothing probes, is refused this way on every backend. Treat `details.id` as
+optional if you create in bulk.
 
 This is about identity, not values. A conflict on a declared `unique` constraint
 raises `UniquenessError` instead, and a violated `unique: true` index declaration

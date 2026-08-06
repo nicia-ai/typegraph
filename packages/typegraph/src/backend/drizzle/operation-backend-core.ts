@@ -254,14 +254,12 @@ async function withDuplicateKeyClassification<T>(
   }
 }
 
-function attemptedNodes(
-  params: readonly InsertNodeParams[],
-): readonly AttemptedInsert[] {
-  return params.map((item) => ({ kind: item.kind, id: item.id }));
-}
-
-function attemptedEdges(
-  params: readonly InsertEdgeParams[],
+/**
+ * The entity refs of an insert's rows, copied out of the insert params so the
+ * error carries identity alone and never the props alongside it.
+ */
+function attemptedInserts(
+  params: readonly AttemptedInsert[],
 ): readonly AttemptedInsert[] {
   return params.map((item) => ({ kind: item.kind, id: item.id }));
 }
@@ -428,7 +426,7 @@ export function createCommonOperationBackend(
         {
           entity: "node",
           relation: operationStrategy.primaryKeyConstraints.nodes,
-          attempted: attemptedNodes([params]),
+          attempted: attemptedInserts([params]),
         },
       );
       if (!row)
@@ -452,7 +450,7 @@ export function createCommonOperationBackend(
       await withDuplicateKeyClassification(() => execution.execRun(query), {
         entity: "node",
         relation: operationStrategy.primaryKeyConstraints.nodes,
-        attempted: attemptedNodes([params]),
+        attempted: attemptedInserts([params]),
       });
     },
 
@@ -466,7 +464,7 @@ export function createCommonOperationBackend(
         await withDuplicateKeyClassification(() => execution.execRun(query), {
           entity: "node",
           relation: operationStrategy.primaryKeyConstraints.nodes,
-          attempted: attemptedNodes(chunk),
+          attempted: attemptedInserts(chunk),
         });
       }
     },
@@ -489,7 +487,7 @@ export function createCommonOperationBackend(
           {
             entity: "node",
             relation: operationStrategy.primaryKeyConstraints.nodes,
-            attempted: attemptedNodes(chunk),
+            attempted: attemptedInserts(chunk),
           },
         );
         allRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));
@@ -615,7 +613,7 @@ export function createCommonOperationBackend(
         {
           entity: "edge",
           relation: operationStrategy.primaryKeyConstraints.edges,
-          attempted: attemptedEdges([params]),
+          attempted: attemptedInserts([params]),
         },
       );
       if (!row)
@@ -639,7 +637,7 @@ export function createCommonOperationBackend(
       await withDuplicateKeyClassification(() => execution.execRun(query), {
         entity: "edge",
         relation: operationStrategy.primaryKeyConstraints.edges,
-        attempted: attemptedEdges([params]),
+        attempted: attemptedInserts([params]),
       });
     },
 
@@ -653,7 +651,7 @@ export function createCommonOperationBackend(
         await withDuplicateKeyClassification(() => execution.execRun(query), {
           entity: "edge",
           relation: operationStrategy.primaryKeyConstraints.edges,
-          attempted: attemptedEdges(chunk),
+          attempted: attemptedInserts(chunk),
         });
       }
     },
@@ -676,7 +674,7 @@ export function createCommonOperationBackend(
           {
             entity: "edge",
             relation: operationStrategy.primaryKeyConstraints.edges,
-            attempted: attemptedEdges(chunk),
+            attempted: attemptedInserts(chunk),
           },
         );
         allRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));

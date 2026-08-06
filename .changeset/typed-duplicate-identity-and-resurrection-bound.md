@@ -3,7 +3,7 @@
 ---
 
 Harden two failures at the operations/backend boundary: a create the engine
-refuses now reports the condition it actually hit, and the last write path that
+refuses now reports the condition it actually hit, and the last UPDATE path that
 could store an inverted valid-time window no longer can.
 
 **A create refused by the engine reports "already exists", not a raw driver
@@ -30,9 +30,11 @@ unique-index duplicate (2067) in the code itself.
 Every such refusal, from either route, now carries the new exported issue code
 `ENTITY_ALREADY_EXISTS`, so a caller can recognize it without matching on the
 message. `details.entityType` and `details.kind` say what was refused;
-`details.id` names the taken id, and is absent only when a BATCH insert lost the
-race, because the engine reports that the batch collided without saying which
-row did.
+`details.id` names the taken id, and is absent only when the refused statement
+inserted more than one row, because the engine reports that the statement
+collided without saying which row did. No race is needed to reach that: a bulk
+create of edges, whose ids the caller supplied and which nothing probes, is
+refused this way on every backend.
 
 The classification is scoped to the primary key on purpose. A `unique: true`
 index declaration materializes a UNIQUE INDEX on the same relation, and violating
@@ -58,7 +60,8 @@ the previous release exists to refuse. The operations layer now passes the
 instant it validated against explicitly, so the bound that is checked is the
 bound that is stored. Stating both endpoints is unaffected; the only change to a
 successful write is that a resurrection's `valid_from` is the operations layer's
-instant rather than the backend's, a difference of well under a millisecond.
+instant rather than the backend's — sampled a moment earlier inside the same
+locked write, before the uniqueness entries it re-checks and re-inserts.
 
 Edge resurrection was never exposed: an edge RETAINS its stored `valid_from`
 unless the write names a new one, so its guard measures against a value already

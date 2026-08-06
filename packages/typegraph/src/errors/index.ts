@@ -195,15 +195,14 @@ export const INVERTED_VALIDITY_WINDOW_CODE = "INVERTED_VALIDITY_WINDOW";
 /**
  * The stable {@link ValidationIssue.code} every "this id is already taken"
  * create refusal carries, whichever way the create found out: its own existence
- * probe, or the engine refusing the INSERT because a concurrent writer took the
- * id first. `ValidationError`'s own code is the family-wide `VALIDATION_ERROR`,
- * so the discriminator lives on the issue — mirroring
- * {@link INVERTED_VALIDITY_WINDOW_CODE}.
+ * probe, or the engine refusing the INSERT. `ValidationError`'s own code is the
+ * family-wide `VALIDATION_ERROR`, so the discriminator lives on the issue —
+ * mirroring {@link INVERTED_VALIDITY_WINDOW_CODE}.
  *
  * `details.entityType` says whether a node or an edge was refused and
  * `details.kind` names its kind. `details.id` names the taken id, and is absent
- * only when a BATCH insert lost the race: the engine reports that the batch
- * collided without saying which row did.
+ * only when the refused statement inserted MORE THAN ONE row: the engine reports
+ * that the statement collided without saying which row did.
  */
 export const ENTITY_ALREADY_EXISTS_CODE = "ENTITY_ALREADY_EXISTS";
 

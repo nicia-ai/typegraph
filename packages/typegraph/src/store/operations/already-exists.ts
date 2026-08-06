@@ -106,12 +106,14 @@ function isDuplicateKeyInsertError(
  * Rethrows a classified duplicate-key insert as {@link createAlreadyExistsError},
  * and anything else untouched.
  *
- * A single insert names the row it lost on exactly. A batch cannot: the engine
- * reports that the chunk collided without saying which row did, and the
- * transaction is already aborted, so there is nothing left to probe. The refusal
- * then names the chunk instead of inventing an attribution — same error type,
- * same issue code, `details.id` simply absent. Every batch here comes from one
- * collection, so the kind is always known.
+ * A single insert names the row it lost on exactly. A multi-row one cannot: the
+ * engine reports that the statement collided without saying which row did, and
+ * the transaction is already aborted, so there is nothing left to probe. The
+ * refusal then names the statement instead of inventing an attribution — same
+ * error type, same issue code, `details.id` simply absent. The count is the
+ * refused STATEMENT's rows, which is the caller's batch only until the backend
+ * chunks it, so the message claims no more than that. Every batch here comes
+ * from one collection, so the kind is always known.
  */
 function rethrowAsAlreadyExists(error: unknown, entity: KindEntity): never {
   if (!isDuplicateKeyInsertError(error, entity)) throw error;
@@ -131,7 +133,7 @@ function rethrowAsAlreadyExists(error: unknown, entity: KindEntity): never {
     entity,
     first.kind,
     undefined,
-    `one of the ${attempted.length} ${first.kind} ids written in this batch`,
+    `one of the ${attempted.length} ${first.kind} ids in the refused insert`,
     error,
   );
 }
