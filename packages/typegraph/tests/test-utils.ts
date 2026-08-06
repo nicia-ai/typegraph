@@ -18,7 +18,12 @@ import {
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
 import type { SqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import type { AdapterBackend, GraphBackend } from "../src/backend/types";
+import type {
+  AdapterBackend,
+  GraphBackend,
+  TransactionBackend,
+  TransactionOptions,
+} from "../src/backend/types";
 import {
   createRecordedInstant,
   type RecordedInstant,
@@ -27,6 +32,16 @@ import {
 import { requireDefined } from "../src/utils/presence";
 
 const backendsToClose: GraphBackend[] = [];
+
+/** A row carrying a validity window, as the backend returns it. */
+type ValidityWindowRow = Readonly<{
+  valid_from: string | undefined;
+  valid_to: string | undefined;
+}>;
+
+/** The id-keyed reads whose rows carry a validity window. */
+type ValidityWindowReads = Pick<GraphBackend, "getNode" | "getEdge"> &
+  Partial<Pick<GraphBackend, "getNodes" | "getEdges">>;
 
 export function recordedRevisionFromDriver(value: unknown): number {
   const revision =
@@ -281,6 +296,129 @@ export function disableTransactions(backend: GraphBackend): GraphBackend {
           ),
       }
     : {}),
+  };
+}
+
+/**
+ * Wraps a backend — and every transaction-scoped backend it hands out — so each
+ * `updateEdge` call is counted.
+ *
+ * Edges carry no version counter and `updated_at` collides within a millisecond,
+ * which is the resolution a repeated write runs at, so an exact write count is
+ * the only way to assert that an edge write did NOT happen. Wrapping the
+ * transaction too is what makes the count survive the one `bulkUpsertById` opens.
+ */
+export function withEdgeUpdateCounting(
+  base: GraphBackend,
+): Readonly<{ backend: GraphBackend; updates: () => number }> {
+  let updates = 0;
+  function countingUpdateEdge(
+    target: Pick<GraphBackend, "updateEdge">,
+  ): GraphBackend["updateEdge"] {
+    return (params) => {
+      updates += 1;
+      return target.updateEdge(params);
+    };
+  }
+  return {
+    backend: {
+      ...base,
+      updateEdge: countingUpdateEdge(base),
+      transaction: <T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+        options?: TransactionOptions,
+      ) =>
+        base.transaction<T>(
+          (txBackend) =>
+            fn({ ...txBackend, updateEdge: countingUpdateEdge(txBackend) }),
+          options,
+        ),
+    },
+    updates: () => updates,
+  };
+}
+
+/**
+ * The same instant in a different text form: `...T00:00:00.000+00:00` for
+ * `...T00:00:00.000Z`.
+ */
+function toZonedTimestampText(value: string | undefined): string | undefined {
+  if (!value?.endsWith("Z")) return value;
+  return `${value.slice(0, -1)}+00:00`;
+}
+
+function withZonedWindow<T extends ValidityWindowRow>(row: T): T {
+  return {
+    ...row,
+    valid_from: toZonedTimestampText(row.valid_from),
+    valid_to: toZonedTimestampText(row.valid_to),
+  };
+}
+
+/** Re-renders the validity window of every row the four id-keyed reads return. */
+function withZonedWindowReads<T extends ValidityWindowReads>(target: T): T {
+  return {
+    ...target,
+    getNode: async (graphId: string, kind: string, id: string) => {
+      const row = await target.getNode(graphId, kind, id);
+      return row === undefined ? undefined : withZonedWindow(row);
+    },
+    getEdge: async (graphId: string, id: string) => {
+      const row = await target.getEdge(graphId, id);
+      return row === undefined ? undefined : withZonedWindow(row);
+    },
+    ...(target.getNodes === undefined ?
+      {}
+    : {
+        getNodes: async (
+          graphId: string,
+          kind: string,
+          ids: readonly string[],
+        ) => {
+          const rows = await requireDefined(target.getNodes)(
+            graphId,
+            kind,
+            ids,
+          );
+          return rows.map((row) => withZonedWindow(row));
+        },
+      }),
+    ...(target.getEdges === undefined ?
+      {}
+    : {
+        getEdges: async (graphId: string, ids: readonly string[]) => {
+          const rows = await requireDefined(target.getEdges)(graphId, ids);
+          return rows.map((row) => withZonedWindow(row));
+        },
+      }),
+  };
+}
+
+/**
+ * Wraps a backend — and every transaction-scoped backend it hands out — so a
+ * stored validity window reaches the store as an EQUIVALENT INSTANT IN A
+ * DIFFERENT TEXT FORM.
+ *
+ * That is the shape a Postgres driver which returns a zoned string rather than a
+ * `Date` produces: `formatPostgresTimestamp` passes any "T"-bearing string
+ * through verbatim, so a window comparison ends up reading the caller's canonical
+ * bound against driver text. Every driver in the matrix normalizes `timestamptz`
+ * to a `Date` today, which is why comparing that text directly looked harmless —
+ * it agreed with the canonical comparison by luck. Simulating the other rendering
+ * is what turns the cross-dialect rule into something every backend can assert
+ * (issue #412).
+ */
+export function withZonedValidityWindowText(base: GraphBackend): GraphBackend {
+  return {
+    ...withZonedWindowReads(base),
+    transaction: <T>(
+      fn: (tx: TransactionBackend) => Promise<T>,
+      options?: TransactionOptions,
+    ) =>
+      base.transaction<T>(
+        (txBackend) => fn(withZonedWindowReads(txBackend)),
+        options,
+      ),
   };
 }
 

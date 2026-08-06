@@ -45,6 +45,10 @@ import {
   shouldCoalesceUpsert,
   type UpsertDirtyCheck,
   type UpsertDirtyCheckFunction,
+  type UpsertWindow,
+  upsertWindowChanges,
+  windowAfterUpsertCreate,
+  windowAfterUpsertUpdate,
 } from "./coalesce";
 import {
   resolveTemporalReadParams,
@@ -657,12 +661,15 @@ export function createNodeCollection<
           clearDeleted: boolean;
         }[] = [];
 
-        // Batch-local running state per id: the props the row would hold after
-        // the writes queued so far, and the item index that queued that write.
-        // A later same-id item coalesces against this running value, not the
-        // once-prefetched row — otherwise [{x:B},{x:A}] on a row holding A would
-        // coalesce the second item against the stale prefetched A and drop the
-        // first item's write, breaking last-write-wins.
+        // Batch-local running state per id: the props AND validity window the
+        // row would hold after the writes queued so far, and the item index that
+        // queued that write. A later same-id item coalesces against this running
+        // value, not the once-prefetched row — otherwise [{x:B},{x:A}] on a row
+        // holding A would coalesce the second item against the stale prefetched
+        // A and drop the first item's write, breaking last-write-wins. The same
+        // staleness applies to the window: a copy re-stating the bound the
+        // prefetched row held, after an earlier copy already moved it, must
+        // write it back rather than coalesce.
         //
         // A QUEUED CREATE is registered here too. Leaving it out queued a SECOND
         // create for a repeated id whose row does not exist yet, and the create
@@ -676,9 +683,14 @@ export function createNodeCollection<
         // check rejected the input): presence of the ENTRY is what routes a
         // later copy away from a second create, while the props only decide
         // coalescing, and an unknown running value simply never coalesces.
+        // `window` is always computed — unlike the props it costs no Zod parse.
         const pending = new Map<
           string,
-          { props: Record<string, unknown> | undefined; sourceIndex: number }
+          {
+            props: Record<string, unknown> | undefined;
+            window: UpsertWindow;
+            sourceIndex: number;
+          }
         >();
         // A coalesced item that matched an in-batch write resolves to that
         // write's result (filled once the writes run), not a fabricated row.
@@ -729,6 +741,7 @@ export function createNodeCollection<
                 repeatedIds.has(item.id) ?
                   runDirtyCheck(item.id, {}, item.props)?.validatedProps
                 : undefined,
+              window: windowAfterUpsertCreate(item),
               sourceIndex: itemIndex,
             });
             itemIndex++;
@@ -751,11 +764,26 @@ export function createNodeCollection<
               runDirtyCheck(item.id, currentProps, item.props)
             );
 
+          // The window the row holds going into this item: the prefetched row's,
+          // or the one the batch's last queued write for this id leaves behind.
+          const currentWindow: UpsertWindow =
+            pendingEntry === undefined ?
+              {
+                valid_from: requireDefined(original).valid_from,
+                valid_to: requireDefined(original).valid_to,
+              }
+            : pendingEntry.window;
+
+          // An explicit window blocks coalescing ONLY when it would change the
+          // window already held — the same rule, through the same comparison,
+          // that shouldCoalesceUpsert applies to a single upsert. Blocking on the
+          // mere PRESENCE of a bound (what this path used to do) rewrote version,
+          // history, and revision state for every re-stated row a caller happened
+          // to hand its own current window.
           const coalesce =
             dirty?.unchanged === true &&
             deletedAt === undefined &&
-            item.validFrom === undefined &&
-            item.validTo === undefined;
+            !upsertWindowChanges(item, currentWindow);
 
           if (coalesce) {
             if (pendingEntry === undefined) {
@@ -776,6 +804,13 @@ export function createNodeCollection<
             });
             pending.set(item.id, {
               props: dirty?.validatedProps,
+              // A resurrecting update rewrites BOTH bounds (buildUpdateNode's
+              // clearDeleted leg stamps `valid_from` and reopens `valid_to`);
+              // a live-row update moves only `valid_to`.
+              window:
+                deletedAt === undefined ?
+                  windowAfterUpsertUpdate(currentWindow, item)
+                : windowAfterUpsertCreate(item),
               sourceIndex: itemIndex,
             });
           }

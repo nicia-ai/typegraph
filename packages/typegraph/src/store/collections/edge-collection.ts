@@ -42,6 +42,10 @@ import {
   findRepeatedUpsertIds,
   type UpsertDirtyCheck,
   type UpsertDirtyCheckFunction,
+  type UpsertWindow,
+  upsertWindowChanges,
+  windowAfterUpsertCreate,
+  windowAfterUpsertUpdate,
 } from "./coalesce";
 import {
   resolveTemporalReadParams,
@@ -755,14 +759,19 @@ export function createEdgeCollection<
         }[] = [];
 
         // Batch-local running state per id so a repeated id coalesces against
-        // the value earlier items in this batch would write, preserving
-        // last-write-wins — and so a repeated id whose edge does not exist yet
-        // queues ONE create plus an update over it rather than two creates the
-        // create batch rejects as "already exists". See the node collection for
-        // the full rationale, including why `props` may be undefined.
+        // the props AND validity window earlier items in this batch would write,
+        // preserving last-write-wins — and so a repeated id whose edge does not
+        // exist yet queues ONE create plus an update over it rather than two
+        // creates the create batch rejects as "already exists". See the node
+        // collection for the full rationale, including why `props` may be
+        // undefined while `window` is always computed.
         const pending = new Map<
           string,
-          { props: Record<string, unknown> | undefined; sourceIndex: number }
+          {
+            props: Record<string, unknown> | undefined;
+            window: UpsertWindow;
+            sourceIndex: number;
+          }
         >();
         const deferred: { index: number; sourceIndex: number }[] = [];
 
@@ -818,6 +827,7 @@ export function createEdgeCollection<
                 repeatedIds.has(item.id) ?
                   runDirtyCheck(kind, item.id, {}, inputProps)?.validatedProps
                 : undefined,
+              window: windowAfterUpsertCreate(item),
               sourceIndex: itemIndex,
             });
             itemIndex++;
@@ -846,21 +856,29 @@ export function createEdgeCollection<
               )
             );
 
-          // An explicit window blocks coalescing ONLY when it would change
-          // the stored window: merge commits pass the staged survivor's
-          // window on every edge write, so a target edge staged back at
-          // itself (identical props AND identical window) must still
-          // coalesce instead of rewriting history and revision state. Against
-          // a QUEUED create there is no stored window to match yet, so any
-          // explicit bound counts as a change and the write happens.
-          const windowChanges =
-            (item.validFrom !== undefined &&
-              item.validFrom !== original?.valid_from) ||
-            (item.validTo !== undefined && item.validTo !== original?.valid_to);
+          // The window the edge holds going into this item: the prefetched row's,
+          // or the one the batch's last queued write for this id leaves behind.
+          const currentWindow: UpsertWindow =
+            pendingEntry === undefined ?
+              {
+                valid_from: requireDefined(original).valid_from,
+                valid_to: requireDefined(original).valid_to,
+              }
+            : pendingEntry.window;
+
+          // An explicit window blocks coalescing ONLY when it would change the
+          // window already held: merge commits pass the staged survivor's window
+          // on every edge write, so a target edge staged back at itself
+          // (identical props AND identical window) must still coalesce instead of
+          // rewriting history and revision state. The comparison is
+          // shouldCoalesceUpsert's own, which reads both sides as INSTANTS —
+          // comparing the driver's text directly (what this path used to do) let
+          // an identical re-stated window coalesce on one dialect and write on
+          // another.
           const coalesce =
             dirty?.unchanged === true &&
             deletedAt === undefined &&
-            !windowChanges;
+            !upsertWindowChanges(item, currentWindow);
 
           if (coalesce) {
             if (pendingEntry === undefined) {
@@ -881,6 +899,13 @@ export function createEdgeCollection<
             });
             pending.set(item.id, {
               props: dirty?.validatedProps,
+              // A resurrection rewrites both bounds only when it NAMES the lower
+              // one (buildUpdateEdge's clearDeleted leg); omitting `validFrom`
+              // keeps the stored window, exactly like a live-row update.
+              window:
+                deletedAt !== undefined && item.validFrom !== undefined ?
+                  windowAfterUpsertCreate(item)
+                : windowAfterUpsertUpdate(currentWindow, item),
               sourceIndex: itemIndex,
             });
           }

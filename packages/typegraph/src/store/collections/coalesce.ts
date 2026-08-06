@@ -54,6 +54,30 @@ export function findRepeatedUpsertIds(
 }
 
 /**
+ * A validity window as a row carries it, in the column names a backend returns —
+ * so a prefetched row is comparable without being reshaped.
+ *
+ * `undefined` means BOTH "no bound" (an open window) and "a bound this layer
+ * cannot know", and the two need no distinguishing: an absent bound never equals
+ * a requested one, so an item naming a bound against either always writes. That
+ * is what makes {@link windowAfterUpsertCreate} safe to leave `undefined` where
+ * the backend will stamp the write instant.
+ */
+export type UpsertWindow = Readonly<{
+  valid_from: string | undefined;
+  valid_to: string | undefined;
+}>;
+
+/** The window bounds an upsert item may request. */
+type RequestedWindow = Readonly<{ validFrom?: string; validTo?: string }>;
+
+/** A window to compare against — a row, or an {@link UpsertWindow}. */
+type CurrentWindow = Readonly<{
+  valid_from?: string | undefined;
+  valid_to?: string | undefined;
+}>;
+
+/**
  * Whether one requested window endpoint differs from the stored one, compared as
  * instants rather than as driver text. An omitted request never changes anything.
  *
@@ -75,6 +99,61 @@ function windowFieldChanges(
     return true;
   }
   return canonicalRequested !== canonicalizeDatabaseTimestamp(stored);
+}
+
+/**
+ * Whether an upsert item's requested window differs from the one its target
+ * already holds.
+ *
+ * THE window comparison: `upsertById` and both `bulkUpsertById` paths call this
+ * one function, so a re-stated window coalesces identically whether it arrives
+ * alone or inside a batch. Comparing as INSTANTS is what keeps one backend from
+ * writing where the other coalesces — the stored value arrives as the driver
+ * rendered it, and the dialects do not render a timestamp the same way (SQLite
+ * returns the written text; a Postgres driver renders `timestamptz` its own way,
+ * and one that hands back a zoned string rather than a `Date` hands back text
+ * that is equivalent to the canonical form without being identical to it).
+ */
+export function upsertWindowChanges(
+  requested: RequestedWindow | undefined,
+  current: CurrentWindow,
+): boolean {
+  return (
+    windowFieldChanges(requested?.validFrom, current.valid_from) ||
+    windowFieldChanges(requested?.validTo, current.valid_to)
+  );
+}
+
+/**
+ * The window a queued upsert CREATE — or a resurrection, which asserts a
+ * COMPLETE window — leaves the row holding, for a later item with the same id in
+ * the same batch to compare against.
+ *
+ * An omitted `validFrom` is stamped with the write instant by the backend, a
+ * value this layer cannot know, so it stays `undefined`. A later copy naming a
+ * lower bound therefore counts as a change and writes, rather than coalescing
+ * against a guess: the bulk path may spend a write the sequential path would
+ * skip, but it never skips one the sequential path makes.
+ */
+export function windowAfterUpsertCreate(
+  requested: RequestedWindow,
+): UpsertWindow {
+  return { valid_from: requested.validFrom, valid_to: requested.validTo };
+}
+
+/**
+ * The window a queued upsert UPDATE over a live row leaves it holding: the lower
+ * bound is history and never moves (only a resurrection rewrites `valid_from`),
+ * and the upper bound moves only when the item names one.
+ */
+export function windowAfterUpsertUpdate(
+  current: UpsertWindow,
+  requested: RequestedWindow,
+): UpsertWindow {
+  return {
+    valid_from: current.valid_from,
+    valid_to: requested.validTo ?? current.valid_to,
+  };
 }
 
 /**
@@ -105,15 +184,7 @@ export function shouldCoalesceUpsert(
   // reconciled end-of-validity, so a row written back with the window it
   // already holds (identical props AND identical window) must still coalesce
   // instead of rewriting version, history, and revision state.
-  //
-  // Both sides are canonicalized before comparison. The stored value reaches
-  // here as the driver rendered it, and the two dialects do not store a
-  // timestamp the same way (SQLite keeps the written text; a Postgres driver
-  // renders `timestamptz` its own way), so comparing as INSTANTS is what keeps
-  // one backend from writing where the other coalesces.
-  const windowChanges =
-    windowFieldChanges(options?.validFrom, existing.valid_from) ||
-    windowFieldChanges(options?.validTo, existing.valid_to);
+  const windowChanges = upsertWindowChanges(options, existing);
   if (
     runDirtyCheck === undefined ||
     existing.deleted_at !== undefined ||

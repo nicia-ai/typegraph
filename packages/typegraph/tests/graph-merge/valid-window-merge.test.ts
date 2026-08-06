@@ -64,6 +64,10 @@ import { asBranchId } from "../../src/graph-merge/types";
 import { WINDOW_NOT_APPLICABLE_DROP_REASON } from "../../src/graph-merge/valid-window";
 import { canonicalizeDatabaseTimestamp } from "../../src/utils/date";
 import { requireDefined } from "../../src/utils/presence";
+import {
+  withEdgeUpdateCounting,
+  withZonedValidityWindowText,
+} from "../test-utils";
 import { backendMatrix, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -406,11 +410,13 @@ describe.each(backendMatrix())(
 
     it("does not write when a branch re-states the end the target holds", async () => {
       const forkPoint = await seededForkPoint();
-      // A hand-seeded target with coalescing on: `branch()` clones do not inherit
-      // store options, and the option is only meaningful on the WRITE side.
-      const target = await seed(
-        await newStore({ coalesceUnchangedUpserts: true }),
-      );
+      // Coalescing OFF, like the two cases above: the committed target moved this
+      // end, which takes the row out of window resolution entirely, so a branch
+      // re-stating that same end is never staged and only the PLAN can keep the
+      // write from happening. The coalesce check's half of this shape — a
+      // re-stated end that IS staged, because the target holds it from an earlier
+      // delivery rather than from its own update — is the re-delivery pin below.
+      const target = await seed(await newStore());
       await target.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
       const versionBefore = (await nodeRow(target, "Patient", "pat-1")).version;
 
@@ -426,10 +432,8 @@ describe.each(backendMatrix())(
         }),
       );
 
-      // The reconciled end differs from BASE (so it IS passed to the upsert) but
-      // equals the committed one, so the coalesce check sees no window change and
-      // skips the write entirely — no version bump, no history row, no revision
-      // churn.
+      // Nothing reaches the write path at all — the version is the proof, since
+      // every node update bumps it — and the end the target authored still stands.
       expect((await nodeRow(target, "Patient", "pat-1")).version).toBe(
         versionBefore,
       );
@@ -828,6 +832,80 @@ describe.each(backendMatrix())(
         // The ending was branch A's only act, so it contributed nothing at all.
         expect(report.provenance.byBranch(BRANCH_A).nodeIds).toEqual([]);
       });
+    });
+
+    /**
+     * The coalesce contract for merge commits, end to end.
+     *
+     * A branch-created edge carries its OWN validity window into the commit, and
+     * the commit writes every survivor through `bulkUpsertById`. So a re-delivered
+     * merge re-states that edge against a target that already holds exactly that
+     * window — the shape an at-least-once merge pipeline produces. If the bulk path
+     * treats the re-statement as a change, an idempotent merge rewrites history and
+     * revision state for every edge it carried.
+     *
+     * `wrapTarget` decides how the target's backend renders the stored window,
+     * which makes this the end-to-end pin for issue #412: comparing an equivalent
+     * instant in a different text form must reach the same decision, or a merge is
+     * a no-op on one driver and a full rewrite on another.
+     */
+    async function assertRedeliveryWritesNothing(
+      wrapTarget: (backend: GraphBackend) => GraphBackend,
+    ): Promise<void> {
+      const forkPoint = await seededForkPoint();
+      const counter = withEdgeUpdateCounting(wrapTarget(await makeBackend()));
+      const [targetStore] = await createStoreWithSchema(
+        careGraph,
+        counter.backend,
+        { coalesceUnchangedUpserts: true },
+      );
+      const target = await seed(targetStore);
+
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      await branchA.store.nodes.Patient.update(PATIENT, { note: "seen" });
+      await branchA.store.edges.hadEncounter.create(
+        { kind: "Patient", id: "pat-2" },
+        { kind: "Encounter", id: "enc-1" },
+        { on: "2026-03-03" },
+        { id: "edge-authored", validTo: LATE },
+      );
+
+      async function deliver(): Promise<void> {
+        unwrap(
+          await mergeIncremental<CareGraph>({
+            forkPoint,
+            target,
+            branches: [branchA],
+            options: { branchOrder: BRANCH_ORDER },
+          }),
+        );
+      }
+
+      await deliver();
+      const nodeAfterFirst = await nodeRow(target, "Patient", "pat-1");
+      const updatesAfterFirst = counter.updates();
+      expect(await edgeEnd(target, "edge-authored")).toBe(LATE);
+
+      await deliver();
+
+      // Nothing changed between the two deliveries, so the second is not a write
+      // at all: no edge update, no node version bump, and the authored window
+      // still stands.
+      expect(counter.updates()).toBe(updatesAfterFirst);
+      const nodeAfterSecond = await nodeRow(target, "Patient", "pat-1");
+      expect(nodeAfterSecond.version).toBe(nodeAfterFirst.version);
+      expect(nodeAfterSecond.updated_at).toBe(nodeAfterFirst.updated_at);
+      expect(await edgeEnd(target, "edge-authored")).toBe(LATE);
+    }
+
+    it("re-delivering an already-merged branch writes nothing at all", async () => {
+      await assertRedeliveryWritesNothing((backend) => backend);
+    });
+
+    it("re-delivers as a no-op when the driver renders the window as a zoned string", async () => {
+      await assertRedeliveryWritesNothing((backend) =>
+        withZonedValidityWindowText(backend),
+      );
     });
 
     it("does not rewrite an unchanged row when nothing changed at all", async () => {
