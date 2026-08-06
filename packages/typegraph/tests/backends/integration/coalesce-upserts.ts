@@ -6,7 +6,10 @@ import {
   createStoreWithSchema,
   type EdgeId,
   type GraphBackend,
+  type Node,
   type NodeId,
+  type Store,
+  ValidationError,
 } from "../../../src";
 import {
   type TransactionBackend,
@@ -16,7 +19,9 @@ import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
+import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 import { requireDefined } from "../../../src/utils/presence";
+import { withZonedValidityWindowText } from "../../test-utils";
 import {
   type HistoryIntegrationStore,
   type IntegrationStore,
@@ -53,6 +58,11 @@ function personId(
 ): NodeId<typeof integrationTestGraph.nodes.Person.type> {
   return asNodeId(id);
 }
+
+type PersonNode = Node<typeof integrationTestGraph.nodes.Person.type>;
+
+/** Any store over the integration graph — history, backend-bearing, or plain. */
+type CoalesceTestStore = Store<typeof integrationTestGraph>;
 
 function knowsId(
   id: string,
@@ -119,6 +129,63 @@ function withEdgeUpdateCounting(base: GraphBackend): EdgeWriteCounter {
       ),
   };
   return { backend, updates: () => updates };
+}
+
+/**
+ * A future instant and a later one. Every re-stated window in these cases has to
+ * be a window the store would accept as a fresh write too, and a bound before the
+ * row's own `validFrom` (its creation instant) is refused as inverted.
+ */
+const WINDOW_END = "2100-06-01T00:00:00.000Z";
+const LATER_WINDOW_END = "2100-09-01T00:00:00.000Z";
+
+/**
+ * A PAST lower bound, for the cases that name `validFrom` on a CREATE and then
+ * read the row back: a row whose window starts in 2100 is not current yet, so a
+ * plain `getById` could not see it at all.
+ */
+const WINDOW_START = "2000-01-01T00:00:00.000Z";
+
+/** Seeds a Person at version 1 whose window ends at {@link WINDOW_END}. */
+async function seedWindowedPerson(
+  store: CoalesceTestStore,
+  id: string,
+): Promise<Readonly<{ validFrom: string; version: number }>> {
+  const created = await store.nodes.Person.upsertById(
+    id,
+    { name: "Win", age: 1 },
+    { validTo: WINDOW_END },
+  );
+  expect(created.meta.version).toBe(1);
+  return {
+    validFrom: requireDefined(created.meta.validFrom),
+    version: created.meta.version,
+  };
+}
+
+/** A coalescing store on a wrapped backend, plus the edge write counter. */
+async function createCountingStore(
+  base: GraphBackend,
+): Promise<Readonly<{ store: CoalesceTestStore; edgeUpdates: () => number }>> {
+  const counter = withEdgeUpdateCounting(base);
+  const [store] = await createStoreWithSchema(
+    integrationTestGraph,
+    counter.backend,
+    { coalesceUnchangedUpserts: true },
+  );
+  return { store, edgeUpdates: counter.updates };
+}
+
+/** Creates two people and returns them as edge endpoints. */
+async function seedEndpoints(
+  store: CoalesceTestStore,
+  prefix: string,
+): Promise<readonly [PersonNode, PersonNode]> {
+  const [alice, bob] = await store.nodes.Person.bulkCreate([
+    { props: { name: "A" }, id: `${prefix}-a` },
+    { props: { name: "B" }, id: `${prefix}-b` },
+  ]);
+  return [requireDefined(alice), requireDefined(bob)];
 }
 
 export function registerCoalesceUpsertIntegrationTests(
@@ -688,6 +755,458 @@ export function registerCoalesceUpsertIntegrationTests(
           { id: "s3", props: { name: "S3" } },
         ]);
         expect(refreshCalls).toBe(1);
+      });
+    });
+
+    /**
+     * The bulk paths compare a requested window against the one its target
+     * already holds, exactly as `shouldCoalesceUpsert` does for a single item —
+     * through the same function, so the two can never drift.
+     *
+     * Two defects met here. The node bulk path refused to coalesce whenever an
+     * item named a bound AT ALL (issue #405), so any caller that re-stated a row
+     * together with its own window — what a merge commit and any
+     * read-modify-write loop does — rewrote version, history, and revision state
+     * for a row that did not change. The edge bulk path did compare, but compared
+     * DRIVER TEXT (issue #412), so an identical re-stated window could coalesce on
+     * one dialect and write on another, and — on every dialect — a repeated id
+     * compared against the once-prefetched row instead of the window the batch had
+     * already queued, which could drop a write the sequential path performs.
+     */
+    describe("bulk window comparison (#405, #412)", () => {
+      it("coalesces a bulk item that re-states an unchanged node and its own window", async () => {
+        const store = await createCoalesceStore(context);
+        const seeded = await seedWindowedPerson(store, "bw-node-same");
+
+        const results = await store.nodes.Person.bulkUpsertById([
+          {
+            id: "bw-node-same",
+            props: { name: "Win", age: 1 },
+            validFrom: seeded.validFrom,
+            validTo: WINDOW_END,
+          },
+        ]);
+
+        // Nothing would change, so nothing is written. Pre-fix the presence of a
+        // bound alone forced the update and the version reached 2.
+        expect(results[0]?.meta.version).toBe(seeded.version);
+        const after = await store.nodes.Person.getById(
+          personId("bw-node-same"),
+        );
+        expect(after?.meta.version).toBe(seeded.version);
+        expect(canonicalizeDatabaseTimestamp(after?.meta.validTo)).toBe(
+          WINDOW_END,
+        );
+      });
+
+      it("captures no history for a bulk re-statement of a node and its window", async () => {
+        const store = await createCoalesceStore(context, { history: true });
+        const seeded = await seedWindowedPerson(store, "bw-node-hist");
+        const recordedBefore = await countRecordedNodeRows(
+          store,
+          "Person",
+          "bw-node-hist",
+        );
+
+        await store.nodes.Person.bulkUpsertById([
+          {
+            id: "bw-node-hist",
+            props: { name: "Win", age: 1 },
+            validFrom: seeded.validFrom,
+            validTo: WINDOW_END,
+          },
+        ]);
+
+        expect(
+          await countRecordedNodeRows(store, "Person", "bw-node-hist"),
+        ).toBe(recordedBefore);
+      });
+
+      it("coalesces a bulk item that re-states an unchanged edge and its own window", async () => {
+        const { store, edgeUpdates } = await createCountingStore(
+          context.getStore().backend,
+        );
+        const [alice, bob] = await seedEndpoints(store, "bw-edge-same");
+
+        const [seeded] = await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("bw-edge-same"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+            validTo: WINDOW_END,
+          },
+        ]);
+        const updatesBefore = edgeUpdates();
+
+        await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("bw-edge-same"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+            validFrom: requireDefined(seeded?.meta.validFrom),
+            validTo: WINDOW_END,
+          },
+        ]);
+
+        expect(edgeUpdates()).toBe(updatesBefore);
+        const after = await store.edges.knows.getById(knowsId("bw-edge-same"));
+        expect(after?.meta.updatedAt).toBe(seeded?.meta.updatedAt);
+      });
+
+      it("coalesces a node whose stored window is rendered as an equivalent instant in another text form", async () => {
+        const [store] = await createStoreWithSchema(
+          integrationTestGraph,
+          withZonedValidityWindowText(context.getStore().backend),
+          { coalesceUnchangedUpserts: true },
+        );
+        const seeded = await seedWindowedPerson(store, "bw-zoned-node");
+
+        // The bounds the caller re-states are canonical; the ones the collection
+        // reads back are the same instants written `+00:00`. Comparing them as
+        // TEXT reports a change that does not exist.
+        const results = await store.nodes.Person.bulkUpsertById([
+          {
+            id: "bw-zoned-node",
+            props: { name: "Win", age: 1 },
+            validFrom: seeded.validFrom,
+            validTo: WINDOW_END,
+          },
+        ]);
+
+        expect(results[0]?.meta.version).toBe(seeded.version);
+      });
+
+      it("coalesces an edge whose stored window is rendered as an equivalent instant in another text form", async () => {
+        const { store, edgeUpdates } = await createCountingStore(
+          withZonedValidityWindowText(context.getStore().backend),
+        );
+        const [alice, bob] = await seedEndpoints(store, "bw-zoned-edge");
+
+        const [seeded] = await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("bw-zoned-edge"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+            validTo: WINDOW_END,
+          },
+        ]);
+        const updatesBefore = edgeUpdates();
+
+        await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("bw-zoned-edge"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+            validFrom: requireDefined(
+              canonicalizeDatabaseTimestamp(seeded?.meta.validFrom),
+            ),
+            validTo: WINDOW_END,
+          },
+        ]);
+
+        expect(edgeUpdates()).toBe(updatesBefore);
+      });
+
+      it("writes when a bulk item moves the window of an otherwise unchanged row", async () => {
+        const store = await createCoalesceStore(context);
+        const seeded = await seedWindowedPerson(store, "bw-node-move");
+
+        const results = await store.nodes.Person.bulkUpsertById([
+          {
+            id: "bw-node-move",
+            props: { name: "Win", age: 1 },
+            validFrom: seeded.validFrom,
+            validTo: LATER_WINDOW_END,
+          },
+        ]);
+
+        expect(results[0]?.meta.version).toBe(seeded.version + 1);
+        const after = await store.nodes.Person.getById(
+          personId("bw-node-move"),
+        );
+        expect(canonicalizeDatabaseTimestamp(after?.meta.validTo)).toBe(
+          LATER_WINDOW_END,
+        );
+      });
+
+      it("writes when a bulk edge item moves the window of an otherwise unchanged edge", async () => {
+        const { store, edgeUpdates } = await createCountingStore(
+          context.getStore().backend,
+        );
+        const [alice, bob] = await seedEndpoints(store, "bw-edge-move");
+
+        await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("bw-edge-move"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+            validTo: WINDOW_END,
+          },
+        ]);
+        const updatesBefore = edgeUpdates();
+
+        await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("bw-edge-move"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+            validTo: LATER_WINDOW_END,
+          },
+        ]);
+
+        expect(edgeUpdates()).toBe(updatesBefore + 1);
+        const after = await store.edges.knows.getById(knowsId("bw-edge-move"));
+        expect(canonicalizeDatabaseTimestamp(after?.meta.validTo)).toBe(
+          LATER_WINDOW_END,
+        );
+      });
+
+      it("refuses an unrepresentable bound from a bulk item with the single path's own error", async () => {
+        const store = await createCoalesceStore(context);
+        await seedWindowedPerson(store, "bw-unrepresentable");
+
+        // An unparseable bound has no instant, and neither has an absent one, so
+        // canonicalizing both sides would report "no change" and coalesce the
+        // write — swallowing the error the caller is owed. The rule that keeps
+        // that from happening lives in the shared comparison, so the bulk path
+        // must now raise exactly what the single path raises for the same item.
+        const item = {
+          props: { name: "Win", age: 1 },
+          validTo: "not-a-date",
+        } as const;
+        // A resolved value is not a ValidationError, so a path that fails to
+        // reject fails the assertion below just as loudly as a wrong error would.
+        const singleError: unknown = await store.nodes.Person.upsertById(
+          "bw-unrepresentable",
+          item.props,
+          {
+            validTo: item.validTo,
+          },
+        ).catch((error: unknown) => error);
+        const bulkError: unknown = await store.nodes.Person.bulkUpsertById([
+          { id: "bw-unrepresentable", ...item },
+        ]).catch((error: unknown) => error);
+
+        expect(singleError).toBeInstanceOf(ValidationError);
+        expect(bulkError).toBeInstanceOf(ValidationError);
+        expect((bulkError as Error).message).toBe(
+          (singleError as Error).message,
+        );
+      });
+
+      it("refuses an unrepresentable bound from a bulk EDGE item", async () => {
+        const store = await createCoalesceStore(context);
+        const [alice, bob] = await seedEndpoints(store, "bw-edge-bad");
+        await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("bw-edge-bad"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+          },
+        ]);
+
+        await expect(
+          store.edges.knows.bulkUpsertById([
+            {
+              id: knowsId("bw-edge-bad"),
+              from: alice,
+              to: bob,
+              props: { since: "2020" },
+              validTo: "not-a-date",
+            },
+          ]),
+        ).rejects.toThrow(/validTo/);
+      });
+
+      it("compares a repeated node id against the window the batch QUEUED, not the prefetched one", async () => {
+        const store = await createCoalesceStore(context);
+        const seeded = await seedWindowedPerson(store, "bw-node-queued");
+
+        // Item 1 moves the end; item 2 re-states the end the row held BEFORE the
+        // batch. Against the queued window that is a change, so it writes — and
+        // it must, or the batch would end at item 1's window while the same items
+        // applied one at a time end at item 2's.
+        await store.nodes.Person.bulkUpsertById([
+          {
+            id: "bw-node-queued",
+            props: { name: "Win", age: 1 },
+            validTo: LATER_WINDOW_END,
+          },
+          {
+            id: "bw-node-queued",
+            props: { name: "Win", age: 1 },
+            validTo: WINDOW_END,
+          },
+        ]);
+
+        const batched = await store.nodes.Person.getById(
+          personId("bw-node-queued"),
+        );
+        expect(batched?.meta.version).toBe(seeded.version + 2);
+        expect(canonicalizeDatabaseTimestamp(batched?.meta.validTo)).toBe(
+          WINDOW_END,
+        );
+
+        // Sequential-equivalence oracle: the same items, one at a time.
+        const sequentialSeed = await seedWindowedPerson(store, "bw-node-seq");
+        await store.nodes.Person.upsertById(
+          "bw-node-seq",
+          { name: "Win", age: 1 },
+          { validTo: LATER_WINDOW_END },
+        );
+        await store.nodes.Person.upsertById(
+          "bw-node-seq",
+          { name: "Win", age: 1 },
+          { validTo: WINDOW_END },
+        );
+        const sequential = await store.nodes.Person.getById(
+          personId("bw-node-seq"),
+        );
+        expect(sequential?.meta.version).toBe(sequentialSeed.version + 2);
+        expect(canonicalizeDatabaseTimestamp(sequential?.meta.validTo)).toBe(
+          canonicalizeDatabaseTimestamp(batched?.meta.validTo),
+        );
+      });
+
+      it("coalesces a repeated node id that re-states the window the batch QUEUED", async () => {
+        const store = await createCoalesceStore(context);
+        const seeded = await seedWindowedPerson(store, "bw-node-restate");
+
+        // Item 1 moves the end, item 2 re-states item 1's window: one write.
+        await store.nodes.Person.bulkUpsertById([
+          {
+            id: "bw-node-restate",
+            props: { name: "Win", age: 1 },
+            validTo: LATER_WINDOW_END,
+          },
+          {
+            id: "bw-node-restate",
+            props: { name: "Win", age: 1 },
+            validTo: LATER_WINDOW_END,
+          },
+        ]);
+
+        const after = await store.nodes.Person.getById(
+          personId("bw-node-restate"),
+        );
+        expect(after?.meta.version).toBe(seeded.version + 1);
+        expect(canonicalizeDatabaseTimestamp(after?.meta.validTo)).toBe(
+          LATER_WINDOW_END,
+        );
+      });
+
+      it("compares a repeated EDGE id against the window the batch QUEUED", async () => {
+        const { store, edgeUpdates } = await createCountingStore(
+          context.getStore().backend,
+        );
+        const [alice, bob] = await seedEndpoints(store, "bw-edge-queued");
+        const base = {
+          from: alice,
+          to: bob,
+          props: { since: "2020" },
+        } as const;
+
+        await store.edges.knows.bulkUpsertById([
+          { id: knowsId("bw-edge-queued"), ...base, validTo: WINDOW_END },
+        ]);
+        const updatesBefore = edgeUpdates();
+
+        await store.edges.knows.bulkUpsertById([
+          { id: knowsId("bw-edge-queued"), ...base, validTo: LATER_WINDOW_END },
+          { id: knowsId("bw-edge-queued"), ...base, validTo: WINDOW_END },
+        ]);
+
+        // Pre-fix the second item compared against the PREFETCHED row, whose end
+        // was still WINDOW_END, called it unchanged and coalesced — leaving the
+        // edge at item 1's end and silently diverging from the sequential result.
+        expect(edgeUpdates()).toBe(updatesBefore + 2);
+        const batched = await store.edges.knows.getById(
+          knowsId("bw-edge-queued"),
+        );
+        expect(canonicalizeDatabaseTimestamp(batched?.meta.validTo)).toBe(
+          WINDOW_END,
+        );
+
+        // Sequential-equivalence oracle: the same items as two batches of one.
+        await store.edges.knows.bulkUpsertById([
+          { id: knowsId("bw-edge-seq"), ...base, validTo: WINDOW_END },
+        ]);
+        await store.edges.knows.bulkUpsertById([
+          { id: knowsId("bw-edge-seq"), ...base, validTo: LATER_WINDOW_END },
+        ]);
+        await store.edges.knows.bulkUpsertById([
+          { id: knowsId("bw-edge-seq"), ...base, validTo: WINDOW_END },
+        ]);
+        const sequential = await store.edges.knows.getById(
+          knowsId("bw-edge-seq"),
+        );
+        expect(canonicalizeDatabaseTimestamp(sequential?.meta.validTo)).toBe(
+          canonicalizeDatabaseTimestamp(batched?.meta.validTo),
+        );
+      });
+
+      it("coalesces a repeated NEW id whose later copy re-states the queued CREATE's window", async () => {
+        const store = await createCoalesceStore(context);
+
+        // The create names both bounds, so the queued window is fully known and a
+        // copy re-stating it changes nothing: one create, no update.
+        const results = await store.nodes.Person.bulkUpsertById([
+          {
+            id: "bw-new-restate",
+            props: { name: "Win", age: 1 },
+            validFrom: WINDOW_START,
+            validTo: WINDOW_END,
+          },
+          {
+            id: "bw-new-restate",
+            props: { name: "Win", age: 1 },
+            validFrom: WINDOW_START,
+            validTo: WINDOW_END,
+          },
+        ]);
+
+        expect(results[1]).toBe(results[0]);
+        expect(results[0]?.meta.version).toBe(1);
+        const after = await store.nodes.Person.getById(
+          personId("bw-new-restate"),
+        );
+        expect(after?.meta.version).toBe(1);
+        expect(canonicalizeDatabaseTimestamp(after?.meta.validFrom)).toBe(
+          WINDOW_START,
+        );
+      });
+
+      it("writes for a repeated NEW id whose later copy names a lower bound the create left implicit", async () => {
+        const store = await createCoalesceStore(context);
+
+        const results = await store.nodes.Person.bulkUpsertById([
+          { id: "bw-new-implicit", props: { name: "Win", age: 1 } },
+          {
+            id: "bw-new-implicit",
+            props: { name: "Win", age: 1 },
+            validTo: WINDOW_END,
+          },
+        ]);
+
+        // The create left `validFrom` to the backend's write instant, which the
+        // batch cannot know, so a later bound is compared against an unknown and
+        // counts as a change. Deliberately conservative: the bulk path may spend a
+        // write the sequential path skips, never skip one it makes.
+        expect(results[1]).not.toBe(results[0]);
+        expect(results[1]?.meta.version).toBe(2);
+        const after = await store.nodes.Person.getById(
+          personId("bw-new-implicit"),
+        );
+        expect(canonicalizeDatabaseTimestamp(after?.meta.validTo)).toBe(
+          WINDOW_END,
+        );
       });
     });
   });
