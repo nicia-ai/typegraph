@@ -698,14 +698,20 @@ describe.each(backendMatrix())(
         const forkPoint = await seededForkPoint();
         const branchA = await forkOf(forkPoint, BRANCH_A);
         const branchB = await forkOf(forkPoint, BRANCH_B);
-        // NODES only: an inherited EDGE modification is observed by two planning
-        // phases as the same contribution, and until that duplicate is collapsed
-        // (issue #399) the whole best-effort persist fails. The edge half of the
-        // credit is asserted through the in-memory index above, which is built
-        // from the identical record list.
+        // Nodes and edges both: the inherited-edge duplicate that used to fail
+        // the whole best-effort persist is collapsed since #400, so the edge
+        // credit is asserted against the durable sidecar alongside the node's.
         await branchA.store.nodes.Patient.update(PATIENT, { note: "flagged" });
+        await branchA.store.edges.hadEncounter.update(EDGE_1, {
+          on: "2026-04-04",
+        });
         await branchB.store.nodes.Patient.update(
           PATIENT,
+          {},
+          { validTo: LATE },
+        );
+        await branchB.store.edges.hadEncounter.update(
+          EDGE_1,
           {},
           { validTo: LATE },
         );
@@ -723,13 +729,21 @@ describe.each(backendMatrix())(
           branchId: BRANCH_B,
         });
         expect(
-          persisted.map((row) => ({
-            role: row.role,
-            canonicalKind: row.canonicalKind,
-            canonicalId: row.canonicalId,
-            sourceId: row.sourceId,
-          })),
+          persisted
+            .map((row) => ({
+              role: row.role,
+              canonicalKind: row.canonicalKind,
+              canonicalId: row.canonicalId,
+              sourceId: row.sourceId,
+            }))
+            .toSorted((left, right) => left.role.localeCompare(right.role)),
         ).toEqual([
+          {
+            role: "edge",
+            canonicalKind: "hadEncounter",
+            canonicalId: "edge-1",
+            sourceId: "edge-1",
+          },
           {
             role: "node",
             canonicalKind: "Patient",
