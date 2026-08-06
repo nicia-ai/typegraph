@@ -61,7 +61,9 @@ const Encounter = defineNode("Encounter", {
   schema: z.object({ reason: z.string(), code: z.string() }),
 });
 const hadEncounter = defineEdge("hadEncounter", {
-  schema: z.object({ on: z.string() }),
+  // `note` is OPTIONAL so a fork can DELETE it: the commit resolves a folded inherited
+  // row against that row's base props, which only happens when the fold lands on it.
+  schema: z.object({ on: z.string(), note: z.string().optional() }),
   from: [Patient],
   to: [Encounter],
 });
@@ -104,6 +106,8 @@ const ENCOUNTER_REASON = "routine annual physical examination";
 const DUPLICATE_REASON = "routine annual physical examinations";
 
 const INHERITED_DATE = "2026-01-05";
+/** A base-only property, seeded when a case is about the fork DELETING one. */
+const BASE_NOTE = "seen at reception";
 /** What the branch edits the INHERITED edge's `on` to. */
 const EDITED_DATE = "2026-02-02";
 /** What the branch's own repointed edge says. */
@@ -137,6 +141,7 @@ type CommittedEdge = Readonly<{
   fromId: string;
   toId: string;
   on: unknown;
+  note: unknown;
   validTo: string | undefined;
 }>;
 
@@ -158,9 +163,10 @@ describe.each(backendMatrix())("edge fold survivorship [$name]", (entry) => {
 
   /**
    * A fork point holding one patient, one encounter, and ONE edge joining them — so
-   * every additional row a case ends up with is the merge's own doing.
+   * every additional row a case ends up with is the merge's own doing. `baseNote` seeds
+   * the optional edge property a fork can delete.
    */
-  async function seededForkPoint(): Promise<CareStore> {
+  async function seededForkPoint(baseNote?: string): Promise<CareStore> {
     const [store] = await createStoreWithSchema(careGraph, await makeBackend());
     await store.nodes.Patient.create({ name: "Ana Rivera" }, { id: "pat-1" });
     await store.nodes.Encounter.create(
@@ -170,7 +176,10 @@ describe.each(backendMatrix())("edge fold survivorship [$name]", (entry) => {
     await store.edges.hadEncounter.create(
       PATIENT,
       ENCOUNTER,
-      { on: INHERITED_DATE },
+      {
+        on: INHERITED_DATE,
+        ...(baseNote === undefined ? {} : { note: baseNote }),
+      },
       { id: INHERITED_EDGE },
     );
     return store;
@@ -201,6 +210,7 @@ describe.each(backendMatrix())("edge fold survivorship [$name]", (entry) => {
         fromId: row.from_id,
         toId: row.to_id,
         on: rowPropsToObject(row.props)["on"],
+        note: rowPropsToObject(row.props)["note"],
         validTo: canonicalizeDatabaseTimestamp(row.valid_to),
       }))
       .sort((left, right) =>
@@ -317,6 +327,48 @@ describe.each(backendMatrix())("edge fold survivorship [$name]", (entry) => {
       });
     },
   );
+
+  it("honors a fork's property DELETION on the committed row it folds onto", async () => {
+    // Edges are written with PATCH semantics, so a removed key only disappears when the
+    // commit resolves the write against the row's BASE props — which it looks up by the
+    // surviving edge id. A survivor the target did not hold has no such entry, so the
+    // deletion used to be dropped together with the row it was staged for; landing the
+    // fold on the inherited row is what makes it reachable.
+    const forkPoint = await seededForkPoint(BASE_NOTE);
+    const target = (await forkOf(forkPoint, TARGET_BRANCH)).store;
+    const branchA = await forkOf(forkPoint);
+    await branchA.store.edges.hadEncounter.update(INHERITED, {
+      on: EDITED_DATE,
+      note: undefined,
+    });
+    await branchA.store.nodes.Encounter.create(
+      { reason: DUPLICATE_REASON, code: ENCOUNTER_CODE },
+      { id: DUPLICATE_ENCOUNTER.id },
+    );
+    await branchA.store.edges.hadEncounter.create(
+      PATIENT,
+      DUPLICATE_ENCOUNTER,
+      { on: BRANCH_DATE },
+      { id: "edge-1" },
+    );
+
+    unwrap(
+      await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [branchA],
+        options: resolveDuplicateEncounters(),
+      }),
+    );
+
+    expect(
+      (await liveEdges(target)).map((edge) => ({
+        id: edge.id,
+        on: edge.on,
+        note: edge.note,
+      })),
+    ).toEqual([{ id: INHERITED_EDGE, on: EDITED_DATE, note: undefined }]);
+  });
 
   it("lands a folded END on the committed row the branch ended", async () => {
     // The branch ends the inherited edge and authors a repointed edge that folds with
