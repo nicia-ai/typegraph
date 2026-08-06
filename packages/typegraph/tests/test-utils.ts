@@ -300,6 +300,45 @@ export function disableTransactions(backend: GraphBackend): GraphBackend {
 }
 
 /**
+ * Wraps a backend — and every transaction-scoped backend it hands out — so each
+ * `updateEdge` call is counted.
+ *
+ * Edges carry no version counter and `updated_at` collides within a millisecond,
+ * which is the resolution a repeated write runs at, so an exact write count is
+ * the only way to assert that an edge write did NOT happen. Wrapping the
+ * transaction too is what makes the count survive the one `bulkUpsertById` opens.
+ */
+export function withEdgeUpdateCounting(
+  base: GraphBackend,
+): Readonly<{ backend: GraphBackend; updates: () => number }> {
+  let updates = 0;
+  function countingUpdateEdge(
+    target: Pick<GraphBackend, "updateEdge">,
+  ): GraphBackend["updateEdge"] {
+    return (params) => {
+      updates += 1;
+      return target.updateEdge(params);
+    };
+  }
+  return {
+    backend: {
+      ...base,
+      updateEdge: countingUpdateEdge(base),
+      transaction: <T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+        options?: TransactionOptions,
+      ) =>
+        base.transaction<T>(
+          (txBackend) =>
+            fn({ ...txBackend, updateEdge: countingUpdateEdge(txBackend) }),
+          options,
+        ),
+    },
+    updates: () => updates,
+  };
+}
+
+/**
  * The same instant in a different text form: `...T00:00:00.000+00:00` for
  * `...T00:00:00.000Z`.
  */

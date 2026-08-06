@@ -64,7 +64,10 @@ import { asBranchId } from "../../src/graph-merge/types";
 import { WINDOW_NOT_APPLICABLE_DROP_REASON } from "../../src/graph-merge/valid-window";
 import { canonicalizeDatabaseTimestamp } from "../../src/utils/date";
 import { requireDefined } from "../../src/utils/presence";
-import { withZonedValidityWindowText } from "../test-utils";
+import {
+  withEdgeUpdateCounting,
+  withZonedValidityWindowText,
+} from "../test-utils";
 import { backendMatrix, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -407,11 +410,13 @@ describe.each(backendMatrix())(
 
     it("does not write when a branch re-states the end the target holds", async () => {
       const forkPoint = await seededForkPoint();
-      // A hand-seeded target with coalescing on: `branch()` clones do not inherit
-      // store options, and the option is only meaningful on the WRITE side.
-      const target = await seed(
-        await newStore({ coalesceUnchangedUpserts: true }),
-      );
+      // Coalescing OFF, like the two cases above: the committed target moved this
+      // end, which takes the row out of window resolution entirely, so a branch
+      // re-stating that same end is never staged and only the PLAN can keep the
+      // write from happening. The coalesce check's half of this shape — a
+      // re-stated end that IS staged, because the target holds it from an earlier
+      // delivery rather than from its own update — is the re-delivery pin below.
+      const target = await seed(await newStore());
       await target.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
       const versionBefore = (await nodeRow(target, "Patient", "pat-1")).version;
 
@@ -427,10 +432,8 @@ describe.each(backendMatrix())(
         }),
       );
 
-      // The reconciled end differs from BASE (so it IS passed to the upsert) but
-      // equals the committed one, so the coalesce check sees no window change and
-      // skips the write entirely — no version bump, no history row, no revision
-      // churn.
+      // Nothing reaches the write path at all — the version is the proof, since
+      // every node update bumps it — and the end the target authored still stands.
       expect((await nodeRow(target, "Patient", "pat-1")).version).toBe(
         versionBefore,
       );
@@ -830,39 +833,6 @@ describe.each(backendMatrix())(
         expect(report.provenance.byBranch(BRANCH_A).nodeIds).toEqual([]);
       });
     });
-
-    /**
-     * A backend that counts `updateEdge` calls, through transactions too. Edges
-     * carry no version counter, so a merge that must write NOTHING can only be
-     * pinned by the write count itself — `updated_at` collides within a
-     * millisecond, which is exactly the resolution a repeated merge runs at.
-     */
-    function withEdgeUpdateCounting(
-      base: GraphBackend,
-    ): Readonly<{ backend: GraphBackend; updates: () => number }> {
-      let updates = 0;
-      function counting(
-        target: Pick<GraphBackend, "updateEdge">,
-      ): GraphBackend["updateEdge"] {
-        return (params) => {
-          updates += 1;
-          return target.updateEdge(params);
-        };
-      }
-      return {
-        backend: {
-          ...base,
-          updateEdge: counting(base),
-          transaction: (fn, options) =>
-            base.transaction(
-              (txBackend) =>
-                fn({ ...txBackend, updateEdge: counting(txBackend) }),
-              options,
-            ),
-        },
-        updates: () => updates,
-      };
-    }
 
     /**
      * The coalesce contract for merge commits, end to end.

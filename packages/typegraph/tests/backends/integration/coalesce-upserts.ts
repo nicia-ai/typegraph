@@ -11,17 +11,16 @@ import {
   type Store,
   ValidationError,
 } from "../../../src";
-import {
-  type TransactionBackend,
-  type TransactionOptions,
-} from "../../../src/backend/types";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 import { requireDefined } from "../../../src/utils/presence";
-import { withZonedValidityWindowText } from "../../test-utils";
+import {
+  withEdgeUpdateCounting,
+  withZonedValidityWindowText,
+} from "../../test-utils";
 import {
   type HistoryIntegrationStore,
   type IntegrationStore,
@@ -92,43 +91,6 @@ async function countRecordedNodeRows(
     `),
   );
   return Number(rows[0]?.cnt ?? 0);
-}
-
-type EdgeWriteCounter = Readonly<{
-  backend: GraphBackend;
-  updates: () => number;
-}>;
-
-/**
- * Wraps a backend — and every transaction-scoped backend it hands out — so
- * each `updateEdge` call is counted. Edges carry no version counter, so the
- * duplicate-id probe matrix needs an exact write count that survives the
- * transaction the bulk-upsert path opens.
- */
-function withEdgeUpdateCounting(base: GraphBackend): EdgeWriteCounter {
-  let updates = 0;
-  function countingUpdateEdge(
-    target: Pick<GraphBackend, "updateEdge">,
-  ): GraphBackend["updateEdge"] {
-    return (params) => {
-      updates += 1;
-      return target.updateEdge(params);
-    };
-  }
-  const backend: GraphBackend = {
-    ...base,
-    updateEdge: countingUpdateEdge(base),
-    transaction: <T>(
-      fn: (tx: TransactionBackend) => Promise<T>,
-      options?: TransactionOptions,
-    ) =>
-      base.transaction<T>(
-        (txBackend) =>
-          fn({ ...txBackend, updateEdge: countingUpdateEdge(txBackend) }),
-        options,
-      ),
-  };
-  return { backend, updates: () => updates };
 }
 
 /**
@@ -1183,7 +1145,7 @@ export function registerCoalesceUpsertIntegrationTests(
         );
       });
 
-      it("writes for a repeated NEW id whose later copy names a lower bound the create left implicit", async () => {
+      it("writes for a repeated NEW id whose later copy bounds a window the create left OPEN", async () => {
         const store = await createCoalesceStore(context);
 
         const results = await store.nodes.Person.bulkUpsertById([
@@ -1195,10 +1157,10 @@ export function registerCoalesceUpsertIntegrationTests(
           },
         ]);
 
-        // The create left `validFrom` to the backend's write instant, which the
-        // batch cannot know, so a later bound is compared against an unknown and
-        // counts as a change. Deliberately conservative: the bulk path may spend a
-        // write the sequential path skips, never skip one it makes.
+        // The queued create leaves the upper bound open, and an open bound is
+        // KNOWN — so naming one is a real change and the same decision the
+        // sequential path reaches. (The lower bound is the unknowable one; that
+        // rule is the case below.)
         expect(results[1]).not.toBe(results[0]);
         expect(results[1]?.meta.version).toBe(2);
         const after = await store.nodes.Person.getById(
@@ -1207,6 +1169,111 @@ export function registerCoalesceUpsertIntegrationTests(
         expect(canonicalizeDatabaseTimestamp(after?.meta.validTo)).toBe(
           WINDOW_END,
         );
+      });
+
+      it("writes for a repeated NEW id whose later copy names the lower bound the BACKEND stamped", async () => {
+        const store = await createCoalesceStore(context);
+
+        // A create that omits `validFrom` is stamped with the write instant, which
+        // the batch cannot know. Freezing the clock is what lets the second copy
+        // name that exact instant — the one input for which a batch-local GUESS
+        // (the write instant is right there in `nowIso()`) would look correct and
+        // coalesce, skipping a write. Leaving the bound unknown is what refuses it.
+        const stamped = "2020-05-05T00:00:00.000Z";
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date(stamped));
+        const batched = await store.nodes.Person.bulkUpsertById([
+          { id: "bw-new-stamped", props: { name: "Win", age: 1 } },
+          {
+            id: "bw-new-stamped",
+            props: { name: "Win", age: 1 },
+            validFrom: stamped,
+          },
+        ]).finally(() => {
+          vi.useRealTimers();
+        });
+
+        expect(batched[1]).not.toBe(batched[0]);
+        expect(batched[1]?.meta.version).toBe(2);
+
+        // The oracle for the OTHER side of the asymmetry: applied one at a time
+        // the second call compares against a bound that is on the row by then, so
+        // it coalesces. The bulk path may spend a write the sequential path skips;
+        // it never skips one the sequential path makes.
+        const created = await store.nodes.Person.upsertById("bw-seq-stamped", {
+          name: "Win",
+          age: 1,
+        });
+        const restated = await store.nodes.Person.upsertById(
+          "bw-seq-stamped",
+          { name: "Win", age: 1 },
+          {
+            validFrom: requireDefined(
+              canonicalizeDatabaseTimestamp(created.meta.validFrom),
+            ),
+          },
+        );
+        expect(restated.meta.version).toBe(created.meta.version);
+      });
+
+      it("carries a queued update's untouched LOWER bound into the next copy's comparison", async () => {
+        const store = await createCoalesceStore(context);
+        const seeded = await seedWindowedPerson(store, "bw-node-carry");
+
+        // Item 1 moves only the end; an in-place update never rewrites
+        // `valid_from`, so the bound the row keeps is the seeded one. The copies
+        // behind it re-state the whole window, and each must be compared against
+        // the state its predecessor leaves — one write for three items.
+        const restated = {
+          props: { name: "Win", age: 1 },
+          validFrom: seeded.validFrom,
+          validTo: LATER_WINDOW_END,
+        } as const;
+        await store.nodes.Person.bulkUpsertById([
+          {
+            id: "bw-node-carry",
+            props: { name: "Win", age: 1 },
+            validTo: LATER_WINDOW_END,
+          },
+          { id: "bw-node-carry", ...restated },
+          { id: "bw-node-carry", ...restated },
+        ]);
+
+        const after = await store.nodes.Person.getById(
+          personId("bw-node-carry"),
+        );
+        expect(after?.meta.version).toBe(seeded.version + 1);
+        expect(canonicalizeDatabaseTimestamp(after?.meta.validTo)).toBe(
+          LATER_WINDOW_END,
+        );
+      });
+
+      it("rolls the whole batch back when a later item's bound is unrepresentable", async () => {
+        const store = await createCoalesceStore(context);
+        const seeded = await seedWindowedPerson(store, "bw-atomic-live");
+
+        // Creates run BEFORE updates, so the first item is already inserted when
+        // the second one's bound is refused: only the batch's transaction can keep
+        // it from surviving. The bulk contract is all-or-nothing — no per-item
+        // error accumulation.
+        await expect(
+          store.nodes.Person.bulkUpsertById([
+            { id: "bw-atomic-created", props: { name: "Win", age: 1 } },
+            {
+              id: "bw-atomic-live",
+              props: { name: "Win", age: 2 },
+              validTo: "not-a-date",
+            },
+          ]),
+        ).rejects.toBeInstanceOf(ValidationError);
+
+        await expect(
+          store.nodes.Person.getById(personId("bw-atomic-created")),
+        ).resolves.toBeUndefined();
+        const live = await store.nodes.Person.getById(
+          personId("bw-atomic-live"),
+        );
+        expect(live?.meta.version).toBe(seeded.version);
       });
     });
   });
