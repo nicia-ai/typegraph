@@ -4846,12 +4846,16 @@ type UpsertFulltextParams = Readonly<{
 type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, Dir extends TraversalDirection> = G["edges"][EK] extends EdgeRegistration ? Dir extends "out" ? G["edges"][EK]["to"][number]["kind"] : G["edges"][EK]["from"][number]["kind"] : never;
 
 // @public
+export const VALIDITY_END_TARGET_PRECEDENCE: "target";
+
+// @public
 export type ValidityEndResolution = Readonly<{
     entity: "node" | "edge";
     kind: string;
     id: string;
     validTo: string;
     claimedBy: readonly BranchId[];
+    precedence?: typeof VALIDITY_END_TARGET_PRECEDENCE;
 }>;
 
 // @public

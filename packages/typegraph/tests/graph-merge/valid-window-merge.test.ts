@@ -11,7 +11,10 @@
  *   3. disjoint edits across branches all survive;
  *   4. two branches ending differently resolve to the EARLIEST end, reported;
  *   5. a deletion ABSORBS another branch's ending — no delete/modify conflict;
- *   6. the incremental target's own end wins over a branch's;
+ *   6. the incremental target's own end wins over a branch's — and the claims that
+ *      loses are REPORTED against the target's instant, marked
+ *      `precedence: "target"` and credited to nobody (issue #409), so a discarded
+ *      claim is no less visible than one that merely lost the least-claim rule;
  *   7. re-writing the end the target already holds is not a write at all;
  *   8. a fork `validFrom` divergence is reported unapplicable, not applied;
  *   9. PARALLEL edges of one kind each take the end claimed on THAT row;
@@ -60,7 +63,10 @@ import {
 } from "../../src/graph-merge/provenance-store";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeReport } from "../../src/graph-merge/types";
-import { asBranchId } from "../../src/graph-merge/types";
+import {
+  asBranchId,
+  VALIDITY_END_TARGET_PRECEDENCE,
+} from "../../src/graph-merge/types";
 import { WINDOW_NOT_APPLICABLE_DROP_REASON } from "../../src/graph-merge/valid-window";
 import { canonicalizeDatabaseTimestamp } from "../../src/utils/date";
 import { requireDefined } from "../../src/utils/presence";
@@ -353,15 +359,16 @@ describe.each(backendMatrix())(
       expect(report.validityEnds).toEqual([]);
     });
 
-    it("keeps the incremental target's own end over a branch's", async () => {
+    it("keeps the incremental target's own end over a branch's, and reports the discard", async () => {
       const forkPoint = await seededForkPoint();
       const target = (await forkOf(forkPoint, asBranchId("window-target")))
         .store;
       const branchA = await forkOf(forkPoint, BRANCH_A);
       await target.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
+      const versionBefore = (await nodeRow(target, "Patient", "pat-1")).version;
       await branchA.store.nodes.Patient.update(PATIENT, {}, { validTo: EARLY });
 
-      unwrap(
+      const report = unwrap(
         await mergeIncremental<CareGraph>({
           forkPoint,
           target,
@@ -373,6 +380,70 @@ describe.each(backendMatrix())(
       // The committed target already windowed this row; a user branch never
       // re-windows it, even with an EARLIER (otherwise winning) claim.
       expect(await nodeEnd(target, "Patient", "pat-1")).toBe(LATE);
+      // Reporting the discard stages NO write: resolving to the end the target
+      // already holds would write the row back at itself, bumping the version, the
+      // history row and the recorded-time entry of a row the merge decided nothing
+      // about. Asserting the committed instant alone cannot see that, because the
+      // instant written back would be the one already there.
+      expect((await nodeRow(target, "Patient", "pat-1")).version).toBe(
+        versionBefore,
+      );
+      // Discarding a claim is an arbitration outcome, so it is reported: the entry
+      // names the TARGET's own instant, the claim thrown away, and the
+      // `precedence` discriminator that keeps it from reading as an end the merge
+      // decided.
+      expect(report.validityEnds).toEqual([
+        {
+          entity: "node",
+          kind: "Patient",
+          id: "pat-1",
+          validTo: LATE,
+          claimedBy: [BRANCH_A],
+          precedence: VALIDITY_END_TARGET_PRECEDENCE,
+        },
+      ]);
+      // Nothing was committed from a branch, so nothing is credited.
+      expect(report.provenance.byBranch(BRANCH_A).nodeIds).toEqual([]);
+    });
+
+    it("reports both discarded claims when TWO branches claimed differing ends", async () => {
+      const forkPoint = await seededForkPoint();
+      const target = (await forkOf(forkPoint, asBranchId("window-target")))
+        .store;
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      const branchB = await forkOf(forkPoint, BRANCH_B);
+      // The target's own end is the LATEST, so neither branch claim wins on the
+      // least-claim rule either — only target precedence explains the outcome.
+      await target.nodes.Patient.update(PATIENT, {}, { validTo: LATEST });
+      await branchA.store.nodes.Patient.update(PATIENT, {}, { validTo: EARLY });
+      await branchB.store.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
+
+      const report = unwrap(
+        await mergeIncremental<CareGraph>({
+          forkPoint,
+          target,
+          branches: [branchA, branchB],
+          options: { branchOrder: BRANCH_ORDER },
+        }),
+      );
+
+      expect(await nodeEnd(target, "Patient", "pat-1")).toBe(LATEST);
+      // ONE entry for the row, naming BOTH discarded claimants — the same
+      // per-row shape a merge-decided arbitration produces, so a consumer reads
+      // the two the same way apart from `precedence`.
+      expect(report.validityEnds).toEqual([
+        {
+          entity: "node",
+          kind: "Patient",
+          id: "pat-1",
+          validTo: LATEST,
+          claimedBy: [BRANCH_A, BRANCH_B],
+          precedence: VALIDITY_END_TARGET_PRECEDENCE,
+        },
+      ]);
+      expect(report.conflicts).toEqual([]);
+      expect(report.provenance.byBranch(BRANCH_A).nodeIds).toEqual([]);
+      expect(report.provenance.byBranch(BRANCH_B).nodeIds).toEqual([]);
     });
 
     it("leaves a row the TARGET alone windowed out of the merge entirely", async () => {

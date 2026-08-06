@@ -97,6 +97,9 @@ const DUPLICATE_ENCOUNTER = { kind: "Encounter", id: "enc-2" } as const;
 const INHERITED_EDGE = "edge-5";
 const INHERITED = asEdgeId<typeof hadEncounter>(INHERITED_EDGE);
 const BRANCH_A = asBranchId("survivor-branch-a");
+/** Two further contributing branches, for the cases where a fold set spans branches. */
+const BRANCH_B = asBranchId("survivor-branch-b");
+const BRANCH_C = asBranchId("survivor-branch-c");
 const TARGET_BRANCH = asBranchId("survivor-target");
 const BRANCH_ORDER = [BRANCH_A];
 
@@ -108,6 +111,8 @@ const DUPLICATE_REASON = "routine annual physical examinations";
 const INHERITED_DATE = "2026-01-05";
 /** A base-only property, seeded when a case is about the fork DELETING one. */
 const BASE_NOTE = "seen at reception";
+/** What a branch's own repointed edge says about that property, having authored it. */
+const BRANCH_NOTE = "arrived by ambulance";
 /** What the branch edits the INHERITED edge's `on` to. */
 const EDITED_DATE = "2026-02-02";
 /** What the branch's own repointed edge says. */
@@ -368,6 +373,81 @@ describe.each(backendMatrix())("edge fold survivorship [$name]", (entry) => {
         note: edge.note,
       })),
     ).toEqual([{ id: INHERITED_EDGE, on: EDITED_DATE, note: undefined }]);
+  });
+
+  // The companion of the window-only carrier case in `edge-parallel-merge.test.ts`, on
+  // the other bucket the fold's property union reads from: a row a branch MODIFIED is
+  // staged with the base it was diffed against, so the properties that edit left alone
+  // contribute no claim either (issue #408).
+  //
+  // Once with one editor, once with two — the second reaches the row through the 3-way
+  // modification reconciler, which REBUILDS the record it stages, so it is the case
+  // that pins the base surviving that rebuild rather than only the diff.
+  describe.each([
+    { editors: "ONE branch", alsoEditedByB: false },
+    { editors: "TWO branches, 3-way reconciled", alsoEditedByB: true },
+  ])("an inherited row edited by $editors", ({ alsoEditedByB }) => {
+    it("does not let its untouched property outvote another member's", async () => {
+      // The editors change `on` and never mention `note`, so they carry the base's
+      // note. Branch C authors both on its own repointed row, and ranks LAST — so
+      // under `lastWriteWins` an untouched note counted as a contribution wins `note`
+      // outright, and the report records a conflict for a disagreement one side never
+      // had. That is what makes the base-awareness observable here.
+      const forkPoint = await seededForkPoint(BASE_NOTE);
+      const target = (await forkOf(forkPoint, TARGET_BRANCH)).store;
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      const branchB = await forkOf(forkPoint, BRANCH_B);
+      const branchC = await forkOf(forkPoint, BRANCH_C);
+
+      await branchA.store.edges.hadEncounter.update(INHERITED, {
+        on: EDITED_DATE,
+      });
+      if (alsoEditedByB) {
+        // The SAME edit, so the two agree and the reconciler's own property union
+        // raises nothing — the fold's is the only arbitration under test.
+        await branchB.store.edges.hadEncounter.update(INHERITED, {
+          on: EDITED_DATE,
+        });
+      }
+      await branchC.store.nodes.Encounter.create(
+        { reason: DUPLICATE_REASON, code: ENCOUNTER_CODE },
+        { id: DUPLICATE_ENCOUNTER.id },
+      );
+      await branchC.store.edges.hadEncounter.create(
+        PATIENT,
+        DUPLICATE_ENCOUNTER,
+        { on: BRANCH_DATE, note: BRANCH_NOTE },
+        { id: "edge-9" },
+      );
+
+      const report = unwrap(
+        await mergeIncremental<CareGraph>({
+          forkPoint,
+          target,
+          branches: [branchA, branchB, branchC],
+          options: {
+            ...resolveDuplicateEncounters(),
+            onPropertyConflict: "lastWriteWins",
+            branchOrder: [BRANCH_A, BRANCH_B, BRANCH_C],
+          },
+        }),
+      );
+
+      // `on` is a real disagreement and the editors win it on rank; `note` is not
+      // contested at all, so the only value anybody authored for it stands.
+      expect(
+        (await liveEdges(target)).map((edge) => ({
+          id: edge.id,
+          on: edge.on,
+          note: edge.note,
+        })),
+      ).toEqual([{ id: INHERITED_EDGE, on: EDITED_DATE, note: BRANCH_NOTE }]);
+      expect(
+        report.conflicts
+          .filter((conflict) => conflict.kind === "hadEncounter")
+          .map((conflict) => conflict.property),
+      ).toEqual(["on"]);
+    });
   });
 
   it("lands a folded END on the committed row the branch ended", async () => {

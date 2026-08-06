@@ -61,6 +61,10 @@ function rank(): ReadonlyMap<typeof BRANCH_A, number> {
  * Builds a staged edge with parsed props; defaults keep the call sites terse. The
  * origin defaults to BRANCH-CREATED, so a case says `inherited: true` exactly when the
  * committed-row survivor rule is what it is about.
+ *
+ * `baseProps` is what the merge base holds for an INHERITED row, so a case supplies it
+ * exactly when it is about which values the property union treats as AUTHORED. A
+ * branch-created edge never carries one.
  */
 function stagedEdge(
   args: Readonly<{
@@ -69,6 +73,7 @@ function stagedEdge(
     to: string;
     kind?: string;
     props?: Readonly<Record<string, JsonValue>>;
+    baseProps?: Readonly<Record<string, JsonValue>>;
     branchId?: typeof BRANCH_A;
     inherited?: boolean;
     validFrom?: string;
@@ -87,6 +92,7 @@ function stagedEdge(
     fromKind: "Doc",
     toKind: "Doc",
     props: args.props ?? {},
+    ...(args.baseProps === undefined ? {} : { baseProps: args.baseProps }),
     branchId: args.branchId ?? BRANCH_A,
     ...(args.validFrom === undefined ? {} : { validFrom: args.validFrom }),
     ...(args.validTo === undefined ? {} : { validTo: args.validTo }),
@@ -1267,6 +1273,289 @@ describe("repointEdges survivor rule (#395)", () => {
       );
     }
   });
+});
+
+/**
+ * The fold's property union is BASE-AWARE (issue #408): only a member that CHANGED a
+ * property from its own base competes for it.
+ *
+ * Without that filter a staged copy of an inherited row contributed its whole fork
+ * bag, so an UNTOUCHED base value entered the union as a first-class `(branch, value)`
+ * claim. Under any rank-based policy the branch label riding on that untouched copy
+ * then decided the committed value — and for a WINDOW-ONLY carrier, whose props are
+ * the base's and whose label is merely whichever branch sorted first, that meant an
+ * arbitrary label could outvote a real edit.
+ *
+ * These cases pin the filter and its edges: a real edit wins over an untouched value
+ * whichever way the ranks fall, a genuine disagreement still conflicts over its REAL
+ * values only, and a property nobody authored keeps the value it had rather than
+ * disappearing with the claim.
+ */
+describe("repointEdges base-aware property union (#408)", () => {
+  const collapse = buildCanonicalMap([clusterOf("a", "b", "c")], (cluster) =>
+    minIdCanonical(cluster),
+  );
+  const BRANCH_C = asBranchId("branch-c");
+
+  /** [a, b, c] — so branch-a outranks branch-b outranks branch-c. */
+  function rankABC(): ReadonlyMap<typeof BRANCH_A, number> {
+    return buildBranchRank(
+      [BRANCH_A, BRANCH_B, BRANCH_C],
+      [BRANCH_A, BRANCH_B, BRANCH_C],
+    );
+  }
+
+  // The carrier's rank against the authoring branch's, both ways round. Ranked
+  // BELOW, the old union happened to commit the authored value; ranked ABOVE, it
+  // committed the base's stale one — the same fold with the same members, decided by
+  // a label. Both orders must now agree.
+  describe.each([
+    { position: "BELOW", carrier: BRANCH_B, author: BRANCH_A },
+    { position: "ABOVE", carrier: BRANCH_A, author: BRANCH_B },
+  ])(
+    "a window-only carrier ranked $position the authoring branch",
+    ({ carrier, author }) => {
+      it("contributes no claim, so the authored value is committed", () => {
+        const result = repointEdges(
+          [
+            // The carrier: an inherited row staged ONLY to carry an ending, so its
+            // props ARE its base props and it authored nothing.
+            stagedEdge({
+              id: "edge-1",
+              from: "x",
+              to: "a",
+              inherited: true,
+              props: { on: "base" },
+              baseProps: { on: "base" },
+              branchId: carrier,
+              validTo: "2100-01-01T00:00:00.000Z",
+            }),
+            stagedEdge({
+              id: "edge-2",
+              from: "x",
+              to: "b",
+              props: { on: "authored" },
+              branchId: author,
+            }),
+          ],
+          collapse,
+          new Set<MergeKey>(),
+          "lastWriteWins",
+          rankABC(),
+        );
+
+        expect(projectEdges(result.edges)).toEqual([
+          {
+            id: "edge-1",
+            kind: "references",
+            fromId: "x",
+            toId: "a",
+            props: { on: "authored" },
+            mergedIds: ["edge-1", "edge-2"],
+            validFrom: undefined,
+            validTo: "2100-01-01T00:00:00.000Z",
+          },
+        ]);
+        // One claim is not a disagreement: the carrier contributes no value, so
+        // there is nothing for the authored one to conflict WITH.
+        expect(result.conflicts).toEqual([]);
+      });
+    },
+  );
+
+  it("still conflicts over two genuinely changed values, naming only those", () => {
+    const result = repointEdges(
+      [
+        stagedEdge({
+          id: "edge-1",
+          from: "x",
+          to: "a",
+          inherited: true,
+          props: { on: "base" },
+          baseProps: { on: "base" },
+          branchId: BRANCH_A,
+        }),
+        stagedEdge({
+          id: "edge-2",
+          from: "x",
+          to: "b",
+          props: { on: "edit-b" },
+          branchId: BRANCH_B,
+        }),
+        stagedEdge({
+          id: "edge-3",
+          from: "x",
+          to: "c",
+          props: { on: "edit-c" },
+          branchId: BRANCH_C,
+        }),
+      ],
+      collapse,
+      new Set<MergeKey>(),
+      "lastWriteWins",
+      rankABC(),
+    );
+
+    // The disagreement is real and reported — over the two AUTHORED values alone.
+    // The carrier's untouched "base" is absent from `values`, so the resolution can
+    // only ever name a value some branch actually asked for.
+    expect(
+      result.conflicts.map((conflict) => ({
+        entityId: conflict.entityId,
+        property: conflict.property,
+        values: conflict.values.map((value) => [
+          value.branchId as string,
+          value.value,
+        ]),
+        resolution: conflict.resolution,
+      })),
+    ).toEqual([
+      {
+        entityId: "edge-1",
+        property: "on",
+        values: [
+          [BRANCH_B as string, "edit-b"],
+          [BRANCH_C as string, "edit-c"],
+        ],
+        resolution: "edit-b",
+      },
+    ]);
+    expect(requireDefined(result.edges[0]).props).toEqual({ on: "edit-b" });
+  });
+
+  it("keeps an unchanged inherited value that no member authored", () => {
+    // Filtering out unauthored CLAIMS must not erase unauthored VALUES: the fold
+    // still commits a full prop bag, so a property nobody touched keeps the value the
+    // survivor holds.
+    const result = repointEdges(
+      [
+        stagedEdge({
+          id: "edge-1",
+          from: "x",
+          to: "a",
+          inherited: true,
+          props: { on: "base" },
+          baseProps: { on: "base" },
+          branchId: BRANCH_A,
+        }),
+        // A branch-created member that says nothing about `on` at all, so the two
+        // members differ on content and the union (not the exact-equal collapse)
+        // decides the result.
+        stagedEdge({
+          id: "edge-2",
+          from: "x",
+          to: "b",
+          props: {},
+          branchId: BRANCH_B,
+        }),
+      ],
+      collapse,
+      new Set<MergeKey>(),
+      "lastWriteWins",
+      rankABC(),
+    );
+
+    expect(requireDefined(result.edges[0]).props).toEqual({ on: "base" });
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it("keeps an unauthored property the SURVIVOR's own bag lacks", () => {
+    // Two committed rows the repoint folded together — the survivor is the min-id
+    // inherited one, and the other member's untouched property has no claim behind
+    // it. It is still part of the folded row's content, so the key survives with the
+    // value that member carried.
+    const result = repointEdges(
+      [
+        stagedEdge({
+          id: "edge-1",
+          from: "x",
+          to: "a",
+          inherited: true,
+          props: { on: "base-a" },
+          baseProps: { on: "base-a" },
+          branchId: BRANCH_A,
+        }),
+        stagedEdge({
+          id: "edge-2",
+          from: "x",
+          to: "b",
+          inherited: true,
+          props: { note: "base-b" },
+          baseProps: { note: "base-b" },
+          branchId: BRANCH_B,
+        }),
+      ],
+      collapse,
+      new Set<MergeKey>(),
+      "lastWriteWins",
+      rankABC(),
+    );
+
+    expect(requireDefined(result.edges[0]).id).toBe("edge-1");
+    expect(requireDefined(result.edges[0]).props).toEqual({
+      on: "base-a",
+      note: "base-b",
+    });
+    expect(result.conflicts).toEqual([]);
+  });
+
+  // Which branch a staged copy of an inherited row belongs to is arbitrary, so the
+  // value kept for a key nobody authored must come from the ROW, not the label. Both
+  // assignments below hold the same three rows; only the labels on the two `note`
+  // carriers swap. Ordering the carriers by branch id instead flips the committed
+  // value between them, which is the label sensitivity #408 is about.
+  describe.each([
+    { labelling: "in id order", second: BRANCH_B, third: BRANCH_C },
+    { labelling: "SWAPPED", second: BRANCH_C, third: BRANCH_B },
+  ])(
+    "two unauthored carriers of a key the survivor lacks, labelled $labelling",
+    ({ second, third }) => {
+      it("keeps the value of the minimum-id row", () => {
+        const result = repointEdges(
+          [
+            // The survivor: min-id inherited, and it carries no `note` at all.
+            stagedEdge({
+              id: "edge-1",
+              from: "x",
+              to: "a",
+              inherited: true,
+              props: { on: "base-a" },
+              baseProps: { on: "base-a" },
+              branchId: BRANCH_A,
+            }),
+            stagedEdge({
+              id: "edge-2",
+              from: "x",
+              to: "b",
+              inherited: true,
+              props: { note: "from-edge-2" },
+              baseProps: { note: "from-edge-2" },
+              branchId: second,
+            }),
+            stagedEdge({
+              id: "edge-3",
+              from: "x",
+              to: "c",
+              inherited: true,
+              props: { note: "from-edge-3" },
+              baseProps: { note: "from-edge-3" },
+              branchId: third,
+            }),
+          ],
+          collapse,
+          new Set<MergeKey>(),
+          "lastWriteWins",
+          rankABC(),
+        );
+
+        expect(requireDefined(result.edges[0]).props).toEqual({
+          on: "base-a",
+          note: "from-edge-2",
+        });
+        expect(result.conflicts).toEqual([]);
+      });
+    },
+  );
 });
 
 describe("repointEdges dedupe-key delimiter safety (F13)", () => {

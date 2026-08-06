@@ -49,7 +49,17 @@
  * committed target itself, so its own end is already the stored one. Resolving
  * to it would write the row back at itself and report an end the merge never
  * decided, which is why a target that moved the end takes this row out of the
- * resolution entirely.
+ * WRITES entirely.
+ *
+ * It does not take it out of the REPORT (issue #409). Discarding a claim is an
+ * arbitration outcome, and the merge report's honesty principle is that every
+ * observable-but-unapplied delta is visible: the claim that merely LOST the
+ * least-claim rule already appears in `ValidityEndResolution.claimedBy`, so a claim
+ * target precedence threw away must not be less visible than that. Such a row gets a
+ * resolution naming the TARGET's own instant, its discarded claimants, and
+ * `precedence: {@link VALIDITY_END_TARGET_PRECEDENCE}` — the discriminator that keeps
+ * "the merge wrote this end" and "the target already held this end" distinguishable.
+ * A row NO branch claimed produces no entry at all: there was nothing to discard.
  *
  * DELETION ABSORBS AN ENDING
  *
@@ -77,6 +87,9 @@
  * is where "who asked for what" belongs. The alternative — crediting every
  * claimant — would make provenance answer "who spoke about this row" instead, a
  * different question that the report already answers.
+ *
+ * By the same rule a target-precedence row credits NOBODY: the merge committed none
+ * of that end, so its resolution is report-only and mints no credit.
  */
 import { requireDefined } from "../utils/presence";
 import {
@@ -89,6 +102,7 @@ import type { StagedWindowedEdge, StagedWindowedNode } from "./staging";
 import type { ValidWindow } from "./state-diff";
 import type { EdgeId, NodeId, NodeType } from "./typegraph-internal";
 import type { BranchId, DroppedItem, ValidityEndResolution } from "./types";
+import { VALIDITY_END_TARGET_PRECEDENCE } from "./types";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
@@ -120,6 +134,12 @@ export type ValidWindowResolution = Readonly<{
   nodeCredits: ReadonlyMap<MergeKey, readonly BranchId[]>;
   /** The edge half of {@link ValidWindowResolution.nodeCredits}. */
   edgeCredits: ReadonlyMap<MergeKey, readonly BranchId[]>;
+  /**
+   * Every row whose end this phase RESOLVED, nodes then edges — a superset of the
+   * ends above: a row target precedence decided appears here (marked
+   * {@link VALIDITY_END_TARGET_PRECEDENCE}) with no entry in `nodeEnds`/`edgeEnds`
+   * and none in the credits.
+   */
   resolutions: readonly ValidityEndResolution[];
   dropped: readonly DroppedItem[];
 }>;
@@ -207,6 +227,10 @@ type WindowDelta = Readonly<{
 /**
  * Reconciles one entity population (nodes or edges), skipping identities the
  * merge finally deletes — deletion absorbs an ending, with no conflict recorded.
+ *
+ * `ends` and `credits` cover only the rows the commit must WRITE; `resolutions`
+ * additionally reports the rows target precedence decided, so a discarded claim is
+ * visible without being staged.
  */
 function resolvePopulation(
   entity: "node" | "edge",
@@ -242,7 +266,7 @@ function resolvePopulation(
   for (const [identity, group] of byIdentity) {
     const claims: EndClaim[] = [];
     let reportedUnapplicable = false;
-    let targetMovedEnd = false;
+    let targetEnd: string | undefined;
     for (const delta of group) {
       const { applicableEnd, unapplicable } = classifyDelta(
         delta.base,
@@ -252,11 +276,13 @@ function resolvePopulation(
       // describes the DESTINATION's own row, not a claim staged against it. A
       // target that already moved this end leaves the merge nothing to apply —
       // that is rule 3's committed-target precedence, reached without writing
-      // the row back at itself or reporting an end the merge did not decide.
+      // the row back at itself. The instant is kept rather than a flag, because
+      // the report has to name the end that actually stands (a group holds at
+      // most one delta per branch, so the `??=` records that one delta's end).
       // A target-side unapplicable delta is likewise not something the merge
       // failed to carry: it is where the merge writes.
       if (delta.branchId === preferredBranchId) {
-        targetMovedEnd ||= applicableEnd !== undefined;
+        targetEnd ??= applicableEnd;
         continue;
       }
       if (applicableEnd !== undefined) {
@@ -270,7 +296,29 @@ function resolvePopulation(
         dropped.push(dropItem(delta.id));
       }
     }
-    const resolved = targetMovedEnd ? undefined : earliestEnd(claims);
+    const first = requireDefined(group[0]);
+    if (targetEnd !== undefined) {
+      // Target precedence: the committed target already moved this end, so the
+      // merge applies nothing and every branch claim is discarded. Say so
+      // (issue #409) — a claim the merge observed and did not apply is exactly what
+      // the report exists to make visible, and the least-claim LOSER is already
+      // visible in `claimedBy`, so a discarded claim must not be less visible than
+      // an out-arbitrated one. The entry names the target's own instant and is
+      // marked so a consumer can tell it from an end the merge decided. No end is
+      // staged and no credit is minted: nothing here was committed by a branch.
+      if (claims.length > 0) {
+        resolutions.push({
+          entity,
+          kind: first.kind,
+          id: first.id,
+          validTo: targetEnd,
+          claimedBy: claimingBranches(claims),
+          precedence: VALIDITY_END_TARGET_PRECEDENCE,
+        });
+      }
+      continue;
+    }
+    const resolved = earliestEnd(claims);
     if (resolved === undefined) {
       continue;
     }
@@ -283,7 +331,6 @@ function resolvePopulation(
       identity,
       claimingBranches(claims.filter((claim) => claim.validTo === resolved)),
     );
-    const first = requireDefined(group[0]);
     resolutions.push({
       entity,
       kind: first.kind,
@@ -319,9 +366,10 @@ function resolvePopulation(
  * @param staging The provenance-tagged union staging set (T7).
  * @param nodeDeletions The AUTHORITATIVE finally-deleted node identities.
  * @param edgeDeletions The AUTHORITATIVE finally-deleted edge identities.
- * @param preferredBranchId The incremental merge's committed-target branch,
- *   whose own end already stands and so takes its row out of the resolution
- *   (rule 3's preferred half). Absent on the snapshot path.
+ * @param preferredBranchId The incremental merge's committed-target branch, whose
+ *   own end already stands and so takes its row out of the ENDS the commit writes
+ *   (rule 3's preferred half) while still reporting the claims it discarded.
+ *   Absent on the snapshot path.
  */
 export function resolveValidWindows(
   staging: Readonly<{

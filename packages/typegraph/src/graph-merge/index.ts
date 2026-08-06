@@ -73,6 +73,10 @@ export type {
   TypeReconciliation,
   ValidityEndResolution,
 } from "./types";
-export { asBaseVersion, asBranchId } from "./types";
+export {
+  asBaseVersion,
+  asBranchId,
+  VALIDITY_END_TARGET_PRECEDENCE,
+} from "./types";
 export type { MakeBackend, WorkingCopyStrategy } from "./working-copy";
 export { cloneWorkingCopyStrategy } from "./working-copy";

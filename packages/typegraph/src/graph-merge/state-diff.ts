@@ -231,6 +231,13 @@ export type WindowedNode = Readonly<{
  * parsed props too, because an inherited edge whose ONLY change is its window is
  * not otherwise staged — the repoint phase needs the full record to carry the
  * ending through to the commit.
+ *
+ * `baseProps` is the same record {@link ModifiedEdge} carries, and for the same
+ * consumer: the repoint fold judges each contributor's property values against
+ * its own base, so an untouched value never enters the union as an authored claim
+ * (issue #408). A window-only fork's `props` happen to equal its `baseProps`,
+ * which is exactly what makes such a copy contribute nothing — but that equality
+ * is a fact about the fork, not something the fold should have to assume.
  */
 export type WindowedEdge = Readonly<{
   id: EdgeId;
@@ -240,6 +247,7 @@ export type WindowedEdge = Readonly<{
   fromKind: string;
   toKind: string;
   props: Readonly<Record<string, unknown>>;
+  baseProps: Readonly<Record<string, unknown>>;
   base: ValidWindow;
   fork: ValidWindow;
 }>;
@@ -550,6 +558,7 @@ function diffEdgeKind(
         fromKind: forkRow.from_kind,
         toKind: forkRow.to_kind,
         props: forkProps,
+        baseProps,
         base: baseWindow,
         fork: forkWindow,
       });

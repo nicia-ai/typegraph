@@ -20,7 +20,10 @@ import { requireDefined } from "../utils/presence";
  *      but carry DIFFERING props, the per-property disagreement is resolved by the
  *      shared T8 conflict policy ({@link resolvePropertyUnion}) on the captured,
  *      non-wall-clock branch order, recording an edge-level {@link PropertyConflict}
- *      whose `entityId` is the surviving edge's id.
+ *      whose `entityId` is the surviving edge's id. Only the members that AUTHORED a
+ *      property — changed it from their own base — compete for it, so an untouched
+ *      inherited value never outvotes a real edit (issue #408; see
+ *      {@link authoredProperty}).
  *
  * SCOPE OF THE FOLD (issue #393). Steps 3 and 4 apply ONLY to a collision the
  * repointing INDUCED. The store is a MULTIGRAPH: nothing enforces uniqueness on
@@ -65,7 +68,7 @@ import { requireDefined } from "../utils/presence";
  * yields an identical result. Clusters are computed once upstream (T8) and passed in
  * as {@link canonicalOf}; this module never re-clusters.
  */
-import { canonicalizeProps } from "./canonical-props";
+import { canonicalizeProps, canonicalValueKey } from "./canonical-props";
 import type { ClusterResult } from "./clustering";
 import type { ProvenanceWeights, ResolutionContext } from "./conflict-policy";
 import {
@@ -155,6 +158,18 @@ export type StagedEdge = Readonly<{
   fromKind: string;
   toKind: string;
   props: Readonly<Record<string, JsonValue>>;
+  /**
+   * The props the MERGE BASE holds for this row — present on an INHERITED edge,
+   * absent on a branch-created one (nothing preceded it).
+   *
+   * The property union compares each member's {@link StagedEdge.props} against it
+   * so only the properties a member actually AUTHORED compete (issue #408, and the
+   * edge analog of the node path's 3-way merge). Without a base, a staged copy of
+   * an inherited row contributes its whole fork bag, so an untouched base value
+   * enters the union as a first-class claim and can outvote a real edit under any
+   * rank-based policy — see {@link authoredProperty}.
+   */
+  baseProps?: Readonly<Record<string, JsonValue>>;
   branchId: BranchId;
   /**
    * The valid-time window the commit must write. A NEW edge carries the branch's
@@ -477,10 +492,81 @@ function pickSurvivor(
 }
 
 /**
+ * Whether one fold member AUTHORED a value for `property` — it carries the
+ * property AND its value differs from the one that member's own merge base holds.
+ * A BRANCH-CREATED member has no base, so everything it carries is authored.
+ *
+ * This is the changed-props filter of {@link unionEdgeProps} (issue #408), the edge
+ * analog of the node path's 3-way merge (`threeWayMergeProps`): a staged copy of an
+ * inherited row contributes its FULL fork bag, so without it an UNTOUCHED base
+ * value competes as a first-class claim and can outvote a real edit under any
+ * rank-based policy — which branch's label happened to ride on the untouched copy
+ * would then decide the committed value.
+ *
+ * The window-only carrier is the case that makes it observable: that staged copy
+ * exists only to give an end-of-validity a row to ride on, its props ARE the base's,
+ * and the branch labelling it is merely whichever sorted first. It authors no
+ * property at all, and so contributes no claim and raises no conflict.
+ */
+function authoredProperty(edge: RepointedEdge, property: string): boolean {
+  const { props, baseProps } = edge.staged;
+  if (!(property in props)) {
+    return false;
+  }
+  if (baseProps === undefined || !(property in baseProps)) {
+    return true;
+  }
+  return (
+    canonicalValueKey(props[property] as JsonValue) !==
+    canonicalValueKey(baseProps[property] as JsonValue)
+  );
+}
+
+/**
+ * The value a fold set carries for a property NO member authored — used for a key the
+ * survivor's own bag lacks, so filtering out unauthored CLAIMS never erases the row's
+ * content. Every carrier holds its own row's base value here (that is what unauthored
+ * means), so which one is taken is a choice between untouched inherited values.
+ *
+ * Taken from the minimum staged EDGE ID, never from the branch label riding on it.
+ * Which branch a staged copy of an inherited row belongs to is arbitrary — for a
+ * window-only carrier it is merely whichever branch sorted first in staging — so
+ * choosing by label would reinstate, for exactly these keys, the label sensitivity the
+ * authored-claims filter removes (issue #408). The edge id is the fold's ordering
+ * authority everywhere else ({@link pickSurvivor}, `mergedIds`), and the canonical
+ * value breaks a tie between two staged copies of ONE row so the order stays total.
+ *
+ * @param edges The fold set. At least one member must carry `property`.
+ */
+function unauthoredValue(
+  property: string,
+  edges: readonly RepointedEdge[],
+): JsonValue {
+  const carriers = edges
+    .filter((edge) => property in edge.staged.props)
+    .sort((left, right) => {
+      const byId = compareStrings(left.staged.id, right.staged.id);
+      return byId === 0 ?
+          compareStrings(
+            canonicalValueKey(left.staged.props[property] as JsonValue),
+            canonicalValueKey(right.staged.props[property] as JsonValue),
+          )
+        : byId;
+    });
+  return requireDefined(carriers[0]).staged.props[property] as JsonValue;
+}
+
+/**
  * Unions the props of one fold set's edges, resolving any per-property
  * disagreement via the shared T8 conflict policy. Returns the surviving prop bag
  * plus an edge-level {@link PropertyConflict} for every property that genuinely
  * differed (its `entityId` is the surviving edge id).
+ *
+ * Only the members that AUTHORED a property compete for it ({@link
+ * authoredProperty}). A property no member changed is not contested at all, so the
+ * value the survivor already holds stands and no conflict is recorded; a property
+ * two members changed differently is a genuine disagreement and resolves — and is
+ * reported — exactly as before, over their real values alone.
  */
 function unionEdgeProps(
   survivorId: EdgeId,
@@ -504,15 +590,24 @@ function unionEdgeProps(
   const props: Record<string, JsonValue> = {};
   const conflicts: PropertyConflict[] = [];
 
-  // The staged record of each edge IS a `(branchId, props)` contribution, so the
-  // shared node/edge collector consumes it directly.
-  const contributions = edges.map((edge) => edge.staged);
-
   for (const property of [...propertyNames].sort((left, right) =>
     compareStrings(left, right),
   )) {
-    const values = collectConflictingValues(property, contributions);
+    // The staged record of an authoring edge IS a `(branchId, props)` contribution,
+    // so the shared node/edge collector consumes it directly.
+    const claimants = edges
+      .filter((edge) => authoredProperty(edge, property))
+      .map((edge) => edge.staged);
+    const values = collectConflictingValues(property, claimants);
     if (values.length === 0) {
+      // No member of the set authored this property, so nothing competes for it:
+      // the value the survivor already holds stands, and no conflict is possible.
+      // Filtering claims must not shrink the row, so a key only a NON-survivor
+      // carries keeps a value too — see {@link unauthoredValue}.
+      props[property] =
+        property in survivor.staged.props ?
+          (survivor.staged.props[property] as JsonValue)
+        : unauthoredValue(property, edges);
       continue;
     }
     const survivorValue =

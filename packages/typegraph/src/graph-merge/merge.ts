@@ -598,9 +598,15 @@ function indexNewNodesById(
  *
  * The modified inherited edges are the RECONCILED ones (one per id, 3-way merged
  * against base by {@link reconcileEdgeModifications}) — NOT the raw per-branch
- * `staging.modifiedEdges`. Staging each branch's full fork props separately would
- * make the repoint union treat unchanged-from-base fields as conflicts, dropping a
- * disjoint edit by another branch.
+ * `staging.modifiedEdges`. That reconciler is the authority on a row several
+ * branches modified: it survived delete/modify resolution, merged the props, and
+ * already recorded any {@link PropertyConflict} the disagreement raised. Staging
+ * each branch's copy separately would put the same row through a second
+ * arbitration in the repoint fold and report the same conflict twice.
+ *
+ * Every inherited edge is staged WITH the base props it was diffed against, which is
+ * what lets the fold's property union tell an authored value from an untouched one
+ * (issue #408). A branch-created edge carries none — nothing preceded it.
  *
  * Each edge's diff bucket is carried through as its staged ORIGIN
  * ({@link INHERITED_EDGE_ORIGIN} / {@link BRANCH_CREATED_EDGE_ORIGIN}): the modified
@@ -643,6 +649,7 @@ function buildStagedEdges(
       fromKind: item.edge.fromKind,
       toKind: item.edge.toKind,
       props: item.edge.forkProps as Readonly<Record<string, JsonValue>>,
+      baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
       branchId: item.branchId,
       ...(validTo === undefined ? {} : { validTo }),
     });
@@ -654,12 +661,12 @@ function buildStagedEdges(
   // alone. Finally-deleted edges are excluded: deletion absorbs the ending.
   //
   // WHICH branch's copy carries it is arbitrary — the first in the staging order,
-  // `(kind, id, branch)` — and deliberately stays that way. That `branchId` is an
-  // input to the repoint fold's PROPERTY union, where the copy contributes the
-  // base's props under its label, so choosing the carrier by anything else (the
-  // authored ending, say) silently moves which value a fold commits. It is
-  // therefore recorded as window-only carried instead, and the ending's author is
-  // credited from the resolution rather than from whoever carried the row.
+  // `(kind, id, branch)` — and stays that way. The copy is staged WITH the base it
+  // was diffed against, so the repoint fold's property union sees that it authored
+  // nothing and it contributes no claim under any label (issue #408); the carrier's
+  // `branchId` is then a write vehicle only. It is still recorded as window-only
+  // carried, because provenance reads the staged copies too and the ending's author
+  // is credited from the resolution rather than from whoever carried the row.
   for (const item of staging.windowedEdges) {
     const identity = mergeKeyOf(item.edge);
     const validTo = edgeValidityEnds.get(identity);
@@ -681,6 +688,7 @@ function buildStagedEdges(
       fromKind: item.edge.fromKind,
       toKind: item.edge.toKind,
       props: item.edge.props as Readonly<Record<string, JsonValue>>,
+      baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
       branchId: item.branchId,
       validTo,
     });
