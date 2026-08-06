@@ -846,26 +846,35 @@ async function performNodeUpdate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  // Without an explicit validFrom the effective lower bound is the write
-  // instant the backend stamps on a resurrection (it rewrites valid_from), and
-  // the live row's stored bound otherwise.
+  // A node resurrection RESETS `valid_from` (see `buildUpdateNode`), so the
+  // effective lower bound is the write instant rather than the row's stored
+  // one. That instant is sampled HERE and then travels to the backend as an
+  // explicit `validFrom`, because the guard has to measure the bound the write
+  // will actually store: left to default, `resolveValidFrom` would stamp the
+  // backend's own, strictly later, sample, and a `validTo` at this instant
+  // would pass the guard as zero-width and land as negative width a
+  // millisecond later (issue #413). An in-place update keeps the row's stored
+  // bound, which no write rewrites and so needs no prediction.
+  const resurrectionInstant =
+    options?.clearDeleted === true && existing.deleted_at !== undefined ?
+      nowIso()
+    : undefined;
   assertWritableValidityWindow(
     `${kind} "${id}"`,
     validFrom,
-    options?.clearDeleted && existing.deleted_at !== undefined ?
-      nowIso()
-    : existing.valid_from,
+    resurrectionInstant ?? existing.valid_from,
     validTo,
   );
 
   const writeContext = createNodeWriteContext(ctx.graphId, ctx.registry, lock);
   // `validFrom` reaches the backend only through a resurrecting write (see
   // UpdateNodeParams): a live row's lower bound is history and stays put.
+  const effectiveValidFrom = validFrom ?? resurrectionInstant;
   const shared = {
     schema: nodeKind.schema,
     validatedProps,
     uniqueConstraints: registration.unique ?? [],
-    ...(validFrom !== undefined && { validFrom }),
+    ...(effectiveValidFrom !== undefined && { validFrom: effectiveValidFrom }),
     ...(validTo !== undefined && { validTo }),
   };
 

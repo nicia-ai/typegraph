@@ -27,6 +27,14 @@ export function sqlNull(value: string | undefined): SQL | string {
  *    fix without narrowing its validity window on re-import (e.g. via a
  *    `branch()` clone).
  *  - a string: passed through unchanged.
+ *
+ * The `timestamp` fallback is a storage convention, not an assertion the caller
+ * can be held to, so a write whose validity window is GUARDED against the
+ * resulting lower bound must supply that bound explicitly instead of relying on
+ * it: this function samples nothing, but its caller's `timestamp` comes from a
+ * later clock read than the guard's, and the difference is a window of negative
+ * width (issue #413). The node resurrection path therefore passes the instant it
+ * validated against; see `buildUpdateNode` and `performNodeUpdate`.
  */
 export function resolveValidFrom(
   validFrom: string | null | undefined,
