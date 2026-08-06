@@ -29,6 +29,7 @@ import { asCompiledStatementSql } from "../query/sql-intent";
 import { parseSerializedSchema } from "../schema/manager";
 import type { SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
 import { ensureFocusedStatusTable } from "./materialize-shared";
@@ -381,7 +382,7 @@ async function reconcilePendingRemovals(
       const currentEntries =
         currentSchema[entity === "node" ? "nodes" : "edges"];
       for (const kindName of Object.keys(priorEntries)) {
-        if (kindName in currentEntries) continue;
+        if (hasOwnKey(currentEntries, kindName)) continue;
         if (
           recorded.has(kindRemovalKey(entity, kindName, currentRow.version))
         ) {
