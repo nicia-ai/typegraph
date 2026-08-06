@@ -10,7 +10,7 @@ import { getSearchableFields } from "../core/searchable";
 import { TrustedImportError } from "../errors";
 import { storeBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
-import { isInvertedValidityWindow } from "../utils/date";
+import { isCanonicalIsoDate, isInvertedValidityWindow } from "../utils/date";
 import type {
   GraphData,
   GraphInterchangeChunk,
@@ -91,6 +91,73 @@ function invalidStream(message: string): TrustedImportError {
   return new TrustedImportError(message, "invalid_stream");
 }
 
+/** The stated validity window of a streamed node or edge. */
+type StatedValidityWindow = Readonly<{
+  validFrom?: string | null | undefined;
+  validTo?: string | undefined;
+}>;
+
+const VALIDITY_WINDOW_FIELDS = ["validFrom", "validTo"] as const;
+
+type ValidityWindowField = (typeof VALIDITY_WINDOW_FIELDS)[number];
+
+/**
+ * The first window field of `entity` stating a timestamp that is not canonical
+ * fixed-width UTC ISO 8601, or `undefined` when every stated one is.
+ *
+ * A trusted stream is never re-parsed, so this is the only place its timestamps
+ * are held to the format the rest of the system assumes. It is deliberately
+ * format-ONLY — the same {@link isCanonicalIsoDate} decision the untrusted
+ * path's schema and the store's own write validation make, and nothing more —
+ * because a non-canonical instant is not merely ugly: every temporal filter
+ * compares these values AS TEXT against an `asOf` coordinate, so a variable-width
+ * one (`...:00.1Z`, an offset, date-only) mis-sorts and silently includes or
+ * excludes the wrong rows once stored, and it would mis-decide the negative-width
+ * check below on the way in. Two field tests per row costs about a microsecond
+ * against the ~4µs an in-memory SQLite row already costs — the price of the
+ * stream's ordering claims meaning anything.
+ *
+ * An absent field states nothing, and a `null` validFrom is a confirmed
+ * open-left window (see {@link nodeParams}) — neither is a timestamp to check.
+ */
+function nonCanonicalWindowField(
+  entity: StatedValidityWindow,
+): ValidityWindowField | undefined {
+  return VALIDITY_WINDOW_FIELDS.find((field) => {
+    const stated = entity[field];
+    return typeof stated === "string" && !isCanonicalIsoDate(stated);
+  });
+}
+
+/**
+ * The first entity in `entities` stating a non-canonical window timestamp, with
+ * the offending field. Allocates only on the failing path, so a clean chunk pays
+ * one predicate per stated timestamp and nothing else.
+ */
+function findNonCanonicalWindow<Entity extends StatedValidityWindow>(
+  entities: readonly Entity[],
+): Readonly<{ entity: Entity; field: ValidityWindowField }> | undefined {
+  for (const entity of entities) {
+    const field = nonCanonicalWindowField(entity);
+    if (field !== undefined) return { entity, field };
+  }
+  return undefined;
+}
+
+/** The refusal message for a non-canonical window timestamp on `subject`. */
+function nonCanonicalWindowMessage(
+  subject: string,
+  field: ValidityWindowField,
+  value: string | null | undefined,
+): string {
+  return (
+    `Non-canonical ${field} in trusted import: ${subject} states "${String(value)}". ` +
+    `Expected canonical fixed-width UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ), ` +
+    `which is what makes a stored timestamp sort chronologically against an asOf ` +
+    `coordinate. Convert with new Date(value).toISOString().`
+  );
+}
+
 /**
  * An entity whose stated window has negative width. Trusted import writes
  * straight to SQL and skips schema validation for throughput, but a row that
@@ -99,13 +166,12 @@ function invalidStream(message: string): TrustedImportError {
  * write repairs it. `null` validFrom is a confirmed open-left window, so there
  * is no lower bound to invert against; zero width is legal (see
  * {@link isInvertedValidityWindow}).
+ *
+ * Only ever reached for a chunk whose timestamps {@link findNonCanonicalWindow}
+ * has already accepted, which is what makes the lexicographic compare inside a
+ * chronological one.
  */
-function hasInvertedWindow(
-  entity: Readonly<{
-    validFrom?: string | null | undefined;
-    validTo?: string | undefined;
-  }>,
-): boolean {
+function hasInvertedWindow(entity: StatedValidityWindow): boolean {
   return isInvertedValidityWindow(
     entity.validFrom ?? undefined,
     entity.validTo,
@@ -195,6 +261,17 @@ async function consumeTrustedChunks<G extends GraphDef>(
             `Unknown node kind in trusted import: ${unknownKind}`,
           );
         }
+        const nonCanonicalNode = findNonCanonicalWindow(chunk.nodes);
+        if (nonCanonicalNode !== undefined) {
+          const { entity, field } = nonCanonicalNode;
+          throw invalidStream(
+            nonCanonicalWindowMessage(
+              `${entity.kind} "${entity.id}"`,
+              field,
+              entity[field],
+            ),
+          );
+        }
         const invertedNode = chunk.nodes.find((node) =>
           hasInvertedWindow(node),
         );
@@ -226,6 +303,17 @@ async function consumeTrustedChunks<G extends GraphDef>(
         if (invalidEdge !== undefined) {
           throw invalidStream(
             `Unknown edge or endpoint kind in trusted import: ${invalidEdge.kind}`,
+          );
+        }
+        const nonCanonicalEdge = findNonCanonicalWindow(chunk.edges);
+        if (nonCanonicalEdge !== undefined) {
+          const { entity, field } = nonCanonicalEdge;
+          throw invalidStream(
+            nonCanonicalWindowMessage(
+              `${entity.kind} edge "${entity.id}"`,
+              field,
+              entity[field],
+            ),
           );
         }
         const invertedEdge = chunk.edges.find((edge) =>
