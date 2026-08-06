@@ -1,3 +1,4 @@
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * The centralized property-conflict resolution rule (design §6.4 rule 4 / §7.3,
@@ -217,7 +218,7 @@ export function collectConflictingValues(
   const seen = new Set<string>();
   const values: ConflictingValue[] = [];
   for (const { branchId, props } of contributions) {
-    if (!(property in props)) {
+    if (!hasOwnKey(props, property)) {
       continue;
     }
     const value = props[property] as JsonValue;
