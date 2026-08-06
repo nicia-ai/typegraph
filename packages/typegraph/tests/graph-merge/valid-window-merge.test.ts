@@ -19,7 +19,12 @@
  *  11. the branch that AUTHORED the committed end is credited in provenance —
  *      including when it authored nothing else on the row (issue #402), and
  *      including every branch that tied on that end — while a branch whose claim
- *      lost the least-claim rule, or whose ending a deletion absorbed, is not.
+ *      lost the least-claim rule, or whose ending a deletion absorbed, is not;
+ *  12. an ending that predates the TARGET row's start is refused, not committed.
+ *
+ * Case 12 is issue #398: an ending legal against the row a branch holds can still
+ * invert against a target that moved on underneath it, and the write layer now
+ * refuses rather than committing a row observable at no coordinate.
  *
  * Case 9 is the window half of issue #393: the repoint/dedupe fold is scoped to
  * collisions repointing INDUCED, so a window claim can no longer migrate between two
@@ -39,18 +44,21 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  INVERTED_VALIDITY_WINDOW_CODE,
+  ValidationError,
 } from "@nicia-ai/typegraph";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { asEdgeId, asNodeId } from "../../src/core/types";
 import { branch } from "../../src/graph-merge/branch";
+import { MergeError } from "../../src/graph-merge/errors";
 import { merge, mergeIncremental } from "../../src/graph-merge/merge";
 import {
   openProvenanceStore,
   readProvenance,
 } from "../../src/graph-merge/provenance-store";
-import { unwrap } from "../../src/graph-merge/result";
+import { isErr, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeReport } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
 import { WINDOW_NOT_APPLICABLE_DROP_REASON } from "../../src/graph-merge/valid-window";
@@ -839,6 +847,56 @@ describe.each(backendMatrix())(
       expect((await nodeRow(forkPoint, "Patient", "pat-1")).version).toBe(
         versionBefore,
       );
+    });
+
+    it("refuses to commit an ending that predates the target row's start", async () => {
+      // Issue #398. A branch's ending is legal against the row the BRANCH holds,
+      // but an incremental target moves on underneath it: here the target
+      // replaces its edge with one that starts LATER than the branch's end.
+      // Committing the ending anyway leaves `valid_to` < `valid_from` — a row
+      // observable at no coordinate at all — which is exactly what the edge write
+      // path used to do while the merge reported success. The write must refuse
+      // and the merge must leave the target untouched.
+      const forkPoint = await seededForkPoint();
+      const target = (await forkOf(forkPoint, asBranchId("window-target")))
+        .store;
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      await branchA.store.edges.hadEncounter.update(
+        EDGE_1,
+        {},
+        { validTo: LATE },
+      );
+
+      await target.edges.hadEncounter.hardDelete(EDGE_1);
+      await target.edges.hadEncounter.create(
+        { kind: "Patient", id: "pat-1" },
+        { kind: "Encounter", id: "enc-1" },
+        { on: "2026-01-05" },
+        { id: EDGE_1, validFrom: LATEST },
+      );
+
+      const result = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [branchA],
+        options: { branchOrder: BRANCH_ORDER },
+      });
+
+      // A typed merge failure carrying the write's typed refusal as its cause —
+      // not a raw driver error, and emphatically not a reported success.
+      expect(isErr(result)).toBe(true);
+      if (!isErr(result)) return;
+      expect(result.error).toBeInstanceOf(MergeError);
+      const cause = result.error.cause;
+      expect(cause).toBeInstanceOf(ValidationError);
+      expect(
+        (cause as ValidationError).details.issues.map((issue) => issue.code),
+      ).toContain(INVERTED_VALIDITY_WINDOW_CODE);
+
+      // The target keeps the window it had, with no end at all.
+      const row = await edgeRow(target, "edge-1");
+      expect(canonicalizeDatabaseTimestamp(row.valid_from)).toBe(LATEST);
+      expect(await edgeEnd(target, "edge-1")).toBeUndefined();
     });
   },
 );

@@ -695,6 +695,15 @@ Every write method below that accepts a `validFrom` option (`create`,
 that operation's own creation timestamp when omitted — `validFrom` is never
 left open-ended. `validTo` remains optional and open-ended until set.
 
+A window may not have negative width. Stating both endpoints out of order, or
+updating a row with a `validTo` that precedes its stored `validFrom`, raises a
+`ValidationError` whose issue carries the code `INVERTED_VALIDITY_WINDOW` — such
+a row stopped being true before it started, so no `asOf` coordinate could ever
+observe it. Two related shapes are legal: a ZERO-width window
+(`validTo === validFrom`), which is what a same-instant retraction produces; and
+a create carrying only a historical `validTo`, which means "born already ended"
+and is read back with the `includeEnded` temporal mode.
+
 ### Node Collections
 
 Each node type has a collection with these methods:

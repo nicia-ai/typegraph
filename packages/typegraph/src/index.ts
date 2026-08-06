@@ -371,6 +371,7 @@ export {
   IdentityContradictionError,
   IdentitySeparationViolationError,
   InvalidEdgeWeightError,
+  INVERTED_VALIDITY_WINDOW_CODE,
   isConstraintError,
   isRecordedCaptureGuardError,
   isSystemError,

@@ -3185,6 +3185,9 @@ export function inverseOf(edgeA: EdgeType, edgeB: EdgeType): OntologyRelation;
 export function invertClosure(closure: ReadonlyMap<string, ReadonlySet<string>>): ReadonlyMap<string, ReadonlySet<string>>;
 
 // @public
+export const INVERTED_VALIDITY_WINDOW_CODE = "INVERTED_VALIDITY_WINDOW";
+
+// @public
 export function isConstraintError(error: unknown): boolean;
 
 // @public (undocumented)

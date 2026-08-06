@@ -260,6 +260,95 @@ describe("trusted import", () => {
     ).toBeUndefined();
   });
 
+  it("refuses a node whose validity window is inverted", async () => {
+    // The trusted path skips schema validation for throughput, but a window of
+    // negative width is a stream SHAPE fault: the row would be observable at no
+    // `asOf` coordinate at all, and no later write repairs it (issue #398).
+    const store = createStore(trustedGraph, createTestBackend());
+
+    await expect(
+      trustedImportGraph(
+        store,
+        graphData([
+          {
+            kind: "TrustedPerson",
+            id: "alice",
+            properties: { name: "Alice" },
+            validFrom: "2026-01-01T00:00:00.000Z",
+            validTo: "2021-01-01T00:00:00.000Z",
+          },
+        ]),
+      ),
+    ).rejects.toEqual(expectReason("invalid_stream"));
+
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
+    ).toBeUndefined();
+  });
+
+  it("refuses an edge whose validity window is inverted", async () => {
+    const store = createStore(trustedGraph, createTestBackend());
+
+    await expect(
+      trustedImportGraph(
+        store,
+        graphData(
+          [
+            {
+              kind: "TrustedPerson",
+              id: "alice",
+              properties: { name: "Alice" },
+            },
+            { kind: "TrustedPerson", id: "bob", properties: { name: "Bob" } },
+          ],
+          [
+            {
+              kind: "trustedKnows",
+              id: "edge-1",
+              from: { kind: "TrustedPerson", id: "alice" },
+              to: { kind: "TrustedPerson", id: "bob" },
+              properties: { since: 2020 },
+              validFrom: "2026-01-01T00:00:00.000Z",
+              validTo: "2021-01-01T00:00:00.000Z",
+            },
+          ],
+        ),
+      ),
+    ).rejects.toEqual(expectReason("invalid_stream"));
+
+    expect(
+      await store.edges.trustedKnows.getById(asEdgeId<typeof knows>("edge-1")),
+    ).toBeUndefined();
+  });
+
+  it("accepts a zero-width and a born-ended window", async () => {
+    // Both round-trip the store's own output: a same-instant retraction emits
+    // zero width, and a row created with only a `validTo` carries a stamped
+    // lower bound it never asserted.
+    const store = createStore(trustedGraph, createTestBackend());
+
+    const result = await trustedImportGraph(
+      store,
+      graphData([
+        {
+          kind: "TrustedPerson",
+          id: "zero-width",
+          properties: { name: "Zero" },
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+        {
+          kind: "TrustedPerson",
+          id: "born-ended",
+          properties: { name: "Ended" },
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      ]),
+    );
+
+    expect(result.nodes).toBe(2);
+  });
+
   it("refuses identity-enabled targets even when the input has no assertions", async () => {
     const store = createStore(identityTrustedGraph, createTestBackend());
 

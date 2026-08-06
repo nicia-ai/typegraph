@@ -120,6 +120,36 @@ try {
 }
 ```
 
+#### `INVERTED_VALIDITY_WINDOW`
+
+A `ValidationError` whose issue carries the exported code
+`INVERTED_VALIDITY_WINDOW` refused a valid-time window of negative width: the
+write's `validTo` precedes the row's effective `validFrom`, so the row would have
+stopped being true before it started and no `asOf` coordinate could observe it.
+Branch on the code rather than on the message.
+
+```typescript
+import { INVERTED_VALIDITY_WINDOW_CODE, ValidationError } from "@nicia-ai/typegraph";
+
+try {
+  // The stored validFrom is later than this end.
+  await store.edges.worksAt.update(edgeId, {}, { validTo: "2020-01-01T00:00:00.000Z" });
+} catch (error) {
+  if (
+    error instanceof ValidationError &&
+    error.details.issues.some((issue) => issue.code === INVERTED_VALIDITY_WINDOW_CODE)
+  ) {
+    // Supply an explicit validFrom for a historical window, or drop validTo.
+  }
+}
+```
+
+Interchange import records the same refusal as a per-row error prefixed with the
+code, so one bad row does not abort the import; trusted import refuses the whole
+stream with `TrustedImportError` reason `invalid_stream`. A zero-width window
+(`validTo === validFrom`) is legal and never raises this, and so is a create
+carrying only a historical `validTo`.
+
 ### `DisjointError`
 
 Thrown when attempting to create a node that violates a disjointness constraint.

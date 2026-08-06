@@ -59,8 +59,8 @@ import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import {
-  assertEffectiveValidityLowerBound,
   assertOrderedValidityWindow,
+  assertWritableValidityWindow,
   nowIso,
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
@@ -589,6 +589,17 @@ function draftNodeCreate<G extends GraphDef>(
         operation: "create",
       });
 
+  const validFrom = validateOptionalCanonicalIsoDate(
+    input.validFrom,
+    "validFrom",
+  );
+  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+  // A stated pair must be ordered. A lone historical validTo is NOT an error on
+  // an insert — it means "born already ended" (see
+  // assertWritableValidityWindow). Both create paths (single and batch) draft
+  // through here, so this is the only insert-side check needed.
+  assertOrderedValidityWindow(`${kind} "${id}"`, validFrom, validTo);
+
   return {
     kind,
     id,
@@ -596,8 +607,8 @@ function draftNodeCreate<G extends GraphDef>(
     nodeKind,
     uniqueConstraints: registration.unique ?? [],
     validatedProps,
-    validFrom: validateOptionalCanonicalIsoDate(input.validFrom, "validFrom"),
-    validTo: validateOptionalCanonicalIsoDate(input.validTo, "validTo"),
+    validFrom,
+    validTo,
   };
 }
 
@@ -835,16 +846,15 @@ async function performNodeUpdate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  assertOrderedValidityWindow(`${kind} "${id}"`, validFrom, validTo);
-  // The EFFECTIVE lower bound: an explicit validFrom, else — resurrection —
-  // the write instant the backend will stamp, else the live row's stored
-  // bound. A lone past validTo must not be born inverted.
-  assertEffectiveValidityLowerBound(
+  // Without an explicit validFrom the effective lower bound is the write
+  // instant the backend stamps on a resurrection (it rewrites valid_from), and
+  // the live row's stored bound otherwise.
+  assertWritableValidityWindow(
     `${kind} "${id}"`,
-    validFrom ??
-      (options?.clearDeleted && existing.deleted_at !== undefined ?
-        nowIso()
-      : existing.valid_from),
+    validFrom,
+    options?.clearDeleted && existing.deleted_at !== undefined ?
+      nowIso()
+    : existing.valid_from,
     validTo,
   );
 

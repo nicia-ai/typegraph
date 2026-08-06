@@ -33,6 +33,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import {
   assertOrderedValidityWindow,
+  assertWritableValidityWindow,
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
@@ -386,6 +387,11 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+  // A stated pair must be ordered. A lone historical validTo is NOT an error on
+  // an insert — it means "born already ended" (see
+  // assertWritableValidityWindow). Both create paths (single and batch) prepare
+  // through here, so this is the only insert-side check needed.
+  assertOrderedValidityWindow(`edge "${id}"`, validFrom, validTo);
 
   // Check cardinality constraints
   const cardinality = registration.cardinality ?? "many";
@@ -730,13 +736,27 @@ async function performEdgeUpdate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  assertOrderedValidityWindow(`edge "${id}"`, validFrom, validTo);
-  // Deliberately NO effective-lower-bound check here (nodes have one): edge
-  // resurrection with a lone past `validTo` is sanctioned public behavior —
-  // `getOrCreateByEndpoints` resurrects an ended employment directly into the
-  // inactive state and counts it against cardinality accordingly. Edges also
-  // RETAIN their stored lower bound on resurrection, so the "born inverted"
-  // corruption the node check closes cannot silently arise from a merge here.
+  // An IN-PLACE update is held to the row's stored lower bound: the row
+  // demonstrably began at `valid_from`, so an end before it is incoherent, and
+  // this is the ordering hole the edge write path used to have (nodes have
+  // always been checked here).
+  //
+  // A RESURRECTION is not. Edges RETAIN their stored lower bound unless the
+  // resurrection names a new one (see UpdateEdgeParams), and reviving one
+  // straight into the ENDED state is sanctioned public behavior —
+  // `getOrCreateByEndpoints` does exactly that to an ended employment and counts
+  // it against cardinality accordingly — so its lone `validTo` is a statement
+  // about the revived row's end, not a claim about its start. Nodes differ only
+  // because their resurrection RESETS `valid_from` to the write instant, which
+  // an unaccompanied historical `validTo` really would invert.
+  const resurrecting =
+    options?.clearDeleted === true && existing.deleted_at !== undefined;
+  assertWritableValidityWindow(
+    `edge "${id}"`,
+    validFrom,
+    resurrecting ? undefined : existing.valid_from,
+    validTo,
+  );
 
   // `validFrom` reaches the backend only through a resurrecting write (see
   // UpdateEdgeParams): a live edge's lower bound is history and stays put.
@@ -1102,12 +1122,19 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   validateMatchOnFields(edgeKind.schema, matchOn, kind);
 
   // Validate temporal inputs before the read probe so validity of a call does
-  // not depend on whether its endpoint identity already exists.
+  // not depend on whether its endpoint identity already exists. Only the
+  // endpoint PAIR can be judged here — the effective lower bound of a lone
+  // `validTo` belongs to the row the write leg resolves to, and is checked there.
   const validFrom = validateOptionalCanonicalIsoDate(
     options?.validFrom,
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(options?.validTo, "validTo");
+  assertOrderedValidityWindow(
+    `${kind} edge between ${fromKind} "${fromId}" and ${toKind} "${toId}"`,
+    validFrom,
+    validTo,
+  );
 
   // Probe outside the transaction: with ifExists "return", the common found
   // path performs no write, so it must not pay for a write transaction
@@ -1296,6 +1323,13 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       "validFrom",
     );
     const validTo = validateOptionalCanonicalIsoDate(item.validTo, "validTo");
+    // As in the single-item path: the endpoint pair is judged up front so a
+    // batch's validity does not depend on which items already exist.
+    assertOrderedValidityWindow(
+      `${kind} edge between ${item.fromKind} "${item.fromId}" and ${item.toKind} "${item.toId}"`,
+      validFrom,
+      validTo,
+    );
 
     const compositeKey = buildEdgeCompositeKey(
       item.fromKind,
