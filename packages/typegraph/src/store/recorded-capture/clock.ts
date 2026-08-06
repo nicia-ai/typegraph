@@ -1,4 +1,4 @@
-import { type GraphBackend } from "../../backend/types";
+import { type GraphBackend, usesPessimisticLocks } from "../../backend/types";
 import {
   createRecordedInstant,
   parseRecordedInstant,
@@ -41,11 +41,6 @@ const RECORDED_MIN_TIME = "1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
 const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
   "typegraph:recorded-graph-write";
-
-const USES_RECORDED_GRAPH_ADVISORY_LOCK = {
-  postgres: true,
-  sqlite: false,
-} as const satisfies Record<SqlDialect, boolean>;
 
 /**
  * Builds a `pg_advisory_xact_lock` call scoped to a `(namespace, graphId)` pair.
@@ -167,11 +162,11 @@ async function acquireRecordedGraphWriteLock(
 }
 
 export async function lockRecordedGraphWrite(
-  target: Pick<GraphBackend, "dialect" | "execute">,
+  target: Pick<GraphBackend, "capabilities" | "execute">,
   graphId: string,
   memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
-  if (!USES_RECORDED_GRAPH_ADVISORY_LOCK[target.dialect]) {
+  if (!usesPessimisticLocks(target)) {
     return graphWriteLockEvidence();
   }
   const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);

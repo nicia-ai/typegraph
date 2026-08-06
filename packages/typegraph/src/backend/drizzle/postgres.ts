@@ -135,6 +135,7 @@ import {
   type UpsertEmbeddingParams,
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
+  usesPessimisticLocks,
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../types";
@@ -265,6 +266,19 @@ export type PostgresBackendOptions = Readonly<{
    * capability gap.
    */
   capabilities?: Partial<BackendCapabilities>;
+  /**
+   * Declares {@link BackendCapabilities.pessimisticLocks}. Defaults to `true`
+   * — every supported PostgreSQL server implements the primitives.
+   *
+   * Set to `false` for a Postgres-compatible engine that does not: DoltgreSQL
+   * as of 0.57 rejects both `pg_advisory_xact_lock` and the row-locking
+   * clauses. Because it lands on the capability rather than on a private flag,
+   * the whole lock surface honors it — the schema-write fence here, the
+   * recorded graph-write lock, the identity ledger — and `history: true` is
+   * refused up front rather than failing mid-flush, since recorded-clock
+   * allocation cannot be made safe without a lock.
+   */
+  pessimisticLocks?: boolean;
   /**
    * Use server-side prepared statements (named statements cached per
    * pg connection) on the node-postgres / neon-serverless fast path.
@@ -479,6 +493,12 @@ export function createPostgresBackend(
   // hold a session across statements, so there is no fence to run under.
   const capabilities: BackendCapabilities = {
     ...declaredCapabilities,
+    // The option is expressed as a capability so that every lock site — here,
+    // the recorded graph-write lock, the identity ledger — reads one source
+    // instead of each re-deriving it.
+    ...(options.pessimisticLocks === undefined ?
+      {}
+    : { pessimisticLocks: options.pessimisticLocks }),
     contributions: {
       supported: true,
       probe: true,
@@ -768,21 +788,25 @@ export function createPostgresBackend(
     }
 
     return db.transaction(async (tx) => {
-      // Advisory lock: hashtext($graphId) is collision-tolerant for the
-      // size of an active graph set; collisions just serialize unrelated
-      // graphs which is harmless. Held until the transaction commits.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
-      // Managed entity writers lock this row FOR SHARE. Locking it FOR UPDATE
-      // before any emptiness probe makes a writer-first commit wait; a
-      // schema-first snapshot-isolated writer gets PostgreSQL's native
-      // serialization failure instead of validating a stale row version.
-      await tx.execute(sql`
-        SELECT ${tables.schemaVersions.version}
-        FROM ${tables.schemaVersions}
-        WHERE ${tables.schemaVersions.graphId} = ${graphId}
-          AND ${tables.schemaVersions.isActive} = TRUE
-        FOR UPDATE
-      `);
+      if (usesPessimisticLocks({ capabilities })) {
+        // Advisory lock: hashtext($graphId) is collision-tolerant for the
+        // size of an active graph set; collisions just serialize unrelated
+        // graphs which is harmless. Held until the transaction commits.
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
+        );
+        // Managed entity writers lock this row FOR SHARE. Locking it FOR UPDATE
+        // before any emptiness probe makes a writer-first commit wait; a
+        // schema-first snapshot-isolated writer gets PostgreSQL's native
+        // serialization failure instead of validating a stale row version.
+        await tx.execute(sql`
+          SELECT ${tables.schemaVersions.version}
+          FROM ${tables.schemaVersions}
+          WHERE ${tables.schemaVersions.graphId} = ${graphId}
+            AND ${tables.schemaVersions.isActive} = TRUE
+          FOR UPDATE
+        `);
+      }
       // Advisory lock is held here, so the schema-write-capable
       // InternalOperationBackend is used intentionally (see its type).
       const { backend: txBackend, drainAndClose } = createTransactionBackend({
@@ -796,7 +820,7 @@ export function createPostgresBackend(
         contributionMaterializer,
         iterativeScanProbe,
         schemaVersionsTable: tables.schemaVersions,
-      });
+          });
       try {
         return await fn(txBackend);
       } finally {
@@ -824,7 +848,7 @@ export function createPostgresBackend(
       contributionMaterializer,
       iterativeScanProbe,
       schemaVersionsTable: tables.schemaVersions,
-    });
+      });
     return {
       backend: gateFulltext(
         backend,
@@ -2052,7 +2076,7 @@ function createPostgresOperationBackend(
       FROM ${schemaVersionsTable}
       WHERE ${schemaVersionsTable.graphId} = ${graphId}
         AND ${schemaVersionsTable.isActive} = TRUE
-      FOR SHARE
+      ${usesPessimisticLocks({ capabilities }) ? sql`FOR SHARE` : sql``}
     `);
     return active?.version;
   }

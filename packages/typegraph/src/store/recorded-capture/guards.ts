@@ -2,6 +2,7 @@ import {
   type GraphBackend,
   type TransactionBackend,
   type TransactionOptions,
+  usesPessimisticLocks,
 } from "../../backend/types";
 import {
   ConfigurationError,
@@ -265,6 +266,16 @@ export function assertCapturableBackend(backend: GraphBackend): void {
       {
         suggestion:
           "Use a built-in SQLite/PostgreSQL backend, or run recorded-time capture on a backend whose engine supports UPDATE … RETURNING — capture closes recorded intervals with a RETURNING statement on its hot path.",
+      },
+    );
+  }
+  if (backend.dialect === "postgres" && !usesPessimisticLocks(backend)) {
+    throw new ConfigurationError(
+      "history: true requires a PostgreSQL backend that supports advisory locks.",
+      { dialect: backend.dialect },
+      {
+        suggestion:
+          "Run recorded-time capture on an engine that implements pg_advisory_xact_lock, or leave history off. Capture serializes clock allocation with an advisory lock; without one, concurrent writers can allocate the same recorded revision. SQLite needs no advisory lock because its write transactions are already exclusive.",
       },
     );
   }
