@@ -608,16 +608,23 @@ function indexNewNodesById(
  * branch created. This is the ONLY place that distinction is known — the repoint phase
  * needs it to fold onto a row the target holds, and an edge id says nothing about
  * where the row came from.
+ *
+ * `windowOnlyCarried` names the identities staged ONLY to carry an ending. Their
+ * `branchId` is a write vehicle rather than a contribution (see the loop below),
+ * which the provenance fold must know so it does not credit it.
  */
 function buildStagedEdges(
   staging: StagingSet,
   modifiedEdges: readonly StagedModifiedEdge[],
   edgeValidityEnds: ReadonlyMap<MergeKey, string>,
-  edgeWindowCredits: ReadonlyMap<MergeKey, readonly BranchId[]>,
   edgeDeletions: ReadonlyMap<MergeKey, string>,
-): readonly StagedEdge[] {
+): Readonly<{
+  edges: readonly StagedEdge[];
+  windowOnlyCarried: ReadonlySet<MergeKey>;
+}> {
   const staged: StagedEdge[] = [];
   const stagedIdentities = new Set<MergeKey>();
+  const windowOnlyCarried = new Set<MergeKey>();
   for (const items of staging.newEdgesByKind.values()) {
     for (const item of items) {
       staged.push(toStagedEdge(item.branchId, item));
@@ -646,24 +653,25 @@ function buildStagedEdges(
   // construction — the write carries the window and leaves the row's content
   // alone. Finally-deleted edges are excluded: deletion absorbs the ending.
   //
-  // Only a branch that AUTHORED the resolved end may carry the row: the staged
-  // copy's `branchId` is what the repoint fold credits as the edge's contributing
-  // branch, so letting a branch whose later claim LOST the least-claim rule carry
-  // it would credit a branch whose statement the merge discarded. One winner
-  // always exists (the end is some branch's claim), and the staging order is
-  // `(kind, id, branch)`, so which winner carries the row is deterministic.
+  // WHICH branch's copy carries it is arbitrary — the first in the staging order,
+  // `(kind, id, branch)` — and deliberately stays that way. That `branchId` is an
+  // input to the repoint fold's PROPERTY union, where the copy contributes the
+  // base's props under its label, so choosing the carrier by anything else (the
+  // authored ending, say) silently moves which value a fold commits. It is
+  // therefore recorded as window-only carried instead, and the ending's author is
+  // credited from the resolution rather than from whoever carried the row.
   for (const item of staging.windowedEdges) {
     const identity = mergeKeyOf(item.edge);
     const validTo = edgeValidityEnds.get(identity);
     if (
       validTo === undefined ||
       stagedIdentities.has(identity) ||
-      edgeDeletions.has(identity) ||
-      !(edgeWindowCredits.get(identity) ?? []).includes(item.branchId)
+      edgeDeletions.has(identity)
     ) {
       continue;
     }
     stagedIdentities.add(identity);
+    windowOnlyCarried.add(identity);
     staged.push({
       id: item.edge.id,
       kind: item.edge.kind,
@@ -677,7 +685,7 @@ function buildStagedEdges(
       validTo,
     });
   }
-  return staged;
+  return { edges: staged, windowOnlyCarried };
 }
 
 /**
@@ -1264,11 +1272,10 @@ function planMerge<G extends GraphDef>(
     identityContext,
     identityNodeUniverse,
   );
-  const stagedEdges = buildStagedEdges(
+  const { edges: stagedEdges, windowOnlyCarried } = buildStagedEdges(
     staging,
     reconciledEdgeModifications.survivingModifications,
     validWindows.edgeEnds,
-    validWindows.edgeCredits,
     edgeDeletions,
   );
   // An edge id can be staged by MORE THAN ONE branch (e.g. an inherited edge
@@ -1283,12 +1290,20 @@ function planMerge<G extends GraphDef>(
   // edge the repoint decides, exactly as a modifying branch is credited, and a
   // `Set` keeps a branch that both edited props and moved the window one
   // contributor.
+  //
+  // A WINDOW-ONLY CARRIER is the exception: that copy exists only to give the
+  // ending a row to ride on, its props are the base's, and the branch holding it
+  // is whichever sorted first — possibly one whose later claim the merge
+  // discarded. Crediting it would name a branch that put nothing in the committed
+  // row, so the row's credit comes from the resolution alone.
   const stagedEdgeBranches = new Map<string, Set<BranchId>>();
   for (const staged of stagedEdges) {
+    const identity = mergeKeyOf(staged);
     const branches = stagedEdgeBranches.get(staged.id) ?? new Set<BranchId>();
-    branches.add(staged.branchId);
-    for (const branchId of validWindows.edgeCredits.get(mergeKeyOf(staged)) ??
-      []) {
+    if (!windowOnlyCarried.has(identity)) {
+      branches.add(staged.branchId);
+    }
+    for (const branchId of validWindows.edgeCredits.get(identity) ?? []) {
       branches.add(branchId);
     }
     stagedEdgeBranches.set(staged.id, branches);

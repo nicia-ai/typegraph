@@ -17,7 +17,13 @@ The credit now comes from the window resolution itself, which is the only phase
 that knows whose claim was committed. It credits exactly the branches whose claim
 IS the resolved end — a claim that lost the least-claim rule contributed nothing
 to the committed row, and remains visible in `MergeReport.validityEnds` under
-`claimedBy` — and the staged carrier for a window-only edge is now chosen from
-those authors, so the row can no longer be credited to a branch whose later end
-the merge discarded. A branch that both edited a row's properties and moved its
-window stays one contribution.
+`claimedBy`. A branch that both edited a row's properties and moved its window
+stays one contribution.
+
+The staged copy that carries a window-only ending is no longer credited for
+carrying it: that copy exists only to give the ending a row to write, its
+properties are the base's, and the branch holding it is whichever sorted first —
+possibly one whose claim the merge discarded. Which branch carries the row is
+left exactly as it was, because that branch also labels the base's properties in
+the repoint fold's property union, where a relabelled contribution can change
+which value a fold commits. Merge outcomes are unchanged; only the provenance is.

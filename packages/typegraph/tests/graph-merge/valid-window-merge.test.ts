@@ -17,8 +17,9 @@
  *   9. PARALLEL edges of one kind each take the end claimed on THAT row;
  *  10. a single branch may EXTEND an end to a later instant;
  *  11. the branch that AUTHORED the committed end is credited in provenance —
- *      including when it authored nothing else on the row (issue #402) — and a
- *      branch whose claim lost the least-claim rule is not.
+ *      including when it authored nothing else on the row (issue #402), and
+ *      including every branch that tied on that end — while a branch whose claim
+ *      lost the least-claim rule, or whose ending a deletion absorbed, is not.
  *
  * Case 9 is the window half of issue #393: the repoint/dedupe fold is scoped to
  * collisions repointing INDUCED, so a window claim can no longer migrate between two
@@ -628,10 +629,10 @@ describe.each(backendMatrix())(
           await merge(forkPoint, [branchA], { branchOrder: BRANCH_ORDER }),
         );
 
-        // The edge rides its own staged copy here (nothing else claimed the
-        // identity), which is how it was already credited; the node's ending is
-        // carried by a write that names no branch, so its credit exists only
-        // because the resolution supplies it.
+        // Neither credit comes from a staged copy: the node's ending is carried
+        // by a write that names no branch, and the edge's copy is a window-only
+        // carrier, whose branch is a write vehicle rather than a contributor. Both
+        // exist only because the resolution supplies them.
         expect(report.provenance.byBranch(BRANCH_A).nodeIds).toContain("pat-1");
         expect(report.provenance.byBranch(BRANCH_A).edgeIds).toContain(
           "edge-1",
@@ -740,6 +741,70 @@ describe.each(backendMatrix())(
         // one contribution, not a second copy of the props author's.
         const all = await readProvenance(provenanceStore);
         expect(report.provenancePersisted?.count).toBe(all.length);
+      });
+
+      it("credits every branch that tied on the committed end", async () => {
+        // Two branches claiming the SAME instant both authored the committed end,
+        // so neither is the "loser" the least-claim rule discards. The edge is
+        // carried by one staged copy, which must not narrow the credit to whoever
+        // happened to carry it.
+        const forkPoint = await seededForkPoint();
+        const branchA = await forkOf(forkPoint, BRANCH_A);
+        const branchB = await forkOf(forkPoint, BRANCH_B);
+        for (const contributor of [branchA, branchB]) {
+          await contributor.store.nodes.Patient.update(
+            PATIENT,
+            {},
+            { validTo: LATE },
+          );
+          await contributor.store.edges.hadEncounter.update(
+            EDGE_1,
+            {},
+            { validTo: LATE },
+          );
+        }
+
+        const report = unwrap(
+          await merge(forkPoint, [branchA, branchB], {
+            branchOrder: BRANCH_ORDER,
+          }),
+        );
+
+        expect(await nodeEnd(forkPoint, "Patient", "pat-1")).toBe(LATE);
+        expect(await edgeEnd(forkPoint, "edge-1")).toBe(LATE);
+        for (const contributor of [BRANCH_A, BRANCH_B]) {
+          expect(report.provenance.byBranch(contributor).nodeIds).toContain(
+            "pat-1",
+          );
+          expect(report.provenance.byBranch(contributor).edgeIds).toContain(
+            "edge-1",
+          );
+        }
+      });
+
+      it("credits nobody for an ending a deletion absorbed", async () => {
+        // Deletion is the stronger statement, so no end is committed at all — and
+        // the branch that only asked for one contributed nothing to the row that
+        // remains. Credit follows the COMMITTED state, which here is the deletion.
+        const forkPoint = await seededForkPoint();
+        const branchA = await forkOf(forkPoint, BRANCH_A);
+        const branchB = await forkOf(forkPoint, BRANCH_B);
+        await branchA.store.nodes.Patient.update(
+          LONE_PATIENT,
+          {},
+          { validTo: LATE },
+        );
+        await branchB.store.nodes.Patient.delete(LONE_PATIENT);
+
+        const report = unwrap(
+          await merge(forkPoint, [branchA, branchB], {
+            branchOrder: BRANCH_ORDER,
+          }),
+        );
+
+        expect(report.validityEnds).toEqual([]);
+        // The ending was branch A's only act, so it contributed nothing at all.
+        expect(report.provenance.byBranch(BRANCH_A).nodeIds).toEqual([]);
       });
     });
 

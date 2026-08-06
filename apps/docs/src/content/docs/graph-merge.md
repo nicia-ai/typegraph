@@ -595,7 +595,8 @@ authored state, so its author is a contributor to that row in
 the only thing that branch changed. Credit follows the *committed* end: when
 several branches end a row differently, only the branches whose claim equals the
 written instant are credited, while `validityEnds[].claimedBy` still names every
-claimant, winning or not.
+claimant, winning or not. An ending a deletion absorbed commits nothing, so it
+credits nobody.
 
 Because an ending is not a modification, `onDeleteModifyConflict` never sees
 one: a row whose *only* change is its window loses to a concurrent deletion even
