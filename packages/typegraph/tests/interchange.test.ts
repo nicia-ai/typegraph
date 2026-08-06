@@ -122,6 +122,50 @@ const identityGraph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
+const identitySameBackendTargetGraph = defineGraph({
+  id: "identity_same_backend_target",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+    },
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const DelimitedPerson = defineNode("Person:x", {
+  schema: z.object({ name: z.string() }),
+});
+const delimitedKnows = defineEdge("delimitedKnows", {
+  schema: z.object({}),
+});
+const delimiterCollisionGraph = defineGraph({
+  id: "interchange_delimiter_collision",
+  nodes: {
+    Person: { type: Person },
+    "Person:x": { type: DelimitedPerson },
+  },
+  edges: {
+    delimitedKnows: {
+      type: delimitedKnows,
+      from: [Person, DelimitedPerson],
+      to: [Person, DelimitedPerson],
+    },
+  },
+});
+
 const CANONICAL_TIMESTAMP = "2024-01-01T00:00:00.000Z";
 
 /** A header carrying an identity section, for hand-built stream chunks. */
@@ -1274,6 +1318,55 @@ describe("Interchange import integrity", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("keeps node kind and id tuple boundaries distinct during reference validation", async () => {
+    const target = createStore(delimiterCollisionGraph, createTestBackend());
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [
+        {
+          // The old `${kind}:${id}` key for this row was `Person:x:y`, the
+          // same key as the missing edge endpoint (`Person:x`, `y`).
+          kind: "Person",
+          id: "x:y",
+          properties: { name: "Present" },
+        },
+        {
+          kind: "Person",
+          id: "destination",
+          properties: { name: "Destination" },
+        },
+      ],
+      edges: [
+        {
+          kind: "delimitedKnows",
+          id: "collision-edge",
+          from: { kind: "Person:x", id: "y" },
+          to: { kind: "Person", id: "destination" },
+          properties: {},
+        },
+      ],
+    };
+
+    const result = await importGraph(
+      target,
+      document,
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.edges.created).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatchObject({
+      entityType: "edge",
+      id: "collision-edge",
+    });
+    expect(result.errors[0]?.error).toContain(
+      "From node not found: Person:x:y",
+    );
+  });
+
   it("rejects edges referencing tombstoned nodes outside the batch", async () => {
     // Target: person-a exists only as a tombstone and is NOT in the import
     // document, so the reference check falls back to the database — which
@@ -1630,6 +1723,50 @@ describe("Identity interchange import guards", () => {
 });
 
 describe("Identity interchange streaming", () => {
+  it("refuses a snapshot import into the same SQLite backend before iteration", async () => {
+    const backend = createTestBackend();
+    const source = await createInitializedStore(identityGraph, backend);
+    const target = await createInitializedStore(
+      identitySameBackendTargetGraph,
+      backend,
+    );
+    const exported = exportGraphStream(source);
+
+    await expect(
+      importGraphStream(
+        target,
+        exported,
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT" },
+    });
+  });
+
+  it("holds one repeatable-read snapshot across the complete export", async () => {
+    const backend = createTestBackend();
+    const source = await createInitializedStore(identityGraph, backend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "snapshot-a" });
+    const transaction = vi.spyOn(backend, "transaction");
+    const activeSchemaRead = vi.spyOn(backend, "getActiveSchema");
+    const nodeRead = vi.spyOn(backend, "findNodesByKind");
+    const edgeRead = vi.spyOn(backend, "findEdgesByKind");
+    const rawRead = vi.spyOn(backend, "executeRaw");
+
+    await exportGraph(source);
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: "repeatable_read",
+      accessMode: "read_only",
+    });
+    expect(activeSchemaRead).not.toHaveBeenCalled();
+    expect(nodeRead).not.toHaveBeenCalled();
+    expect(edgeRead).not.toHaveBeenCalled();
+    expect(rawRead).not.toHaveBeenCalled();
+  });
+
   it("omits redundant kind predicates from an unfiltered export", async () => {
     const { backend, captured } = createPlanCaptureBackend();
     const source = await createInitializedStore(identityGraph, backend);
@@ -1644,6 +1781,52 @@ describe("Identity interchange streaming", () => {
     );
     expect(identityRead.sql).not.toContain("a_kind IN");
     expect(identityRead.sql).not.toContain("b_kind IN");
+  });
+
+  it("reads one bounded assertion page before delivering its first identity chunk", async () => {
+    const { backend, captured } = createPlanCaptureBackend();
+    const source = await createInitializedStore(identityGraph, backend);
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "page-alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "page-bob" },
+    );
+    const carol = await source.nodes.Person.create(
+      { name: "Carol" },
+      { id: "page-carol" },
+    );
+    await source.identity.assertSame(alice, bob);
+    await source.identity.assertSame(bob, carol);
+
+    captured.length = 0;
+    const iterator = exportGraphStream(source, {
+      batchSize: 1,
+    })[Symbol.asyncIterator]();
+    let firstIdentity: GraphInterchangeChunk | undefined;
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      if (next.value.type === "identity") {
+        firstIdentity = next.value;
+        break;
+      }
+    }
+
+    expect(firstIdentity).toEqual({
+      type: "identity",
+      assertions: [expect.objectContaining({ relation: "same" })],
+    });
+    const identityReads = captured.filter((statement) =>
+      statement.sql.includes("typegraph_identity_assertions"),
+    );
+    expect(identityReads).toHaveLength(1);
+    expect(identityReads[0]?.sql).toContain("ORDER BY identity_assertions.id");
+    expect(identityReads[0]?.sql).toContain("LIMIT");
+
+    await iterator.return?.();
   });
 
   it("omits identity assertions whose endpoint kinds are filtered out", async () => {

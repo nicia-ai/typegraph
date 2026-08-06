@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode } from "../../../src";
+import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { type IdentityTransferAssertion } from "../../../src/identity/service";
 import {
   exportGraph,
@@ -10,7 +10,11 @@ import {
   importGraphStream,
 } from "../../../src/interchange";
 import { storeRuntime } from "../../../src/store/runtime-port";
-import { matchingArray, matchingObject } from "../../test-utils";
+import {
+  createTestBackend,
+  matchingArray,
+  matchingObject,
+} from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
 /**
@@ -24,8 +28,10 @@ import { type IntegrationTestContext } from "./test-context";
  * `valid_from`/`valid_to` against the document, is the assertion that fails
  * first when canonicalization regresses on one backend.
  *
- * Source and target graphs are separate `graph_id`s provisioned on the same
- * per-test backend, so a document really travels between two stores.
+ * Source and target graphs are normally separate `graph_id`s on the same
+ * per-test backend. The streaming snapshot case uses an independent target:
+ * SQLite cannot write through the same connection while the source's
+ * repeatable-read export transaction remains open.
  */
 const InterchangePerson = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -418,7 +424,10 @@ export function registerIdentityImportIntegrationTests(
       await source.identity.assertSame(alice, author);
       await source.identity.assertSame(alice, bob);
 
-      const target = await context.createStore(identityInterchangeTargetGraph);
+      const [target] = await createStoreWithSchema(
+        identityInterchangeTargetGraph,
+        createTestBackend(),
+      );
       const result = await importGraphStream(
         target,
         exportGraphStream(source, { includeTemporal: true, batchSize: 1 }),

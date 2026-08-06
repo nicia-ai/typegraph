@@ -36,6 +36,7 @@ import { asCompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { isMissingTableError } from "../utils/sql-errors";
+import { encodeTupleKey } from "../utils/tuple-key";
 import {
   executeIdentityStatement,
   identityChunkSize,
@@ -55,7 +56,7 @@ const MAX_SEPARATION_INSERT_CHUNK_SIZE = 100;
  * while an in-memory map key is free to change with its map.
  */
 export function identityClassKey(ref: PlainNodeRef): string {
-  return JSON.stringify([ref.kind, ref.id]);
+  return encodeTupleKey([ref.kind, ref.id]);
 }
 
 /** One separated pair of identity classes, ordered by code point. */

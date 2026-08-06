@@ -24,6 +24,12 @@ import type { BatchableQuery } from "../../query/builder/types";
 import { groupBy } from "../../utils/array";
 import { requireDefined } from "../../utils/presence";
 import { getEdgeRowsByIds } from "../edge-fetch";
+import {
+  assertEdgeIdentityMatches,
+  type EdgeIdentity,
+  type EdgeIdentityExpectation,
+  edgeIdentityFromRow,
+} from "../operations/edge-identity";
 import { type EdgeRow } from "../row-mappers";
 import {
   type CreateEdgeInput,
@@ -94,6 +100,7 @@ export type EdgeCollectionConfig = Readonly<{
   executeUpdate: (
     input: {
       id: string;
+      identity: EdgeIdentityExpectation;
       props: Partial<Record<string, unknown>>;
       validTo?: string;
     },
@@ -107,10 +114,17 @@ export type EdgeCollectionConfig = Readonly<{
   /** See EdgeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
+    kind: string,
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeHardDelete: (
+    kind: string,
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
@@ -203,6 +217,7 @@ type EdgeEndpointPredicate =
 
 type EdgeUpdateInput = Readonly<{
   id: string;
+  identity: EdgeIdentityExpectation;
   props: Partial<Record<string, unknown>>;
   validTo?: string;
 }>;
@@ -224,31 +239,47 @@ export type UpsertUpdateEdgeInput = EdgeUpdateInput &
   Readonly<{ validFrom?: string }>;
 
 function buildUpdateEdgeInput(
+  kind: string,
   id: string,
   props: Record<string, unknown>,
   options?: Readonly<{ validTo?: string }>,
 ): EdgeUpdateInput {
   const input: {
     id: string;
+    identity: EdgeIdentityExpectation;
     props: Partial<Record<string, unknown>>;
     validTo?: string;
-  } = { id, props };
+  } = { id, identity: { kind }, props };
   if (options?.validTo !== undefined) input.validTo = options.validTo;
   return input;
 }
 
 /** Builds an {@link UpsertUpdateEdgeInput} — see that type for why upsert alone carries `validFrom`. */
 function buildUpsertUpdateEdgeInput(
+  kind: string,
   id: string,
+  from: NodeRef,
+  to: NodeRef,
   props: Record<string, unknown>,
   options?: Readonly<{ validFrom?: string; validTo?: string }>,
 ): UpsertUpdateEdgeInput {
   const input: {
     id: string;
+    identity: EdgeIdentityExpectation;
     props: Partial<Record<string, unknown>>;
     validFrom?: string;
     validTo?: string;
-  } = { id, props };
+  } = {
+    id,
+    identity: {
+      kind,
+      fromKind: from.kind,
+      fromId: from.id,
+      toKind: to.kind,
+      toId: to.id,
+    },
+    props,
+  };
   if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
   if (options?.validTo !== undefined) input.validTo = options.validTo;
   return input;
@@ -346,6 +377,7 @@ export function createEdgeCollection<
     executeUpdate: executeEdgeUpdate,
     executeUpsertUpdate: executeEdgeUpsertUpdate,
     executeDelete: executeEdgeDelete,
+    executeDeleteBatch: executeEdgeDeleteBatch,
     executeHardDelete: executeEdgeHardDelete,
     temporalRowMatcher,
   } = config;
@@ -564,7 +596,7 @@ export function createEdgeCollection<
       options?: Readonly<{ validTo?: string }>,
     ): Promise<Edge<E>> {
       const result = await executeEdgeUpdate(
-        buildUpdateEdgeInput(id, props, options),
+        buildUpdateEdgeInput(kind, id, props, options),
         backend,
       );
       return narrowEdge<E>(result);
@@ -626,11 +658,11 @@ export function createEdgeCollection<
     },
 
     async delete(id: string): Promise<void> {
-      await executeEdgeDelete(id, backend);
+      await executeEdgeDelete(kind, id, backend);
     },
 
     async hardDelete(id: string): Promise<void> {
-      await executeEdgeHardDelete(id, backend);
+      await executeEdgeHardDelete(kind, id, backend);
     },
 
     async find(
@@ -768,6 +800,7 @@ export function createEdgeCollection<
         const pending = new Map<
           string,
           {
+            identity: EdgeIdentity;
             props: Record<string, unknown> | undefined;
             window: UpsertWindow;
             sourceIndex: number;
@@ -823,6 +856,13 @@ export function createEdgeCollection<
             // EMPTY base is exactly the validated props the insert will store —
             // needed only when a later copy of this id will compare against it.
             pending.set(item.id, {
+              identity: {
+                kind,
+                fromKind: item.from.kind,
+                fromId: item.from.id,
+                toKind: item.to.kind,
+                toId: item.to.id,
+              },
               props:
                 repeatedIds.has(item.id) ?
                   runDirtyCheck(kind, item.id, {}, inputProps)?.validatedProps
@@ -838,6 +878,24 @@ export function createEdgeCollection<
             pendingEntry === undefined ?
               requireDefined(original).deleted_at
             : undefined;
+
+          const expectedIdentity: EdgeIdentityExpectation = {
+            kind,
+            fromKind: item.from.kind,
+            fromId: item.from.id,
+            toKind: item.to.kind,
+            toId: item.to.id,
+          };
+          const actualIdentity =
+            pendingEntry === undefined ?
+              edgeIdentityFromRow(requireDefined(original))
+            : pendingEntry.identity;
+          assertEdgeIdentityMatches(
+            item.id,
+            expectedIdentity,
+            actualIdentity,
+            "update",
+          );
 
           const currentProps =
             pendingEntry === undefined ?
@@ -894,10 +952,18 @@ export function createEdgeCollection<
           } else {
             toUpdate.push({
               index: itemIndex,
-              input: buildUpsertUpdateEdgeInput(item.id, inputProps, item),
+              input: buildUpsertUpdateEdgeInput(
+                kind,
+                item.id,
+                item.from,
+                item.to,
+                inputProps,
+                item,
+              ),
               clearDeleted: deletedAt !== undefined,
             });
             pending.set(item.id, {
+              identity: actualIdentity,
               props: dirty?.validatedProps,
               // A resurrection rewrites both bounds only when it NAMES the lower
               // one (buildUpdateEdge's clearDeleted leg); omitting `validFrom`
@@ -978,18 +1044,7 @@ export function createEdgeCollection<
 
     async bulkDelete(ids: readonly string[]): Promise<void> {
       if (ids.length === 0) return;
-      const deleteAll = async (
-        target: GraphBackend | TransactionBackend,
-      ): Promise<void> => {
-        for (const id of ids) {
-          await executeEdgeDelete(id, target);
-        }
-      };
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => deleteAll(txBackend));
-        return;
-      }
-      await deleteAll(backend);
+      await executeEdgeDeleteBatch(kind, ids, backend);
     },
 
     async findByEndpoints(

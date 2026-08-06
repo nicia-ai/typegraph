@@ -19,6 +19,7 @@ import {
 } from "../../dialect/vector-strategy";
 import { sql, type SqlFragment } from "../../sql-fragment";
 import { planIdentityFrontierExpansion } from "../identity-traversal";
+import { compileInverseTraversalDuplicateGuard } from "../inverse-traversal-guard";
 import { type TemporalFilterPass } from "../passes";
 import {
   compileKindFilter,
@@ -536,22 +537,12 @@ export function buildStandardTraversalCte(
   const inverseTargetKindField =
     traversal.direction === "out" ? "from_kind" : "to_kind";
 
-  const overlappingKinds = inverseEdgeKinds.filter((kind) =>
-    directEdgeKinds.includes(kind),
+  const duplicateGuard = compileInverseTraversalDuplicateGuard(
+    directEdgeKinds,
+    inverseEdgeKinds,
+    (overlappingKinds) =>
+      compileKindFilter(sql.raw("e.kind"), overlappingKinds),
   );
-
-  // Exclude a TRUE self-loop (an edge whose two endpoints are the same node)
-  // from the inverse branch so it is traversed once, not twice. Identity of a
-  // node is (kind, id), not id alone: under sameIdAcrossKinds folding a genuine
-  // two-node edge between folded peers (e.g. (Person, x) -> (Author, x)) has
-  // from_id = to_id while from_kind <> to_kind, and must NOT be suppressed.
-  const duplicateGuard =
-    overlappingKinds.length > 0 ?
-      sql`NOT (e.from_id = e.to_id AND e.from_kind = e.to_kind AND ${compileKindFilter(
-        sql.raw("e.kind"),
-        overlappingKinds,
-      )})`
-    : undefined;
 
   const inverseBranch = compileTraversalBranch({
     duplicateGuard,

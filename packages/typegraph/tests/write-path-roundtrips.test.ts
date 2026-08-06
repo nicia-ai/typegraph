@@ -197,11 +197,11 @@ describe("cascade edge deletion batches", () => {
 });
 
 // ============================================================
-// Delete preflight elimination
+// Delete gate and transaction recheck
 // ============================================================
 
 describe("delete round trips", () => {
-  it("edge delete and hard delete read the row once (gate only)", async () => {
+  it("edge delete and hard delete gate, then recheck inside the transaction", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
       const { backend, counts } = withCallCounts(rawBackend);
@@ -219,12 +219,12 @@ describe("delete round trips", () => {
 
       counts["getEdge"] = 0;
       await store.edges.links.delete(soft.id);
-      expect(counts["getEdge"]).toBe(1);
+      expect(counts["getEdge"]).toBe(2);
       expect(counts["deleteEdge"]).toBe(1);
 
       counts["getEdge"] = 0;
       await store.edges.links.hardDelete(hard.id);
-      expect(counts["getEdge"]).toBe(1);
+      expect(counts["getEdge"]).toBe(2);
       expect(counts["hardDeleteEdge"]).toBe(1);
 
       expect(await store.edges.links.findFrom(hub)).toHaveLength(0);
@@ -267,7 +267,7 @@ describe("delete round trips", () => {
   });
 
   it("a stale gate read degrades to a guarded no-op, recorded history intact", async () => {
-    // Simulates the race the removed preflight used to absorb: the gate
+    // Simulates the race the transaction recheck must absorb: the gate
     // sees a live row, but the row is tombstoned before the write
     // transaction runs. The tombstone UPDATE's `deleted_at IS NULL`
     // guard makes it a 0-row no-op, and the recorded-capture touch of

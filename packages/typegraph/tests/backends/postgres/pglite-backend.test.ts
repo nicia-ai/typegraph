@@ -28,6 +28,7 @@ import { generatePostgresDDL } from "../../../src/backend/drizzle/ddl";
 import { PGLITE_MAX_BIND_PARAMETERS } from "../../../src/backend/drizzle/execution/postgres-execution";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
+import { sharesSerializedTransactionResource } from "../../../src/backend/transaction-resource";
 import { createStore, createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
 
@@ -75,6 +76,28 @@ describe("PGlite backend", () => {
 
   afterEach(async () => {
     for (const cleanup of cleanups.splice(0)) await cleanup();
+  });
+
+  describe("serialized transaction resource ownership", () => {
+    it("recognizes Drizzle wrappers over the same PGlite client", async () => {
+      const client = await PGlite.create();
+      cleanups.push(() => client.close());
+
+      const first = createPostgresBackend(drizzle(client), { vector: false });
+      const second = createPostgresBackend(drizzle(client), { vector: false });
+
+      expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+    });
+
+    it("preserves ownership through the managed local-backend wrapper", async () => {
+      const local = await createLocalPgliteBackend({ vector: false });
+      cleanups.push(() => local.backend.close());
+      const sibling = createPostgresBackend(local.db, { vector: false });
+
+      expect(sharesSerializedTransactionResource(local.backend, sibling)).toBe(
+        true,
+      );
+    });
   });
 
   describe("execution fast-path (blocker fix)", () => {

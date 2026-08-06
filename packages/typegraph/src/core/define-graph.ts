@@ -353,6 +353,17 @@ export function defineGraph<
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
 ): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
+  return defineGraphUnchecked(config);
+}
+
+function defineGraphUnchecked<
+  const TNodes extends Record<string, NodeRegistration<NodeType>>,
+  const TEdges extends Record<string, EdgeEntry>,
+  const TOntology extends readonly OntologyRelation[],
+  const TIdentity extends GraphIdentityConfig | undefined = undefined,
+>(
+  config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
+): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
   const defaults = {
     onNodeDelete: config.defaults?.onNodeDelete ?? "restrict",
     temporalMode: config.defaults?.temporalMode ?? "current",
@@ -397,6 +408,18 @@ export function defineGraph<
     extension: undefined,
     deprecatedKinds: EMPTY_DEPRECATED_KINDS,
   }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
+}
+
+/** @internal Creates a framework-owned graph in a reserved namespace. */
+export function defineInternalGraph<
+  const TNodes extends Record<string, NodeRegistration<NodeType>>,
+  const TEdges extends Record<string, EdgeEntry>,
+  const TOntology extends readonly OntologyRelation[],
+  const TIdentity extends GraphIdentityConfig | undefined = undefined,
+>(
+  config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
+): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
+  return defineGraphUnchecked(config);
 }
 
 // Sharing one frozen empty Set keeps the canonical-form hash stable

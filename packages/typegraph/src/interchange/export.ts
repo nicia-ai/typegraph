@@ -3,16 +3,22 @@
  *
  * Exports nodes and edges from a store to the interchange format.
  */
-import { type GraphBackend, rowPropsToObject } from "../backend/types";
+import {
+  type GraphBackend,
+  rowPropsToObject,
+  type TransactionBackend,
+} from "../backend/types";
 import {
   getEdgeKinds,
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
+import { ConfigurationError } from "../errors";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
+import { markExportStreamBackend } from "./stream-source";
 import {
   type ExportOptionsInput,
   type ExportStreamOptionsInput,
@@ -98,18 +104,84 @@ export async function exportGraph<G extends GraphDef>(
  * a network, file, or fresh working copy can process one chunk at a time rather
  * than materializing a graph-sized {@link GraphData} value.
  */
-export async function* exportGraphStream<G extends GraphDef>(
+export function exportGraphStream<G extends GraphDef>(
   store: Store<G>,
   options?: ExportStreamOptionsInput,
 ): AsyncIterable<GraphInterchangeChunk> {
-  const resolved = ExportStreamOptionsSchema.parse(options ?? {});
-  const graphId = store.graphId;
   const backend = storeBackend(store);
-  const nodeKinds = resolved.nodeKinds ?? getNodeKinds(store.graph);
-  const edgeKinds = resolved.edgeKinds ?? getEdgeKinds(store.graph);
+  return markExportStreamBackend(
+    exportGraphStreamFromBackend(store, backend, options),
+    backend,
+  );
+}
+
+async function* exportGraphStreamFromBackend<G extends GraphDef>(
+  store: Store<G>,
+  backend: GraphBackend,
+  options?: ExportStreamOptionsInput,
+): AsyncIterable<GraphInterchangeChunk> {
+  const resolved = ExportStreamOptionsSchema.parse(options ?? {});
+  if (
+    store.graph.identity !== undefined &&
+    !backend.capabilities.transactions
+  ) {
+    throw new ConfigurationError(
+      "Identity export requires a transactional backend so nodes, edges, and assertions share one snapshot.",
+      {
+        code: "IDENTITY_EXPORT_TRANSACTIONS_REQUIRED",
+        graphId: store.graphId,
+      },
+    );
+  }
+
+  const channel = createRendezvousChannel<GraphInterchangeChunk>();
+  const produce = async (
+    target: GraphBackend | TransactionBackend,
+  ): Promise<void> => {
+    await produceExportChunks(store, target, resolved, (chunk) =>
+      channel.push(chunk),
+    );
+  };
+  const producer = (
+    backend.capabilities.transactions ?
+      backend.transaction((target) => produce(target), {
+        isolationLevel: "repeatable_read",
+        accessMode: "read_only",
+      })
+    : produce(backend)).then(
+    () => {
+      channel.finish();
+    },
+    (error: unknown) => {
+      channel.fail(error);
+    },
+  );
+
+  try {
+    for (;;) {
+      const delivery = await channel.take();
+      if (delivery === undefined) return;
+      yield delivery.value;
+      delivery.acknowledge();
+    }
+  } finally {
+    channel.cancel();
+    await producer;
+  }
+}
+
+async function produceExportChunks<G extends GraphDef>(
+  store: Store<G>,
+  backend: GraphBackend | TransactionBackend,
+  options: ExportOptions_ & Readonly<{ batchSize: number }>,
+  emit: (chunk: GraphInterchangeChunk) => Promise<void>,
+): Promise<void> {
+  const graphId = store.graphId;
+  const nodeKinds = options.nodeKinds ?? getNodeKinds(store.graph);
+  const edgeKinds = options.edgeKinds ?? getEdgeKinds(store.graph);
   const schemaVersion = await backend.getActiveSchema(graphId);
 
-  yield {
+  await emit({
     type: "header",
     header: {
       formatVersion: FORMAT_VERSION,
@@ -124,52 +196,194 @@ export async function* exportGraphStream<G extends GraphDef>(
       : {
           identity: {
             profile: "typegraph-identity-v1" as const,
-            mode: resolved.identityMode,
+            mode: options.identityMode,
           },
         }),
     },
-  };
+  });
 
   for (const kind of nodeKinds) {
-    yield* exportNodeChunks(backend, graphId, kind, resolved);
-  }
-  for (const kind of edgeKinds) {
-    yield* exportEdgeChunks(backend, graphId, kind, resolved);
-  }
-  if (store.graph.identity !== undefined) {
-    const assertions = await storeRuntime(store).readCurrentIdentityAssertions(
-      resolved.identityMode,
-      {
-        ...(resolved.nodeKinds === undefined ? {} : { nodeKinds }),
-        includeDeleted: resolved.includeDeleted,
-      },
-    );
-    for (
-      let index = 0;
-      index < assertions.length;
-      index += resolved.batchSize
-    ) {
-      yield {
-        type: "identity",
-        assertions: assertions.slice(index, index + resolved.batchSize),
-      };
+    for await (const chunk of exportNodeChunks(
+      backend,
+      graphId,
+      kind,
+      options,
+    )) {
+      await emit(chunk);
     }
   }
-}
+  for (const kind of edgeKinds) {
+    for await (const chunk of exportEdgeChunks(
+      backend,
+      graphId,
+      kind,
+      options,
+    )) {
+      await emit(chunk);
+    }
+  }
+  if (store.graph.identity === undefined) return;
 
-// ============================================================
-// Node Export
-// ============================================================
+  let after: string | undefined;
+  for (;;) {
+    const page = await storeRuntime(store).readIdentityAssertionPageAtTarget(
+      backend,
+      options.identityMode,
+      {
+        ...(options.nodeKinds === undefined ? {} : { nodeKinds }),
+        includeDeleted: options.includeDeleted,
+        ...(after === undefined ? {} : { after }),
+        limit: options.batchSize,
+      },
+    );
+    if (page.assertions.length > 0) {
+      await emit({ type: "identity", assertions: [...page.assertions] });
+    }
+    if (page.done) return;
+    after = requireDefined(page.nextAfter);
+  }
+}
 
 type ExportOptions_ = Readonly<{
   includeTemporal: boolean;
   includeMeta: boolean;
   includeDeleted: boolean;
   identityMode: "state" | "archival";
+  nodeKinds?: readonly string[] | undefined;
+  edgeKinds?: readonly string[] | undefined;
 }>;
 
+type RendezvousDelivery<T> = Readonly<{
+  value: T;
+  acknowledge: () => void;
+}>;
+
+type RendezvousChannel<T> = Readonly<{
+  push: (value: T) => Promise<void>;
+  take: () => Promise<RendezvousDelivery<T> | undefined>;
+  finish: () => void;
+  fail: (error: unknown) => void;
+  cancel: () => void;
+}>;
+
+function createRendezvousChannel<T>(): RendezvousChannel<T> {
+  type PendingPush = Readonly<{
+    delivery: RendezvousDelivery<T>;
+    reject: (error: unknown) => void;
+  }>;
+  type PendingTake = Readonly<{
+    resolve: (delivery: RendezvousDelivery<T> | undefined) => void;
+    reject: (error: unknown) => void;
+  }>;
+
+  const cancelledError = new Error("Export stream consumer cancelled.");
+  let pendingPush: PendingPush | undefined;
+  let pendingTake: PendingTake | undefined;
+  let inFlightReject: ((error: unknown) => void) | undefined;
+  let terminal: Readonly<{ error?: Error }> | undefined;
+  let cancelled = false;
+
+  function push(value: T): Promise<void> {
+    if (cancelled) return Promise.reject(cancelledError);
+    if (terminal !== undefined || pendingPush !== undefined) {
+      return Promise.reject(
+        new Error("Cannot push to a completed or occupied export channel."),
+      );
+    }
+    return new Promise<void>((resolve, reject) => {
+      const delivery = {
+        value,
+        acknowledge: () => {
+          inFlightReject = undefined;
+          resolve();
+        },
+      };
+      if (pendingTake !== undefined) {
+        const take = pendingTake;
+        pendingTake = undefined;
+        inFlightReject = reject;
+        take.resolve(delivery);
+        return;
+      }
+      pendingPush = { delivery, reject };
+    });
+  }
+
+  function take(): Promise<RendezvousDelivery<T> | undefined> {
+    if (pendingPush !== undefined) {
+      const push = pendingPush;
+      pendingPush = undefined;
+      inFlightReject = push.reject;
+      return Promise.resolve(push.delivery);
+    }
+    if (terminal !== undefined) {
+      return terminal.error === undefined ?
+          Promise.resolve(undefined)
+        : Promise.reject(terminal.error);
+    }
+    if (pendingTake !== undefined) {
+      return Promise.reject(
+        new Error("Export channel already has a consumer."),
+      );
+    }
+    return new Promise<RendezvousDelivery<T> | undefined>((resolve, reject) => {
+      pendingTake = { resolve, reject };
+    });
+  }
+
+  function finish(): void {
+    if (cancelled) return;
+    terminal = {};
+    if (pendingTake !== undefined) {
+      const take = pendingTake;
+      pendingTake = undefined;
+      take.resolve(undefined);
+    }
+  }
+
+  function fail(error: unknown): void {
+    if (cancelled && error === cancelledError) return;
+    const exportError =
+      error instanceof Error ? error : (
+        new Error("Graph export failed.", { cause: error })
+      );
+    terminal = { error: exportError };
+    if (pendingTake !== undefined) {
+      const take = pendingTake;
+      pendingTake = undefined;
+      take.reject(exportError);
+    }
+  }
+
+  function cancel(): void {
+    if (cancelled) return;
+    cancelled = true;
+    if (pendingPush !== undefined) {
+      const push = pendingPush;
+      pendingPush = undefined;
+      push.reject(cancelledError);
+    }
+    if (inFlightReject !== undefined) {
+      const reject = inFlightReject;
+      inFlightReject = undefined;
+      reject(cancelledError);
+    }
+    if (pendingTake !== undefined) {
+      const take = pendingTake;
+      pendingTake = undefined;
+      take.resolve(undefined);
+    }
+  }
+
+  return { push, take, finish, fail, cancel };
+}
+
+// ============================================================
+// Node Export
+// ============================================================
+
 async function* exportNodeChunks(
-  backend: GraphBackend,
+  backend: GraphBackend | TransactionBackend,
   graphId: string,
   kind: string,
   options: ExportOptions_ & Readonly<{ batchSize: number }>,
@@ -230,7 +444,7 @@ async function* exportNodeChunks(
 // ============================================================
 
 async function* exportEdgeChunks(
-  backend: GraphBackend,
+  backend: GraphBackend | TransactionBackend,
   graphId: string,
   kind: string,
   options: ExportOptions_ & Readonly<{ batchSize: number }>,

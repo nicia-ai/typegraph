@@ -37,7 +37,13 @@
  * `IdentitySeparationViolationError` — an `IDENTITY_`-coded refusal — is
  * translated here like any other applier refusal.
  */
+import { identityAssertionSemanticKey } from "../identity/assertion-key";
+import {
+  compareIdentityReferences,
+  identityReferenceKey,
+} from "../identity/reference";
 import { requireDefined } from "../utils/presence";
+import { encodeTupleKey } from "../utils/tuple-key";
 import type { CanonicalEntity } from "./canonicalize";
 import {
   BaseVersionMismatchError,
@@ -98,11 +104,15 @@ function endpointTuple(
 }
 
 function identityEndpointKey(assertion: IdentityTransferAssertion): string {
-  return JSON.stringify(endpointTuple(assertion));
+  return encodeTupleKey(endpointTuple(assertion));
 }
 
 function identitySemanticKey(assertion: IdentityTransferAssertion): string {
-  return JSON.stringify([assertion.relation, ...endpointTuple(assertion)]);
+  return identityAssertionSemanticKey(
+    assertion.relation,
+    assertion.a,
+    assertion.b,
+  );
 }
 
 function compareIdentitySurvivors(
@@ -417,20 +427,6 @@ export function planIdentityChanges(
 type IdentityEndpoint = Readonly<{ kind: string; id: string }>;
 
 /**
- * Code-point order over `(kind, id)` endpoints, matching the identity service's
- * pair normalization (kind first, id as the tie-break). A stored identity pair MUST
- * satisfy `a <= b` under this order or the import path the merge commit reuses
- * rejects it as non-normalized.
- */
-function compareIdentityEndpoints(
-  left: IdentityEndpoint,
-  right: IdentityEndpoint,
-): number {
-  const byKind = compareCodePoints(left.kind, right.kind);
-  return byKind === 0 ? compareCodePoints(left.id, right.id) : byKind;
-}
-
-/**
  * Maps an endpoint onto the `(kind, id)` it will actually carry in the committed
  * target: first through the cluster canonical map (the SAME map edge repoint
  * uses), then through the ontology retype cascade, keyed EXACTLY as
@@ -509,7 +505,7 @@ export function remapIdentityAssertionEndpoints(
       continue;
     }
     const [a, b] =
-      compareIdentityEndpoints(remappedA, remappedB) <= 0 ?
+      compareIdentityReferences(remappedA, remappedB) <= 0 ?
         [remappedA, remappedB]
       : [remappedB, remappedA];
     const result = { ...assertion, a, b };
@@ -980,13 +976,10 @@ async function snapshotIdentityClasses<G extends GraphDef>(
   const groups: (readonly Readonly<{ kind: string; id: string }>[])[] = [];
   for (const seed of seeds) {
     const key = mergeKey(seed.kind, seed.id);
-    // The service keys classes by `JSON.stringify([kind, id])`. Members the
-    // plan DELETES are excluded on both sides of the comparison — the
+    // Members the plan DELETES are excluded on both sides of the comparison — the
     // committed state no longer contains them, so keeping them would reject
     // a legal delete-and-replace.
-    const members = (
-      classes.get(JSON.stringify([seed.kind, seed.id])) ?? [seed]
-    ).filter(
+    const members = (classes.get(identityReferenceKey(seed)) ?? [seed]).filter(
       (member) => !plannedDeletions.has(mergeKey(member.kind, member.id)),
     );
     groups.push(members);
@@ -1025,7 +1018,8 @@ async function relevantLedgerAssertions<G extends GraphDef>(
 }
 
 /** Deterministic fingerprint of the `different` assertions in a ledger slice. */
-function differentLedgerFingerprint(
+/** @internal Deterministic fingerprint for commit-guard verification. */
+export function differentLedgerFingerprint(
   assertions: readonly LedgerAssertion[],
 ): string {
   return JSON.stringify(
@@ -1033,7 +1027,7 @@ function differentLedgerFingerprint(
       .filter((assertion) => assertion.relation === "different")
       .map((assertion) => [assertion.id, ...endpointTuple(assertion)])
       .toSorted((left, right) =>
-        compareStrings(left.join("\u0000"), right.join("\u0000")),
+        compareStrings(encodeTupleKey(left), encodeTupleKey(right)),
       ),
   );
 }

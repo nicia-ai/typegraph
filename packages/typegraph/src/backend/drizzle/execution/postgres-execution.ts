@@ -167,9 +167,15 @@ function isPgliteClient(candidate: unknown): candidate is NodePgClient {
  */
 export const PGLITE_MAX_BIND_PARAMETERS = 32_767;
 
+/** Returns the PGlite client that owns a root Drizzle database, if present. */
+export function getPgliteClient(db: AnyPgDatabase): object | undefined {
+  const client = (db as PgClientCarrier).$client;
+  return isPgliteClient(client) ? client : undefined;
+}
+
 /** Detects a root Drizzle database backed by PGlite without importing it. */
 export function isPgliteDatabase(db: AnyPgDatabase): boolean {
-  return isPgliteClient((db as PgClientCarrier).$client);
+  return getPgliteClient(db) !== undefined;
 }
 
 function transactionSession(

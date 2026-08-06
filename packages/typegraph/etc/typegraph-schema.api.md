@@ -2051,7 +2051,7 @@ class ValidationError extends TypeGraphError {
 type ValidationErrorDetails = Readonly<{
     entityType?: KindEntity;
     kind?: string;
-    operation?: "create" | "update";
+    operation?: "create" | "update" | "delete" | "hardDelete";
     id?: string;
     issues: readonly ValidationIssue[];
 }>;

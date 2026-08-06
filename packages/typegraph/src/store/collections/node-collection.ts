@@ -183,6 +183,11 @@ export type NodeCollectionConfig = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
@@ -312,6 +317,7 @@ export function createNodeCollection<
     executeUpdateWhere: executeNodeUpdateWhere,
     executeUpsertUpdate: executeNodeUpsertUpdate,
     executeDelete: executeNodeDelete,
+    executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
     temporalRowMatcher,
     createQuery,
@@ -881,18 +887,7 @@ export function createNodeCollection<
 
     async bulkDelete(ids: readonly NodeId<N>[]): Promise<void> {
       if (ids.length === 0) return;
-      const deleteAll = async (
-        target: GraphBackend | TransactionBackend,
-      ): Promise<void> => {
-        for (const id of ids) {
-          await executeNodeDelete(kind, id, target);
-        }
-      };
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => deleteAll(txBackend));
-        return;
-      }
-      await deleteAll(backend);
+      await executeNodeDeleteBatch(kind, ids, backend);
     },
 
     async findByConstraint(

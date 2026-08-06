@@ -1,8 +1,31 @@
 import { describe, expect, it } from "vitest";
 
+import {
+  EDGE_IDENTITY_MISMATCH_CODE,
+  ValidationError,
+} from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
 import { expectImmutableLowerBoundRefusal } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
+
+async function expectEdgeIdentityMismatch(
+  operation: Promise<unknown>,
+  expectedOperation: "update" | "delete" | "hardDelete",
+): Promise<void> {
+  try {
+    await operation;
+    throw new Error("Expected edge identity mismatch");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ValidationError);
+    if (!(error instanceof ValidationError)) throw error;
+    expect(error.details.operation).toBe(expectedOperation);
+    expect(error.details.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: EDGE_IDENTITY_MISMATCH_CODE }),
+      ]),
+    );
+  }
+}
 
 export function registerEdgeOperationIntegrationTests(
   context: IntegrationTestContext,
@@ -48,6 +71,143 @@ export function registerEdgeOperationIntegrationTests(
       );
 
       expect(retrieved).toBeUndefined();
+    });
+
+    it("refuses to mutate an edge through a collection of another kind", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const edge = await store.edges.knows.create(
+        alice,
+        bob,
+        { since: "2020" },
+        { id: "cross-kind-edge" },
+      );
+
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.update(edge.id as never, { role: "Engineer" }),
+        "update",
+      );
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.delete(edge.id as never),
+        "delete",
+      );
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.hardDelete(edge.id as never),
+        "hardDelete",
+      );
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.bulkUpsertById([
+          {
+            id: edge.id as never,
+            from: alice,
+            to: bob as never,
+            props: { role: "Engineer" },
+          },
+        ]),
+        "update",
+      );
+
+      const untouched = await store.edges.knows.getById(edge.id);
+      expect(untouched?.since).toBe("2020");
+      expect(untouched?.meta.deletedAt).toBeUndefined();
+
+      await store.edges.knows.delete(edge.id);
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.delete(edge.id as never),
+        "delete",
+      );
+    });
+
+    it("refuses to bulk-delete an edge through a collection of another kind", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const edge = await store.edges.knows.create(
+        alice,
+        bob,
+        { since: "2020" },
+        { id: "cross-kind-bulk-delete" },
+      );
+
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.bulkDelete([edge.id as never]),
+        "delete",
+      );
+
+      await expect(store.edges.knows.getById(edge.id)).resolves.toMatchObject({
+        id: edge.id,
+        since: "2020",
+        meta: { deletedAt: undefined },
+      });
+    });
+
+    it("refuses bulk-upsert endpoint changes for stored and batch-local edges", async () => {
+      const store = context.getStore();
+      const [alice, bob, charlie] = await store.nodes.Person.bulkCreate([
+        { id: "endpoint-alice", props: { name: "Alice" } },
+        { id: "endpoint-bob", props: { name: "Bob" } },
+        { id: "endpoint-charlie", props: { name: "Charlie" } },
+      ]);
+      const from = requireDefined(alice);
+      const originalTo = requireDefined(bob);
+      const differentTo = requireDefined(charlie);
+      const existing = await store.edges.knows.create(
+        from,
+        originalTo,
+        { since: "2020" },
+        { id: "endpoint-existing" },
+      );
+
+      await expect(
+        store.edges.knows.bulkUpsertById([
+          {
+            id: existing.id,
+            from,
+            to: differentTo,
+            props: { since: "2021" },
+          },
+        ]),
+      ).rejects.toThrow(ValidationError);
+
+      await expect(
+        store.edges.knows.bulkUpsertById([
+          {
+            id: "endpoint-new" as never,
+            from,
+            to: originalTo,
+            props: { since: "2020" },
+          },
+          {
+            id: "endpoint-new" as never,
+            from,
+            to: differentTo,
+            props: { since: "2021" },
+          },
+        ]),
+      ).rejects.toThrow(ValidationError);
+
+      const untouched = await store.edges.knows.getById(existing.id);
+      expect(untouched?.toId).toBe(originalTo.id);
+      expect(untouched?.since).toBe("2020");
+      expect(
+        await store.edges.knows.getById("endpoint-new" as never),
+      ).toBeUndefined();
+    });
+
+    it("rejects inherited prototype names in matchOn", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      await expect(
+        store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { since: "2020" },
+          { matchOn: ["toString" as never] },
+        ),
+      ).rejects.toThrow(ValidationError);
     });
 
     it("deletes edge and excludes from queries", async () => {
@@ -236,6 +396,47 @@ export function registerEdgeOperationIntegrationTests(
       expect(updated?.action).toBe("updated");
       expect(updated?.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
       expect(updated?.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    it("keeps delimiter-bearing endpoint tuples distinct in one batch", async () => {
+      const store = context.getStore();
+      const separator = "\u001ECompany\u001E";
+      const firstFrom = await store.nodes.Person.create(
+        { name: "First" },
+        { id: "a" },
+      );
+      const secondFrom = await store.nodes.Person.create(
+        { name: "Second" },
+        { id: `a${separator}b` },
+      );
+      const firstTo = await store.nodes.Company.create(
+        { name: "First company" },
+        { id: `b${separator}c` },
+      );
+      const secondTo = await store.nodes.Company.create(
+        { name: "Second company" },
+        { id: "c" },
+      );
+
+      const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+        {
+          from: firstFrom,
+          to: firstTo,
+          props: { role: "Engineer" },
+        },
+        {
+          from: secondFrom,
+          to: secondTo,
+          props: { role: "Manager" },
+        },
+      ]);
+
+      expect(results).toHaveLength(2);
+      expect(results.map((result) => result.action)).toEqual([
+        "created",
+        "created",
+      ]);
+      expect(results[0]?.edge.id).not.toBe(results[1]?.edge.id);
     });
 
     it("refuses a bulk endpoint update that states a validFrom the live edge does not hold", async () => {

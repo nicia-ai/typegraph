@@ -20,6 +20,7 @@ import {
   compileIdentityClassCte,
   planIdentityFrontierExpansion,
 } from "./identity-traversal";
+import { compileInverseTraversalDuplicateGuard } from "./inverse-traversal-guard";
 import {
   createTemporalFilterPass,
   runCompilerPass,
@@ -592,19 +593,11 @@ function compileRecursiveCte(
     const inverseJoinKindField = direction === "out" ? "to_kind" : "from_kind";
     const inverseTargetKindField =
       direction === "out" ? "from_kind" : "to_kind";
-    const overlappingKinds = inverseEdgeKinds.filter((kind) =>
-      directEdgeKinds.includes(kind),
+    const duplicateGuard = compileInverseTraversalDuplicateGuard(
+      directEdgeKinds,
+      inverseEdgeKinds,
+      (overlappingKinds) => compileKindFilter(overlappingKinds, "e.kind"),
     );
-
-    // Exclude a TRUE self-loop (both endpoints the same node) from the inverse
-    // branch so it is traversed once, not twice. Node identity is (kind, id),
-    // not id alone: under sameIdAcrossKinds folding a real edge between folded
-    // peers has from_id = to_id with from_kind <> to_kind, and must NOT be
-    // suppressed or a direction:"both" traversal would never cross it.
-    const duplicateGuard =
-      overlappingKinds.length > 0 ?
-        sql`NOT (e.from_id = e.to_id AND e.from_kind = e.to_kind AND ${compileKindFilter(overlappingKinds, "e.kind")})`
-      : undefined;
 
     const inverseBranch = compileRecursiveBranch({
       joinField: inverseJoinField,

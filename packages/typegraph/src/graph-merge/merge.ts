@@ -80,7 +80,12 @@ import {
   INHERITED_EDGE_ORIGIN,
   repointEdges,
 } from "./edge-repoint";
-import { BaseVersionMismatchError, describeCause, MergeError } from "./errors";
+import {
+  BaseVersionMismatchError,
+  describeCause,
+  InvalidMergeOptionsError,
+  MergeError,
+} from "./errors";
 import {
   assertIdentityEndpointsNotDeleted,
   assertIdentityPeersStable,
@@ -772,10 +777,9 @@ function buildProvenanceIndex(
 }
 
 /**
- * Empty per-branch trust weights — the fallback when the caller supplies no
- * {@link MergeOptions.provenanceWeights}. With empty weights the
- * `"provenanceWeighted"` policy degrades to the stable branch order (its
- * documented tie-break), i.e. `"lastWriteWins"` semantics.
+ * Empty per-branch trust weights used by policies that do not consult weights.
+ * Option validation requires a non-empty map whenever `"provenanceWeighted"`
+ * is selected, so this value is never a silent fallback for that policy.
  */
 const EMPTY_WEIGHTS: ProvenanceWeights = new Map<BranchId, number>();
 
@@ -2038,11 +2042,26 @@ async function validateBaseVersions<G extends GraphDef>(
 /** Normalizes options, converting an invalid-option throw into a typed result. */
 function tryNormalize<G extends GraphDef>(
   optionsInput: MergeOptions<G>,
+  refusedOptions: readonly (keyof MergeOptions<G>)[] = [],
 ): Result<NormalizedMergeOptions<G>, MergeError> {
+  const refusedOption = refusedOptions.find((option) =>
+    hasOwnKey(optionsInput, option),
+  );
+  if (refusedOption !== undefined) {
+    return err(
+      new InvalidMergeOptionsError(
+        `This merge operation does not accept options.${refusedOption}.`,
+        { details: { option: refusedOption } },
+      ),
+    );
+  }
+
   try {
     return ok(normalizeMergeOptions(optionsInput));
   } catch (error) {
-    return err(new MergeError("Invalid merge options.", { cause: error }));
+    return err(
+      new InvalidMergeOptionsError("Invalid merge options.", { cause: error }),
+    );
   }
 }
 
@@ -3330,7 +3349,8 @@ async function commitIncrementalPlan<G extends GraphDef>(
  * through the same three-way merge planner.
  *
  * Object-form args so the two same-typed stores (`forkPoint`, `target`) cannot be
- * swapped. `options.target` is ignored — `target` is the explicit arg.
+ * swapped. The named `target` is authoritative; an untyped caller that also
+ * supplies `options.target` is refused rather than silently ignored.
  *
  * Preconditions (typed errors): every branch forked from `forkPoint`
  * (`branch.base === computeBaseVersion(forkPoint)`); `forkPoint` and `target` share a
@@ -3342,7 +3362,7 @@ export async function mergeIncremental<G extends GraphDef>(
 ): Promise<Result<MergeReport<G>, MergeError>> {
   const { forkPoint, target, branches } = args;
 
-  const normalized = tryNormalize(args.options ?? {});
+  const normalized = tryNormalize(args.options ?? {}, ["target"]);
   if (isErr(normalized)) {
     return err(normalized.error);
   }

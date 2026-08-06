@@ -5,6 +5,7 @@ import {
   getSearchableMetadata,
   type SearchableMetadata,
 } from "../core/searchable";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { type ValueType } from "./ast";
 
@@ -110,7 +111,9 @@ export function createSchemaIntrospector(
     fieldName: string,
   ): FieldTypeInfo | undefined {
     const shape = getShapeForKind(kindName);
-    return shape?.[fieldName];
+    return shape !== undefined && hasOwnKey(shape, fieldName) ?
+        shape[fieldName]
+      : undefined;
   }
 
   function getSharedFieldTypeInfo(
@@ -139,7 +142,9 @@ export function createSchemaIntrospector(
     fieldName: string,
   ): FieldTypeInfo | undefined {
     const shape = getShapeForEdgeKind(edgeKindName);
-    return shape?.[fieldName];
+    return shape !== undefined && hasOwnKey(shape, fieldName) ?
+        shape[fieldName]
+      : undefined;
   }
 
   function getSharedEdgeFieldTypeInfo(
@@ -511,7 +516,7 @@ function intersectShapes(
   }
 
   const keys = Object.keys(first).filter((key) =>
-    rest.every((shape) => key in shape),
+    rest.every((shape) => hasOwnKey(shape, key)),
   );
 
   const entries = keys

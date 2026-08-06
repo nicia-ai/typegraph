@@ -272,8 +272,9 @@ export type BulkOperationHookContext = HookContext &
 /**
  * Observability hooks for monitoring store operations.
  *
- * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip
- * per-item operation hooks for throughput. Query hooks still fire normally.
+ * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`,
+ * `bulkDelete`) skip per-item operation hooks for throughput. Query hooks
+ * still fire normally.
  *
  * @example
  * ```typescript
@@ -1340,8 +1341,10 @@ export type EdgeCollection<
    * last-write-wins: the first item creates or updates the edge, and every later
    * copy is an update over the value the earlier item wrote. This holds whether
    * or not the edge existed before the batch. An update never repoints an edge,
-   * so the endpoints of the first write stand — a later copy's `from` / `to` are
-   * ignored exactly as they are for an id that already existed.
+   * so every item's `from` / `to` must exactly restate the endpoints already
+   * owned by that id (including an earlier item in the same batch). A mismatch
+   * is refused with `ValidationError` carrying
+   * `EDGE_IDENTITY_MISMATCH_CODE`; it is never silently ignored.
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the

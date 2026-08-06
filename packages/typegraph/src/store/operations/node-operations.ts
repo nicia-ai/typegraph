@@ -1844,6 +1844,62 @@ export async function executeNodeDelete<G extends GraphDef>(
 }
 
 /**
+ * Soft-deletes a batch without per-item operation hooks.
+ *
+ * Batch collection methods deliberately omit per-item hooks for throughput.
+ * Owning the write transaction here also prevents a per-item success from
+ * being reported before the batch's outer COMMIT.
+ */
+export async function executeNodeDeleteBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  ids: readonly string[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  await runInWriteTransaction(
+    ctx,
+    backend,
+    async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
+      const registration = getNodeRegistration(ctx.graph, kind);
+      const writeContext = createNodeWriteContext(
+        ctx.graphId,
+        ctx.registry,
+        lock,
+      );
+      let affectedCount = 0;
+
+      for (const id of ids) {
+        // This is both the existence gate and the concurrency-correct
+        // pre-image consumed by uniqueness cleanup. It must stay inside the
+        // batch transaction after the graph write lock is held.
+        const preflight = await target.getNode(ctx.graphId, kind, id);
+        if (!preflight || !isLiveNodeRow(preflight)) continue;
+
+        await applyNodeSoftDelete(
+          writeContext,
+          {
+            existing: preflight,
+            schema: registration.type.schema,
+            uniqueConstraints: registration.unique ?? [],
+            onDelete: registration.onDelete,
+          },
+          target,
+        );
+        if (identity !== undefined) {
+          await identity.detachDeleted(target, { kind, id }, "soft");
+        }
+        affectedCount += 1;
+      }
+
+      return affectedCount;
+    },
+    { didWrite: (affectedCount) => affectedCount > 0 },
+  );
+}
+
+/**
  * Executes a node hard delete operation (permanent removal).
  *
  * Unlike soft delete, this permanently removes the node and all

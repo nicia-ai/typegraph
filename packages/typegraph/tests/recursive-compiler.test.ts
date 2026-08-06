@@ -351,6 +351,7 @@ describe("compileVariableLengthQuery", () => {
       expect(sql).toContain("e.from_id = r.target_id");
       expect(sql).toContain("e.to_id = r.target_id");
       expect(sql).toContain("e.from_id = e.to_id");
+      expect(sql).toContain("e.from_kind = e.to_kind");
     });
 
     it("forces worktable-first join order on sqlite recursive steps", () => {

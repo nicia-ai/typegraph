@@ -19,16 +19,21 @@
 
 import { z } from "zod";
 
+import { encodeTupleKey } from "../utils/tuple-key";
+import { parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
 import type { GraphBackend, GraphDef, Node, Store } from "./typegraph-internal";
 import {
+  computeSchemaHash,
+  ConfigurationError,
   createStoreWithSchema,
-  defineGraph,
+  defineInternalGraph,
   defineNode,
+  serializeSchema,
   sha256Hex,
   storeBackend,
 } from "./typegraph-internal";
-import type { BranchId, ProvenanceRecord } from "./types";
+import { asBranchId, type BranchId, type ProvenanceRecord } from "./types";
 
 /** The Provenance node: one row per `{branch, sourceId}` → canonical contribution. */
 const Provenance = defineNode("Provenance", {
@@ -42,6 +47,26 @@ const Provenance = defineNode("Provenance", {
   }),
 });
 
+const PROVENANCE_OWNER = "@nicia-ai/typegraph/merge-provenance";
+const PROVENANCE_OWNER_VERSION = 1;
+const PROVENANCE_OWNER_ID = "merge-provenance-owner";
+
+/**
+ * Durable ownership claim for the sidecar graph id.
+ *
+ * Schema equality cannot establish ownership: an application is allowed to
+ * define the same `Provenance` kind at the conventional sidecar id. The marker
+ * row is therefore required independently of the schema hash on every sidecar
+ * created by this version.
+ */
+const ProvenanceOwner = defineNode("ProvenanceOwner", {
+  schema: z.object({
+    owner: z.literal(PROVENANCE_OWNER),
+    version: z.literal(PROVENANCE_OWNER_VERSION),
+    targetGraphId: z.string(),
+  }),
+});
+
 /**
  * Derives the sidecar graph id for a target graph. Suffixing the target's own id
  * keeps each target graph's provenance in its own `graphId`-namespaced tables on a
@@ -52,15 +77,30 @@ export function provenanceGraphId(targetGraphId: string): string {
 }
 
 /** Builds the sidecar provenance graph definition for a target graph. */
+function buildOwnedProvenanceGraph(targetGraphId: string) {
+  return defineInternalGraph({
+    id: provenanceGraphId(targetGraphId),
+    nodes: {
+      Provenance: { type: Provenance },
+      ProvenanceOwner: { type: ProvenanceOwner },
+    },
+    edges: {},
+  });
+}
+
+/** The schema written by releases before durable sidecar ownership markers. */
 function buildProvenanceGraph(targetGraphId: string) {
-  return defineGraph({
+  return defineInternalGraph({
     id: provenanceGraphId(targetGraphId),
     nodes: { Provenance: { type: Provenance } },
     edges: {},
   });
 }
 
-/** The concrete sidecar provenance graph type. */
+/**
+ * Public view of the sidecar graph. The ownership kind is deliberately hidden:
+ * it is framework metadata, not provenance data or an application collection.
+ */
 export type ProvenanceGraph = ReturnType<typeof buildProvenanceGraph>;
 
 /** A persisted provenance node (the queryable record). */
@@ -90,14 +130,129 @@ export async function openProvenanceStore<G extends GraphDef>(
 ): Promise<Store<ProvenanceGraph>> {
   const [backend, targetGraphId] =
     args.length === 1 ? [storeBackend(args[0]), args[0].graphId] : args;
-  const [store] = await createStoreWithSchema(
-    buildProvenanceGraph(targetGraphId),
-    backend,
-  );
-  return store;
+  const graph = buildOwnedProvenanceGraph(targetGraphId);
+  const activeSchema = await backend.getActiveSchema(graph.id);
+  let recognizedLegacySidecar = false;
+  if (activeSchema !== undefined) {
+    const expectedHash = await computeSchemaHash(
+      serializeSchema(graph, activeSchema.version),
+    );
+    if (activeSchema.schema_hash === expectedHash) {
+      if (!(await hasProvenanceOwnerMarker(backend, graph.id, targetGraphId))) {
+        throw provenanceGraphIdCollision(graph.id, targetGraphId);
+      }
+    } else {
+      const legacyHash = await computeSchemaHash(
+        serializeSchema(
+          buildProvenanceGraph(targetGraphId),
+          activeSchema.version,
+        ),
+      );
+      recognizedLegacySidecar =
+        activeSchema.schema_hash === legacyHash &&
+        (await isRecognizableLegacySidecar(backend, graph.id, targetGraphId));
+      if (!recognizedLegacySidecar) {
+        throw provenanceGraphIdCollision(graph.id, targetGraphId);
+      }
+    }
+  }
+  const [store] = await createStoreWithSchema(graph, backend);
+  if (activeSchema === undefined || recognizedLegacySidecar) {
+    await store.nodes.ProvenanceOwner.upsertById(PROVENANCE_OWNER_ID, {
+      owner: PROVENANCE_OWNER,
+      version: PROVENANCE_OWNER_VERSION,
+      targetGraphId,
+    });
+  }
+  return store as unknown as Store<ProvenanceGraph>;
 }
 
-/** Null byte — cannot occur in a normal id, so an unambiguous tuple separator. */
+function provenanceGraphIdCollision(
+  graphId: string,
+  targetGraphId: string,
+): ConfigurationError {
+  return new ConfigurationError(
+    `Graph id "${graphId}" is already used by an application graph and cannot host merge provenance.`,
+    {
+      code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+      graphId,
+      targetGraphId,
+    },
+    {
+      suggestion:
+        "Rename the colliding application graph before enabling persisted merge provenance for this target.",
+    },
+  );
+}
+
+async function hasProvenanceOwnerMarker(
+  backend: GraphBackend,
+  graphId: string,
+  targetGraphId: string,
+): Promise<boolean> {
+  const row = await backend.getNode(
+    graphId,
+    "ProvenanceOwner",
+    PROVENANCE_OWNER_ID,
+  );
+  if (row === undefined || row.deleted_at !== undefined) return false;
+  const parsed = ProvenanceOwner.schema.safeParse(parseRowProps(row.props));
+  return parsed.success && parsed.data.targetGraphId === targetGraphId;
+}
+
+/**
+ * Recognizes a pre-marker sidecar from its actual durable contents.
+ *
+ * An empty legacy graph is intentionally ambiguous with an empty application
+ * graph of the same shape and is refused. Non-empty legacy sidecars are
+ * admitted only when every row is a valid contribution for this target and
+ * its deterministic id verifies. That preserves meaningful legacy sidecars
+ * without falling back to schema equality as an ownership claim.
+ */
+async function isRecognizableLegacySidecar(
+  backend: GraphBackend,
+  graphId: string,
+  targetGraphId: string,
+): Promise<boolean> {
+  const pageSize = 500;
+  let after: string | undefined;
+  let rowCount = 0;
+
+  for (;;) {
+    const rows = await backend.findNodesByKind({
+      graphId,
+      kind: "Provenance",
+      temporalMode: "includeTombstones",
+      excludeDeleted: false,
+      orderBy: "id",
+      ...(after === undefined ? {} : { after }),
+      limit: pageSize,
+    });
+    for (const row of rows) {
+      if (row.deleted_at !== undefined) return false;
+      const parsed = Provenance.schema.safeParse(parseRowProps(row.props));
+      if (!parsed.success || parsed.data.targetGraphId !== targetGraphId) {
+        return false;
+      }
+      const expectedId = await provenanceNodeId(targetGraphId, {
+        role: parsed.data.role,
+        canonicalId: parsed.data.canonicalId,
+        canonicalKind: parsed.data.canonicalKind,
+        branchId: asBranchId(parsed.data.branchId),
+        sourceId: parsed.data.sourceId,
+      });
+      if (row.id !== expectedId) return false;
+      rowCount += 1;
+    }
+    if (rows.length < pageSize) break;
+    after = rows.at(-1)?.id;
+    if (after === undefined) break;
+  }
+
+  return rowCount > 0;
+}
+
+/** Separator used by provenance ids written before tuple escaping was added. */
 const ID_SEPARATOR = "\0";
 
 /** Bytes of the SHA-256 digest kept (128 bits — collision-safe for provenance). */
@@ -112,13 +267,24 @@ const ID_DIGEST_BYTES = 16;
  * are different entities under the `(kind, id)` identity model.
  */
 export function contributionKey(record: ProvenanceRecord): string {
-  return [
+  return encodeProvenanceTuple([
     record.role,
     record.canonicalKind,
     record.canonicalId,
     record.branchId,
     record.sourceId,
-  ].join(ID_SEPARATOR);
+  ]);
+}
+
+/**
+ * Preserves existing provenance ids for ordinary values while making the full
+ * string domain injective. JSON tuple output never contains a literal NUL, so
+ * it cannot collide with the legacy form, which has one between every field.
+ */
+function encodeProvenanceTuple(values: readonly string[]): string {
+  return values.some((value) => value.includes(ID_SEPARATOR)) ?
+      encodeTupleKey(values)
+    : values.join(ID_SEPARATOR);
 }
 
 /**
@@ -134,7 +300,14 @@ export async function provenanceNodeId(
   targetGraphId: string,
   record: ProvenanceRecord,
 ): Promise<string> {
-  const tuple = [targetGraphId, contributionKey(record)].join(ID_SEPARATOR);
+  const tuple = encodeProvenanceTuple([
+    targetGraphId,
+    record.role,
+    record.canonicalKind,
+    record.canonicalId,
+    record.branchId,
+    record.sourceId,
+  ]);
   const digest = await sha256Hex(tuple, ID_DIGEST_BYTES);
   return `prov_${digest}`;
 }

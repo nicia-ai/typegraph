@@ -37,7 +37,9 @@ import {
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { hasOwnKey } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
+import { encodeTupleKey } from "../../utils/tuple-key";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateEdgeInput } from "../collections/edge-collection";
 import {
@@ -59,6 +61,11 @@ import {
   type OperationHookContext,
 } from "../types";
 import { withAlreadyExistsTranslation } from "./already-exists";
+import {
+  assertEdgeIdentityMatches,
+  type EdgeIdentityExpectation,
+  edgeIdentityFromRow,
+} from "./edge-identity";
 import {
   runHookedWriteOperation,
   runInWriteTransaction,
@@ -731,8 +738,14 @@ async function performEdgeUpdate<G extends GraphDef>(
 
   const existing = await target.getEdge(ctx.graphId, id);
   if (!existing || (!options?.clearDeleted && existing.deleted_at)) {
-    throw new EdgeNotFoundError("unknown", id);
+    throw new EdgeNotFoundError(input.identity.kind, id);
   }
+  assertEdgeIdentityMatches(
+    id,
+    input.identity,
+    edgeIdentityFromRow(existing),
+    "update",
+  );
 
   const { validatedProps } = resolveEdgeUpdateProps(ctx, existing, input.props);
 
@@ -801,6 +814,7 @@ export async function executeEdgeUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: {
     id: string;
+    identity: EdgeIdentityExpectation;
     props: Partial<Record<string, unknown>>;
     validTo?: string;
   },
@@ -817,8 +831,14 @@ export async function executeEdgeUpdate<G extends GraphDef>(
   // delete between this gate and the write lock is still handled correctly.
   const gate = await backend.getEdge(ctx.graphId, id);
   if (!gate || gate.deleted_at) {
-    throw new EdgeNotFoundError("unknown", id);
+    throw new EdgeNotFoundError(input.identity.kind, id);
   }
+  assertEdgeIdentityMatches(
+    id,
+    input.identity,
+    edgeIdentityFromRow(gate),
+    "update",
+  );
 
   const opContext = ctx.createOperationContext("update", "edge", gate.kind, id);
 
@@ -847,6 +867,7 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
  */
 export async function executeEdgeDelete<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
+  expectedKind: string,
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
@@ -855,20 +876,69 @@ export async function executeEdgeDelete<G extends GraphDef>(
   // because hooks must WRAP the transaction (matching node operations and
   // edge create) so onOperationEnd reports success only after COMMIT.
   const gate = await backend.getEdge(ctx.graphId, id);
-  if (!gate || gate.deleted_at) return;
+  if (!gate) return;
+  assertEdgeIdentityMatches(
+    id,
+    { kind: expectedKind },
+    edgeIdentityFromRow(gate),
+    "delete",
+  );
+  if (gate.deleted_at) return;
 
   const opContext = ctx.createOperationContext("delete", "edge", gate.kind, id);
 
   return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
-    // No in-transaction preflight: the tombstone UPDATE is guarded by
-    // `deleted_at IS NULL`, so a concurrent delete between the gate and
-    // the write lock is a 0-row no-op — the statement itself is the
-    // concurrency-correct check, and nothing here consumes the row.
+    const current = await target.getEdge(ctx.graphId, id);
+    if (!current) return;
+    assertEdgeIdentityMatches(
+      id,
+      { kind: expectedKind },
+      edgeIdentityFromRow(current),
+      "delete",
+    );
+    if (current.deleted_at) return;
     await target.deleteEdge({
       graphId: ctx.graphId,
       id,
     });
   });
+}
+
+/**
+ * Soft-deletes a batch without per-item operation hooks.
+ *
+ * The edge kind is checked from the authoritative row inside the transaction;
+ * accepting an ID owned by another collection would violate collection
+ * isolation even though edge IDs are graph-global.
+ */
+export async function executeEdgeDeleteBatch<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  expectedKind: string,
+  ids: readonly string[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  await runInWriteTransaction(
+    ctx,
+    backend,
+    async (target) => {
+      let affectedCount = 0;
+      for (const id of ids) {
+        const current = await target.getEdge(ctx.graphId, id);
+        if (!current) continue;
+        assertEdgeIdentityMatches(
+          id,
+          { kind: expectedKind },
+          edgeIdentityFromRow(current),
+          "delete",
+        );
+        if (current.deleted_at) continue;
+        await target.deleteEdge({ graphId: ctx.graphId, id });
+        affectedCount += 1;
+      }
+      return affectedCount;
+    },
+    { didWrite: (affectedCount) => affectedCount > 0 },
+  );
 }
 
 /**
@@ -878,6 +948,7 @@ export async function executeEdgeDelete<G extends GraphDef>(
  */
 export async function executeEdgeHardDelete<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
+  expectedKind: string,
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
@@ -885,13 +956,24 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
   // hooks wrap the transaction (see executeEdgeDelete).
   const gate = await backend.getEdge(ctx.graphId, id);
   if (!gate) return;
+  assertEdgeIdentityMatches(
+    id,
+    { kind: expectedKind },
+    edgeIdentityFromRow(gate),
+    "hardDelete",
+  );
 
   const opContext = ctx.createOperationContext("delete", "edge", gate.kind, id);
 
   return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
-    // No in-transaction preflight: DELETE by primary key is idempotent
-    // (0 rows when concurrently removed) and nothing here consumes the
-    // row.
+    const current = await target.getEdge(ctx.graphId, id);
+    if (!current) return;
+    assertEdgeIdentityMatches(
+      id,
+      { kind: expectedKind },
+      edgeIdentityFromRow(current),
+      "hardDelete",
+    );
     await target.hardDeleteEdge({
       graphId: ctx.graphId,
       id,
@@ -903,9 +985,6 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
 // Get-Or-Create Operations
 // ============================================================
 
-// Delimiters for composite match keys
-const RECORD_SEP = "\u001E";
-const UNIT_SEP = "\u001F";
 const UNDEFINED_SENTINEL = "\u001D";
 
 /**
@@ -933,7 +1012,7 @@ function validateMatchOnFields(
     );
   }
 
-  const invalidFields = matchOn.filter((field) => !(field in shape));
+  const invalidFields = matchOn.filter((field) => !hasOwnKey(shape, field));
   if (invalidFields.length > 0) {
     throw new ValidationError(
       `Invalid matchOn fields for edge kind "${edgeKind}": ${invalidFields.join(", ")}`,
@@ -970,7 +1049,8 @@ function stableStringify(value: unknown): string {
 /**
  * Builds a deterministic composite key for edge matching.
  *
- * Format: `fromKind\u001EfromId\u001EtoKind\u001EtoId[\u001Efield\u001Fvalue]*`
+ * Endpoints and sorted property-name/value pairs are encoded as one injective
+ * string tuple, so legal control characters cannot collapse distinct edges.
  */
 function buildEdgeCompositeKey(
   fromKind: string,
@@ -980,15 +1060,14 @@ function buildEdgeCompositeKey(
   props: Record<string, unknown>,
   matchOn: readonly string[],
 ): string {
-  const endpointPart = `${fromKind}${RECORD_SEP}${fromId}${RECORD_SEP}${toKind}${RECORD_SEP}${toId}`;
-  if (matchOn.length === 0) return endpointPart;
-
   const sortedFields = [...matchOn].toSorted();
-  const propertyParts = sortedFields.map(
-    (field) =>
-      `${RECORD_SEP}${field}${UNIT_SEP}${stableStringify(props[field])}`,
-  );
-  return endpointPart + propertyParts.join("");
+  return encodeTupleKey([
+    fromKind,
+    fromId,
+    toKind,
+    toId,
+    ...sortedFields.flatMap((field) => [field, stableStringify(props[field])]),
+  ]);
 }
 
 /**
@@ -1000,7 +1079,7 @@ function buildEndpointPairKey(
   toKind: string,
   toId: string,
 ): string {
-  return `${fromKind}${RECORD_SEP}${fromId}${RECORD_SEP}${toKind}${RECORD_SEP}${toId}`;
+  return encodeTupleKey([fromKind, fromId, toKind, toId]);
 }
 
 type EdgeMatch = Readonly<{
@@ -1231,6 +1310,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         ctx,
         {
           id: liveRow.id,
+          identity: { kind, fromKind, fromId, toKind, toId },
           props: validatedProps,
           ...(validFrom !== undefined && { validFrom }),
           ...(validTo !== undefined && { validTo }),
@@ -1273,6 +1353,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       ctx,
       {
         id: matchedDeletedRow.id,
+        identity: { kind, fromKind, fromId, toKind, toId },
         props: validatedProps,
         ...(validFrom !== undefined && { validFrom }),
         ...(validTo !== undefined && { validTo }),
@@ -1598,6 +1679,13 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           ctx,
           {
             id: entry.row.id,
+            identity: {
+              kind,
+              fromKind: entry.fromKind,
+              fromId: entry.fromId,
+              toKind: entry.toKind,
+              toId: entry.toId,
+            },
             props: entry.validatedProps,
             ...(entry.validFrom !== undefined && {
               validFrom: entry.validFrom,
@@ -1616,6 +1704,13 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           ctx,
           {
             id: entry.row.id,
+            identity: {
+              kind,
+              fromKind: entry.fromKind,
+              fromId: entry.fromId,
+              toKind: entry.toKind,
+              toId: entry.toId,
+            },
             props: entry.validatedProps,
             ...(entry.validFrom !== undefined && {
               validFrom: entry.validFrom,

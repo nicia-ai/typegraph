@@ -6,6 +6,7 @@
  */
 import type { z } from "zod";
 
+import { sharesSerializedTransactionResource } from "../backend/transaction-resource";
 import {
   type GraphBackend,
   isLiveNodeRow,
@@ -28,7 +29,10 @@ import {
   UniquenessError,
   ValidationError,
 } from "../errors";
-import { IDENTITY_IMPORT_FAILED_ASSERTION } from "../identity/service";
+import {
+  IDENTITY_IMPORT_FAILED_ASSERTION,
+  IDENTITY_IMPORT_PROGRESS,
+} from "../identity/service";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   createNodeBatchValidationBackend,
@@ -51,6 +55,8 @@ import {
   validateOptionalCanonicalIsoDate,
 } from "../utils/date";
 import { hasOwnKey } from "../utils/object";
+import { encodeTupleKey } from "../utils/tuple-key";
+import { exportStreamBackend } from "./stream-source";
 import {
   type GraphData,
   type GraphDataHeader,
@@ -221,6 +227,29 @@ export async function importGraphStream<G extends GraphDef>(
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
   const options = ImportOptionsSchema.parse(rawOptions);
+  const sourceBackend = exportStreamBackend(chunks);
+  const targetBackend = storeBackend(store);
+  const sameSqliteBackend =
+    sourceBackend === targetBackend && targetBackend.dialect === "sqlite";
+  const sharedSerializedBackend =
+    sourceBackend !== undefined &&
+    sharesSerializedTransactionResource(sourceBackend, targetBackend);
+  if (sameSqliteBackend || sharedSerializedBackend) {
+    throw new ConfigurationError(
+      "A snapshot export cannot be streamed into a target that shares its serialized database connection: the read transaction holds that connection while import requires its writer lock.",
+      {
+        code:
+          sameSqliteBackend ?
+            "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT"
+          : "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+        graphId: store.graphId,
+      },
+      {
+        suggestion:
+          "Export to a file first, or import the stream into an independent backend.",
+      },
+    );
+  }
   const result = emptyImportResult();
   let header: GraphDataHeader | undefined;
   let receivedEdges = false;
@@ -545,9 +574,9 @@ function isIdentityAssertionValidationError(
  * thrown import — discarding the valid node and edge work alongside it.
  *
  * Assertions the coordinator applied before the failing one stay committed,
- * exactly as rows accepted before a failing node do. They are not reflected in
- * `result.identity.created`: the coordinator reports counts only on success, so
- * the counts under-report rather than invent a number.
+ * exactly as rows accepted before a failing node do. The tagged error carries
+ * the coordinator's completed counts so the returned result describes those
+ * durable partial effects accurately.
  */
 async function importIdentitySection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
@@ -568,8 +597,33 @@ async function importIdentitySection<G extends GraphDef>(
   } catch (error) {
     const entry = asIdentityImportError(identity.assertions, graphId, error);
     if (entry === undefined) throw error;
+    const progress = identityImportProgress(error);
+    result.identity.created += progress.created;
+    result.identity.skipped += progress.skipped;
     errors.push(entry);
   }
+}
+
+function identityImportProgress(
+  error: unknown,
+): Readonly<{ created: number; skipped: number }> {
+  if (typeof error !== "object" || error === null) {
+    return { created: 0, skipped: 0 };
+  }
+  const progress = (error as Record<PropertyKey, unknown>)[
+    IDENTITY_IMPORT_PROGRESS
+  ];
+  if (
+    typeof progress !== "object" ||
+    progress === null ||
+    !("created" in progress) ||
+    typeof progress.created !== "number" ||
+    !("skipped" in progress) ||
+    typeof progress.skipped !== "number"
+  ) {
+    return { created: 0, skipped: 0 };
+  }
+  return { created: progress.created, skipped: progress.skipped };
 }
 
 function validateStreamHeader(header: GraphDataHeader): void {
@@ -1900,5 +1954,5 @@ function formatZodError(error: z.ZodError): string {
 // ============================================================
 
 function makeNodeKey(kind: string, id: string): string {
-  return `${kind}:${id}`;
+  return encodeTupleKey([kind, id]);
 }

@@ -102,6 +102,7 @@ import {
   loadAssertionsByIds,
   loadCurrentStructuralClasses,
   lockIdentityGraph,
+  readIdentityAssertionPageAtTarget,
   readIdentityAssertionsForInterchange,
   rebuildIdentityClosureForContext,
   refKey,
@@ -209,6 +210,7 @@ import {
   executeEdgeCreateBatch,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
+  executeEdgeDeleteBatch,
   executeEdgeFindByEndpoints,
   executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
@@ -221,6 +223,7 @@ import {
   executeNodeCreateBatch,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
+  executeNodeDeleteBatch,
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
@@ -1039,6 +1042,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.readCurrentIdentityAssertions(mode, options),
       identityAssertionsAtTarget: (target, mode) =>
         this.identityAssertionsAtTarget(target, mode),
+      readIdentityAssertionPageAtTarget: (target, mode, options) =>
+        this.readIdentityAssertionPageAtTarget(target, mode, options),
       lockIdentityImportTarget: (target) =>
         this.lockIdentityImportTarget(target),
       foldImportedIdentityNodes: (target, references) =>
@@ -1232,6 +1237,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return readIdentityAssertionsForInterchange(
       this.#identityContext(target),
       mode,
+    );
+  }
+
+  /** @internal Reads one bounded identity-assertion page at a bound target. */
+  readIdentityAssertionPageAtTarget(
+    target: GraphBackend | TransactionBackend,
+    mode: "state" | "archival",
+    options: Readonly<{
+      nodeKinds?: readonly string[];
+      includeDeleted?: boolean;
+      after?: string;
+      limit: number;
+    }>,
+  ): ReturnType<typeof readIdentityAssertionPageAtTarget> {
+    if (this.#graph.identity === undefined) {
+      return Promise.resolve({ assertions: [], done: true });
+    }
+    return readIdentityAssertionPageAtTarget(
+      this.#identityContext(target),
+      target,
+      mode,
+      options,
     );
   }
 
@@ -1755,6 +1782,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       }),
       executeDelete: (kind, id, backend) =>
         executeNodeDelete(ctx, kind, id, backend),
+      executeDeleteBatch: (kind, ids, backend) =>
+        executeNodeDeleteBatch(ctx, kind, ids, backend),
       executeHardDelete: (kind, id, backend) =>
         executeNodeHardDelete(ctx, kind, id, backend),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
@@ -1837,9 +1866,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           edgeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
-      executeDelete: (id, backend) => executeEdgeDelete(ctx, id, backend),
-      executeHardDelete: (id, backend) =>
-        executeEdgeHardDelete(ctx, id, backend),
+      executeDelete: (kind, id, backend) =>
+        executeEdgeDelete(ctx, kind, id, backend),
+      executeDeleteBatch: (kind, ids, backend) =>
+        executeEdgeDeleteBatch(ctx, kind, ids, backend),
+      executeHardDelete: (kind, id, backend) =>
+        executeEdgeHardDelete(ctx, kind, id, backend),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByEndpoints: (

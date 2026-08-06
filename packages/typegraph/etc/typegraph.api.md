@@ -1316,6 +1316,9 @@ export type Edge<E extends AnyEdgeType = EdgeType, From extends NodeType = NodeT
 const EDGE_BATCH_READ_NAMES: readonly ["batchFindFrom", "batchFindTo", "batchFindByEndpoints"];
 
 // @public
+export const EDGE_IDENTITY_MISMATCH_CODE = "EDGE_IDENTITY_MISMATCH";
+
+// @public
 const EDGE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findFrom", "findTo", "bulkFindFrom", "bulkFindTo", "findByEndpoints"];
 
 // @public
@@ -5643,6 +5646,33 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
+    readIdentityAssertionPageAtTarget: (target: GraphBackend | TransactionBackend, mode: "state" | "archival", options: Readonly<{
+        nodeKinds?: readonly string[];
+        includeDeleted?: boolean;
+        after?: string;
+        limit: number;
+    }>) => Promise<Readonly<{
+        assertions: readonly Readonly<{
+            id: string;
+            relation: "same" | "different";
+            a: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            b: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            validFrom: string;
+            validTo?: string | undefined;
+            endedBy?: Readonly<{
+                kind: string;
+                id: string;
+            }> | undefined;
+        }>[];
+        nextAfter?: string;
+        done: boolean;
+    }>>;
     lockIdentityImportTarget: (target: GraphBackend | TransactionBackend) => Promise<void>;
     foldImportedIdentityNodes: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
         kind: string;
@@ -6430,7 +6460,7 @@ export class ValidationError extends TypeGraphError {
 export type ValidationErrorDetails = Readonly<{
     entityType?: KindEntity;
     kind?: string;
-    operation?: "create" | "update";
+    operation?: "create" | "update" | "delete" | "hardDelete";
     id?: string;
     issues: readonly ValidationIssue[];
 }>;

@@ -44,6 +44,7 @@ import {
   CompilerInvariantError,
   ConfigurationError,
   StaleVersionError,
+  UnsupportedBackendCapabilityError,
 } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -88,6 +89,7 @@ import {
   nowIso,
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
+import { markSerializedTransactionResource } from "../transaction-resource";
 import {
   type AdapterBackend,
   type BackendCapabilities,
@@ -158,6 +160,7 @@ import {
   type AnyPgDatabase,
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
+  getPgliteClient,
   isNeonHttpClient,
   isPgliteDatabase,
   PGLITE_MAX_BIND_PARAMETERS,
@@ -1432,6 +1435,10 @@ export function createPostgresBackend(
     },
   };
 
+  const pgliteClient = getPgliteClient(db);
+  if (pgliteClient !== undefined) {
+    markSerializedTransactionResource(backend, pgliteClient);
+  }
   return backend;
 }
 
@@ -1589,24 +1596,6 @@ function createPostgresOperationBackend(
 
   type VectorSearchRow = Readonly<{ node_id: string; score: number }>;
 
-  // One warning per backend instance when `efSearch` is supplied but the
-  // driver can't hold a transaction to scope `SET LOCAL` to.
-  let efSearchUnsupportedWarned = false;
-  function warnEfSearchUnsupported(): void {
-    if (efSearchUnsupportedWarned) return;
-    efSearchUnsupportedWarned = true;
-    if (typeof console === "undefined" || typeof console.warn !== "function") {
-      return;
-    }
-    console.warn(
-      "[typegraph] efSearch (hnsw.ef_search override) was ignored: this " +
-        "Postgres backend has transactions disabled (e.g. drizzle-orm/neon-http), " +
-        "and SET LOCAL needs a transaction to scope the override. Use a " +
-        "transactional driver (node-postgres / neon-serverless / postgres-js) " +
-        "to apply efSearch.",
-    );
-  }
-
   /** One transaction-local GUC override applied around a vector SELECT. */
   type SearchGucOverride = Readonly<{ name: string; value: string }>;
 
@@ -1623,8 +1612,8 @@ function createPostgresOperationBackend(
    * The transaction-local GUC overrides for one vector search:
    *
    * - `hnsw.ef_search` when the caller supplied `efSearch` (validated
-   *   upstream; warned-and-skipped on transactionless drivers, where
-   *   `SET LOCAL` cannot be scoped).
+   *   upstream; refused on transactionless drivers, where `SET LOCAL` cannot
+   *   be scoped).
    * - `hnsw.iterative_scan = strict_order` on HNSW slots (pgvector >= 0.8):
    *   the search SQL constrains results to live candidate nodes (and
    *   optionally `minScore`), and a plain HNSW scan yields only `ef_search`
@@ -1645,13 +1634,28 @@ function createPostgresOperationBackend(
   ): Promise<readonly SearchGucOverride[]> {
     const overrides: SearchGucOverride[] = [];
     if (params.efSearch !== undefined) {
+      if (params.indexType !== "hnsw") {
+        throw new ConfigurationError(
+          "PostgreSQL efSearch requires an HNSW vector index.",
+          { efSearch: params.efSearch, indexType: params.indexType },
+          {
+            suggestion:
+              'Configure the embedding with index: { type: "hnsw" }, or omit efSearch.',
+          },
+        );
+      }
       if (capabilities.transactions) {
         overrides.push({
           name: "hnsw.ef_search",
           value: String(params.efSearch),
         });
       } else {
-        warnEfSearchUnsupported();
+        throw new UnsupportedBackendCapabilityError(
+          "PostgreSQL efSearch override",
+          "transactions",
+          { efSearch: params.efSearch },
+          "Use a transactional PostgreSQL driver such as node-postgres, neon-serverless, or postgres-js.",
+        );
       }
     }
     if (

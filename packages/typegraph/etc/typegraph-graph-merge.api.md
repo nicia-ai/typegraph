@@ -2207,6 +2207,15 @@ type InternalWeaklyConnectedComponentsOptions<G extends GraphDef> = InternalTemp
 // @public (undocumented)
 type InternalWeightedShortestPathOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<WeightedShortestPathOptions<G>, keyof TemporalAlgorithmOptions>;
 
+// @public
+export class InvalidMergeOptionsError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_INVALID_OPTIONS";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
 // @public (undocumented)
 type IsDynamicEdgeType<E> = E extends Readonly<{
     [DYNAMIC_EDGE_BRAND]: true;
@@ -2495,6 +2504,7 @@ export function merge<G extends GraphDef>(store: Store<G>, branches: readonly Gr
 // @public
 export const MERGE_ERROR_CODES: {
     readonly merge: "GRAPH_MERGE_ERROR";
+    readonly invalidOptions: "GRAPH_MERGE_INVALID_OPTIONS";
     readonly branch: "GRAPH_MERGE_BRANCH_ERROR";
     readonly similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE";
     readonly conflict: "GRAPH_MERGE_CONFLICT";
@@ -2533,6 +2543,8 @@ export type MergedCounts = Readonly<{
 // @public
 export class MergeError extends TypeGraphError {
     constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    protected static readonly errorCategory: TypeGraphErrorOptions["category"];
 }
 
 // @public
@@ -2550,7 +2562,7 @@ export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
     forkPoint: Store<G>;
     target: Store<G>;
     branches: readonly GraphBranch<G>[];
-    options?: MergeOptions<G>;
+    options?: Omit<MergeOptions<G>, "target">;
 }>;
 
 // @public
@@ -4191,6 +4203,33 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
+    readIdentityAssertionPageAtTarget: (target: GraphBackend | TransactionBackend, mode: "state" | "archival", options: Readonly<{
+        nodeKinds?: readonly string[];
+        includeDeleted?: boolean;
+        after?: string;
+        limit: number;
+    }>) => Promise<Readonly<{
+        assertions: readonly Readonly<{
+            id: string;
+            relation: "same" | "different";
+            a: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            b: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            validFrom: string;
+            validTo?: string | undefined;
+            endedBy?: Readonly<{
+                kind: string;
+                id: string;
+            }> | undefined;
+        }>[];
+        nextAfter?: string;
+        done: boolean;
+    }>>;
     lockIdentityImportTarget: (target: GraphBackend | TransactionBackend) => Promise<void>;
     foldImportedIdentityNodes: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
         kind: string;

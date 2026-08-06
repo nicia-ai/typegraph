@@ -26,10 +26,17 @@ import { z } from "zod";
 
 import { rowPropsToObject } from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
-import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
+import {
+  BaseVersionMismatchError,
+  InvalidMergeOptionsError,
+} from "../../src/graph-merge/errors";
 import { mergeIncremental } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
-import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
+import type {
+  GraphBranch,
+  MergeIncrementalArgs,
+  MergeOptions,
+} from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
 import { requireDefined } from "../../src/utils/presence";
 import { normalizeGraph } from "../property/graph-merge/normalize";
@@ -178,6 +185,54 @@ describe.each(backendMatrix())(
       ]);
       return requireDefined(edge);
     }
+
+    it("refuses an untyped options.target instead of ignoring it", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const target = await emptyStore();
+      const conflictingTarget = await emptyStore();
+      const unsafeArguments = {
+        forkPoint,
+        target,
+        branches: [],
+        options: { ...options(), target: conflictingTarget },
+      } as unknown as MergeIncrementalArgs<CareGraph>;
+
+      const result = await mergeIncremental<CareGraph>(unsafeArguments);
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(InvalidMergeOptionsError);
+        expect(result.error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
+        expect(result.error.category).toBe("user");
+        expect(result.error.message).toContain(
+          "does not accept options.target",
+        );
+        expect(result.error.details).toMatchObject({ option: "target" });
+      }
+    });
+
+    it("returns the same typed user error for invalid option values", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const target = await emptyStore();
+      const unsafeArguments = {
+        forkPoint,
+        target,
+        branches: [],
+        options: { maxComparisonsPerKind: -1 },
+      } as unknown as MergeIncrementalArgs<CareGraph>;
+
+      const result = await mergeIncremental<CareGraph>(unsafeArguments);
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(InvalidMergeOptionsError);
+        expect(result.error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
+        expect(result.error.category).toBe("user");
+        expect(result.error.cause).toBeDefined();
+      }
+    });
 
     it("commits an incremental merge into a history-backed target", async () => {
       cleanups = [];

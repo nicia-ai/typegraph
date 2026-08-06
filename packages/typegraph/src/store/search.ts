@@ -141,8 +141,11 @@ export type HybridVectorOptions = Readonly<{
    * HNSW search frontier for this query (pgvector `hnsw.ef_search`).
    * The vector side over-fetches `k` (default `4 * limit`) candidates;
    * `efSearch` must be `>= k` for the index to surface that many
-   * neighbors, and ~2–4× `k` is the high-recall target. Postgres HNSW
-   * only — no-op elsewhere. See `VectorSearchOptions.efSearch`.
+   * neighbors, and ~2–4× `k` is the high-recall target. PostgreSQL
+   * requires an HNSW index and a transaction-capable driver, refusing the
+   * option with a typed error otherwise. Backends without an HNSW frontier
+   * knob, such as sqlite-vec, treat it as a no-op. See
+   * `VectorSearchOptions.efSearch`.
    */
   efSearch?: number;
 }>;
@@ -174,11 +177,12 @@ export type VectorSearchOptions<N extends NodeType = NodeType> =
        * interactive path and a recall-sensitive batch path share one
        * connection pool, tuning per query rather than per session.
        *
-       * Postgres HNSW only: applied transaction-locally via `SET LOCAL`.
-       * sqlite-vec has no equivalent frontier knob and ignores it; Postgres
-       * backends without transactions (`drizzle-orm/neon-http`) ignore it
-       * with a one-time warning. Must be a positive integer; pgvector caps
-       * it at 1000.
+       * PostgreSQL HNSW only: applied transaction-locally via `SET LOCAL`.
+       * PostgreSQL refuses the option with a typed error when the slot is not
+       * HNSW-indexed or the driver cannot hold a transaction (for example,
+       * `drizzle-orm/neon-http`). sqlite-vec has no equivalent frontier knob
+       * and treats it as a no-op. Must be a positive integer; pgvector caps it
+       * at 1000.
        */
       efSearch?: number;
     }>;

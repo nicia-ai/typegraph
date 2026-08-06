@@ -1,3 +1,4 @@
+export { sharesSerializedTransactionResource } from "../backend/transaction-resource";
 export type {
   GraphBackend,
   TransactionBackend,
@@ -5,7 +6,7 @@ export type {
 } from "../backend/types";
 export { computeUniqueKey } from "../constraints";
 export {
-  defineGraph,
+  defineInternalGraph,
   getEdgeKinds,
   getNodeKinds,
   type GetNodeType,
@@ -15,14 +16,15 @@ export {
 export { defineNode } from "../core/node";
 export type { EdgeId, JsonValue, NodeId, NodeType } from "../core/types";
 export {
+  ConfigurationError,
   IdentityContradictionError,
   NodeNotFoundError,
   TypeGraphError,
   type TypeGraphErrorOptions,
 } from "../errors";
 export type { IdentityTransferAssertion } from "../identity/service";
-export { exportGraphStream } from "../interchange/export";
-export { importGraphStream } from "../interchange/import";
+export { exportGraph, exportGraphStream } from "../interchange/export";
+export { importGraph, importGraphStream } from "../interchange/import";
 export { computeTransitiveClosure, isReachable } from "../ontology/closures";
 export {
   META_EDGE_EQUIVALENT_TO,

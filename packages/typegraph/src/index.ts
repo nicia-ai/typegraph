@@ -361,6 +361,7 @@ export {
   DatabaseOperationError,
   DisjointError,
   EagerMaterializationError,
+  EDGE_IDENTITY_MISMATCH_CODE,
   EdgeNotFoundError,
   EmbeddingDimensionChangedError,
   EndpointError,

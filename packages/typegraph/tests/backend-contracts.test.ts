@@ -10,6 +10,8 @@
  *   through `onError` and never through `onOperationEnd`, for every hooked
  *   node and edge operation — hooks wrap the transaction, so success means
  *   durably committed.
+ * - Batch-hook contract: batch methods remain deliberately hookless, including
+ *   when their transaction rolls back at COMMIT.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -24,6 +26,10 @@ import {
   searchable,
 } from "../src";
 import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
+import {
+  markSerializedTransactionResource,
+  sharesSerializedTransactionResource,
+} from "../src/backend/transaction-resource";
 import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
 import { dumpObservableState } from "./state-snapshot";
 import { createTestBackend } from "./test-utils";
@@ -64,6 +70,20 @@ const graph = defineGraph({
   edges: {
     knows: { type: knows, from: [Person], to: [Person] },
   },
+});
+
+describe("serialized transaction resource ownership", () => {
+  it("recognizes distinct backend wrappers sharing one serialized connection", () => {
+    const root = createTestBackend();
+    const resource = {};
+    markSerializedTransactionResource(root, resource);
+    const first = createBackendOverlay(root, {});
+    const second = createBackendOverlay(root, {});
+
+    expect(first).not.toBe(second);
+    expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+    expect(sharesSerializedTransactionResource(first, root)).toBe(true);
+  });
 });
 
 const WRITE_METHOD_PATTERN =
@@ -351,6 +371,41 @@ describe("hook contract: success is reported only after COMMIT", () => {
       "bulk-end:updateWhere:node:2",
     ]);
   });
+
+  for (const batchDelete of [
+    {
+      name: "node bulkDelete",
+      run: (store: Awaited<ReturnType<typeof buildStore>>["store"]) =>
+        store.nodes.Person.bulkDelete(["person-a" as never]),
+    },
+    {
+      name: "edge bulkDelete",
+      run: (store: Awaited<ReturnType<typeof buildStore>>["store"]) =>
+        store.edges.knows.bulkDelete(["knows-1" as never]),
+    },
+  ] as const) {
+    it(`${batchDelete.name}: remains hookless and rolls back on commit failure`, async () => {
+      const { store, failing, events } = await buildStore();
+      const before = await dumpObservableState(store);
+      events.length = 0;
+
+      failing.arm();
+      await expect(batchDelete.run(store)).rejects.toThrow(
+        InjectedCommitFailure,
+      );
+      failing.disarm();
+
+      // Batch methods deliberately skip per-item hooks. In particular, no
+      // item may report success from inside the transaction before the outer
+      // COMMIT fails.
+      expect(events).toEqual([]);
+      expect(await dumpObservableState(store)).toEqual(before);
+
+      await batchDelete.run(store);
+      expect(events).toEqual([]);
+      expect(await dumpObservableState(store)).not.toEqual(before);
+    });
+  }
 
   for (const operation of operations) {
     it(`${operation.name}: commit failure reports onError, never onOperationEnd, and rolls back`, async () => {

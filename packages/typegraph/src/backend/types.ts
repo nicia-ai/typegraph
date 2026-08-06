@@ -25,6 +25,7 @@ import {
 } from "../query/sql-intent";
 import { type SerializedSchema } from "../schema/types";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
+import { inheritSerializedTransactionResource } from "./transaction-resource";
 
 // ============================================================
 // Vector Search Types
@@ -697,8 +698,9 @@ export type VectorSearchParams = Readonly<{
    * candidate set is `efSearch >= limit`; ~2–4× is the high-recall
    * target. Applied transaction-locally (`SET LOCAL`) on the Postgres
    * HNSW path only. No-op on backends without an HNSW frontier knob
-   * (sqlite-vec) and ignored — with a one-time warning — on Postgres
-   * backends without transactions (e.g. `drizzle-orm/neon-http`).
+   * (sqlite-vec). PostgreSQL backends without transactions (for example,
+   * `drizzle-orm/neon-http`) refuse the option because they cannot safely scope
+   * the override.
    */
   efSearch?: number;
 }>;
@@ -2743,7 +2745,7 @@ export function createBackendOverlay<
     return Object.hasOwn(overlay, property);
   }
 
-  return new Proxy(target, {
+  const decoratedBackend = new Proxy(target, {
     get(targetObject, property) {
       if (hasOverlayProperty(property)) {
         return Reflect.get(overlay, property, overlay);
@@ -2796,6 +2798,8 @@ export function createBackendOverlay<
       return Reflect.deleteProperty(targetObject, property);
     },
   });
+  inheritSerializedTransactionResource(decoratedBackend, target);
+  return decoratedBackend;
 }
 
 /**

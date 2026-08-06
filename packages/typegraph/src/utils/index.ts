@@ -23,3 +23,4 @@ export {
   unwrapOr,
 } from "./result";
 export { isMissingTableError } from "./sql-errors";
+export { encodeTupleKey } from "./tuple-key";

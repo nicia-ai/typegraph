@@ -212,6 +212,17 @@ export const IMMUTABLE_VALIDITY_LOWER_BOUND_CODE =
   "IMMUTABLE_VALIDITY_LOWER_BOUND";
 
 /**
+ * Stable {@link ValidationIssue.code} for an edge-id ownership mismatch.
+ *
+ * Edge ids are graph-global. A collection-scoped write therefore has to prove
+ * that the stored row has the collection's kind and, when the caller supplies
+ * endpoints, the same immutable endpoints. This refusal prevents a collection
+ * from mutating another kind's row and prevents an upsert from silently
+ * ignoring an attempted repoint.
+ */
+export const EDGE_IDENTITY_MISMATCH_CODE = "EDGE_IDENTITY_MISMATCH";
+
+/**
  * The stable {@link ValidationIssue.code} every "this id is already taken"
  * create refusal carries, whichever way the create found out: its own existence
  * probe, or the engine refusing the INSERT. `ValidationError`'s own code is the
@@ -234,7 +245,7 @@ export type ValidationErrorDetails = Readonly<{
   /** Kind/type name of the entity */
   kind?: string;
   /** Operation being performed */
-  operation?: "create" | "update";
+  operation?: "create" | "update" | "delete" | "hardDelete";
   /** Entity ID if updating */
   id?: string;
   /** Individual validation issues */

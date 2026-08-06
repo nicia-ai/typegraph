@@ -62,6 +62,27 @@ const hadEncounter = defineEdge("hadEncounter", {
   to: [Encounter],
 });
 
+// Deliberately mirrors the internal sidecar schema. Schema equality is not an
+// ownership claim: an application is allowed to define these exact kinds at
+// the conventional sidecar graph id.
+const ApplicationProvenance = defineNode("Provenance", {
+  schema: z.object({
+    targetGraphId: z.string(),
+    role: z.enum(["node", "edge"]),
+    canonicalId: z.string(),
+    canonicalKind: z.string(),
+    branchId: z.string(),
+    sourceId: z.string(),
+  }),
+});
+const ApplicationProvenanceOwner = defineNode("ProvenanceOwner", {
+  schema: z.object({
+    owner: z.literal("@nicia-ai/typegraph/merge-provenance"),
+    version: z.literal(1),
+    targetGraphId: z.string(),
+  }),
+});
+
 const careGraph = defineGraph({
   id: "provenance-test-care",
   nodes: { Patient: { type: Patient }, Encounter: { type: Encounter } },
@@ -137,7 +158,7 @@ type Fixture = Readonly<{
 }>;
 
 describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
-  let cleanups: (() => Promise<void>)[];
+  let cleanups: (() => Promise<void>)[] = [];
 
   afterEach(async () => {
     for (const cleanup of cleanups ?? []) {
@@ -514,6 +535,109 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     const provStore = await openProvenanceStore(base);
     expect(await provStore.nodes.Provenance.find()).toHaveLength(0);
   });
+
+  it("refuses an existing application graph at the sidecar id without modifying it", async () => {
+    const backend = await makeBackend();
+    const applicationGraph = defineGraph({
+      id: provenanceGraphId(careGraph.id),
+      nodes: { Patient: { type: Patient } },
+      edges: {},
+    });
+    const [applicationStore] = await createStoreWithSchema(
+      applicationGraph,
+      backend,
+    );
+    await applicationStore.nodes.Patient.create(
+      { name: "Existing", birthDate: "1970-01-01" },
+      { id: "existing" },
+    );
+
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION" },
+    });
+    await expect(
+      applicationStore.nodes.Patient.getById("existing" as never),
+    ).resolves.toMatchObject({ id: "existing", name: "Existing" });
+  });
+
+  it("refuses an exact-schema application graph without the internal owner marker", async () => {
+    const backend = await makeBackend();
+    const applicationGraph = defineGraph({
+      id: provenanceGraphId(careGraph.id),
+      nodes: {
+        Provenance: { type: ApplicationProvenance },
+        ProvenanceOwner: { type: ApplicationProvenanceOwner },
+      },
+      edges: {},
+    });
+    const [applicationStore] = await createStoreWithSchema(
+      applicationGraph,
+      backend,
+    );
+    await applicationStore.nodes.Provenance.create(
+      {
+        targetGraphId: careGraph.id,
+        role: "node",
+        canonicalId: "application-canonical",
+        canonicalKind: "Patient",
+        branchId: "application-branch",
+        sourceId: "application-source",
+      },
+      { id: "application-owned-row" },
+    );
+
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION" },
+    });
+    await expect(
+      applicationStore.nodes.Provenance.getById(
+        "application-owned-row" as never,
+      ),
+    ).resolves.toMatchObject({ id: "application-owned-row" });
+  });
+
+  it("upgrades a populated legacy sidecar and preserves its contributions", async () => {
+    const backend = await makeBackend();
+    const legacyGraph = defineGraph({
+      id: provenanceGraphId(careGraph.id),
+      nodes: { Provenance: { type: ApplicationProvenance } },
+      edges: {},
+    });
+    const [legacyStore] = await createStoreWithSchema(legacyGraph, backend);
+    const legacyRecord = {
+      role: "node",
+      canonicalId: "legacy-canonical",
+      canonicalKind: "Patient",
+      branchId: BRANCH_A,
+      sourceId: "legacy-source",
+    } as const;
+    const legacyId = await provenanceNodeId(careGraph.id, legacyRecord);
+    await legacyStore.nodes.Provenance.create(
+      { targetGraphId: careGraph.id, ...legacyRecord },
+      { id: legacyId },
+    );
+
+    const upgraded = await openProvenanceStore(backend, careGraph.id);
+    await expect(
+      upgraded.nodes.Provenance.getById(legacyId as never),
+    ).resolves.toMatchObject({
+      id: legacyId,
+      canonicalId: "legacy-canonical",
+      sourceId: "legacy-source",
+    });
+
+    // A second open must use the durable marker written by the upgrade rather
+    // than falling back to the legacy schema/content recognition path.
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).resolves.toBeDefined();
+  });
 });
 
 describe("provenance row identity", () => {
@@ -524,6 +648,16 @@ describe("provenance row identity", () => {
     branchId: BRANCH_A,
     sourceId: "pat-fork",
   } as const;
+
+  it("preserves application graph ids that predate the sidecar convention", () => {
+    expect(
+      defineGraph({
+        id: provenanceGraphId("care-graph"),
+        nodes: { Patient: { type: Patient } },
+        edges: {},
+      }).id,
+    ).toBe("care-graph::merge-provenance");
+  });
 
   it("hashes a contribution to a stable id across versions", async () => {
     // Pinned as a literal because the id is a CROSS-VERSION contract: rows in a
@@ -546,5 +680,23 @@ describe("provenance row identity", () => {
       contributionKey({ ...record, sourceId: "other-fork" }),
     ]);
     expect(keys.size).toBe(6);
+  });
+
+  it("does not collapse contributions when a NUL moves between fields", async () => {
+    const left = {
+      ...record,
+      canonicalId: "canonical\0branch",
+      branchId: asBranchId("source"),
+    };
+    const right = {
+      ...record,
+      canonicalId: "canonical",
+      branchId: asBranchId("branch\0source"),
+    };
+
+    expect(contributionKey(left)).not.toBe(contributionKey(right));
+    expect(await provenanceNodeId("care-graph", left)).not.toBe(
+      await provenanceNodeId("care-graph", right),
+    );
   });
 });
