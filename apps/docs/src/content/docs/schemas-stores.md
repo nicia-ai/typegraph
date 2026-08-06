@@ -939,8 +939,14 @@ advance, and no `update` operation hooks — and resolves with the existing node
 at-least-once / replay materializers, where a byte-identical re-delivery would
 otherwise rewrite every row and grow recorded history by one per delivery. A
 write still happens (never coalesced) when the row is soft-deleted (an upsert
-resurrects it), when an explicit `validFrom` / `validTo` is passed, or when any
-prop differs after Zod normalization. The default is off, because some
+resurrects it), when an explicit `validFrom` / `validTo` MOVES the window the row
+already holds, or when any prop differs after Zod normalization. Re-stating the
+window a row already holds coalesces like any other unchanged value, and a
+`validFrom` naming a bound a live row does not hold is refused rather than
+written (see
+[Immutable validity lower bounds](/errors/#immutable_validity_lower_bound)) —
+with this option on or off, because coalescing must not decide whether an
+unappliable or malformed bound is reported. The default is off, because some
 consumers want an audit row per re-delivery as proof the event was reprocessed.
 In a receipt, a coalesced upsert still counts as one write intent
 (`writes.total`) but captures nothing (`recorded` stays `undefined`) — the same
@@ -1528,8 +1534,12 @@ store.edges.worksAt.getOrCreateByEndpoints(
 ```
 
 `validFrom` applies when the operation creates the edge and when it resurrects
-one; an `"updated"` live match leaves the existing start unchanged, because a
-live row's lower bound is history. On a resurrection, naming `validFrom` asserts
+one. An `"updated"` live match leaves the existing start unchanged, because a
+live row's lower bound is history — so a `validFrom` naming a different instant
+is refused rather than ignored, see
+[Immutable validity lower bounds](/errors/#immutable_validity_lower_bound);
+restating the bound the edge already holds is accepted. On a resurrection, naming
+`validFrom` asserts
 the COMPLETE window: an accompanying `validTo` is applied, and an omitted one
 reopens the revived row rather than keeping the tombstoned incarnation's end.
 `validTo` applies when the edge is created, updated, or resurrected, and may not

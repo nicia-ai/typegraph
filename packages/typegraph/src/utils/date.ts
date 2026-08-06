@@ -7,7 +7,11 @@
  * - Sorts correctly as strings
  */
 
-import { INVERTED_VALIDITY_WINDOW_CODE, ValidationError } from "../errors";
+import {
+  IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
+  INVERTED_VALIDITY_WINDOW_CODE,
+  ValidationError,
+} from "../errors";
 
 /**
  * ISO 8601 datetime pattern.
@@ -196,6 +200,32 @@ export function validateOptionalCanonicalIsoDate(
 }
 
 /**
+ * Whether a CANONICAL stated bound names the same instant a row already stores.
+ *
+ * The one comparison of a caller's bound against a stored one, so the coalesce
+ * dirty check ("would this write move the window?") and the write guard ("can
+ * this stated bound be applied?") can never disagree about what "the same bound"
+ * means. Two copies of it did disagree — one comparing driver text, one
+ * comparing instants — which is how a re-stated window wrote on one backend and
+ * coalesced on the other.
+ *
+ * Only the STORED side is canonicalized. It arrives as the driver rendered it,
+ * and the dialects do not render a timestamp the same way (SQLite returns the
+ * written text; a Postgres driver may hand back a zoned string equivalent to the
+ * canonical form without being identical to it). The stated side needs no
+ * canonicalization because every write path validates it as canonical first —
+ * which is a PRECONDITION here, not an assumption: a non-canonical stated bound
+ * would compare unequal to an equivalent stored instant and must be rejected by
+ * {@link validateCanonicalIsoDate} rather than silently treated as a mismatch.
+ */
+export function statedBoundMatchesStored(
+  stated: string,
+  stored: string | undefined,
+): boolean {
+  return stated === canonicalizeDatabaseTimestamp(stored);
+}
+
+/**
  * Whether a stated validity window has NEGATIVE width — a row that stopped
  * being true before it started. The one comparison every window refusal is
  * built on, so paths that must report the fault through their own error type
@@ -304,15 +334,93 @@ export function assertOrderedValidityWindow(
 }
 
 /**
+ * What an UPDATE will do with the row's validity lower bound — the two facts the
+ * write guard needs, stated by the writer that knows them.
+ *
+ * Every update path must decide `appliesStatedValidFrom` explicitly, because the
+ * answer is not a property of the guard's other arguments: the same
+ * `(validFrom, storedBound, validTo)` triple is a legal window restatement on a
+ * resurrection and an unappliable bound on an in-place update.
+ */
+export type UpdateValidityLowerBound = Readonly<{
+  /**
+   * The bound the row will hold when the caller states no `validFrom`: the
+   * stored `valid_from` for an in-place update, the write instant for a
+   * resurrection that stamps a new one, `undefined` where there is no bound to
+   * invert against.
+   */
+  effectiveValidFrom: string | undefined;
+  /**
+   * Whether the write STORES a stated `validFrom`. False for an in-place update
+   * of a live row — `buildUpdateNode` / `buildUpdateEdge` rewrite `valid_from`
+   * only on a resurrection — which is what makes a differing stated bound a
+   * refusal rather than a silent drop.
+   */
+  appliesStatedValidFrom: boolean;
+}>;
+
+/**
+ * Refuses a stated `validFrom` the write would not apply.
+ *
+ * A live row's lower bound is HISTORY: it records when the row started being
+ * true, and an in-place update never moves it. Accepting a bound that names a
+ * different instant and then dropping it is the API lying — the caller's stated
+ * window silently is not the stored one, while the write still spends a version
+ * bump and a history row moving nothing. Restating the bound the row already
+ * holds stays legal, so a caller that echoes a row's own window back (a merge
+ * commit, a re-delivered upsert) is unaffected.
+ *
+ * Reached through {@link assertWritableValidityWindow} rather than called
+ * directly, so no writer can accept a lower bound without declaring whether it
+ * applies one.
+ */
+function assertStatedLowerBoundIsApplicable(
+  subject: string,
+  statedValidFrom: string,
+  storedValidFrom: string | undefined,
+): void {
+  if (statedBoundMatchesStored(statedValidFrom, storedValidFrom)) return;
+  const storedDescription =
+    storedValidFrom === undefined ?
+      "the row has no lower bound"
+    : `the row's stored lower bound is "${storedValidFrom}"`;
+  throw new ValidationError(
+    `Unappliable validFrom for ${subject}: stated "${statedValidFrom}", but ${storedDescription} and the row is live.`,
+    {
+      issues: [
+        {
+          path: "validFrom",
+          code: IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
+          message: `A live row's lower bound is history and an in-place update never rewrites it, so "${statedValidFrom}" could not be applied.`,
+        },
+      ],
+    },
+    {
+      suggestion:
+        storedValidFrom === undefined ?
+          "Omit validFrom: this row has no lower bound to restate, and only a resurrection can give it one."
+        : `Restate the stored bound ("${storedValidFrom}") or omit validFrom.`,
+    },
+  );
+}
+
+/**
  * THE window-ordering guard a valid-time UPDATE goes through, identically for
  * nodes and edges. Refuses a window of negative width — a row that stopped
  * being true before it started — whether the caller states both endpoints or
- * only the new end.
+ * only the new end. Also refuses a stated lower bound the write cannot apply,
+ * so no update accepts a `validFrom` it will ignore.
  *
- * Two checks, because the two failures deserve different messages: the caller
- * who supplied both endpoints out of order gets told about the pair, and the
- * caller whose lone `validTo` inverts against the bound the row will actually
- * carry gets told which bound that is.
+ * Three checks, because the failures deserve different messages: the caller who
+ * supplied both endpoints out of order gets told about the pair, the caller who
+ * stated a lower bound this write cannot store gets told which bound the row
+ * holds, and the caller whose lone `validTo` inverts against the bound the row
+ * will actually carry gets told which bound that is.
+ *
+ * The stated pair is judged FIRST — an inverted pair is wrong whatever the row
+ * holds — and the applicability of the lower bound before the effective-bound
+ * check, so a caller is told their bound will not be stored rather than being
+ * told about a bound they did not name.
  *
  * INSERTS use {@link assertOrderedValidityWindow} alone. An insert carrying a
  * lone historical `validTo` means "born already ended", and the write instant
@@ -324,22 +432,28 @@ export function assertOrderedValidityWindow(
  * @param subject - Human-readable identification of the row, for the message
  *   (e.g. `Person "01H..."`).
  * @param validFrom - The caller's explicit lower bound, if any.
- * @param fallbackValidFrom - The lower bound the row carries when the caller
- *   supplies none: the stored `valid_from` for an in-place update, the write
- *   instant for a resurrection that resets it, `undefined` where there is no
- *   bound to invert against.
+ * @param lowerBound - What the write will do with the row's lower bound; see
+ *   {@link UpdateValidityLowerBound}.
  * @throws ValidationError with issue code {@link INVERTED_VALIDITY_WINDOW_CODE}
+ *   or {@link IMMUTABLE_VALIDITY_LOWER_BOUND_CODE}
  */
 export function assertWritableValidityWindow(
   subject: string,
   validFrom: string | undefined,
-  fallbackValidFrom: string | undefined,
+  lowerBound: UpdateValidityLowerBound,
   validTo: string | undefined,
 ): void {
   assertOrderedValidityWindow(subject, validFrom, validTo);
+  if (validFrom !== undefined && !lowerBound.appliesStatedValidFrom) {
+    assertStatedLowerBoundIsApplicable(
+      subject,
+      validFrom,
+      lowerBound.effectiveValidFrom,
+    );
+  }
   assertEffectiveValidityLowerBound(
     subject,
-    validFrom ?? fallbackValidFrom,
+    validFrom ?? lowerBound.effectiveValidFrom,
     validTo,
   );
 }

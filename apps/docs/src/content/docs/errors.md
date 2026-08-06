@@ -150,6 +150,50 @@ stream with `TrustedImportError` reason `invalid_stream`. A zero-width window
 (`validTo === validFrom`) is legal and never raises this, and so is a create
 carrying only a historical `validTo`.
 
+#### `IMMUTABLE_VALIDITY_LOWER_BOUND`
+
+A `ValidationError` whose issue carries the exported code
+`IMMUTABLE_VALIDITY_LOWER_BOUND` refused a `validFrom` the write could not apply.
+A live row's lower bound is history: an in-place update never rewrites
+`valid_from`, so a bound naming a different instant is refused rather than
+accepted and silently dropped. The message names both instants — the one stated
+and the one the row stores — so you can restate the stored bound without a
+second read.
+
+```typescript
+import { IMMUTABLE_VALIDITY_LOWER_BOUND_CODE, ValidationError } from "@nicia-ai/typegraph";
+
+try {
+  // The row is live and started at some other instant.
+  await store.nodes.Person.upsertById(id, props, { validFrom: "2020-01-01T00:00:00.000Z" });
+} catch (error) {
+  if (
+    error instanceof ValidationError &&
+    error.details.issues.some(
+      (issue) => issue.code === IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
+    )
+  ) {
+    // Omit validFrom, or restate the bound the row already holds.
+  }
+}
+```
+
+What deliberately does not raise it:
+
+- **Restating the stored bound.** Naming the instant the row already holds is
+  accepted; there is nothing to apply and nothing being ignored.
+- **A create, or a resurrection.** Both write a fresh window, so a stated
+  `validFrom` is stored — that is the way to give a row a different lower bound.
+- **`getOrCreateByEndpoints` returning an existing edge.** That branch performs
+  no write, so its window options describe the row to create if none is found.
+
+It reaches every path that accepts `validFrom` against a live row: `upsertById`,
+`bulkUpsertById` (including a repeated id in one batch, judged against the row
+the batch just queued), `getOrCreateByEndpoints` / `bulkGetOrCreateByEndpoints`
+with `ifExists: "update"`, and interchange import's `onConflict: "update"` legs —
+where, as with the inverted-window refusal, it is recorded as a per-row error
+prefixed with the code rather than aborting the import.
+
 #### `ENTITY_ALREADY_EXISTS`
 
 A `ValidationError` whose issue carries the exported code

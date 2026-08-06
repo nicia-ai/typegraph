@@ -846,10 +846,18 @@ async function performNodeUpdate<G extends GraphDef>(
     options?.clearDeleted === true && existing.deleted_at !== undefined ?
       nowIso()
     : undefined;
+  // A resurrection STORES a stated `validFrom` (it rewrites the whole window);
+  // an in-place update never does, so one that differs from the row's stored
+  // bound is refused rather than accepted and dropped.
   assertWritableValidityWindow(
     `${kind} "${id}"`,
     validFrom,
-    resurrectionInstant ?? existing.valid_from,
+    resurrectionInstant === undefined ?
+      {
+        effectiveValidFrom: existing.valid_from,
+        appliesStatedValidFrom: false,
+      }
+    : { effectiveValidFrom: resurrectionInstant, appliesStatedValidFrom: true },
     validTo,
   );
 
@@ -901,8 +909,10 @@ async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
     // Upsert still owns the requested properties, so converge by re-reading
     // the now-live row and applying an ordinary update instead of exposing
     // the resurrection UPDATE's internal zero-row sentinel. The peer owns the
-    // new validity window: this late writer updates its props without replacing
-    // the peer's validFrom, matching upsert's documented update semantics.
+    // new validity window: this late writer updates its props and leaves the
+    // peer's validFrom alone, matching upsert's documented update semantics —
+    // so a caller that STATED a lower bound for the resurrection it lost is
+    // refused here rather than silently updated without it.
     const current = await target.getNode(ctx.graphId, input.kind, input.id);
     if (current === undefined || current.deleted_at !== undefined) throw error;
     return performNodeUpdate(ctx, input, target, lock);

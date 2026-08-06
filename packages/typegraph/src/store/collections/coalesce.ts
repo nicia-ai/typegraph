@@ -1,4 +1,4 @@
-import { canonicalizeDatabaseTimestamp } from "../../utils/date";
+import { isCanonicalIsoDate, statedBoundMatchesStored } from "../../utils/date";
 
 /**
  * Coalesce dirty-check shared by `upsertById` / `bulkUpsertById`.
@@ -81,11 +81,18 @@ type CurrentWindow = Readonly<{
  * Whether one requested window endpoint differs from the stored one, compared as
  * instants rather than as driver text. An omitted request never changes anything.
  *
- * An UNREPRESENTABLE request always counts as a change, so it reaches the write
- * path that rejects it. Canonicalization maps both an unparseable string and an
- * absent value to `undefined`, so comparing the canonical forms would read a
- * garbage bound against an open window as "no change" and coalesce the write —
- * swallowing a `ValidationError` the caller must see.
+ * A NON-CANONICAL request always counts as a change, so it reaches the write path
+ * that rejects it. Coalescing must not decide whether malformed input is
+ * reported: a bound the write path refuses has to be refused whether or not this
+ * store happens to coalesce, or the flag silently turns a `ValidationError` into
+ * a no-op. That covers the unparseable string and the merely non-canonical one
+ * alike — `"2100-06-01T00:00:00Z"` names the same instant as the stored
+ * `"2100-06-01T00:00:00.000Z"` and is still refused by every write path, because
+ * a variable-width bound mis-sorts against an `asOf` coordinate.
+ *
+ * Counting it as a change is also what lets the comparison canonicalize the
+ * STORED side only ({@link statedBoundMatchesStored}): past this guard the
+ * requested value is known canonical.
  */
 function windowFieldChanges(
   requested: string | undefined,
@@ -94,11 +101,10 @@ function windowFieldChanges(
   if (requested === undefined) {
     return false;
   }
-  const canonicalRequested = canonicalizeDatabaseTimestamp(requested);
-  if (canonicalRequested === undefined) {
+  if (!isCanonicalIsoDate(requested)) {
     return true;
   }
-  return canonicalRequested !== canonicalizeDatabaseTimestamp(stored);
+  return !statedBoundMatchesStored(requested, stored);
 }
 
 /**

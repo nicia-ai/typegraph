@@ -202,6 +202,19 @@ from import time forward. Pass `includeTemporal: true` on export when the
 clone needs to match the source's `asOf` behavior exactly (this is what
 `branch()` does internally).
 
+**`includeTemporal: true` with `onConflict: "update"`:** an update leg sends the
+document's `validTo` and never its `validFrom`, because a live row's lower bound
+is history. A document whose `validFrom` names a different instant than the
+target row holds is therefore stating a bound the import will not apply, and that
+row is reported as a per-row error carrying
+[`IMMUTABLE_VALIDITY_LOWER_BOUND`](/errors/#immutable_validity_lower_bound)
+rather than updated under a bound it ignored. This is reachable whenever a
+temporal export is replayed over rows that were created separately — the same
+document imported into a fresh graph creates those rows with their stated bounds
+and is unaffected. To update props over existing rows from a temporal export,
+either omit `validFrom` from the update document, export with
+`includeTemporal: false`, or import into a fresh graph and swap it in.
+
 ## Importing Data
 
 Use `importGraph` to load data into a store:
