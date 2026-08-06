@@ -193,6 +193,20 @@ export type ValidationIssue = Readonly<{
 export const INVERTED_VALIDITY_WINDOW_CODE = "INVERTED_VALIDITY_WINDOW";
 
 /**
+ * The stable {@link ValidationIssue.code} every "this id is already taken"
+ * create refusal carries, whichever way the create found out: its own existence
+ * probe, or the engine refusing the INSERT. `ValidationError`'s own code is the
+ * family-wide `VALIDATION_ERROR`, so the discriminator lives on the issue —
+ * mirroring {@link INVERTED_VALIDITY_WINDOW_CODE}.
+ *
+ * `details.entityType` says whether a node or an edge was refused and
+ * `details.kind` names its kind. `details.id` names the taken id, and is absent
+ * only when the refused statement inserted MORE THAN ONE row: the engine reports
+ * that the statement collided without saying which row did.
+ */
+export const ENTITY_ALREADY_EXISTS_CODE = "ENTITY_ALREADY_EXISTS";
+
+/**
  * Details for ValidationError.
  */
 export type ValidationErrorDetails = Readonly<{
@@ -1595,7 +1609,22 @@ function storageLabelFromLogicalName(logicalName: unknown): string {
 export type DatabaseOperationErrorDetails = Readonly<{
   operation: string;
   entity: string;
-  reason?: "no_row_returned";
+  /**
+   * `"duplicate_key"` means the engine refused the write because the entity's
+   * identity is already taken — the shape a concurrent create of the same new id
+   * produces on an engine that does not serialize the two writers. It is a
+   * *classified* driver failure, so callers that own a better error for the
+   * condition (the create paths, which report it as "already exists") translate
+   * it rather than surfacing it.
+   */
+  reason?: "no_row_returned" | "duplicate_key";
+  /**
+   * The entities the failed statement tried to insert, carried structurally so a
+   * translating caller never has to parse the driver's message for them. One
+   * element for a single insert; for a batch, every row in the failing chunk —
+   * the engine reports the collision without saying which row lost.
+   */
+  attempted?: readonly Readonly<{ kind: string; id: string }>[];
 }>;
 
 /**

@@ -98,6 +98,10 @@ import {
   createUniquenessContext,
 } from "../uniqueness";
 import {
+  createAlreadyExistsError,
+  withAlreadyExistsTranslation,
+} from "./already-exists";
+import {
   applyNodeHardDelete,
   applyNodeInsertSideEffects,
   applyNodeInsertSideEffectsBatch,
@@ -204,23 +208,6 @@ function buildUniqueCacheKey(
   key: string,
 ): string {
   return `${graphId}${CACHE_KEY_SEPARATOR}${nodeKind}${CACHE_KEY_SEPARATOR}${constraintName}${CACHE_KEY_SEPARATOR}${key}`;
-}
-
-function createNodeAlreadyExistsError(
-  kind: string,
-  id: string,
-): ValidationError {
-  return new ValidationError(
-    `Node already exists: ${kind}/${id}`,
-    {
-      entityType: "node",
-      kind,
-      operation: "create",
-      id,
-      issues: [{ path: "id", message: "A node with this ID already exists" }],
-    },
-    { suggestion: `Use a different ID or update the existing node.` },
-  );
 }
 
 function buildInsertNodeParams(
@@ -631,7 +618,7 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   // before the update because the row can change while constraints are checked.
   const existingNode = await backend.getNode(ctx.graphId, kind, id);
   if (existingNode && !existingNode.deleted_at) {
-    throw createNodeAlreadyExistsError(kind, id);
+    throw createAlreadyExistsError("node", kind, id);
   }
 
   const constraintContext: ConstraintContext = {
@@ -846,26 +833,35 @@ async function performNodeUpdate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  // Without an explicit validFrom the effective lower bound is the write
-  // instant the backend stamps on a resurrection (it rewrites valid_from), and
-  // the live row's stored bound otherwise.
+  // A node resurrection RESETS `valid_from` (see `buildUpdateNode`), so the
+  // effective lower bound is the write instant rather than the row's stored
+  // one. That instant is sampled HERE and then travels to the backend as an
+  // explicit `validFrom`, because the guard has to measure the bound the write
+  // will actually store: left to default, `resolveValidFrom` would stamp the
+  // backend's own, strictly later, sample, and a `validTo` at this instant
+  // would pass the guard as zero-width and land as negative width a
+  // millisecond later (issue #413). An in-place update keeps the row's stored
+  // bound, which no write rewrites and so needs no prediction.
+  const resurrectionInstant =
+    options?.clearDeleted === true && existing.deleted_at !== undefined ?
+      nowIso()
+    : undefined;
   assertWritableValidityWindow(
     `${kind} "${id}"`,
     validFrom,
-    options?.clearDeleted && existing.deleted_at !== undefined ?
-      nowIso()
-    : existing.valid_from,
+    resurrectionInstant ?? existing.valid_from,
     validTo,
   );
 
   const writeContext = createNodeWriteContext(ctx.graphId, ctx.registry, lock);
   // `validFrom` reaches the backend only through a resurrecting write (see
   // UpdateNodeParams): a live row's lower bound is history and stays put.
+  const effectiveValidFrom = validFrom ?? resurrectionInstant;
   const shared = {
     schema: nodeKind.schema,
     validatedProps,
     uniqueConstraints: registration.unique ?? [],
-    ...(validFrom !== undefined && { validFrom }),
+    ...(effectiveValidFrom !== undefined && { validFrom: effectiveValidFrom }),
     ...(validTo !== undefined && { validTo }),
   };
 
@@ -1115,7 +1111,7 @@ async function resurrectPreparedNode<G extends GraphDef>(
     );
   }
   if (current.deleted_at === undefined) {
-    throw createNodeAlreadyExistsError(prepared.kind, prepared.id);
+    throw createAlreadyExistsError("node", prepared.kind, prepared.id);
   }
   try {
     return await applyNodeUpdate(
@@ -1146,7 +1142,7 @@ async function resurrectPreparedNode<G extends GraphDef>(
       prepared.id,
     );
     if (afterFailure !== undefined && afterFailure.deleted_at === undefined) {
-      throw createNodeAlreadyExistsError(prepared.kind, prepared.id);
+      throw createAlreadyExistsError("node", prepared.kind, prepared.id);
     }
     throw error;
   }
@@ -1277,15 +1273,18 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         return shouldReturnRow ? rowToNode(resurrected) : undefined;
       }
 
-      let row: BackendNodeRow | undefined;
-      if (shouldReturnRow) {
-        row = await target.insertNode(prepared.insertParams);
-      } else {
+      // The existence probe above is not the last word: on an engine that does
+      // not serialize the two writers, a concurrent create of the same new id
+      // can commit between the probe and this INSERT, and only the engine's
+      // refusal reports it. Both routes to that conclusion raise the same error.
+      const row = await withAlreadyExistsTranslation("node", async () => {
+        if (shouldReturnRow) return target.insertNode(prepared.insertParams);
         await runInsertNoReturn(
           nodeInsertDispatch(target),
           prepared.insertParams,
         );
-      }
+        return;
+      });
 
       await finalizeNodeCreate(ctx, prepared, target, lock);
       if (identity !== undefined) {
@@ -1344,9 +1343,11 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
 
     const partition = partitionCreates(preparedCreates);
-    await runInsertBatch(
-      nodeInsertDispatch(target),
-      partition.inserts.map((prepared) => prepared.insertParams),
+    await withAlreadyExistsTranslation("node", () =>
+      runInsertBatch(
+        nodeInsertDispatch(target),
+        partition.inserts.map((prepared) => prepared.insertParams),
+      ),
     );
     for (const prepared of partition.resurrections) {
       await resurrectPreparedNode(ctx, target, lock, prepared);
@@ -1386,9 +1387,11 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
     );
 
     const partition = partitionCreates(preparedCreates);
-    const inserted = await runInsertBatchReturning(
-      nodeInsertDispatch(target),
-      partition.inserts.map((prepared) => prepared.insertParams),
+    const inserted = await withAlreadyExistsTranslation("node", () =>
+      runInsertBatchReturning(
+        nodeInsertDispatch(target),
+        partition.inserts.map((prepared) => prepared.insertParams),
+      ),
     );
     const resurrected: BackendNodeRow[] = [];
     for (const prepared of partition.resurrections) {

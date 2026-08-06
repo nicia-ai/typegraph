@@ -3,6 +3,7 @@ import { type SQL, sql } from "drizzle-orm";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import { isSqlFragment } from "../../../query/sql-fragment";
 import { isPresent } from "../../../utils/presence";
+import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import { nowIso } from "../../row-mappers";
 import type {
   CheckUniqueBatchParams,
@@ -89,7 +90,12 @@ import {
   buildInsertSchema,
   buildSetActiveSchema,
 } from "./schema";
-import { liveNodeIdsSubquery, type Tables } from "./shared";
+import {
+  edgePrimaryKeyConstraint,
+  liveNodeIdsSubquery,
+  nodePrimaryKeyConstraint,
+  type Tables,
+} from "./shared";
 import {
   buildCheckUnique,
   buildCheckUniqueBatch,
@@ -110,6 +116,20 @@ function nullableText(value: string | undefined): SQL {
 }
 
 export type CommonOperationStrategy = Readonly<{
+  /**
+   * The nodes and edges PRIMARY KEY constraints, as the engine names them — the
+   * only scope in which a driver duplicate-key failure means "this identity is
+   * already taken" rather than "these values collide with another row's".
+   *
+   * Data rather than SQL, and a member of this interface rather than a lookup at
+   * the classification site, so it is derived once from the same `tables` the
+   * insert builders render and every dialect is forced by the type checker to
+   * supply it.
+   */
+  primaryKeyConstraints: Readonly<{
+    nodes: PrimaryKeyRelation;
+    edges: PrimaryKeyRelation;
+  }>;
   buildUpsertFulltext: (
     params: UpsertFulltextParams,
     timestamp: string,
@@ -502,6 +522,10 @@ function createCommonOperationStrategy(
   return {
     ...tableOperations,
     ...fulltextBuilders,
+    primaryKeyConstraints: {
+      nodes: nodePrimaryKeyConstraint(tables.nodes),
+      edges: edgePrimaryKeyConstraint(tables.edges),
+    },
     buildUpdateNodeSet(params: UpdateNodeSetParams, timestamp: string): SQL {
       return buildUpdateNodeSet(tables, dialect, params, timestamp);
     },

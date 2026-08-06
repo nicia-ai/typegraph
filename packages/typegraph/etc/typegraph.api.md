@@ -1018,7 +1018,11 @@ export class DatabaseOperationError extends TypeGraphError {
 export type DatabaseOperationErrorDetails = Readonly<{
     operation: string;
     entity: string;
-    reason?: "no_row_returned";
+    reason?: "no_row_returned" | "duplicate_key";
+    attempted?: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[];
 }>;
 
 // @public (undocumented)
@@ -1749,6 +1753,9 @@ export type EndpointNotFoundErrorDetails = Readonly<{
     nodeKind: string;
     nodeId: string;
 }>;
+
+// @public
+export const ENTITY_ALREADY_EXISTS_CODE = "ENTITY_ALREADY_EXISTS";
 
 // @public
 export function equivalentTo(kindA: NodeType, kindBOrIri: NodeType | string): OntologyRelation;

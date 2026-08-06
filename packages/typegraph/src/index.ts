@@ -365,6 +365,7 @@ export {
   EmbeddingDimensionChangedError,
   EndpointError,
   EndpointNotFoundError,
+  ENTITY_ALREADY_EXISTS_CODE,
   // Error utility functions
   getErrorSuggestion,
   GraphAlgorithmConvergenceError,

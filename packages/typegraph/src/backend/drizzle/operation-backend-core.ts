@@ -18,6 +18,10 @@ import type {
 import { asCompiledStatementSql } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
 import {
+  isDuplicatePrimaryKeyError,
+  type PrimaryKeyRelation,
+} from "../../utils/sql-errors";
+import {
   resolveEdgeEndpointIds,
   resolveHeterogeneousEdgeRead,
 } from "../edge-endpoint-sets";
@@ -204,6 +208,62 @@ type CreateCommonOperationBackendOptions = Readonly<{
   tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
 
+/**
+ * The entity refs a duplicate-key classification reports back. Nodes carry a
+ * kind of their own; an edge's `kind` is its edge kind, which the insert params
+ * also carry.
+ */
+type AttemptedInsert = Readonly<{ kind: string; id: string }>;
+
+/**
+ * Runs an insert and converts a PRIMARY KEY duplicate-key refusal into a
+ * classified {@link DatabaseOperationError} carrying the rows it attempted.
+ *
+ * The translation stops here rather than reaching for the store's "already
+ * exists" error because that is a store-level judgement: the backend's job is to
+ * say *what the engine refused and why* in terms callers can branch on, instead
+ * of letting a `DrizzleQueryError` whose `.message` is the raw INSERT text
+ * escape as the operation's outcome (issue #410). The create paths translate it
+ * onward; every other caller sees a system error, exactly as before.
+ *
+ * Any other failure — including a 23505 from a declared `unique: true` index on
+ * the same relation — propagates untouched.
+ */
+async function withDuplicateKeyClassification<T>(
+  run: () => Promise<T>,
+  context: Readonly<{
+    entity: "node" | "edge";
+    relation: PrimaryKeyRelation;
+    attempted: readonly AttemptedInsert[];
+  }>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!isDuplicatePrimaryKeyError(error, context.relation)) throw error;
+    throw new DatabaseOperationError(
+      `Insert ${context.entity} failed: a row with this identity already exists`,
+      {
+        operation: "insert",
+        entity: context.entity,
+        reason: "duplicate_key",
+        attempted: context.attempted,
+      },
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * The entity refs of an insert's rows, copied out of the insert params so the
+ * error carries identity alone and never the props alongside it.
+ */
+function attemptedInserts(
+  params: readonly AttemptedInsert[],
+): readonly AttemptedInsert[] {
+  return params.map((item) => ({ kind: item.kind, id: item.id }));
+}
+
 function verifyExpectedActiveVersion(
   graphId: string,
   expected: CommitSchemaVersionParams["expected"],
@@ -361,7 +421,14 @@ export function createCommonOperationBackend(
     async insertNode(params: InsertNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
       const query = operationStrategy.buildInsertNode(params, timestamp);
-      const row = await execution.execGet<Record<string, unknown>>(query);
+      const row = await withDuplicateKeyClassification(
+        () => execution.execGet<Record<string, unknown>>(query),
+        {
+          entity: "node",
+          relation: operationStrategy.primaryKeyConstraints.nodes,
+          attempted: attemptedInserts([params]),
+        },
+      );
       if (!row)
         throw new DatabaseOperationError(
           "Insert node failed: no row returned",
@@ -380,7 +447,11 @@ export function createCommonOperationBackend(
         params,
         timestamp,
       );
-      await execution.execRun(query);
+      await withDuplicateKeyClassification(() => execution.execRun(query), {
+        entity: "node",
+        relation: operationStrategy.primaryKeyConstraints.nodes,
+        attempted: attemptedInserts([params]),
+      });
     },
 
     async insertNodesBatch(params: readonly InsertNodeParams[]): Promise<void> {
@@ -390,7 +461,11 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       for (const chunk of chunkArray(params, batchConfig.nodeInsertBatchSize)) {
         const query = operationStrategy.buildInsertNodesBatch(chunk, timestamp);
-        await execution.execRun(query);
+        await withDuplicateKeyClassification(() => execution.execRun(query), {
+          entity: "node",
+          relation: operationStrategy.primaryKeyConstraints.nodes,
+          attempted: attemptedInserts(chunk),
+        });
       }
     },
 
@@ -407,7 +482,14 @@ export function createCommonOperationBackend(
           chunk,
           timestamp,
         );
-        const rows = await execution.execAll<Record<string, unknown>>(query);
+        const rows = await withDuplicateKeyClassification(
+          () => execution.execAll<Record<string, unknown>>(query),
+          {
+            entity: "node",
+            relation: operationStrategy.primaryKeyConstraints.nodes,
+            attempted: attemptedInserts(chunk),
+          },
+        );
         allRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));
       }
       return allRows;
@@ -526,7 +608,14 @@ export function createCommonOperationBackend(
     async insertEdge(params: InsertEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
       const query = operationStrategy.buildInsertEdge(params, timestamp);
-      const row = await execution.execGet<Record<string, unknown>>(query);
+      const row = await withDuplicateKeyClassification(
+        () => execution.execGet<Record<string, unknown>>(query),
+        {
+          entity: "edge",
+          relation: operationStrategy.primaryKeyConstraints.edges,
+          attempted: attemptedInserts([params]),
+        },
+      );
       if (!row)
         throw new DatabaseOperationError(
           "Insert edge failed: no row returned",
@@ -545,7 +634,11 @@ export function createCommonOperationBackend(
         params,
         timestamp,
       );
-      await execution.execRun(query);
+      await withDuplicateKeyClassification(() => execution.execRun(query), {
+        entity: "edge",
+        relation: operationStrategy.primaryKeyConstraints.edges,
+        attempted: attemptedInserts([params]),
+      });
     },
 
     async insertEdgesBatch(params: readonly InsertEdgeParams[]): Promise<void> {
@@ -555,7 +648,11 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       for (const chunk of chunkArray(params, batchConfig.edgeInsertBatchSize)) {
         const query = operationStrategy.buildInsertEdgesBatch(chunk, timestamp);
-        await execution.execRun(query);
+        await withDuplicateKeyClassification(() => execution.execRun(query), {
+          entity: "edge",
+          relation: operationStrategy.primaryKeyConstraints.edges,
+          attempted: attemptedInserts(chunk),
+        });
       }
     },
 
@@ -572,7 +669,14 @@ export function createCommonOperationBackend(
           chunk,
           timestamp,
         );
-        const rows = await execution.execAll<Record<string, unknown>>(query);
+        const rows = await withDuplicateKeyClassification(
+          () => execution.execAll<Record<string, unknown>>(query),
+          {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts(chunk),
+          },
+        );
         allRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));
       }
       return allRows;

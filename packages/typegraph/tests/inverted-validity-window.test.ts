@@ -16,7 +16,10 @@
  *      caller assertion, and the row is read back through `includeEnded`;
  *   5. resurrecting an edge into the ended state stays legal, but the end it
  *      names is held to the bound the row RETAINS across resurrection;
- *   6. import refuses an inverted document per row, carrying the stable code.
+ *   6. import refuses an inverted document per row, carrying the stable code;
+ *   7. a node resurrection — which RESETS `valid_from` and so has no stored
+ *      bound to measure against — stores the very instant its guard measured
+ *      against, instead of a later one the guard never saw.
  *
  * Trusted import carries the same refusal through its own typed stream error;
  * those cases live with the rest of its stream-shape suite in
@@ -25,7 +28,7 @@
  * Every refusal carries {@link INVERTED_VALIDITY_WINDOW_CODE} on its issue, so
  * callers branch on the code rather than on prose.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import type { GraphBackend } from "../src";
@@ -695,6 +698,150 @@ describe("inverted valid-time windows", () => {
         expect(result.success).toBe(true);
         expect(result.nodes.created).toBe(2);
       }
+    });
+  });
+
+  describe("a node resurrection stores the bound it was measured against", () => {
+    /**
+     * A node resurrection REWRITES `valid_from`, so its guard has no stored bound
+     * to measure against and uses the write instant instead. The operations layer
+     * and the backend read the same clock at two different moments, so the bound
+     * the guard approved was not the bound the write stored: a `validTo` at the
+     * guard's instant passed as zero-width and landed as NEGATIVE width once the
+     * backend's later sample became `valid_from` (issue #413).
+     *
+     * The fix makes the guard's instant the stored one by passing it to the
+     * backend explicitly. These cases step the clock at the operations/backend
+     * boundary — the real ordering, made deterministic — so the gap is one
+     * millisecond every run instead of whatever the machine happened to produce.
+     */
+    const GUARD_INSTANT = "2031-01-01T00:00:00.000Z";
+    const BACKEND_INSTANT = "2031-01-01T00:00:00.001Z";
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /**
+     * A backend whose resurrecting node UPDATE observes a clock one millisecond
+     * ahead of the one the operations layer sampled. Interception has to happen
+     * on the TRANSACTION target: the write runs against the backend
+     * `runInWriteTransaction` yields, not against the outer object.
+     */
+    function clockSteppingBackend(): GraphBackend {
+      const base = createTestBackend();
+      return {
+        ...base,
+        transaction: (fn, options) =>
+          base.transaction((transactionTarget) => {
+            const steppingTarget = new Proxy(transactionTarget, {
+              get(source, property, receiver) {
+                const value: unknown = Reflect.get(source, property, receiver);
+                if (property !== "updateNode" || typeof value !== "function") {
+                  return value;
+                }
+                const updateNode = value as (
+                  params: Parameters<GraphBackend["updateNode"]>[0],
+                ) => ReturnType<GraphBackend["updateNode"]>;
+                return async (
+                  params: Parameters<GraphBackend["updateNode"]>[0],
+                ) => {
+                  if (params.clearDeleted === true) {
+                    vi.setSystemTime(new Date(BACKEND_INSTANT));
+                  }
+                  return updateNode.call(source, params);
+                };
+              },
+            });
+            return fn(steppingTarget);
+          }, options),
+      } satisfies GraphBackend;
+    }
+
+    it("stores zero width when a resurrecting upsertById ends at the guard's own instant", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(GUARD_INSTANT));
+      const stepping = clockSteppingBackend();
+      const store = createStore(graph, stepping);
+
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "resurrect-now" },
+      );
+      await store.nodes.Person.delete(person.id);
+
+      // `validTo` at the instant the guard samples: zero width, so the guard
+      // admits it. Pre-fix the backend then stamped BACKEND_INSTANT as
+      // `valid_from` and the committed row was one millisecond wide backwards.
+      const revived = await store.nodes.Person.upsertById(
+        person.id,
+        { name: "Alice" },
+        { validTo: GUARD_INSTANT },
+      );
+
+      expect(revived.meta.validFrom).toBe(GUARD_INSTANT);
+      expect(revived.meta.validTo).toBe(GUARD_INSTANT);
+
+      const raw = requireDefined(
+        await stepping.getNode(graph.id, "Person", person.id),
+      );
+      expect(raw.deleted_at).toBeUndefined();
+      expect(
+        requireDefined(raw.valid_from) <= requireDefined(raw.valid_to),
+      ).toBe(true);
+      expect(raw.valid_from).toBe(GUARD_INSTANT);
+      expect(raw.valid_to).toBe(GUARD_INSTANT);
+    });
+
+    it("stores zero width when a resurrecting bulkUpsertById ends at the guard's own instant", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(GUARD_INSTANT));
+      const stepping = clockSteppingBackend();
+      const store = createStore(graph, stepping);
+
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "resurrect-now-bulk" },
+      );
+      await store.nodes.Person.delete(person.id);
+
+      await store.nodes.Person.bulkUpsertById([
+        { id: person.id, props: { name: "Alice" }, validTo: GUARD_INSTANT },
+      ]);
+
+      const raw = requireDefined(
+        await stepping.getNode(graph.id, "Person", person.id),
+      );
+      expect(
+        requireDefined(raw.valid_from) <= requireDefined(raw.valid_to),
+      ).toBe(true);
+      expect(raw.valid_from).toBe(GUARD_INSTANT);
+      expect(raw.valid_to).toBe(GUARD_INSTANT);
+    });
+
+    it("leaves an explicitly stated resurrection window untouched", async () => {
+      // The stated-pair path is unaffected: an explicit validFrom still wins
+      // over the sampled instant, so restating the whole historical window
+      // behaves exactly as before.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(GUARD_INSTANT));
+      const stepping = clockSteppingBackend();
+      const store = createStore(graph, stepping);
+
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "resurrect-stated" },
+      );
+      await store.nodes.Person.delete(person.id);
+
+      const revived = await store.nodes.Person.upsertById(
+        person.id,
+        { name: "Alice" },
+        { validFrom: EARLIER, validTo: START },
+      );
+
+      expect(revived.meta.validFrom).toBe(EARLIER);
+      expect(revived.meta.validTo).toBe(START);
     });
   });
 });

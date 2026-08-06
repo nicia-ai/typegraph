@@ -16,6 +16,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  edgePrimaryKeyConstraint,
+  nodePrimaryKeyConstraint,
+} from "../src/backend/drizzle/operations/shared";
+import { tables as sqliteTables } from "../src/backend/drizzle/sqlite";
+import {
+  isDuplicatePrimaryKeyError,
   isMissingTableError,
   isPostgresUniqueViolationError,
   isSqliteNotAuthorizedError,
@@ -321,5 +327,190 @@ describe("isSqliteNotAuthorizedError", () => {
         new Error("request not authorized by application policy"),
       ),
     ).toBe(false);
+  });
+});
+
+/**
+ * `isDuplicatePrimaryKeyError` decides whether a create lost its id or merely
+ * collided on a value (issue #410), so it has to be right about two things at
+ * once: every driver's way of REPORTING a duplicate key, and the difference
+ * between the relation's PRIMARY KEY and any other unique index on it.
+ *
+ * These cases carry the driver shapes end-to-end tests cannot reach from this
+ * suite — postgres-js's `*_name` field spellings, and a remote libSQL connection
+ * that surfaces only the numeric extended result code with no nested
+ * `SqliteError` to read a symbolic one from.
+ */
+/** Mirrors a node-postgres / PGlite `DatabaseError` for a 23505. */
+function pgDuplicate(
+  constraint: string,
+  table: string,
+): Error & Readonly<{ code: string }> {
+  return Object.assign(
+    new Error(`duplicate key value violates unique constraint "${constraint}"`),
+    { code: "23505", constraint, table, schema: "public" },
+  );
+}
+
+/** Mirrors a postgres-js `PostgresError`: a plain object, `*_name` fields. */
+function postgresJsDuplicate(
+  constraint: string,
+  table: string,
+): Readonly<Record<string, string>> {
+  return {
+    code: "23505",
+    message: `duplicate key value violates unique constraint "${constraint}"`,
+    constraint_name: constraint,
+    table_name: table,
+    schema_name: "public",
+  };
+}
+
+describe("isDuplicatePrimaryKeyError", () => {
+  const nodes = nodePrimaryKeyConstraint(sqliteTables.nodes);
+  const edges = edgePrimaryKeyConstraint(sqliteTables.edges);
+
+  it("derives both constraint names a PRIMARY KEY can carry", () => {
+    // TypeGraph's own DDL emits an unnamed `PRIMARY KEY (...)`, which the server
+    // names `<relation>_pkey`; drizzle-kit renders the Drizzle builder's own
+    // `<relation>_<column>_..._pk`. Provisioning either way must classify.
+    expect(nodes.table).toBe("typegraph_nodes");
+    expect([...nodes.constraintNames]).toEqual([
+      "typegraph_nodes_pkey",
+      "typegraph_nodes_graph_id_kind_id_pk",
+    ]);
+    expect([...edges.constraintNames]).toEqual([
+      "typegraph_edges_pkey",
+      "typegraph_edges_graph_id_id_pk",
+    ]);
+  });
+
+  it("detects a Postgres primary-key duplicate through the Drizzle wrapper", () => {
+    for (const name of nodes.constraintNames) {
+      expect(
+        isDuplicatePrimaryKeyError(
+          drizzleQueryError(
+            "INSERT INTO typegraph_nodes ...",
+            pgDuplicate(name, "typegraph_nodes"),
+          ),
+          nodes,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("detects a postgres-js shaped duplicate reached through a plain-object cause", () => {
+    expect(
+      isDuplicatePrimaryKeyError(
+        drizzleQueryError(
+          "INSERT INTO typegraph_edges ...",
+          postgresJsDuplicate("typegraph_edges_pkey", "typegraph_edges"),
+        ),
+        edges,
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT classify a violated unique INDEX on the same relation", () => {
+    // Declared uniqueness: same SQLSTATE, same table, the user's index name.
+    // Reshaping this into "already exists" would report a value collision as an
+    // identity collision.
+    expect(
+      isDuplicatePrimaryKeyError(
+        drizzleQueryError(
+          "INSERT INTO typegraph_nodes ...",
+          pgDuplicate("person_email_unique_idx", "typegraph_nodes"),
+        ),
+        nodes,
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT classify a primary-key duplicate on a DIFFERENT relation", () => {
+    expect(
+      isDuplicatePrimaryKeyError(
+        pgDuplicate("typegraph_node_uniques_pkey", "typegraph_node_uniques"),
+        nodes,
+      ),
+    ).toBe(false);
+    // The edges primary key is not the nodes primary key, and vice versa.
+    const edgeDuplicate = pgDuplicate(
+      "typegraph_edges_pkey",
+      "typegraph_edges",
+    );
+    expect(isDuplicatePrimaryKeyError(edgeDuplicate, nodes)).toBe(false);
+    expect(isDuplicatePrimaryKeyError(edgeDuplicate, edges)).toBe(true);
+  });
+
+  it("detects SQLite's primary-key extended code, symbolic and numeric", () => {
+    // better-sqlite3 (and the SqliteError libSQL nests): symbolic `code`.
+    expect(
+      isDuplicatePrimaryKeyError(
+        drizzleQueryError(
+          "INSERT INTO typegraph_nodes ...",
+          Object.assign(
+            new Error("UNIQUE constraint failed: typegraph_nodes.graph_id"),
+            { code: "SQLITE_CONSTRAINT_PRIMARYKEY", rawCode: 1555 },
+          ),
+        ),
+        nodes,
+      ),
+    ).toBe(true);
+
+    // A remote libSQL connection surfaces only the generic symbolic code plus
+    // the numeric extended one, with no nested SqliteError to read.
+    expect(
+      isDuplicatePrimaryKeyError(
+        drizzleQueryError(
+          "INSERT INTO typegraph_edges ...",
+          Object.assign(
+            new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed"),
+            { code: "SQLITE_CONSTRAINT", rawCode: 1555, extendedCode: 1555 },
+          ),
+        ),
+        edges,
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT classify SQLite's non-primary-key unique violation", () => {
+    // 2067 is SQLITE_CONSTRAINT_UNIQUE: a unique index, not the primary key.
+    expect(
+      isDuplicatePrimaryKeyError(
+        Object.assign(
+          new Error("UNIQUE constraint failed: typegraph_nodes.x"),
+          {
+            code: "SQLITE_CONSTRAINT_UNIQUE",
+            rawCode: 2067,
+          },
+        ),
+        nodes,
+      ),
+    ).toBe(false);
+    expect(
+      isDuplicatePrimaryKeyError(
+        Object.assign(
+          new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed"),
+          {
+            code: "SQLITE_CONSTRAINT",
+            rawCode: 2067,
+          },
+        ),
+        nodes,
+      ),
+    ).toBe(false);
+  });
+
+  it("does not classify unrelated failures", () => {
+    expect(
+      isDuplicatePrimaryKeyError(
+        pgError('relation "typegraph_nodes" does not exist', "42P01"),
+        nodes,
+      ),
+    ).toBe(false);
+    expect(
+      isDuplicatePrimaryKeyError(new Error("connection reset"), nodes),
+    ).toBe(false);
+    expect(isDuplicatePrimaryKeyError(undefined, nodes)).toBe(false);
   });
 });

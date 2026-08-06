@@ -1,10 +1,78 @@
-import { type SQL, sql } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 
+import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import type { SqlDialect } from "../../types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 
 export type Tables = SqliteTables | PostgresTables;
+
+/**
+ * The names a relation's PRIMARY KEY constraint can carry, given the relation
+ * name and its key columns.
+ *
+ * Two, because TypeGraph supports two provisioning paths for the same schema
+ * and they name the constraint differently:
+ *
+ *  - TypeGraph's own DDL (`generatePostgresCreateTableSQL`) emits an UNNAMED
+ *    `PRIMARY KEY (...)` clause, which PostgreSQL names `<relation>_pkey`;
+ *  - `drizzle-kit` renders the Drizzle `primaryKey({ columns })` builder with
+ *    its explicit name, `<relation>_<column>_..._pk`.
+ *
+ * Both are derived rather than hardcoded so a custom table name is covered
+ * too. Accepting only these two — never
+ * an arbitrary unique constraint on the relation — is what keeps a declared
+ * `unique: true` index violation out of the duplicate-identity classification.
+ *
+ * One declared bound: PostgreSQL clips every identifier to 63 bytes, and clips
+ * the RELATION part to make room for the `_pkey` it appends, so a custom
+ * relation name long enough to overflow that (58+ bytes) is named something
+ * neither of these matches. Classification then simply does not happen and the
+ * driver failure surfaces as it did before — no misattribution, just no
+ * translation.
+ */
+function primaryKeyConstraintNames(
+  relation: string,
+  keyColumns: readonly string[],
+): readonly string[] {
+  return [`${relation}_pkey`, `${relation}_${keyColumns.join("_")}_pk`];
+}
+
+/**
+ * The nodes relation's identity constraint: `(graph_id, kind, id)`, the tuple
+ * every node read also filters on.
+ */
+export function nodePrimaryKeyConstraint(
+  nodes: Tables["nodes"],
+): PrimaryKeyRelation {
+  const relation = getTableName(nodes);
+  return {
+    table: relation,
+    constraintNames: primaryKeyConstraintNames(relation, [
+      nodes.graphId.name,
+      nodes.kind.name,
+      nodes.id.name,
+    ]),
+  };
+}
+
+/**
+ * The edges relation's identity constraint: `(graph_id, id)`. An edge id is
+ * unique per graph without its kind, so the key is one column shorter than a
+ * node's.
+ */
+export function edgePrimaryKeyConstraint(
+  edges: Tables["edges"],
+): PrimaryKeyRelation {
+  const relation = getTableName(edges);
+  return {
+    table: relation,
+    constraintNames: primaryKeyConstraintNames(relation, [
+      edges.graphId.name,
+      edges.id.name,
+    ]),
+  };
+}
 
 /**
  * Converts undefined to SQL NULL for use in template literals.
@@ -27,6 +95,14 @@ export function sqlNull(value: string | undefined): SQL | string {
  *    fix without narrowing its validity window on re-import (e.g. via a
  *    `branch()` clone).
  *  - a string: passed through unchanged.
+ *
+ * The `timestamp` fallback is a storage convention, not an assertion the caller
+ * can be held to, so a write whose validity window is GUARDED against the
+ * resulting lower bound must supply that bound explicitly instead of relying on
+ * it: this function samples nothing, but its caller's `timestamp` comes from a
+ * later clock read than the guard's, and the difference is a window of negative
+ * width (issue #413). The node resurrection path therefore passes the instant it
+ * validated against; see `buildUpdateNode` and `performNodeUpdate`.
  */
 export function resolveValidFrom(
   validFrom: string | null | undefined,

@@ -173,6 +173,13 @@ export function buildUpdateNode(
     );
   }
 
+  // A resurrection RESETS the window: `valid_from` is rewritten rather than
+  // retained (an edge retains it — see `buildUpdateEdge`). `timestamp` is only
+  // the fallback: the operations layer passes the instant its inverted-window
+  // guard measured against as an explicit `validFrom`, so the bound this stores
+  // is the bound that was checked. Falling back to a locally sampled instant
+  // would store a bound strictly later than the one the guard approved (issue
+  // #413).
   if (params.clearDeleted) {
     setParts.push(
       sql`${quotedColumn(nodes.validFrom)} = ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}`,
