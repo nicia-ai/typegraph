@@ -39,6 +39,7 @@ import {
   type QueryOptions,
 } from "../types";
 import {
+  findRepeatedUpsertIds,
   type UpsertDirtyCheck,
   type UpsertDirtyCheckFunction,
 } from "./coalesce";
@@ -755,12 +756,37 @@ export function createEdgeCollection<
 
         // Batch-local running state per id so a repeated id coalesces against
         // the value earlier items in this batch would write, preserving
-        // last-write-wins. See the node collection for the full rationale.
+        // last-write-wins — and so a repeated id whose edge does not exist yet
+        // queues ONE create plus an update over it rather than two creates the
+        // create batch rejects as "already exists". See the node collection for
+        // the full rationale, including why `props` may be undefined.
         const pending = new Map<
           string,
-          { props: Record<string, unknown>; sourceIndex: number }
+          { props: Record<string, unknown> | undefined; sourceIndex: number }
         >();
         const deferred: { index: number; sourceIndex: number }[] = [];
+
+        const repeatedIds = findRepeatedUpsertIds(items);
+
+        /** See the node collection's runDirtyCheck. */
+        function runDirtyCheck(
+          edgeKind: string,
+          id: string,
+          currentProps: Record<string, unknown>,
+          inputProps: Record<string, unknown>,
+        ): UpsertDirtyCheck | undefined {
+          if (config.upsertDirtyCheck === undefined) return undefined;
+          try {
+            return config.upsertDirtyCheck(
+              edgeKind,
+              id,
+              currentProps,
+              inputProps,
+            );
+          } catch {
+            return undefined;
+          }
+        }
 
         let itemIndex = 0;
         for (const item of items) {
@@ -779,6 +805,16 @@ export function createEdgeCollection<
                 item,
               ),
             });
+            // A create merges over nothing, so the dirty check run against an
+            // EMPTY base is exactly the validated props the insert will store —
+            // needed only when a later copy of this id will compare against it.
+            pending.set(item.id, {
+              props:
+                repeatedIds.has(item.id) ?
+                  runDirtyCheck(kind, item.id, {}, inputProps)?.validatedProps
+                : undefined,
+              sourceIndex: itemIndex,
+            });
             itemIndex++;
             continue;
           }
@@ -788,30 +824,30 @@ export function createEdgeCollection<
               requireDefined(original).deleted_at
             : undefined;
 
-          let dirty: UpsertDirtyCheck | undefined;
-          if (config.upsertDirtyCheck !== undefined) {
-            const currentProps =
-              pendingEntry?.props ??
-              rowPropsToObject(requireDefined(original).props);
-            try {
-              // The fetched edge carries the authoritative kind (an id may
-              // resolve to a different edge kind than this collection).
-              dirty = config.upsertDirtyCheck(
+          const currentProps =
+            pendingEntry === undefined ?
+              rowPropsToObject(requireDefined(original).props)
+            : pendingEntry.props;
+          // The fetched edge carries the authoritative kind (an id may resolve
+          // to a different edge kind than this collection); a queued create is
+          // this collection's kind by construction.
+          const dirty =
+            currentProps === undefined ? undefined : (
+              runDirtyCheck(
                 original?.kind ?? kind,
                 item.id,
                 currentProps,
                 inputProps,
-              );
-            } catch {
-              dirty = undefined;
-            }
-          }
+              )
+            );
 
           // An explicit window blocks coalescing ONLY when it would change
           // the stored window: merge commits pass the staged survivor's
           // window on every edge write, so a target edge staged back at
           // itself (identical props AND identical window) must still
-          // coalesce instead of rewriting history and revision state.
+          // coalesce instead of rewriting history and revision state. Against
+          // a QUEUED create there is no stored window to match yet, so any
+          // explicit bound counts as a change and the write happens.
           const windowChanges =
             (item.validFrom !== undefined &&
               item.validFrom !== original?.valid_from) ||
@@ -838,12 +874,10 @@ export function createEdgeCollection<
               input: buildUpsertUpdateEdgeInput(item.id, inputProps, item),
               clearDeleted: deletedAt !== undefined,
             });
-            if (dirty !== undefined) {
-              pending.set(item.id, {
-                props: dirty.validatedProps,
-                sourceIndex: itemIndex,
-              });
-            }
+            pending.set(item.id, {
+              props: dirty?.validatedProps,
+              sourceIndex: itemIndex,
+            });
           }
           itemIndex++;
         }
@@ -867,7 +901,8 @@ export function createEdgeCollection<
         }
 
         // Items that coalesced against an in-batch write take that write's
-        // result (now filled). Its sourceIndex is always a write slot.
+        // result (now filled). Its sourceIndex is always a write slot — a
+        // queued create or a queued update, both filled above.
         for (const { index, sourceIndex } of deferred) {
           results[index] = requireDefined(results[sourceIndex]);
         }

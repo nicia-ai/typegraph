@@ -417,7 +417,9 @@ export type BaseStoreOptions = Readonly<{
    *
    * A write is coalesced only when **all** of the following hold; otherwise the
    * normal write happens:
-   *   1. An existing row is found for the id (else it is a create).
+   *   1. A value to compare against is known for the id: an existing row, or —
+   *      for a repeated id in one bulk batch — the value an earlier item in that
+   *      batch already queued (a create or an update). Otherwise it is a create.
    *   2. That row is not soft-deleted (a deleted row resurrects — a real
    *      change — and is never coalesced).
    *   3. The caller passed no explicit `validFrom` / `validTo` (an explicit
@@ -909,6 +911,12 @@ export type NodeCollection<
    * For each item, if a node with the given ID exists, updates it.
    * Otherwise, creates a new node with that ID.
    *
+   * Items are applied in order, so a **repeated id** within one batch is
+   * last-write-wins: the first item creates or updates the row, and every later
+   * copy is an update over the value the earlier item wrote — the same final row
+   * the equivalent sequence of `upsertById` calls produces. This holds whether
+   * or not the row existed before the batch.
+   *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
    * operation's timestamp when omitted. It has no effect on an update to a live
@@ -1296,6 +1304,13 @@ export type EdgeCollection<
    *
    * For each item, if an edge with the given ID exists, updates it.
    * Otherwise, creates a new edge with that ID.
+   *
+   * Items are applied in order, so a **repeated id** within one batch is
+   * last-write-wins: the first item creates or updates the edge, and every later
+   * copy is an update over the value the earlier item wrote. This holds whether
+   * or not the edge existed before the batch. An update never repoints an edge,
+   * so the endpoints of the first write stand — a later copy's `from` / `to` are
+   * ignored exactly as they are for an id that already existed.
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
