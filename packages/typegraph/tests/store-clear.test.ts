@@ -19,6 +19,11 @@ function withSerializablePostgresProbe(base: GraphBackend): GraphBackend {
   return {
     ...base,
     dialect: "postgres",
+    // The double borrows a SQLite backend's capabilities, which declare no
+    // pessimistic locks. A real PostgreSQL server has them, and history
+    // capture is refused without them, so say so rather than shipping a
+    // backend that claims a dialect its capabilities contradict.
+    capabilities: { ...base.capabilities, pessimisticLocks: true },
     async transaction(fn, options) {
       return base.transaction(
         (tx) =>

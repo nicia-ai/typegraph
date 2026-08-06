@@ -41,7 +41,16 @@ function backendWithReturning(returning?: boolean): GraphBackend {
 }
 
 function postgresLikeBackend(): GraphBackend {
-  return { ...backendWithReturning(true), dialect: "postgres" };
+  const base = backendWithReturning(true);
+  return {
+    ...base,
+    dialect: "postgres",
+    // Borrowed from a SQLite backend, whose capabilities declare no
+    // pessimistic locks. A real PostgreSQL server has them, and history
+    // capture is refused without them, so the double must not claim a
+    // dialect its capabilities contradict.
+    capabilities: { ...base.capabilities, pessimisticLocks: true },
+  };
 }
 
 function backendWithoutTransactions(): GraphBackend {

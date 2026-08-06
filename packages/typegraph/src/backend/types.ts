@@ -253,6 +253,21 @@ export type BackendCapabilities = Readonly<{
    * budget applies.
    */
   maxBindParameters?: number;
+  /**
+   * Whether the engine implements the pessimistic locking primitives TypeGraph
+   * uses to serialize concurrent writers: `pg_advisory_xact_lock` (with
+   * `hashtext`) and the `FOR UPDATE` / `FOR SHARE` row-locking clauses. Absent
+   * means supported.
+   *
+   * `false` makes every lock site skip acquisition rather than fail, which is
+   * why it is one capability and not one per call site: SQLite declares it
+   * (its single-writer transactions serialize writes without an advisory
+   * lock), and so must any Postgres-compatible engine that has not implemented
+   * them — DoltgreSQL as of 0.57 rejects both. Skipping them narrows write
+   * serialization to whatever isolation the engine provides on its own, which
+   * is sound for a single-writer deployment and not for a contended one.
+   */
+  pessimisticLocks?: boolean;
   /** Vector search capabilities (undefined if not configured) */
   vector?: VectorCapabilities | undefined;
   /** Fulltext search capabilities (undefined if not configured) */
@@ -3306,12 +3321,29 @@ export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
 export const POSTGRES_MAX_BIND_PARAMETERS = 65_533;
 
 /**
+ * The one place that answers "may this backend take pessimistic locks?".
+ *
+ * Every lock site — the schema-write fence, the recorded graph-write lock, the
+ * identity ledger — asks here rather than re-deriving the answer from the
+ * dialect, so a backend can never take an advisory lock on one path while
+ * skipping it on another.
+ */
+export function usesPessimisticLocks(
+  backend: Pick<GraphBackend, "capabilities">,
+): boolean {
+  return backend.capabilities.pessimisticLocks !== false;
+}
+
+/**
  * Default capabilities for SQLite.
  */
 export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   transactions: true, // SQLite supports transactions
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
   returning: true, // SQLite has supported RETURNING since 3.35.0
+  // No advisory locks and no row-locking clauses; a SQLite write transaction
+  // is already exclusive, so there is nothing for them to add.
+  pessimisticLocks: false,
   maxBindParameters: SQLITE_MAX_BIND_PARAMETERS,
   // Generic SQLite builds do not guarantee ENABLE_MATH_FUNCTIONS. The local
   // better-sqlite3 factory overrides this flag for its bundled build contract.

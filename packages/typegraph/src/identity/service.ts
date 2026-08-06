@@ -1,3 +1,4 @@
+import { usesPessimisticLocks } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { type ReadCoordinate } from "../core/temporal";
 import {
@@ -358,7 +359,7 @@ export async function lockIdentityGraph(
   target: Backend,
   graphId: string,
 ): Promise<void> {
-  if (target.dialect !== "postgres") return;
+  if (!usesPessimisticLocks(target)) return;
   await target.execute(
     asCompiledRowsSql(sql`
       SELECT pg_advisory_xact_lock(
