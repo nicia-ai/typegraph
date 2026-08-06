@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { asEdgeId, asNodeId, type EdgeId, type NodeId } from "../../../src";
+import {
+  asEdgeId,
+  asNodeId,
+  defineGraph,
+  defineNode,
+  type EdgeId,
+  type NodeId,
+} from "../../../src";
+import { UniquenessError } from "../../../src/errors";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
@@ -22,6 +31,11 @@ import { type IntegrationTestContext } from "./test-context";
  * id in the batch-local pending map, so a repeated new id queued two creates and
  * the batch threw "Node already exists" (issue #401).
  *
+ * Because the later copy is a real update rather than a rewritten create, the
+ * sidecars it maintains have to land on the final value too: the uniqueness
+ * reservation the create took must move, and the fulltext projection must hold
+ * the last copy's text.
+ *
  * These cases run against every backend because they are query/write semantics,
  * not backend wiring. Both coalescing states are covered: the defect was in the
  * create/update bucketing, which runs with `coalesceUnchangedUpserts` off as
@@ -40,6 +54,48 @@ function knowsId(
 }
 
 type PersonShape = Readonly<{ name?: string; age?: number }>;
+
+/**
+ * A kind whose props reach the row through a uniqueness reservation, a schema
+ * default, and a transform — the three things a queued create's running value
+ * has to agree with. `email` is reserved per kind, `status` is absent from every
+ * input, and `slug` is stored upper-cased, so a running value taken straight
+ * from the raw input instead of from the validated create would disagree with
+ * the row the insert actually writes.
+ */
+const Account = defineNode("Account", {
+  schema: z.object({
+    email: z.string(),
+    label: z.string().optional(),
+    status: z.string().default("active"),
+    slug: z
+      .string()
+      .optional()
+      .transform((value) => value?.toUpperCase()),
+  }),
+});
+
+const accountGraph = defineGraph({
+  id: "bulk_upsert_repeated_accounts",
+  nodes: {
+    Account: {
+      type: Account,
+      unique: [
+        {
+          name: "account_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+
+function accountId(id: string): NodeId<typeof Account> {
+  return asNodeId(id);
+}
 
 /** The row state the sequential-equivalence oracle compares. */
 type ComparableNode = Readonly<{
@@ -329,6 +385,70 @@ export function registerBulkUpsertRepeatedIdIntegrationTests(
         );
         expect((sequential as { since?: string }).since).toBe("B");
       });
+
+      it("leaves ONE uniqueness reservation, on the final value", async () => {
+        const store = await context.createStore(accountGraph);
+
+        // The create reserves "first@example.com"; the update over it must
+        // release that key and reserve "second@example.com" instead. A create
+        // whose reservation outlived the batch would pin BOTH values.
+        await store.nodes.Account.bulkUpsertById([
+          { id: "uniq-rep", props: { email: "first@example.com" } },
+          { id: "uniq-rep", props: { email: "second@example.com" } },
+        ]);
+
+        // The key the create reserved is free again.
+        const reuse = await store.nodes.Account.create({
+          email: "first@example.com",
+        });
+        expect(reuse.id).not.toBe("uniq-rep");
+
+        // The final value is the one that is reserved.
+        await expect(
+          store.nodes.Account.create({ email: "second@example.com" }),
+        ).rejects.toThrow(UniquenessError);
+      });
+
+      it("leaves the fulltext projection holding the final text", async (ctx) => {
+        const store = context.getStore();
+        if (store.backend.capabilities.fulltext?.supported !== true) {
+          ctx.skip();
+        }
+
+        await store.nodes.Article.bulkUpsertById([
+          {
+            id: "ft-rep",
+            props: {
+              title: "Perovskite tandem cells",
+              body: "First body.",
+              category: "science",
+              published: true,
+            },
+          },
+          {
+            id: "ft-rep",
+            props: {
+              title: "Thermoelectric harvesting",
+              body: "Second body.",
+              category: "science",
+              published: true,
+            },
+          },
+        ]);
+
+        // The update re-syncs the projection, so only the last copy's text is
+        // findable: a stale row from the create would leave both terms hitting.
+        const superseded = await store.search.fulltext("Article", {
+          query: "perovskite",
+          limit: 10,
+        });
+        expect(superseded).toHaveLength(0);
+        const current = await store.search.fulltext("Article", {
+          query: "thermoelectric",
+          limit: 10,
+        });
+        expect(current.map((hit) => hit.node.id)).toEqual(["ft-rep"]);
+      });
     });
 
     describe("with coalescing on", () => {
@@ -353,6 +473,27 @@ export function registerBulkUpsertRepeatedIdIntegrationTests(
           deletedAt: undefined,
           validTo: undefined,
         });
+      });
+
+      it("compares a later copy against the props the create VALIDATED, not the raw input", async () => {
+        const store = await context.createStore(accountGraph, {
+          coalesceUnchangedUpserts: true,
+        });
+
+        const results = await store.nodes.Account.bulkUpsertById([
+          { id: "coal-derived", props: { email: "a@example.com", slug: "ab" } },
+          { id: "coal-derived", props: { email: "a@example.com", slug: "ab" } },
+        ]);
+
+        // The create stores `status: "active"` (a schema default the input never
+        // carried) and `slug: "AB"` (transformed). A running value taken from
+        // the raw input would miss both, so the second copy would look changed
+        // and write again. It must coalesce to the create's own result.
+        expect(results[1]).toBe(results[0]);
+        expect(results[0]?.meta.version).toBe(1);
+        expect(
+          await store.nodes.Account.getById(accountId("coal-derived")),
+        ).toMatchObject({ status: "active", slug: "AB" });
       });
 
       it("coalesces only the copies that match the running value", async () => {
