@@ -200,8 +200,15 @@ export function validateOptionalCanonicalIsoDate(
  * being true before it started. The one comparison every window refusal is
  * built on, so paths that must report the fault through their own error type
  * (trusted import) decide it identically to the ones that throw a
- * `ValidationError`. Both endpoints are canonical ISO 8601 by the time they get
- * here, so a lexicographic compare is a chronological compare.
+ * `ValidationError`.
+ *
+ * PRECONDITION: both endpoints are canonical fixed-width UTC ISO 8601, which is
+ * what makes a lexicographic compare a chronological one. Every caller that
+ * throws reaches this through {@link validateOptionalCanonicalIsoDate} first,
+ * and rows read back from either backend are canonicalized by the row mappers.
+ * Trusted import is the exception: it trusts its stream's timestamps wholesale,
+ * so a non-canonical instant there mis-compares here — the same way it already
+ * mis-sorts against an `asOf` read coordinate once stored.
  *
  * ZERO width (`validFrom === validTo`) is not inverted: it is what a
  * same-instant retraction produces at millisecond precision, and the store's own

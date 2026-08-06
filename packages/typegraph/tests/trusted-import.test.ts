@@ -319,6 +319,12 @@ describe("trusted import", () => {
     expect(
       await store.edges.trustedKnows.getById(asEdgeId<typeof knows>("edge-1")),
     ).toBeUndefined();
+    // The WHOLE stream is refused, not just the offending chunk: the nodes
+    // streamed before the bad edge roll back with it, since the session runs
+    // inside one transaction.
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
+    ).toBeUndefined();
   });
 
   it("accepts a zero-width and a born-ended window", async () => {

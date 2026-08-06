@@ -8,6 +8,7 @@ import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import {
   CardinalityError,
+  INVERTED_VALIDITY_WINDOW_CODE,
   NodeConstraintNotFoundError,
   UniquenessError,
   ValidationError,
@@ -29,6 +30,15 @@ const Entity = defineNode("Entity", {
 });
 
 const relatedTo = defineEdge("relatedTo");
+
+/**
+ * The resurrect cases' window, stated as two fixed ORDERED instants in the past.
+ * Both endpoints are explicit on purpose: a resurrect that names only its end
+ * takes the row's creation instant as the start, so a hardcoded end silently
+ * becomes a negative-width window once the wall clock passes it.
+ */
+const RESURRECT_VALID_FROM = "2023-01-01T00:00:00.000Z";
+const RESURRECT_VALID_TO = "2024-12-31T23:59:59.999Z";
 
 const graph = defineGraph({
   id: "find_or_create_test",
@@ -717,10 +727,16 @@ describe("store.edges.*.getOrCreateByEndpoints()", () => {
     const acme = await store.nodes.Company.create({ name: "Acme" });
     const bigCo = await store.nodes.Company.create({ name: "BigCo" });
 
+    // The employment states its own historical START. Without one it would take
+    // the creation instant, and this case's fixed 2024 end — in the future when
+    // this test was written — has since drifted into the past, which stored a
+    // window of NEGATIVE width. An explicit validFrom keeps the resurrected
+    // window ordered no matter when the suite runs.
     const endedEmployment = await store.edges.oneActiveEdge.create(
       alice,
       acme,
       { label: "first" },
+      { validFrom: RESURRECT_VALID_FROM },
     );
     await store.edges.oneActiveEdge.delete(endedEmployment.id);
     await store.edges.oneActiveEdge.create(alice, bigCo, { label: "second" });
@@ -729,12 +745,48 @@ describe("store.edges.*.getOrCreateByEndpoints()", () => {
       alice,
       acme,
       { label: "first" },
-      { validTo: "2024-12-31T23:59:59.999Z" },
+      { validTo: RESURRECT_VALID_TO },
     );
 
     expect(result.action).toBe("resurrected");
     expect(result.edge.id).toBe(endedEmployment.id);
-    expect(result.edge.meta.validTo).toBe("2024-12-31T23:59:59.999Z");
+    expect(result.edge.meta.validFrom).toBe(RESURRECT_VALID_FROM);
+    expect(result.edge.meta.validTo).toBe(RESURRECT_VALID_TO);
+  });
+
+  it("refuses a resurrect whose validTo precedes the stated validFrom", async () => {
+    // The companion of the case above: resurrecting straight into the ended
+    // state is sanctioned, but the pair must still be ordered. Without this the
+    // drift that case used to carry could return as accepted behavior.
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const endedEmployment = await store.edges.oneActiveEdge.create(
+      alice,
+      acme,
+      { label: "first" },
+      { validFrom: RESURRECT_VALID_FROM },
+    );
+    await store.edges.oneActiveEdge.delete(endedEmployment.id);
+
+    const revive = (): Promise<unknown> =>
+      store.edges.oneActiveEdge.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { label: "first" },
+        { validFrom: RESURRECT_VALID_TO, validTo: RESURRECT_VALID_FROM },
+      );
+
+    await expect(revive()).rejects.toThrow(ValidationError);
+    const rejection = await revive().catch((error: unknown) => error);
+    expect(
+      (rejection as ValidationError).details.issues.map((issue) => issue.code),
+    ).toContain(INVERTED_VALIDITY_WINDOW_CODE);
+
+    // Refused before any write: the tombstone is still a tombstone.
+    const stored = await store.edges.oneActiveEdge.getById(endedEmployment.id);
+    expect(stored).toBeUndefined();
   });
 
   it("validates temporal fields before resolving the operation branch", async () => {
@@ -922,10 +974,18 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const first = await store.edges.worksAt.create(alice, acme, {
-      role: "eng",
-      since: 2020,
-    });
+    // Both endpoints stated, for the reason RESURRECT_VALID_FROM documents: a
+    // hardcoded end with no stated start is measured against the creation
+    // instant, so it becomes a negative-width window as the clock passes it.
+    const first = await store.edges.worksAt.create(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+      { validFrom: RESURRECT_VALID_FROM },
+    );
     await store.edges.worksAt.delete(first.id);
 
     const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
@@ -933,7 +993,7 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
         from: alice,
         to: acme,
         props: { role: "resurrected", since: 2025 },
-        validTo: "2025-12-31T23:59:59.999Z",
+        validTo: RESURRECT_VALID_TO,
       },
     ]);
 
@@ -941,8 +1001,11 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     expect(requireDefined(results[0]).action).toBe("resurrected");
     expect(requireDefined(results[0]).edge.id).toBe(first.id);
     expect(requireDefined(results[0]).edge.role).toBe("resurrected");
+    expect(requireDefined(results[0]).edge.meta.validFrom).toBe(
+      RESURRECT_VALID_FROM,
+    );
     expect(requireDefined(results[0]).edge.meta.validTo).toBe(
-      "2025-12-31T23:59:59.999Z",
+      RESURRECT_VALID_TO,
     );
     expect(requireDefined(results[0]).edge.meta.deletedAt).toBeUndefined();
   });

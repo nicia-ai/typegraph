@@ -1527,11 +1527,16 @@ store.edges.worksAt.getOrCreateByEndpoints(
 }>;
 ```
 
-`validFrom` applies only when the operation creates the edge and otherwise
-leaves the existing start unchanged. `validTo` applies when the edge is
-created, updated, or resurrected. When `ifExists` is omitted or `"return"`, a
-live match produces the `"found"` action and neither temporal option changes
-the edge.
+`validFrom` applies when the operation creates the edge and when it resurrects
+one; an `"updated"` live match leaves the existing start unchanged, because a
+live row's lower bound is history. On a resurrection, naming `validFrom` asserts
+the COMPLETE window: an accompanying `validTo` is applied, and an omitted one
+reopens the revived row rather than keeping the tombstoned incarnation's end.
+`validTo` applies when the edge is created, updated, or resurrected, and may not
+precede the row's effective start — see
+[Inverted validity windows](/errors/#inverted_validity_window). When `ifExists`
+is omitted or `"return"`, a live match produces the `"found"` action and neither
+temporal option changes the edge.
 
 #### `bulkGetOrCreateByEndpoints(items, options?)`
 

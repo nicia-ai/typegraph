@@ -736,25 +736,22 @@ async function performEdgeUpdate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  // An IN-PLACE update is held to the row's stored lower bound: the row
-  // demonstrably began at `valid_from`, so an end before it is incoherent, and
-  // this is the ordering hole the edge write path used to have (nodes have
-  // always been checked here).
+  // The row's stored lower bound is the effective one on EVERY edge update,
+  // in-place or resurrecting: an edge RETAINS `valid_from` unless the
+  // resurrection names a new one (see UpdateEdgeParams), so a lone `validTo`
+  // is always measured against the bound the row already carries. This is the
+  // ordering hole the edge write path used to have; nodes have always been
+  // checked here, and the two now agree.
   //
-  // A RESURRECTION is not. Edges RETAIN their stored lower bound unless the
-  // resurrection names a new one (see UpdateEdgeParams), and reviving one
-  // straight into the ENDED state is sanctioned public behavior —
-  // `getOrCreateByEndpoints` does exactly that to an ended employment and counts
-  // it against cardinality accordingly — so its lone `validTo` is a statement
-  // about the revived row's end, not a claim about its start. Nodes differ only
-  // because their resurrection RESETS `valid_from` to the write instant, which
-  // an unaccompanied historical `validTo` really would invert.
-  const resurrecting =
-    options?.clearDeleted === true && existing.deleted_at !== undefined;
+  // Resurrecting an edge straight into the ENDED state stays available — that is
+  // what `getOrCreateByEndpoints` does to an ended employment, counting it
+  // against cardinality as inactive — but the end it names must not precede the
+  // window it is ending. Reviving a row into a window that closed before the row
+  // began means restating the start, so pass `validFrom` alongside `validTo`.
   assertWritableValidityWindow(
     `edge "${id}"`,
     validFrom,
-    resurrecting ? undefined : existing.valid_from,
+    existing.valid_from,
     validTo,
   );
 
@@ -1246,11 +1243,18 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       effectiveValidTo,
     );
 
+    // A resurrection forwards `validFrom` as the create leg does: naming it
+    // restates the revived row's WHOLE window (the backend rewrites both
+    // endpoints together), which is the only way to revive a row into a window
+    // that closed before the row originally began. Dropping it here silently
+    // ignored a stated lower bound and left the caller no way to satisfy the
+    // window-ordering guard.
     const edge = await executeEdgeUpsertUpdate(
       ctx,
       {
         id: matchedDeletedRow.id,
         props: validatedProps,
+        ...(validFrom !== undefined && { validFrom }),
         ...(validTo !== undefined && { validTo }),
       },
       backend,
@@ -1411,6 +1415,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     fromId: string;
     toKind: string;
     toId: string;
+    /** Reaches the write only on a RESURRECTION, which rewrites both endpoints. */
+    validFrom?: string;
     validTo?: string;
   }
   interface DuplicateEntry {
@@ -1482,6 +1488,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           fromId: entry.fromId,
           toKind: entry.toKind,
           toId: entry.toId,
+          ...(entry.validFrom !== undefined && {
+            validFrom: entry.validFrom,
+          }),
           ...(entry.validTo !== undefined && { validTo: entry.validTo }),
         });
       }
@@ -1559,11 +1568,16 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           effectiveValidTo,
         );
 
+        // As in the single-item path: a resurrection forwards `validFrom` so a
+        // stated lower bound restates the revived row's whole window.
         const edge = await executeEdgeUpsertUpdate(
           ctx,
           {
             id: entry.row.id,
             props: entry.validatedProps,
+            ...(entry.validFrom !== undefined && {
+              validFrom: entry.validFrom,
+            }),
             ...(entry.validTo !== undefined && { validTo: entry.validTo }),
           },
           target,

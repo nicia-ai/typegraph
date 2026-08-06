@@ -14,9 +14,8 @@
  *   4. "born already ended" — an INSERT carrying a lone historical `validTo` —
  *      stays legal: the stamped `valid_from` is a storage convention, not a
  *      caller assertion, and the row is read back through `includeEnded`;
- *   5. resurrecting an EDGE straight into the ended state stays legal, because
- *      an edge retains its stored lower bound (a node's resurrection resets it,
- *      which is why the node path refuses the same shape);
+ *   5. resurrecting an edge into the ended state stays legal, but the end it
+ *      names is held to the bound the row RETAINS across resurrection;
  *   6. import refuses an inverted document per row, carrying the stable code.
  *
  * Trusted import carries the same refusal through its own typed stream error;
@@ -31,6 +30,7 @@ import { z } from "zod";
 
 import type { GraphBackend } from "../src";
 import {
+  asEdgeId,
   asNodeId,
   createStore,
   defineEdge,
@@ -42,6 +42,7 @@ import {
 import type { GraphData } from "../src/interchange";
 import {
   exportGraph,
+  FORMAT_VERSION,
   importGraph,
   ImportOptionsSchema,
 } from "../src/interchange";
@@ -375,10 +376,10 @@ describe("inverted valid-time windows", () => {
 
       // An ended employment, revived by endpoint identity with only its end
       // stated. An edge RETAINS its stored lower bound across resurrection, so
-      // the lone validTo is a statement about the revived row's end, not a claim
-      // about its start — `getOrCreateByEndpoints` counts it against cardinality
-      // as an inactive row. The node path refuses this same shape because a
-      // node's resurrection resets `valid_from` to the write instant.
+      // the lone validTo lands the row in the inactive state with its original
+      // start intact — `getOrCreateByEndpoints` counts it against cardinality as
+      // inactive. The end still has to sit at or after that start; see the case
+      // below.
       const ended = await store.edges.oneActiveJob.create(
         alice,
         acme,
@@ -397,7 +398,126 @@ describe("inverted valid-time windows", () => {
 
       expect(revived.action).toBe("resurrected");
       expect(revived.edge.id).toBe(ended.id);
+      expect(revived.edge.meta.validFrom).toBe(START);
       expect(revived.edge.meta.validTo).toBe(LATER);
+    });
+  });
+
+  describe("a resurrection is held to the bound it retains", () => {
+    it("refuses a resurrecting upsertById whose lone validTo precedes the stored start", async () => {
+      // An edge resurrection retains `valid_from`, so a lone earlier `validTo`
+      // is measured against it exactly as an in-place update's is. `upsertById`
+      // carries no resurrect-as-ended semantics of its own, so there is nothing
+      // here to exempt.
+      const store = createStore(graph, backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme" });
+      const edge = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: LATER },
+      );
+      await store.edges.worksAt.delete(edge.id);
+
+      await expectInvertedWindowRefusal(
+        store.edges.worksAt.bulkUpsertById([
+          {
+            id: edge.id,
+            from: alice,
+            to: acme,
+            props: { role: "Revived" },
+            validTo: START,
+          },
+        ]),
+      );
+    });
+
+    it("refuses a resurrecting getOrCreateByEndpoints whose lone validTo precedes the stored start", async () => {
+      const store = createStore(graph, backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme" });
+      const edge = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: LATER },
+      );
+      await store.edges.worksAt.delete(edge.id);
+
+      await expectInvertedWindowRefusal(
+        store.edges.worksAt.getOrCreateByEndpoints(
+          alice,
+          acme,
+          { role: "Engineer" },
+          { validTo: START },
+        ),
+      );
+
+      // Refused before the write: the tombstone is untouched, so no inverted row
+      // was persisted and then hidden behind `deleted_at`.
+      const raw = requireDefined(await backend.getEdge(graph.id, edge.id));
+      expect(raw.valid_to).toBeUndefined();
+      expect(raw.deleted_at).toBeDefined();
+    });
+
+    it("accepts a resurrection that restates the whole historical window", async () => {
+      // The sanctioned way to revive a row into a window that closed before the
+      // row originally began: name both endpoints, and the resurrection rewrites
+      // them together.
+      const store = createStore(graph, backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme" });
+      const edge = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: LATER },
+      );
+      await store.edges.worksAt.delete(edge.id);
+
+      const revived = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: EARLIER, validTo: START },
+      );
+
+      expect(revived.action).toBe("resurrected");
+      expect(revived.edge.meta.validFrom).toBe(EARLIER);
+      expect(revived.edge.meta.validTo).toBe(START);
+    });
+
+    it("accepts a bulk resurrection that restates the whole historical window", async () => {
+      // The bulk companion. Both resurrect legs must FORWARD a stated
+      // `validFrom` — dropping it silently ignored the caller's lower bound and
+      // left the guard unsatisfiable, since the retained bound was the only one
+      // the write could be measured against.
+      const store = createStore(graph, backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme" });
+      const edge = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: LATER },
+      );
+      await store.edges.worksAt.delete(edge.id);
+
+      const [revived] = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: EARLIER,
+          validTo: START,
+        },
+      ]);
+
+      expect(requireDefined(revived).action).toBe("resurrected");
+      expect(requireDefined(revived).edge.id).toBe(edge.id);
+      expect(requireDefined(revived).edge.meta.validFrom).toBe(EARLIER);
+      expect(requireDefined(revived).edge.meta.validTo).toBe(START);
     });
   });
 
@@ -429,6 +549,129 @@ describe("inverted valid-time windows", () => {
       expect(
         await target.nodes.Person.getById(asNodeId<typeof Person>("person-1")),
       ).toBeUndefined();
+    });
+
+    it("refuses an end before the existing row's start under onConflict update", async () => {
+      // `onConflict: "update"` sends the document's validTo to an IN-PLACE
+      // update of a live row whose stored validFrom stays put, so the document
+      // is held to that bound exactly as a direct `update` call would be. The
+      // insert-shaped pair check cannot see this: the document states no
+      // validFrom at all.
+      const target = createStore(graph, backend);
+      await target.nodes.Person.create(
+        { name: "Alice" },
+        { id: "person-1", validFrom: LATER },
+      );
+      await target.nodes.Person.create({ name: "Bob" }, { id: "person-2" });
+
+      const result = await importGraph(
+        target,
+        await documentWithWindow({ validFrom: undefined, validTo: START }),
+        ImportOptionsSchema.parse({ onConflict: "update" }),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(requireDefined(result.errors[0]).id).toBe("person-1");
+      expect(requireDefined(result.errors[0]).error).toContain(
+        INVERTED_VALIDITY_WINDOW_CODE,
+      );
+
+      // The refused row keeps its window and its props.
+      const stored = requireDefined(
+        await target.nodes.Person.getById(asNodeId<typeof Person>("person-1")),
+      );
+      expect(stored.meta.validFrom).toBe(LATER);
+      expect(stored.meta.validTo).toBeUndefined();
+      expect(stored.name).toBe("Alice");
+    });
+
+    it("refuses on the duplicate-id leg as well as the batched one", async () => {
+      // A repeated id is deferred past the batch flush and re-run through the
+      // sequential row path, which is a second update leg with its own copy of
+      // the check. Both occurrences must refuse, or the guard covers only the
+      // leg the batch size happened to pick.
+      const target = createStore(graph, backend);
+      await target.nodes.Person.create(
+        { name: "Alice" },
+        { id: "person-1", validFrom: LATER },
+      );
+      await target.nodes.Person.create({ name: "Bob" }, { id: "person-2" });
+
+      const document = await documentWithWindow({
+        validFrom: undefined,
+        validTo: START,
+      });
+      const withDuplicate: GraphData = {
+        ...document,
+        nodes: [
+          ...document.nodes,
+          requireDefined(document.nodes.find((node) => node.id === "person-1")),
+        ],
+      };
+
+      const result = await importGraph(
+        target,
+        withDuplicate,
+        ImportOptionsSchema.parse({ onConflict: "update" }),
+      );
+
+      expect(result.errors).toHaveLength(2);
+      for (const error of result.errors) {
+        expect(error.id).toBe("person-1");
+        expect(error.error).toContain(INVERTED_VALIDITY_WINDOW_CODE);
+      }
+    });
+
+    it("refuses an edge end before the existing edge's start under onConflict update", async () => {
+      const target = createStore(graph, backend);
+      const alice = await target.nodes.Person.create(
+        { name: "Alice" },
+        { id: "person-1" },
+      );
+      const acme = await target.nodes.Company.create(
+        { name: "Acme" },
+        { id: "company-1" },
+      );
+      await target.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { id: "edge-1", validFrom: LATER },
+      );
+
+      const result = await importGraph(
+        target,
+        {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: START,
+          source: { type: "external", description: "inverted window test" },
+          nodes: [],
+          edges: [
+            {
+              kind: "worksAt",
+              id: "edge-1",
+              from: { kind: "Person", id: "person-1" },
+              to: { kind: "Company", id: "company-1" },
+              properties: { role: "Manager" },
+              validTo: START,
+            },
+          ],
+        },
+        ImportOptionsSchema.parse({ onConflict: "update" }),
+      );
+
+      expect(result.errors).toHaveLength(1);
+      expect(requireDefined(result.errors[0]).error).toContain(
+        INVERTED_VALIDITY_WINDOW_CODE,
+      );
+
+      const stored = requireDefined(
+        await target.edges.worksAt.getById(asEdgeId<typeof worksAt>("edge-1")),
+      );
+      expect(stored.meta.validFrom).toBe(LATER);
+      expect(stored.meta.validTo).toBeUndefined();
+      expect(stored.role).toBe("Engineer");
     });
 
     it("accepts a zero-width and a born-ended window", async () => {

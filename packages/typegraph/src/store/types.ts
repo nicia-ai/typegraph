@@ -729,13 +729,16 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
     /** Existing record behavior. Default: "return" */
     ifExists?: IfExistsMode;
     /**
-     * Valid-time start for a newly created edge. Ignored when an edge is found,
-     * updated, or resurrected.
+     * Valid-time start for a created or RESURRECTED edge — on a resurrection it
+     * asserts the complete window, so an omitted `validTo` reopens the revived
+     * row. Ignored when an edge is found or updated in place, whose stored lower
+     * bound is history.
      */
     validFrom?: string;
     /**
      * Valid-time end for a created, updated, or resurrected edge. Ignored when
-     * the operation returns an existing edge without writing.
+     * the operation returns an existing edge without writing. May not precede
+     * the row's effective start; see `INVERTED_VALIDITY_WINDOW_CODE`.
      */
     validTo?: string;
   }>;

@@ -166,9 +166,13 @@ const membership = await store.edges.memberOf.getOrCreateByEndpoints(
 // membership.action: "created" | "found" | "updated" | "resurrected"
 ```
 
-For endpoint writes, `validFrom` applies only when a new edge is created.
-`validTo` also applies to the `"updated"` and `"resurrected"` branches. A
-`"found"` result performs no write and preserves the existing validity window.
+For endpoint writes, `validFrom` applies when a new edge is created and on the
+`"resurrected"` branch, where it restates the revived row's whole window; an
+`"updated"` live edge keeps its stored lower bound, which is history. `validTo`
+applies to both the `"updated"` and `"resurrected"` branches. A `"found"` result
+performs no write and preserves the existing validity window. An end that
+precedes the row's effective start is refused — see
+[Inverted validity windows](/errors/#inverted_validity_window).
 
 ### Edge Bulk Operations
 

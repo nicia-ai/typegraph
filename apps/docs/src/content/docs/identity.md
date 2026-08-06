@@ -128,7 +128,9 @@ historical `validTo` is refused as a `ValidationError` rather than
 persisting a window that ends before it begins; pass both bounds for a
 historical window. (Edge resurrection instead keeps its stored lower bound,
 so `getOrCreateByEndpoints` can resurrect an edge directly into the ended
-state.) This graph-wide rule does not depend on the
+state — but the end it names is held to that retained bound, so reviving
+an edge into a window that closed before the edge began likewise means
+passing both.) This graph-wide rule does not depend on the
 identity profile. Resurrection does not revive ended assertions, but folding
 runs again over the resurrected node when configured. Kind removal
 cascades assertion and closure rows for the removed kinds. Tightening ontology
