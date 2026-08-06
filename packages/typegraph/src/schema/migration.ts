@@ -750,7 +750,9 @@ function classifyPropertyChanges(
   const added = Object.keys(afterProps).filter(
     (property) => !hasOwnKey(beforeProps, property),
   );
-  const newRequired = [...afterRequired].filter((p) => !beforeRequired.has(p));
+  const newRequired = [...afterRequired].filter(
+    (property) => !beforeRequired.has(property),
+  );
 
   // A shared property whose schema changed in a way that can invalidate existing
   // rows (type/shape change, a breaking nested/array/enum/constraint change).

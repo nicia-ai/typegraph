@@ -26,9 +26,10 @@ export function isPlainObject(
  * Reachable, and not through anything exotic: a schema may DECLARE a field named
  * after a prototype member — `z.object({ toString: z.string() })` is an ordinary
  * schema — and such a field survives validation, storage, and the JSON round-trip
- * as normal data. (`__proto__` is the weak case, not the dangerous one: Zod drops
- * an own `__proto__` key, and `bag["__proto__"] = value` assigns a prototype
- * rather than creating a key, so it struggles to exist in the first place.)
+ * as normal data. (`__proto__` is the narrower case: Zod drops an own `__proto__`
+ * key and `bag["__proto__"] = value` assigns a prototype rather than creating one,
+ * so no validated write produces it — but the unvalidated trusted import writes a
+ * caller's bag verbatim, and JSON parses `__proto__` back as an own key.)
  *
  * `in` remains correct — and stays in use — where the key set is statically
  * known: a discriminated union's tag, a capability probe, a brand check. The

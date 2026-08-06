@@ -13,8 +13,11 @@
  * through the VALIDATING interchange import, the base@V content fingerprint
  * refuses a base mutated after the fork, and — decisively — `bag["__proto__"] =
  * value` sets a PROTOTYPE rather than creating a key, so the merge's own
- * assignment-built result bags cannot carry one either. Every layer independently
- * blocks it.
+ * assignment-built result bags cannot carry one either. Every VALIDATED layer blocks
+ * it; what remains is `trustedImportGraph`, which by contract does not validate
+ * properties, so a caller's bag reaches the column verbatim and parses back with
+ * `__proto__` as an own key. Hence the unit tests at the bottom of this file, which
+ * hold the predicate to that shape directly.
  *
  * The live ammunition is the rest of `Object.prototype`: `toString`,
  * `constructor`, `valueOf`, `hasOwnProperty`. A schema may legitimately DECLARE a

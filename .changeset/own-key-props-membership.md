@@ -24,10 +24,17 @@ removed prototype-named property as an incompatible schema change rather than a
 removal, because the absent field resolved to a function that was then compared
 as though it were the field's new schema.
 
-The edge fold was affected in the same way, and worse: a member that says NOTHING
-about a prototype-named field counted as having AUTHORED a value it never wrote,
-so an inherited function entered the property union as a first-class claim and
-displaced the surviving row's real value.
+The edge fold and the node cluster union were affected in the same way, and their
+worst outcome was a committed function. For a property the SURVIVING row does not
+carry, both ask that row's bag for the value to keep, so under `in` they took the
+inherited `Object.prototype` member and wrote that function into the merged row
+instead of the value a member actually carried. The cluster union additionally
+routed such a property through the separate base-property-conflict policy on the
+strength of a base member that does not carry it, so the wrong policy decided the
+committed value. The edge fold's claim filter separately counted a member that says
+NOTHING about such a field as having AUTHORED it; the shared value collector
+discarded that phantom claim, so the two agreed only by one absorbing the other's
+mistake.
 
 Two guards were quietly weakened rather than corrupted. Graph-extension validation
 accepted a unique constraint on an undeclared field named after a prototype
@@ -44,9 +51,11 @@ in use, where the key set is statically known: a discriminated union's tag, a
 capability probe, a brand check, and the deliberate `Object.prototype` lookup in
 selective projection.
 
-`__proto__`, the case originally reported, is the NARROW variant and is already
-blocked several times over — Zod drops an own `__proto__` key, `branch()` clones
-through the validating interchange import, the base@V fingerprint refuses a base
-mutated after the fork, and `bag["__proto__"] = value` assigns a prototype rather
-than creating a key, so assignment-built result bags cannot carry one either.
-Recorded here so it is not "fixed" again as though it were the reachable case.
+`__proto__`, the case originally reported, is the NARROW variant. Every VALIDATED
+write path blocks it: Zod drops an own `__proto__` key, and `bag["__proto__"] = value`
+assigns a prototype rather than creating a key, so an assignment-built bag cannot
+carry one either. It is still reachable through `trustedImportGraph`, which by
+contract does not validate properties and writes a caller's bag verbatim — the
+stored JSON parses back with `__proto__` as an own key on both dialects. Recorded
+here so the two are not confused: a prototype-named field needs nothing unusual at
+all, while `__proto__` needs the trusted path.

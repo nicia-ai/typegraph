@@ -164,6 +164,7 @@ import { serializeSchema } from "../schema/serializer";
 import { type SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import {
   createGraphAlgorithms,
@@ -4683,10 +4684,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // named after an `Object.prototype` member would otherwise always look
     // still-present and skip the pending-removal refusal this guard exists for.
     const addedNodes = Object.keys(merged.nodes).filter(
-      (kind) => !Object.hasOwn(baseline.nodes, kind),
+      (kind) => !hasOwnKey(baseline.nodes, kind),
     );
     const addedEdges = Object.keys(merged.edges).filter(
-      (kind) => !Object.hasOwn(baseline.edges, kind),
+      (kind) => !hasOwnKey(baseline.edges, kind),
     );
     if (addedNodes.length === 0 && addedEdges.length === 0) return;
 
