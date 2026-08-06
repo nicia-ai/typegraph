@@ -25,10 +25,11 @@
  * A genuine repoint-induced collapse still folds — that fold is what the dedupe
  * exists for. Its end-to-end contract is `self-edge-collapse.test.ts` and
  * `valid-window-merge.test.ts`; its mechanics are `edge-repoint.test.ts`. One
- * property of that fold is pinned here because only this fixture reaches it: the
- * staged copy carrying a window-only ending votes in the fold's property union
- * under its branch's label, so which branch carries the row must stay independent
- * of who authored the ending (issue #402).
+ * property of that fold is pinned here because only this fixture reaches it end to
+ * end: the staged copy carrying a window-only ending belongs to an arbitrary branch
+ * (the staging order's first claimant, credited nothing — issue #402), and it must
+ * therefore contribute NOTHING to the fold's property union, at any rank, since it
+ * authored nothing (issue #408).
  *
  * Runs on every backend in the matrix: edge multiplicity is asserted through the
  * committed rows, and a per-dialect test would happily certify a divergence.
@@ -106,14 +107,26 @@ const WINDOW_CLAIMANT_LATE = asBranchId("parallel-window-b-late");
 /** Ends it EARLIER, so its claim is the one committed. Sorts AFTER the loser. */
 const WINDOW_CLAIMANT_EARLY = asBranchId("parallel-window-c-early");
 /**
- * Branch rank INVERTED against the branch-id sort: the losing claimant carries
- * the row (it sorts first in staging) while ranking last, so a carrier chosen by
- * authorship instead would resolve a rank-based property policy differently.
+ * The two branch orders the carrier case runs under. In both, the row is carried by
+ * `WINDOW_CLAIMANT_LATE` — it sorts first in staging, and its own claim is the one the
+ * least-claim rule discards — so the carrier and the credited author are provably
+ * different branches either way. What differs is the carrier's RANK against the branch
+ * that authored the folded edge's props: below it, then above it.
+ *
+ * That must not matter, and it used to (issue #408). The carrier contributed the base's
+ * untouched props as a first-class claim, so ranking it above the author handed a stale
+ * value the priority to win a `lastWriteWins` union — the same fold with the same
+ * members committing different props because of a label.
  */
-const RANK_INVERTED_ORDER = [
+const CARRIER_RANKED_BELOW_AUTHOR = [
   WINDOW_CLAIMANT_EARLY,
   BRANCH_A,
   WINDOW_CLAIMANT_LATE,
+];
+const CARRIER_RANKED_ABOVE_AUTHOR = [
+  WINDOW_CLAIMANT_LATE,
+  WINDOW_CLAIMANT_EARLY,
+  BRANCH_A,
 ];
 
 /** The committed encounter's block key + reason, and the branch's near-duplicate of
@@ -481,78 +494,92 @@ describe.each(backendMatrix())("merging parallel edges [$name]", (entry) => {
     expect(report.conflicts).toEqual([]);
   });
 
-  it("does not let a window-only carrier outvote a folded edge's props", async () => {
-    // An inherited edge whose only change is its ending still needs a staged copy
-    // to ride on, and that copy contributes the BASE's props under the carrying
-    // branch's label. So when a repoint folds a branch's own edge onto that row,
-    // the carrier is a voter in the property union — which makes WHICH branch
-    // carries the row a merge outcome, not just a provenance detail.
-    //
-    // The carrier therefore stays the staging order's first claimant, and the
-    // ending's author is credited from the window resolution instead (issue #402).
-    // Choosing the carrier by authorship moves the committed props: here it would
-    // hand the base's stale `on` a rank high enough to beat the value the props
-    // branch actually authored.
-    const forkPoint = await seededForkPoint();
-    const target = (await forkOf(forkPoint, TARGET_BRANCH)).store;
-    const propsBranch = await forkOf(forkPoint, BRANCH_A);
-    // Two window claimants whose id order is INVERTED against their branch rank,
-    // so the carrier and the credited author are provably different branches.
-    const losingClaimant = await forkOf(forkPoint, WINDOW_CLAIMANT_LATE);
-    const winningClaimant = await forkOf(forkPoint, WINDOW_CLAIMANT_EARLY);
+  describe.each([
+    { position: "BELOW", branchOrder: CARRIER_RANKED_BELOW_AUTHOR },
+    { position: "ABOVE", branchOrder: CARRIER_RANKED_ABOVE_AUTHOR },
+  ])(
+    "a window-only carrier ranked $position the props author",
+    ({ branchOrder }) => {
+      it("does not outvote the folded edge's props", async () => {
+        // An inherited edge whose only change is its ending still needs a staged copy
+        // to ride on, and WHICH branch carries it is arbitrary: the staging order's
+        // first claimant, possibly one whose own claim the merge discarded (#402).
+        //
+        // That copy used to contribute the BASE's props under the carrying branch's
+        // label, making the carrier a voter in the fold's property union — so the
+        // arbitrary label decided the committed properties under a rank-based policy
+        // (#408). The union now judges every contributor against its own base, and a
+        // carrier authored nothing, so it contributes no claim at any rank.
+        const forkPoint = await seededForkPoint();
+        const target = (await forkOf(forkPoint, TARGET_BRANCH)).store;
+        const propsBranch = await forkOf(forkPoint, BRANCH_A);
+        const losingClaimant = await forkOf(forkPoint, WINDOW_CLAIMANT_LATE);
+        const winningClaimant = await forkOf(forkPoint, WINDOW_CLAIMANT_EARLY);
 
-    await propsBranch.store.nodes.Encounter.create(
-      { reason: DUPLICATE_REASON, code: ENCOUNTER_CODE },
-      { id: DUPLICATE_ENCOUNTER.id },
-    );
-    await propsBranch.store.edges.hadEncounter.create(
-      PATIENT,
-      DUPLICATE_ENCOUNTER,
-      { on: BRANCH_DATE },
-      { id: "edge-9" },
-    );
-    await losingClaimant.store.edges.hadEncounter.update(
-      INHERITED,
-      {},
-      { validTo: LATER_END },
-    );
-    await winningClaimant.store.edges.hadEncounter.update(
-      INHERITED,
-      {},
-      { validTo: END },
-    );
+        await propsBranch.store.nodes.Encounter.create(
+          { reason: DUPLICATE_REASON, code: ENCOUNTER_CODE },
+          { id: DUPLICATE_ENCOUNTER.id },
+        );
+        await propsBranch.store.edges.hadEncounter.create(
+          PATIENT,
+          DUPLICATE_ENCOUNTER,
+          { on: BRANCH_DATE },
+          { id: "edge-9" },
+        );
+        await losingClaimant.store.edges.hadEncounter.update(
+          INHERITED,
+          {},
+          { validTo: LATER_END },
+        );
+        await winningClaimant.store.edges.hadEncounter.update(
+          INHERITED,
+          {},
+          { validTo: END },
+        );
 
-    const report = unwrap(
-      await mergeIncremental<CareGraph>({
-        forkPoint,
-        target,
-        branches: [propsBranch, losingClaimant, winningClaimant],
-        options: {
-          ...resolveDuplicateEncounters(),
-          // Rank-sensitive: the winner is the highest-priority CONTRIBUTING
-          // branch, so a relabelled carrier changes the value that survives.
-          onPropertyConflict: "lastWriteWins",
-          branchOrder: RANK_INVERTED_ORDER,
-        },
-      }),
-    );
+        const report = unwrap(
+          await mergeIncremental<CareGraph>({
+            forkPoint,
+            target,
+            branches: [propsBranch, losingClaimant, winningClaimant],
+            options: {
+              ...resolveDuplicateEncounters(),
+              // Rank-sensitive: the winner is the highest-priority CONTRIBUTING
+              // branch, so an untouched value that still counted as a contribution
+              // would change the value that survives.
+              onPropertyConflict: "lastWriteWins",
+              branchOrder,
+            },
+          }),
+        );
 
-    // The fold committed the props branch's authored value, and the earliest
-    // claimed ending — neither decided by who happened to carry the row.
-    expect(
-      (await liveEdges(target)).map((edge) => ({
-        id: edge.id,
-        on: edge.on,
-        validTo: edge.validTo,
-      })),
-    ).toEqual([{ id: INHERITED_EDGE, on: BRANCH_DATE, validTo: END }]);
-    // Only the branch whose claim IS the committed ending is credited; the
-    // carrier's own label buys it nothing.
-    expect(report.provenance.byBranch(WINDOW_CLAIMANT_EARLY).edgeIds).toContain(
-      INHERITED_EDGE,
-    );
-    expect(report.provenance.byBranch(WINDOW_CLAIMANT_LATE).edgeIds).toEqual(
-      [],
-    );
-  });
+        // The fold committed the props branch's authored value, and the earliest
+        // claimed ending — neither decided by who happened to carry the row.
+        expect(
+          (await liveEdges(target)).map((edge) => ({
+            id: edge.id,
+            on: edge.on,
+            validTo: edge.validTo,
+          })),
+        ).toEqual([{ id: INHERITED_EDGE, on: BRANCH_DATE, validTo: END }]);
+        // And nothing about the EDGE disagreed: one authored value against an
+        // untouched one is not a property conflict, so the report no longer invents
+        // one. (The Encounter cluster's own `reason` conflict is the identity
+        // resolution's, and stands.)
+        expect(
+          report.conflicts.filter(
+            (conflict) => conflict.kind === "hadEncounter",
+          ),
+        ).toEqual([]);
+        // Only the branch whose claim IS the committed ending is credited; the
+        // carrier's own label buys it nothing.
+        expect(
+          report.provenance.byBranch(WINDOW_CLAIMANT_EARLY).edgeIds,
+        ).toContain(INHERITED_EDGE);
+        expect(
+          report.provenance.byBranch(WINDOW_CLAIMANT_LATE).edgeIds,
+        ).toEqual([]);
+      });
+    },
+  );
 });
