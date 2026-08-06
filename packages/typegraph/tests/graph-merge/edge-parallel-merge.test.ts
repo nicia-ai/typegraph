@@ -24,7 +24,11 @@
  *
  * A genuine repoint-induced collapse still folds — that fold is what the dedupe
  * exists for. Its end-to-end contract is `self-edge-collapse.test.ts` and
- * `valid-window-merge.test.ts`; its mechanics are `edge-repoint.test.ts`.
+ * `valid-window-merge.test.ts`; its mechanics are `edge-repoint.test.ts`. One
+ * property of that fold is pinned here because only this fixture reaches it: the
+ * staged copy carrying a window-only ending votes in the fold's property union
+ * under its branch's label, so which branch carries the row must stay independent
+ * of who authored the ending (issue #402).
  *
  * Runs on every backend in the matrix: edge multiplicity is asserted through the
  * committed rows, and a per-dialect test would happily certify a divergence.
@@ -97,6 +101,20 @@ const SECOND_INHERITED = asEdgeId<typeof hadEncounter>(SECOND_INHERITED_EDGE);
 const BRANCH_A = asBranchId("parallel-branch-a");
 const TARGET_BRANCH = asBranchId("parallel-target");
 const BRANCH_ORDER = [BRANCH_A];
+/** Ends the inherited edge LATER, so the least-claim rule discards its claim. */
+const WINDOW_CLAIMANT_LATE = asBranchId("parallel-window-b-late");
+/** Ends it EARLIER, so its claim is the one committed. Sorts AFTER the loser. */
+const WINDOW_CLAIMANT_EARLY = asBranchId("parallel-window-c-early");
+/**
+ * Branch rank INVERTED against the branch-id sort: the losing claimant carries
+ * the row (it sorts first in staging) while ranking last, so a carrier chosen by
+ * authorship instead would resolve a rank-based property policy differently.
+ */
+const RANK_INVERTED_ORDER = [
+  WINDOW_CLAIMANT_EARLY,
+  BRANCH_A,
+  WINDOW_CLAIMANT_LATE,
+];
 
 /** The committed encounter's block key + reason, and the branch's near-duplicate of
  *  it (Dice trigram ≈ 0.96 ≥ the case's threshold, so the two resolve as one). */
@@ -116,6 +134,8 @@ const BRANCH_DATE = "2026-03-11";
 /** In the FUTURE: a row's `validFrom` defaults to creation, and an inverted
  *  window is refused, so an authorable end must be after that instant. */
 const END = "2100-01-01T00:00:00.000Z";
+/** A LATER authorable end, for the claim the least-claim rule discards. */
+const LATER_END = "2101-01-01T00:00:00.000Z";
 
 /**
  * Merge options for the MIXED case: the branch's near-duplicate encounter resolves
@@ -459,5 +479,80 @@ describe.each(backendMatrix())("merging parallel edges [$name]", (entry) => {
       { id: INHERITED_EDGE, on: INHERITED_DATE, validTo: END },
     ]);
     expect(report.conflicts).toEqual([]);
+  });
+
+  it("does not let a window-only carrier outvote a folded edge's props", async () => {
+    // An inherited edge whose only change is its ending still needs a staged copy
+    // to ride on, and that copy contributes the BASE's props under the carrying
+    // branch's label. So when a repoint folds a branch's own edge onto that row,
+    // the carrier is a voter in the property union — which makes WHICH branch
+    // carries the row a merge outcome, not just a provenance detail.
+    //
+    // The carrier therefore stays the staging order's first claimant, and the
+    // ending's author is credited from the window resolution instead (issue #402).
+    // Choosing the carrier by authorship moves the committed props: here it would
+    // hand the base's stale `on` a rank high enough to beat the value the props
+    // branch actually authored.
+    const forkPoint = await seededForkPoint();
+    const target = (await forkOf(forkPoint, TARGET_BRANCH)).store;
+    const propsBranch = await forkOf(forkPoint, BRANCH_A);
+    // Two window claimants whose id order is INVERTED against their branch rank,
+    // so the carrier and the credited author are provably different branches.
+    const losingClaimant = await forkOf(forkPoint, WINDOW_CLAIMANT_LATE);
+    const winningClaimant = await forkOf(forkPoint, WINDOW_CLAIMANT_EARLY);
+
+    await propsBranch.store.nodes.Encounter.create(
+      { reason: DUPLICATE_REASON, code: ENCOUNTER_CODE },
+      { id: DUPLICATE_ENCOUNTER.id },
+    );
+    await propsBranch.store.edges.hadEncounter.create(
+      PATIENT,
+      DUPLICATE_ENCOUNTER,
+      { on: BRANCH_DATE },
+      { id: "edge-9" },
+    );
+    await losingClaimant.store.edges.hadEncounter.update(
+      INHERITED,
+      {},
+      { validTo: LATER_END },
+    );
+    await winningClaimant.store.edges.hadEncounter.update(
+      INHERITED,
+      {},
+      { validTo: END },
+    );
+
+    const report = unwrap(
+      await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [propsBranch, losingClaimant, winningClaimant],
+        options: {
+          ...resolveDuplicateEncounters(),
+          // Rank-sensitive: the winner is the highest-priority CONTRIBUTING
+          // branch, so a relabelled carrier changes the value that survives.
+          onPropertyConflict: "lastWriteWins",
+          branchOrder: RANK_INVERTED_ORDER,
+        },
+      }),
+    );
+
+    // The fold committed the props branch's authored value, and the earliest
+    // claimed ending — neither decided by who happened to carry the row.
+    expect(
+      (await liveEdges(target)).map((edge) => ({
+        id: edge.id,
+        on: edge.on,
+        validTo: edge.validTo,
+      })),
+    ).toEqual([{ id: INHERITED_EDGE, on: BRANCH_DATE, validTo: END }]);
+    // Only the branch whose claim IS the committed ending is credited; the
+    // carrier's own label buys it nothing.
+    expect(report.provenance.byBranch(WINDOW_CLAIMANT_EARLY).edgeIds).toContain(
+      INHERITED_EDGE,
+    );
+    expect(report.provenance.byBranch(WINDOW_CLAIMANT_LATE).edgeIds).toEqual(
+      [],
+    );
   });
 });

@@ -608,15 +608,23 @@ function indexNewNodesById(
  * branch created. This is the ONLY place that distinction is known — the repoint phase
  * needs it to fold onto a row the target holds, and an edge id says nothing about
  * where the row came from.
+ *
+ * `windowOnlyCarried` names the identities staged ONLY to carry an ending. Their
+ * `branchId` is a write vehicle rather than a contribution (see the loop below),
+ * which the provenance fold must know so it does not credit it.
  */
 function buildStagedEdges(
   staging: StagingSet,
   modifiedEdges: readonly StagedModifiedEdge[],
   edgeValidityEnds: ReadonlyMap<MergeKey, string>,
   edgeDeletions: ReadonlyMap<MergeKey, string>,
-): readonly StagedEdge[] {
+): Readonly<{
+  edges: readonly StagedEdge[];
+  windowOnlyCarried: ReadonlySet<MergeKey>;
+}> {
   const staged: StagedEdge[] = [];
   const stagedIdentities = new Set<MergeKey>();
+  const windowOnlyCarried = new Set<MergeKey>();
   for (const items of staging.newEdgesByKind.values()) {
     for (const item of items) {
       staged.push(toStagedEdge(item.branchId, item));
@@ -644,6 +652,14 @@ function buildStagedEdges(
   // have nothing to ride on. Its props are the fork's, which equal the base's by
   // construction — the write carries the window and leaves the row's content
   // alone. Finally-deleted edges are excluded: deletion absorbs the ending.
+  //
+  // WHICH branch's copy carries it is arbitrary — the first in the staging order,
+  // `(kind, id, branch)` — and deliberately stays that way. That `branchId` is an
+  // input to the repoint fold's PROPERTY union, where the copy contributes the
+  // base's props under its label, so choosing the carrier by anything else (the
+  // authored ending, say) silently moves which value a fold commits. It is
+  // therefore recorded as window-only carried instead, and the ending's author is
+  // credited from the resolution rather than from whoever carried the row.
   for (const item of staging.windowedEdges) {
     const identity = mergeKeyOf(item.edge);
     const validTo = edgeValidityEnds.get(identity);
@@ -655,6 +671,7 @@ function buildStagedEdges(
       continue;
     }
     stagedIdentities.add(identity);
+    windowOnlyCarried.add(identity);
     staged.push({
       id: item.edge.id,
       kind: item.edge.kind,
@@ -668,7 +685,7 @@ function buildStagedEdges(
       validTo,
     });
   }
-  return staged;
+  return { edges: staged, windowOnlyCarried };
 }
 
 /**
@@ -1150,6 +1167,45 @@ function planMerge<G extends GraphDef>(
     preferredBranchId,
   );
 
+  // (6-window provenance) credit the branches that AUTHORED a committed node
+  // ending. Ending a row is authored state, but a branch whose only change to a
+  // node is its window is neither a cluster member nor a surviving modification,
+  // and the write that carries the ending names no branch — so without this the
+  // branch whose claim the commit applied is absent from the provenance sidecar
+  // entirely (issue #402). The credit comes from the resolution because only the
+  // resolution knows whose claim won; a claim that LOST the least-claim rule is
+  // not in `nodeCredits` and is not credited, since provenance records
+  // contribution to COMMITTED state.
+  //
+  // Edges take the same credit through `stagedEdgeBranches` below, where the
+  // repoint's surviving edge id is known.
+  //
+  // A branch that edited the node's props AND moved its window is already
+  // credited with this exact record by the modification loop above; re-recording
+  // it would count one sidecar row twice. A record whose `sourceId` differs from
+  // its canonical is a DIFFERENT contribution (a fork id folded into a survivor)
+  // and never stands in for the in-place one.
+  const creditedNodeIdentities = new Map<MergeKey, Set<BranchId>>();
+  for (const record of provenanceRecords) {
+    if (record.role !== "node" || record.sourceId !== record.canonicalId) {
+      continue;
+    }
+    const identity = mergeKey(record.canonicalKind, record.canonicalId);
+    const credited =
+      creditedNodeIdentities.get(identity) ?? new Set<BranchId>();
+    credited.add(record.branchId);
+    creditedNodeIdentities.set(identity, credited);
+  }
+  for (const [identity, branchIds] of validWindows.nodeCredits) {
+    for (const branchId of branchIds) {
+      if (creditedNodeIdentities.get(identity)?.has(branchId) === true) {
+        continue;
+      }
+      const id = idOf(identity);
+      recordProvenance("node", branchId, id, kindOf(identity), id);
+    }
+  }
+
   // (7) opt-in ontology type reconciliation over the public-closure glue. Inputs
   // (incl. base member kinds) were collected per cluster in the canonicalize loop.
   const reconciliation = reconcileTypes(
@@ -1216,7 +1272,7 @@ function planMerge<G extends GraphDef>(
     identityContext,
     identityNodeUniverse,
   );
-  const stagedEdges = buildStagedEdges(
+  const { edges: stagedEdges, windowOnlyCarried } = buildStagedEdges(
     staging,
     reconciledEdgeModifications.survivingModifications,
     validWindows.edgeEnds,
@@ -1225,14 +1281,32 @@ function planMerge<G extends GraphDef>(
   // An edge id can be staged by MORE THAN ONE branch (e.g. an inherited edge
   // modified by two branches), so map each id to the SET of contributing branches.
   // A plain last-write Map would credit only one branch's provenance.
+  //
+  // A branch that authored the row's committed END is a contributor too, and the
+  // staged copy cannot name it: an identity is staged ONCE, so a branch whose only
+  // change is the window has no copy of its own whenever another branch's props
+  // edit already staged the row (issue #402). Folding the window authors in here —
+  // from the resolution that chose the end — credits them against the SURVIVING
+  // edge the repoint decides, exactly as a modifying branch is credited, and a
+  // `Set` keeps a branch that both edited props and moved the window one
+  // contributor.
+  //
+  // A WINDOW-ONLY CARRIER is the exception: that copy exists only to give the
+  // ending a row to ride on, its props are the base's, and the branch holding it
+  // is whichever sorted first — possibly one whose later claim the merge
+  // discarded. Crediting it would name a branch that put nothing in the committed
+  // row, so the row's credit comes from the resolution alone.
   const stagedEdgeBranches = new Map<string, Set<BranchId>>();
   for (const staged of stagedEdges) {
-    const branches = stagedEdgeBranches.get(staged.id);
-    if (branches === undefined) {
-      stagedEdgeBranches.set(staged.id, new Set([staged.branchId]));
-    } else {
+    const identity = mergeKeyOf(staged);
+    const branches = stagedEdgeBranches.get(staged.id) ?? new Set<BranchId>();
+    if (!windowOnlyCarried.has(identity)) {
       branches.add(staged.branchId);
     }
+    for (const branchId of validWindows.edgeCredits.get(identity) ?? []) {
+      branches.add(branchId);
+    }
+    stagedEdgeBranches.set(staged.id, branches);
   }
   const deletedNodeIdSet = new Set<MergeKey>(nodeDeletions.keys());
   const repoint = repointEdges<G>(

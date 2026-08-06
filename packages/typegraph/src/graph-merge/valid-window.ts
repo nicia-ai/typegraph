@@ -59,6 +59,24 @@
  * — deleting and ending are both "no longer true", and the stronger statement
  * wins. The callers pass the finally-deleted identity sets so the ending is
  * dropped with the row.
+ *
+ * WHO GETS PROVENANCE CREDIT
+ *
+ * An ending is authored state, so the branch that authored it contributed to the
+ * committed row and must appear in the merge's provenance — even when the ending
+ * is its ONLY change to that row (issue #402). This module is the authority on
+ * that: it decided which claim was committed, so it also emits the credit
+ * ({@link ValidWindowResolution.nodeCredits} / `edgeCredits`), rather than leaving
+ * the commit to re-derive it from staging and lose the claim that won.
+ *
+ * Credit goes to exactly the branches whose claim IS the resolved end — the `min`
+ * winner and anyone who tied with it. Provenance records contribution to
+ * COMMITTED state, and a branch whose later end lost the least-claim rule
+ * contributed none of it; its claim is still visible in the report
+ * (`ValidityEndResolution.claimedBy` names every claimant, winning or not), which
+ * is where "who asked for what" belongs. The alternative — crediting every
+ * claimant — would make provenance answer "who spoke about this row" instead, a
+ * different question that the report already answers.
  */
 import { requireDefined } from "../utils/presence";
 import {
@@ -92,6 +110,16 @@ export type ValidWindowResolution = Readonly<{
   nodeEnds: ReadonlyMap<MergeKey, string>;
   /** `(kind, id) -> validTo` for every inherited EDGE the commit must end. */
   edgeEnds: ReadonlyMap<MergeKey, string>;
+  /**
+   * `(kind, id) -> the branches that AUTHORED the resolved node end`: the
+   * claimants whose claim equals {@link ValidWindowResolution.nodeEnds}, sorted
+   * and deduped. The provenance credit for a window change, keyed identically to
+   * `nodeEnds` so the two are read together. Never empty for an identity present
+   * in `nodeEnds` — an end exists only because some branch claimed it.
+   */
+  nodeCredits: ReadonlyMap<MergeKey, readonly BranchId[]>;
+  /** The edge half of {@link ValidWindowResolution.nodeCredits}. */
+  edgeCredits: ReadonlyMap<MergeKey, readonly BranchId[]>;
   resolutions: readonly ValidityEndResolution[];
   dropped: readonly DroppedItem[];
 }>;
@@ -188,6 +216,7 @@ function resolvePopulation(
   dropItem: (id: string) => DroppedItem,
 ): Readonly<{
   ends: ReadonlyMap<MergeKey, string>;
+  credits: ReadonlyMap<MergeKey, readonly BranchId[]>;
   resolutions: readonly ValidityEndResolution[];
   dropped: readonly DroppedItem[];
 }> {
@@ -206,6 +235,7 @@ function resolvePopulation(
   }
 
   const ends = new Map<MergeKey, string>();
+  const credits = new Map<MergeKey, readonly BranchId[]>();
   const resolutions: ValidityEndResolution[] = [];
   const dropped: DroppedItem[] = [];
 
@@ -245,6 +275,14 @@ function resolvePopulation(
       continue;
     }
     ends.set(identity, resolved);
+    // The AUTHORS of the committed end: every branch whose claim is the resolved
+    // instant, including the ones that tied with it. A later claim lost the
+    // least-claim rule and put nothing into the committed row, so it earns no
+    // credit — it stays visible as a claimant in the resolution below.
+    credits.set(
+      identity,
+      claimingBranches(claims.filter((claim) => claim.validTo === resolved)),
+    );
     const first = requireDefined(group[0]);
     resolutions.push({
       entity,
@@ -260,6 +298,7 @@ function resolvePopulation(
   // would not be a total order and the output would depend on insertion order.
   return {
     ends,
+    credits,
     resolutions: resolutions.sort((left, right) =>
       compareMergeKeys(
         mergeKey(left.kind, left.id),
@@ -331,6 +370,8 @@ export function resolveValidWindows(
   return {
     nodeEnds: nodes.ends,
     edgeEnds: edges.ends,
+    nodeCredits: nodes.credits,
+    edgeCredits: edges.credits,
     resolutions: [...nodes.resolutions, ...edges.resolutions],
     dropped: [...nodes.dropped, ...edges.dropped],
   };

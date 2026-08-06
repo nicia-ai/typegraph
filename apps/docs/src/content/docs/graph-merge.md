@@ -446,7 +446,10 @@ A typical operator loop: auto-apply when `conflicts` and
 
 ## Provenance
 
-Provenance answers *which branch contributed each merged node and edge*.
+Provenance answers *which branch contributed each merged node and edge*. A
+contribution is anything a branch authored into the committed row — the
+properties it staged, the modification that survived, or the end-of-validity the
+merge applied.
 
 - **Report-only (default, `provenance: true`)** — `report.provenance.byBranch(id)`
   returns the `{ nodeIds, edgeIds }` that branch contributed. In-memory; it
@@ -585,6 +588,15 @@ explains the whole contract:
 The earliest-end rule is fixed, not a policy knob: it is commutative and
 associative, so the merge stays order-independent, and `onPropertyConflict`
 never sees a property your schema does not have.
+
+**The branch that authored the committed end is credited.** An ending is
+authored state, so its author is a contributor to that row in
+`report.provenance` and in the durable sidecar — even when moving the window is
+the only thing that branch changed. Credit follows the *committed* end: when
+several branches end a row differently, only the branches whose claim equals the
+written instant are credited, while `validityEnds[].claimedBy` still names every
+claimant, winning or not. An ending a deletion absorbed commits nothing, so it
+credits nobody.
 
 Because an ending is not a modification, `onDeleteModifyConflict` never sees
 one: a row whose *only* change is its window loses to a concurrent deletion even
