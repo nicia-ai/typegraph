@@ -24,6 +24,12 @@ stays a full claim — which means a carrier contributes no claim and raises no
 conflict at any rank. Genuine disagreements are unaffected: two members that
 changed one property differently still conflict, over their real values alone.
 
+Filtering claims does not erase content: the folded row commits the same property
+set as before, and a key only a non-survivor carries keeps the value held by the
+member with the minimum edge ID — the row, never the branch label riding on it,
+since for these keys no branch claimed anything and an arbitrary label deciding
+the committed value is the very thing being fixed.
+
 `MergeReport.validityEnds` now also reports the window claims that target
 precedence discards. When the incremental target had already moved an inherited
 row's end, the reconciler took the row out of the resolution and the branch

@@ -361,6 +361,7 @@ describe.each(backendMatrix())(
         .store;
       const branchA = await forkOf(forkPoint, BRANCH_A);
       await target.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
+      const versionBefore = (await nodeRow(target, "Patient", "pat-1")).version;
       await branchA.store.nodes.Patient.update(PATIENT, {}, { validTo: EARLY });
 
       const report = unwrap(
@@ -375,6 +376,14 @@ describe.each(backendMatrix())(
       // The committed target already windowed this row; a user branch never
       // re-windows it, even with an EARLIER (otherwise winning) claim.
       expect(await nodeEnd(target, "Patient", "pat-1")).toBe(LATE);
+      // Reporting the discard stages NO write: resolving to the end the target
+      // already holds would write the row back at itself, bumping the version, the
+      // history row and the recorded-time entry of a row the merge decided nothing
+      // about. Asserting the committed instant alone cannot see that, because the
+      // instant written back would be the one already there.
+      expect((await nodeRow(target, "Patient", "pat-1")).version).toBe(
+        versionBefore,
+      );
       // Discarding a claim is an arbitration outcome, so it is reported: the entry
       // names the TARGET's own instant, the claim thrown away, and the
       // `precedence` discriminator that keeps it from reading as an end the merge

@@ -1498,6 +1498,64 @@ describe("repointEdges base-aware property union (#408)", () => {
     });
     expect(result.conflicts).toEqual([]);
   });
+
+  // Which branch a staged copy of an inherited row belongs to is arbitrary, so the
+  // value kept for a key nobody authored must come from the ROW, not the label. Both
+  // assignments below hold the same three rows; only the labels on the two `note`
+  // carriers swap. Ordering the carriers by branch id instead flips the committed
+  // value between them, which is the label sensitivity #408 is about.
+  describe.each([
+    { labelling: "in id order", second: BRANCH_B, third: BRANCH_C },
+    { labelling: "SWAPPED", second: BRANCH_C, third: BRANCH_B },
+  ])(
+    "two unauthored carriers of a key the survivor lacks, labelled $labelling",
+    ({ second, third }) => {
+      it("keeps the value of the minimum-id row", () => {
+        const result = repointEdges(
+          [
+            // The survivor: min-id inherited, and it carries no `note` at all.
+            stagedEdge({
+              id: "edge-1",
+              from: "x",
+              to: "a",
+              inherited: true,
+              props: { on: "base-a" },
+              baseProps: { on: "base-a" },
+              branchId: BRANCH_A,
+            }),
+            stagedEdge({
+              id: "edge-2",
+              from: "x",
+              to: "b",
+              inherited: true,
+              props: { note: "from-edge-2" },
+              baseProps: { note: "from-edge-2" },
+              branchId: second,
+            }),
+            stagedEdge({
+              id: "edge-3",
+              from: "x",
+              to: "c",
+              inherited: true,
+              props: { note: "from-edge-3" },
+              baseProps: { note: "from-edge-3" },
+              branchId: third,
+            }),
+          ],
+          collapse,
+          new Set<MergeKey>(),
+          "lastWriteWins",
+          rankABC(),
+        );
+
+        expect(requireDefined(result.edges[0]).props).toEqual({
+          on: "base-a",
+          note: "from-edge-2",
+        });
+        expect(result.conflicts).toEqual([]);
+      });
+    },
+  );
 });
 
 describe("repointEdges dedupe-key delimiter safety (F13)", () => {
