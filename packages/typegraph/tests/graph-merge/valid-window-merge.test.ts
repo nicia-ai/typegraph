@@ -64,6 +64,7 @@ import { asBranchId } from "../../src/graph-merge/types";
 import { WINDOW_NOT_APPLICABLE_DROP_REASON } from "../../src/graph-merge/valid-window";
 import { canonicalizeDatabaseTimestamp } from "../../src/utils/date";
 import { requireDefined } from "../../src/utils/presence";
+import { withZonedValidityWindowText } from "../test-utils";
 import { backendMatrix, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -828,6 +829,113 @@ describe.each(backendMatrix())(
         // The ending was branch A's only act, so it contributed nothing at all.
         expect(report.provenance.byBranch(BRANCH_A).nodeIds).toEqual([]);
       });
+    });
+
+    /**
+     * A backend that counts `updateEdge` calls, through transactions too. Edges
+     * carry no version counter, so a merge that must write NOTHING can only be
+     * pinned by the write count itself — `updated_at` collides within a
+     * millisecond, which is exactly the resolution a repeated merge runs at.
+     */
+    function withEdgeUpdateCounting(
+      base: GraphBackend,
+    ): Readonly<{ backend: GraphBackend; updates: () => number }> {
+      let updates = 0;
+      function counting(
+        target: Pick<GraphBackend, "updateEdge">,
+      ): GraphBackend["updateEdge"] {
+        return (params) => {
+          updates += 1;
+          return target.updateEdge(params);
+        };
+      }
+      return {
+        backend: {
+          ...base,
+          updateEdge: counting(base),
+          transaction: (fn, options) =>
+            base.transaction(
+              (txBackend) =>
+                fn({ ...txBackend, updateEdge: counting(txBackend) }),
+              options,
+            ),
+        },
+        updates: () => updates,
+      };
+    }
+
+    /**
+     * The coalesce contract for merge commits, end to end.
+     *
+     * A branch-created edge carries its OWN validity window into the commit, and
+     * the commit writes every survivor through `bulkUpsertById`. So a re-delivered
+     * merge re-states that edge against a target that already holds exactly that
+     * window — the shape an at-least-once merge pipeline produces. If the bulk path
+     * treats the re-statement as a change, an idempotent merge rewrites history and
+     * revision state for every edge it carried.
+     *
+     * `wrapTarget` decides how the target's backend renders the stored window,
+     * which makes this the end-to-end pin for issue #412: comparing an equivalent
+     * instant in a different text form must reach the same decision, or a merge is
+     * a no-op on one driver and a full rewrite on another.
+     */
+    async function assertRedeliveryWritesNothing(
+      wrapTarget: (backend: GraphBackend) => GraphBackend,
+    ): Promise<void> {
+      const forkPoint = await seededForkPoint();
+      const counter = withEdgeUpdateCounting(wrapTarget(await makeBackend()));
+      const [targetStore] = await createStoreWithSchema(
+        careGraph,
+        counter.backend,
+        { coalesceUnchangedUpserts: true },
+      );
+      const target = await seed(targetStore);
+
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      await branchA.store.nodes.Patient.update(PATIENT, { note: "seen" });
+      await branchA.store.edges.hadEncounter.create(
+        { kind: "Patient", id: "pat-2" },
+        { kind: "Encounter", id: "enc-1" },
+        { on: "2026-03-03" },
+        { id: "edge-authored", validTo: LATE },
+      );
+
+      async function deliver(): Promise<void> {
+        unwrap(
+          await mergeIncremental<CareGraph>({
+            forkPoint,
+            target,
+            branches: [branchA],
+            options: { branchOrder: BRANCH_ORDER },
+          }),
+        );
+      }
+
+      await deliver();
+      const nodeAfterFirst = await nodeRow(target, "Patient", "pat-1");
+      const updatesAfterFirst = counter.updates();
+      expect(await edgeEnd(target, "edge-authored")).toBe(LATE);
+
+      await deliver();
+
+      // Nothing changed between the two deliveries, so the second is not a write
+      // at all: no edge update, no node version bump, and the authored window
+      // still stands.
+      expect(counter.updates()).toBe(updatesAfterFirst);
+      const nodeAfterSecond = await nodeRow(target, "Patient", "pat-1");
+      expect(nodeAfterSecond.version).toBe(nodeAfterFirst.version);
+      expect(nodeAfterSecond.updated_at).toBe(nodeAfterFirst.updated_at);
+      expect(await edgeEnd(target, "edge-authored")).toBe(LATE);
+    }
+
+    it("re-delivering an already-merged branch writes nothing at all", async () => {
+      await assertRedeliveryWritesNothing((backend) => backend);
+    });
+
+    it("re-delivers as a no-op when the driver renders the window as a zoned string", async () => {
+      await assertRedeliveryWritesNothing((backend) =>
+        withZonedValidityWindowText(backend),
+      );
     });
 
     it("does not rewrite an unchanged row when nothing changed at all", async () => {
