@@ -102,7 +102,12 @@ import {
 } from "../capabilities/declarations";
 import { scopeAtomicBatchToSession } from "../capabilities/execution";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
-import { markFirstPartyFactory } from "../capabilities/write-fence";
+import {
+  markFirstPartyFactory,
+  requireWriteFence,
+  resolveWriteFencePlan,
+  type WriteFenceTarget,
+} from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -1148,9 +1153,20 @@ export function createPostgresBackend(
     return tableExistsFromRow(rows[0]);
   }
 
+  // ONE fence target for the whole factory, shared by the contribution
+  // materializer's two lock sites and by the schema fence's two below, so
+  // every lock this backend can take resolves the SAME plan. Marked
+  // first-party because both are, and because `capabilities` here is the
+  // object the factory assembled — a caller who blanked `pessimisticLocks`
+  // out of it must still resolve the dialect-derived plan, not `unfenced`.
+  const fenceTarget: WriteFenceTarget = markFirstPartyFactory({
+    dialect: "postgres",
+    capabilities,
+  });
+
   const contributionMaterializer = createContributionMaterializer({
     dialect: "postgres",
-    fenceTarget: markFirstPartyFactory({ dialect: "postgres", capabilities }),
+    fenceTarget,
     fulltextStrategy,
     fulltextTableName: tables.fulltextTableName,
     vectorStrategy,
@@ -1195,15 +1211,103 @@ export function createPostgresBackend(
     contributionMaterializer,
     iterativeScanProbe,
     schemaVersionsTable: tables.schemaVersions,
+    fenceTarget,
     transactionScoped: false,
   });
 
   /**
-   * Runs `fn` inside a Postgres transaction, holding an
-   * `pg_advisory_xact_lock` keyed on the graph id. The advisory lock
-   * serializes all schema commits per-graph: the read-then-write CAS in
-   * `commitSchemaVersion` is safe even for the initial-commit case
-   * where there is no row yet to `SELECT ... FOR UPDATE`.
+   * The per-graph schema-commit fence.
+   *
+   * Resolves a {@link resolveWriteFencePlan} rather than emitting the lock
+   * unconditionally, so the decision has the same one owner every other lock
+   * site reads — and then REFUSES, like every other fence that guards a
+   * read-then-write spanning statements, rather than degrading.
+   *
+   * It fences a read-then-write sequence that spans STATEMENTS, not a
+   * predicate carried inside one. `commitSchemaVersion` reads the row for the
+   * incoming version, reads the active version, and only then runs the
+   * `deactivateAll` / `activateVersion` pair — and its own comment names this
+   * fence as what serializes that ("BEGIN IMMEDIATE on SQLite,
+   * pg_advisory_xact_lock on Postgres"). Skipping the lock does not leave a
+   * slower-but-correct path, it leaves a check-then-write window in which a
+   * concurrent commit lands between the read and the flip. The partial unique
+   * index on `(graph_id) WHERE is_active` still refuses a SECOND active row,
+   * but it cannot order two commits that each read a version the other is
+   * about to replace.
+   *
+   * `engine-serialized` is the exception `requireWriteFence` already encodes:
+   * the writer slot IS the fence, so there is no concurrent commit to order.
+   *
+   * The row-locking clause rides the `lock` arm rather than a fact of its
+   * own: it is never taken without the advisory lock above it, so no shipped
+   * or plausible engine distinguishes them. An engine that implements
+   * `pg_advisory_xact_lock` but not `FOR UPDATE` is where a `rowLocks`
+   * member of `PessimisticLockCapabilities` would earn its place.
+   */
+  async function acquireSchemaWriteFence(
+    tx: AnyPgTransaction,
+    graphId: string,
+  ): Promise<void> {
+    const plan = requireWriteFence(
+      resolveWriteFencePlan(fenceTarget),
+      "The PostgreSQL schema-commit fence",
+      "advisory-lock",
+    );
+    switch (plan.kind) {
+      case "lock": {
+        // Advisory lock: hashtext($graphId) is collision-tolerant for the
+        // size of an active graph set; collisions just serialize unrelated
+        // graphs which is harmless. Held until the transaction commits.
+        //
+        // The ONE-ARGUMENT (bigint) form is deliberate and load-bearing: it
+        // occupies a different lock space than the two-argument (int4, int4)
+        // form every namespaced TypeGraph lock uses (`typegraph:identity`,
+        // `typegraph:identity-ddl`, the recorded-write clock). PostgreSQL
+        // stores the two forms with different locktag field4 values, so a
+        // bigint key can never collide with an (int4, int4) key however the
+        // hashes land — the schema fence is therefore independent of every
+        // lock taken INSIDE it. Normalizing this to the two-argument form
+        // would merge the spaces and put that independence at the mercy of
+        // `hashtext` collisions.
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
+        );
+        // Managed entity writers lock this row FOR SHARE. Locking it FOR
+        // UPDATE before any emptiness probe makes a writer-first commit
+        // wait; a schema-first snapshot-isolated writer gets PostgreSQL's
+        // native serialization failure instead of validating a stale row
+        // version.
+        await tx.execute(sql`
+          SELECT ${tables.schemaVersions.version}
+          FROM ${tables.schemaVersions}
+          WHERE ${tables.schemaVersions.graphId} = ${graphId}
+            AND ${tables.schemaVersions.isActive} = TRUE
+          FOR UPDATE
+        `);
+        return;
+      }
+      case "engine-serialized": {
+        // The writer slot IS the fence; the commit already runs alone, which
+        // is the guarantee `commitSchemaVersion`'s own comment names
+        // ("BEGIN IMMEDIATE on SQLite"). Nothing to take.
+        return;
+      }
+      default: {
+        plan satisfies never;
+      }
+    }
+  }
+
+  /**
+   * Runs `fn` inside a Postgres transaction, under whatever fence
+   * {@link acquireSchemaWriteFence} resolves. On a `lock` backend that is an
+   * `pg_advisory_xact_lock` keyed on the graph id, which serializes all
+   * schema commits per-graph: the read-then-write CAS in
+   * `commitSchemaVersion` is safe even for the initial-commit case where
+   * there is no row yet to `SELECT ... FOR UPDATE`. On an `unfenced` one
+   * that initial-commit case falls back to the storage layer — the partial
+   * unique index on `(graph_id) WHERE is_active` fails the loser of a
+   * concurrent first commit rather than admitting two active rows.
    *
    * Refuses on backends that don't support transactions
    * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
@@ -1229,32 +1333,8 @@ export function createPostgresBackend(
     }
 
     return db.transaction(async (tx) => {
-      // Advisory lock: hashtext($graphId) is collision-tolerant for the
-      // size of an active graph set; collisions just serialize unrelated
-      // graphs which is harmless. Held until the transaction commits.
-      //
-      // The ONE-ARGUMENT (bigint) form is deliberate and load-bearing: it
-      // occupies a different lock space than the two-argument (int4, int4)
-      // form every namespaced TypeGraph lock uses (`typegraph:identity`,
-      // `typegraph:identity-ddl`, the recorded-write clock). PostgreSQL stores
-      // the two forms with different locktag field4 values, so a bigint key can
-      // never collide with an (int4, int4) key however the hashes land — the
-      // schema fence is therefore independent of every lock taken INSIDE it.
-      // Normalizing this to the two-argument form would merge the spaces and
-      // put that independence at the mercy of `hashtext` collisions.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
-      // Managed entity writers lock this row FOR SHARE. Locking it FOR UPDATE
-      // before any emptiness probe makes a writer-first commit wait; a
-      // schema-first snapshot-isolated writer gets PostgreSQL's native
-      // serialization failure instead of validating a stale row version.
-      await tx.execute(sql`
-        SELECT ${tables.schemaVersions.version}
-        FROM ${tables.schemaVersions}
-        WHERE ${tables.schemaVersions.graphId} = ${graphId}
-          AND ${tables.schemaVersions.isActive} = TRUE
-        FOR UPDATE
-      `);
-      // Advisory lock is held here, so the schema-write-capable
+      await acquireSchemaWriteFence(tx, graphId);
+      // The fence resolved above is held here, so the schema-write-capable
       // InternalOperationBackend is used intentionally (see its type).
       const { backend: txBackend, drainAndClose } = createTransactionBackend({
         db: tx,
@@ -1267,6 +1347,7 @@ export function createPostgresBackend(
         contributionMaterializer,
         iterativeScanProbe,
         schemaVersionsTable: tables.schemaVersions,
+        fenceTarget,
       });
       try {
         return await fn(txBackend);
@@ -1295,6 +1376,7 @@ export function createPostgresBackend(
       contributionMaterializer,
       iterativeScanProbe,
       schemaVersionsTable: tables.schemaVersions,
+      fenceTarget,
     });
     const gatedBackend = carryAtomicMutationSessionRegistration(
       backend,
@@ -2422,6 +2504,13 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    */
   iterativeScanProbe: IterativeScanProbe;
   schemaVersionsTable: PostgresTables["schemaVersions"];
+  /**
+   * The factory's shared write-fence target. `lockSchemaVersionForWrite`
+   * resolves its plan instead of taking `FOR SHARE` unconditionally,
+   * so a managed write and the schema commit it fences against read the
+   * same decision.
+   */
+  fenceTarget: WriteFenceTarget;
   /** Whether this operation backend is bound to an explicit transaction. */
   transactionScoped: boolean;
 }>;
@@ -2440,6 +2529,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   /** Shared iterative-scan probe. See {@link CreatePostgresOperationBackendOptions}. */
   iterativeScanProbe: IterativeScanProbe;
   schemaVersionsTable: PostgresTables["schemaVersions"];
+  /** Shared write-fence target. See {@link CreatePostgresOperationBackendOptions}. */
+  fenceTarget: WriteFenceTarget;
 }>;
 
 function createPostgresOperationBackend(
@@ -2458,6 +2549,7 @@ function createPostgresOperationBackend(
     contributionMaterializer,
     iterativeScanProbe,
     schemaVersionsTable,
+    fenceTarget,
     transactionScoped,
   } = options;
   // Route through the execution adapter so driver-specific result shapes
@@ -2650,6 +2742,46 @@ function createPostgresOperationBackend(
     capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
   );
 
+  /**
+   * The third consumer of the schema fence's `FOR SHARE`, and the
+   * writer-side half that managed entity inserts carry INSIDE their own
+   * statement rather than taking beforehand.
+   *
+   * `buildInsertNodeWithSchemaFence` (and its edge and projection siblings)
+   * fold the fence into the INSERT as a subquery that both ASSERTS the
+   * expected active version and locks the row it matched. Only the lock
+   * needs the engine's cooperation: with an empty clause the subquery still
+   * yields no row when the expected version is no longer active, so the
+   * INSERT still writes nothing — which is exactly the posture SQLite has
+   * always run in, where this clause is `sql.raw("")`.
+   *
+   * So it resolves the SAME {@link resolveWriteFencePlan} the two fences
+   * above do — one `FOR UPDATE`/`FOR SHARE` contract, one decision, three
+   * consumers — but it is the ONE that may degrade, and the reason is
+   * structural: those two fence sequences that span statements, where
+   * dropping the lock opens a check-then-write window, while this predicate
+   * is evaluated INSIDE the INSERT that depends on it. One statement cannot
+   * race itself. With an
+   * empty clause the subquery still yields no row when the expected version
+   * is no longer active, so the INSERT still writes nothing — which is why
+   * SQLite has always run this path with `sql.raw("")`.
+   *
+   * It reads the plan directly rather than calling `requireWriteFence`
+   * because it is a construction-time constant on a backend that may never
+   * open a schema-managed store at all; the refusal an `unfenced` backend
+   * earns is owed by the two fences above, at the moment such a store is
+   * actually built.
+   *
+   * `sql.raw("")` and not `undefined`: `undefined` means "this backend has
+   * no schema-fenced insert program at all", which sends the Store down the
+   * unfused fallback path. The fused program is still correct here; it is
+   * the lock inside it that is not available.
+   */
+  const schemaFenceInsertLockClause = ((): SQL => {
+    const plan = resolveWriteFencePlan(fenceTarget);
+    return plan.kind === "lock" ? sql.raw("FOR SHARE") : sql.raw("");
+  })();
+
   const commonOperationMembers = createCommonOperationBackend({
     batchConfig,
     commandSession: transactionScoped ? "transaction" : "root",
@@ -2672,7 +2804,7 @@ function createPostgresOperationBackend(
       toSchemaVersionRow,
       toUniqueRow,
     },
-    schemaFenceLockClause: sql.raw("FOR SHARE"),
+    schemaFenceLockClause: schemaFenceInsertLockClause,
     async resolveAtomicNodeProjectionEvidence(creates, updates) {
       const requirements = resolveAtomicNodeProjectionRequirements(
         creates,
@@ -3013,20 +3145,45 @@ function createPostgresOperationBackend(
       };
 
   /**
-   * Takes the transaction-scoped share lock on the graph's active schema row,
+   * The managed writer's side of the schema fence: takes the
+   * transaction-scoped share lock on the graph's active schema row,
    * returning the version it locked — or `undefined` when the statement found
    * no active row to lock, which at `read committed` does not by itself mean the
    * graph has no active version — see the fence that calls this.
+   *
+   * Resolves the SAME {@link resolveWriteFencePlan} the schema-commit fence
+   * does, and refuses
+   * with it: the two halves of one `FOR UPDATE`/`FOR SHARE` contract must
+   * never disagree about whether the engine honors row locks.
+   *
+   * The `FOR SHARE` is not merely a WAIT. This transaction HOLDS it for its
+   * remainder, which is what makes the version it just asserted binding
+   * through to the writes that follow — a concurrent schema commit's
+   * `FOR UPDATE` blocks on it and cannot deactivate the row underneath
+   * an in-flight write. Reading the version without the lock would still
+   * ASSERT it, and then let the very flip the assertion was checking for
+   * land before the write. That is a check-then-write race, not a degraded
+   * fence, so `unfenced` is refused here.
+   *
+   * `engine-serialized` skips the clause instead, and correctly: SQLite's
+   * `lockSchemaVersionForWrite` already runs exactly this way, on the
+   * strength of the writer slot no concurrent commit can hold.
    */
   async function lockActiveSchemaVersion(
     graphId: string,
   ): Promise<number | undefined> {
+    const plan = requireWriteFence(
+      resolveWriteFencePlan(fenceTarget),
+      "The PostgreSQL schema write fence",
+      "advisory-lock",
+    );
+    const shareLock = plan.kind === "lock" ? sql`FOR SHARE` : sql``;
     const active = await execGet<{ version: number }>(sql`
       SELECT ${schemaVersionsTable.version} AS version
       FROM ${schemaVersionsTable}
       WHERE ${schemaVersionsTable.graphId} = ${graphId}
         AND ${schemaVersionsTable.isActive} = TRUE
-      FOR SHARE
+      ${shareLock}
     `);
     return active?.version;
   }
@@ -3405,6 +3562,7 @@ function createTransactionBackend(
       // rather than a fresh one per transaction.
       iterativeScanProbe: options.iterativeScanProbe,
       schemaVersionsTable: options.schemaVersionsTable,
+      fenceTarget: options.fenceTarget,
       transactionScoped: true,
     }),
   );

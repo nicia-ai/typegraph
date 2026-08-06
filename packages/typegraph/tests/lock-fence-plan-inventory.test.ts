@@ -4,11 +4,21 @@
  * Two ratchets, both comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **11** call sites — the 8 lock
+ *  1. `resolveWriteFencePlan` has exactly **14** call sites — the 8 lock
  *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
- *     ownership, J9b identity), and the adopted-transaction writer-slot
- *     proof (J9c) — enumerated in both directions, keyed on
- *     `(file, trimmed line)` so line drift cannot rot the pin.
+ *     ownership, J9b identity), the adopted-transaction writer-slot proof
+ *     (J9c), and the 3 consumers of the PostgreSQL schema fence (J14
+ *     commit-side, J15 writer-side, J16 the writer-side clause folded into
+ *     the fused managed-insert programs) — enumerated in both directions,
+ *     keyed on `(file, trimmed line)` so line drift cannot rot the pin.
+ *
+ *     J14 and J15 REFUSE like J1-J8: both fence a read-then-write sequence
+ *     that spans statements, so the lock is what makes the check binding
+ *     through to the write, and skipping it would leave a check-then-write
+ *     race rather than a slower but correct path. J16 is the ONLY degrading
+ *     site, because its predicate lives INSIDE the insert statement: one
+ *     statement cannot race itself, so an empty clause is correct at any
+ *     isolation level — which is the posture SQLite has always run in.
  *  2. Zero dialect-literal comparisons (`dialect (!==|===) "postgres"/
  *     "sqlite"`, in a `BinaryExpression` or a `SwitchStatement` discriminant)
  *     remain in the eight lock sites' five files. The same scan run over the
@@ -22,8 +32,8 @@
  * *Mutation*: re-inline a dialect check at any lock site → fails naming the
  * file (both the "no resolveWriteFencePlan call added" half and the
  * "dialect literal reappeared" half catch this, from different angles).
- * *Mutation*: pin the `resolveWriteFencePlan` count at 8 (round 1's number,
- * before J9a/J9b were recognized as call sites) → fails.
+ * *Mutation*: pin the `resolveWriteFencePlan` count at 10 (the number before
+ * the Postgres schema fence's three consumers joined the model) → fails.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -131,6 +141,27 @@ const CALL_SITES: readonly InventoryEntry[] = [
     site: "J9c",
     reason:
       "An adopted engine-serialized transaction proves its writer slot before any constrained-write read.",
+  },
+  {
+    file: "backend/drizzle/postgres.ts",
+    line: "resolveWriteFencePlan(fenceTarget),",
+    site: "J14",
+    reason:
+      "acquireSchemaWriteFence resolves the plan for the per-graph schema-commit advisory lock and its FOR UPDATE. Refuses an unfenced backend: commitSchemaVersion reads the active version and writes the flip in separate statements, and says so in its own comment.",
+  },
+  {
+    file: "backend/drizzle/postgres.ts",
+    line: "resolveWriteFencePlan(fenceTarget),",
+    site: "J15",
+    reason:
+      "lockActiveSchemaVersion resolves the plan for the managed writer's FOR SHARE on the active schema row — J14's other half, so the two must resolve one decision. Refuses an unfenced backend: the transaction HOLDS this lock across the writes it fences.",
+  },
+  {
+    file: "backend/drizzle/postgres.ts",
+    line: "const plan = resolveWriteFencePlan(fenceTarget);",
+    site: "J16",
+    reason:
+      "schemaFenceInsertLockClause resolves the plan for the FOR SHARE the fused managed-insert programs carry INSIDE their own statement. The ONLY degrading site: an in-statement predicate cannot race itself, so an empty clause stays correct.",
   },
 ];
 
@@ -387,13 +418,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 11 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 14 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 11 declared call sites, both directions", () => {
-    expect(found).toHaveLength(11);
-    expect(CALL_SITES).toHaveLength(11);
+  it("has exactly the 14 declared call sites, both directions", () => {
+    expect(found).toHaveLength(14);
+    expect(CALL_SITES).toHaveLength(14);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

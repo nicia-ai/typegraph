@@ -1331,8 +1331,9 @@ declaration turns into a plan every lock site consumes instead of re-deriving:
   (and, where needed, table) lock.
 - `{ kind: "engine-serialized" }` — no lock needed; the engine serializes writers by
   construction (SQLite's single writer slot).
-- `{ kind: "unfenced" }` — neither. Every non-degradable fence refuses rather than running
-  unfenced.
+- `{ kind: "unfenced" }` — neither. Every fence that guards a read-then-write across statements
+  refuses rather than running unfenced. Only a predicate carried *inside* the statement it
+  guards degrades, since one statement cannot race itself.
 
 Resolution order: (1) the declared `pessimisticLocks` value, if present; (2) absent AND the
 backend was built by `createSqliteBackend` / `createPostgresBackend` — derived from `dialect`,
@@ -1361,6 +1362,44 @@ A declared-advisory-only backend (`tableLocks: false`) that reaches a site whose
 `requires: "table-lock"` is refused with details code `WRITE_FENCE_UNAVAILABLE`, naming
 `details.operation` and `details.requires` — the lock plan resolved, but it cannot satisfy what
 this specific operation needs.
+
+The PostgreSQL schema fence refuses too, and it is worth knowing why it is not on the
+degradable side. The per-graph advisory lock plus `SELECT ... FOR UPDATE` a schema commit takes,
+and the `FOR SHARE` a managed write takes on that same row, each fence a read-then-write sequence
+that spans **statements**: `commitSchemaVersion` reads the active version and then writes the
+flip, and a managed write holds its `FOR SHARE` for the remainder of the transaction so the
+version it asserted stays true through the writes that follow. Skipping those locks would not
+give a slower-but-correct path; it would assert a version and then let the very change the
+assertion was checking for land before the write. So a PostgreSQL-dialect backend that resolves
+`unfenced` is refused at the schema commit with `WRITE_FENCE_UNAVAILABLE`, naming the operation.
+
+The one part that *does* degrade is the fence folded into a managed insert's own statement. That
+predicate is evaluated inside the INSERT that depends on it, and one statement cannot race
+itself: with no locking clause the fence subquery still yields no row when the expected version
+is no longer active, so the INSERT still writes nothing. This is how SQLite has always run the
+path, on the strength of its writer slot.
+
+This matters for **DoltgreSQL**, which speaks the PostgreSQL wire protocol but implements neither
+`pg_advisory_xact_lock` nor the `FOR UPDATE` / `FOR SHARE` clauses
+([doltgresql#2600](https://github.com/dolthub/doltgresql/issues/2600)), and whose engine merges
+concurrent transactions rather than serializing them — so all three facts are false:
+
+```typescript
+const backend = createPostgresBackend(db, {
+  capabilities: {
+    pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: false },
+  },
+});
+```
+
+Declared that way, the backend is honest about what it can do — and TypeGraph is honest back: a
+schema-managed store is refused at construction, naming the missing capability, rather than
+running a fence the engine cannot enforce.
+
+Do not reach for `serializedWriters: true` because a deployment clamps its pool to one
+connection. That field means the engine serializes writers *by construction*; a deployment
+convention is not a construction, and declaring it would silently re-enable the fences that
+depend on it. (`createPostgresBackend` refuses that particular claim outright for this reason.)
 
 ### Recorded-time ownership (recordedTimeOwnership)
 
