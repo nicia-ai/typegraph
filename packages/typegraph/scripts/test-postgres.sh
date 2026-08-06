@@ -72,8 +72,10 @@ vitest_args+=(
   tests/search-liveness.test.ts
   tests/similar-to-approximate.test.ts
   tests/vector-cross-backend-parity.test.ts
-  # Self-skips unless TYPEGRAPH_PERF=1, so it costs the lane nothing by
-  # default; listed so its Postgres leg has a lane when perf runs are enabled.
+  # Self-skip unless TYPEGRAPH_PERF=1, so they cost the lane nothing by
+  # default; listed so their Postgres legs have a lane when perf runs are
+  # enabled.
+  tests/perf/identity-current-traversal-scaling.test.ts
   tests/perf/identity-historical-traversal-scaling.test.ts
 )
 

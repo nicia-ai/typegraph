@@ -228,27 +228,40 @@ traversal supports the same option.
 TypeGraph does not perform automatic graph-wide expansion and collection reads
 such as `getById` have no identity option.
 
-The two coordinates reach membership differently, and they cost differently.
+Both coordinates reach membership the same way — a single materialized relation
+of `(seed, member)` pairs, evaluated once per statement, which each traversal
+step joins so the candidate edge is reached by an ordinary indexed equality.
+What differs is where that relation's rows come from, and what building it
+costs.
 
-At the current coordinate the hop reads the materialized closure through its
-indexes, but it does so from inside a correlated predicate, so the edge join
-stays correlated too. On broad edge kinds the planner may scan matching edges
-per source row; keep current-coordinate expanded traversals narrowly filtered
-until the de-correlation tracked in
-[typegraph#270](https://github.com/nicia-ai/typegraph/issues/270) lands.
+At the **current** coordinate they come from the materialized closure, joined to
+itself on the class label and filtered to members visible now. There is nothing
+to reconstruct, so the relation costs one pass over the closure. Measured on
+SQLite with *n* Person nodes, each folded with a Company and an Alias peer
+sharing its id (a three-member class per source), all *n* acting as source rows
+and every edge leaving the Company peer:
+
+| source rows | fan-out | matching edges | before | after |
+| --- | --- | --- | --- | --- |
+| 250 | 1 | 250 | 67 ms | 6 ms |
+| 1000 | 1 | 1000 | 1077 ms | 9 ms |
+| 2000 | 1 | 2000 | 4616 ms | 19 ms |
+| 1000 | 8 | 8000 | 8611 ms | 13 ms |
+| 500 | 200 | 100,000 | 51,602 ms | 77 ms |
+
+Growth is linear in graph size where it used to quadruple per doubling: the hop
+no longer evaluates membership per candidate *(source row, edge)* pair. The
+number to plan around is the last row — a hundred thousand matching edges over a
+five-hundred-row frontier is where the old per-source rescan dominated.
 
 A **historical** hop — one under `asOf`, `asOfRecorded`, or a non-current
 `view()` — cannot use the materialized closure, because the closure represents
-only the present. It rebuilds identity classes from the assertion ledger, and
-under `sameIdAcrossKinds: "fold"` that rebuild also has to consider the
-structural same-id relation, which is proportional to the number of live nodes
-in the graph. That rebuild is now hoisted to a single materialized relation
-evaluated **once per query** — keyed by the nodes that have identity peers at
-all, not by the frontier — which each traversal step joins. The cost is
-therefore one reconstruction plus an ordinary indexed edge join per expanded
-member, rather than a reconstruction per candidate *(source row, edge)* pair.
-Measured on the narrow-edge fixture that isolates the term (SQLite, *n* Person
-nodes each folded with a Company peer, all *n* acting as source rows, fan-out 1):
+only the present. Its rows come from a reconstruction of identity classes out of
+the assertion ledger, and under `sameIdAcrossKinds: "fold"` that reconstruction
+also has to consider the structural same-id relation, which is proportional to
+the number of live nodes in the graph. Measured on the narrow-edge fixture that
+isolates the term (SQLite, *n* Person nodes each folded with a Company peer, all
+*n* acting as source rows, fan-out 1):
 
 | *n* | before | after |
 | --- | --- | --- |
@@ -257,18 +270,17 @@ nodes each folded with a Company peer, all *n* acting as source rows, fan-out 1)
 | 1000 | 1984 ms | 14 ms |
 | 2000 | 8261 ms | 28 ms |
 
-Growth is linear in graph size where it used to quadruple per doubling. Because
-the step now joins the class relation instead of testing membership per
-candidate row, a historical hop no longer pays the correlated candidate-edge
-scan either — that residual cost applies to the current coordinate only, and
-remains #270's subject.
+Growth is linear in graph size where it used to quadruple per doubling.
 
-One caveat is worth planning around: the hoisted relation is built for the whole
-graph at that coordinate, so a historical expanded traversal from a handful of
-nodes still pays for one reconstruction over the identity ledger and the
-folded-id population. It is cheap in absolute terms on small and mid-sized
-graphs and no longer grows with the number of source rows, but it is not
-proportional to how little you asked for.
+One caveat applies to both coordinates and is worth planning around: the relation
+is built for the whole graph, so an expanded traversal from a handful of nodes
+still pays one pass over the identity population rather than a cost proportional
+to how little you asked for. What a narrow-frontier hop used to pay instead was a
+pass over the candidate edges, so which is cheaper depends on the graph — on
+SQLite a single-start-row hop over 50,000 folded triples measures 208 ms against
+77 ms before, while PostgreSQL improves on the same shape (223 ms against
+310 ms). Both are linear in graph size; neither grows with the number of source
+rows.
 
 ## Interchange and branch merge
 

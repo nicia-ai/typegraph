@@ -31,6 +31,7 @@ import {
   registerCoalesceUpsertIntegrationTests,
   registerContributionDiagnosticIntegrationTests,
   registerCrossBackendConsistencyTests,
+  registerCurrentIdentityTraversalTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
@@ -201,6 +202,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerIdentityIntegrationTests(context);
     registerIdentityImportIntegrationTests(context);
     registerHistoricalIdentityTraversalTests(context);
+    registerCurrentIdentityTraversalTests(context);
     registerIdentitySeparationIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);

@@ -58,9 +58,18 @@ function templateHasReadInstant(template: CompiledTemplate): boolean {
  * True when a query's compiled SQL must bind a fresh "current" instant per
  * execution — i.e. it reads valid-time "current" and is not pinned to a
  * recorded instant (a recorded pin replaces the wall clock with a fixed
- * instant). `asOf`, `includeEnded`, and `includeTombstones` reads bind no
- * read instant at all, so their compiled statement is stable and cacheable
- * verbatim.
+ * instant).
+ *
+ * This is the *guard's* question, not "does the statement contain a read
+ * instant". An `includeEnded` or `includeTombstones` read drops node validity,
+ * but if it expands identity its class relation still binds the wall clock for
+ * the assertion window — so such a statement can carry a read instant while
+ * this returns false. That is safe rather than stale: placeholder-mode
+ * compilation templatizes every read-instant emission through the one
+ * placeholder seam, and {@link fillTemplateParams} fills a fresh value on each
+ * execution whether or not the guard demanded one. `false` only relaxes the
+ * "the placeholder MUST be present" check, which exists to refuse caching a
+ * statement that froze "now" into a literal.
  */
 function queryAstNeedsCurrentReadInstant(ast: QueryAst): boolean {
   return ast.temporalMode.mode === "current" && ast.recordedAsOf === undefined;
