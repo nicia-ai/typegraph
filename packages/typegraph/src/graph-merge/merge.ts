@@ -109,6 +109,7 @@ import {
 import type { NormalizedMergeOptions } from "./options";
 import { normalizeMergeOptions } from "./options";
 import {
+  contributionKey,
   openProvenanceStore,
   persistProvenanceRecords,
   provenanceGraphId,
@@ -834,6 +835,18 @@ function planMerge<G extends GraphDef>(
 ): MergePlan<G> {
   const identity = planIdentityChanges(staging, storedIdentityRowsById);
   const provenanceRecords: ProvenanceRecord[] = [];
+  // The contributions already recorded, keyed by `contributionKey` — the sidecar
+  // row's own identity, so a repeat is the same row written twice and never new
+  // information. Several phases legitimately observe the SAME contribution: an
+  // inherited edge is credited once when its modification survives delete/modify
+  // and again when the repoint folds it, and a fold set's `mergedIds` lists one
+  // entry per staged COPY, so a row staged by several branches re-offers each of
+  // its branches once per copy. Repeats inflate `provenancePersisted.count` and,
+  // because `bulkUpsertById` cannot create the same id twice in one batch, fail the
+  // whole best-effort persist. Collapsing at this single funnel keeps the record
+  // list, the in-memory index and the reported count all speaking about DISTINCT
+  // contributions.
+  const recordedContributions = new Set<string>();
   // Per-branch trust weights for the `"provenanceWeighted"` policy, or empty when
   // the caller supplied none (then the policy falls back to the stable branch order).
   const weights = options.provenanceWeights ?? EMPTY_WEIGHTS;
@@ -849,13 +862,19 @@ function planMerge<G extends GraphDef>(
     if (branchId === preferredBranchId) {
       return;
     }
-    provenanceRecords.push({
+    const record: ProvenanceRecord = {
       role,
       canonicalId,
       canonicalKind,
       branchId,
       sourceId,
-    });
+    };
+    const key = contributionKey(record);
+    if (recordedContributions.has(key)) {
+      return;
+    }
+    recordedContributions.add(key);
+    provenanceRecords.push(record);
   };
 
   // (4) cluster over every staged new-node id + every base member id (so a forced

@@ -10,7 +10,18 @@
  *      (with the original fork-local `sourceId`s);
  *   3. edges are tagged too (`role: "edge"`);
  *   4. re-persisting is idempotent (deterministic ids → upsert, no duplicates);
- *   5. it is OFF by default (no `provenancePersisted`, no rows).
+ *   5. it is OFF by default (no `provenancePersisted`, no rows);
+ *   6. a contribution the pipeline observes SEVERAL times (an edge id staged by two
+ *      branches, an inherited edge modification seen by both delete/modify and the
+ *      repoint fold — with two contributing branches or just one) is persisted and
+ *      counted ONCE per distinct `(role, canonical, branch, source)` — while every
+ *      genuinely distinct contributing branch is still credited;
+ *   7. `persistProvenanceRecords` collapses hash-identical records for callers that
+ *      reach it without going through a merge.
+ *
+ * A final backend-independent block pins the row identity itself: the literal id a
+ * contribution hashes to, and that no identifying field is missing from the key
+ * every collapse is keyed on.
  */
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
@@ -22,12 +33,16 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { asEdgeId } from "../../src/core/types";
 import { branch } from "../../src/graph-merge/branch";
 import { merge } from "../../src/graph-merge/merge";
+import type { ProvenanceNode } from "../../src/graph-merge/provenance-store";
 import {
+  contributionKey,
   openProvenanceStore,
   persistProvenanceRecords,
   provenanceGraphId,
+  provenanceNodeId,
 } from "../../src/graph-merge/provenance-store";
 import { isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
@@ -58,6 +73,46 @@ type CareGraph = typeof careGraph;
 
 const BRANCH_A = asBranchId("provider-a");
 const BRANCH_B = asBranchId("provider-b");
+
+/** Committed endpoints both branches fork with, so their edges share an identity. */
+const COMMITTED_PATIENT = "pat-committed";
+const COMMITTED_ENCOUNTER = "enc-committed";
+const COMMITTED_BIRTH_DATE = "1961-11-02";
+const SHARED_EDGE = "edge-shared";
+const SHARED_EDGE_ID = asEdgeId<typeof hadEncounter>(SHARED_EDGE);
+
+/**
+ * The contribution identity a persisted row stands for — the exact tuple
+ * {@link provenanceNodeId} hashes into the row's id. Two rows agreeing on it are
+ * the same contribution, so a duplicate is what an over-count is MADE of.
+ */
+function contributionOf(node: ProvenanceNode): string {
+  return JSON.stringify([
+    node.role,
+    node.canonicalKind,
+    node.canonicalId,
+    node.branchId,
+    node.sourceId,
+  ]);
+}
+
+/** Edge contributions in a stable, readable order (persisted ids are hashes). */
+function edgeContributions(
+  nodes: readonly ProvenanceNode[],
+): readonly Readonly<{
+  branchId: string;
+  canonicalId: string;
+  sourceId: string;
+}>[] {
+  return nodes
+    .filter((node) => node.role === "edge")
+    .map((node) => ({
+      branchId: node.branchId,
+      canonicalId: node.canonicalId,
+      sourceId: node.sourceId,
+    }))
+    .sort((left, right) => left.branchId.localeCompare(right.branchId));
+}
 
 /** Fulltext name match (no embedder): "Anna Rivera" ~ "Ana Rivera" clears 0.85. */
 function provMergeOptions(persistProvenance: boolean): MergeOptions<CareGraph> {
@@ -147,6 +202,209 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
 
     return { backend, base, branches: [branchA, branchB] };
   }
+
+  /**
+   * A base holding the Patient and Encounter both branches fork with, so every
+   * `hadEncounter` edge they stage lands on the SAME committed endpoints and
+   * therefore in one repoint fold set. With `withEdge` the joining edge is
+   * committed too, so both branches INHERIT it instead of authoring it.
+   */
+  async function materializeSharedEndpoints(
+    withEdge: boolean,
+  ): Promise<Fixture> {
+    const backend = await makeBackend();
+    const [base] = await createStoreWithSchema(careGraph, backend);
+    await base.nodes.Patient.bulkCreate([
+      {
+        id: COMMITTED_PATIENT,
+        props: { name: "Nadia Okonkwo", birthDate: COMMITTED_BIRTH_DATE },
+      },
+    ]);
+    await base.nodes.Encounter.bulkCreate([
+      { id: COMMITTED_ENCOUNTER, props: { reason: "intake" } },
+    ]);
+    if (withEdge) {
+      await base.edges.hadEncounter.bulkCreate([
+        {
+          id: SHARED_EDGE,
+          from: { kind: "Patient", id: COMMITTED_PATIENT },
+          to: { kind: "Encounter", id: COMMITTED_ENCOUNTER },
+          props: { on: "2024-01-01" },
+        },
+      ]);
+    }
+    const branchA = unwrap(
+      await branch<CareGraph>(base, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchB = unwrap(
+      await branch<CareGraph>(base, () => makeBackend(), { id: BRANCH_B }),
+    );
+    return { backend, base, branches: [branchA, branchB] };
+  }
+
+  it("counts an edge id staged by two branches once per branch, not once per staged copy", async () => {
+    cleanups = [];
+    const { base, branches } = await materializeSharedEndpoints(false);
+    const [branchA, branchB] = branches;
+
+    // Both branches author the SAME caller-chosen edge id between the same
+    // committed endpoints, so the fold set holds one member per branch and its
+    // `mergedIds` names that id TWICE. Each member re-offers the id's full branch
+    // set, so the recording loop sees all FOUR (branch, source) pairs though only
+    // two contributions exist.
+    for (const [contributor, on] of [
+      [requireDefined(branchA), "2024-02-01"],
+      [requireDefined(branchB), "2024-02-02"],
+    ] as const) {
+      await contributor.store.edges.hadEncounter.bulkCreate([
+        {
+          id: SHARED_EDGE,
+          from: { kind: "Patient", id: COMMITTED_PATIENT },
+          to: { kind: "Encounter", id: COMMITTED_ENCOUNTER },
+          props: { on },
+        },
+      ]);
+    }
+
+    const report = unwrap(
+      await merge<CareGraph>(base, branches, provMergeOptions(true)),
+    );
+    expect(report.warnings).toEqual([]);
+
+    // Read the sidecar back — the count is only meaningful against the rows that
+    // actually landed, never against the report's own arithmetic.
+    const persisted = await (
+      await openProvenanceStore(base)
+    ).nodes.Provenance.find();
+    expect(new Set(persisted.map((node) => contributionOf(node))).size).toBe(
+      persisted.length,
+    );
+    expect(report.provenancePersisted?.count).toBe(persisted.length);
+
+    // Both branches are still credited: the collapse drops re-observations of one
+    // contribution, never a second contributor.
+    expect(edgeContributions(persisted)).toEqual([
+      {
+        branchId: BRANCH_A,
+        canonicalId: SHARED_EDGE,
+        sourceId: SHARED_EDGE,
+      },
+      {
+        branchId: BRANCH_B,
+        canonicalId: SHARED_EDGE,
+        sourceId: SHARED_EDGE,
+      },
+    ]);
+  });
+
+  it("counts an inherited edge modified by two branches once per branch", async () => {
+    cleanups = [];
+    const { base, branches } = await materializeSharedEndpoints(true);
+    const [branchA, branchB] = branches;
+
+    // An inherited edge modification is observed TWICE: once as a surviving
+    // delete/modify contribution (per branch) and again as the repoint fold's
+    // source (for the branch reconcile kept). The reconcile winner is therefore
+    // offered to the recording loop twice.
+    await requireDefined(branchA).store.edges.hadEncounter.update(
+      SHARED_EDGE_ID,
+      {
+        on: "2024-03-01",
+      },
+    );
+    await requireDefined(branchB).store.edges.hadEncounter.update(
+      SHARED_EDGE_ID,
+      {
+        on: "2024-03-02",
+      },
+    );
+
+    const report = unwrap(
+      await merge<CareGraph>(base, branches, provMergeOptions(true)),
+    );
+    expect(report.warnings).toEqual([]);
+
+    const persisted = await (
+      await openProvenanceStore(base)
+    ).nodes.Provenance.find();
+    expect(new Set(persisted.map((node) => contributionOf(node))).size).toBe(
+      persisted.length,
+    );
+    expect(report.provenancePersisted?.count).toBe(persisted.length);
+    expect(edgeContributions(persisted)).toEqual([
+      {
+        branchId: BRANCH_A,
+        canonicalId: SHARED_EDGE,
+        sourceId: SHARED_EDGE,
+      },
+      {
+        branchId: BRANCH_B,
+        canonicalId: SHARED_EDGE,
+        sourceId: SHARED_EDGE,
+      },
+    ]);
+  });
+
+  it("credits a lone branch's inherited-edge modification once, seen by two phases", async () => {
+    cleanups = [];
+    const { base, branches } = await materializeSharedEndpoints(true);
+    const onlyBranch = requireDefined(branches[0]);
+
+    // The MINIMAL trigger, and the one a single-contributor merge hits in ordinary
+    // use: no second branch is needed for the same contribution to be observed
+    // twice — delete/modify credits the modification, then the repoint fold reads
+    // it as a source. One contribution, so one row and a count of one.
+    await onlyBranch.store.edges.hadEncounter.update(SHARED_EDGE_ID, {
+      on: "2024-04-04",
+    });
+
+    const report = unwrap(
+      await merge<CareGraph>(base, [onlyBranch], provMergeOptions(true)),
+    );
+    expect(report.warnings).toEqual([]);
+
+    const persisted = await (
+      await openProvenanceStore(base)
+    ).nodes.Provenance.find();
+    expect(new Set(persisted.map((node) => contributionOf(node))).size).toBe(
+      persisted.length,
+    );
+    expect(report.provenancePersisted?.count).toBe(persisted.length);
+    expect(edgeContributions(persisted)).toEqual([
+      {
+        branchId: BRANCH_A,
+        canonicalId: SHARED_EDGE,
+        sourceId: SHARED_EDGE,
+      },
+    ]);
+  });
+
+  it("collapses hash-identical records offered to persistProvenanceRecords directly", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    const [base] = await createStoreWithSchema(careGraph, backend);
+    const provStore = await openProvenanceStore(base);
+
+    // The exported helper takes ANY record list, so a caller reaching it without
+    // going through a merge can offer one contribution twice as two objects. They
+    // hash to a single id, and a `bulkUpsertById` batch cannot CREATE the same id
+    // twice — so the helper must collapse them into the one row it reports rather
+    // than throw on a sidecar that does not hold the row yet.
+    const record = {
+      role: "node",
+      canonicalId: COMMITTED_PATIENT,
+      canonicalKind: "Patient",
+      branchId: BRANCH_A,
+      sourceId: "pat-fork-local",
+    } as const;
+    const written = await persistProvenanceRecords(provStore, base.graphId, [
+      record,
+      { ...record },
+    ]);
+
+    expect(written).toBe(1);
+    expect(await provStore.nodes.Provenance.find()).toHaveLength(1);
+  });
 
   it("opens from a backend and graph id without the target GraphDef", async () => {
     cleanups = [];
@@ -255,5 +513,38 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
 
     const provStore = await openProvenanceStore(base);
     expect(await provStore.nodes.Provenance.find()).toHaveLength(0);
+  });
+});
+
+describe("provenance row identity", () => {
+  const record = {
+    role: "node",
+    canonicalId: "pat-canonical",
+    canonicalKind: "Patient",
+    branchId: BRANCH_A,
+    sourceId: "pat-fork",
+  } as const;
+
+  it("hashes a contribution to a stable id across versions", async () => {
+    // Pinned as a literal because the id is a CROSS-VERSION contract: rows in a
+    // sidecar written by an earlier release are re-upserted rather than orphaned
+    // and duplicated only while the same contribution keeps hashing to this id.
+    expect(await provenanceNodeId("care-graph", record)).toBe(
+      "prov_4d724f22030e40e5603682bd44f6ca0d",
+    );
+  });
+
+  it("keeps every identifying field in the key collapses are keyed on", () => {
+    // A key NARROWER than the row identity would silently merge two genuinely
+    // distinct contributions, which is the one way a collapse can lose data.
+    const keys = new Set([
+      contributionKey(record),
+      contributionKey({ ...record, role: "edge" }),
+      contributionKey({ ...record, canonicalKind: "Encounter" }),
+      contributionKey({ ...record, canonicalId: "other-canonical" }),
+      contributionKey({ ...record, branchId: BRANCH_B }),
+      contributionKey({ ...record, sourceId: "other-fork" }),
+    ]);
+    expect(keys.size).toBe(6);
   });
 });

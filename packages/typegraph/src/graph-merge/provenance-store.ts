@@ -104,6 +104,24 @@ const ID_SEPARATOR = "\0";
 const ID_DIGEST_BYTES = 16;
 
 /**
+ * The tuple that IDENTIFIES a contribution: everything {@link provenanceNodeId}
+ * hashes except the target graph id, which is fixed for one merge. Two records
+ * agreeing on it are one sidecar row by definition, so a caller that collapses on
+ * this key collapses exactly what the row identity would have collapsed —
+ * `canonicalKind` is part of it because two same-id canonicals of different kinds
+ * are different entities under the `(kind, id)` identity model.
+ */
+export function contributionKey(record: ProvenanceRecord): string {
+  return [
+    record.role,
+    record.canonicalKind,
+    record.canonicalId,
+    record.branchId,
+    record.sourceId,
+  ].join(ID_SEPARATOR);
+}
+
+/**
  * Deterministic provenance node id: a hash of the contribution tuple, so
  * re-persisting the same contribution UPSERTS the same row (idempotent re-runs).
  *
@@ -116,17 +134,7 @@ export async function provenanceNodeId(
   targetGraphId: string,
   record: ProvenanceRecord,
 ): Promise<string> {
-  const tuple = [
-    targetGraphId,
-    record.role,
-    // canonicalKind is part of node identity: two contributions to different-kind
-    // canonicals that share a bare id (e.g. base Patient:x and Encounter:x) must NOT
-    // hash to the same sidecar row and clobber each other (the (kind,id) identity model).
-    record.canonicalKind,
-    record.canonicalId,
-    record.branchId,
-    record.sourceId,
-  ].join(ID_SEPARATOR);
+  const tuple = [targetGraphId, contributionKey(record)].join(ID_SEPARATOR);
   const digest = await sha256Hex(tuple, ID_DIGEST_BYTES);
   return `prov_${digest}`;
 }
@@ -136,6 +144,12 @@ export async function provenanceNodeId(
  * deterministic id (re-running the same merge is a no-op upsert, never a
  * duplicate). Returns the row count written. The caller wraps this for best-effort
  * behavior — a failure here must not fail an already-committed merge.
+ *
+ * Records that hash to the SAME id are collapsed before the batch: the id is the
+ * contribution's identity, so they are one row by definition — and a single
+ * `bulkUpsertById` batch cannot create the same id twice. Collapsing here is what
+ * makes the returned number the rows actually written for ANY caller, whatever
+ * shape its record list arrived in.
  */
 export async function persistProvenanceRecords(
   store: Store<ProvenanceGraph>,
@@ -145,7 +159,7 @@ export async function persistProvenanceRecords(
   if (records.length === 0) {
     return 0;
   }
-  const items = await Promise.all(
+  const identified = await Promise.all(
     records.map(async (record) => ({
       id: await provenanceNodeId(targetGraphId, record),
       props: {
@@ -158,6 +172,11 @@ export async function persistProvenanceRecords(
       },
     })),
   );
+  const itemsById = new Map<string, (typeof identified)[number]>();
+  for (const item of identified) {
+    itemsById.set(item.id, item);
+  }
+  const items = [...itemsById.values()];
   await store.nodes.Provenance.bulkUpsertById(items);
   return items.length;
 }
