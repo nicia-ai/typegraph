@@ -361,25 +361,35 @@ describe("trusted import", () => {
     ).toBeUndefined();
   });
 
-  it("names the offending field, row, and value in the refusal", async () => {
-    const store = createStore(trustedGraph, createTestBackend());
+  it.each([
+    { field: "validFrom" as const, value: "2021-01-01" },
+    { field: "validTo" as const, value: "2021-01-01T00:00:00Z" },
+  ])(
+    "names the offending $field, row, and value in the refusal",
+    async ({ field, value }) => {
+      // Each window field must report ITS OWN value, so a refusal points at the
+      // timestamp to convert rather than at the row's other endpoint.
+      const store = createStore(trustedGraph, createTestBackend());
 
-    await expect(
-      trustedImportGraph(
-        store,
-        graphData([
-          {
-            kind: "TrustedPerson",
-            id: "alice",
-            properties: { name: "Alice" },
-            validTo: "2021-01-01T00:00:00Z",
-          },
-        ]),
-      ),
-    ).rejects.toThrow(
-      /Non-canonical validTo in trusted import: TrustedPerson "alice" states "2021-01-01T00:00:00Z"/,
-    );
-  });
+      await expect(
+        trustedImportGraph(
+          store,
+          graphData([
+            {
+              kind: "TrustedPerson",
+              id: "alice",
+              properties: { name: "Alice" },
+              ...(field === "validFrom" ?
+                { validFrom: value }
+              : { validTo: value }),
+            },
+          ]),
+        ),
+      ).rejects.toThrow(
+        `Non-canonical ${field} in trusted import: TrustedPerson "alice" states "${value}"`,
+      );
+    },
+  );
 
   it("refuses a non-canonical edge window and rolls back the nodes already streamed", async () => {
     const store = createStore(trustedGraph, createTestBackend());

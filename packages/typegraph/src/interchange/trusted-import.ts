@@ -97,13 +97,18 @@ type StatedValidityWindow = Readonly<{
   validTo?: string | undefined;
 }>;
 
-const VALIDITY_WINDOW_FIELDS = ["validFrom", "validTo"] as const;
+type ValidityWindowField = "validFrom" | "validTo";
 
-type ValidityWindowField = (typeof VALIDITY_WINDOW_FIELDS)[number];
+/** A stated window field that is not canonical, with the offending value. */
+type NonCanonicalWindow = Readonly<{
+  field: ValidityWindowField;
+  value: string;
+}>;
 
 /**
  * The first window field of `entity` stating a timestamp that is not canonical
- * fixed-width UTC ISO 8601, or `undefined` when every stated one is.
+ * fixed-width UTC ISO 8601 — with the offending value — or `undefined` when
+ * every stated one is canonical.
  *
  * A trusted stream is never re-parsed, so this is the only place its timestamps
  * are held to the format the rest of the system assumes. It is deliberately
@@ -120,26 +125,30 @@ type ValidityWindowField = (typeof VALIDITY_WINDOW_FIELDS)[number];
  * An absent field states nothing, and a `null` validFrom is a confirmed
  * open-left window (see {@link nodeParams}) — neither is a timestamp to check.
  */
-function nonCanonicalWindowField(
+function nonCanonicalWindowOf(
   entity: StatedValidityWindow,
-): ValidityWindowField | undefined {
-  return VALIDITY_WINDOW_FIELDS.find((field) => {
-    const stated = entity[field];
-    return typeof stated === "string" && !isCanonicalIsoDate(stated);
-  });
+): NonCanonicalWindow | undefined {
+  const { validFrom, validTo } = entity;
+  if (typeof validFrom === "string" && !isCanonicalIsoDate(validFrom)) {
+    return { field: "validFrom", value: validFrom };
+  }
+  if (typeof validTo === "string" && !isCanonicalIsoDate(validTo)) {
+    return { field: "validTo", value: validTo };
+  }
+  return undefined;
 }
 
 /**
  * The first entity in `entities` stating a non-canonical window timestamp, with
- * the offending field. Allocates only on the failing path, so a clean chunk pays
- * one predicate per stated timestamp and nothing else.
+ * the offending field and value. Allocates only on the failing path, so a clean
+ * chunk pays one predicate per stated timestamp and nothing else.
  */
 function findNonCanonicalWindow<Entity extends StatedValidityWindow>(
   entities: readonly Entity[],
-): Readonly<{ entity: Entity; field: ValidityWindowField }> | undefined {
+): (NonCanonicalWindow & Readonly<{ entity: Entity }>) | undefined {
   for (const entity of entities) {
-    const field = nonCanonicalWindowField(entity);
-    if (field !== undefined) return { entity, field };
+    const nonCanonical = nonCanonicalWindowOf(entity);
+    if (nonCanonical !== undefined) return { entity, ...nonCanonical };
   }
   return undefined;
 }
@@ -148,10 +157,10 @@ function findNonCanonicalWindow<Entity extends StatedValidityWindow>(
 function nonCanonicalWindowMessage(
   subject: string,
   field: ValidityWindowField,
-  value: string | null | undefined,
+  value: string,
 ): string {
   return (
-    `Non-canonical ${field} in trusted import: ${subject} states "${String(value)}". ` +
+    `Non-canonical ${field} in trusted import: ${subject} states "${value}". ` +
     `Expected canonical fixed-width UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ), ` +
     `which is what makes a stored timestamp sort chronologically against an asOf ` +
     `coordinate. Convert with new Date(value).toISOString().`
@@ -263,12 +272,12 @@ async function consumeTrustedChunks<G extends GraphDef>(
         }
         const nonCanonicalNode = findNonCanonicalWindow(chunk.nodes);
         if (nonCanonicalNode !== undefined) {
-          const { entity, field } = nonCanonicalNode;
+          const { entity, field, value } = nonCanonicalNode;
           throw invalidStream(
             nonCanonicalWindowMessage(
               `${entity.kind} "${entity.id}"`,
               field,
-              entity[field],
+              value,
             ),
           );
         }
@@ -307,12 +316,12 @@ async function consumeTrustedChunks<G extends GraphDef>(
         }
         const nonCanonicalEdge = findNonCanonicalWindow(chunk.edges);
         if (nonCanonicalEdge !== undefined) {
-          const { entity, field } = nonCanonicalEdge;
+          const { entity, field, value } = nonCanonicalEdge;
           throw invalidStream(
             nonCanonicalWindowMessage(
               `${entity.kind} edge "${entity.id}"`,
               field,
-              entity[field],
+              value,
             ),
           );
         }

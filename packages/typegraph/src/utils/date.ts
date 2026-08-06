@@ -206,11 +206,14 @@ export function validateOptionalCanonicalIsoDate(
  * what makes a lexicographic compare a chronological one. Every caller
  * establishes that before comparing, with no exception: the paths that throw a
  * `ValidationError` reach this through {@link validateOptionalCanonicalIsoDate},
- * rows read back from either backend are canonicalized by the row mappers, and
- * trusted import — which skips schema validation for throughput — format-checks
- * the stated window fields of every streamed row against
- * {@link isCanonicalIsoDate} before reaching here. So no caller can compare a
- * value that would mis-sort, here or later against an `asOf` coordinate.
+ * and trusted import — which skips schema validation for throughput —
+ * format-checks the stated window fields of every streamed row against
+ * {@link isCanonicalIsoDate} before reaching here. A bound read back from a row
+ * needs no check of its own: it is canonical because the write that stored it
+ * was held to this same contract — SQLite hands that text back verbatim, and the
+ * PostgreSQL row mapper normalizes the driver's shape back to it. So no caller
+ * can compare a value that would mis-sort, here or later against an `asOf`
+ * coordinate.
  *
  * ZERO width (`validFrom === validTo`) is not inverted: it is what a
  * same-instant retraction produces at millisecond precision, and the store's own

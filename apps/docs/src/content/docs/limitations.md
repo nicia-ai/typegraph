@@ -302,7 +302,8 @@ Bulk semantics are set-like, not scripted — a batch states the rows you want,
 not an order to reach them in — so this is a stated limitation rather than a
 pending fix. It always surfaces as a typed error, never as a dropped write.
 Split the handoff across two batches (release, then claim), or apply the
-conflicting items as sequential `upsertById` calls. See
+conflicting items one at a time — as sequential `upsertById` calls for nodes,
+and as `update` then `create` for edges, which have no single-item upsert. See
 [Data Sync](/data-sync#one-batch-cannot-hand-a-unique-value-from-one-row-to-another)
 for the worked example.
 

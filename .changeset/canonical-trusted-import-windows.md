@@ -1,5 +1,5 @@
 ---
-"@nicia-ai/typegraph": patch
+"@nicia-ai/typegraph": minor
 ---
 
 Refuse non-canonical validity-window timestamps in trusted import.
