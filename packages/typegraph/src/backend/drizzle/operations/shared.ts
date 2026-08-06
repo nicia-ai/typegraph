@@ -1,10 +1,71 @@
-import { type SQL, sql } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 
+import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import type { SqlDialect } from "../../types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 
 export type Tables = SqliteTables | PostgresTables;
+
+/**
+ * The names a relation's PRIMARY KEY constraint can carry, given the relation
+ * name and its key columns.
+ *
+ * Two, because TypeGraph supports two provisioning paths for the same schema
+ * and they name the constraint differently:
+ *
+ *  - TypeGraph's own DDL (`generatePostgresCreateTableSQL`) emits an UNNAMED
+ *    `PRIMARY KEY (...)` clause, which PostgreSQL names `<relation>_pkey`;
+ *  - `drizzle-kit` renders the Drizzle `primaryKey({ columns })` builder with
+ *    its explicit name, `<relation>_<column>_..._pk`.
+ *
+ * Both are derived rather than hardcoded so a custom table name is covered
+ * too. Accepting only these two — never
+ * an arbitrary unique constraint on the relation — is what keeps a declared
+ * `unique: true` index violation out of the duplicate-identity classification.
+ */
+function primaryKeyConstraintNames(
+  relation: string,
+  keyColumns: readonly string[],
+): readonly string[] {
+  return [`${relation}_pkey`, `${relation}_${keyColumns.join("_")}_pk`];
+}
+
+/**
+ * The nodes relation's identity constraint: `(graph_id, kind, id)`, the tuple
+ * every node read also filters on.
+ */
+export function nodePrimaryKeyConstraint(
+  nodes: Tables["nodes"],
+): PrimaryKeyRelation {
+  const relation = getTableName(nodes);
+  return {
+    table: relation,
+    constraintNames: primaryKeyConstraintNames(relation, [
+      nodes.graphId.name,
+      nodes.kind.name,
+      nodes.id.name,
+    ]),
+  };
+}
+
+/**
+ * The edges relation's identity constraint: `(graph_id, id)`. An edge id is
+ * unique per graph without its kind, so the key is one column shorter than a
+ * node's.
+ */
+export function edgePrimaryKeyConstraint(
+  edges: Tables["edges"],
+): PrimaryKeyRelation {
+  const relation = getTableName(edges);
+  return {
+    table: relation,
+    constraintNames: primaryKeyConstraintNames(relation, [
+      edges.graphId.name,
+      edges.id.name,
+    ]),
+  };
+}
 
 /**
  * Converts undefined to SQL NULL for use in template literals.

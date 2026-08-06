@@ -9,7 +9,15 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { avg, count, max, min, sum } from "../../../src";
+import {
+  avg,
+  count,
+  ENTITY_ALREADY_EXISTS_CODE,
+  max,
+  min,
+  sum,
+  ValidationError,
+} from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -328,6 +336,91 @@ function registerConcurrencyTests(context: IntegrationTestContext): void {
 }
 
 // ============================================================
+// Duplicate Identity Tests
+// ============================================================
+
+/**
+ * A create refused because the id is taken carries
+ * {@link ENTITY_ALREADY_EXISTS_CODE}, on EVERY backend and whichever layer
+ * noticed.
+ *
+ * The two cases below deliberately reach the refusal through DIFFERENT layers,
+ * and must still be indistinguishable to a caller. A node create probes for the
+ * id first, so its own probe refuses. An edge create has no probe — its id is
+ * caller-supplied or freshly generated — so the ENGINE refuses and the failure is
+ * classified back into this error.
+ *
+ * Running both on every backend is the point: the engine leg is where the two
+ * dialects could drift, since PostgreSQL and SQLite report a duplicate primary
+ * key through entirely different structures. Losing a genuine race to the engine
+ * (PostgreSQL only — SQLite serializes writers at `BEGIN IMMEDIATE`) is covered
+ * by `tests/backends/postgres/concurrent-create-duplicate-key.test.ts` (#410).
+ */
+/**
+ * Asserts a rejection is the already-exists refusal, identified by its stable
+ * issue code rather than by message text, and naming the id it lost on.
+ */
+async function expectAlreadyExists(
+  operation: Promise<unknown>,
+  expected: Readonly<{
+    entityType: "node" | "edge";
+    kind: string;
+    id: string;
+  }>,
+): Promise<void> {
+  const error = await operation.catch((error_: unknown) => error_);
+  expect(error).toBeInstanceOf(ValidationError);
+  const validation = error as ValidationError;
+  expect(validation.details.issues.map((issue) => issue.code)).toContain(
+    ENTITY_ALREADY_EXISTS_CODE,
+  );
+  expect(validation.details.entityType).toBe(expected.entityType);
+  expect(validation.details.kind).toBe(expected.kind);
+  expect(validation.details.id).toBe(expected.id);
+  expect(validation.details.operation).toBe("create");
+}
+
+function registerDuplicateIdentityTests(context: IntegrationTestContext): void {
+  describe("Duplicate Identity", () => {
+    it("refuses a node create on a taken id with the stable code", async () => {
+      const store = context.getStore();
+      const created = await store.nodes.Product.create({
+        name: "Taken",
+        price: 1,
+        category: "A",
+      });
+
+      await expectAlreadyExists(
+        store.nodes.Product.create(
+          { name: "Second", price: 2, category: "A" },
+          { id: created.id },
+        ),
+        { entityType: "node", kind: "Product", id: created.id },
+      );
+    });
+
+    it("refuses an edge create on a taken id with the stable code", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const created = await store.edges.knows.create(alice, bob, {
+        since: "first",
+      });
+
+      await expectAlreadyExists(
+        store.edges.knows.create(
+          alice,
+          bob,
+          { since: "second" },
+          { id: created.id },
+        ),
+        { entityType: "edge", kind: "knows", id: created.id },
+      );
+    });
+  });
+}
+
+// ============================================================
 // Combined Registration
 // ============================================================
 
@@ -338,4 +431,5 @@ export function registerEdgeCaseIntegrationTests(
   registerNullHandlingTests(context);
   registerBoundaryTests(context);
   registerConcurrencyTests(context);
+  registerDuplicateIdentityTests(context);
 }

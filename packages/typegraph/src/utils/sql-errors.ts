@@ -230,6 +230,133 @@ export function isPostgresUniqueViolationError(error: unknown): boolean {
   return false;
 }
 
+/**
+ * The PostgreSQL error fields naming the violated constraint and its relation.
+ * Both spellings are read because the drivers disagree: node-postgres and
+ * PGlite expose the protocol fields as `constraint` / `table`, while
+ * postgres-js exposes them as `constraint_name` / `table_name`. Reading only
+ * one spelling would silently classify nothing on the other driver.
+ */
+const POSTGRES_CONSTRAINT_FIELDS = ["constraint", "constraint_name"] as const;
+const POSTGRES_RELATION_FIELDS = ["table", "table_name"] as const;
+
+/**
+ * SQLite's EXTENDED result code for a primary-key duplicate, in both spellings a
+ * driver reports it: the symbolic name (better-sqlite3 `code`, and the
+ * `SqliteError` the libSQL client nests on its own error's `.cause`) and the
+ * numeric value (libSQL `rawCode` / `extendedCode`, the only form a remote
+ * connection surfaces).
+ *
+ * The extended code — not the base `SQLITE_CONSTRAINT` — is what makes the
+ * classification possible at all: SQLite distinguishes a PRIMARY KEY duplicate
+ * (1555) from any other unique-index duplicate (`SQLITE_CONSTRAINT_UNIQUE`,
+ * 2067) in the code itself, so nothing has to read the message, which names the
+ * columns rather than the constraint.
+ */
+const SQLITE_PRIMARY_KEY_VIOLATION_CODE = "SQLITE_CONSTRAINT_PRIMARYKEY";
+const SQLITE_PRIMARY_KEY_VIOLATION_EXTENDED_CODE = 1555;
+const SQLITE_EXTENDED_CODE_FIELDS = ["rawCode", "extendedCode"] as const;
+
+/**
+ * A relation plus the names its PRIMARY KEY constraint can carry — how far a
+ * duplicate-key classification is allowed to reach on an engine that reports the
+ * violated constraint by name. See {@link isDuplicatePrimaryKeyError}.
+ */
+export type PrimaryKeyRelation = Readonly<{
+  table: string;
+  constraintNames: readonly string[];
+}>;
+
+function firstStringField(
+  link: object,
+  fields: readonly string[],
+): string | undefined {
+  for (const field of fields) {
+    const value: unknown = Reflect.get(link, field);
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+/**
+ * Whether PostgreSQL reported this link as a duplicate of `relation`'s PRIMARY
+ * KEY: SQLSTATE, relation, and constraint name must all agree on the SAME link
+ * (the driver error), so a 23505 raised by an unrelated statement deeper in the
+ * chain cannot be attributed to this relation.
+ */
+function isPostgresPrimaryKeyViolation(
+  link: object,
+  relation: PrimaryKeyRelation,
+): boolean {
+  if (Reflect.get(link, "code") !== POSTGRES_UNIQUE_VIOLATION_CODE)
+    return false;
+  if (firstStringField(link, POSTGRES_RELATION_FIELDS) !== relation.table) {
+    return false;
+  }
+  const constraint = firstStringField(link, POSTGRES_CONSTRAINT_FIELDS);
+  return (
+    constraint !== undefined && relation.constraintNames.includes(constraint)
+  );
+}
+
+/**
+ * Whether SQLite reported this link as a PRIMARY KEY duplicate. The relation is
+ * not checked because SQLite does not report one — see
+ * {@link isDuplicatePrimaryKeyError} for why the call site supplies that scope.
+ */
+function isSqlitePrimaryKeyViolation(link: object): boolean {
+  if (Reflect.get(link, "code") === SQLITE_PRIMARY_KEY_VIOLATION_CODE) {
+    return true;
+  }
+  for (const field of SQLITE_EXTENDED_CODE_FIELDS) {
+    const value: unknown = Reflect.get(link, field);
+    if (
+      typeof value === "number" &&
+      value === SQLITE_PRIMARY_KEY_VIOLATION_EXTENDED_CODE
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether the engine refused a statement because it duplicated a PRIMARY KEY —
+ * on PostgreSQL, `relation`'s specifically.
+ *
+ * Classification is structural: SQLSTATE and SQLite extended result codes, plus
+ * the PostgreSQL protocol's own constraint and relation fields. Never message
+ * text, which is translated under a non-English `lc_messages`, is overwritten
+ * with the query string by Drizzle's wrapper, and on SQLite names the key's
+ * COLUMNS rather than the constraint. The `.cause` chain is walked because every
+ * driver here nests the real error under at least one wrapper.
+ *
+ * Narrowing to the primary key is the whole point. A `unique: true` index
+ * declaration materializes a UNIQUE INDEX on the same relation, and violating
+ * THAT is a declared-uniqueness failure about the row's VALUES, not a duplicate
+ * identity. PostgreSQL reports it under the index's own name and SQLite under a
+ * different extended code, so it never matches here and keeps surfacing as it
+ * did before.
+ *
+ * `relation` scopes the PostgreSQL arm, which is the one that can see a
+ * constraint name. SQLite reports no relation at all, so its scope comes from
+ * the CALL SITE instead: callers must invoke this only for a statement that
+ * writes exactly one relation — the node or edge insert — where a primary-key
+ * duplicate can only be that relation's. Applying it to a multi-relation
+ * statement would attribute the wrong table's collision.
+ */
+export function isDuplicatePrimaryKeyError(
+  error: unknown,
+  relation: PrimaryKeyRelation,
+): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    if (isPostgresPrimaryKeyViolation(link, relation)) return true;
+    if (isSqlitePrimaryKeyViolation(link)) return true;
+  }
+  return false;
+}
+
 function isSqlStateIn<SqlState extends string>(
   code: unknown,
   states: readonly SqlState[],

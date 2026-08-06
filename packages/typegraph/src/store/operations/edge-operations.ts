@@ -58,6 +58,7 @@ import {
   type IfExistsMode,
   type OperationHookContext,
 } from "../types";
+import { withAlreadyExistsTranslation } from "./already-exists";
 import {
   runHookedWriteOperation,
   runInWriteTransaction,
@@ -449,15 +450,18 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
   return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
     const prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target);
 
-    let row: BackendEdgeRow | undefined;
-    if (shouldReturnRow) {
-      row = await target.insertEdge(prepared.insertParams);
-    } else {
+    // An edge create has no existence probe at all — its id is either
+    // caller-supplied or freshly generated — so the engine's refusal is the ONLY
+    // report that the id is taken. Translated here, that report is the same
+    // already-exists error a node create raises.
+    const row = await withAlreadyExistsTranslation("edge", async () => {
+      if (shouldReturnRow) return target.insertEdge(prepared.insertParams);
       await runInsertNoReturn(
         edgeInsertDispatch(target),
         prepared.insertParams,
       );
-    }
+      return;
+    });
 
     if (row === undefined) return;
     return rowToEdge(row);
@@ -603,7 +607,9 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
       inputs,
       target,
     );
-    await runInsertBatch(edgeInsertDispatch(target), batchInsertParams);
+    await withAlreadyExistsTranslation("edge", () =>
+      runInsertBatch(edgeInsertDispatch(target), batchInsertParams),
+    );
   });
 }
 
@@ -632,9 +638,8 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
       target,
     );
 
-    const rows = await runInsertBatchReturning(
-      edgeInsertDispatch(target),
-      batchInsertParams,
+    const rows = await withAlreadyExistsTranslation("edge", () =>
+      runInsertBatchReturning(edgeInsertDispatch(target), batchInsertParams),
     );
 
     return rows.map((row) => rowToEdge(row));

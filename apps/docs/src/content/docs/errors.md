@@ -150,6 +150,48 @@ stream with `TrustedImportError` reason `invalid_stream`. A zero-width window
 (`validTo === validFrom`) is legal and never raises this, and so is a create
 carrying only a historical `validTo`.
 
+#### `ENTITY_ALREADY_EXISTS`
+
+A `ValidationError` whose issue carries the exported code
+`ENTITY_ALREADY_EXISTS` refused a create because the id is already taken.
+`details.entityType` says whether a node or an edge was refused and
+`details.kind` names its kind.
+
+```typescript
+import { ENTITY_ALREADY_EXISTS_CODE, ValidationError } from "@nicia-ai/typegraph";
+
+try {
+  await store.nodes.Person.create({ name: "Alice" }, { id: takenId });
+} catch (error) {
+  if (
+    error instanceof ValidationError &&
+    error.details.issues.some((issue) => issue.code === ENTITY_ALREADY_EXISTS_CODE)
+  ) {
+    // Use a different id, or update the existing entity.
+  }
+}
+```
+
+The code is the same whichever layer noticed, on either backend. A node create
+finds out from its own existence probe — but the probe and the INSERT are two
+statements, and PostgreSQL does not serialize two write transactions under its
+default READ COMMITTED isolation, so a concurrent create of the same NEW id can
+commit in between and the engine refuses the INSERT instead. (SQLite's
+`BEGIN IMMEDIATE` gives the writer slot to one transaction at a time, so its probe
+always sees the winner's row.) An edge create has no existence probe at all, so
+the engine's refusal is always what reports a taken edge id. All of these raise the
+same error, so a caller retrying a generated id needs one branch, not several.
+
+`details.id` names the taken id, and is present for every single-entity create.
+It is absent only when a BATCH create lost that race: the engine reports that the
+batch collided without saying which row did, and its transaction is already
+aborted, so there is nothing left to probe. Treat `details.id` as optional if you
+create in bulk.
+
+This is about identity, not values. A conflict on a declared `unique` constraint
+raises `UniquenessError` instead, and a violated `unique: true` index declaration
+surfaces as the engine's own failure — neither is reshaped into this error.
+
 ### `DisjointError`
 
 Thrown when attempting to create a node that violates a disjointness constraint.
