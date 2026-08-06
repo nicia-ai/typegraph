@@ -106,13 +106,19 @@ type NormalizedDropped = Readonly<{
   reason: string;
 }>;
 
-/** A resolved end-of-validity in canonical form. */
+/**
+ * A resolved end-of-validity in canonical form. `precedence` is COMPARED, not
+ * stripped: it is the difference between an end the merge wrote and one the
+ * incremental target already held, so two orderings that disagree about which
+ * happened must fail the gate rather than compare equal on the instant alone.
+ */
 type NormalizedValidityEnd = Readonly<{
   entity: string;
   kind: string;
   id: string;
   validTo: string;
   claimedBy: readonly string[];
+  precedence: string | undefined;
 }>;
 
 /** Per-branch provenance materialized from the report closure, sorted. */
@@ -276,6 +282,7 @@ export function normalizeReport<G extends GraphDef>(
       claimedBy: [...entry.claimedBy]
         .map((branchId) => branchId as string)
         .sort((left, right) => compareStrings(left, right)),
+      precedence: entry.precedence,
     }))
     .sort((left, right) =>
       compareStrings(

@@ -86,7 +86,10 @@ import {
 } from "../../../src/graph-merge/merge-identity";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
 import type { BranchId, MergeReport } from "../../../src/graph-merge/types";
-import { asBranchId } from "../../../src/graph-merge/types";
+import {
+  asBranchId,
+  VALIDITY_END_TARGET_PRECEDENCE,
+} from "../../../src/graph-merge/types";
 import { asIdentityAssertionId } from "../../../src/identity/types";
 import { importGraph } from "../../../src/interchange";
 import { storeBackend, storeRuntime } from "../../../src/store/runtime-port";
@@ -979,8 +982,9 @@ const WINDOW_POPULATIONS: readonly WindowPopulation[] = [
  *   - NO UNASKED SHORTENING: when NO branch claimed an end, the target's window
  *     is exactly the one it already held, and the report names no end.
  *   - COMMITTED-TARGET PRECEDENCE: when the incremental target moved the end
- *     ITSELF, its own end stands over every branch claim, and the merge reports
- *     nothing — it decided nothing.
+ *     ITSELF, its own end stands over every branch claim — and the discarded
+ *     claims are reported against the target's own instant, marked
+ *     `precedence: "target"` so nothing reads as an end the merge decided.
  *   - LEAST CLAIM, NO SILENT LOSS: otherwise the EARLIEST branch claim is what
  *     the merge commits — including a lone claim that EXTENDS the ancestor's end
  *     to a later instant — and it is reported with every claiming branch named.
@@ -1060,10 +1064,24 @@ async function expectLawfulWindows(args: {
           postEnd,
           `${label}: a branch re-windowed an end the committed target itself moved`,
         ).toBe(targetEnd);
+        // Target precedence DISCARDS every claim, and a discarded claim is still
+        // reported (issue #409): the least-claim loser is visible in `claimedBy`, so
+        // a claim thrown away wholesale must not be less visible than one that was
+        // merely out-arbitrated. The entry names the TARGET's own instant and carries
+        // the discriminator, so it can never be read as an end the merge wrote.
         expect(
           reported,
-          `${label}: reported an end the merge never decided`,
-        ).toBeUndefined();
+          `${label}: the discarded claims were not reported faithfully`,
+        ).toEqual({
+          entity: population.entity,
+          kind: population.kind,
+          id,
+          validTo: targetEnd,
+          claimedBy: claimants
+            .map((entry) => entry.id as string)
+            .toSorted((left, right) => compareStrings(left, right)),
+          precedence: VALIDITY_END_TARGET_PRECEDENCE,
+        });
       } else if (heldLiveEverywhere) {
         const earliest = requireDefined(claims[0]);
         expect(

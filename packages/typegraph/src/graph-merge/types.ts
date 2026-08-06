@@ -435,9 +435,16 @@ export type DroppedItem =
   | Readonly<{ kind: "identity"; id: string; reason: string }>;
 
 /**
- * One inherited row whose end-of-validity the merge changed: the instant it
- * applied and every branch that claimed an end for that row (including the ones
- * whose claim lost the least-claim tie-break).
+ * The {@link ValidityEndResolution.precedence} of an entry the INCREMENTAL TARGET
+ * decided rather than the merge: the destination had already moved this row's end
+ * before the merge ran, so every branch claim was discarded and no write was staged.
+ */
+export const VALIDITY_END_TARGET_PRECEDENCE = "target" as const;
+
+/**
+ * One inherited row whose end-of-validity the merge RESOLVED: the instant that
+ * stands and every branch that claimed an end for the row (including the ones whose
+ * claim lost the least-claim tie-break).
  *
  * `id` is bare because `entity` + `kind` already disambiguate it — a node and an
  * edge, or two kinds, that share an id string are distinct entries.
@@ -446,10 +453,25 @@ export type ValidityEndResolution = Readonly<{
   entity: "node" | "edge";
   kind: string;
   id: string;
-  /** The instant the commit wrote, as a canonical UTC ISO 8601 string. */
+  /**
+   * The row's end-of-validity as a canonical UTC ISO 8601 string: the instant the
+   * commit WROTE, or — under {@link VALIDITY_END_TARGET_PRECEDENCE} — the instant
+   * the target already held and the merge left alone.
+   */
   validTo: string;
   /** Every branch that claimed an end, sorted; length > 1 means arbitration. */
   claimedBy: readonly BranchId[];
+  /**
+   * Present only as {@link VALIDITY_END_TARGET_PRECEDENCE}, marking an entry the
+   * merge did NOT decide: the incremental target had already moved this end, so
+   * `validTo` is the target's own committed instant, every claim in `claimedBy` was
+   * discarded, and nothing was written or credited for the row.
+   *
+   * ABSENT means the merge decided the end — `validTo` is the instant it wrote and
+   * `claimedBy` names the claims it arbitrated between. A consumer that ignores the
+   * field therefore keeps reading the entries it always read.
+   */
+  precedence?: typeof VALIDITY_END_TARGET_PRECEDENCE;
 }>;
 
 /**
@@ -541,15 +563,18 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
   typeReconciliations: readonly TypeReconciliation[];
   dropped: readonly DroppedItem[];
   /**
-   * Every inherited row whose END-OF-VALIDITY the merge changed, with the instant
-   * applied and the branches that claimed an end.
+   * Every inherited row whose END-OF-VALIDITY the merge resolved, with the instant
+   * that stands and the branches that claimed an end.
    *
    * Reported because the resolution is silent by design: two branches ending the
    * same row at different instants are not in conflict (an ending is a monotone
    * claim, like a deletion), so the earliest end is taken without a
    * `PropertyConflict`. This list is how a caller sees that arbitration happened.
-   * Window deltas the commit CANNOT apply appear in {@link MergeReport.dropped}
-   * instead, with reason `"window-not-applicable"`.
+   * It includes the rows where the arbitration discarded EVERY claim because the
+   * incremental target had already moved the end — those carry
+   * `precedence: "target"` and staged no write. Window deltas the commit CANNOT
+   * apply appear in {@link MergeReport.dropped} instead, with reason
+   * `"window-not-applicable"`.
    */
   validityEnds: readonly ValidityEndResolution[];
   /**
