@@ -8,8 +8,10 @@ import type {
   StagedEdge,
 } from "../../src/graph-merge/edge-repoint";
 import {
+  BRANCH_CREATED_EDGE_ORIGIN,
   buildCanonicalMap,
   ENDPOINT_DELETED_DROP_REASON,
+  INHERITED_EDGE_ORIGIN,
   repointEdges,
 } from "../../src/graph-merge/edge-repoint";
 import {
@@ -55,7 +57,11 @@ function rank(): ReadonlyMap<typeof BRANCH_A, number> {
   return buildBranchRank([BRANCH_A, BRANCH_B], [BRANCH_A, BRANCH_B]);
 }
 
-/** Builds a staged edge with parsed props; defaults keep the call sites terse. */
+/**
+ * Builds a staged edge with parsed props; defaults keep the call sites terse. The
+ * origin defaults to BRANCH-CREATED, so a case says `inherited: true` exactly when the
+ * committed-row survivor rule is what it is about.
+ */
 function stagedEdge(
   args: Readonly<{
     id: string;
@@ -64,6 +70,7 @@ function stagedEdge(
     kind?: string;
     props?: Readonly<Record<string, JsonValue>>;
     branchId?: typeof BRANCH_A;
+    inherited?: boolean;
     validFrom?: string;
     validTo?: string;
   }>,
@@ -71,6 +78,10 @@ function stagedEdge(
   return {
     id: edgeId(args.id),
     kind: args.kind ?? "references",
+    origin:
+      args.inherited === true ?
+        INHERITED_EDGE_ORIGIN
+      : BRANCH_CREATED_EDGE_ORIGIN,
     fromId: nodeId(args.from),
     toId: nodeId(args.to),
     fromKind: "Doc",
@@ -941,6 +952,319 @@ describe("repointEdges fold scope (#393)", () => {
         rank(),
       );
       expect(projectEdges(result.edges)).toEqual(reference);
+    }
+  });
+});
+
+/**
+ * The survivor rule (issue #395): a fold lands on the row the merge TARGET already
+ * holds. A fold rewrites its survivor and ends none of the members that folded into
+ * it, so a survivor the target does not hold leaves every committed member live beside
+ * the row meant to replace it, still carrying its pre-merge props.
+ */
+describe("repointEdges survivor rule (#395)", () => {
+  // {a, b} collapse to canonical "a" (min id): the repoint-induced fold.
+  const collapse = buildCanonicalMap([clusterOf("a", "b")], (cluster) =>
+    minIdCanonical(cluster),
+  );
+
+  // Both orderings of the branch-created id against the inherited one. The min-id rule
+  // agreed with inherited-wins only in the second, so the LOW case is the regression
+  // and the HIGH case pins that the two orders now produce the same survivor.
+  describe.each([
+    { position: "BELOW", inheritedId: "edge-5", createdId: "edge-1" },
+    { position: "ABOVE", inheritedId: "edge-1", createdId: "edge-9" },
+  ])(
+    "a branch-created member whose id sorts $position the inherited one",
+    ({ inheritedId, createdId }) => {
+      it("folds onto the inherited row", () => {
+        const staged = [
+          stagedEdge({
+            id: inheritedId,
+            from: "x",
+            to: "a",
+            props: { weight: 1 },
+            inherited: true,
+          }),
+          stagedEdge({
+            id: createdId,
+            from: "x",
+            to: "b",
+            props: { weight: 2 },
+            branchId: BRANCH_B,
+          }),
+        ];
+
+        const result = repointEdges(
+          staged,
+          collapse,
+          new Set<MergeKey>(),
+          "flag",
+          rank(),
+        );
+
+        expect(
+          result.edges.map((edge) => ({
+            id: edge.id,
+            weight: edge.props["weight"],
+            mergedIds: edge.mergedIds.map((id) => id as string),
+          })),
+        ).toEqual([
+          {
+            id: inheritedId,
+            // "flag" keeps the survivor's value — now the committed row's edit.
+            weight: 1,
+            mergedIds: [inheritedId, createdId].sort((left, right) =>
+              lexicographic(left, right),
+            ),
+          },
+        ]);
+        // The report names the row that actually persists.
+        expect(
+          result.conflicts.map((conflict) => ({
+            entityId: conflict.entityId,
+            values: conflict.values.map((value) => value.value),
+          })),
+        ).toEqual([{ entityId: inheritedId, values: [1, 2] }]);
+      });
+    },
+  );
+
+  it("prefers an inherited row over the PREFERRED branch's own new row", () => {
+    // The incremental target's new row is live too, so the preferred-branch pick was
+    // never wrong about liveness — but it can only ever protect ONE of the two rows,
+    // and choosing it strands the committed one WITH the edit staged for it. So
+    // inherited-wins outranks it; the target's row folds in and keeps existing.
+    const staged = [
+      stagedEdge({
+        id: "edge-5",
+        from: "x",
+        to: "a",
+        props: { weight: 1 },
+        branchId: BRANCH_B,
+        inherited: true,
+      }),
+      stagedEdge({
+        id: "edge-1",
+        from: "x",
+        to: "b",
+        props: { weight: 2 },
+        branchId: BRANCH_A,
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+      undefined,
+      BRANCH_A,
+    );
+
+    expect(result.edges.map((edge) => edge.id)).toEqual(["edge-5"]);
+    // The preferred branch still wins the PROPERTY it disagrees on: survivorship
+    // decides which row is written, the conflict policy what is written to it.
+    expect(result.edges[0]?.props["weight"]).toBe(2);
+  });
+
+  it("picks the minimum-id INHERITED member when the repoint folded several committed rows", () => {
+    // Three pre-repoint pairs, two of them committed rows. Only one row can be written
+    // per folded set, so the other committed row stays live — the residual the node
+    // path has too (§6.4-A keeps a cluster to ≤1 base member for exactly this reason).
+    // What the rule fixes is that the survivor is never the row nobody holds yet.
+    const staged = [
+      stagedEdge({
+        id: "edge-5",
+        from: "x",
+        to: "a",
+        props: { weight: 1 },
+        inherited: true,
+      }),
+      stagedEdge({
+        id: "edge-3",
+        from: "x",
+        to: "b",
+        props: { weight: 2 },
+        inherited: true,
+      }),
+      stagedEdge({
+        id: "edge-1",
+        from: "x",
+        to: "c",
+        props: { weight: 3 },
+        branchId: BRANCH_B,
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      buildCanonicalMap([clusterOf("a", "b", "c")], (cluster) =>
+        minIdCanonical(cluster),
+      ),
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(
+      result.edges.map((edge) => ({
+        id: edge.id,
+        mergedIds: edge.mergedIds.map((id) => id as string),
+      })),
+    ).toEqual([{ id: "edge-3", mergedIds: ["edge-1", "edge-3", "edge-5"] }]);
+  });
+
+  it("keeps the minimum edge id when NO member is inherited", () => {
+    // Nothing committed is at stake, so the fallback is the unchanged min-id rule.
+    const staged = [
+      stagedEdge({ id: "edge-9", from: "x", to: "a", props: { weight: 1 } }),
+      stagedEdge({
+        id: "edge-2",
+        from: "x",
+        to: "b",
+        props: { weight: 2 },
+        branchId: BRANCH_B,
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.edges.map((edge) => edge.id)).toEqual(["edge-2"]);
+    expect(result.conflicts.map((conflict) => conflict.entityId)).toEqual([
+      "edge-2",
+    ]);
+  });
+
+  it("lands a folded END on the inherited survivor and leaves its own start alone", () => {
+    // The end is a monotone claim and folds across the set either way; what changes is
+    // WHERE it lands. A branch-created member's authored START does not travel with it:
+    // the committed row already has the correct `validFrom` and a merge never restates
+    // one (the previous survivor, being a fresh row, needed it written).
+    const staged = [
+      stagedEdge({
+        id: "edge-5",
+        from: "x",
+        to: "a",
+        props: { weight: 1 },
+        inherited: true,
+      }),
+      stagedEdge({
+        id: "edge-1",
+        from: "x",
+        to: "b",
+        props: { weight: 1 },
+        branchId: BRANCH_B,
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2100-01-01T00:00:00.000Z",
+      }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.edges).toHaveLength(1);
+    expect(result.edges[0]?.id).toBe("edge-5");
+    expect(result.edges[0]?.validFrom).toBeUndefined();
+    expect(result.edges[0]?.validTo).toBe("2100-01-01T00:00:00.000Z");
+  });
+
+  it("produces an identical result across shuffled input for mixed-origin groups", () => {
+    // Origin is intrinsic to the staged set, so a group holding both buckets — folded
+    // and parallel, one row staged by two branches — resolves identically whatever
+    // order the edges arrive in.
+    const staged = [
+      // One INHERITED row staged by both branches — the same row seen twice.
+      stagedEdge({
+        id: "edge-1",
+        from: "x",
+        to: "a",
+        props: { weight: 1 },
+        inherited: true,
+      }),
+      stagedEdge({
+        id: "edge-1",
+        from: "x",
+        to: "a",
+        props: { weight: 9 },
+        branchId: BRANCH_B,
+        inherited: true,
+      }),
+      // A branch-created parallel row on the same pair: multiplicity, not a fold.
+      stagedEdge({ id: "edge-4", from: "x", to: "a", props: { weight: 4 } }),
+      // A branch-created row the repoint brought onto those endpoints: this is the
+      // fold, and it lands on the inherited row.
+      stagedEdge({
+        id: "edge-2",
+        from: "x",
+        to: "b",
+        props: { weight: 2 },
+        branchId: BRANCH_B,
+      }),
+    ];
+
+    const reference = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+    expect(
+      reference.edges.map((edge) => ({
+        id: edge.id,
+        weight: edge.props["weight"],
+        mergedIds: edge.mergedIds.map((id) => id as string),
+      })),
+    ).toEqual([
+      {
+        id: "edge-1",
+        weight: 1,
+        mergedIds: ["edge-1", "edge-1", "edge-2"],
+      },
+      { id: "edge-4", weight: 4, mergedIds: ["edge-4"] },
+    ]);
+    expect(
+      reference.conflicts.map((conflict) => ({
+        entityId: conflict.entityId,
+        resolution: conflict.resolution,
+      })),
+    ).toEqual([{ entityId: "edge-1", resolution: 1 }]);
+
+    for (let seed = 1; seed <= 6; seed += 1) {
+      const result = repointEdges(
+        shuffled(staged, seed),
+        collapse,
+        new Set<MergeKey>(),
+        "flag",
+        rank(),
+      );
+      expect(projectEdges(result.edges)).toEqual(projectEdges(reference.edges));
+      expect(
+        result.conflicts.map((conflict) => ({
+          entityId: conflict.entityId,
+          property: conflict.property,
+          resolution: conflict.resolution,
+        })),
+      ).toEqual(
+        reference.conflicts.map((conflict) => ({
+          entityId: conflict.entityId,
+          property: conflict.property,
+          resolution: conflict.resolution,
+        })),
+      );
     }
   });
 });

@@ -73,7 +73,12 @@ import {
   resolveEdgeDeleteModify,
 } from "./delete-modify";
 import type { MergedEdge, StagedEdge } from "./edge-repoint";
-import { buildCanonicalMap, repointEdges } from "./edge-repoint";
+import {
+  BRANCH_CREATED_EDGE_ORIGIN,
+  buildCanonicalMap,
+  INHERITED_EDGE_ORIGIN,
+  repointEdges,
+} from "./edge-repoint";
 import { BaseVersionMismatchError, describeCause, MergeError } from "./errors";
 import {
   assertIdentityEndpointsNotDeleted,
@@ -595,6 +600,13 @@ function indexNewNodesById(
  * `staging.modifiedEdges`. Staging each branch's full fork props separately would
  * make the repoint union treat unchanged-from-base fields as conflicts, dropping a
  * disjoint edit by another branch.
+ *
+ * Each edge's diff bucket is carried through as its staged ORIGIN
+ * ({@link INHERITED_EDGE_ORIGIN} / {@link BRANCH_CREATED_EDGE_ORIGIN}): the modified
+ * and re-windowed buckets hold rows the base already has, the new bucket holds rows a
+ * branch created. This is the ONLY place that distinction is known — the repoint phase
+ * needs it to fold onto a row the target holds, and an edge id says nothing about
+ * where the row came from.
  */
 function buildStagedEdges(
   staging: StagingSet,
@@ -616,6 +628,7 @@ function buildStagedEdges(
     staged.push({
       id: item.edge.id,
       kind: item.edge.kind,
+      origin: INHERITED_EDGE_ORIGIN,
       fromId: item.edge.fromId,
       toId: item.edge.toId,
       fromKind: item.edge.fromKind,
@@ -644,6 +657,7 @@ function buildStagedEdges(
     staged.push({
       id: item.edge.id,
       kind: item.edge.kind,
+      origin: INHERITED_EDGE_ORIGIN,
       fromId: item.edge.fromId,
       toId: item.edge.toId,
       fromKind: item.edge.fromKind,
@@ -668,6 +682,7 @@ function toStagedEdge(branchId: BranchId, item: StagedNewEdge): StagedEdge {
   return {
     id: item.edge.id,
     kind: item.edge.kind,
+    origin: BRANCH_CREATED_EDGE_ORIGIN,
     fromId: item.edge.fromId,
     toId: item.edge.toId,
     fromKind: item.edge.fromKind,
