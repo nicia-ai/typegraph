@@ -19,7 +19,12 @@ import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
 import { RESERVED_EDGE_KEYS, RESERVED_NODE_KEYS } from "../store/reserved-keys";
-import { compactUndefined, freezeDeep, isPlainObject } from "../utils/object";
+import {
+  compactUndefined,
+  freezeDeep,
+  hasOwnKey,
+  isPlainObject,
+} from "../utils/object";
 import { err, ok, type Result } from "../utils/result";
 import {
   type GraphExtensionIssue,
@@ -1770,7 +1775,7 @@ function validateUniqueConstraints(
         fieldsValid = false;
         break;
       }
-      if (!(field in properties)) {
+      if (!hasOwnKey(properties, field)) {
         issues.push({
           path: `${constraintPath}/fields/${fieldIndex}`,
           message: `Unique constraint field "${field}" is not declared on this kind.`,
@@ -1867,7 +1872,7 @@ function validateUniqueWhere(
     });
     return undefined;
   }
-  if (!(field in properties)) {
+  if (!hasOwnKey(properties, field)) {
     issues.push({
       path: `${path}/field`,
       message: `Unique \`where.field\` "${field}" is not declared on this kind.`,
