@@ -10,6 +10,7 @@ import { getSearchableFields } from "../core/searchable";
 import { TrustedImportError } from "../errors";
 import { storeBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
+import { isInvertedValidityWindow } from "../utils/date";
 import type {
   GraphData,
   GraphInterchangeChunk,
@@ -88,6 +89,27 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
 
 function invalidStream(message: string): TrustedImportError {
   return new TrustedImportError(message, "invalid_stream");
+}
+
+/**
+ * An entity whose stated window has negative width. Trusted import writes
+ * straight to SQL and skips schema validation for throughput, but a row that
+ * stopped being true before it started is a stream SHAPE fault rather than a
+ * policy check: it is unobservable at every `asOf` coordinate, and no later
+ * write repairs it. `null` validFrom is a confirmed open-left window, so there
+ * is no lower bound to invert against; zero width is legal (see
+ * {@link isInvertedValidityWindow}).
+ */
+function hasInvertedWindow(
+  entity: Readonly<{
+    validFrom?: string | null | undefined;
+    validTo?: string | undefined;
+  }>,
+): boolean {
+  return isInvertedValidityWindow(
+    entity.validFrom ?? undefined,
+    entity.validTo,
+  );
 }
 
 function nodeParams(graphId: string, node: InterchangeNode): InsertNodeParams {
@@ -173,6 +195,15 @@ async function consumeTrustedChunks<G extends GraphDef>(
             `Unknown node kind in trusted import: ${unknownKind}`,
           );
         }
+        const invertedNode = chunk.nodes.find((node) =>
+          hasInvertedWindow(node),
+        );
+        if (invertedNode !== undefined) {
+          throw invalidStream(
+            `Inverted validity window in trusted import: ${invertedNode.kind} "${invertedNode.id}" ends at ` +
+              `"${String(invertedNode.validTo)}", before its validFrom "${String(invertedNode.validFrom)}".`,
+          );
+        }
         await session.insertNodes(
           chunk.nodes.map((node) => nodeParams(store.graphId, node)),
         );
@@ -195,6 +226,15 @@ async function consumeTrustedChunks<G extends GraphDef>(
         if (invalidEdge !== undefined) {
           throw invalidStream(
             `Unknown edge or endpoint kind in trusted import: ${invalidEdge.kind}`,
+          );
+        }
+        const invertedEdge = chunk.edges.find((edge) =>
+          hasInvertedWindow(edge),
+        );
+        if (invertedEdge !== undefined) {
+          throw invalidStream(
+            `Inverted validity window in trusted import: ${invertedEdge.kind} edge "${invertedEdge.id}" ends at ` +
+              `"${String(invertedEdge.validTo)}", before its validFrom "${String(invertedEdge.validFrom)}".`,
           );
         }
         await session.insertEdges(

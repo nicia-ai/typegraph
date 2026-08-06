@@ -695,6 +695,15 @@ Every write method below that accepts a `validFrom` option (`create`,
 that operation's own creation timestamp when omitted — `validFrom` is never
 left open-ended. `validTo` remains optional and open-ended until set.
 
+A window may not have negative width. Stating both endpoints out of order, or
+updating a row with a `validTo` that precedes its stored `validFrom`, raises a
+`ValidationError` whose issue carries the code `INVERTED_VALIDITY_WINDOW` — such
+a row stopped being true before it started, so no `asOf` coordinate could ever
+observe it. Two related shapes are legal: a ZERO-width window
+(`validTo === validFrom`), which is what a same-instant retraction produces; and
+a create carrying only a historical `validTo`, which means "born already ended"
+and is read back with the `includeEnded` temporal mode.
+
 ### Node Collections
 
 Each node type has a collection with these methods:
@@ -1518,11 +1527,16 @@ store.edges.worksAt.getOrCreateByEndpoints(
 }>;
 ```
 
-`validFrom` applies only when the operation creates the edge and otherwise
-leaves the existing start unchanged. `validTo` applies when the edge is
-created, updated, or resurrected. When `ifExists` is omitted or `"return"`, a
-live match produces the `"found"` action and neither temporal option changes
-the edge.
+`validFrom` applies when the operation creates the edge and when it resurrects
+one; an `"updated"` live match leaves the existing start unchanged, because a
+live row's lower bound is history. On a resurrection, naming `validFrom` asserts
+the COMPLETE window: an accompanying `validTo` is applied, and an omitted one
+reopens the revived row rather than keeping the tombstoned incarnation's end.
+`validTo` applies when the edge is created, updated, or resurrected, and may not
+precede the row's effective start — see
+[Inverted validity windows](/errors/#inverted_validity_window). When `ifExists`
+is omitted or `"return"`, a live match produces the `"found"` action and neither
+temporal option changes the edge.
 
 #### `bulkGetOrCreateByEndpoints(items, options?)`
 

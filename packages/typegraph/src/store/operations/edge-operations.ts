@@ -33,6 +33,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import {
   assertOrderedValidityWindow,
+  assertWritableValidityWindow,
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
@@ -386,6 +387,11 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+  // A stated pair must be ordered. A lone historical validTo is NOT an error on
+  // an insert — it means "born already ended" (see
+  // assertWritableValidityWindow). Both create paths (single and batch) prepare
+  // through here, so this is the only insert-side check needed.
+  assertOrderedValidityWindow(`edge "${id}"`, validFrom, validTo);
 
   // Check cardinality constraints
   const cardinality = registration.cardinality ?? "many";
@@ -730,13 +736,24 @@ async function performEdgeUpdate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  assertOrderedValidityWindow(`edge "${id}"`, validFrom, validTo);
-  // Deliberately NO effective-lower-bound check here (nodes have one): edge
-  // resurrection with a lone past `validTo` is sanctioned public behavior —
-  // `getOrCreateByEndpoints` resurrects an ended employment directly into the
-  // inactive state and counts it against cardinality accordingly. Edges also
-  // RETAIN their stored lower bound on resurrection, so the "born inverted"
-  // corruption the node check closes cannot silently arise from a merge here.
+  // The row's stored lower bound is the effective one on EVERY edge update,
+  // in-place or resurrecting: an edge RETAINS `valid_from` unless the
+  // resurrection names a new one (see UpdateEdgeParams), so a lone `validTo`
+  // is always measured against the bound the row already carries. This is the
+  // ordering hole the edge write path used to have; nodes have always been
+  // checked here, and the two now agree.
+  //
+  // Resurrecting an edge straight into the ENDED state stays available — that is
+  // what `getOrCreateByEndpoints` does to an ended employment, counting it
+  // against cardinality as inactive — but the end it names must not precede the
+  // window it is ending. Reviving a row into a window that closed before the row
+  // began means restating the start, so pass `validFrom` alongside `validTo`.
+  assertWritableValidityWindow(
+    `edge "${id}"`,
+    validFrom,
+    existing.valid_from,
+    validTo,
+  );
 
   // `validFrom` reaches the backend only through a resurrecting write (see
   // UpdateEdgeParams): a live edge's lower bound is history and stays put.
@@ -1102,12 +1119,19 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   validateMatchOnFields(edgeKind.schema, matchOn, kind);
 
   // Validate temporal inputs before the read probe so validity of a call does
-  // not depend on whether its endpoint identity already exists.
+  // not depend on whether its endpoint identity already exists. Only the
+  // endpoint PAIR can be judged here — the effective lower bound of a lone
+  // `validTo` belongs to the row the write leg resolves to, and is checked there.
   const validFrom = validateOptionalCanonicalIsoDate(
     options?.validFrom,
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(options?.validTo, "validTo");
+  assertOrderedValidityWindow(
+    `${kind} edge between ${fromKind} "${fromId}" and ${toKind} "${toId}"`,
+    validFrom,
+    validTo,
+  );
 
   // Probe outside the transaction: with ifExists "return", the common found
   // path performs no write, so it must not pay for a write transaction
@@ -1219,11 +1243,18 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       effectiveValidTo,
     );
 
+    // A resurrection forwards `validFrom` as the create leg does: naming it
+    // restates the revived row's WHOLE window (the backend rewrites both
+    // endpoints together), which is the only way to revive a row into a window
+    // that closed before the row originally began. Dropping it here silently
+    // ignored a stated lower bound and left the caller no way to satisfy the
+    // window-ordering guard.
     const edge = await executeEdgeUpsertUpdate(
       ctx,
       {
         id: matchedDeletedRow.id,
         props: validatedProps,
+        ...(validFrom !== undefined && { validFrom }),
         ...(validTo !== undefined && { validTo }),
       },
       backend,
@@ -1296,6 +1327,13 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       "validFrom",
     );
     const validTo = validateOptionalCanonicalIsoDate(item.validTo, "validTo");
+    // As in the single-item path: the endpoint pair is judged up front so a
+    // batch's validity does not depend on which items already exist.
+    assertOrderedValidityWindow(
+      `${kind} edge between ${item.fromKind} "${item.fromId}" and ${item.toKind} "${item.toId}"`,
+      validFrom,
+      validTo,
+    );
 
     const compositeKey = buildEdgeCompositeKey(
       item.fromKind,
@@ -1377,6 +1415,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     fromId: string;
     toKind: string;
     toId: string;
+    /** Reaches the write only on a RESURRECTION, which rewrites both endpoints. */
+    validFrom?: string;
     validTo?: string;
   }
   interface DuplicateEntry {
@@ -1448,6 +1488,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           fromId: entry.fromId,
           toKind: entry.toKind,
           toId: entry.toId,
+          ...(entry.validFrom !== undefined && {
+            validFrom: entry.validFrom,
+          }),
           ...(entry.validTo !== undefined && { validTo: entry.validTo }),
         });
       }
@@ -1525,11 +1568,16 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           effectiveValidTo,
         );
 
+        // As in the single-item path: a resurrection forwards `validFrom` so a
+        // stated lower bound restates the revived row's whole window.
         const edge = await executeEdgeUpsertUpdate(
           ctx,
           {
             id: entry.row.id,
             props: entry.validatedProps,
+            ...(entry.validFrom !== undefined && {
+              validFrom: entry.validFrom,
+            }),
             ...(entry.validTo !== undefined && { validTo: entry.validTo }),
           },
           target,

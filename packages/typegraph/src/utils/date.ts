@@ -7,7 +7,7 @@
  * - Sorts correctly as strings
  */
 
-import { ValidationError } from "../errors";
+import { INVERTED_VALIDITY_WINDOW_CODE, ValidationError } from "../errors";
 
 /**
  * ISO 8601 datetime pattern.
@@ -196,39 +196,61 @@ export function validateOptionalCanonicalIsoDate(
 }
 
 /**
- * Rejects an inverted validity window. `validFrom > validTo` describes a row
- * that stopped being true before it started, so NO `asOf` coordinate can ever
- * observe it — the write succeeds and the row is then invisible everywhere,
- * which reads as data loss rather than as the error it is. Call this wherever
- * both endpoints are supplied together; both are canonical ISO 8601 by then, so
- * a lexicographic compare is a chronological compare.
+ * Whether a stated validity window has NEGATIVE width — a row that stopped
+ * being true before it started. The one comparison every window refusal is
+ * built on, so paths that must report the fault through their own error type
+ * (trusted import) decide it identically to the ones that throw a
+ * `ValidationError`.
  *
- * @param subject - Human-readable identification of the row, for the message
- *   (e.g. `Person "01H..."`).
- * @throws ValidationError if both endpoints are present and out of order
+ * PRECONDITION: both endpoints are canonical fixed-width UTC ISO 8601, which is
+ * what makes a lexicographic compare a chronological one. Every caller that
+ * throws reaches this through {@link validateOptionalCanonicalIsoDate} first,
+ * and rows read back from either backend are canonicalized by the row mappers.
+ * Trusted import is the exception: it trusts its stream's timestamps wholesale,
+ * so a non-canonical instant there mis-compares here — the same way it already
+ * mis-sorts against an `asOf` read coordinate once stored.
+ *
+ * ZERO width (`validFrom === validTo`) is not inverted: it is what a
+ * same-instant retraction produces at millisecond precision, and the store's own
+ * output must round-trip.
  */
+export function isInvertedValidityWindow(
+  validFrom: string | undefined,
+  validTo: string | undefined,
+): boolean {
+  if (validFrom === undefined || validTo === undefined) return false;
+  return validFrom > validTo;
+}
+
 /**
- * Refuses a `validTo` whose EFFECTIVE lower bound would invert the window.
- * On a resurrecting write the backend stamps the write instant as the new
- * lower bound when no `validFrom` accompanies the write, so a lone past
- * `validTo` would be born inverted — permanently invisible at every
- * coordinate. On a live-row update the stored lower bound is the effective
- * one and must stay <= the new `validTo`.
+ * Refuses a `validTo` whose EFFECTIVE lower bound would invert the window. On an
+ * in-place update the row's stored lower bound is the effective one and must stay
+ * <= the new `validTo`; on a resurrection that RESETS `valid_from` it is the
+ * write instant, so a lone past `validTo` would be born inverted.
+ *
+ * A ZERO-width window (`validTo === effectiveValidFrom`) is legal and stays
+ * legal: it is what a same-instant retraction produces at millisecond
+ * precision, and the identity-import window check sanctions it for the same
+ * reason. Only NEGATIVE width refuses.
+ *
+ * Reached through {@link assertWritableValidityWindow} rather than called
+ * directly, so no writer can check the effective bound without also checking a
+ * stated pair.
  */
-export function assertEffectiveValidityLowerBound(
+function assertEffectiveValidityLowerBound(
   subject: string,
   effectiveValidFrom: string | undefined,
   validTo: string | undefined,
 ): void {
-  if (validTo === undefined || effectiveValidFrom === undefined) return;
-  if (effectiveValidFrom <= validTo) return;
+  if (!isInvertedValidityWindow(effectiveValidFrom, validTo)) return;
   throw new ValidationError(
     `Inverted validity window for ${subject}: the effective validFrom "${effectiveValidFrom}" is after validTo "${validTo}".`,
     {
       issues: [
         {
           path: "validTo",
-          message: `Expected the effective validFrom <= validTo, got "${effectiveValidFrom}" > "${validTo}". On a resurrecting write, pass an explicit validFrom alongside a historical validTo.`,
+          code: INVERTED_VALIDITY_WINDOW_CODE,
+          message: `Expected the effective validFrom <= validTo, got "${effectiveValidFrom}" > "${validTo}". The effective validFrom is the row's stored lower bound, or the write instant where the write stamps one.`,
         },
       ],
     },
@@ -239,19 +261,32 @@ export function assertEffectiveValidityLowerBound(
   );
 }
 
+/**
+ * Rejects an inverted validity window. `validFrom > validTo` describes a row
+ * that stopped being true before it started, so no current-mode or `asOf` read
+ * can ever observe it — the write succeeds and the row is then reachable only
+ * through `includeEnded`, which reads as data loss rather than as the error it
+ * is. Call this wherever both endpoints are supplied together; both are
+ * canonical ISO 8601 by then, so a lexicographic compare is a chronological
+ * compare.
+ *
+ * @param subject - Human-readable identification of the row, for the message
+ *   (e.g. `Person "01H..."`).
+ * @throws ValidationError if both endpoints are present and out of order
+ */
 export function assertOrderedValidityWindow(
   subject: string,
   validFrom: string | undefined,
   validTo: string | undefined,
 ): void {
-  if (validFrom === undefined || validTo === undefined) return;
-  if (validFrom <= validTo) return;
+  if (!isInvertedValidityWindow(validFrom, validTo)) return;
   throw new ValidationError(
     `Inverted validity window for ${subject}: validFrom "${validFrom}" is after validTo "${validTo}".`,
     {
       issues: [
         {
           path: "validFrom",
+          code: INVERTED_VALIDITY_WINDOW_CODE,
           message: `Expected validFrom <= validTo, got "${validFrom}" > "${validTo}"`,
         },
       ],
@@ -260,6 +295,47 @@ export function assertOrderedValidityWindow(
       suggestion:
         "Pass a validFrom at or before validTo, or omit validTo to leave the window open.",
     },
+  );
+}
+
+/**
+ * THE window-ordering guard a valid-time UPDATE goes through, identically for
+ * nodes and edges. Refuses a window of negative width — a row that stopped
+ * being true before it started — whether the caller states both endpoints or
+ * only the new end.
+ *
+ * Two checks, because the two failures deserve different messages: the caller
+ * who supplied both endpoints out of order gets told about the pair, and the
+ * caller whose lone `validTo` inverts against the bound the row will actually
+ * carry gets told which bound that is.
+ *
+ * INSERTS use {@link assertOrderedValidityWindow} alone. An insert carrying a
+ * lone historical `validTo` means "born already ended", and the write instant
+ * the backend stamps as `valid_from` is a storage convention rather than a
+ * caller assertion — the row is deliberately not current and is read back
+ * through `includeEnded`. Only an UPDATE has a lower bound the caller can be
+ * held to.
+ *
+ * @param subject - Human-readable identification of the row, for the message
+ *   (e.g. `Person "01H..."`).
+ * @param validFrom - The caller's explicit lower bound, if any.
+ * @param fallbackValidFrom - The lower bound the row carries when the caller
+ *   supplies none: the stored `valid_from` for an in-place update, the write
+ *   instant for a resurrection that resets it, `undefined` where there is no
+ *   bound to invert against.
+ * @throws ValidationError with issue code {@link INVERTED_VALIDITY_WINDOW_CODE}
+ */
+export function assertWritableValidityWindow(
+  subject: string,
+  validFrom: string | undefined,
+  fallbackValidFrom: string | undefined,
+  validTo: string | undefined,
+): void {
+  assertOrderedValidityWindow(subject, validFrom, validTo);
+  assertEffectiveValidityLowerBound(
+    subject,
+    validFrom ?? fallbackValidFrom,
+    validTo,
   );
 }
 

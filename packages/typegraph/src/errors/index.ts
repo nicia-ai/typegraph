@@ -179,6 +179,20 @@ export type ValidationIssue = Readonly<{
 }>;
 
 /**
+ * The stable {@link ValidationIssue.code} every inverted-validity-window
+ * refusal carries, so a caller can recognize that specific failure without
+ * matching on the message. `ValidationError`'s own code is the family-wide
+ * `VALIDATION_ERROR`, so the discriminator lives on the issue — mirroring the
+ * identity-import window refusal (`IDENTITY_IMPORT_INVALID_WINDOW`).
+ *
+ * A write carrying it was refused because `validTo` precedes the row's
+ * effective `validFrom`: the row would have stopped being true before it
+ * started, observable at no `asOf` coordinate at all. Zero-width windows
+ * (`validTo === validFrom`) are legal and never raise it.
+ */
+export const INVERTED_VALIDITY_WINDOW_CODE = "INVERTED_VALIDITY_WINDOW";
+
+/**
  * Details for ValidationError.
  */
 export type ValidationErrorDetails = Readonly<{

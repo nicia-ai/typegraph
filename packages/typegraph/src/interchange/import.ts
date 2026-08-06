@@ -22,6 +22,7 @@ import { type EdgeRegistration, type NodeRegistration } from "../core/types";
 import {
   ConfigurationError,
   IdentityContradictionError,
+  INVERTED_VALIDITY_WINDOW_CODE,
   NodeNotFoundError,
   UniquenessError,
   ValidationError,
@@ -43,7 +44,11 @@ import { type GraphWriteLock } from "../store/recorded-capture/clock";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { checkUniquenessConstraints } from "../store/uniqueness";
-import { validateOptionalCanonicalIsoDate } from "../utils/date";
+import {
+  assertOrderedValidityWindow,
+  assertWritableValidityWindow,
+  validateOptionalCanonicalIsoDate,
+} from "../utils/date";
 import {
   type GraphData,
   type GraphDataHeader,
@@ -913,6 +918,14 @@ async function processNodeSlice(
             record(node, { status: "skipped", liveTarget: false });
             break;
           }
+          const updateWindowError = validateUpdateValidityWindow(
+            node,
+            existing.valid_from,
+          );
+          if (updateWindowError !== undefined) {
+            record(node, { status: "error", error: updateWindowError });
+            break;
+          }
           const updateResult = await catchUniquenessError(() =>
             applyNodeUpdate(
               writeContext,
@@ -1075,23 +1088,57 @@ async function catchUniquenessError<T>(
 }
 
 /**
- * Validates an entity's validity-window timestamps against the canonical
- * fixed-width UTC ISO-8601 contract that `create` / `update` enforce, so no
- * import write path can persist a non-canonical `valid_from` / `valid_to` that
- * later mis-sorts as text against an `asOf` read coordinate. The interchange
- * schema enforces the same contract at the parse boundary, but `importGraph`
- * accepts a pre-typed `GraphData` and does not re-parse it, so this is the
- * guarantee for callers that bypass the schema. Returns a per-row error message
- * (recorded in the import result) instead of throwing, so one malformed row
- * does not abort the whole import.
+ * Runs a window assertion and reports its refusal as a per-row error message
+ * (recorded in the import result) instead of throwing, so one malformed row does
+ * not abort the whole import. An inverted window's message is prefixed with
+ * {@link INVERTED_VALIDITY_WINDOW_CODE} so the refusal is recognizable without
+ * parsing prose.
+ */
+function windowErrorOf(assert: () => void): string | undefined {
+  try {
+    assert();
+    return undefined;
+  } catch (error) {
+    if (
+      error instanceof ValidationError &&
+      error.details.issues.some(
+        (issue) => issue.code === INVERTED_VALIDITY_WINDOW_CODE,
+      )
+    ) {
+      return `${INVERTED_VALIDITY_WINDOW_CODE}: ${error.message}`;
+    }
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+/**
+ * Validates an entity's validity window against the two contracts `create` /
+ * `update` enforce: canonical fixed-width UTC ISO-8601 timestamps, so no import
+ * write path can persist a `valid_from` / `valid_to` that later mis-sorts as
+ * text against an `asOf` read coordinate, and non-negative window WIDTH, so no
+ * import document can persist a row that stopped being true before it started.
+ * Import writes straight to the backend rather than through the store
+ * operations layer, so it carries its own copy of both — this is the only place
+ * the guarantee exists for an imported row.
+ *
+ * The interchange schema enforces the timestamp contract at the parse boundary,
+ * but `importGraph` accepts a pre-typed `GraphData` and does not re-parse it, so
+ * this is also the guarantee for callers that bypass the schema.
+ *
+ * This is the INSERT-shaped half, judged before the existence probe so a
+ * malformed document is refused whether or not the row already exists. The
+ * update legs additionally call {@link validateUpdateValidityWindow}, which
+ * needs the row.
  */
 function validateValidityWindow(
   entity: Readonly<{
+    kind: string;
+    id: string;
     validFrom?: string | null | undefined;
     validTo?: string | undefined;
   }>,
 ): string | undefined {
-  try {
+  return windowErrorOf(() => {
     // null is a confirmed open-left window (see InterchangeNodeSchema's
     // validFrom doc), not a value to format-check — treat it like
     // "not provided" here, same as the canonical-date validator does.
@@ -1100,10 +1147,43 @@ function validateValidityWindow(
       "validFrom",
     );
     validateOptionalCanonicalIsoDate(entity.validTo, "validTo");
-    return undefined;
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
+    // On an INSERT only a stated pair is judged — a lone historical validTo
+    // means "born already ended", exactly as it does on `create` (see
+    // assertWritableValidityWindow). `null` is a confirmed open-left window and
+    // is not a lower bound at all.
+    assertOrderedValidityWindow(
+      `${entity.kind} "${entity.id}"`,
+      entity.validFrom ?? undefined,
+      entity.validTo,
+    );
+  });
+}
+
+/**
+ * The UPDATE-shaped half, for `onConflict: "update"` against a row that already
+ * exists. All four update legs — batched and sequential, nodes and edges — send
+ * the document's `validTo` to an in-place update of a LIVE row while its stored
+ * `valid_from` stays put, so the document's end is held to that bound exactly as
+ * `store.nodes.*.update` holds a caller's. Without this an import could still
+ * write the inverted row the direct update path refuses, and the insert-shaped
+ * check above cannot see it: such a document states no `validFrom` at all.
+ */
+function validateUpdateValidityWindow(
+  entity: Readonly<{
+    kind: string;
+    id: string;
+    validTo?: string | undefined;
+  }>,
+  storedValidFrom: string | undefined,
+): string | undefined {
+  return windowErrorOf(() => {
+    assertWritableValidityWindow(
+      `${entity.kind} "${entity.id}"`,
+      undefined,
+      storedValidFrom,
+      entity.validTo,
+    );
+  });
 }
 
 async function processNode(
@@ -1163,6 +1243,13 @@ async function processNode(
           // stays invisible — a uniqueness reservation held by a tombstoned
           // node would block live creates of the same value.
           return { status: "skipped", liveTarget: false };
+        }
+        const updateWindowError = validateUpdateValidityWindow(
+          node,
+          existing.valid_from,
+        );
+        if (updateWindowError !== undefined) {
+          return { status: "error", error: updateWindowError };
         }
         // Route through the shared write step so the update maintains
         // uniqueness entries, embeddings, and fulltext — the collection API's
@@ -1488,6 +1575,14 @@ async function processEdgeSlice(
             record(edge, { status: "skipped", liveTarget: false });
             break;
           }
+          const updateWindowError = validateUpdateValidityWindow(
+            edge,
+            existing.valid_from,
+          );
+          if (updateWindowError !== undefined) {
+            record(edge, { status: "error", error: updateWindowError });
+            break;
+          }
           await backend.updateEdge({
             graphId,
             id: edge.id,
@@ -1658,6 +1753,13 @@ async function processEdge(
         // the backend's update targets live rows only.
         if (existing.deleted_at !== undefined) {
           return { status: "skipped", liveTarget: false };
+        }
+        const updateWindowError = validateUpdateValidityWindow(
+          edge,
+          existing.valid_from,
+        );
+        if (updateWindowError !== undefined) {
+          return { status: "error", error: updateWindowError };
         }
         await backend.updateEdge({
           graphId,
