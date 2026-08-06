@@ -13,9 +13,11 @@ staged copy — so a row staged by several branches re-offered each of its
 branches once per copy. The tuple is exactly the sidecar row's identity, so
 those re-observations were never new information: they inflated
 `provenancePersisted.count`, and because a single `bulkUpsertById` batch cannot
-create the same id twice, a merge that touched an inherited edge failed the
-whole best-effort persist and reported the failure as a warning with no rows
-written.
+create the same id twice, the over-count was the milder half: with
+`persistProvenance: true`, a merge in which a single branch modified one
+inherited edge failed the whole best-effort persist, so `provenancePersisted`
+came back absent, a `provenance persistence failed …` warning was reported, and
+NO provenance rows were written at all.
 
 Contributions are now collapsed at the single recording funnel, so the record
 list, the in-memory `provenance.byBranch` index and the reported count all

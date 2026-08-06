@@ -104,6 +104,24 @@ const ID_SEPARATOR = "\0";
 const ID_DIGEST_BYTES = 16;
 
 /**
+ * The tuple that IDENTIFIES a contribution: everything {@link provenanceNodeId}
+ * hashes except the target graph id, which is fixed for one merge. Two records
+ * agreeing on it are one sidecar row by definition, so a caller that collapses on
+ * this key collapses exactly what the row identity would have collapsed —
+ * `canonicalKind` is part of it because two same-id canonicals of different kinds
+ * are different entities under the `(kind, id)` identity model.
+ */
+export function contributionKey(record: ProvenanceRecord): string {
+  return [
+    record.role,
+    record.canonicalKind,
+    record.canonicalId,
+    record.branchId,
+    record.sourceId,
+  ].join(ID_SEPARATOR);
+}
+
+/**
  * Deterministic provenance node id: a hash of the contribution tuple, so
  * re-persisting the same contribution UPSERTS the same row (idempotent re-runs).
  *
@@ -116,17 +134,7 @@ export async function provenanceNodeId(
   targetGraphId: string,
   record: ProvenanceRecord,
 ): Promise<string> {
-  const tuple = [
-    targetGraphId,
-    record.role,
-    // canonicalKind is part of node identity: two contributions to different-kind
-    // canonicals that share a bare id (e.g. base Patient:x and Encounter:x) must NOT
-    // hash to the same sidecar row and clobber each other (the (kind,id) identity model).
-    record.canonicalKind,
-    record.canonicalId,
-    record.branchId,
-    record.sourceId,
-  ].join(ID_SEPARATOR);
+  const tuple = [targetGraphId, contributionKey(record)].join(ID_SEPARATOR);
   const digest = await sha256Hex(tuple, ID_DIGEST_BYTES);
   return `prov_${digest}`;
 }
