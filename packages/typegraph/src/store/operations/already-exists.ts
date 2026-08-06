@@ -16,8 +16,10 @@
  *    PostgreSQL under its default READ COMMITTED does not serialize two write
  *    transactions, so both can probe an absent row and both can then insert it,
  *    and the loser finds out from the INSERT. SQLite cannot reach this shape:
- *    `BEGIN IMMEDIATE` gives the writer slot to one transaction at a time, so the
- *    loser's probe runs after the winner committed and its verdict stands.
+ *    `BEGIN IMMEDIATE` gives the writer slot to one transaction at a time (pinned
+ *    by the business-transaction write-lock cases in
+ *    `tests/backends/sqlite/sqlite-backend.test.ts`), so the loser's probe runs
+ *    after the winner committed and its verdict stands.
  *  - An EDGE create has no existence probe at all — its id is caller-supplied or
  *    freshly generated — so the engine's refusal is the ONLY report on EVERY
  *    backend, race or no race. That is why the classification covers both

@@ -17,11 +17,16 @@
  * SQLite cannot reach this shape. `BEGIN IMMEDIATE` hands the writer slot to one
  * transaction at a time, so a node create cannot be between its probe and its
  * INSERT while another commits — the probe is authoritative, and the refusal is
- * the probe's own error. Staging the overlap there is not merely unnecessary but
- * impossible in-process: better-sqlite3 is synchronous, so a second writer's
- * blocked `BEGIN IMMEDIATE` blocks the event loop the holder needs to reach
- * COMMIT, and the attempt ends in `SQLITE_BUSY: database is locked` after the
- * full `busy_timeout` — never in a duplicate-key report.
+ * the probe's own error. That serialization is already pinned, by the
+ * `SQLite Backend - business transaction write lock` cases in
+ * `tests/backends/sqlite/sqlite-backend.test.ts`: a second connection cannot take
+ * the write lock while a business transaction holds it.
+ *
+ * Staging the overlap there is therefore not merely unnecessary but impossible
+ * in-process: better-sqlite3 is synchronous, so a second writer's blocked
+ * `BEGIN IMMEDIATE` blocks the event loop the holder needs to reach COMMIT, and
+ * the attempt ends in `SQLITE_BUSY: database is locked` once the 5s default
+ * `busyTimeoutMs` elapses — never in a duplicate-key report.
  *
  * The translation itself is NOT Postgres-only, though: an edge create has no
  * existence probe at all, so the engine's refusal is its only report of a taken
