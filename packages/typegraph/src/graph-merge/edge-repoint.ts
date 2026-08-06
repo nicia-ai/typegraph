@@ -117,15 +117,19 @@ export const INHERITED_EDGE_ORIGIN = "inherited" as const;
 export const BRANCH_CREATED_EDGE_ORIGIN = "branch-created" as const;
 
 /**
- * Whether a staged edge's ROW already exists in the merge base, or was created on a
- * branch. It is the diff BUCKET the staging phase (T7) put the edge in — a modified
- * or re-windowed inherited edge is {@link INHERITED_EDGE_ORIGIN}, a new fork edge is
- * {@link BRANCH_CREATED_EDGE_ORIGIN} — threaded through as data because nothing about
- * an edge id reveals its origin (ids are opaque and may be caller-chosen, so
- * re-deriving one from the id is not possible, not merely unwise).
+ * Whether a staged edge's ROW already existed at the fork point its branch diffed
+ * against, or was created after it. It is the diff BUCKET the staging phase (T7) put the
+ * edge in — a modified or re-windowed inherited edge is {@link INHERITED_EDGE_ORIGIN}, a
+ * new fork edge is {@link BRANCH_CREATED_EDGE_ORIGIN} — threaded through as data because
+ * nothing about an edge id reveals its origin (ids are opaque and may be caller-chosen,
+ * so re-deriving one from the id is not possible, not merely unwise).
  *
- * Survivor selection is the consumer: an inherited row is one the merge target
- * already holds, and a fold must land on it (see {@link pickSurvivor}).
+ * Survivor selection is the consumer: an inherited row is one the merge target already
+ * holds, so a fold must land on it (see {@link pickSurvivor}). Note this is not a
+ * liveness dichotomy — an incremental target's OWN new edge is
+ * {@link BRANCH_CREATED_EDGE_ORIGIN} while being a live committed row of the target too,
+ * which is why the order between the two is a decision {@link pickSurvivor} has to make
+ * rather than a tautology.
  */
 type StagedEdgeOrigin =
   typeof INHERITED_EDGE_ORIGIN | typeof BRANCH_CREATED_EDGE_ORIGIN;
@@ -171,8 +175,10 @@ export type StagedEdge = Readonly<{
  * A surviving merged edge after repoint + dedupe. `id` is the canonical survivor
  * of its fold set (its inherited member, else its minimum contributing edge id — see
  * {@link pickSurvivor}); `mergedIds` is every staged edge id that collapsed into it
- * (always includes `id`), so the commit phase (T11) knows which inherited edges to
- * fold away.
+ * (always includes `id`), which is how the commit phase (T11) records each contributing
+ * branch's provenance against the row that actually persists. Nothing ENDS a folded-away
+ * row — that is precisely why `id` is a commit-correctness choice and not a preference
+ * (see the module header's survivor rule).
  */
 export type MergedEdge = Readonly<{
   id: EdgeId;
@@ -400,13 +406,14 @@ function foldSets(
  * Orders two members of one fold set for the survivor pick: by edge id, then toward
  * the preferred branch, then by branch id.
  *
- * Members that tie on the edge id are the SAME ROW staged by several branches, so the
- * row that survives is settled either way and the remaining choice is only WHICH
- * branch's staged copy of it the fold reads its kind, window and survivor prop values
- * from. Preferring the preferred branch's copy is what lets {@link foldEdgeSet}
- * recognize a survivor as the incremental target's own row and keep its end verbatim;
- * the branch id then makes the order total, so the pick cannot depend on which copy
- * the caller listed first.
+ * Members that tie on the edge id are the SAME ROW staged by several branches (two
+ * branches creating one caller-chosen id), so the row that survives is settled either
+ * way and the remaining choice is only WHICH branch's staged copy of it the fold reads
+ * its kind, window and survivor prop values from. It goes to the preferred branch,
+ * agreeing with {@link pickSurvivor}'s candidate preference — which is where a
+ * preferred-branch copy is normally selected, so this clause only ever breaks a tie
+ * INSIDE a candidate class. The branch id then makes the order total, so the pick cannot
+ * depend on which copy the caller listed first.
  */
 function compareMembers(
   left: RepointedEdge,
@@ -579,8 +586,10 @@ function foldEdgeSet(
   // reconciler uses.
   //
   // A survivor from the PREFERRED branch keeps its own end verbatim when it
-  // HAS one: that member is the live incremental target's row, and a user
-  // branch never re-windows what the target already holds. When it has none
+  // HAS one: that member is the live incremental target's row — or, when the
+  // target also staged the inherited survivor, the end already reconciled FOR
+  // that row — and a user branch never re-windows what the target already
+  // holds, so neither is the fold's to move. When the survivor has none
   // there is no target window to protect, so the fold still resolves across
   // the set — otherwise a preferred survivor would silently swallow the
   // only end any branch claimed.
