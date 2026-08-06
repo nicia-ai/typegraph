@@ -14,6 +14,8 @@ import {
   createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
+  IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
+  ValidationError,
 } from "../src";
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
 import type { SqliteTables } from "../src/backend/sqlite";
@@ -420,6 +422,25 @@ export function withZonedValidityWindowText(base: GraphBackend): GraphBackend {
         options,
       ),
   };
+}
+
+/**
+ * Asserts an operation was refused for stating a `validFrom` the write could not
+ * apply, identified by its stable issue code rather than by message text.
+ *
+ * One helper for every path, because the point of the refusal is that it is the
+ * SAME refusal wherever a stated lower bound meets a live row — a per-file copy
+ * asserting "some ValidationError" would let one path drift to a different
+ * failure and still pass.
+ */
+export async function expectImmutableLowerBoundRefusal(
+  operation: Promise<unknown>,
+): Promise<void> {
+  await expect(operation).rejects.toThrow(ValidationError);
+  const error = await operation.catch((error_: unknown) => error_);
+  expect(
+    (error as ValidationError).details.issues.map((issue) => issue.code),
+  ).toContain(IMMUTABLE_VALIDITY_LOWER_BOUND_CODE);
 }
 
 export { generateSqliteDDL } from "../src/backend/drizzle/ddl";

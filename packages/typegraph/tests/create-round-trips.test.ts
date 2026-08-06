@@ -9,7 +9,11 @@ import {
   type TransactionBackend,
 } from "../src";
 import { type SqlFragment } from "../src/query/sql-fragment";
-import { createInitializedStore, createTestBackend } from "./test-utils";
+import {
+  createInitializedStore,
+  createTestBackend,
+  expectImmutableLowerBoundRefusal,
+} from "./test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const Author = defineNode("Author", {
@@ -231,14 +235,45 @@ describe("create-path round trips", () => {
     );
     await store.nodes.Person.delete(original.id);
 
-    const revived = await store.nodes.Person.upsertById(
-      "contended-upsert",
-      { name: "Late writer" },
-      { validFrom: "2025-01-01T00:00:00.000Z" },
-    );
+    // No stated lower bound, so the recovery re-run is an ordinary update: the
+    // peer owns the revived row's window and this writer owns its props.
+    const revived = await store.nodes.Person.upsertById("contended-upsert", {
+      name: "Late writer",
+    });
 
     expect(revived.name).toBe("Late writer");
     expect(revived.meta.validFrom).toBe(PEER_RESURRECTION_VALID_FROM);
+  });
+
+  it("refuses an upsert that loses a resurrection race while stating its own validFrom", async () => {
+    // The recovery path converts a lost resurrection into an ordinary update of
+    // the peer's now-live row, and an ordinary update cannot store a lower
+    // bound. This case asserted that the stated bound was dropped and the props
+    // applied anyway; the write now refuses instead of quietly landing under a
+    // window the caller did not ask for.
+    const store = await createInitializedStore(
+      plainGraph,
+      peerResurrectionBackend("contended-refused"),
+    );
+    const original = await store.nodes.Person.create(
+      { name: "Original" },
+      { id: "contended-refused" },
+    );
+    await store.nodes.Person.delete(original.id);
+
+    await expectImmutableLowerBoundRefusal(
+      store.nodes.Person.upsertById(
+        "contended-refused",
+        { name: "Late writer" },
+        { validFrom: "2025-01-01T00:00:00.000Z" },
+      ),
+    );
+
+    // Nothing landed. The refusal rolls its transaction back, and the simulated
+    // peer's resurrection is injected INSIDE that transaction, so the row is
+    // left tombstoned rather than revived — which is also the proof the late
+    // writer's props did not half-apply.
+    expect(await store.nodes.Person.getById(original.id)).toBeUndefined();
   });
 
   it("skips the identity fold probe for generated ids", async () => {

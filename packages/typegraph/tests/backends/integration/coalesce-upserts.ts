@@ -18,6 +18,7 @@ import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 import { requireDefined } from "../../../src/utils/presence";
 import {
+  expectImmutableLowerBoundRefusal,
   withEdgeUpdateCounting,
   withZonedValidityWindowText,
 } from "../../test-utils";
@@ -102,6 +103,14 @@ const WINDOW_END = "2100-06-01T00:00:00.000Z";
 const LATER_WINDOW_END = "2100-09-01T00:00:00.000Z";
 
 /**
+ * {@link WINDOW_END} as a PARSEABLE but non-canonical string: the same instant
+ * without the fixed-width milliseconds. Every write path refuses it — a
+ * variable-width bound mis-sorts against an `asOf` coordinate — so coalescing
+ * must not be able to swallow that refusal by reading it as "unchanged".
+ */
+const NON_CANONICAL_WINDOW_END = "2100-06-01T00:00:00Z";
+
+/**
  * A PAST lower bound, for the cases that name `validFrom` on a CREATE and then
  * read the row back: a row whose window starts in 2100 is not current yet, so a
  * plain `getById` could not see it at all.
@@ -148,6 +157,44 @@ async function seedEndpoints(
     { props: { name: "B" }, id: `${prefix}-b` },
   ]);
   return [requireDefined(alice), requireDefined(bob)];
+}
+
+/**
+ * Runs `attempt` against a coalescing and a non-coalescing store, returning what
+ * each produced (the error, or `undefined` when it resolved).
+ *
+ * The two stores share the suite's one backend — hence the `label` every attempt
+ * must work into its ids, so the second run seeds its own rows instead of
+ * colliding with the first's.
+ */
+async function errorsWithFlagOnAndOff(
+  context: IntegrationTestContext,
+  attempt: (store: CoalesceTestStore, label: string) => Promise<unknown>,
+): Promise<readonly [unknown, unknown]> {
+  const coalescing = await context.createStore(integrationTestGraph, {
+    coalesceUnchangedUpserts: true,
+  });
+  const plain = await context.createStore(integrationTestGraph, {});
+  const withFlagOn: unknown = await attempt(coalescing, "on").catch(
+    (error: unknown) => error,
+  );
+  const withFlagOff: unknown = await attempt(plain, "off").catch(
+    (error: unknown) => error,
+  );
+  return [withFlagOn, withFlagOff];
+}
+
+/**
+ * Asserts both flag states refused with the SAME message. Equality is the
+ * assertion, not merely that each threw: a flag that reported a DIFFERENT
+ * failure would still be the flag changing what the caller is told.
+ */
+function expectSameRefusal(errors: readonly [unknown, unknown]): void {
+  const [withFlagOn, withFlagOff] = errors;
+  expect(withFlagOff).toBeInstanceOf(ValidationError);
+  expect(withFlagOn).toBeInstanceOf(ValidationError);
+  expect((withFlagOn as Error).message).toBe((withFlagOff as Error).message);
+  expect((withFlagOn as Error).message).toMatch(/validTo/);
 }
 
 export function registerCoalesceUpsertIntegrationTests(
@@ -238,7 +285,7 @@ export function registerCoalesceUpsertIntegrationTests(
       ).resolves.toBeDefined();
     });
 
-    it("writes when an explicit validFrom / validTo override is passed", async () => {
+    it("writes when an explicit validTo override is passed", async () => {
       const store = await createCoalesceStore(context);
 
       const created = await store.nodes.Person.upsertById("p4", {
@@ -249,10 +296,63 @@ export function registerCoalesceUpsertIntegrationTests(
       const overridden = await store.nodes.Person.upsertById(
         "p4",
         { name: "Dana", age: 25 },
-        { validFrom: "2020-01-01T00:00:00.000Z" },
+        { validTo: WINDOW_END },
       );
 
       expect(overridden.meta.version).toBe(created.meta.version + 1);
+    });
+
+    it("refuses an explicit validFrom the live row does not hold, rather than writing without it", async () => {
+      // This case asserted the opposite until the honesty rule landed: a
+      // differing `validFrom` blocked coalescing, so the upsert wrote — bumping
+      // the version and capturing history while `buildUpdateNode` left
+      // `valid_from` alone, because only a resurrection rewrites it. The bound
+      // was accepted and dropped; now it is refused.
+      const store = await createCoalesceStore(context);
+
+      const created = await store.nodes.Person.upsertById("p4-immutable", {
+        name: "Dana",
+        age: 25,
+      });
+
+      await expectImmutableLowerBoundRefusal(
+        store.nodes.Person.upsertById(
+          "p4-immutable",
+          { name: "Dana", age: 26 },
+          { validFrom: "2020-01-01T00:00:00.000Z" },
+        ),
+      );
+
+      // Refused whole: no version bump, and the props the caller sent are not
+      // half-applied.
+      const stored = await store.nodes.Person.getById(personId("p4-immutable"));
+      expect(stored?.meta.version).toBe(created.meta.version);
+      expect(stored?.age).toBe(25);
+      expect(canonicalizeDatabaseTimestamp(stored?.meta.validFrom)).toBe(
+        canonicalizeDatabaseTimestamp(created.meta.validFrom),
+      );
+    });
+
+    it("accepts an explicit validFrom that restates the bound the live row holds", async () => {
+      const store = await createCoalesceStore(context);
+
+      const created = await store.nodes.Person.upsertById("p4-restated", {
+        name: "Dana",
+        age: 25,
+      });
+      const storedValidFrom = requireDefined(created.meta.validFrom);
+
+      const updated = await store.nodes.Person.upsertById(
+        "p4-restated",
+        { name: "Dana", age: 26 },
+        { validFrom: storedValidFrom },
+      );
+
+      expect(updated.meta.version).toBe(created.meta.version + 1);
+      expect(updated.age).toBe(26);
+      expect(canonicalizeDatabaseTimestamp(updated.meta.validFrom)).toBe(
+        canonicalizeDatabaseTimestamp(storedValidFrom),
+      );
     });
 
     it("rejects an unrepresentable validTo instead of coalescing it away", async () => {
@@ -960,6 +1060,77 @@ export function registerCoalesceUpsertIntegrationTests(
         expect((bulkError as Error).message).toBe(
           (singleError as Error).message,
         );
+      });
+
+      describe("a non-canonical requested bound reports either way (#421)", () => {
+        // `NON_CANONICAL_WINDOW_END` names the same INSTANT as the stored
+        // `WINDOW_END`, so a comparison that canonicalized the requested side
+        // read it as "no change" and coalesced — with the flag off the same call
+        // reached the write path and raised. The flag decided whether malformed
+        // input was reported at all. Now the requested side must be canonical to
+        // count as unchanged, so both flag states raise the SAME error.
+        //
+        // Equality of the two messages is the assertion, not merely that each
+        // throws: a flag that reports a DIFFERENT failure would still be the flag
+        // changing what the caller is told.
+        it("on a single node upsert", async () => {
+          expectSameRefusal(
+            await errorsWithFlagOnAndOff(context, async (store, label) => {
+              await store.nodes.Person.upsertById(
+                `nc-node-single-${label}`,
+                { name: "Win", age: 1 },
+                { validTo: WINDOW_END },
+              );
+              return store.nodes.Person.upsertById(
+                `nc-node-single-${label}`,
+                { name: "Win", age: 1 },
+                { validTo: NON_CANONICAL_WINDOW_END },
+              );
+            }),
+          );
+        });
+
+        it("on a bulk node upsert", async () => {
+          expectSameRefusal(
+            await errorsWithFlagOnAndOff(context, async (store, label) => {
+              await store.nodes.Person.upsertById(
+                `nc-node-bulk-${label}`,
+                { name: "Win", age: 1 },
+                { validTo: WINDOW_END },
+              );
+              return store.nodes.Person.bulkUpsertById([
+                {
+                  id: `nc-node-bulk-${label}`,
+                  props: { name: "Win", age: 1 },
+                  validTo: NON_CANONICAL_WINDOW_END,
+                },
+              ]);
+            }),
+          );
+        });
+
+        it("on a bulk edge upsert", async () => {
+          expectSameRefusal(
+            await errorsWithFlagOnAndOff(context, async (store, label) => {
+              const [alice, bob] = await seedEndpoints(
+                store,
+                `nc-edge-${label}`,
+              );
+              const item = {
+                id: knowsId(`nc-edge-${label}`),
+                from: alice,
+                to: bob,
+                props: { since: "2020" },
+              } as const;
+              await store.edges.knows.bulkUpsertById([
+                { ...item, validTo: WINDOW_END },
+              ]);
+              return store.edges.knows.bulkUpsertById([
+                { ...item, validTo: NON_CANONICAL_WINDOW_END },
+              ]);
+            }),
+          );
+        });
       });
 
       it("refuses an unrepresentable bound from a bulk EDGE item", async () => {

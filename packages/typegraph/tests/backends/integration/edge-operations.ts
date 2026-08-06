@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { requireDefined } from "../../../src/utils/presence";
+import { expectImmutableLowerBoundRefusal } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
 export function registerEdgeOperationIntegrationTests(
@@ -109,19 +111,79 @@ export function registerEdgeOperationIntegrationTests(
         { role: "Engineer" },
         { validFrom: FIRST_VALID_FROM },
       );
+      // The update states no lower bound: a live edge's is history, so moving
+      // only the end is the whole of what this leg can do. Naming a DIFFERENT
+      // one is refused by the case below rather than silently preserving this
+      // one, which is what this case used to assert.
+      const updated = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Manager" },
+        { ifExists: "update", validTo: SECOND_VALID_TO },
+      );
+
+      expect(updated.action).toBe("updated");
+      expect(updated.edge.id).toBe(created.edge.id);
+      expect(updated.edge.role).toBe("Manager");
+      expect(updated.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(updated.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    it("refuses an endpoint update that states a validFrom the live edge does not hold", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const created = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+
+      await expectImmutableLowerBoundRefusal(
+        store.edges.worksAt.getOrCreateByEndpoints(
+          alice,
+          acme,
+          { role: "Manager" },
+          {
+            ifExists: "update",
+            validFrom: SECOND_VALID_FROM,
+            validTo: SECOND_VALID_TO,
+          },
+        ),
+      );
+
+      // Refused whole: neither the props nor the end moved.
+      const stored = await store.edges.worksAt.getById(created.edge.id);
+      expect(stored?.role).toBe("Engineer");
+      expect(stored?.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(stored?.meta.validTo).toBeUndefined();
+    });
+
+    it("restating the bound a live edge already holds is accepted", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
       const updated = await store.edges.worksAt.getOrCreateByEndpoints(
         alice,
         acme,
         { role: "Manager" },
         {
           ifExists: "update",
-          validFrom: SECOND_VALID_FROM,
+          validFrom: FIRST_VALID_FROM,
           validTo: SECOND_VALID_TO,
         },
       );
 
       expect(updated.action).toBe("updated");
-      expect(updated.edge.id).toBe(created.edge.id);
       expect(updated.edge.role).toBe("Manager");
       expect(updated.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
       expect(updated.edge.meta.validTo).toBe(SECOND_VALID_TO);
@@ -157,13 +219,14 @@ export function registerEdgeOperationIntegrationTests(
       expect(results[1]?.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
       expect(results[1]?.edge.meta.validTo).toBe(SECOND_VALID_TO);
 
+      // As on the single path: the update states no lower bound, because a live
+      // edge's is history.
       const [updated] = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
         [
           {
             from: alice,
             to: acme,
             props: { role: "Principal Engineer" },
-            validFrom: SECOND_VALID_FROM,
             validTo: SECOND_VALID_TO,
           },
         ],
@@ -173,6 +236,44 @@ export function registerEdgeOperationIntegrationTests(
       expect(updated?.action).toBe("updated");
       expect(updated?.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
       expect(updated?.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    it("refuses a bulk endpoint update that states a validFrom the live edge does not hold", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      // Left OPEN so the refused row is readable in current mode afterwards.
+      const [created] = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+      ]);
+
+      await expectImmutableLowerBoundRefusal(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints(
+          [
+            {
+              from: alice,
+              to: acme,
+              props: { role: "Principal Engineer" },
+              validFrom: SECOND_VALID_FROM,
+              validTo: SECOND_VALID_TO,
+            },
+          ],
+          { ifExists: "update" },
+        ),
+      );
+
+      const stored = await store.edges.worksAt.getById(
+        requireDefined(created).edge.id,
+      );
+      expect(stored?.role).toBe("Engineer");
+      expect(stored?.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(stored?.meta.validTo).toBeUndefined();
     });
   });
 }

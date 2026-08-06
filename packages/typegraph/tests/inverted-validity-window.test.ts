@@ -98,6 +98,13 @@ const LATER = "2022-01-01T00:00:00.000Z";
  * A two-node export whose `person-1` row carries `window` — which REPLACES both
  * endpoints, so passing `validFrom: undefined` states the born-ended shape
  * rather than inheriting the exported creation instant.
+ *
+ * Every OTHER row is stripped of its exported `validFrom`. An exported bound
+ * names the SOURCE store's creation instant, and importing it over a target row
+ * created separately states a lower bound the update cannot apply — refused with
+ * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`. These fixtures isolate the
+ * inverted-window refusal, so the rows they are not about must not raise a
+ * second, unrelated one.
  */
 async function documentWithWindow(
   window: Readonly<{
@@ -112,7 +119,9 @@ async function documentWithWindow(
   return {
     ...exported,
     nodes: exported.nodes.map((node) =>
-      node.id === "person-1" ? { ...node, ...window } : node,
+      node.id === "person-1" ?
+        { ...node, ...window }
+      : { ...node, validFrom: undefined },
     ),
   };
 }
