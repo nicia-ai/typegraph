@@ -327,6 +327,136 @@ describe("trusted import", () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    { name: "a missing millisecond field", validFrom: "2021-01-01T00:00:00Z" },
+    {
+      name: "a variable-width millisecond field",
+      validFrom: "2021-01-01T00:00:00.1Z",
+    },
+    { name: "a non-UTC offset", validFrom: "2021-01-01T00:00:00.000+01:00" },
+    { name: "a date-only value", validFrom: "2021-01-01" },
+  ])("refuses a node whose validFrom states $name", async ({ validFrom }) => {
+    // Trusted import never re-parses its stream, so this format check is the
+    // only thing holding its timestamps to the shape everything downstream
+    // assumes (issue #414). All four shapes pass `z.iso.datetime()`-style
+    // leniency yet sort wrongly as TEXT against an `asOf` coordinate.
+    const store = createStore(trustedGraph, createTestBackend());
+
+    await expect(
+      trustedImportGraph(
+        store,
+        graphData([
+          {
+            kind: "TrustedPerson",
+            id: "alice",
+            properties: { name: "Alice" },
+            validFrom,
+          },
+        ]),
+      ),
+    ).rejects.toEqual(expectReason("invalid_stream"));
+
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    { field: "validFrom" as const, value: "2021-01-01" },
+    { field: "validTo" as const, value: "2021-01-01T00:00:00Z" },
+  ])(
+    "names the offending $field, row, and value in the refusal",
+    async ({ field, value }) => {
+      // Each window field must report ITS OWN value, so a refusal points at the
+      // timestamp to convert rather than at the row's other endpoint.
+      const store = createStore(trustedGraph, createTestBackend());
+
+      await expect(
+        trustedImportGraph(
+          store,
+          graphData([
+            {
+              kind: "TrustedPerson",
+              id: "alice",
+              properties: { name: "Alice" },
+              ...(field === "validFrom" ?
+                { validFrom: value }
+              : { validTo: value }),
+            },
+          ]),
+        ),
+      ).rejects.toThrow(
+        `Non-canonical ${field} in trusted import: TrustedPerson "alice" states "${value}"`,
+      );
+    },
+  );
+
+  it("refuses a non-canonical edge window and rolls back the nodes already streamed", async () => {
+    const store = createStore(trustedGraph, createTestBackend());
+
+    await expect(
+      trustedImportGraph(
+        store,
+        graphData(
+          [
+            {
+              kind: "TrustedPerson",
+              id: "alice",
+              properties: { name: "Alice" },
+            },
+            { kind: "TrustedPerson", id: "bob", properties: { name: "Bob" } },
+          ],
+          [
+            {
+              kind: "trustedKnows",
+              id: "edge-1",
+              from: { kind: "TrustedPerson", id: "alice" },
+              to: { kind: "TrustedPerson", id: "bob" },
+              properties: { since: 2020 },
+              validFrom: "2020-06-01T12:00:00.000Z",
+              validTo: "2021-01-01T00:00:00Z",
+            },
+          ],
+        ),
+      ),
+    ).rejects.toEqual(expectReason("invalid_stream"));
+
+    // The WHOLE stream is refused: the nodes chunk that already committed
+    // inside the session's transaction rolls back with the bad edge.
+    expect(
+      await store.edges.trustedKnows.getById(asEdgeId<typeof knows>("edge-1")),
+    ).toBeUndefined();
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
+    ).toBeUndefined();
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("bob")),
+    ).toBeUndefined();
+  });
+
+  it("accepts an absent and an explicitly open-left window", async () => {
+    // `null` validFrom is a confirmed open-left window, not a timestamp, so the
+    // canonical-format check must let it through untouched.
+    const store = createStore(trustedGraph, createTestBackend());
+
+    const result = await trustedImportGraph(
+      store,
+      graphData([
+        { kind: "TrustedPerson", id: "absent", properties: { name: "Absent" } },
+        {
+          kind: "TrustedPerson",
+          id: "open-left",
+          properties: { name: "Open" },
+          // eslint-disable-next-line unicorn/no-null -- the interchange format states an open-left window as null
+          validFrom: null,
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      ]),
+    );
+
+    expect(result.nodes).toBe(2);
+  });
+
   it("accepts a zero-width and a born-ended window", async () => {
     // Both round-trip the store's own output: a same-instant retraction emits
     // zero width, and a row created with only a `validTo` carries a stamped

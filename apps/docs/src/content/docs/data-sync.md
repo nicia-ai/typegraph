@@ -128,6 +128,50 @@ over the earlier value — a field the last copy omits keeps what an earlier cop
 set. Edges follow the same rule, except that an update never repoints an edge:
 the endpoints of the first write stand.
 
+#### One batch cannot hand a unique value from one row to another
+
+Item order settles which value each id ends up with, but the writes themselves
+are grouped: every create in the batch runs before every update. A batch where
+one item **releases** a `unique` constraint value and a later item **claims** it
+therefore fails, even though the same operations applied one at a time succeed:
+
+```typescript
+// "alice@example.com" is currently held by person_a.
+await store.nodes.Person.bulkUpsertById([
+  { id: "person_a", props: { email: "moved@example.com" } }, // releases it
+  { id: "person_b", props: { email: "alice@example.com" } }, // claims it
+]);
+// ✗ UniquenessError: person_b's create is checked while person_a still holds
+//   the value. On a backend with transactions nothing is written at all.
+```
+
+Edges have the same limitation for a `cardinality` slot: a batch that ends the
+lone `oneActive` edge from a source while creating its replacement fails with a
+`CardinalityError`, because the replacement's create is checked before the
+update that frees the slot.
+
+This is a stated property of the bulk APIs rather than a bug to work around
+blindly. A batch describes the **set** of rows you want, not a script to reach
+them by, and grouping the creates apart from the updates is what makes a batch a
+couple of statements instead of one per item. The failure is loud and typed —
+never a silently dropped write.
+
+Two workarounds, both exact:
+
+- **Split the handoff across two batches**: one carrying the items that release
+  the value, then one carrying the items that claim it. Reordering items
+  *within* a single batch does not help, since the grouping ignores that order.
+  This keeps bulk throughput for everything else.
+- **Apply the conflicting items as sequential `upsertById` calls** (for edges,
+  as `update` then `create`), which frees the value before the claim is checked.
+
+If a sync feed can legitimately swap unique values between records, the
+two-batch shape is the reliable one: send one `bulkUpsertById` for the ids that
+already exist, then a second for the new ones. The interchange importer
+(`importGraph` with `onConflict: "update"`) is the other option that handles it
+directly — it applies each row in document order regardless of batch size, at the
+cost of the per-row validation and reporting that a bulk write skips.
+
 ### bulkDelete
 
 Deletes multiple nodes by ID. Silently ignores IDs that don't exist:
