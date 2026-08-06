@@ -334,7 +334,9 @@ When nodes collapse, their edges must too. After clustering, Graph Merge:
    `(from, type, to, props)` — so `x → a` and `x → b` both landing on `x → c*`
    collapse to one edge.
 4. **Reconciles** edges that collapse that way but disagree on properties, via
-   the same conflict policy as nodes.
+   the same conflict policy as nodes — over the properties each side actually
+   *changed*, so an inherited row's untouched value never competes with (or
+   outvotes) a value some branch authored.
 
 Steps 3 and 4 are scoped to collisions **repointing caused**: edges are grouped by
 the endpoint pair they named *before* repointing, and one row per pair collapses. A
@@ -359,7 +361,11 @@ keeps the lexicographically-minimal edge id.
 Inherited edges that a branch **deleted** are removed from the target, and
 inherited edges **modified** by multiple branches go through the same base-aware
 three-way merge as nodes — so an edge's `since` edited by one branch and `note`
-edited by another keep *both* edits.
+edited by another keep *both* edits. The collapse in step 4 is base-aware for the
+same reason: a staged copy of an inherited row carries that row's whole property
+bag, and only the values it *changed* count as claims. The clearest case is a row
+staged solely to carry an end-of-validity — it authored no property, so it
+contributes no claim and raises no conflict, whatever its branch's rank.
 
 ## Ontology type reconciliation
 
@@ -432,7 +438,9 @@ type MergeReport = {
   // identity:retraction-target-mismatch, identity:deletion-overruled), and
   // window deltas the commit cannot apply (window-not-applicable)
   dropped: DroppedItem[];
-  validityEnds: ValidityEndResolution[]; // inherited rows the merge ended, and who claimed each end
+  // Inherited rows whose end-of-validity the merge resolved, and who claimed each
+  // end; precedence: "target" marks a row the incremental target had already ended
+  validityEnds: ValidityEndResolution[];
   baseAmbiguities: BaseAmbiguity[]; // new-vs-base matches that spanned >= 2 committed entities
   provenance: ProvenanceIndex; // byBranch(id) -> { nodeIds, edgeIds }
   warnings: string[]; // non-fatal advisories (ceiling skips, provenance-persist failures)
@@ -580,7 +588,7 @@ explains the whole contract:
 | --------- | ------- |
 | One branch ends the row | That end is written — including a *later* end, which extends the window. |
 | Several branches end it differently | No conflict. The **earliest** end wins, and `report.validityEnds` names every claiming branch. |
-| The incremental target already ended it | The target's end stands. A branch never re-windows a row the target itself windowed, and the row is left out of the merge's writes entirely. |
+| The incremental target already ended it | The target's end stands. A branch never re-windows a row the target itself windowed, and the row is left out of the merge's writes entirely — but the discarded claims are still reported, as an entry carrying `precedence: "target"` and the target's own instant. |
 | One branch ends it, another deletes it | Deleted, with **no** `DeleteModifyConflict` — the stronger statement absorbs the weaker one. |
 | A branch re-states the end the target holds | No write at all — nothing is staged, so there is no version bump or history row even with `coalesceUnchangedUpserts` off. |
 | No branch touched the window | Untouched. A properties-only edit never passes a window, so the committed one stands. |
@@ -596,7 +604,16 @@ the only thing that branch changed. Credit follows the *committed* end: when
 several branches end a row differently, only the branches whose claim equals the
 written instant are credited, while `validityEnds[].claimedBy` still names every
 claimant, winning or not. An ending a deletion absorbed commits nothing, so it
-credits nobody.
+credits nobody, and neither does an entry marked `precedence: "target"` — the
+merge committed none of that end.
+
+**Every claim the merge observed is visible in `validityEnds`, applied or not.**
+An entry with no `precedence` is one the merge *decided*: `validTo` is the
+instant it wrote. An entry with `precedence: "target"` is one it did **not** —
+the incremental target had already moved that end, so `validTo` is the instant
+the target already held, `claimedBy` names the branch claims that were thrown
+away, and nothing was written or credited for the row. A row no branch claimed
+at all produces no entry, since there was nothing to discard.
 
 Because an ending is not a modification, `onDeleteModifyConflict` never sees
 one: a row whose *only* change is its window loses to a concurrent deletion even
