@@ -22,6 +22,7 @@ import { type EdgeRegistration, type NodeRegistration } from "../core/types";
 import {
   ConfigurationError,
   IdentityContradictionError,
+  IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   INVERTED_VALIDITY_WINDOW_CODE,
   NodeNotFoundError,
   UniquenessError,
@@ -1090,22 +1091,23 @@ async function catchUniquenessError<T>(
 /**
  * Runs a window assertion and reports its refusal as a per-row error message
  * (recorded in the import result) instead of throwing, so one malformed row does
- * not abort the whole import. An inverted window's message is prefixed with
- * {@link INVERTED_VALIDITY_WINDOW_CODE} so the refusal is recognizable without
- * parsing prose.
+ * not abort the whole import. A window refusal that carries a stable issue code —
+ * {@link INVERTED_VALIDITY_WINDOW_CODE} or
+ * {@link IMMUTABLE_VALIDITY_LOWER_BOUND_CODE} — is prefixed with it, so the
+ * refusal is recognizable without parsing prose.
  */
 function windowErrorOf(assert: () => void): string | undefined {
   try {
     assert();
     return undefined;
   } catch (error) {
-    if (
-      error instanceof ValidationError &&
-      error.details.issues.some(
-        (issue) => issue.code === INVERTED_VALIDITY_WINDOW_CODE,
-      )
-    ) {
-      return `${INVERTED_VALIDITY_WINDOW_CODE}: ${error.message}`;
+    if (error instanceof ValidationError) {
+      const coded = error.details.issues.find(
+        (issue) =>
+          issue.code === INVERTED_VALIDITY_WINDOW_CODE ||
+          issue.code === IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
+      );
+      if (coded !== undefined) return `${coded.code}: ${error.message}`;
     }
     return error instanceof Error ? error.message : String(error);
   }
@@ -1166,12 +1168,22 @@ function validateValidityWindow(
  * `valid_from` stays put, so the document's end is held to that bound exactly as
  * `store.nodes.*.update` holds a caller's. Without this an import could still
  * write the inverted row the direct update path refuses, and the insert-shaped
- * check above cannot see it: such a document states no `validFrom` at all.
+ * check above cannot see it: such a document may state no `validFrom` at all.
+ *
+ * The document's `validFrom` is judged here for the same reason: import never
+ * sends it on an update, so a document stating a bound that differs from the
+ * row's is stating one the write will not apply. That is refused per row —
+ * `onConflict: "update"` re-importing a document whose rows were created at a
+ * different instant now reports those rows instead of silently updating their
+ * props under a bound it ignored. `null` is a confirmed open-left window rather
+ * than a stated bound (see `InterchangeNodeSchema`'s `validFrom`) and asserts
+ * nothing.
  */
 function validateUpdateValidityWindow(
   entity: Readonly<{
     kind: string;
     id: string;
+    validFrom?: string | null | undefined;
     validTo?: string | undefined;
   }>,
   storedValidFrom: string | undefined,
@@ -1179,8 +1191,8 @@ function validateUpdateValidityWindow(
   return windowErrorOf(() => {
     assertWritableValidityWindow(
       `${entity.kind} "${entity.id}"`,
-      undefined,
-      storedValidFrom,
+      entity.validFrom ?? undefined,
+      { effectiveValidFrom: storedValidFrom, appliesStatedValidFrom: false },
       entity.validTo,
     );
   });

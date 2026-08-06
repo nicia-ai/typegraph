@@ -753,10 +753,21 @@ async function performEdgeUpdate<G extends GraphDef>(
   // against cardinality as inactive — but the end it names must not precede the
   // window it is ending. Reviving a row into a window that closed before the row
   // began means restating the start, so pass `validFrom` alongside `validTo`.
+  //
+  // A stated `validFrom` is STORED only on the resurrecting leg, which
+  // `buildUpdateEdge` selects on `clearDeleted` ALONE — its UPDATE carries no
+  // `deleted_at` predicate, so the leg is taken (and the bound applied) even
+  // where a concurrent writer revived the row between the caller's probe and
+  // this re-read. A plain in-place update stores no lower bound at all, so one
+  // that differs from the bound the row holds is refused rather than accepted
+  // and dropped.
   assertWritableValidityWindow(
     `edge "${id}"`,
     validFrom,
-    existing.valid_from,
+    {
+      effectiveValidFrom: existing.valid_from,
+      appliesStatedValidFrom: options?.clearDeleted === true,
+    },
     validTo,
   );
 
@@ -1212,12 +1223,16 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       if (ifExists === "return") {
         return { edge: rowToEdge(liveRow), action: "found" };
       }
-      // ifExists === "update"
+      // ifExists === "update". `validFrom` is forwarded even though an in-place
+      // update stores no lower bound: the shared write guard is what judges it,
+      // refusing a bound that differs from the one the live row holds instead of
+      // dropping it here where the caller would never hear about it.
       const edge = await executeEdgeUpsertUpdate(
         ctx,
         {
           id: liveRow.id,
           props: validatedProps,
+          ...(validFrom !== undefined && { validFrom }),
           ...(validTo !== undefined && { validTo }),
         },
         backend,
@@ -1420,7 +1435,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     fromId: string;
     toKind: string;
     toId: string;
-    /** Reaches the write only on a RESURRECTION, which rewrites both endpoints. */
+    /**
+     * STORED only on a RESURRECTION, which rewrites both endpoints. It is
+     * forwarded on the live-update leg too, where the write guard refuses a
+     * bound that differs from the one the row already holds.
+     */
     validFrom?: string;
     validTo?: string;
   }
@@ -1590,11 +1609,17 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
         );
         results[entry.index] = { edge, action: "resurrected" };
       } else if (ifExists === "update") {
+        // As in the single-item path: `validFrom` is forwarded so the shared
+        // write guard refuses a bound the in-place update cannot store, rather
+        // than dropping it silently here.
         const edge = await executeEdgeUpsertUpdate(
           ctx,
           {
             id: entry.row.id,
             props: entry.validatedProps,
+            ...(entry.validFrom !== undefined && {
+              validFrom: entry.validFrom,
+            }),
             ...(entry.validTo !== undefined && { validTo: entry.validTo }),
           },
           target,

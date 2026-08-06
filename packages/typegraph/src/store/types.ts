@@ -731,8 +731,14 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
     /**
      * Valid-time start for a created or RESURRECTED edge — on a resurrection it
      * asserts the complete window, so an omitted `validTo` reopens the revived
-     * row. Ignored when an edge is found or updated in place, whose stored lower
-     * bound is history.
+     * row.
+     *
+     * A live edge's stored lower bound is history, so an in-place update
+     * (`ifExists: "update"`) cannot store this: one naming a different instant is
+     * REFUSED with `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`, and one restating the
+     * bound the edge holds is accepted. Ignored when an existing edge is returned
+     * (`ifExists: "return"`), which writes nothing at all — there the window
+     * describes the edge to create if none is found.
      */
     validFrom?: string;
     /**
@@ -864,8 +870,11 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. It has no effect on an update to a live
-   * row, whose lower bound is already history.
+   * operation's timestamp when omitted. An update to a LIVE row stores no lower
+   * bound, because that row's is already history, so one naming a different
+   * instant is REFUSED (`ValidationError` carrying
+   * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
+   * bound the row already holds is accepted and changes nothing.
    */
   upsertById: (
     id: string,
@@ -882,8 +891,11 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. It has no effect on an update to a live
-   * row, whose lower bound is already history.
+   * operation's timestamp when omitted. An update to a LIVE row stores no lower
+   * bound, because that row's is already history, so one naming a different
+   * instant is REFUSED (`ValidationError` carrying
+   * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
+   * bound the row already holds is accepted and changes nothing.
    */
   upsertByIdFromRecord: (
     id: string,
@@ -922,8 +934,11 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. It has no effect on an update to a live
-   * row, whose lower bound is already history.
+   * operation's timestamp when omitted. An update to a LIVE row stores no lower
+   * bound, because that row's is already history, so one naming a different
+   * instant is REFUSED (`ValidationError` carrying
+   * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
+   * bound the row already holds is accepted and changes nothing.
    *
    * **Limitation — a batch cannot hand a unique value from one row to
    * another.** Item order settles which value each id ends up with, but the
@@ -1330,8 +1345,11 @@ export type EdgeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. It has no effect on an update to a live
-   * row, whose lower bound is already history.
+   * operation's timestamp when omitted. An update to a LIVE row stores no lower
+   * bound, because that row's is already history, so one naming a different
+   * instant is REFUSED (`ValidationError` carrying
+   * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
+   * bound the row already holds is accepted and changes nothing.
    *
    * **Limitation — a batch cannot hand a constrained slot from one edge to
    * another.** Item order settles the final props, but the writes are grouped:
@@ -1414,10 +1432,15 @@ export type EdgeCollection<
    * property fields, only edges whose properties match on those fields are considered.
    * Soft-deleted matches are resurrected when cardinality allows.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted. `validTo` applies on create,
-   * update, and resurrection, but not when an existing edge is returned
-   * without a write.
+   * `validFrom` applies on the create and RESURRECT branches, defaulting to the
+   * operation's creation timestamp when omitted. On the `ifExists: "update"`
+   * branch a live edge's lower bound is history and cannot be stored, so a
+   * `validFrom` naming a different instant is REFUSED (`ValidationError`
+   * carrying `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`); restating the bound the
+   * edge holds is accepted. A returned existing edge (`ifExists: "return"`)
+   * writes nothing and judges nothing — the window options describe the row to
+   * create if none is found. `validTo` applies on create, update, and
+   * resurrection, but not when an existing edge is returned without a write.
    *
    * @param from - Source node
    * @param to - Target node

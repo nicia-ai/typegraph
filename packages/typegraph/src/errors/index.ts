@@ -193,6 +193,25 @@ export type ValidationIssue = Readonly<{
 export const INVERTED_VALIDITY_WINDOW_CODE = "INVERTED_VALIDITY_WINDOW";
 
 /**
+ * The stable {@link ValidationIssue.code} carried by a refusal to accept a
+ * `validFrom` the write cannot apply: the target row is LIVE, and an in-place
+ * update never rewrites a live row's lower bound — that bound is history.
+ * `ValidationError`'s own code is the family-wide `VALIDATION_ERROR`, so the
+ * discriminator lives on the issue — mirroring
+ * {@link INVERTED_VALIDITY_WINDOW_CODE}.
+ *
+ * Only a bound naming a DIFFERENT instant than the row already stores raises it.
+ * Restating the stored bound is legal and writes nothing new, and a resurrection
+ * — which does rewrite `valid_from` — applies a stated bound rather than
+ * refusing it.
+ *
+ * The message names both instants: the one stated and the one the row stores, so
+ * the caller can restate the stored bound without a second read.
+ */
+export const IMMUTABLE_VALIDITY_LOWER_BOUND_CODE =
+  "IMMUTABLE_VALIDITY_LOWER_BOUND";
+
+/**
  * The stable {@link ValidationIssue.code} every "this id is already taken"
  * create refusal carries, whichever way the create found out: its own existence
  * probe, or the engine refusing the INSERT. `ValidationError`'s own code is the

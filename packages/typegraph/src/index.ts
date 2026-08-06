@@ -371,6 +371,7 @@ export {
   GraphAlgorithmConvergenceError,
   IdentityContradictionError,
   IdentitySeparationViolationError,
+  IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   InvalidEdgeWeightError,
   INVERTED_VALIDITY_WINDOW_CODE,
   isConstraintError,

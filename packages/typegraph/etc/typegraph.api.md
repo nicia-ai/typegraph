@@ -2898,6 +2898,9 @@ export type IdGenerator = () => string;
 export type IfExistsMode = "return" | "update";
 
 // @public
+export const IMMUTABLE_VALIDITY_LOWER_BOUND_CODE = "IMMUTABLE_VALIDITY_LOWER_BOUND";
+
+// @public
 export function implies(edgeA: EdgeType, edgeB: EdgeType): OntologyRelation;
 
 // @public
