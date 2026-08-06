@@ -766,7 +766,12 @@ export function createEdgeCollection<
         >();
         const deferred: { index: number; sourceIndex: number }[] = [];
 
-        const repeatedIds = findRepeatedUpsertIds(items);
+        // See the node collection: only a coalescing store reads a running
+        // value, so only it needs the repeated-id set.
+        const repeatedIds =
+          config.upsertDirtyCheck === undefined ?
+            new Set<string>()
+          : findRepeatedUpsertIds(items);
 
         /** See the node collection's runDirtyCheck. */
         function runDirtyCheck(

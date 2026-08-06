@@ -419,7 +419,7 @@ export type BaseStoreOptions = Readonly<{
    * normal write happens:
    *   1. A value to compare against is known for the id: an existing row, or —
    *      for a repeated id in one bulk batch — the value an earlier item in that
-   *      batch already queued (a create or an update). Otherwise it is a create.
+   *      batch already queued (a create or an update).
    *   2. That row is not soft-deleted (a deleted row resurrects — a real
    *      change — and is never coalesced).
    *   3. The caller passed no explicit `validFrom` / `validTo` (an explicit

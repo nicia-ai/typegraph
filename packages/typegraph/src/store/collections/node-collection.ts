@@ -684,7 +684,12 @@ export function createNodeCollection<
         // write's result (filled once the writes run), not a fabricated row.
         const deferred: { index: number; sourceIndex: number }[] = [];
 
-        const repeatedIds = findRepeatedUpsertIds(items);
+        // A running value exists only to be dirty-checked, so a store without
+        // coalescing never needs to know which ids repeat.
+        const repeatedIds =
+          config.upsertDirtyCheck === undefined ?
+            new Set<string>()
+          : findRepeatedUpsertIds(items);
 
         /**
          * The dirty check for one item, or undefined when coalescing is off or
