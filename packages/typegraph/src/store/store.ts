@@ -4679,11 +4679,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const getPendingKindRemovals = this.#backend.getPendingKindRemovals;
     if (getPendingKindRemovals === undefined) return;
 
+    // Own keys only: `baseline` is rebuilt from the PARSED stored schema, so a kind
+    // named after an `Object.prototype` member would otherwise always look
+    // still-present and skip the pending-removal refusal this guard exists for.
     const addedNodes = Object.keys(merged.nodes).filter(
-      (kind) => !(kind in baseline.nodes),
+      (kind) => !Object.hasOwn(baseline.nodes, kind),
     );
     const addedEdges = Object.keys(merged.edges).filter(
-      (kind) => !(kind in baseline.edges),
+      (kind) => !Object.hasOwn(baseline.edges, kind),
     );
     if (addedNodes.length === 0 && addedEdges.length === 0) return;
 
