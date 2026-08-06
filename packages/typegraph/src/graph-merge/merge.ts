@@ -819,6 +819,18 @@ function planMerge<G extends GraphDef>(
 ): MergePlan<G> {
   const identity = planIdentityChanges(staging, storedIdentityRowsById);
   const provenanceRecords: ProvenanceRecord[] = [];
+  // The contribution tuples already recorded. Several phases legitimately observe
+  // the SAME contribution: an inherited edge is credited once when its
+  // modification survives delete/modify and again when the repoint folds it, and a
+  // fold set's `mergedIds` lists one entry per staged COPY, so a row staged by
+  // several branches re-offers each of its branches once per copy. The tuple below
+  // is exactly the sidecar's node identity (`provenanceNodeId`), so re-recording it
+  // is never new information — it is the same row written twice, which inflates
+  // `provenancePersisted.count` (and, because `bulkUpsertById` cannot create the
+  // same id twice in one batch, fails the whole best-effort persist). Collapsing at
+  // this single funnel keeps the record list, the in-memory index and the reported
+  // count all speaking about DISTINCT contributions.
+  const recordedContributions = new Set<string>();
   // Per-branch trust weights for the `"provenanceWeighted"` policy, or empty when
   // the caller supplied none (then the policy falls back to the stable branch order).
   const weights = options.provenanceWeights ?? EMPTY_WEIGHTS;
@@ -834,6 +846,17 @@ function planMerge<G extends GraphDef>(
     if (branchId === preferredBranchId) {
       return;
     }
+    const contribution = JSON.stringify([
+      role,
+      canonicalKind,
+      canonicalId,
+      branchId,
+      sourceId,
+    ]);
+    if (recordedContributions.has(contribution)) {
+      return;
+    }
+    recordedContributions.add(contribution);
     provenanceRecords.push({
       role,
       canonicalId,
