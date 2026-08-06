@@ -29,6 +29,11 @@ import { PGLITE_MAX_BIND_PARAMETERS } from "../../../src/backend/drizzle/executi
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { sharesSerializedTransactionResource } from "../../../src/backend/transaction-resource";
+import {
+  exportGraphStream,
+  importGraphStream,
+  ImportOptionsSchema,
+} from "../../../src/interchange";
 import { createStore, createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
 
@@ -37,6 +42,11 @@ const Person = defineNode("Person", {
 });
 const peopleGraph = defineGraph({
   id: "pglite_people",
+  nodes: { Person: { type: Person } },
+  edges: {},
+});
+const peopleImportGraph = defineGraph({
+  id: "pglite_people_import",
   nodes: { Person: { type: Person } },
   edges: {},
 });
@@ -97,6 +107,37 @@ describe("PGlite backend", () => {
       expect(sharesSerializedTransactionResource(local.backend, sibling)).toBe(
         true,
       );
+    });
+
+    it("refuses snapshot import across wrappers sharing one PGlite client", async () => {
+      const client = await PGlite.create();
+      cleanups.push(() => client.close());
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const sourceBackend = createPostgresBackend(drizzle(client), {
+        vector: false,
+      });
+      const targetBackend = createPostgresBackend(drizzle(client), {
+        vector: false,
+      });
+      const [source] = await createStoreWithSchema(peopleGraph, sourceBackend);
+      const [target] = await createStoreWithSchema(
+        peopleImportGraph,
+        targetBackend,
+      );
+
+      await expect(
+        importGraphStream(
+          target,
+          exportGraphStream(source),
+          ImportOptionsSchema.parse({ onConflict: "error" }),
+        ),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+          graphId: peopleImportGraph.id,
+        },
+      });
     });
   });
 

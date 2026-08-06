@@ -176,7 +176,8 @@ distinct PGlite backend wrappers sharing one in-process connection: materialize 
 first or import it into an independent backend. TypeGraph's branch cloner detects
 the shared-PGlite case and materializes its snapshot before importing it.
 Non-transactional backends can export identity-disabled graphs without this
-snapshot guarantee; identity export is refused there.
+snapshot guarantee. Identity-enabled stores already require a transactional
+backend at construction, so every identity export has the snapshot guarantee.
 
 ## Entity resolution
 

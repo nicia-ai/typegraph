@@ -13,7 +13,6 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
-import { ConfigurationError } from "../errors";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { nowIso } from "../utils/date";
@@ -121,19 +120,6 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
   options?: ExportStreamOptionsInput,
 ): AsyncIterable<GraphInterchangeChunk> {
   const resolved = ExportStreamOptionsSchema.parse(options ?? {});
-  if (
-    store.graph.identity !== undefined &&
-    !backend.capabilities.transactions
-  ) {
-    throw new ConfigurationError(
-      "Identity export requires a transactional backend so nodes, edges, and assertions share one snapshot.",
-      {
-        code: "IDENTITY_EXPORT_TRANSACTIONS_REQUIRED",
-        graphId: store.graphId,
-      },
-    );
-  }
-
   const channel = createRendezvousChannel<GraphInterchangeChunk>();
   const produce = async (
     target: GraphBackend | TransactionBackend,
