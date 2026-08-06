@@ -1005,7 +1005,7 @@ declaration turns into a plan every lock site consumes instead of re-deriving:
 - `{ kind: "engine-serialized" }` — no lock needed; the engine serializes writers by
   construction (SQLite's single writer slot).
 - `{ kind: "unfenced" }` — neither. Every non-degradable fence refuses rather than running
-  unfenced.
+  unfenced; the degradable ones skip the lock and keep their compare-and-swap.
 
 Resolution order: (1) the declared `pessimisticLocks` value, if present; (2) absent AND the
 backend was built by `createSqliteBackend` / `createPostgresBackend` — derived from `dialect`,
@@ -1034,6 +1034,32 @@ A declared-advisory-only backend (`tableLocks: false`) that reaches a site whose
 `requires: "table-lock"` is refused with details code `WRITE_FENCE_UNAVAILABLE`, naming
 `details.operation` and `details.requires` — the lock plan resolved, but it cannot satisfy what
 this specific operation needs.
+
+Everything else keeps working. The PostgreSQL schema fence — the per-graph advisory lock plus
+`SELECT ... FOR UPDATE` a schema commit takes, and the `FOR SHARE` a managed write takes on that
+same row — resolves the same plan but **degrades** instead of refusing: under `unfenced` it skips
+both locks and keeps the compare-and-swap, so `lockSchemaVersionForWrite` still rejects a writer
+holding a stale schema version and only the WAIT between concurrent schema commits is lost. That
+is what makes `unfenced` a usable posture rather than a dead end: a Postgres-wire engine with no
+locking primitive runs the ordinary store, and only the fences that cannot degrade are refused.
+
+This is the posture for **DoltgreSQL**, which speaks the PostgreSQL wire protocol but implements
+neither `pg_advisory_xact_lock` nor the `FOR UPDATE` / `FOR SHARE` clauses
+([doltgresql#2600](https://github.com/dolthub/doltgresql/issues/2600)), and whose engine merges
+concurrent transactions rather than serializing them — so all three facts are false:
+
+```typescript
+const backend = createPostgresBackend(db, {
+  capabilities: {
+    pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: false },
+  },
+});
+```
+
+Do not reach for `serializedWriters: true` because a deployment clamps its pool to one
+connection. That field means the engine serializes writers *by construction*; a deployment
+convention is not a construction, and declaring it would silently re-enable the fences that
+depend on it.
 
 ### Recorded-time ownership (recordedTimeOwnership)
 

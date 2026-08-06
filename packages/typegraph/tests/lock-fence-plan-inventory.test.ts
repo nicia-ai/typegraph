@@ -4,10 +4,14 @@
  * Two ratchets, both comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **10** call sites — the 8 lock
- *     sites (J1-J8) plus the 2 construction gates (J9a recorded-clock
- *     ownership, J9b identity) — enumerated in both directions, keyed on
- *     `(file, trimmed line)` so line drift cannot rot the pin.
+ *  1. `resolveWriteFencePlan` has exactly **12** call sites — the 8 lock
+ *     sites (J1-J8), the 2 construction gates (J9a recorded-clock ownership,
+ *     J9b identity), and the 2 halves of the Postgres schema fence (J14
+ *     commit-side, J15 writer-side) — enumerated in both directions, keyed
+ *     on `(file, trimmed line)` so line drift cannot rot the pin. J14/J15
+ *     are the only DEGRADING sites: they switch on `plan.kind` directly
+ *     rather than calling `requireWriteFence`, because the CAS they fence
+ *     still runs correctly unfenced.
  *  2. Zero dialect-literal comparisons (`dialect (!==|===) "postgres"/
  *     "sqlite"`, in a `BinaryExpression` or a `SwitchStatement` discriminant)
  *     remain in the eight lock sites' five files. The same scan run over the
@@ -21,8 +25,8 @@
  * *Mutation*: re-inline a dialect check at any lock site → fails naming the
  * file (both the "no resolveWriteFencePlan call added" half and the
  * "dialect literal reappeared" half catch this, from different angles).
- * *Mutation*: pin the `resolveWriteFencePlan` count at 8 (round 1's number,
- * before J9a/J9b were recognized as call sites) → fails.
+ * *Mutation*: pin the `resolveWriteFencePlan` count at 10 (the number before
+ * the Postgres schema fence's two halves joined the model) → fails.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -123,6 +127,20 @@ const CALL_SITES: readonly InventoryEntry[] = [
     site: "J9a",
     reason:
       "The recorded-clock-allocation construction gate refuses an unfenced backend before any statement runs.",
+  },
+  {
+    file: "backend/drizzle/postgres.ts",
+    line: "const plan = resolveWriteFencePlan(fenceTarget);",
+    site: "J14",
+    reason:
+      "acquireSchemaWriteFence resolves the plan for the per-graph schema-commit advisory lock and its FOR UPDATE. Degrades instead of refusing: the CAS it fences still runs unfenced.",
+  },
+  {
+    file: "backend/drizzle/postgres.ts",
+    line: "const plan = resolveWriteFencePlan(fenceTarget);",
+    site: "J15",
+    reason:
+      "lockActiveSchemaVersion resolves the plan for the managed writer's FOR SHARE on the active schema row — J14's other half, so the two must resolve one decision.",
   },
 ];
 
@@ -379,13 +397,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 10 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 12 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 10 declared call sites, both directions", () => {
-    expect(found).toHaveLength(10);
-    expect(CALL_SITES).toHaveLength(10);
+  it("has exactly the 12 declared call sites, both directions", () => {
+    expect(found).toHaveLength(12);
+    expect(CALL_SITES).toHaveLength(12);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

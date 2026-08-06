@@ -1,0 +1,11 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+The PostgreSQL schema fence's two halves now resolve a `WriteFencePlan` instead of emitting their locks unconditionally, bringing the last two lock sites in `createPostgresBackend` into the model the rest of the codebase already reads: the per-graph schema-commit fence (`pg_advisory_xact_lock` plus `SELECT ... FOR UPDATE` on the active schema row) and the managed writer's `FOR SHARE` on that same row. Both are the two halves of one `FOR UPDATE`/`FOR SHARE` contract, so they must never disagree about whether the engine honors row locks — they now resolve one decision through `resolveWriteFencePlan`, and the inventory ratchet pins `resolveWriteFencePlan` at 12 call sites (J14, J15) rather than 10.
+
+Unlike the eight sites consolidated previously, these two DEGRADE rather than calling `requireWriteFence`: under `engine-serialized` and `unfenced` they skip the lock and keep the compare-and-swap they were fencing. `unfenced` is the CAS-only posture the capability model already names — `lockSchemaVersionForWrite` still reads the active version and still feeds `assertActiveSchemaVersion`, so a writer holding a stale expectation is rejected exactly as before and only the WAIT between concurrent schema commits is lost. `history` / `revisionTracking` and Operational Identity remain refused at construction on an unfenced backend, because those fences cannot degrade.
+
+The row-locking clause rides the `lock` arm rather than a `pessimisticLocks` fact of its own: it is never taken without the advisory lock above it, so no engine distinguishes them today. An engine that implements `pg_advisory_xact_lock` but not `FOR UPDATE` is where a `rowLocks` member would earn its place.
+
+No first-party configuration changes behavior: `POSTGRES_CAPABILITIES` declares `{ advisoryLocks: true, tableLocks: true, serializedWriters: false }`, which resolves `lock`, and the emitted SQL is byte-for-byte what it was. What changes is that a Postgres-wire-compatible engine with no locking primitive — DoltgreSQL, which implements neither `pg_advisory_xact_lock` nor the row-locking clauses ([doltgresql#2600](https://github.com/dolthub/doltgresql/issues/2600)) — can now declare `pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: false }` and run the store, where before it failed on the first schema commit.
