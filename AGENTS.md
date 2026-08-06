@@ -199,6 +199,15 @@ import type { GraphBackend } from "../src/backend/types";
 - **Vitest** - Primary test runner
 - **fast-check** - Property-based testing for invariants
 
+## Load-Bearing Tests
+
+A test guarding a behavior ships with evidence it fails when that behavior
+breaks: temporarily revert the fix (or mutate the guarded code), watch the
+test fail, restore, watch it pass. A test that cannot fail is coverage
+theater — it certifies nothing and reads as protection that is not there.
+State the revert/mutation check in the PR body when the test is the point
+of the change.
+
 ## Test Organization
 
 - Unit tests: `tests/*.test.ts`
@@ -250,6 +259,24 @@ describe("Feature", () => {
 - Branches: 64%
 - Functions: 74%
 - Lines: 75%
+
+# Contract Discipline
+
+Two rules, each distilled from a recurring class of real defects:
+
+- **One predicate, one owner.** A comparison, classification, or validation
+  decision consumed by more than one path must be a single exported function
+  every path calls. A second inline implementation of an existing decision is
+  a defect even while the copies agree — the copies WILL drift (raw-text vs
+  canonical-instant window compares, guard clock vs write clock, probe vs
+  engine verdicts all did). When you find yourself re-spelling a decision,
+  extract the seam instead.
+- **An accepted option is applied or refused — never ignored.** If a layer
+  validates an option and then cannot honor it in some state, it refuses with
+  a typed error naming that state; silently dropping a stated value is the
+  API lying to its caller. Audit every option a change touches: each one is
+  either threaded to the write that honors it or refused on the path that
+  cannot.
 
 # Error Handling
 
