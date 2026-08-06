@@ -46,10 +46,13 @@ the refusal.
 The convention now has one owner, `hasOwnKey`, applied across graph-merge node and
 edge property resolution, schema-diff property classification, schema-removal
 reconciliation, interchange unknown-property stripping, graph-extension document
-validation, and the evolve pending-removal guard. `in` remains correct, and still
-in use, where the key set is statically known: a discriminated union's tag, a
-capability probe, a brand check, and the deliberate `Object.prototype` lookup in
-selective projection.
+validation, query and index schema-field validation, and the evolve
+pending-removal guard. `in` remains correct, and still in use, when both the key
+and membership question are internal: a discriminated union's tag, a capability
+probe, a brand check, and the deliberate `Object.prototype` lookup in selective
+projection. A user-supplied field name is always checked as an own key, even when
+the schema shape itself is statically known, so names such as `__proto__` and
+`constructor` cannot masquerade as declared fields through `Object.prototype`.
 
 `__proto__`, the case originally reported, is the NARROW variant. Every VALIDATED
 write path blocks it: Zod drops an own `__proto__` key, and `bag["__proto__"] = value`

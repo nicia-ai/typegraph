@@ -2635,7 +2635,7 @@ type OperationHookContext = HookContext &
   }>;
 ```
 
-> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item
+> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`) skip per-item
 operation hooks for throughput. Query hooks still fire normally.
 
 **Example:**

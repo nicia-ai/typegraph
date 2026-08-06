@@ -242,7 +242,7 @@ const edgesBySource = await store.bulkFindEdgesFrom({
 ```
 
 :::note[Operation hooks]
-Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
+Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`) skip per-item operation hooks for
 throughput. Query hooks still fire normally. See
 [Schemas & Stores](/schemas-stores#observability-hooks) for details.
 :::

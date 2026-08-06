@@ -826,11 +826,12 @@ today's behavior exactly — no transaction is opened. It applies to the
 - **sqlite-vec** has no equivalent frontier knob and ignores `efSearch`
   (no-op).
 - **Transaction-less Postgres drivers** (`drizzle-orm/neon-http`) can't
-  scope `SET LOCAL`, so `efSearch` is ignored with a one-time warning —
-  use a transactional driver (`node-postgres` / `neon-serverless` /
-  `postgres-js`) to apply it.
-- It tunes HNSW only; IVFFlat's analogous knob (`ivfflat.probes`) is not
-  yet exposed.
+  scope `SET LOCAL`, so a search that supplies `efSearch` is refused with
+  `UnsupportedBackendCapabilityError`. Use a transactional driver
+  (`node-postgres` / `neon-serverless` / `postgres-js`) to apply it.
+- It tunes HNSW only. Supplying it for IVFFlat is refused with a
+  `ConfigurationError`; IVFFlat's analogous knob (`ivfflat.probes`) is not yet
+  exposed.
 
 ## Troubleshooting
 

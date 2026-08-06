@@ -168,10 +168,15 @@ larger architectural step; they are not hidden behind a micro-optimization.
 Revision tracking covers writes through the Store API. Direct backend writes and
 raw graph-table writes through `tx.sql` bypass the anchor, so applications using
 either escape hatch must avoid them for a branchable graph or retain the default
-content-fingerprint validation. Streaming export is likewise not a transactional
-backup snapshot: concurrent writes can produce a stream that spans multiple
-committed graph states. Use a database snapshot or quiesce writes when backup
-consistency matters.
+content-fingerprint validation. On transactional backends, streaming export holds
+one read-only repeatable-read transaction across nodes, edges, and identity
+assertions, so every chunk belongs to one committed snapshot. A snapshot stream
+cannot be piped directly into another graph on the same SQLite backend, or between
+distinct PGlite backend wrappers sharing one in-process connection: materialize it
+first or import it into an independent backend. TypeGraph's branch cloner detects
+the shared-PGlite case and materializes its snapshot before importing it.
+Non-transactional backends can export identity-disabled graphs without this
+snapshot guarantee; identity export is refused there.
 
 ## Entity resolution
 
@@ -675,6 +680,7 @@ subclass you can branch on:
 | `BranchError` | `branch()` could not materialize a working copy. |
 | `BaseVersionMismatchError` | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge). |
+| `InvalidMergeOptionsError` | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, or `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it. |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`. |
 | `MergeConflictError` | A conflict could not be resolved under the configured policy. |
 | `MergeError` | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes. |
