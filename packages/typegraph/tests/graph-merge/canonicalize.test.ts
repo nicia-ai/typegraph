@@ -358,3 +358,71 @@ describe("ClusterMember origin discriminator (step 1)", () => {
     expect(entity.props["name"]).toBe("Branch"); // value overwritten by opt-in
   });
 });
+
+/**
+ * A cluster member's props bag is data — its keys come out of a JSON column — so a
+ * schema may declare a field named after an `Object.prototype` member and the union
+ * must ask each bag for OWN keys (issue #422). Under `in` a member that carries no such
+ * property answers as though it does, and the read that follows yields the inherited
+ * function instead of stored data.
+ */
+describe("prototype-named property membership (#422)", () => {
+  function rank(order: readonly BranchId[]): ReadonlyMap<BranchId, number> {
+    return buildBranchRank(order, [b1, b2, b3]);
+  }
+
+  it("does not take a canonical member's inherited prototype member as its value", () => {
+    // The canonical member carries no `toString`, so the contested value falls back to
+    // the first real claim. Under `in` it "carries" one, and the function on
+    // `Object.prototype` is committed as the property's value.
+    const cluster = clusterOf("node-a", "node-b", "node-c");
+    const members: readonly ClusterMember[] = [
+      member("node-a", b1, { name: "Anna" }),
+      member("node-b", b2, { name: "Anna", toString: "from-b" }),
+      member("node-c", b3, { name: "Anna", toString: "from-c" }),
+    ];
+
+    const entity = canonicalizeCluster(
+      cluster,
+      members,
+      "flag",
+      rank([b1, b2, b3]),
+    );
+
+    expect(entity.canonicalId).toBe("node-a");
+    // The whole bag is compared rather than the one key because TypeScript resolves
+    // `props.toString` to `Object`'s method signature, not the record's index
+    // signature — the shadowing under test, one level up in the type system.
+    expect(entity.props).toEqual({ name: "Anna", toString: "from-b" });
+    expect(requireDefined(entity.conflicts[0]).resolution).toBe("from-b");
+  });
+
+  it("does not treat a base member that lacks a prototype-named property as involved", () => {
+    // A property the BASE does not carry is a staged-vs-staged gap fill and is governed
+    // by the staged policy — here `lastWriteWins`, which takes the highest-ranked
+    // branch's value. Under `in` the base "carries" it, so the separate base policy
+    // (default `flag`) governs instead and commits the canonical value.
+    const cluster = clusterOf("a-new", "b-new", "z-base");
+    const members: readonly ClusterMember[] = [
+      {
+        origin: "base",
+        id: nodeId("z-base"),
+        kind: "Patient",
+        branchId: BASE_PROVENANCE_BRANCH,
+        props: { name: "Committed" },
+      },
+      member("a-new", b1, { name: "Committed", toString: "from-b1" }),
+      member("b-new", b2, { name: "Committed", toString: "from-b2" }),
+    ];
+
+    const entity = canonicalizeCluster(
+      cluster,
+      members,
+      "lastWriteWins",
+      rank([b2, b1]),
+    );
+
+    expect(entity.canonicalId).toBe("z-base");
+    expect(entity.props).toEqual({ name: "Committed", toString: "from-b2" });
+  });
+});

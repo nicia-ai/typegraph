@@ -49,6 +49,7 @@ import {
   assertWritableValidityWindow,
   validateOptionalCanonicalIsoDate,
 } from "../utils/date";
+import { hasOwnKey } from "../utils/object";
 import {
   type GraphData,
   type GraphDataHeader,
@@ -1823,7 +1824,7 @@ function validateProperties(
           // Remove unknown properties
           const stripped: Record<string, unknown> = {};
           for (const key of knownKeys) {
-            if (key in properties) {
+            if (hasOwnKey(properties, key)) {
               stripped[key] = properties[key];
             }
           }

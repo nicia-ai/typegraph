@@ -1132,6 +1132,28 @@ describe("validation failures", () => {
     );
   });
 
+  /**
+   * The extension document's `properties` map is parsed JSON, so declared-field
+   * membership must be an OWN-key question. Under `in`, a field named after an
+   * `Object.prototype` member answers "declared" against the prototype, so a
+   * constraint on an undeclared `toString` was silently accepted and went on to
+   * index a field that does not exist.
+   */
+  it("rejects a unique constraint on an undeclared field named after a prototype member", () => {
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            N: {
+              properties: { id: { type: "string" } },
+              unique: [{ name: "by_to_string", fields: ["toString"] }],
+            },
+          },
+        }),
+      "UNKNOWN_UNIQUE_FIELD",
+    );
+  });
+
   it("rejects unique where predicates with unsupported ops", () => {
     expectInvalid(
       () =>

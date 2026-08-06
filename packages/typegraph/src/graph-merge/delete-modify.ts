@@ -1,3 +1,4 @@
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Node-level delete/modify conflict resolution (design §6.2, T8a).
@@ -481,7 +482,7 @@ function threeWayMergeProps(
   }
 
   for (const property of [...propertyNames].sort(compareStrings)) {
-    const baseHas = property in baseProps;
+    const baseHas = hasOwnKey(baseProps, property);
     const baseKey =
       baseHas ?
         canonicalValueKey(requireDefined(baseProps[property]))
@@ -493,7 +494,7 @@ function threeWayMergeProps(
     // of conflict gathering, with the canonical NUL-separated dedupe key.
     const changed = contributions
       .filter((contribution) => {
-        if (!(property in contribution.forkProps)) {
+        if (!hasOwnKey(contribution.forkProps, property)) {
           return false; // absent — a deletion (handled below), never a change
         }
         const value = contribution.forkProps[property] as JsonValue;
@@ -512,7 +513,7 @@ function threeWayMergeProps(
       const deletedByFork =
         baseHas &&
         contributions.some(
-          (contribution) => !(property in contribution.forkProps),
+          (contribution) => !hasOwnKey(contribution.forkProps, property),
         );
       if (baseHas && !deletedByFork) {
         merged[property] = requireDefined(baseProps[property]);

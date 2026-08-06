@@ -1459,6 +1459,57 @@ describe("repointEdges base-aware property union (#408)", () => {
     expect(result.conflicts).toEqual([]);
   });
 
+  /**
+   * The property union asks each staged bag whether it CARRIES a property, and a
+   * props bag is data: an edge schema may declare a field named after an
+   * `Object.prototype` member, and such a field survives validation and the JSON
+   * round-trip as ordinary data (issue #422). Membership must therefore be an
+   * OWN-key question.
+   *
+   * Under `in`, the branch-created member below "carries" `toString` despite saying
+   * nothing about it, so it is counted as having AUTHORED a value it never wrote. The
+   * authored-claims filter this describe block exists to pin is defeated for exactly
+   * these field names, and the fold's claim filter and the shared value collector must
+   * agree that a member which does not carry a property has no claim on it: whichever
+   * of the two asks with `in` reintroduces a phantom claimant.
+   */
+  it("does not treat a prototype-named property as authored by a member that lacks it", () => {
+    const result = repointEdges(
+      [
+        stagedEdge({
+          id: "edge-1",
+          from: "x",
+          to: "a",
+          inherited: true,
+          props: { on: "base", toString: "base-owned" },
+          baseProps: { on: "base", toString: "base-owned" },
+          branchId: BRANCH_A,
+        }),
+        // Authors `on` and says nothing whatsoever about `toString`.
+        stagedEdge({
+          id: "edge-2",
+          from: "x",
+          to: "b",
+          props: { on: "authored" },
+          branchId: BRANCH_B,
+        }),
+      ],
+      collapse,
+      new Set<MergeKey>(),
+      "lastWriteWins",
+      rankABC(),
+    );
+
+    expect(requireDefined(result.edges[0]).props).toEqual({
+      on: "authored",
+      toString: "base-owned",
+    });
+    // No member authored `toString`, so there is nothing for it to conflict over.
+    expect(
+      result.conflicts.filter((conflict) => conflict.property === "toString"),
+    ).toEqual([]);
+  });
+
   it("keeps an unauthored property the SURVIVOR's own bag lacks", () => {
     // Two committed rows the repoint folded together — the survivor is the min-id
     // inherited one, and the other member's untouched property has no claim behind
@@ -1497,6 +1548,98 @@ describe("repointEdges base-aware property union (#408)", () => {
       note: "base-b",
     });
     expect(result.conflicts).toEqual([]);
+  });
+
+  /**
+   * The same fold, with the carried key named after an `Object.prototype` member
+   * (issue #422). This path asks the SURVIVOR's bag whether the fold already holds a
+   * value for the key, and a props bag is data: under `in` a survivor that carries no
+   * `toString` answers yes, so the committed row takes `Object.prototype.toString` — a
+   * FUNCTION — as the property's value instead of the value the other member carries.
+   */
+  it("keeps a prototype-named unauthored property the SURVIVOR's own bag lacks", () => {
+    const result = repointEdges(
+      [
+        stagedEdge({
+          id: "edge-1",
+          from: "x",
+          to: "a",
+          inherited: true,
+          props: { on: "base-a" },
+          baseProps: { on: "base-a" },
+          branchId: BRANCH_A,
+        }),
+        stagedEdge({
+          id: "edge-2",
+          from: "x",
+          to: "b",
+          inherited: true,
+          props: { toString: "base-b" },
+          baseProps: { toString: "base-b" },
+          branchId: BRANCH_B,
+        }),
+      ],
+      collapse,
+      new Set<MergeKey>(),
+      "lastWriteWins",
+      rankABC(),
+    );
+
+    expect(requireDefined(result.edges[0]).id).toBe("edge-1");
+    expect(requireDefined(result.edges[0]).props).toEqual({
+      on: "base-a",
+      toString: "base-b",
+    });
+    expect(result.conflicts).toEqual([]);
+  });
+
+  /**
+   * The survivor-lacks-the-key read on the CONTESTED path: `"flag"` commits the
+   * canonical value, which for a key the survivor does not carry is the first real
+   * claim. Under `in` the survivor's bag supplies `Object.prototype.toString` instead,
+   * so a function is committed as the merged property value.
+   *
+   * The whole bag is compared rather than the one key because TypeScript resolves
+   * `props["toString"]` to `Object`'s method signature, not the record's index
+   * signature — the shadowing this file is about, one level up in the type system.
+   */
+  it("resolves a contested prototype-named property the SURVIVOR lacks from real claims", () => {
+    const result = repointEdges(
+      [
+        stagedEdge({
+          id: "edge-1",
+          from: "x",
+          to: "a",
+          inherited: true,
+          props: { on: "base-a" },
+          baseProps: { on: "base-a" },
+          branchId: BRANCH_A,
+        }),
+        stagedEdge({
+          id: "edge-2",
+          from: "x",
+          to: "b",
+          props: { toString: "from-b" },
+          branchId: BRANCH_B,
+        }),
+        stagedEdge({
+          id: "edge-3",
+          from: "x",
+          to: "c",
+          props: { toString: "from-c" },
+          branchId: BRANCH_C,
+        }),
+      ],
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rankABC(),
+    );
+
+    expect(requireDefined(result.edges[0]).props).toEqual({
+      on: "base-a",
+      toString: "from-b",
+    });
   });
 
   // Which branch a staged copy of an inherited row belongs to is arbitrary, so the

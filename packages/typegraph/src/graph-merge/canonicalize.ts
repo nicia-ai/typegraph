@@ -1,3 +1,4 @@
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Canonical survivor selection + commutative property union (design §6.4 rule 3
@@ -224,7 +225,8 @@ function findPreferredMember(
   }
   return members.find(
     (member) =>
-      member.branchId === preferredBranchId && property in member.props,
+      member.branchId === preferredBranchId &&
+      hasOwnKey(member.props, property),
   );
 }
 
@@ -232,7 +234,7 @@ function memberPropertyValue(
   member: ClusterMember,
   property: string,
 ): JsonValue | undefined {
-  if (!(property in member.props)) {
+  if (!hasOwnKey(member.props, property)) {
     return undefined;
   }
   return member.props[property];
@@ -326,7 +328,8 @@ function unionProperties(
     const baseInvolved =
       hasBaseMember &&
       members.some(
-        (member) => member.origin === "base" && property in member.props,
+        (member) =>
+          member.origin === "base" && hasOwnKey(member.props, property),
       );
 
     // Resolution math sees the FULL contributions (including the base value, so the

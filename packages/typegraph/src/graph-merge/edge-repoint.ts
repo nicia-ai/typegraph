@@ -1,3 +1,4 @@
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Edge repoint to canonical + set-dedupe cascade (design §6.3 / §6.4 rule 5, T9).
@@ -510,10 +511,10 @@ function pickSurvivor(
  */
 function authoredProperty(edge: RepointedEdge, property: string): boolean {
   const { props, baseProps } = edge.staged;
-  if (!(property in props)) {
+  if (!hasOwnKey(props, property)) {
     return false;
   }
-  if (baseProps === undefined || !(property in baseProps)) {
+  if (baseProps === undefined || !hasOwnKey(baseProps, property)) {
     return true;
   }
   return (
@@ -543,7 +544,7 @@ function unauthoredValue(
   edges: readonly RepointedEdge[],
 ): JsonValue {
   const carriers = edges
-    .filter((edge) => property in edge.staged.props)
+    .filter((edge) => hasOwnKey(edge.staged.props, property))
     .sort((left, right) => {
       const byId = compareStrings(left.staged.id, right.staged.id);
       return byId === 0 ?
@@ -605,13 +606,13 @@ function unionEdgeProps(
       // Filtering claims must not shrink the row, so a key only a NON-survivor
       // carries keeps a value too — see {@link unauthoredValue}.
       props[property] =
-        property in survivor.staged.props ?
+        hasOwnKey(survivor.staged.props, property) ?
           (survivor.staged.props[property] as JsonValue)
         : unauthoredValue(property, edges);
       continue;
     }
     const survivorValue =
-      property in survivor.staged.props ?
+      hasOwnKey(survivor.staged.props, property) ?
         (survivor.staged.props[property] as JsonValue)
       : requireDefined(values[0]).value;
     const canonicalValue: JsonValue =

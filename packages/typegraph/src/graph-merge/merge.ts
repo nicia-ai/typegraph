@@ -1,3 +1,4 @@
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * `merge()` orchestrator (design §7.2, T11).
@@ -1463,7 +1464,7 @@ function commitModificationProps(
 ): Record<string, unknown> {
   const props: Record<string, unknown> = { ...forkProps };
   for (const key of Object.keys(baseProps)) {
-    if (!(key in forkProps)) {
+    if (!hasOwnKey(forkProps, key)) {
       props[key] = undefined;
     }
   }

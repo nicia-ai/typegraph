@@ -7,7 +7,7 @@
  */
 
 import type { KindEntity } from "../../core/types";
-import { compareStrings, normalizePath } from "../../utils";
+import { compareStrings, hasOwnKey, normalizePath } from "../../utils";
 import { mergeEdgeKinds, type SelectiveField, type Traversal } from "../ast";
 import type {
   AliasMap,
@@ -369,10 +369,17 @@ function createGuardedProxy(
         return;
       }
 
-      if (property in object) {
+      // Own keys only: the projected row's keys are data, so `in` here would
+      // answer for `Object.prototype` members the row does not carry. Behavior
+      // is unchanged — such a key falls through to the prototype branch below
+      // and resolves the same way — but the two cases are now distinct.
+      if (hasOwnKey(object, property)) {
         return Reflect.get(object, property, receiver);
       }
 
+      // Deliberately `in`, NOT hasOwnKey: this branch's whole purpose is to
+      // reach inherited `Object.prototype` members (`toString`, `valueOf`, …) so
+      // a projected row still behaves like an object. Leave it alone.
       if (property in Object.prototype) {
         return Reflect.get(Object.prototype, property, receiver) as unknown;
       }
