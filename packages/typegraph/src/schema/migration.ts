@@ -7,6 +7,7 @@
 import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
 import { compareStrings } from "../utils/compare";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { canonicalEqual, sortedReplacer } from "./canonical";
 import {
@@ -696,7 +697,7 @@ function isBreakingObjectSchemaChange(
   const afterRequired = new Set(after.required);
 
   for (const key of Object.keys(beforeProps)) {
-    if (!(key in afterProps)) return true; // nested property removed
+    if (!hasOwnKey(afterProps, key)) return true; // nested property removed
   }
   for (const key of afterRequired) {
     if (!beforeRequired.has(key)) return true; // nested property newly required
@@ -743,8 +744,12 @@ function classifyPropertyChanges(
   const beforeRequired = new Set(before.required);
   const afterRequired = new Set(after.required);
 
-  const removed = Object.keys(beforeProps).filter((p) => !(p in afterProps));
-  const added = Object.keys(afterProps).filter((p) => !(p in beforeProps));
+  const removed = Object.keys(beforeProps).filter(
+    (property) => !hasOwnKey(afterProps, property),
+  );
+  const added = Object.keys(afterProps).filter(
+    (property) => !hasOwnKey(beforeProps, property),
+  );
   const newRequired = [...afterRequired].filter((p) => !beforeRequired.has(p));
 
   // A shared property whose schema changed in a way that can invalidate existing

@@ -307,6 +307,69 @@ describe("computeSchemaDiff", () => {
       expect(requireDefined(diff.nodes[0]).details).toContain("removed");
     });
 
+    /**
+     * A schema's `properties` map is parsed JSON, so a declared field may be named
+     * after an `Object.prototype` member, and membership must be an OWN-key
+     * question. Under `in`, `"toString" in afterProperties` is true even though the
+     * field is gone, so the field never reaches the removal list; instead
+     * `afterProperties["toString"]` resolves to `Object.prototype.toString` — a
+     * FUNCTION — which is then compared as though it were this field's new schema.
+     *
+     * The severity survives that by luck (comparing a schema against a function
+     * reports SOME incompatibility, so the change still lands as breaking), which is
+     * why this pin asserts the REASON: the operator is told the property's schema
+     * changed incompatibly when the property was in fact removed, and the migration
+     * actions that follow from those two diagnoses differ.
+     */
+    it("detects removal of a property named after a prototype member as breaking", () => {
+      const before = createSchema({
+        version: 1,
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                toString: { type: "string" },
+              },
+              required: ["name"],
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+          },
+        },
+      });
+      const after = createSchema({
+        version: 2,
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {
+              type: "object",
+              properties: { name: { type: "string" } },
+              required: ["name"],
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+          },
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasBreakingChanges).toBe(true);
+      expect(diff.nodes[0]).toMatchObject({
+        type: "modified",
+        kind: "Person",
+        severity: "breaking",
+      });
+      expect(requireDefined(diff.nodes[0]).details).toContain("toString");
+      expect(requireDefined(diff.nodes[0]).details).toContain("removed");
+    });
+
     it("detects new required property as breaking change", () => {
       const before = createSchema({
         version: 1,
