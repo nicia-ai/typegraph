@@ -136,6 +136,12 @@ export async function provenanceNodeId(
  * deterministic id (re-running the same merge is a no-op upsert, never a
  * duplicate). Returns the row count written. The caller wraps this for best-effort
  * behavior — a failure here must not fail an already-committed merge.
+ *
+ * Records that hash to the SAME id are collapsed before the batch: the id is the
+ * contribution's identity, so they are one row by definition — and a single
+ * `bulkUpsertById` batch cannot create the same id twice. Collapsing here is what
+ * makes the returned number the rows actually written for ANY caller, whatever
+ * shape its record list arrived in.
  */
 export async function persistProvenanceRecords(
   store: Store<ProvenanceGraph>,
@@ -145,7 +151,7 @@ export async function persistProvenanceRecords(
   if (records.length === 0) {
     return 0;
   }
-  const items = await Promise.all(
+  const identified = await Promise.all(
     records.map(async (record) => ({
       id: await provenanceNodeId(targetGraphId, record),
       props: {
@@ -158,6 +164,11 @@ export async function persistProvenanceRecords(
       },
     })),
   );
+  const itemsById = new Map<string, (typeof identified)[number]>();
+  for (const item of identified) {
+    itemsById.set(item.id, item);
+  }
+  const items = [...itemsById.values()];
   await store.nodes.Provenance.bulkUpsertById(items);
   return items.length;
 }
