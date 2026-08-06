@@ -1459,6 +1459,56 @@ describe("repointEdges base-aware property union (#408)", () => {
     expect(result.conflicts).toEqual([]);
   });
 
+  /**
+   * The property union asks each staged bag whether it CARRIES a property, and a
+   * props bag is data: an edge schema may declare a field named after an
+   * `Object.prototype` member, and such a field survives validation and the JSON
+   * round-trip as ordinary data (issue #422). Membership must therefore be an
+   * OWN-key question.
+   *
+   * Under `in`, the branch-created member below "carries" `toString` despite saying
+   * nothing about it, so it is counted as having AUTHORED a value it never wrote,
+   * that inherited function enters the union as a claim, and it displaces the
+   * survivor's real value. The authored-claims filter this describe block exists to
+   * pin is defeated for exactly these field names.
+   */
+  it("does not treat a prototype-named property as authored by a member that lacks it", () => {
+    const result = repointEdges(
+      [
+        stagedEdge({
+          id: "edge-1",
+          from: "x",
+          to: "a",
+          inherited: true,
+          props: { on: "base", toString: "base-owned" },
+          baseProps: { on: "base", toString: "base-owned" },
+          branchId: BRANCH_A,
+        }),
+        // Authors `on` and says nothing whatsoever about `toString`.
+        stagedEdge({
+          id: "edge-2",
+          from: "x",
+          to: "b",
+          props: { on: "authored" },
+          branchId: BRANCH_B,
+        }),
+      ],
+      collapse,
+      new Set<MergeKey>(),
+      "lastWriteWins",
+      rankABC(),
+    );
+
+    expect(requireDefined(result.edges[0]).props).toEqual({
+      on: "authored",
+      toString: "base-owned",
+    });
+    // No member authored `toString`, so there is nothing for it to conflict over.
+    expect(
+      result.conflicts.filter((conflict) => conflict.property === "toString"),
+    ).toEqual([]);
+  });
+
   it("keeps an unauthored property the SURVIVOR's own bag lacks", () => {
     // Two committed rows the repoint folded together — the survivor is the min-id
     // inherited one, and the other member's untouched property has no claim behind
