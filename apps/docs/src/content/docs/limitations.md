@@ -284,6 +284,28 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 }
 ```
 
+### One `bulkUpsertById` batch cannot hand a constrained value between rows
+
+`bulkUpsertById` applies items in order for the purpose of deciding each row's
+final props, but it groups the writes: every create in the batch runs before
+every update. A batch where one item **releases** a constrained value and a later
+item **claims** it therefore fails, where the same operations applied one at a
+time succeed.
+
+- Nodes: releasing and re-claiming a `unique` constraint value in one batch
+  throws `UniquenessError` — the claiming create is checked while the releasing
+  row still reserves the value.
+- Edges: ending the lone `oneActive` edge from a source while creating its
+  replacement throws `CardinalityError`, for the same reason.
+
+Bulk semantics are set-like, not scripted — a batch states the rows you want,
+not an order to reach them in — so this is a stated limitation rather than a
+pending fix. It always surfaces as a typed error, never as a dropped write.
+Split the handoff across two batches (release, then claim), or apply the
+conflicting items as sequential `upsertById` calls. See
+[Data Sync](/data-sync#one-batch-cannot-hand-a-unique-value-from-one-row-to-another)
+for the worked example.
+
 ## Graph Analytics Limits
 
 TypeGraph ships focused algorithms on `store.algorithms.*` — shortest path

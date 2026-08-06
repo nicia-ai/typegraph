@@ -924,6 +924,19 @@ export type NodeCollection<
    * a tombstoned one — both write a fresh validity window — defaulting to the
    * operation's timestamp when omitted. It has no effect on an update to a live
    * row, whose lower bound is already history.
+   *
+   * **Limitation — a batch cannot hand a unique value from one row to
+   * another.** Item order settles which value each id ends up with, but the
+   * writes themselves are grouped: every create runs before every update. So a
+   * batch where one item RELEASES a `unique` constraint value and a later item
+   * CLAIMS it — `[{ id: "a", props: { email: "moved@x" } }, { id: "b", props:
+   * { email: "shared@x" } }]` where `a` currently holds `"shared@x"` and `b` is
+   * new — checks `b`'s create while `a` still reserves the value, and the whole
+   * batch fails with a `UniquenessError`. The equivalent sequence of
+   * single `upsertById` calls succeeds. A batch states the set of rows it wants,
+   * not a script to reach them by; the failure is loud rather than silent, and
+   * the workaround is to split the handoff across two batches (release, then
+   * claim) or to apply those items as sequential `upsertById` calls.
    */
   bulkUpsertById: (
     items: readonly Readonly<{
@@ -1319,6 +1332,18 @@ export type EdgeCollection<
    * a tombstoned one — both write a fresh validity window — defaulting to the
    * operation's timestamp when omitted. It has no effect on an update to a live
    * row, whose lower bound is already history.
+   *
+   * **Limitation — a batch cannot hand a constrained slot from one edge to
+   * another.** Item order settles the final props, but the writes are grouped:
+   * every create runs before every update. So a batch where one item frees the
+   * slot a `cardinality` constraint allows and a later item claims it — ending
+   * the lone `oneActive` edge from a source while creating its replacement —
+   * checks the create while the old edge is still active, and the whole batch
+   * fails with a `CardinalityError`. Applying the update first, as
+   * separate `update` / `create` calls, succeeds. A batch states the set of
+   * edges it wants, not a script to reach them by; the failure is loud rather
+   * than silent, and the workaround is to split the handoff across two batches
+   * (free the slot, then claim it) or to apply those items individually.
    */
   bulkUpsertById: (
     items: readonly Readonly<{
