@@ -268,6 +268,58 @@ Key options:
 - `incremental: true` - Caches results between runs for faster iteration
 - `coverageAnalysis: "perTest"` - Only runs relevant tests per mutant
 
+### Changed-Line Mutation Testing on Pull Requests
+
+[`.github/workflows/mutation.yml`](../.github/workflows/mutation.yml) runs Stryker on every pull request
+that touches `packages/typegraph/src`, mutating **only the lines that pull request changed**. It computes
+the scope from the diff, runs `stryker.diff.config.json` against it, and writes the changed-line mutation
+score, the per-status counts, and the location of every survived mutant to the job summary. The full JSON
+report is attached as a workflow artifact.
+
+Why changed lines rather than whole files: a whole-file run over the files a typical pull request touches
+takes hours, which is unaffordable per pull request, while the same run restricted to the changed line
+ranges finishes in minutes. Scoping to the diff also keeps the signal actionable — every survivor it
+reports is a mutant in code this pull request wrote, not pre-existing debt in a file it happened to open.
+
+The scope script and the config it feeds:
+
+```bash
+cd packages/typegraph
+
+# List the changed-line ranges this branch would mutate
+pnpm test:mutation:diff
+
+# Run Stryker against exactly those ranges
+npx stryker run stryker.diff.config.json --mutate "$(node --import tsx scripts/mutation-diff.ts --csv)"
+```
+
+`scripts/mutation-diff.ts` diffs `$MUTATION_BASE_REF...HEAD` (default base: `origin/main`, three-dot, so
+only this branch's own commits count) over `packages/typegraph/src/**/*.ts`, skipping `.d.ts` files,
+deleted files, and files with deletions only. Ranges separated by fewer than ten unchanged lines merge
+into one entry. It emits `src/<path>.ts:<start>-<end>` entries — one per line by default, comma-joined
+with `--csv`, or a JSON array with `--json` — and exits 0 with no entries when nothing is mutable, which
+is the signal CI uses to skip the run entirely.
+
+`stryker.diff.config.json` runs the default vitest config, so the dry run executes the whole suite
+(roughly 25 minutes) before any mutant is tested; per-mutant runs are cheap after that because
+`coverageAnalysis: "perTest"` narrows each mutant to the tests that actually cover it. That trade is
+deliberate: a narrower dry-run scope is faster but risks attributing a mutant's survival to a test file
+the scoped config never loaded. `ignoreStatic: true` drops mutants that only execute while a module
+loads — killing those requires reloading the environment and re-running everything, and they say little
+about the changed behavior. The incremental cache (`.stryker-cache/incremental-diff.json`) is restored
+across runs on the same branch, so a follow-up push only retests what moved.
+
+The threshold is `break: null`: surviving mutants annotate the pull request but do not fail it. Making
+the job blocking is a one-line change to that field once the signal is quiet across the fleet.
+
+**Triage discipline.** A survived mutant on a changed line gets one of two things before the pull request
+merges: a test that kills it, or a written justification in the pull request description explaining why
+the mutation is not observable behavior (an unreachable defensive branch, a log message that is not part
+of any contract). Survivors on lines the pull request did not change are pre-existing debt and are out of
+scope for that review — the job never reports them. This is the mechanical enforcement of the
+[Load-Bearing Tests](../AGENTS.md#load-bearing-tests) rule: a test that cannot fail when the behavior it
+guards breaks is coverage theater, and a surviving mutant is the machine finding exactly that.
+
 ## Writing Tests
 
 ### Test Structure
@@ -386,7 +438,11 @@ tests). The jobs are:
 
 A separate [release workflow](../.github/workflows/release.yml) packs the npm
 tarball after CI passes and smoke-imports every public subpath (ESM + CJS)
-before publishing.
+before publishing. A separate
+[mutation workflow](../.github/workflows/mutation.yml) runs changed-line
+mutation testing on pull requests that touch `packages/typegraph/src`; it
+annotates the pull request but does not gate it (see
+[Changed-Line Mutation Testing on Pull Requests](#changed-line-mutation-testing-on-pull-requests)).
 
 To reproduce the core gate locally before pushing, run `pnpm fix && pnpm
 typecheck && pnpm test`, then `pnpm test:postgres` (Docker-backed) for any
