@@ -17,62 +17,112 @@
  * (TypeGraph's cross-store `withTransaction`), deliberately deferred for v1.
  *
  * OWNERSHIP OF THE SIDECAR GRAPH ID. {@link openProvenanceStore} is the only
- * gateway, and it never writes provenance to a graph id it has not established
- * ownership of ({@link inspectSidecarGraphId} decides what may be done):
+ * gateway, and the OWNERSHIP MARKER — not the schema shape — is the boundary.
+ * One invariant states the whole rule: no write of any kind ever lands on a graph
+ * id this module has not ALREADY marked as its own, and an open that refuses
+ * writes nothing at all.
  *
- *   - unregistered id: free ONLY when it carries no node and no edge row.
- *     A schema-less application graph (plain `createStore`, which registers no
- *     schema row) is still an application graph, so any pre-existing row refuses;
- *   - a VALID live owner marker for this target: owned, open it;
+ * {@link inspectSidecarGraphId} decides what may be done with an id:
+ *
+ *   - a VALID live owner marker for this target: OWNED — open it, registering (or
+ *     migrating) the sidecar schema if that write has not landed yet;
  *   - ANY other `ProvenanceOwner`-kind row — tombstoned, schema-invalid, claiming a
  *     different target, or stored under a different id: foreign occupancy, refused
  *     with `corrupt-ownership-marker`. A marker this module cannot verify is never
  *     overwritten or resurrected;
- *   - sidecar schema + NO owner marker at all: an INTERRUPTED CREATION/UPGRADE,
- *     resumed by claiming the marker — but only when the id's durable contents are
- *     exactly what this module could have written and nothing else (see below);
- *   - pre-marker (legacy) schema: upgraded when every `Provenance` row verifies;
+ *   - unregistered id: FREE, and claimable, ONLY when it carries no row in ANY
+ *     per-graph table — nodes and edges, but equally recorded-time history, the
+ *     revision clock and origins, identity assertions and their derived
+ *     closure/separation, fulltext, and unique keys. A schema-less application
+ *     graph (plain `createStore`, which registers no schema row) is still an
+ *     application graph, so any pre-existing row refuses;
+ *   - the CURRENT sidecar schema with NO marker: refused
+ *     (`unowned-exact-schema-graph`) whatever its contents — empty and
+ *     provenance-shaped included (see below);
+ *   - pre-marker (legacy) schema: upgraded when every `Provenance` row verifies as
+ *     one this module wrote for THIS target, refused otherwise;
  *   - anything else: refused with `GRAPH_MERGE_PROVENANCE_ID_COLLISION` and a
  *     remediation naming the state that was actually found.
  *
- * WHY RESUMABILITY. Creation is two separately committed writes — the schema, then
- * the marker — so a crash (or a concurrent opener that has committed the schema but
- * not yet the marker) leaves schema-without-marker. Refusing that state forever
- * would brick the sidecar with no repair path and would report it as an application
- * graph, which it is not. The recognition predicate is therefore precise rather than
- * schema-shaped: schema-without-marker is resumed only when the graph id holds no
- * node row of any other kind, no edge row at all, and every `Provenance` row is
- * live, valid for THIS target, and stored under its recomputed deterministic id.
- * Zero rows (the crash-right-after-schema-registration state) trivially qualifies.
+ * MARKER-FIRST ORDERING. Claiming the id is the FIRST write of an open, and it
+ * happens BEFORE the sidecar schema is registered. That is possible because the
+ * marker is a plain node row in the shared nodes table, which needs no per-graph
+ * schema DDL — the same way a schema-less `createStore` graph writes rows. The
+ * claim ({@link claimSidecarOwnership}) re-verifies the id and inserts the marker
+ * as ONE fenced unit (`backend.schemaWriteTransaction`). What that fence is worth
+ * differs by engine and by state, so be precise about it:
  *
- * WHY AN EMPTY EXACT-SCHEMA ID MAY BE ADOPTED. "Verified empty" is only evidence of
- * a free id if nothing can appear between the verification and the claim. It cannot:
- * the contents check and the marker write happen in ONE fenced transaction
- * ({@link claimSidecarOwnership} — `backend.schemaWriteTransaction`, the same
- * per-graph fence a schema commit holds). On SQLite that fence is `BEGIN IMMEDIATE`,
- * which owns the single writer slot; on PostgreSQL it takes a per-graph advisory
- * transaction lock and locks the graph's active schema row `FOR UPDATE`, the row
- * every schema-managed Store write must take `FOR SHARE` — so a competing
- * application writer either commits first (and this claim then SEES its row and
- * refuses) or waits until the claim has committed. An empty exact-schema graph is
- * therefore adopted, which keeps an interrupted creation self-healing, and the
- * ambiguous "empty now, occupied a moment later" outcome the adoption used to
- * accept is unreachable rather than merely unlikely. One writer class sits
- * outside the fence on PostgreSQL at read committed: a schema-LESS raw
- * `createStore` writer takes no schema-row lock, so its insert can commit
- * between the claim's read and the claim's commit — such a writer is still
- * refused whenever its row lands before the claim's fenced re-inspection, but
- * a row landing inside that window coexists with the claim. SQLite has no such
- * gap (`BEGIN IMMEDIATE` serializes all writers).
+ *   - SQLite: `BEGIN IMMEDIATE` owns the single writer slot, so it serializes the
+ *     claim against EVERY other writer, whatever the id's state;
+ *   - PostgreSQL: a per-graph `pg_advisory_xact_lock` plus `SELECT ... FOR UPDATE`
+ *     on the graph's ACTIVE SCHEMA ROW. On the marker-first free-id path there is
+ *     no such row yet, so the `FOR UPDATE` locks nothing and the advisory lock is
+ *     the whole fence: it serializes this claim against other claims and against
+ *     schema commits (which take the same lock), which is what makes two racing
+ *     openers safe. The row lock earns its keep on the schema-BEARING states — the
+ *     legacy upgrade, and any schema-managed Store write, which takes that row
+ *     `FOR SHARE`.
  *
- * RESIDUE. The sidecar SCHEMA is registered by `createStoreWithSchema`, which owns
- * its own transactions and cannot run inside the claim's fence. The unfenced
- * preflight therefore runs FIRST and refuses an occupied id before any registration,
- * but a claim that loses the race after the preflight leaves the sidecar schema
- * registered on a graph id this module does not own. That residue is accepted
- * because the open still REFUSES and no `Provenance` row and no marker are written:
- * a schema-version row alone changes no application row and no query result, and the
- * refusal names the occupant so the operator can drop it.
+ * So a competing writer of those classes either commits first — and this claim
+ * then SEES its row and refuses, having written nothing — or waits until the claim
+ * has committed, by which time the id is visibly owned and a later application
+ * write makes that application the intruder in a marked graph rather than making
+ * this module the colonizer of an application's graph. Only after the marker
+ * commits does `createStoreWithSchema` register the schema.
+ *
+ * WHY AN UNMARKED CURRENT-SCHEMA ID IS NEVER ADOPTED. Contents cannot establish
+ * ownership: an application may legitimately define these exact kinds at the
+ * conventional sidecar id, and one that is empty (or holds rows that happen to
+ * recompute) is indistinguishable from a sidecar of ours. Adopting it used to be
+ * defended by the claim's fence, but the fence only orders the claim against
+ * writers that contend for it — an application Store already open on that id keeps
+ * writing afterwards, and once the marker exists no later open re-litigates
+ * contents. Marker-first removes the question: the current schema without a marker
+ * is a state this module cannot produce except by crashing between the marker
+ * commit and the schema commit, which leaves the marker, not the schema. It is
+ * therefore refused unconditionally, and — because 0.46 is unreleased — no
+ * legitimate fleet state carries the current sidecar schema without a marker.
+ *
+ * RESUMABILITY. Creation is still two separately committed writes, but in the safe
+ * order: the marker, then the schema. A crash between them leaves
+ * marker-without-schema, and a valid live marker for this target IS the proof of
+ * ownership, so that state resumes by registering the schema. The legacy upgrade
+ * has the same window: the marker is claimed inside the fence that verified every
+ * pre-marker row, and the migration to the current schema runs afterwards.
+ *
+ * NO RESIDUE. A refused open leaves the occupant byte-identical: no schema row, no
+ * marker, no provenance row. The unfenced preflight is a read-only classification —
+ * it decides whether a fence must be opened at all (an already-owned sidecar needs
+ * no claim), never whether a write is allowed; every decision that admits a write
+ * is re-taken inside the fence.
+ *
+ * ACCEPTED RESIDUAL: the PostgreSQL read-committed schema-less writer. One writer
+ * class sits outside the fence on PostgreSQL: a raw `createStore` writer takes no
+ * schema-row lock and no advisory lock, so at read committed its insert can commit
+ * between the claim's fenced re-inspection and the claim's commit. Such a writer is
+ * refused whenever its row lands BEFORE the re-inspection; a row landing inside
+ * that window coexists with the claim. SQLite has no such gap (`BEGIN IMMEDIATE`
+ * serializes all writers).
+ *
+ * This is not closable at reasonable cost, and deliberately is not closed. Raising
+ * the claim to SERIALIZABLE does not help: SSI constrains only transactions that
+ * are themselves serializable, and a plain `createStore` writer is not one, so it
+ * is never a party to the conflict SSI would detect. Predicate-locking the range
+ * instead would mean taking a lock on rows that do not exist for a graph id that
+ * has none — `SELECT ... FOR UPDATE` locks matched rows, and an empty result
+ * matches nothing — so there is no expressible lock for "no row for this graph id
+ * may appear". The remaining option, forcing every raw writer through a per-graph
+ * advisory lock, would put a lock acquisition on the hot path of every write in the
+ * library to protect one module's claim, which is the wrong trade.
+ *
+ * The consequence is also bounded. The failure is a visible NAMESPACE COLLISION —
+ * an application's rows and this module's marker under one graph id — not
+ * corruption: no row is overwritten, no row is lost, and both sides read their own
+ * rows back unchanged. And it lands in the same place as the accepted semantics
+ * one instant later: an application writing into the sidecar AFTER the claim
+ * commits is precisely the marker-boundary case this module already documents as
+ * "the application is the intruder in a marked graph". The window makes that
+ * outcome reachable a few milliseconds early; it does not create a new one.
  *
  * The claim needs a transactional schema fence. A backend that exposes none is
  * refused with `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED` rather than claiming the id
@@ -186,18 +236,28 @@ export type ProvenanceGraph = ReturnType<typeof buildProvenanceGraph>;
 export type ProvenanceNode = Node<typeof Provenance>;
 
 /**
- * Opens — materializing the schema if needed — the provenance store for a target.
- * Pass the target Store in ordinary application code; inspection tools that do
- * not have its GraphDef may instead pass the backend and target graph id.
+ * Opens the provenance store for a target — OPENING OR CREATING, never merely
+ * reading. On a free graph id this claims the ownership marker and registers the
+ * sidecar schema; on an occupied one it throws. There is no read-only entry
+ * point: a tool that wants to inspect an existing sidecar without creating one
+ * must decide for itself (e.g. by checking `backend.getActiveSchema` for
+ * {@link provenanceGraphId}) before calling this.
  *
- * Idempotent: safe to call before every persist/query, and shares the backend
- * with the target (so the caller must NOT close it separately — closing the
- * shared backend is the target owner's job).
+ * Pass the target Store in ordinary application code; callers that do not have
+ * its GraphDef may instead pass the backend and target graph id.
+ *
+ * Idempotent in the sense that matters for the persist/query path: repeated calls
+ * converge on one sidecar and write no second marker. It shares the backend with
+ * the target, so the caller must NOT close it separately — closing the shared
+ * backend is the target owner's job.
  */
 export function openProvenanceStore<G extends GraphDef>(
   target: Store<G>,
 ): Promise<Store<ProvenanceGraph>>;
-/** Opens a provenance store for standalone inspection without a target GraphDef. */
+/**
+ * Opens (or creates — see above) a provenance store without a target GraphDef,
+ * for callers that hold only the backend and the target's graph id.
+ */
 export function openProvenanceStore(
   backend: GraphBackend,
   targetGraphId: string,
@@ -210,26 +270,33 @@ export async function openProvenanceStore<G extends GraphDef>(
   const [backend, targetGraphId] =
     args.length === 1 ? [storeBackend(args[0]), args[0].graphId] : args;
   const graph = buildOwnedProvenanceGraph(targetGraphId);
-  // Preflight, unfenced: refuses an occupied id BEFORE `createStoreWithSchema`
-  // can register the sidecar schema over it. It is deliberately not the decision
-  // the claim below relies on — see the module doc's RESIDUE note.
+  // Preflight, unfenced and read-only: it decides whether a CLAIM is needed at
+  // all (an already-owned sidecar needs none, so read-only use stays available
+  // on a backend with no schema fence) and refuses early. It authorizes no
+  // write — the claim below re-takes the decision inside its fence.
   const preflight = await inspectSidecarGraphId(backend, graph, targetGraphId);
   if (preflight.state === "refuse") {
     throw provenanceGraphIdCollision(graph.id, targetGraphId, preflight.reason);
   }
-  const [store] = await createStoreWithSchema(graph, backend);
   if (preflight.state !== "owned") {
+    // Marker-first: the ownership row is this open's FIRST write, so a lost race
+    // refuses before anything — not even a schema-version row — has been written
+    // to the occupant.
     const claim = await claimSidecarOwnership(backend, graph, targetGraphId);
     if (claim.state === "refuse") {
       throw provenanceGraphIdCollision(graph.id, targetGraphId, claim.reason);
     }
   }
+  // Reached only once the marker owns the id: registering the sidecar schema (or
+  // migrating a pre-marker one) now writes into a graph this module has claimed.
+  const [store] = await createStoreWithSchema(graph, backend);
   return store as unknown as Store<ProvenanceGraph>;
 }
 
 /**
- * Re-verifies the sidecar id's contents and writes the ownership marker as ONE
- * fenced unit, so no writer can occupy the id between the two.
+ * Re-verifies the sidecar id and writes the ownership marker as ONE fenced unit,
+ * so no writer can occupy the id between the two — and, being the open's first
+ * write, so a claim that loses the race leaves the occupant untouched.
  *
  * `backend.schemaWriteTransaction` is the fence: the same per-graph lock a schema
  * commit holds (SQLite `BEGIN IMMEDIATE`; PostgreSQL `pg_advisory_xact_lock` plus
@@ -243,7 +310,9 @@ export async function openProvenanceStore<G extends GraphDef>(
  * claim is ever allowed to make — the marker is claimed only when the id holds no
  * `ProvenanceOwner` row at all, so an unverifiable marker can never be overwritten
  * or resurrected. `ProvenanceOwner` declares no unique field, embedding, or
- * fulltext projection, so the row a Store write would produce is this row.
+ * fulltext projection, so the row a Store write would produce is this row — and,
+ * being a plain row in the shared nodes table, it needs no registered schema for
+ * the graph id, which is what lets the claim run BEFORE the schema commit.
  */
 async function claimSidecarOwnership(
   backend: GraphBackend,
@@ -286,11 +355,16 @@ type SidecarRefusalReason =
   | "unupgradeable-legacy-sidecar"
   | "unowned-exact-schema-graph";
 
-/** What {@link openProvenanceStore} may do with the sidecar graph id. */
+/**
+ * What {@link openProvenanceStore} may do with the sidecar graph id. `create`
+ * (a completely free id) and `upgrade` (a pre-marker sidecar whose every row
+ * verifies) are the two states a claim may write the marker in; `owned` needs no
+ * claim, and `refuse` permits no write at all.
+ */
 type SidecarDisposition =
   | Readonly<{ state: "create" }>
   | Readonly<{ state: "owned" }>
-  | Readonly<{ state: "adopt" }>
+  | Readonly<{ state: "upgrade" }>
   | Readonly<{ state: "refuse"; reason: SidecarRefusalReason }>;
 
 /** Rows this module could have written, keyed by what they mean for ownership. */
@@ -302,12 +376,22 @@ type SidecarContents =
  * top-level {@link GraphBackend} and a transaction-scoped backend, so the SAME
  * inspection runs as the unfenced preflight and again inside the claim's fence —
  * two callers of one decision rather than two decisions that can disagree.
+ *
+ * `tableExists` is the one member only the fenced port has, and it exists so the
+ * two callers can run that one decision the same way: a secondary relation a
+ * database has never materialized must be skipped, and inside a PostgreSQL
+ * transaction a failed statement aborts the whole transaction, so the fenced
+ * caller cannot learn that by attempting the read. See
+ * {@link hasRowsInSecondaryTable}.
  */
 type SidecarInspectionPort = Readonly<
   Pick<
     GraphBackend,
     "getActiveSchema" | "findNodesByKind" | "execute" | "tableNames"
-  >
+  > &
+    Readonly<{
+      tableExists?: (tableName: string) => Promise<boolean>;
+    }>
 >;
 
 /**
@@ -351,12 +435,13 @@ async function inspectSidecarGraphId(
     serializeSchema(graph, activeSchema.version),
   );
   if (activeSchema.schema_hash === ownedHash) {
-    // Schema committed, marker not (yet): an interrupted creation/upgrade, or a
-    // concurrent opener between its two writes. Resume only if the contents are
-    // ours-or-nothing.
-    return OWNED_SCHEMA_DISPOSITION[
-      await inspectSidecarContents(port, graph.id, targetGraphId)
-    ];
+    // The current sidecar schema with no marker. This module writes the marker
+    // FIRST, so it cannot have produced this state: whatever registered the
+    // schema, it was not an interrupted creation of ours. Contents are not
+    // consulted — empty or provenance-shaped, they are not evidence of
+    // authorship, and adopting on them is exactly how an application graph gets
+    // colonized.
+    return { state: "refuse", reason: "unowned-exact-schema-graph" };
   }
 
   const legacyHash = await computeSchemaHash(
@@ -371,34 +456,16 @@ async function inspectSidecarGraphId(
 }
 
 /**
- * Contents → disposition for a graph id carrying the CURRENT sidecar schema
- * without an ownership marker (an interrupted creation/upgrade). `empty` adopts:
- * a crash right after schema registration leaves exactly that, and — because the
- * emptiness is re-verified inside the claim's fence — nothing can occupy the id
- * between that verification and the marker write. See the module doc.
- */
-const OWNED_SCHEMA_DISPOSITION: Readonly<
-  Record<SidecarContents, SidecarDisposition>
-> = {
-  provenance: { state: "adopt" },
-  empty: { state: "adopt" },
-  "unrecognized-provenance": {
-    state: "refuse",
-    reason: "unowned-exact-schema-graph",
-  },
-  "foreign-rows": { state: "refuse", reason: "application-graph" },
-};
-
-/**
- * Contents → disposition for a graph id carrying the PRE-MARKER (legacy) schema.
- * `empty` refuses here — unlike the owned-schema case, an empty legacy sidecar
- * carries no evidence at all that this module wrote it, so it cannot be told
- * apart from an application graph of the same shape.
+ * Contents → disposition for a graph id carrying the PRE-MARKER (legacy) schema —
+ * the ONE state whose contents may establish ownership, because a pre-marker
+ * release could not have written a marker beside them. `empty` still refuses: an
+ * empty legacy sidecar carries no evidence at all that this module wrote it, so
+ * it cannot be told apart from an application graph of the same shape.
  */
 const LEGACY_SCHEMA_DISPOSITION: Readonly<
   Record<SidecarContents, SidecarDisposition>
 > = {
-  provenance: { state: "adopt" },
+  provenance: { state: "upgrade" },
   empty: { state: "refuse", reason: "empty-legacy-sidecar" },
   "unrecognized-provenance": {
     state: "refuse",
@@ -443,9 +510,9 @@ const SIDECAR_REFUSALS: Readonly<
   },
   "unowned-exact-schema-graph": {
     describe: (graphId) =>
-      `Graph id "${graphId}" carries the merge-provenance schema without an ownership marker and holds rows this library did not write.`,
+      `Graph id "${graphId}" carries the merge-provenance schema but no ownership marker, so this library did not create it.`,
     suggestion: (graphId) =>
-      `Rename or drop the graph at id "${graphId}"; a sidecar this library owns carries a "${PROVENANCE_OWNER}" marker row, and one written by an application is never adopted.`,
+      `Drop graph id "${graphId}" (or rename the graph that occupies it) and re-run the merge: a sidecar this library owns writes its "${PROVENANCE_OWNER}" marker row BEFORE the schema, so a marker-less one carrying this schema was written either by an application — which is never adopted — or by a crash of an unreleased build between those two writes. Persisted provenance is derived, so re-running the merge rebuilds it.`,
   },
 };
 
@@ -576,17 +643,33 @@ type SidecarProbeRow = Readonly<{ present: number }>;
 
 /**
  * Cheapest existence probe a backend offers for "does this graph id hold rows?":
- * one `LIMIT 1` lookup per row table, on the same `graph_id` prefix every read
- * path uses. Tombstoned rows COUNT — a soft-deleted application row still means
- * the id belongs to that application.
+ * one `LIMIT 1` lookup per per-graph row table, on the same `graph_id` prefix
+ * every read path uses, short-circuiting at the first hit. Tombstoned rows COUNT
+ * — a soft-deleted application row still means the id belongs to that
+ * application.
  *
- * `scope: "foreign"` narrows it to rows this module could not have written: node
- * rows of any other kind, plus any edge row at all (the sidecar graph declares no
- * edges). `ProvenanceOwner` rows are NOT excused here — the marker probe has
- * already classified every one of them, so a row this raw probe can see and
- * `findNodesByKind` cannot is unaccounted-for occupancy and must refuse. It cannot
- * be expressed through `findNodesByKind`, which needs the kinds of a graph whose
- * schema — by construction, in the case that matters — was never registered.
+ * EVERY per-graph table is probed, not just nodes and edges. A graph id whose
+ * only durable rows are recorded-time history, a revision clock or origin,
+ * identity assertions and their derived closure/separation, fulltext, or unique
+ * keys is an id an application has used — claiming it because the two entity
+ * tables happen to be empty is the same colonization refusing a stray node row
+ * exists to prevent.
+ *
+ * `scope: "foreign"` narrows only the NODE table, to rows this module could not
+ * have written: node rows of any other kind. Every other table is occupancy in
+ * both scopes — a sidecar declares no edges, tracks no revisions, asserts no
+ * identities, and projects no fulltext or unique keys, so a row in any of them
+ * is not ours whatever the schema says. `ProvenanceOwner` rows are NOT excused
+ * either: the marker probe has already classified every one of them, so a row
+ * this raw probe can see and `findNodesByKind` cannot is unaccounted-for
+ * occupancy and must refuse. It cannot be expressed through `findNodesByKind`,
+ * which needs the kinds of a graph whose schema — by construction, in the case
+ * that matters — was never registered.
+ *
+ * The reachable set is exactly the tables the backend names through its
+ * `tableNames` port. The schema-version table and the materialization-marker
+ * tables are NOT addressable through it, so they are not probed; the active
+ * schema row is covered by `getActiveSchema` in {@link inspectSidecarGraphId}.
  */
 async function hasRowsUnderGraphId(
   port: SidecarInspectionPort,
@@ -596,18 +679,93 @@ async function hasRowsUnderGraphId(
   const schema = createSqlSchema(port.tableNames);
   const kindFilter =
     scope === "any" ? sql.empty() : sql` AND kind <> ${PROVENANCE_KIND}`;
-  const nodeRows = await port.execute<SidecarProbeRow>(
+  // The entity tables first: every backend has them, so a failure here is a real
+  // failure and propagates, and they are where an occupant is likeliest to be.
+  if (await hasRowsInTable(port, schema.tables.nodes, graphId, kindFilter)) {
+    return true;
+  }
+  if (await hasRowsInTable(port, schema.tables.edges, graphId, sql.empty())) {
+    return true;
+  }
+  for (const tableName of secondaryRowTableNames(schema.tables)) {
+    if (await hasRowsInSecondaryTable(port, tableName, graphId)) return true;
+  }
+  return false;
+}
+
+/**
+ * The per-graph row tables beyond nodes and edges, deduplicated because a
+ * backend may map two logical relations onto one physical name.
+ *
+ * This list is the probe's completeness claim: it is every member of the
+ * backend's resolved table names that carries a `graph_id` column.
+ */
+function secondaryRowTableNames(
+  tables: ReturnType<typeof createSqlSchema>["tables"],
+): readonly string[] {
+  return [
+    ...new Set([
+      tables.recordedNodes,
+      tables.recordedEdges,
+      tables.recordedClock,
+      tables.revisionOrigins,
+      tables.identityAssertions,
+      tables.recordedIdentityAssertions,
+      tables.identityClosure,
+      tables.identitySeparation,
+      tables.fulltext,
+      tables.uniques,
+    ]),
+  ];
+}
+
+/** One `LIMIT 1` existence lookup for one graph id in one table. */
+async function hasRowsInTable(
+  port: SidecarInspectionPort,
+  tableName: string,
+  graphId: string,
+  filter: ReturnType<typeof sql.empty>,
+): Promise<boolean> {
+  const rows = await port.execute<SidecarProbeRow>(
     asCompiledRowsSql(
-      sql`SELECT 1 AS present FROM ${schema.nodesTable} WHERE graph_id = ${graphId}${kindFilter} LIMIT 1`,
+      sql`SELECT 1 AS present FROM ${sql.identifier(tableName)} WHERE graph_id = ${graphId}${filter} LIMIT 1`,
     ),
   );
-  if (nodeRows.length > 0) return true;
-  const edgeRows = await port.execute<SidecarProbeRow>(
-    asCompiledRowsSql(
-      sql`SELECT 1 AS present FROM ${schema.edgesTable} WHERE graph_id = ${graphId} LIMIT 1`,
-    ),
-  );
-  return edgeRows.length > 0;
+  return rows.length > 0;
+}
+
+/**
+ * The same lookup for a relation the database may never have materialized —
+ * identity storage, for instance, is created when identity is first enabled, so
+ * a database from an earlier release can be missing it entirely.
+ *
+ * A missing table holds no rows for ANY graph id, so skipping it is exact rather
+ * than lenient. Proving it is missing is where the two ports differ: the fenced
+ * caller MUST ask the catalog first, because on PostgreSQL a failed statement
+ * aborts the enclosing transaction and would take the claim's marker write down
+ * with it; the unfenced preflight runs each probe as its own statement, so it can
+ * simply let the failure answer the question. Only this narrow "does the relation
+ * exist" question is answered that way — the entity-table probes above are strict,
+ * and they run first, so a broken connection or an unreadable database fails there
+ * instead of being mistaken for a free id.
+ */
+async function hasRowsInSecondaryTable(
+  port: SidecarInspectionPort,
+  tableName: string,
+  graphId: string,
+): Promise<boolean> {
+  const tableExists = port.tableExists;
+  if (tableExists !== undefined) {
+    return (
+      (await tableExists(tableName)) &&
+      (await hasRowsInTable(port, tableName, graphId, sql.empty()))
+    );
+  }
+  try {
+    return await hasRowsInTable(port, tableName, graphId, sql.empty());
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -615,9 +773,9 @@ async function hasRowsUnderGraphId(
  *
  * `provenance` is claimed only when every row is a live, valid contribution for
  * THIS target stored under its recomputed deterministic id, and the id holds no
- * other row. That single predicate serves both admission paths — upgrading a
- * pre-marker sidecar and resuming an interrupted creation — so the two can never
- * drift into disagreeing about what "our rows" means.
+ * other row. It is the sole admission path that reasons from CONTENTS rather than
+ * from the marker, and it exists only for pre-marker sidecars, whose release could
+ * not have written a marker beside them.
  */
 async function inspectSidecarContents(
   port: SidecarInspectionPort,

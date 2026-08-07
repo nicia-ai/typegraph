@@ -519,6 +519,22 @@ if (!result.success) {
 }
 ```
 
+### Serialized-connection refusals
+
+Row-level failures are reported in `result.errors`, but one class of failure is
+thrown instead: two long-lived interchange streams cannot share a single
+serialized database connection, so whichever starts second is refused with a
+typed `ConfigurationError`. The lease is exclusive — one stream of any kind per
+connection — and every long-lived import claims it, so `importGraph`,
+`importGraphStream`, `trustedImportGraph`, and `trustedImportGraphStream` can all
+throw it, as can `exportGraphStream` when an import already holds the connection
+— there, on the stream's first pull, since the claim begins when the snapshot
+transaction opens rather than when the iterable is constructed. The codes (`INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT`,
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`,
+`INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`) and the `details.requested` /
+`details.heldBy` pairing they carry are documented in
+[Interchange serialized-connection guard codes](/errors#interchange-serialized-connection-guard-codes).
+
 ## Best Practices
 
 ### Validate Before Import

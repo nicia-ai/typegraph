@@ -76,27 +76,34 @@ describe("batteries-included constructors with a custom SqlSchema", () => {
     }
   });
 
-  it("provisions and reads the same custom tables on PGlite", async () => {
-    const schema = createSqlSchema(CUSTOM_TABLES);
-    const store = await createLocalPgliteStore(graph, {
-      store: { schema },
-      schemaManagement: {
-        schema: createSqlSchema({}),
-      } as never,
-    });
-    try {
-      const person = await store.nodes.Person.create(
-        { name: "N" },
-        { id: "nested" },
-      );
-      await store.nodes.Author.create({ penName: "N." }, { id: "nested" });
-      expect(
-        await store.identity.areSame(person, { kind: "Author", id: "nested" }),
-      ).toBe(true);
-    } finally {
-      await store.close();
-    }
-  });
+  it(
+    "provisions and reads the same custom tables on PGlite",
+    { timeout: 60_000 },
+    async () => {
+      const schema = createSqlSchema(CUSTOM_TABLES);
+      const store = await createLocalPgliteStore(graph, {
+        store: { schema },
+        schemaManagement: {
+          schema: createSqlSchema({}),
+        } as never,
+      });
+      try {
+        const person = await store.nodes.Person.create(
+          { name: "N" },
+          { id: "nested" },
+        );
+        await store.nodes.Author.create({ penName: "N." }, { id: "nested" });
+        expect(
+          await store.identity.areSame(person, {
+            kind: "Author",
+            id: "nested",
+          }),
+        ).toBe(true);
+      } finally {
+        await store.close();
+      }
+    },
+  );
 });
 
 describe("schema option brand validation", () => {

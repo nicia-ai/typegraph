@@ -1,4 +1,4 @@
-import { is, type SQL } from "drizzle-orm";
+import { is } from "drizzle-orm";
 
 import {
   ConfigurationError,
@@ -91,7 +91,7 @@ export type CommonOperationBackend = Pick<
   | "deleteNode"
   | "deleteUnique"
   | "edgeExistsBetween"
-    | "executeTemporaryStatement"
+  | "executeTemporaryStatement"
   | "findEdgesByKind"
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
@@ -143,9 +143,7 @@ export type CommonOperationBackend = Pick<
 export type InternalOperationBackend = TransactionBackend &
   CommonOperationBackend &
   Readonly<{
-    deleteSchemaVectorSlotContribution: (
-      slot: VectorSlot,
-    ) => Promise<void>;
+    deleteSchemaVectorSlotContribution: (slot: VectorSlot) => Promise<void>;
   }>;
 
 const DRIZZLE_DIALECT_LABELS = {
@@ -373,7 +371,7 @@ export function createCommonOperationBackend(
 
   async function runIgnorableClearStatement(
     statement: Readonly<{
-      query: SQL;
+      query: ExecutableSql;
       ignoreMissingTable?: boolean;
       requiredTableName?: string;
     }>,

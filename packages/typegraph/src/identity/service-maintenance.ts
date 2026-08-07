@@ -22,6 +22,7 @@ import {
   assertClosureMatchesComponents,
   classHasDisjointKinds,
   closureMismatchError,
+  identityActiveKinds,
   loadLiveReferences,
   loadSnapshot,
   validateSnapshotIntegrity,
@@ -94,7 +95,7 @@ export async function rebuildIdentityClosureForContext<G extends GraphDef>(
   async function rebuildAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
     await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-      const activeKinds = new Set(ctx.registry.nodeKinds.keys());
+      const activeKinds = identityActiveKinds(ctx.registry);
       const snapshot = await loadSnapshot(
         rawTarget,
         ctx.schema,
@@ -126,7 +127,7 @@ export async function validateIdentityForContext<G extends GraphDef>(
 
   async function validateAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
-    const activeKinds = new Set(ctx.registry.nodeKinds.keys());
+    const activeKinds = identityActiveKinds(ctx.registry);
     const snapshot = await loadSnapshot(
       target,
       ctx.schema,
@@ -409,7 +410,7 @@ export async function assertAffectedIdentityClassesConsistent<
       rawTarget,
       ctx.schema,
       ctx.graphId,
-      new Set(ctx.registry.nodeKinds.keys()),
+      identityActiveKinds(ctx.registry),
       ctx.sameIdAcrossKinds,
     );
   });
@@ -596,7 +597,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
       target,
       ctx.schema,
       ctx.graphId,
-      new Set(ctx.registry.nodeKinds.keys()),
+      identityActiveKinds(ctx.registry),
       ctx.sameIdAcrossKinds,
     );
   });

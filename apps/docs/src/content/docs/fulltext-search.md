@@ -187,8 +187,10 @@ read path, or on a replica — which is the point: the alternative was to
 run `store.repairContributions()`, a write with repair side effects, and
 hope. When it reports `degraded`, escalate through the contribution health
 ladder — probe, then `repairContributions()`, then
-`rebuildContribution("fulltext")` for storage that has to be dropped and
-recreated. The three rungs, what each one writes, and when to stop are in
+`rebuildContribution("fulltext")`, which is scoped to the calling graph: it
+deletes and refills only that graph's rows in the shared fulltext table, and
+drops and recreates the table itself only when no other graph has rows in
+it. The three rungs, what each one writes, and when to stop are in
 [Contribution health: probe, repair, rebuild](/troubleshooting#contribution-health-probe-repair-rebuild).
 
 ## Database Setup

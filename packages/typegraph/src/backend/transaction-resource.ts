@@ -2,7 +2,7 @@
  * Ownership tracking for backends that serialize every statement onto ONE
  * database connection.
  *
- * Three facts are recorded here, and only these three:
+ * Two facts are recorded here, and only these two:
  *
  * 1. **Which serialized resource a backend wrapper belongs to.** Distinct
  *    `GraphBackend` objects (a second `createPostgresBackend(...)` over the same
@@ -19,43 +19,64 @@
  *    marked, deliberately unmarked, and known gaps — is the inventory at the
  *    bottom of this doc.
  *
- * 2. **Whether a serialized resource currently has an export snapshot
- *    transaction open on it.** A streaming export holds a read-only transaction
- *    on its connection for the whole stream. Any write issued on that same
- *    connection meanwhile either lands inside the read-only transaction or waits
- *    for a connection that is never released — so an import into a resource with
- *    an active export snapshot is refused regardless of which object the caller
- *    passes, including a user-wrapped stream that no longer identifies its
- *    source backend.
+ * 2. **Which long-lived interchange stream currently holds that resource.** A
+ *    streaming export holds a read-only transaction on its connection for the
+ *    whole stream; a streaming import opens a write transaction per chunk on
+ *    that same connection for the whole stream. Any second long-lived stream on
+ *    the resource therefore either nests a transaction inside the first one
+ *    (`cannot start a transaction within a transaction`) or waits for a
+ *    connection that is never released — and that is true of ALL FOUR pairings,
+ *    not only the two cross-kind ones:
  *
- * 3. **Whether a serialized resource currently has a streaming import writing
- *    through it.** The mirror image of fact 2: a streaming import commits chunk
- *    after chunk on that one connection for the whole stream, so an export
- *    snapshot opening meanwhile would hold a read transaction the import's next
- *    chunk can never write past. Registering the import makes the SECOND
- *    long-lived stream on a shared resource refusable in whichever order the two
- *    start.
+ *    | holder          | second stream    | outcome without the lease          |
+ *    | --------------- | ---------------- | ---------------------------------- |
+ *    | export snapshot | import stream    | import's chunk waits on the reader |
+ *    | import stream   | export snapshot  | export's read strands the import   |
+ *    | import stream   | import stream    | nested BEGIN                       |
+ *    | export snapshot | export snapshot  | nested BEGIN                       |
  *
- * Facts 2 and 3 are refcounted leases over the same resource keys, and every
- * holder registers itself in the SAME synchronous section in which it checks the
- * other registry (see {@link beginSerializedSnapshotExport} and
- * {@link beginSerializedImport}). On a single-threaded event loop a check with no
- * `await` before its registration is atomic: two long-lived streams cannot both
- * observe an empty registry, so no interleaving window is left where each waits
- * for the other.
+ *    So the lease is EXCLUSIVE, not refcounted: at most one stream of any kind
+ *    holds a given serialized resource, and the second one is refused with the
+ *    holder's kind named (see {@link acquireSerializedStreamLease}). Refcounting
+ *    admitted the two same-kind rows above, which then failed on the driver
+ *    after chunks had already committed.
  *
- * None of the three facts is a general concurrency model:
+ *    `"import-stream"` is the kind of EVERY long-lived import, not only the
+ *    chunk-streaming one: an in-memory `importGraph` and a `trustedImport`
+ *    session write through the same one connection over the same kind of window,
+ *    so they claim the same lease and are refused by the same holders.
+ *
+ * The check and the registration happen in ONE synchronous section inside
+ * {@link acquireSerializedStreamLease} — there is no way for a caller to check
+ * without claiming, so there is no window to get wrong. On a single-threaded
+ * event loop a check with no `await` before its registration is atomic: two
+ * long-lived streams cannot both observe a free resource, so no interleaving is
+ * left where each waits for the other.
+ *
+ * Neither fact is a general concurrency model:
  *
  * - No attempt is made to detect shared connections we cannot see (two `pg`
  *   Clients dialed at the same server, two better-sqlite3 handles on one file).
  *   Those are genuinely independent connections and are correctly not refused.
- * - RESIDUAL GAP: the leases are keyed by serialized resource, so an UNMARKED
- *   backend registers nothing and can hold neither lease. A driver we cannot
+ * - RESIDUAL GAP: the lease is keyed by serialized resource, so an UNMARKED
+ *   backend registers nothing and can hold nothing. A driver we cannot
  *   positively identify as single-connection therefore keeps exactly today's
  *   protection — the identity-based pre-flight in `importGraphStream`, which
  *   only sees a stream that still names its own source backend — and an
  *   export/import pair interleaved on such a connection can still wedge. Closing
  *   that requires recognizing the driver, not more bookkeeping here.
+ * - RESIDUAL GAP: a `transactions: false` export abstains entirely — it opens no
+ *   snapshot transaction, so `exportGraphStream` neither claims the lease nor
+ *   consults it: such an export is never refused and never refuses anyone.
+ *   A streaming import claims the lease whatever its backend reports,
+ *   because its writes still have to land somewhere an open snapshot is not.
+ *   The visible cost of that asymmetry is one conservative refusal: two
+ *   streaming imports through a MARKED but deliberately `transactionMode:
+ *   "none"` connection frame nothing and would in fact interleave harmlessly,
+ *   yet the second is refused. That is the deliberate trade — the alternative
+ *   (gating the import's claim on `capabilities.transactions` too) would stop a
+ *   real snapshot export from being refused mid-import on a mixed-profile
+ *   connection, which is the far likelier pairing.
  *
  * ## Inventory of serialized resources
  *
@@ -139,55 +160,26 @@ import { type GraphBackend } from "./types";
 const SERIALIZED_TRANSACTION_RESOURCES = new WeakMap<object, object>();
 
 /**
- * Counts the export snapshot transactions currently open on each serialized
- * resource. An entry exists only while at least one export is in flight; the
- * final release deletes the key, so a completed export retains nothing.
+ * The kinds of long-lived interchange stream that hold a serialized connection
+ * across many statements — the population the lease is exclusive over.
  */
-const ACTIVE_SNAPSHOT_EXPORTS = new Map<object, number>();
+export type SerializedStreamKind = "export-snapshot" | "import-stream";
 
 /**
- * Counts the streaming imports currently writing through each serialized
- * resource, with the same lifecycle as {@link ACTIVE_SNAPSHOT_EXPORTS}.
+ * The outcome of claiming a serialized resource for a long-lived stream: the
+ * (idempotent) release when the claim succeeded, or the kind of stream already
+ * holding it when it did not.
  */
-const ACTIVE_STREAMING_IMPORTS = new Map<object, number>();
+export type SerializedStreamLease =
+  | Readonly<{ acquired: true; release: () => void }>
+  | Readonly<{ acquired: false; heldBy: SerializedStreamKind }>;
 
 /**
- * The refcount both leases share: register `backend`'s serialized resource in
- * `leases` and return the (idempotent) release.
- *
- * Unmarked backends get a no-op: without a known serialized resource there is
- * no shared connection for the other side to be refused against.
+ * The one long-lived stream holding each serialized resource. An entry exists
+ * only while that stream is in flight; its release deletes the key, so a
+ * finished stream retains nothing and refuses nobody.
  */
-function acquireResourceLease(
-  leases: Map<object, number>,
-  backend: GraphBackend,
-): () => void {
-  const resource = SERIALIZED_TRANSACTION_RESOURCES.get(backend);
-  if (resource !== undefined) {
-    leases.set(resource, (leases.get(resource) ?? 0) + 1);
-  }
-  let released = false;
-  return () => {
-    if (released || resource === undefined) return;
-    released = true;
-    const remaining = (leases.get(resource) ?? 1) - 1;
-    if (remaining <= 0) {
-      leases.delete(resource);
-      return;
-    }
-    leases.set(resource, remaining);
-  };
-}
-
-/** Whether any holder has `leases` open on the resource `backend` runs on. */
-function hasResourceLease(
-  leases: Map<object, number>,
-  backend: GraphBackend,
-): boolean {
-  const resource = SERIALIZED_TRANSACTION_RESOURCES.get(backend);
-  if (resource === undefined) return false;
-  return (leases.get(resource) ?? 0) > 0;
-}
+const ACTIVE_SERIALIZED_STREAMS = new Map<object, SerializedStreamKind>();
 
 /**
  * Marks backends whose distinct wrappers still serialize on one connection.
@@ -261,50 +253,53 @@ export function snapshotExportContention(
 }
 
 /**
- * Records that an export snapshot transaction is open on `backend`'s serialized
- * resource and returns the (idempotent) release for when it closes.
+ * Claims the serialized resource `backend` runs on for a long-lived stream of
+ * `kind`, or reports which kind of stream already holds it.
  *
- * CALL CONTRACT: the caller must check {@link hasActiveSerializedImport} and call
- * this with NO `await` in between, so the pair is one atomic section against a
- * concurrently starting import.
+ * EXCLUSIVE: one stream per serialized resource, whatever its kind. Two exports
+ * nest their snapshot transactions on the one connection exactly as an export
+ * and an import do, so "is a stream already running here" — not "is a stream of
+ * the OTHER kind already running here" — is the question the holder registry
+ * answers.
+ *
+ * ONE SYNCHRONOUS SECTION, by construction: the lookup and the registration are
+ * in this function's body with no `await` between them, and there is no separate
+ * "is it free?" query a caller could read and then act on later. On a
+ * single-threaded event loop that makes "no other stream held this connection
+ * when this one claimed it" true for the whole stream, in whichever order two
+ * streams start — the second one always finds the first's registration.
+ *
+ * Marked backends only: without a known serialized resource there is no shared
+ * connection for anyone to be refused against, so an unmarked backend always
+ * acquires and registers nothing (see the residual gap in the module doc).
+ *
+ * The returned release is idempotent and deletes only its own registration,
+ * so an already-released stream can never evict the next stream's lease.
  */
-export function beginSerializedSnapshotExport(
+export function acquireSerializedStreamLease(
   backend: GraphBackend,
-): () => void {
-  return acquireResourceLease(ACTIVE_SNAPSHOT_EXPORTS, backend);
-}
-
-/**
- * Whether an export snapshot transaction is open on the serialized resource
- * `backend` writes through — from ANY backend wrapper over that resource, and
- * regardless of how the export's chunk stream reached its consumer.
- */
-export function hasActiveSerializedSnapshotExport(
-  backend: GraphBackend,
-): boolean {
-  return hasResourceLease(ACTIVE_SNAPSHOT_EXPORTS, backend);
-}
-
-/**
- * Records that a streaming import is writing through `backend`'s serialized
- * resource and returns the (idempotent) release for when the chunk loop ends.
- *
- * CALL CONTRACT: the caller must check {@link hasActiveSerializedSnapshotExport}
- * and call this with NO `await` in between — that is what makes "no export
- * snapshot was open when this import claimed the connection" true for the whole
- * import rather than only at the instant it was observed.
- *
- * The import's own chunk transactions run on this same connection and are not
- * exports, so the lease never conflicts with the import that holds it.
- */
-export function beginSerializedImport(backend: GraphBackend): () => void {
-  return acquireResourceLease(ACTIVE_STREAMING_IMPORTS, backend);
-}
-
-/**
- * Whether a streaming import is writing through the serialized resource
- * `backend` reads from — from ANY backend wrapper over that resource.
- */
-export function hasActiveSerializedImport(backend: GraphBackend): boolean {
-  return hasResourceLease(ACTIVE_STREAMING_IMPORTS, backend);
+  kind: SerializedStreamKind,
+): SerializedStreamLease {
+  const resource = SERIALIZED_TRANSACTION_RESOURCES.get(backend);
+  if (resource === undefined) {
+    return {
+      acquired: true,
+      release: () => {
+        // Nothing was registered: an unmarked backend has no known serialized
+        // resource, so there is nothing to give back.
+      },
+    };
+  }
+  const holder = ACTIVE_SERIALIZED_STREAMS.get(resource);
+  if (holder !== undefined) return { acquired: false, heldBy: holder };
+  ACTIVE_SERIALIZED_STREAMS.set(resource, kind);
+  let released = false;
+  return {
+    acquired: true,
+    release: () => {
+      if (released) return;
+      released = true;
+      ACTIVE_SERIALIZED_STREAMS.delete(resource);
+    },
+  };
 }

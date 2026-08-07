@@ -180,6 +180,7 @@ export type {
   RemovalMaterializationBackend,
   RowProps,
   SchemaCommitBackend,
+  SchemaCommitPreflightBackend,
   SchemaKindEmptinessProbe,
   SchemaReadBackend,
   SchemaVersionRow,

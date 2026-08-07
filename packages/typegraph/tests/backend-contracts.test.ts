@@ -20,8 +20,9 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePostgres } from "drizzle-orm/node-postgres";
+import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
 import { Client, Pool } from "pg";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -41,15 +42,15 @@ import {
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
 import {
-  beginSerializedImport,
-  beginSerializedSnapshotExport,
-  hasActiveSerializedImport,
-  hasActiveSerializedSnapshotExport,
+  acquireSerializedStreamLease,
   markSerializedTransactionResource,
+  type SerializedStreamKind,
+  type SerializedStreamLease,
   sharesSerializedTransactionResource,
   snapshotExportContention,
 } from "../src/backend/transaction-resource";
 import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
+import { requireDefined } from "../src/utils/presence";
 import { dumpObservableState } from "./state-snapshot";
 import { createTestBackend } from "./test-utils";
 import {
@@ -134,45 +135,99 @@ describe("serialized transaction resource ownership", () => {
   });
 });
 
-describe("serialized import lease", () => {
-  // The lease is what makes "an export snapshot may not open while a streaming
-  // import is writing through this connection" answerable from any wrapper, in
-  // either direction. It is registered against the RESOURCE, so the export side
-  // sees it even though it holds a different backend object.
-  it("publishes an import against the resource, not the wrapper", () => {
+/**
+ * Narrows a lease the test expects to have been granted, reporting the actual
+ * holder when it was not — a lease refused where the test assumed it was free
+ * must not surface as `undefined is not a function`.
+ */
+function acquiredLease(lease: SerializedStreamLease): () => void {
+  if (!lease.acquired) {
+    throw new Error(
+      `Expected the serialized stream lease to be free, but a ${lease.heldBy} holds it.`,
+    );
+  }
+  return lease.release;
+}
+
+describe("serialized stream lease", () => {
+  // The lease is what makes "no second long-lived interchange stream may run on
+  // this connection" answerable from any wrapper, in either direction. It is
+  // registered against the RESOURCE, so the second stream sees the first even
+  // though the two hold different backend objects.
+  it("publishes a stream against the resource, not the wrapper", () => {
     const root = createTestBackend();
     const resource = {};
     markSerializedTransactionResource(root, resource);
     const importing = createBackendOverlay(root, {});
     const exporting = createBackendOverlay(root, {});
 
-    const release = beginSerializedImport(importing);
+    const release = acquiredLease(
+      acquireSerializedStreamLease(importing, "import-stream"),
+    );
 
-    expect(hasActiveSerializedImport(exporting)).toBe(true);
-    // The two registries are separate facts: an import in flight must not read
-    // as an open export snapshot, or an import would refuse itself.
-    expect(hasActiveSerializedSnapshotExport(exporting)).toBe(false);
+    expect(acquireSerializedStreamLease(exporting, "export-snapshot")).toEqual({
+      acquired: false,
+      heldBy: "import-stream",
+    });
 
     release();
-    expect(hasActiveSerializedImport(exporting)).toBe(false);
+    expect(
+      acquireSerializedStreamLease(exporting, "export-snapshot").acquired,
+    ).toBe(true);
   });
 
-  it("keeps the lease until the last holder releases it", () => {
+  // All FOUR pairings, because the lease is exclusive rather than a pair of
+  // per-kind registries: two exports nest their snapshot transactions on the one
+  // connection exactly as an export and an import do, and a refcounted lease
+  // admitted both same-kind rows until the driver failed on them mid-stream.
+  it.each([
+    ["export-snapshot", "import-stream"],
+    ["import-stream", "export-snapshot"],
+    ["import-stream", "import-stream"],
+    ["export-snapshot", "export-snapshot"],
+  ] as const satisfies readonly (readonly [
+    SerializedStreamKind,
+    SerializedStreamKind,
+  ])[])("refuses a %s the connection a %s already holds", (second, holder) => {
+    const root = createTestBackend();
+    markSerializedTransactionResource(root, {});
+    const first = createBackendOverlay(root, {});
+    const other = createBackendOverlay(root, {});
+
+    const release = acquiredLease(acquireSerializedStreamLease(first, holder));
+
+    expect(acquireSerializedStreamLease(other, second)).toEqual({
+      acquired: false,
+      heldBy: holder,
+    });
+
+    // Scoped to a RUNNING stream: a lease left behind would refuse every
+    // later stream on that connection.
+    release();
+    expect(acquireSerializedStreamLease(other, second).acquired).toBe(true);
+  });
+
+  it("releases only its own claim, however often it is called", () => {
     const root = createTestBackend();
     markSerializedTransactionResource(root, {});
 
-    const first = beginSerializedImport(root);
-    const second = beginSerializedImport(root);
+    const finished = acquiredLease(
+      acquireSerializedStreamLease(root, "import-stream"),
+    );
+    finished();
+    const running = acquiredLease(
+      acquireSerializedStreamLease(root, "export-snapshot"),
+    );
 
-    first();
-    expect(hasActiveSerializedImport(root)).toBe(true);
-    // Idempotent: a repeated release must not decrement the other holder's
-    // count away.
-    first();
-    expect(hasActiveSerializedImport(root)).toBe(true);
+    // Idempotent: a second release from the stream that is OVER must not hand
+    // the connection away while the new holder is still on it.
+    finished();
 
-    second();
-    expect(hasActiveSerializedImport(root)).toBe(false);
+    expect(acquireSerializedStreamLease(root, "import-stream")).toEqual({
+      acquired: false,
+      heldBy: "export-snapshot",
+    });
+    running();
   });
 
   it("does not conflate independent resources", () => {
@@ -181,18 +236,24 @@ describe("serialized import lease", () => {
     markSerializedTransactionResource(first, {});
     markSerializedTransactionResource(second, {});
 
-    const release = beginSerializedImport(first);
+    const release = acquiredLease(
+      acquireSerializedStreamLease(first, "import-stream"),
+    );
 
-    expect(hasActiveSerializedImport(second)).toBe(false);
+    expect(acquireSerializedStreamLease(second, "import-stream").acquired).toBe(
+      true,
+    );
     release();
   });
 
   it("is inert for a backend with no known serialized connection", () => {
-    // A default `pg` Pool hands out an independent connection per checkout, so it
-    // is deliberately unmarked — and an unmarked backend can hold no lease. That
-    // is the documented residual gap (a driver we cannot positively identify
-    // keeps only the identity-based pre-flight), asserted here so it stays
-    // deliberate rather than becoming an accident.
+    // The CORRECT case, not the residual gap: a default `pg` Pool hands out an
+    // independent connection per checkout, so two streams over it genuinely run
+    // on two connections and refusing either would refuse work that succeeds.
+    // The pool is therefore deliberately unmarked, and an unmarked backend can
+    // hold no lease. (The residual gap is a different population — drivers that
+    // ARE serialized but cannot be positively identified; nothing here stands in
+    // for those.)
     const pool = new Pool({
       connectionString: "postgres://user@127.0.0.1:1/typegraph_lease",
     });
@@ -202,27 +263,95 @@ describe("serialized import lease", () => {
         vector: false,
       });
 
-      const release = beginSerializedImport(unmarked);
+      const release = acquiredLease(
+        acquireSerializedStreamLease(unmarked, "import-stream"),
+      );
 
-      expect(hasActiveSerializedImport(unmarked)).toBe(false);
+      expect(
+        acquireSerializedStreamLease(unmarked, "export-snapshot").acquired,
+      ).toBe(true);
       release();
     } finally {
       void pool.end();
     }
   });
+});
 
-  it("reports an export snapshot and an import independently", () => {
-    const root = createTestBackend();
-    markSerializedTransactionResource(root, {});
-
-    const releaseExport = beginSerializedSnapshotExport(root);
-
-    expect(hasActiveSerializedSnapshotExport(root)).toBe(true);
-    expect(hasActiveSerializedImport(root)).toBe(false);
-
-    releaseExport();
-    expect(hasActiveSerializedSnapshotExport(root)).toBe(false);
+/**
+ * A SQLite driver that records every statement and can be told to reject one of
+ * them. `sqlite-proxy` is the sanctioned bring-your-own-driver adapter, so the
+ * frame statements (BEGIN / COMMIT / ROLLBACK) arrive here as plain text with no
+ * real database involved.
+ */
+function createFrameRecordingDatabase(
+  statements: string[],
+  failing: Readonly<{ prefix: string; error: Error }>,
+): AnySqliteDatabase {
+  return drizzleSqliteProxy((query: string) => {
+    statements.push(query);
+    if (query.startsWith(failing.prefix)) return Promise.reject(failing.error);
+    return Promise.resolve({ rows: [] });
   });
+}
+
+describe("SQLite manual transaction frames", () => {
+  // Both manually framed paths ("sql" transaction mode): the business
+  // transaction and the schema write. Each one used to `await ROLLBACK; throw
+  // error` — so a ROLLBACK that rejected replaced the caller's actionable error
+  // with a secondary one AND skipped its own rethrow. SQLite auto-rolls-back on
+  // SQLITE_FULL / SQLITE_IOERR / SQLITE_NOMEM, which is exactly when the
+  // original error matters most and exactly when ROLLBACK answers "cannot
+  // rollback - no transaction is active".
+  it.each([
+    [
+      "a business transaction",
+      (backend: GraphBackend, failure: Error): Promise<unknown> =>
+        backend.transaction(() => {
+          throw failure;
+        }),
+    ],
+    [
+      "a schema write",
+      (backend: GraphBackend, failure: Error): Promise<unknown> =>
+        requireDefined(backend.schemaWriteTransaction)(graph.id, () => {
+          throw failure;
+        }),
+    ],
+  ])(
+    "rethrows the original failure when ROLLBACK fails in %s",
+    async (_frame, runFrame) => {
+      const statements: string[] = [];
+      const rollbackFailure = new Error(
+        "cannot rollback - no transaction is active",
+      );
+      const backend = createSqliteBackend(
+        createFrameRecordingDatabase(statements, {
+          prefix: "ROLLBACK",
+          error: rollbackFailure,
+        }),
+        { executionProfile: { isSync: false, transactionMode: "sql" } },
+      );
+      const diskFailure = new Error("database disk image is malformed");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+        // The rollback failure is reported, not thrown; keep it out of the
+        // suite's output.
+      });
+
+      try {
+        await expect(runFrame(backend, diskFailure)).rejects.toBe(diskFailure);
+
+        // The frame was opened and the rollback WAS attempted — the original
+        // error survives because the attempt is reported, not because it was
+        // skipped.
+        expect(
+          statements.filter((query) => !query.startsWith("PRAGMA")),
+        ).toEqual(["BEGIN IMMEDIATE", "ROLLBACK"]);
+        expect(warn).toHaveBeenCalledOnce();
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
 });
 
 describe("snapshot export contention", () => {
@@ -249,6 +378,8 @@ describe("snapshot export contention", () => {
       // deliberately unmarked, so the shared-resource arm cannot be what
       // answers.
       expect(backend.capabilities.transactions).toBe(true);
+      // Not marked because a pool is genuinely concurrent — the correct
+      // classification for this driver, not an unidentified one.
       expect(sharesSerializedTransactionResource(backend, backend)).toBe(false);
 
       expect(snapshotExportContention(backend, backend)).toBeUndefined();

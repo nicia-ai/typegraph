@@ -547,6 +547,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
           ctx.graphId,
           currentClassKey(firstClass),
           currentClassKey(secondClass),
+          ctx.registry,
         );
         return (
           separated ||

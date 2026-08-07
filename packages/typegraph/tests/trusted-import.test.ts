@@ -15,8 +15,11 @@ import {
   StaleVersionError,
   TrustedImportError,
 } from "../src";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import type { GraphBackend, TrustedImportOptions } from "../src/backend/types";
 import {
+  exportGraph,
+  exportGraphStream,
   FORMAT_VERSION,
   type GraphData,
   type GraphInterchangeChunk,
@@ -24,7 +27,8 @@ import {
   trustedImportGraphStream,
 } from "../src/interchange";
 import { requireDefined } from "../src/utils/presence";
-import { createTestBackend } from "./test-utils";
+import { createGate, type Gate } from "./concurrency-utils";
+import { createTestBackend, createTestDatabase } from "./test-utils";
 
 const Person = defineNode("TrustedPerson", {
   schema: z.object({ name: z.string() }),
@@ -76,6 +80,42 @@ function* chunkStream(
   chunks: readonly GraphInterchangeChunk[],
 ): Iterable<GraphInterchangeChunk> {
   for (const chunk of chunks) yield chunk;
+}
+
+/**
+ * A second graph on the SAME connection: the export side of the
+ * serialized-connection guard tests, kept apart from the trusted import's own
+ * graph id so each refusal names the store it actually refused.
+ */
+const bystanderGraph = defineGraph({
+  id: "trusted_import_bystander",
+  nodes: { TrustedPerson: { type: Person } },
+  edges: {},
+});
+
+/**
+ * A trusted chunk stream that parks after its header — the deterministic moment
+ * at which the trusted import's single write transaction is open and its lease
+ * on the connection is held, with a chunk still to come.
+ *
+ * Deliberately NOT an `exportGraphStream`, so it carries no source-backend mark:
+ * only the lease can refuse anything here, which is what makes this a test of
+ * the lease rather than of the pre-flight.
+ */
+async function* pausingTrustedChunks(
+  paused: Gate,
+  resume: Gate,
+): AsyncIterable<GraphInterchangeChunk> {
+  const { nodes, edges, ...header } = graphData([]);
+  yield { type: "header", header };
+  paused.open();
+  await resume.opened;
+  yield {
+    type: "nodes",
+    nodes: [
+      { kind: "TrustedPerson", id: "paused-alice", properties: { name: "A" } },
+    ],
+  };
 }
 
 function expectReason(reason: string): unknown {
@@ -663,5 +703,73 @@ describe("trusted import", () => {
     await expect(
       trustedImportGraph(store, graphData([])),
     ).rejects.toBeInstanceOf(TrustedImportError);
+  });
+});
+
+describe("trusted import on a serialized connection", () => {
+  // A trusted import holds ONE write transaction open for the whole stream, so
+  // it is a long-lived import holder exactly like `importGraphStream` — but it
+  // used to carry no guard at all: streaming an export from the same connection
+  // into it reached the driver as a nested BEGIN, and an export opening while it
+  // ran did the same in the other direction.
+
+  it("refuses a snapshot export streamed into it from the same connection", async () => {
+    const db = createTestDatabase();
+    const sourceBackend = createSqliteBackend(db);
+    const targetBackend = createSqliteBackend(db);
+    const source = createStore(bystanderGraph, sourceBackend);
+    const target = createStore(trustedGraph, targetBackend);
+    await source.nodes.TrustedPerson.create({ name: "Alice" }, { id: "alice" });
+
+    await expect(
+      trustedImportGraphStream(target, exportGraphStream(source)),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+        graphId: trustedGraph.id,
+        requested: "import-stream",
+        heldBy: "export-snapshot",
+      },
+    });
+    // Refused before the trusted session opened, so nothing was written.
+    expect(await target.nodes.TrustedPerson.count()).toBe(0);
+  });
+
+  it("refuses an export snapshot that opens while it holds the connection", async () => {
+    const db = createTestDatabase();
+    const importBackend = createSqliteBackend(db);
+    const exportBackend = createSqliteBackend(db);
+    const target = createStore(trustedGraph, importBackend);
+    // Left empty on purpose: trusted import requires globally empty node and
+    // edge tables, so the export side can only be a store with no rows yet.
+    const bystander = createStore(bystanderGraph, exportBackend);
+    const paused = createGate();
+    const resume = createGate();
+
+    const importing = trustedImportGraphStream(
+      target,
+      pausingTrustedChunks(paused, resume),
+    );
+    await paused.opened;
+
+    await expect(exportGraph(bystander)).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+        graphId: bystanderGraph.id,
+        requested: "export-snapshot",
+        heldBy: "import-stream",
+      },
+    });
+
+    resume.open();
+    expect(await importing).toEqual({ nodes: 1, edges: 0 });
+    expect(await target.nodes.TrustedPerson.count()).toBe(1);
+
+    // The lease is scoped to the running import: the export it refused
+    // succeeds once the trusted session commits.
+    const exported = await exportGraph(bystander);
+    expect(exported.nodes).toEqual([]);
   });
 });

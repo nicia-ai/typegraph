@@ -22,12 +22,21 @@ import {
   StoreNotInitializedError,
   type StoreNotInitializedReason,
 } from "../../errors";
-import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
+import {
+  buildForeignFulltextGraphProbe,
+  buildFulltextGraphDelete,
+  type FulltextStrategy,
+} from "../../query/dialect/fulltext-strategy";
 import { type SqlDialect } from "../../query/dialect/types";
 import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
+import { sql as portableSql } from "../../query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  asCompiledStatementSql,
+} from "../../query/sql-intent";
 import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
 import { isMissingTableError } from "../../utils/sql-errors";
@@ -331,13 +340,14 @@ const PROBE_PROJECTION_ORDER: readonly ContributionProbeContribution[] = [
 ] as const;
 
 /** Why the projection is unusable, in one operator-facing clause. */
-const PROBE_DETAIL_PHRASE: Readonly<Record<ContributionDiagnosticState, string>> =
-  {
-    "orphaned-marker": "storage is missing",
-    "missing-marker": "storage is not attested by a durable marker",
-    "failed-materialization": "provisioning failed and produced no storage",
-    stale: "storage exists at a different shape than the current declaration",
-  };
+const PROBE_DETAIL_PHRASE: Readonly<
+  Record<ContributionDiagnosticState, string>
+> = {
+  "orphaned-marker": "storage is missing",
+  "missing-marker": "storage is not attested by a durable marker",
+  "failed-materialization": "provisioning failed and produced no storage",
+  stale: "storage exists at a different shape than the current declaration",
+};
 
 /**
  * Names the affected contribution the way an operator would look for it:
@@ -580,7 +590,7 @@ export type ContributionMaterializer = Readonly<{
    * physical table is dropped (vector-field reclaim) so a future
    * `ensureVectorSlot` re-creates the table instead of trusting an
    * orphaned marker. No-op when vector support is disabled.
-  */
+   */
   dropVectorSlot: (slot: VectorSlot) => Promise<void>;
   /** Conservatively evict one slot from the process-local marker cache. */
   evictVectorSlot: (slot: VectorSlot) => void;
@@ -650,6 +660,19 @@ export function contributionRebuildSupported(
     )
   );
 }
+
+/**
+ * Advisory-lock key serializing contribution DDL across every graph in one
+ * database. See `lockContributionDdl`.
+ */
+const CONTRIBUTION_DDL_LOCK_KEY = "typegraph:contribution-ddl";
+
+/**
+ * How many other graph ids a refusal names. The probe only has to decide
+ * whether the set is empty; the ids are there so an operator knows which
+ * deployments share the table, and a full list of them would be unbounded.
+ */
+const FOREIGN_GRAPH_REPORT_LIMIT = 5;
 
 // NUL separator for the per-instance contribution cache key: collision-safe
 // across arbitrary graph ids / names (a printable delimiter could appear in a
@@ -1150,9 +1173,9 @@ export function createContributionMaterializer(
       // which the per-target verdict already models as an empty row set.
       const read = await readMarkerRows(id);
       const rows =
-        read.kind === "rows" ? read.rows : (
-          new Map<string, ContributionMaterializationRow>()
-        );
+        read.kind === "rows" ?
+          read.rows
+        : new Map<string, ContributionMaterializationRow>();
       for (const { contribution, projection, kind, fieldPath } of targets) {
         const key = contributionKey(id, contribution);
         const row = rows.get(key);
@@ -1248,8 +1271,11 @@ export function createContributionMaterializer(
   ): Promise<ContributionRepairResult> {
     const diagnosed = await diagnoseContributions(graphId, vectorSlots);
     const results: ContributionRepairEntry[] = [];
-    for (const { graphId: targetGraphId, contribution, diagnostic } of
-      diagnosed) {
+    for (const {
+      graphId: targetGraphId,
+      contribution,
+      diagnostic,
+    } of diagnosed) {
       if (
         diagnostic.state === "stale" ||
         diagnostic.state === "orphaned-marker"
@@ -1280,6 +1306,60 @@ export function createContributionMaterializer(
       results,
       remaining: await verifyContributions(graphId, vectorSlots),
     };
+  }
+
+  /**
+   * The DATABASE-scoped critical section for contribution DDL.
+   *
+   * The schema-write fence is per GRAPH, but the fulltext table is one
+   * physical table shared by every graph in the database, so two graphs
+   * rebuilding at once are not serialized by that fence at all: they would
+   * race the drop, the recreate, and — worse — each other's reading of
+   * "does another graph still have rows here?". One constant-keyed
+   * transaction-scoped advisory lock removes the race instead of recovering
+   * from it.
+   *
+   * Taken INSIDE the per-graph fence, matching the order the identity DDL
+   * lock uses (per-graph fence first, then the database-scoped DDL lock), so
+   * two paths that take both can never hold one lock each and wait for the
+   * other. Keyed distinctly from `typegraph:identity-ddl`, and in the
+   * two-argument lock space every namespaced TypeGraph lock uses — the
+   * per-graph fence deliberately occupies the one-argument space.
+   *
+   * SQLite needs nothing: `BEGIN IMMEDIATE` already holds the database's
+   * single writer slot for the whole fence.
+   */
+  async function lockContributionDdl(
+    tx: SchemaWriteTransactionBackend,
+  ): Promise<void> {
+    if (dialect !== "postgres") return;
+    await tx.execute(
+      asCompiledRowsSql(
+        portableSql`SELECT pg_advisory_xact_lock(hashtext(${CONTRIBUTION_DDL_LOCK_KEY}), 0)`,
+      ),
+    );
+  }
+
+  /**
+   * Graph ids other than `graphId` with rows in the shared fulltext table.
+   * Read inside the rebuild's transaction so the verdict cannot change
+   * between the check and the teardown it authorizes.
+   */
+  async function readForeignGraphIds(
+    tx: SchemaWriteTransactionBackend,
+    tableName: string,
+    graphId: string,
+  ): Promise<readonly string[]> {
+    const rows = await tx.execute<Readonly<{ graph_id: unknown }>>(
+      asCompiledRowsSql(
+        buildForeignFulltextGraphProbe(
+          tableName,
+          graphId,
+          FOREIGN_GRAPH_REPORT_LIMIT,
+        ),
+      ),
+    );
+    return rows.map((row) => String(row.graph_id));
   }
 
   async function rebuildContribution(
@@ -1337,6 +1417,15 @@ export function createContributionMaterializer(
     // never bootstrapped it would fail after the drop had already run.
     await deps.ensureMarkerTable();
 
+    // This graph's durable markers, and whether the shared storage is on
+    // disk at all. Both are read before the fence — the marker read decides
+    // whether a rebuild that may not recreate the storage owes a refusal,
+    // and a catalog probe cannot run inside the fence against a table that
+    // may not exist without aborting the transaction on PostgreSQL.
+    const markers = indexMarkerRows(graphId, await deps.getMarkers(graphId));
+    const sharedTable = deps.fulltextTableName;
+    const sharedTableExisted = await deps.tableExists(sharedTable);
+
     const rebuilt = await fence(graphId, async (tx) => {
       const record = tx.recordContributionMaterialization;
       if (record === undefined) {
@@ -1344,19 +1433,93 @@ export function createContributionMaterializer(
           "rebuildContribution requires a transaction-scoped backend that " +
             "can write contribution markers; without it the drop, recreate, " +
             "and stamp could not commit together.",
-          { backend: dialect, capability: "contributions", operation: "rebuild" },
+          {
+            backend: dialect,
+            capability: "contributions",
+            operation: "rebuild",
+          },
         );
       }
 
+      // Database-scoped, because what follows may be database-global DDL
+      // that the per-graph fence does not serialize at all.
+      await lockContributionDdl(tx);
+
+      // The decision this whole path turns on: `dropDdl` is a `DROP TABLE`
+      // on ONE physical table that holds every graph's fulltext rows, so
+      // running it under a per-graph fence would destroy content belonging
+      // to graphs this process cannot even name — let alone rebuild, since
+      // fulltext content is reconstructed from a graph's own nodes through
+      // its own schema. The teardown is therefore graph-scoped by default
+      // and only escalates to the drop when the drop takes nothing with it.
+      //
+      // Storage that was already absent is never dropped either: there is
+      // nothing to tear down, and a table that appeared between the
+      // pre-fence catalog probe and this lock would belong to whoever
+      // created it. Recreating from `createDdl` and clearing this graph's
+      // rows serves that state without betting on the probe.
+      const foreignGraphIds =
+        sharedTableExisted ?
+          await readForeignGraphIds(tx, sharedTable, graphId)
+        : [];
+      const recreateStorage =
+        sharedTableExisted && foreignGraphIds.length === 0;
+
+      if (!recreateStorage) {
+        // `stale` means the physical table is at a shape the current
+        // declaration no longer produces, and the only repair for that is
+        // the drop this rebuild just declined to run. Deleting this graph's
+        // rows and re-stamping instead would publish the current signature
+        // over a shape nothing verified — precisely the blessing the drift
+        // guard exists to prevent. Refuse, before any DDL runs.
+        const staleStamp = stamps.find(
+          ({ key, signature }) =>
+            diagnoseContribution(
+              markers.get(key),
+              signature,
+              sharedTableExisted,
+            ) === "stale",
+        );
+        if (staleStamp !== undefined) {
+          throw new ContributionRebuildUnsupportedError(
+            "shared-storage-in-use",
+            {
+              graphId,
+              contribution: scope,
+              owner: staleStamp.contribution.owner,
+              logicalName: staleStamp.contribution.logicalName,
+              physicalName: staleStamp.contribution.tableName,
+              otherGraphIds: foreignGraphIds,
+            },
+          );
+        }
+      }
+
       for (const { contribution } of stamps) {
-        // `dropDdl` is present on every entry — the refusal above
-        // rejected the whole rebuild otherwise.
-        for (const statement of contribution.dropDdl ?? []) {
-          await tx.executeSchemaDdl(statement);
+        if (recreateStorage) {
+          // `dropDdl` is present on every entry — the refusal above
+          // rejected the whole rebuild otherwise.
+          for (const statement of contribution.dropDdl ?? []) {
+            await tx.executeSchemaDdl(statement);
+          }
         }
         for (const statement of contribution.createDdl) {
           await tx.executeSchemaDdl(statement);
         }
+      }
+
+      // Graph-scoped teardown when the storage was kept: the same
+      // `DELETE ... WHERE graph_id` `clearGraph` owns, so the rebuild
+      // removes exactly this graph's index content and nothing else. Only
+      // the table the fulltext rows are keyed by `graph_id` in can be
+      // scoped this way; a strategy that owns further tables keeps them
+      // (they are recreated, never dropped, on this path).
+      if (!recreateStorage) {
+        await tx.executeStatement(
+          asCompiledStatementSql(
+            buildFulltextGraphDelete(sharedTable, graphId),
+          ),
+        );
       }
 
       // Refill before stamping, inside the same transaction. The order is

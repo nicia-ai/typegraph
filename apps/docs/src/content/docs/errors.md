@@ -506,7 +506,8 @@ Operational Identity lifecycle failures use stable `details.code` values on
 | `IDENTITY_REQUIRES_ATOMIC_BACKEND` | The selected adapter cannot provide the interactive transaction required by identity writes. |
 | `IDENTITY_REQUIRES_STATEMENT_EXECUTION` | The backend cannot execute the raw statements Operational Identity issues internally. |
 | `IDENTITY_NOT_ENABLED` | `store.identity`, `tx.identity`, `StoreView.identity`, or an identity-expanded query option was reached on a graph without `identity: { ... }` — normally caught at compile time; this is the runtime guard for a widened or `any`-typed handle. |
-| `IDENTITY_STORAGE_MISSING` | An identity relation disappeared after enablement; restore ledgers or recreate and rebuild the derived closure before serving traffic. |
+| `IDENTITY_STORAGE_MISSING` | An identity relation disappeared after enablement, or exists without this graph's fill. Restore ledgers, or recreate and rebuild the derived closure, before serving traffic. `details.reason: "unfilled"` marks the second case: the separation relation is present but holds no row for this graph while the ledger holds a live `different` assertion across two distinct identity classes — reopen the Store (the open runs the fill) or run `rebuildIdentityClosure(store)`. A Store handle opened while the relation did not exist keeps failing until it is reopened, which is deliberate: the alternative is a confident "not separated" the moment another graph's upgrade creates the shared relation. |
+| `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL` | The backend cannot publish the derived separation relation's upgrade — the `CREATE` and the fill — as one commit, on a graph that owes rows. `details.missingPorts` names what is absent: `schemaWriteTransaction` / `identityTableDdl` on the fenced path, or `executeSchemaDdl` on the schema-commit path. Refused rather than degraded, because a relation created empty and filled afterwards reads as "nothing is separated" in between. Both bundled Drizzle backends implement all three when transactions are enabled, so this is a custom-backend path. |
 | `IDENTITY_ENABLEMENT_PENDING` | First enablement is pending because `autoMigrate` is disabled. |
 | `IDENTITY_PROFILE_MIGRATION_PENDING` | A `sameIdAcrossKinds` change (a breaking `fold`↔`ignore` flip, or disabling identity) has not been applied — either it is breaking, or `autoMigrate` is disabled. |
 | `IDENTITY_SCHEMA_MIGRATION_PENDING` | An identity-relevant ontology change is pending because `autoMigrate` is disabled. |
@@ -541,6 +542,66 @@ assertion's id structurally in `details.issues[].assertionId`, and
 | `IDENTITY_IMPORT_ENDED_BY_WITHOUT_END` | An assertion names an `endedBy` cause but carries no `validTo`; only an ended assertion has a cause. |
 | `IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT` | An assertion's `endedBy` names a node that is not one of its own endpoints; a deletion cascade only ends assertions that touch the deleted node. |
 | `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
+
+#### Merge provenance sidecar codes
+
+`persistProvenance: true` writes to a *sidecar* graph beside the merge target,
+and `openProvenanceStore` refuses any sidecar graph id it cannot prove it owns.
+Both refusals are `ConfigurationError`s with a stable `details.code`, and both
+carry `details.graphId` (the sidecar id) and `details.targetGraphId`:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `GRAPH_MERGE_PROVENANCE_ID_COLLISION` | The sidecar graph id is occupied by something this library did not write. `details.reason` names which state was found, and the suggestion is specific to it. |
+| `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED` | The backend exposes no transactional schema fence (`schemaWriteTransaction`), so the id's emptiness check and its ownership-marker write cannot commit as one unit. Not a collision — the id may well be free. An already-owned sidecar still opens on such a backend, so read-only use of an existing sidecar stays available. |
+
+The five `details.reason` values on `GRAPH_MERGE_PROVENANCE_ID_COLLISION`:
+
+| `details.reason` | The state that was found |
+| --- | --- |
+| `application-graph` | The id holds rows (in any per-graph table) or a schema that is not the sidecar's, so it belongs to an application. Rename the colliding graph or point the merge elsewhere. |
+| `empty-legacy-sidecar` | A pre-marker sidecar with no rows at all, which carries no evidence of authorship and is indistinguishable from an application graph of the same shape. |
+| `unupgradeable-legacy-sidecar` | A pre-marker sidecar whose rows do not verify as provenance this library wrote for *this* target, so it cannot be upgraded to an owned sidecar. |
+| `unowned-exact-schema-graph` | The current sidecar schema with no ownership marker. Because the marker is written *first*, this library cannot have produced this state; contents are not consulted, so an empty or provenance-shaped occupant is refused too. |
+| `corrupt-ownership-marker` | A `ProvenanceOwner` row that is not a valid live claim for this target — soft-deleted, schema-invalid, naming a different target, or stored under a different row id. It is never overwritten or resurrected, because it may be an application's row. |
+
+Under `persistProvenance: true` these arrive wrapped: the sidecar is opened and
+claimed **before** the merge commits, and either code refuses the merge as an
+`InvalidMergeOptionsError` (`details.option: "persistProvenance"`,
+`details.provenanceErrorCode` echoing the code above, the `ConfigurationError`
+as `cause`) with the target left unmodified. Only transient row-write failures
+after the commit degrade to a `warnings` entry.
+
+#### Interchange serialized-connection guard codes
+
+Two long-lived interchange streams cannot share one serialized database
+connection: an export snapshot holds a read transaction for the whole stream and
+a streaming import writes a transaction per chunk on that same connection, so
+the second one either nests a `BEGIN` or waits for a slot that never frees. The
+lease is **exclusive** — one stream of any kind per connection — so all four
+pairings refuse with a `ConfigurationError` rather than hanging:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` | An export snapshot holds the connection, detected through the shared serialized resource the two backend wrappers were marked with. |
+| `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT` | The same condition, reported by the object-identity detector: one SQLite backend is exporting into itself. Worth telling apart because the fix differs — pass a second backend rather than await whatever else is running. |
+| `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS` | A streaming import holds the connection, in either order of discovery. |
+
+The code names *what holds the connection*; `details.requested` and
+`details.heldBy` (each `"export-snapshot"` or `"import-stream"`) name which
+pairing was actually refused, so a same-kind refusal is never reported as
+something it is not. `details.graphId` names the graph the refused stream was
+for.
+
+`"import-stream"` is the kind of every long-lived import, not only
+`importGraphStream`: `importGraph` holds the lease for the whole call, and
+`trustedImportGraph` / `trustedImportGraphStream` hold it for the whole trusted
+session — so those APIs throw this `ConfigurationError` as well as their own
+`TrustedImportError`. Connections TypeGraph cannot observe are not refused: two
+clients dialed at one server, or two SQLite handles on one file, are genuinely
+independent. See
+[Scaling branches and interchange](/graph-merge#scaling-branches-and-interchange)
+for which drivers are recognized as serialized.
 
 #### Recorded-capture guard codes
 

@@ -497,7 +497,7 @@ describe("Operational Identity provisioning + enablement gating", () => {
     }
   });
 
-  it("reports no owed fill when it filled the derived relation itself", async () => {
+  it("owes the commit nothing when it filled the derived relation itself", async () => {
     const result = createLocalSqliteBackend();
     try {
       const [seeded] = await createStoreWithSchema(
@@ -523,19 +523,17 @@ describe("Operational Identity provisioning + enablement gating", () => {
         {
           graphId: GRAPH_ID,
           enablement: false,
+          registry: buildKindRegistry(enabledGraph),
           recomputeDerivedRelations: (target) =>
             rebuildSeparationFromLedger(result, target),
         },
       );
 
-      // The flag is the contract with the caller's LATE rebuild (the one that
-      // runs at the end of boot, after the schema commit and the
-      // materializers). Having filled the relation inside its own fence, this
-      // call owes the caller nothing — and reporting otherwise would run a
-      // second, unfenced rebuild over the state it just published. `false`
-      // exactly, not merely falsy: an absent flag reads as "no opinion" at the
-      // call site and would silently skip a fill that IS owed elsewhere.
-      expect(outcome.recomputeDerivedRelations).toBe(false);
+      // `provisionInCommit` is the DDL a schema commit must issue inside its
+      // own transaction. Having created AND filled the relation inside its own
+      // fence, this call owes that commit nothing — handing back DDL here would
+      // re-issue a CREATE for a relation that is already published and filled.
+      expect(outcome.provisionInCommit).toEqual([]);
       expect(readSeparationRows(result)).toEqual(expected);
     } finally {
       await result.backend.close();
@@ -543,7 +541,7 @@ describe("Operational Identity provisioning + enablement gating", () => {
   });
 
   for (const port of ["schemaWriteTransaction", "identityTableDdl"] as const) {
-    it(`provisions the derived relation without ${port}`, async () => {
+    it(`refuses the derived-relation upgrade without ${port}`, async () => {
       const result = createLocalSqliteBackend();
       try {
         const [seeded] = await createStoreWithSchema(
@@ -559,37 +557,83 @@ describe("Operational Identity provisioning + enablement gating", () => {
           { id: "bob" },
         );
         await seeded.identity.assertDifferent(first, second);
-        const expected = readSeparationRows(result);
-        expect(expected).toHaveLength(1);
+        expect(readSeparationRows(result)).toHaveLength(1);
         rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
 
         // The atomic upgrade needs BOTH ports: the fence to hold the CREATE and
         // the fill together, and the DDL-as-data to issue inside it without
-        // re-entering the backend's serialized statement queue. A custom
-        // backend implementing neither is a documented, supported shape — it
-        // takes the adjacent-but-not-atomic path and still ends up provisioned
-        // and filled. Assuming the ports are present instead calls `undefined`.
+        // re-entering the backend's serialized statement queue. A backend
+        // missing either cannot publish the two as one commit, and the
+        // degraded alternative it used to take — create, then fill — leaves the
+        // relation readable and EMPTY in between, where every pair reads as
+        // "not separated". That is refused, loudly and by capability name,
+        // rather than performed with a weaker guarantee than the invariant
+        // requires.
         const withheld = backendWithoutPort(result.backend, port);
 
-        const outcome = await ensureIdentitySchemaStorage(
-          withheld,
-          identitySchema(result),
-          {
+        await expect(
+          ensureIdentitySchemaStorage(withheld, identitySchema(result), {
             graphId: GRAPH_ID,
             enablement: false,
+            registry: buildKindRegistry(enabledGraph),
             recomputeDerivedRelations: (target) =>
               rebuildSeparationFromLedger(result, target),
-          },
+          }),
+        ).rejects.toThrow(
+          expect.objectContaining({
+            name: "ConfigurationError",
+            details: matchingObject({
+              code: "IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL",
+              graphId: GRAPH_ID,
+              missingPorts: [port],
+            }),
+          }),
         );
 
-        expect(outcome.recomputeDerivedRelations).toBe(false);
-        expect(separationTableExists(result)).toBe(true);
-        expect(readSeparationRows(result)).toEqual(expected);
+        // A refusal, not a partial attempt: the relation stays ABSENT, which is
+        // the one non-answering state. Every read of it raises
+        // IDENTITY_STORAGE_MISSING instead of quietly reporting no separations.
+        expect(separationTableExists(result)).toBe(false);
       } finally {
         await result.backend.close();
       }
     });
   }
+
+  it("provisions without the atomic ports when the graph owes no rows", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      // Same upgrade, same missing ports — but this graph has never asserted a
+      // `different`, so its separation projection is EMPTY. Creating the
+      // relation empty is not a compromise here, it is the correct content, so
+      // there is nothing for the fence to make atomic and the refusal above
+      // would be gratuitous.
+      await createStoreWithSchema(enabledGraph, result.backend);
+      rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
+
+      const withheld = backendWithoutPort(
+        backendWithoutPort(result.backend, "schemaWriteTransaction"),
+        "identityTableDdl",
+      );
+      const outcome = await ensureIdentitySchemaStorage(
+        withheld,
+        identitySchema(result),
+        {
+          graphId: GRAPH_ID,
+          enablement: false,
+          registry: buildKindRegistry(enabledGraph),
+          recomputeDerivedRelations: (target) =>
+            rebuildSeparationFromLedger(result, target),
+        },
+      );
+
+      expect(outcome.provisionInCommit).toEqual([]);
+      expect(separationTableExists(result)).toBe(true);
+      expect(readSeparationRows(result)).toEqual([]);
+    } finally {
+      await result.backend.close();
+    }
+  });
 
   it("gates a same-id folding flip behind an explicit migration that rebuilds the closure", async () => {
     const result = createLocalSqliteBackend();

@@ -1721,15 +1721,21 @@ export type GraphBackend = Readonly<{
    * Internal schema-lifecycle seam for features whose data preflight must
    * commit atomically with the schema CAS. The callback runs in the same
    * write transaction after the schema write fence is acquired and before the
-   * version write; it receives only the ordinary transaction backend, so
-   * callers cannot bypass the CAS.
+   * version write; it receives no schema-version write methods, so callers
+   * cannot bypass the CAS.
+   *
+   * The preflight target is a {@link SchemaCommitPreflightBackend}: the
+   * transaction backend plus the schema-write DDL primitive, because a
+   * transition may have to CREATE the storage its own preflight then fills —
+   * and creating it outside this transaction would publish it empty whenever
+   * the commit is refused.
    *
    * @internal
    */
   commitSchemaVersionWithPreflight?: (
     this: void,
     params: CommitSchemaVersionParams,
-    preflight: (target: TransactionBackend) => Promise<void>,
+    preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
   ) => Promise<SchemaVersionRow>;
   /**
    * Atomically flips the active schema pointer to an existing version,
@@ -2257,9 +2263,10 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly ContributionProbeEntry[]>;
 
   /**
-   * Destructively rebuild one search projection's storage: drop it,
-   * recreate it from the current `createDdl`, reconstruct its content,
-   * and stamp the durable marker at the current signature.
+   * Destructively rebuild one search projection for one graph: clear that
+   * graph's rows from the projection's storage, ensure the storage matches
+   * the current `createDdl`, reconstruct the graph's content, and stamp the
+   * durable marker at the current signature.
    *
    * This is the repair `repairContributions` deliberately refuses to
    * perform, and it must never be reachable from it. A `stale`
@@ -2267,9 +2274,17 @@ export type GraphBackend = Readonly<{
    * idempotent `CREATE ... IF NOT EXISTS` in the ordinary ensure path
    * no-ops; re-stamping the marker there would leave it blessing a table
    * whose shape is wrong, which is exactly what the drift guard exists
-   * to prevent. Only a drop makes the recreate meaningful, and dropping
-   * is a decision the caller states rather than one a flag named `force`
-   * implies.
+   * to prevent. Only a drop makes the recreate meaningful, and destroying
+   * content is a decision the caller states rather than one a flag named
+   * `force` implies.
+   *
+   * The fulltext projection's storage is one physical table shared by every
+   * graph in the database, while this call is fenced per graph.
+   * Implementations must therefore scope the teardown to `graphId` and may
+   * drop the storage only when doing so destroys no other graph's rows;
+   * when the recorded shape is stale and the drop that would repair it is
+   * not available, they refuse (`shared-storage-in-use`) rather than
+   * re-stamp a shape nothing verified.
    *
    * Runs the whole sequence inside one transaction under the same
    * per-graph fence as a schema commit, so an interrupted rebuild leaves
@@ -2695,6 +2710,25 @@ export type SchemaWriteTransactionBackend = TransactionBackend &
       this: void,
       slot: VectorSlot,
     ) => Promise<void>;
+  }>;
+
+/**
+ * The target a schema-commit preflight runs against: a transaction backend
+ * that MAY also carry the schema-write DDL primitive.
+ *
+ * Optional, deliberately. Both bundled backends pass the same
+ * {@link SchemaWriteTransactionBackend} their `schemaWriteTransaction` exposes,
+ * so DDL is available there; a custom backend may implement
+ * {@link GraphBackend.commitSchemaVersionWithPreflight} over a transaction that
+ * cannot run DDL. Declaring the port as present-or-absent lets a preflight that
+ * needs it refuse with a typed error naming the capability, instead of calling
+ * `undefined` — or, far worse, skipping the DDL and continuing.
+ *
+ * @internal
+ */
+export type SchemaCommitPreflightBackend = TransactionBackend &
+  Readonly<{
+    executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
   }>;
 
 /**

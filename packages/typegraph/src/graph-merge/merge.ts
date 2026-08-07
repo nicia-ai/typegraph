@@ -114,6 +114,7 @@ import {
 } from "./node-key";
 import type { NormalizedMergeOptions } from "./options";
 import { normalizeMergeOptions } from "./options";
+import type { ProvenanceGraph } from "./provenance-store";
 import {
   contributionKey,
   openProvenanceStore,
@@ -168,6 +169,7 @@ import {
   storeBackend,
   storeRuntime,
   transactionBackend,
+  TypeGraphError,
 } from "./typegraph-internal";
 import type {
   BaseAmbiguity,
@@ -2066,6 +2068,53 @@ function tryNormalize<G extends GraphDef>(
 }
 
 /**
+ * Opens (creating if needed) the target's provenance sidecar BEFORE the merge
+ * mutates anything, converting a refusal into a typed merge result.
+ *
+ * `openProvenanceStore` refuses two classes of state — an occupied sidecar graph
+ * id (`GRAPH_MERGE_PROVENANCE_ID_COLLISION`) and a backend that cannot fence the
+ * ownership claim (`GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED`) — and both are pure
+ * configuration verdicts: they are as true before the merge as after it, and
+ * nothing the merge does changes them. Reporting them post-commit as a warning
+ * would leave the caller with a committed graph and an option it stated,
+ * TypeGraph accepted, and then silently dropped. They are therefore refusals of
+ * `options.persistProvenance` itself, carried as `InvalidMergeOptionsError`
+ * (`category: "user"`, catchable exactly like every other refused merge option)
+ * with the originating `ConfigurationError` as its cause.
+ *
+ * Any OTHER failure is a backend failure, not a verdict about the option, and is
+ * wrapped as a plain `MergeError` — still pre-commit, because a merge whose
+ * provenance sidecar cannot be reached should not commit half a contract either.
+ */
+async function tryOpenProvenanceStore<G extends GraphDef>(
+  target: Store<G>,
+): Promise<Result<Store<ProvenanceGraph>, MergeError>> {
+  try {
+    return ok(await openProvenanceStore(target));
+  } catch (error) {
+    const code =
+      error instanceof TypeGraphError ?
+        (error.details as Readonly<{ code?: unknown }> | undefined)?.code
+      : undefined;
+    const details = {
+      option: "persistProvenance",
+      graphId: provenanceGraphId(target.graphId),
+      targetGraphId: target.graphId,
+      ...(typeof code === "string" ? { provenanceErrorCode: code } : {}),
+    };
+    const message = `options.persistProvenance was requested but the merge-provenance sidecar cannot be opened: ${describeCause(error)}`;
+    return err(
+      (
+        code === "GRAPH_MERGE_PROVENANCE_ID_COLLISION" ||
+          code === "GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED"
+      ) ?
+        new InvalidMergeOptionsError(message, { details, cause: error })
+      : new MergeError(message, { details, cause: error }),
+    );
+  }
+}
+
+/**
  * The shared resolve→commit→report pipeline behind both `merge()` (snapshot,
  * staged-vs-staged) and `mergeAgainstBase()` (synthetic new-vs-base). It stages the
  * union of branch diffs, generates candidates (with or without the base sources per
@@ -2155,6 +2204,25 @@ async function resolveMerge<G extends GraphDef>(
         ),
       );
     }
+  }
+
+  // (1c) provenance sidecar precondition. `persistProvenance` is an ACCEPTED
+  // option, so whether it can be honored must be settled before the merge
+  // mutates anything: which occupant holds the sidecar graph id, and whether the
+  // backend can fence the ownership claim, are configuration facts that are true
+  // now and unchanged by the merge. Opening the sidecar here refuses those states
+  // with their typed error — a merge that cannot persist provenance never commits
+  // — and leaves the post-commit write with only the failure modes that are
+  // genuinely transient. The handle is REUSED below rather than re-opened, so the
+  // write cannot re-litigate ownership and reach a configuration verdict there.
+  // The open is idempotent and claims only this module's own sidecar graph, so a
+  // merge that later fails leaves an owned, empty sidecar and no target change.
+  const provenanceStore =
+    options.persistProvenance ?
+      await tryOpenProvenanceStore(target)
+    : undefined;
+  if (provenanceStore !== undefined && isErr(provenanceStore)) {
+    return provenanceStore;
   }
 
   try {
@@ -2399,14 +2467,18 @@ async function resolveMerge<G extends GraphDef>(
 
     const warnings = [...plan.warnings];
     let provenancePersisted: MergeReport<G>["provenancePersisted"];
-    if (options.persistProvenance) {
-      // POST-COMMIT, best-effort: the graph is already committed, so a provenance
-      // write failure must NOT fail the merge — it surfaces as a warning. The
-      // sidecar node ids are deterministic, so this UPSERTS (idempotent re-runs).
+    if (provenanceStore !== undefined && !isErr(provenanceStore)) {
+      // POST-COMMIT, best-effort — and now ONLY for transient failures: the
+      // sidecar was opened and claimed before the merge committed, so every
+      // configuration verdict has already been taken. What is left here is a row
+      // write against a graph this module owns, whose failures are backend
+      // failures (a dropped connection, a lock timeout, a full disk). The graph
+      // is already committed, so those must NOT fail the merge — they surface as
+      // a warning. The sidecar node ids are deterministic, so this UPSERTS
+      // (idempotent re-runs).
       try {
-        const provenanceStore = await openProvenanceStore(target);
         const count = await persistProvenanceRecords(
-          provenanceStore,
+          provenanceStore.data,
           target.graphId,
           plan.provenanceRecords,
         );

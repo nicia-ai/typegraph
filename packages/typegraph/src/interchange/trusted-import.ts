@@ -1,3 +1,4 @@
+import { snapshotExportContention } from "../backend/transaction-resource";
 import type {
   InsertEdgeParams,
   InsertNodeParams,
@@ -11,6 +12,8 @@ import { TrustedImportError } from "../errors";
 import { storeBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import { isCanonicalIsoDate, isInvertedValidityWindow } from "../utils/date";
+import { serializedStreamRefusal, withImportStreamLease } from "./import";
+import { exportStreamBackend } from "./stream-source";
 import type {
   GraphData,
   GraphInterchangeChunk,
@@ -368,6 +371,17 @@ async function consumeTrustedChunks<G extends GraphDef>(
  * names, but it does not validate properties, references, cardinality, or
  * conflicts. The caller must guarantee those invariants. Use
  * {@link importGraphStream} for untrusted data.
+ *
+ * Trusted of the DATA, not of the connection: this holds ONE write transaction
+ * open for the entire stream, which makes it a long-lived import holder exactly
+ * like {@link importGraphStream}, and it is guarded the same way — the source
+ * stream's own backend is checked against the target before the first chunk, and
+ * the target connection's exclusive stream lease is held for the whole import.
+ * `trustedImportGraphStream(target, exportGraphStream(source))` over one
+ * serialized connection is therefore refused with the shared typed
+ * {@link ConfigurationError} (codes and `details.heldBy` / `details.requested`
+ * as documented on `importGraphStream`) rather than reaching the driver as a
+ * nested BEGIN.
  */
 export async function trustedImportGraphStream<G extends GraphDef>(
   store: Store<G>,
@@ -384,6 +398,24 @@ export async function trustedImportGraphStream<G extends GraphDef>(
       { dialect: backend.dialect },
     );
   }
+  // The same pre-flight `importGraphStream` runs, through the same owner of
+  // "would this export hold the connection that write needs": a synchronous
+  // iterable was materialized by its producer and holds nothing, so only an
+  // async stream can name a source backend.
+  const sourceBackend =
+    Symbol.asyncIterator in chunks ? exportStreamBackend(chunks) : undefined;
+  const contention =
+    sourceBackend === undefined ? undefined : (
+      snapshotExportContention(sourceBackend, backend)
+    );
+  if (contention !== undefined) {
+    throw serializedStreamRefusal({
+      graphId: store.graphId,
+      requested: "import-stream",
+      heldBy: "export-snapshot",
+      detector: contention,
+    });
+  }
   const schemaVersion = store.introspect().schemaVersion;
   const options: TrustedImportOptions | undefined =
     schemaVersion === undefined ? undefined : (
@@ -394,9 +426,11 @@ export async function trustedImportGraphStream<G extends GraphDef>(
         },
       }
     );
-  return trustedImport(
-    (session) => consumeTrustedChunks(store, session, chunks),
-    options,
+  return withImportStreamLease(store, () =>
+    trustedImport(
+      (session) => consumeTrustedChunks(store, session, chunks),
+      options,
+    ),
   );
 }
 

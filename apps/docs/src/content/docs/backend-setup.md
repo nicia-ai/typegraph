@@ -1124,19 +1124,27 @@ reopen it through a managed factory before resuming version-fenced writes.
 - **`store.probeContributions()` is the read-only readiness check;
   `store.rebuildContribution()` is the destructive last resort.**
   The two bracket `repairContributions()` into one escalation ladder:
-  probe (writes nothing) → repair (non-destructive) → rebuild (drops and
-  recreates storage). The probe reports one `ready` / `degraded` entry per
+  probe (writes nothing) → repair (non-destructive) → rebuild
+  (destructive, but scoped to the calling graph). The probe reports one
+  `ready` / `degraded` entry per
   search projection and is safe on a read path, on a replica, and under
   the least-privilege role — it shares the detection logic of the other
   two rather than reimplementing it, so it cannot disagree with the gate
   the hot path actually consults. The rebuild is the only repair for a
   `stale` contribution, whose table exists at a shape the current
-  `createDdl` no longer produces; it runs drop → recreate → refill →
-  stamp inside one transaction under the schema-write fence, and refuses
+  `createDdl` no longer produces; it deletes and refills only the calling
+  graph's rows in the shared fulltext table, escalating to drop → recreate
+  when that table holds no other graph's rows (under a database-scoped DDL
+  advisory lock, since that DDL is database-global), and runs the whole
+  sequence inside one transaction under the schema-write fence. It refuses
   with `ContributionRebuildUnsupportedError` for vector storage, whose
-  embeddings exist only in the table it would drop. Run rebuilds through
+  embeddings exist only in the table it would drop
+  (`reason: "vector-source-unavailable"`), and for a `stale` shape whose
+  storage still holds other graphs' rows
+  (`reason: "shared-storage-in-use"`, naming them in
+  `details.otherGraphIds`). Run rebuilds through
   the DDL-capable migration role, in a maintenance window: the
-  transaction is held for the whole refill, and on PostgreSQL the drop's
+  transaction is held for the whole refill, and on PostgreSQL a drop's
   `ACCESS EXCLUSIVE` lock blocks both searches and writes to any kind with
   `searchable()` fields until it commits. Reach it from a `createStore()`
   Store — the managed factory's boot step refuses to open while a

@@ -807,6 +807,16 @@ export function createPostgresBackend(
       // Advisory lock: hashtext($graphId) is collision-tolerant for the
       // size of an active graph set; collisions just serialize unrelated
       // graphs which is harmless. Held until the transaction commits.
+      //
+      // The ONE-ARGUMENT (bigint) form is deliberate and load-bearing: it
+      // occupies a different lock space than the two-argument (int4, int4)
+      // form every namespaced TypeGraph lock uses (`typegraph:identity`,
+      // `typegraph:identity-ddl`, the recorded-write clock). PostgreSQL stores
+      // the two forms with different locktag field4 values, so a bigint key can
+      // never collide with an (int4, int4) key however the hashes land — the
+      // schema fence is therefore independent of every lock taken INSIDE it.
+      // Normalizing this to the two-argument form would merge the spaces and
+      // put that independence at the mercy of `hashtext` collisions.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
       // Managed entity writers lock this row FOR SHARE. Locking it FOR UPDATE
       // before any emptiness probe makes a writer-first commit wait; a
@@ -1333,7 +1343,10 @@ export function createPostgresBackend(
 
     async commitSchemaVersionWithPreflight(
       params: CommitSchemaVersionParams,
-      preflight: (target: TransactionBackend) => Promise<void>,
+      // The schema-write target, not the narrowed transaction backend: a
+      // preflight may have to CREATE the storage it then fills, and that DDL
+      // belongs in this transaction rather than before it.
+      preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
     ): Promise<SchemaVersionRow> {
       return runSchemaWriteTransaction(params.graphId, async (target) => {
         await preflight(target);

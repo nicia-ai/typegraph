@@ -103,7 +103,9 @@ export async function validateCurrentRelation(
   // the write it validates, before the next validation runs.
   const aKey = currentClassKey(aClass);
   const bKey = currentClassKey(bClass);
-  if (await isSeparated(target, ctx.schema, ctx.graphId, aKey, bKey)) {
+  if (
+    await isSeparated(target, ctx.schema, ctx.graphId, aKey, bKey, ctx.registry)
+  ) {
     // The relation records THAT the classes are separated, not which assertion
     // separates them, and the typed error names one — so the ledger answers
     // that single question, on the refusal path only.

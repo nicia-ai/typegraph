@@ -185,6 +185,33 @@ const sameHandleTargetGraph = defineGraph({
   },
 });
 
+/**
+ * A SECOND import target on that one connection. Two streaming imports at once
+ * is a pairing of its own, and giving each its own graph id keeps the refusal's
+ * `graphId` unambiguous about which import was turned away.
+ */
+const secondSameHandleTargetGraph = defineGraph({
+  id: "interchange_same_handle_target_2",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+    },
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+});
+
 const DelimitedPerson = defineNode("Person:x", {
   schema: z.object({ name: z.string() }),
 });
@@ -288,6 +315,43 @@ function failNodeReadsAfter(
     );
   };
   vi.spyOn(backend, "transaction").mockImplementation(failing);
+}
+
+/**
+ * Parks the FIRST transaction this backend opens: `paused` opens once the BEGIN
+ * has landed and the callback is running, and the transaction stays open until
+ * `resume` does. That is the moment a second long-lived stream on the same
+ * connection must be refused instead of nesting its own BEGIN inside this one.
+ */
+function parkInsideFirstTransaction(
+  backend: GraphBackend,
+  paused: Gate,
+  resume: Gate,
+): void {
+  const runTransaction = backend.transaction;
+  let parked = false;
+  const parking: GraphBackend["transaction"] = (run, options) =>
+    runTransaction(async (target) => {
+      if (!parked) {
+        parked = true;
+        paused.open();
+        await resume.opened;
+      }
+      return run(target);
+    }, options);
+  vi.spyOn(backend, "transaction").mockImplementation(parking);
+}
+
+/** Pulls an export stream to completion through the iterator already opened on it. */
+async function drainIterator(
+  iterator: AsyncIterator<GraphInterchangeChunk>,
+): Promise<GraphInterchangeChunk[]> {
+  const drained: GraphInterchangeChunk[] = [];
+  for (;;) {
+    const next = await iterator.next();
+    if (next.done === true) return drained;
+    drained.push(next.value);
+  }
 }
 
 /**
@@ -2421,6 +2485,260 @@ describe("Serialized-connection snapshot streaming guards", () => {
     }
     expect(settled.success).toBe(true);
     expect(await target.nodes.Person.count()).toBe(1);
+  });
+
+  it("refuses a second streaming import into one serialized connection", async () => {
+    // Both sides used to check only the OPPOSITE registry: two IMPORTS each
+    // found no export snapshot, both claimed the connection, and the second
+    // one's chunk transaction opened inside the first one's — SQLITE_ERROR
+    // "cannot start a transaction within a transaction", after chunks had
+    // already committed. The first import is parked INSIDE its chunk
+    // transaction here, so the connection really is mid-BEGIN when the second
+    // one asks for it.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const firstTargetBackend = createSqliteBackend(drizzle(database));
+    const secondTargetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const firstTarget = createStore(sameHandleTargetGraph, firstTargetBackend);
+    const secondTarget = createStore(
+      secondSameHandleTargetGraph,
+      secondTargetBackend,
+    );
+    await source.nodes.Person.create({ name: "Alice" }, { id: "two-imports" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    const paused = createGate();
+    const resume = createGate();
+    parkInsideFirstTransaction(firstTargetBackend, paused, resume);
+
+    const firstImport = importGraphStream(
+      firstTarget,
+      chunkStream(chunks),
+      importOptions({ onConflict: "error" }),
+    );
+    await paused.opened;
+
+    await expect(
+      importGraphStream(
+        secondTarget,
+        chunkStream(chunks),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+        graphId: secondSameHandleTargetGraph.id,
+        requested: "import-stream",
+        heldBy: "import-stream",
+      },
+    });
+
+    resume.open();
+    const settled = await raceTimeout(firstImport, GUARD_TIMEOUT_MS);
+    if (settled === TIMEOUT_SENTINEL) {
+      throw new Error(
+        `The first import did not finish within ${GUARD_TIMEOUT_MS}ms: the refused import took something it was supposed to be denied.`,
+      );
+    }
+    expect(settled.success).toBe(true);
+    expect(await firstTarget.nodes.Person.count()).toBe(1);
+    expect(await secondTarget.nodes.Person.count()).toBe(0);
+
+    // The lease is scoped to a RUNNING import: once the first one is done the
+    // second target imports the same chunks without complaint.
+    const retried = await importGraphStream(
+      secondTarget,
+      chunkStream(chunks),
+      importOptions({ onConflict: "error" }),
+    );
+    expect(retried.success).toBe(true);
+  });
+
+  it("refuses a second snapshot export from one serialized connection", async () => {
+    // The export side had the mirror hole: it consulted only the import lease,
+    // so a second export opened its snapshot transaction inside the first one's
+    // BEGIN on the shared connection. The first export is held open at its
+    // header here, which is precisely when its read transaction is live.
+    const database = openMigratedDatabase();
+    const firstBackend = createSqliteBackend(drizzle(database));
+    const secondBackend = createSqliteBackend(drizzle(database));
+    const first = createStore(testGraph, firstBackend);
+    const second = createStore(sameHandleTargetGraph, secondBackend);
+    await first.nodes.Person.create({ name: "Alice" }, { id: "two-exports" });
+
+    const stream = exportGraphStream(first)[Symbol.asyncIterator]();
+    const header = await stream.next();
+    expect(header.done).toBe(false);
+
+    await expect(exportGraph(second)).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+        graphId: sameHandleTargetGraph.id,
+        requested: "export-snapshot",
+        heldBy: "export-snapshot",
+      },
+    });
+
+    // The first export still owns the connection and runs to completion.
+    const drained = await raceTimeout(drainIterator(stream), GUARD_TIMEOUT_MS);
+    if (drained === TIMEOUT_SENTINEL) {
+      throw new Error(
+        `The first export did not finish within ${GUARD_TIMEOUT_MS}ms: the refused export took the connection it was supposed to be denied.`,
+      );
+    }
+    expect(drained.some((chunk) => chunk.type === "nodes")).toBe(true);
+
+    // ...and once it releases, the next export on that connection succeeds.
+    const exported = await exportGraph(first);
+    expect(exported.nodes).toHaveLength(1);
+  });
+
+  it("releases the export's lease when opening the transaction throws synchronously", async () => {
+    // A driver can refuse a transaction BEFORE returning a promise (a closed
+    // handle, a pool that will not check a connection out). The release is
+    // installed on the promise `transaction()` returns, so a synchronous throw
+    // bypassed it and stranded the lease for the life of the process — every
+    // later stream on that connection refused on behalf of an export that never
+    // ran a single statement.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "sync-throw" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    const driverFailure = new Error("transaction refused before it began");
+    vi.spyOn(sourceBackend, "transaction").mockImplementation(() => {
+      throw driverFailure;
+    });
+
+    // The original error is what the consumer sees: the guard rethrows rather
+    // than converting a driver failure into a refusal.
+    await expect(collectChunks(exportGraphStream(source))).rejects.toBe(
+      driverFailure,
+    );
+
+    // And the connection is free — a leaked lease would refuse this import
+    // with INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT instead.
+    const imported = await importGraphStream(
+      target,
+      chunkStream(chunks),
+      importOptions({ onConflict: "error" }),
+    );
+    expect(imported.success).toBe(true);
+    expect(await target.nodes.Person.count()).toBe(1);
+  });
+
+  it("refuses a hand-rolled export-stream-into-importGraph loop", async () => {
+    // The loop a caller writes when they do not reach for importGraphStream.
+    // `importGraph` carried no guard at all, so the first chunk's BEGIN
+    // IMMEDIATE landed inside the export's still-open snapshot on the one
+    // handle — the documented refusal was simply not true of this surface.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "hand-rolled" });
+
+    const handRolled = async (): Promise<void> => {
+      for await (const chunk of exportGraphStream(source)) {
+        if (chunk.type !== "nodes") continue;
+        await importGraph(
+          target,
+          {
+            formatVersion: "2.0",
+            exportedAt: CANONICAL_TIMESTAMP,
+            source: { type: "external" },
+            nodes: chunk.nodes,
+            edges: [],
+          },
+          importOptions({ onConflict: "error" }),
+        );
+      }
+    };
+
+    await expect(handRolled()).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+        graphId: sameHandleTargetGraph.id,
+        requested: "import-stream",
+        heldBy: "export-snapshot",
+      },
+    });
+    expect(await target.nodes.Person.count()).toBe(0);
+
+    // The refusal is scoped to the open snapshot: the same import off a
+    // collected stream succeeds.
+    const chunks = await collectChunks(exportGraphStream(source));
+    const imported = await importGraphStream(
+      target,
+      chunkStream(chunks),
+      importOptions({ onConflict: "error" }),
+    );
+    expect(imported.success).toBe(true);
+  });
+
+  it("refuses a second import on a non-transactional connection: a documented, deliberate false refusal", async () => {
+    // RESIDUAL R6, pinned so it stays a decision rather than becoming an
+    // accident. With `transactionMode: "none"` neither import frames anything,
+    // so these two would in fact interleave harmlessly on the one handle — and
+    // the second is refused anyway, because the import side claims the
+    // connection whatever its backend reports. Gating that claim on
+    // `capabilities.transactions` would buy this case back at the price of
+    // letting a REAL export snapshot open mid-import on a mixed-profile
+    // connection, which is the far likelier pairing. See the residual note in
+    // `backend/transaction-resource.ts`.
+    const database = openMigratedDatabase();
+    const executionProfile = { transactionMode: "none", isSync: true } as const;
+    const source = createStore(
+      testGraph,
+      createSqliteBackend(drizzle(database), { executionProfile }),
+    );
+    const firstTargetBackend = createSqliteBackend(drizzle(database), {
+      executionProfile,
+    });
+    const secondTargetBackend = createSqliteBackend(drizzle(database), {
+      executionProfile,
+    });
+    expect(firstTargetBackend.capabilities.transactions).toBe(false);
+    const firstTarget = createStore(sameHandleTargetGraph, firstTargetBackend);
+    const secondTarget = createStore(
+      secondSameHandleTargetGraph,
+      secondTargetBackend,
+    );
+    await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-twice" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    const paused = createGate();
+    const resume = createGate();
+
+    const firstImport = importGraphStream(
+      firstTarget,
+      pausingChunkStream(chunks, 1, paused, resume),
+      importOptions({ onConflict: "error" }),
+    );
+    await paused.opened;
+
+    await expect(
+      importGraphStream(
+        secondTarget,
+        chunkStream(chunks),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+        heldBy: "import-stream",
+      },
+    });
+
+    resume.open();
+    const settled = await firstImport;
+    expect(settled.success).toBe(true);
   });
 
   it("allows an export while a non-transactional import holds the connection", async () => {

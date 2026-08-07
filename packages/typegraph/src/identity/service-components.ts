@@ -144,6 +144,24 @@ export function buildComponents(
   return unionFind.components();
 }
 
+/**
+ * Which node kinds an identity derivation is allowed to see: exactly the kinds
+ * the graph's registry declares.
+ *
+ * The single owner of that filter, next to the {@link loadSnapshot} scoping it
+ * feeds. Every derivation applies it, so an assertion naming a kind this schema
+ * does not register is part of neither the closure nor the separation
+ * projection. Anything that PREDICTS what a derivation will produce —
+ * `separationRebuildRequired`, which decides whether a graph still owes
+ * separation rows — has to apply the same filter, or it predicts rows the fill
+ * will never write and asks for a rebuild that cannot converge.
+ */
+export function identityActiveKinds(
+  registry: KindRegistry,
+): ReadonlySet<string> {
+  return new Set(registry.nodeKinds.keys());
+}
+
 export async function loadSnapshot(
   target: Backend,
   schema: SqlSchema,

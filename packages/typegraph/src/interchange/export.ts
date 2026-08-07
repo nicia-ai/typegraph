@@ -3,10 +3,7 @@
  *
  * Exports nodes and edges from a store to the interchange format.
  */
-import {
-  beginSerializedSnapshotExport,
-  hasActiveSerializedImport,
-} from "../backend/transaction-resource";
+import { acquireSerializedStreamLease } from "../backend/transaction-resource";
 import {
   type GraphBackend,
   rowPropsToObject,
@@ -17,11 +14,11 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
-import { ConfigurationError } from "../errors";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
+import { serializedStreamRefusal } from "./import";
 import { markExportStreamBackend } from "./stream-source";
 import {
   type ExportOptionsInput,
@@ -134,29 +131,45 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
     );
   };
   // On a serialized backend the snapshot transaction below holds the single
-  // connection for the whole stream. Publish that fact for the duration so a
-  // concurrent import into the same connection is refused rather than left to
-  // wait for a writer slot that cannot free up — this is what the stream's
-  // consumer identity cannot answer once a caller wraps the iterable. And if a
-  // streaming import already holds that connection, THIS side is the one
-  // refused: it is the stream that started second.
-  // Registration is deliberately inside the generator body: it must begin when
-  // the transaction opens (first pull), not when the iterable is constructed.
+  // connection for the whole stream. Claim that connection's one stream lease
+  // for the duration so a concurrent import — or a SECOND export, whose
+  // snapshot transaction would nest inside this one just as fatally — is
+  // refused rather than left to wait for a slot that cannot free up. This is
+  // what the stream's consumer identity cannot answer once a caller wraps the
+  // iterable. And if another stream already holds that connection, THIS side is
+  // the one refused: it is the stream that started second.
+  // The claim is deliberately inside the generator body: it must begin when the
+  // transaction opens (first pull), not when the iterable is constructed.
   const releaseSnapshotExport =
     backend.capabilities.transactions ?
-      beginSnapshotExportOrRefuse(store.graphId, backend)
+      claimSnapshotExportLeaseOrRefuse(store.graphId, backend)
     : () => {
-        // No snapshot transaction is opened here, so none was registered:
+        // No snapshot transaction is opened here, so nothing was claimed:
         // a non-transactional export holds nothing against a concurrent
-        // import.
+        // stream.
       };
-  const producer = (
-    backend.capabilities.transactions ?
-      backend.transaction((target) => produce(target), {
-        isolationLevel: "repeatable_read",
-        accessMode: "read_only",
-      })
-    : produce(backend)).then(
+  // `backend.transaction(...)` is a driver call, and a driver can reject
+  // SYNCHRONOUSLY — a closed handle, a pool that refuses the checkout — before
+  // any promise exists. The release below is installed on the promise it
+  // returns, so a synchronous throw would skip it and strand the lease for the
+  // life of the process, refusing every later stream on that connection on
+  // behalf of one that never started. Releasing here (idempotently) and
+  // rethrowing keeps "the lease lives exactly as long as the transaction" true
+  // on that path too.
+  const beginProducer = (): Promise<void> => {
+    try {
+      return backend.capabilities.transactions ?
+          backend.transaction((target) => produce(target), {
+            isolationLevel: "repeatable_read",
+            accessMode: "read_only",
+          })
+        : produce(backend);
+    } catch (error) {
+      releaseSnapshotExport();
+      throw error;
+    }
+  };
+  const producer = beginProducer().then(
     () => {
       releaseSnapshotExport();
       channel.finish();
@@ -181,43 +194,34 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
 }
 
 /**
- * The refusal code for "a streaming import holds the connection this snapshot
- * export needs". The import-side counterpart lives in `./import.ts`; the two
- * codes name the two orders in which the same pairing can be attempted.
- */
-const SERIALIZED_IMPORT_IN_PROGRESS_CODE =
-  "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS";
-
-/**
  * Claims the serialized connection for this export's snapshot transaction, or
- * refuses because a streaming import is already writing through it.
+ * refuses because another long-lived stream — a streaming import, or another
+ * snapshot export — is already using it.
  *
- * ONE SYNCHRONOUS SECTION, by construction: the check and the registration sit
- * in the same function with no `await` between them, and the caller runs it
- * immediately before opening the transaction. On a single-threaded event loop
- * that makes "no import held this connection when the snapshot opened" true for
- * the whole stream — an import cannot slip its own claim in between, and the two
- * sides cannot both conclude the connection was free.
+ * The check and the claim are one synchronous section inside
+ * {@link acquireSerializedStreamLease}, which offers no way to ask without
+ * claiming. On a single-threaded event loop that makes "no other stream held
+ * this connection when the snapshot opened" true for the whole stream: nobody
+ * can slip a claim in between, and two streams cannot both conclude the
+ * connection was free.
  *
  * Only called when the backend is transactional: a `transactionMode: "none"`
- * export holds nothing open, interleaves harmlessly with an import's writes, and
- * must not be refused.
+ * export holds nothing open, interleaves harmlessly, and must not be refused —
+ * nor refuse anyone.
  */
-function beginSnapshotExportOrRefuse(
+function claimSnapshotExportLeaseOrRefuse(
   graphId: string,
   backend: GraphBackend,
 ): () => void {
-  if (hasActiveSerializedImport(backend)) {
-    throw new ConfigurationError(
-      "A snapshot export cannot open on a serialized database connection while a streaming import is writing through it: the export's read transaction would hold the one connection the import's next chunk has to write on.",
-      { code: SERIALIZED_IMPORT_IN_PROGRESS_CODE, graphId },
-      {
-        suggestion:
-          "Await the import before exporting, or export from an independent backend.",
-      },
-    );
+  const lease = acquireSerializedStreamLease(backend, "export-snapshot");
+  if (!lease.acquired) {
+    throw serializedStreamRefusal({
+      graphId,
+      requested: "export-snapshot",
+      heldBy: lease.heldBy,
+    });
   }
-  return beginSerializedSnapshotExport(backend);
+  return lease.release;
 }
 
 async function produceExportChunks<G extends GraphDef>(

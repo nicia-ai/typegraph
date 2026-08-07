@@ -1518,6 +1518,37 @@ export function createSqliteBackend(
   }
 
   /**
+   * Rolls the manually framed transaction back on the failure path WITHOUT ever
+   * throwing: the caller rethrows the original error immediately after.
+   *
+   * SQLite rolls a transaction back by itself on some errors (SQLITE_FULL,
+   * SQLITE_IOERR, SQLITE_NOMEM), so by the time this runs the frame can already
+   * be gone and the ROLLBACK fails with "cannot rollback - no transaction is
+   * active". A bare `await ROLLBACK; throw error` replaces the caller's
+   * actionable failure ("disk image is malformed") with that secondary one and
+   * never reaches its own rethrow — the masking that `closeAfterFailure` and the
+   * index-materialization claim release exist to prevent, applied here too.
+   *
+   * A rollback failure that is NOT an already-closed frame leaves the frame open
+   * on this connection; nothing here can close it (the statement that would is
+   * the one that just failed), so it is reported and the next BEGIN on the
+   * connection fails loudly rather than silently joining it.
+   */
+  async function rollbackFrameQuietly(): Promise<void> {
+    try {
+      await runFrameStatement(sql`ROLLBACK`);
+    } catch (rollbackError) {
+      console.warn(
+        "typegraph: ROLLBACK failed while unwinding a failed SQLite " +
+          "transaction; the original failure is the one thrown. SQLite " +
+          "auto-rolls-back on SQLITE_FULL / SQLITE_IOERR / SQLITE_NOMEM, in " +
+          "which case the frame was already closed and nothing is leaked.",
+        rollbackError,
+      );
+    }
+  }
+
+  /**
    * Runs `fn` inside a SQLite write transaction (BEGIN IMMEDIATE) so that
    * the read-then-write inside `commitSchemaVersion` / `setActiveVersion`
    * is serialized against concurrent writers — a deferred BEGIN would let
@@ -1560,7 +1591,7 @@ export function createSqliteBackend(
           await runFrameStatement(sql`COMMIT`);
           return result;
         } catch (error) {
-          await runFrameStatement(sql`ROLLBACK`);
+          await rollbackFrameQuietly();
           throw error;
         }
       });
@@ -2033,7 +2064,10 @@ export function createSqliteBackend(
 
     async commitSchemaVersionWithPreflight(
       params: CommitSchemaVersionParams,
-      preflight: (target: TransactionBackend) => Promise<void>,
+      // The schema-write target, not the narrowed transaction backend: a
+      // preflight may have to CREATE the storage it then fills, and that DDL
+      // belongs in this transaction rather than before it.
+      preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
     ): Promise<SchemaVersionRow> {
       return runSchemaWriteTransaction(async (target) => {
         await preflight(target);
@@ -2128,7 +2162,7 @@ export function createSqliteBackend(
             await runFrameStatement(sql`COMMIT`);
             return result;
           } catch (error) {
-            await runFrameStatement(sql`ROLLBACK`);
+            await rollbackFrameQuietly();
             throw error;
           }
         });

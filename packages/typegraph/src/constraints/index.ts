@@ -133,6 +133,14 @@ type PredicateContext = Readonly<
  * is also the shape `serializeWherePredicate` (src/schema/serializer.ts) has
  * always captured constraints with, so a persisted `where` and an evaluated
  * `where` now see the same builder.
+ *
+ * The guard against a TYPO'D field name is the type system, not this Proxy:
+ * `UniqueConstraintPredicateBuilder` declares exactly the schema's fields, so a
+ * typed caller cannot name an undeclared one. An UNTYPED caller naming an
+ * undeclared field gets absent-⇒-null semantics (the predicate quietly never
+ * applies) rather than a runtime refusal — this function has no schema shape
+ * to validate against. Runtime refusal parity with `validateMatchOnFields`
+ * would need the shape threaded to every checkWherePredicate call site.
  */
 function buildPredicateContext(): PredicateContext {
   return new Proxy<PredicateContext>(

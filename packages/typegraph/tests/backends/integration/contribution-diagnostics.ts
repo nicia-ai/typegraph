@@ -29,10 +29,14 @@
  * rather than building a fresh database per test.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
   ContributionRebuildUnsupportedError,
+  defineGraph,
+  defineNode,
   resolveGraphVectorSlots,
+  searchable,
 } from "../../../src";
 import type { StrategyTableContribution } from "../../../src/backend/table-contribution";
 import type {
@@ -52,6 +56,26 @@ import { type IntegrationTestContext } from "./test-context";
 
 const ARTICLE_KIND = "Article";
 const ARTICLE_EMBEDDING_FIELD = "embedding";
+
+/**
+ * A second graph living in the SAME database as the suite's graph.
+ *
+ * The fulltext table is one physical table whose rows are keyed by
+ * `graph_id`, so this is the neighbor whose searchable content a per-graph
+ * rebuild must never be able to destroy. Its own kind, because the point is
+ * that the two graphs share storage, not declarations.
+ */
+const NEIGHBOR_GRAPH_ID = "contribution-neighbor-graph";
+const NeighborNote = defineNode("Note", {
+  schema: z.object({ body: searchable({ language: "english" }) }),
+});
+const neighborGraph = defineGraph({
+  id: NEIGHBOR_GRAPH_ID,
+  nodes: { Note: { type: NeighborNote } },
+  edges: {},
+});
+/** Term only the neighbor graph's content matches. */
+const NEIGHBOR_QUERY = "unshareable";
 /** A signature no `createDdl` can ever hash to. */
 const IMPOSSIBLE_SIGNATURE = "0000000000000000";
 
@@ -1136,6 +1160,135 @@ export function registerContributionDiagnosticIntegrationTests(
         // Every backend in this lane has both a transactional schema fence
         // and a fulltext strategy declaring teardown DDL.
         expect(capabilities?.rebuild).toBe(true);
+      });
+
+      /**
+       * The rebuild is fenced per GRAPH, but the storage it rebuilds is one
+       * table shared by every graph in the database. These are the cases
+       * where those two scopes disagree — the ones a single-graph test can
+       * never see, because with one graph a `DROP TABLE` and a
+       * `DELETE WHERE graph_id` are indistinguishable.
+       */
+      describe("shared storage", () => {
+        let neighbor:
+          | Awaited<
+              ReturnType<typeof context.createStore<typeof neighborGraph>>
+            >
+          | undefined;
+
+        /**
+         * A second graph on this database with one searchable node, so the
+         * shared fulltext table holds rows the suite's graph does not own.
+         */
+        async function createNeighborWithContent(): Promise<
+          NonNullable<typeof neighbor>
+        > {
+          const store = await context.createStore(neighborGraph);
+          neighbor = store;
+          await store.nodes.Note.create({
+            body: `Neighbor content that is ${NEIGHBOR_QUERY} by another graph.`,
+          });
+          return store;
+        }
+
+        async function neighborHits(
+          store: NonNullable<typeof neighbor>,
+        ): Promise<readonly string[]> {
+          const hits = await store.search.fulltext("Note", {
+            query: NEIGHBOR_QUERY,
+            limit: 10,
+          });
+          return hits.map((hit) => hit.node.id);
+        }
+
+        // The neighbor's rows live in the database-global fulltext table,
+        // so leaving them behind would change what every later test in a
+        // shared-engine lane sees.
+        afterEach(async () => {
+          const store = neighbor;
+          neighbor = undefined;
+          if (store === undefined) return;
+          await store.clear();
+        });
+
+        it("rebuilds this graph's content without touching another graph's", async (ctx) => {
+          if (!requireRebuild(context, ctx)) return;
+          const store = context.getStore();
+          const neighborStore = await createNeighborWithContent();
+          const article = await store.nodes.Article.create({
+            title: "Neighborly rebuild",
+            body: "Rebuilt while another graph shares the table.",
+            category: "health",
+            published: true,
+          });
+
+          const before = await neighborHits(neighborStore);
+          expect(before.length).toBe(1);
+
+          const result = await store.rebuildContribution("fulltext");
+          expect(result.repopulated).toBeGreaterThanOrEqual(1);
+
+          // The whole defect in one assertion: a rebuild fenced on this
+          // graph must not be able to empty another graph's index. A
+          // `DROP TABLE` here leaves the neighbor with zero hits and a
+          // marker that still reports `ready`.
+          expect(await neighborHits(neighborStore)).toEqual(before);
+          expect(
+            probeEntry(await neighborStore.probeContributions(), "fulltext"),
+          ).toEqual({ contribution: "fulltext", state: "ready" });
+
+          // And this graph got the rebuild it asked for.
+          const hits = await store.search.fulltext("Article", {
+            query: "Neighborly",
+            limit: 10,
+          });
+          expect(hits.map((hit) => hit.node.id)).toContain(article.id);
+          expect(
+            probeEntry(await store.probeContributions(), "fulltext"),
+          ).toEqual({ contribution: "fulltext", state: "ready" });
+        });
+
+        it("refuses a stale rebuild it could only finish by destroying another graph's content", async (ctx) => {
+          if (!requireRebuild(context, ctx)) return;
+          const store = context.getStore();
+          const contribution = fulltextContribution();
+          const neighborStore = await createNeighborWithContent();
+          await store.nodes.Article.create({
+            title: "Stale beside a neighbor",
+            body: "The repair for this state is a drop that is not available.",
+            category: "health",
+            published: true,
+          });
+          const rowsBefore = await countFulltextRows(store);
+          const neighborBefore = await neighborHits(neighborStore);
+
+          // `stale` is the one state only a recreate repairs — and the
+          // recreate would take the neighbor's rows with it.
+          await markStale(context, contribution);
+          const error = await captureRejection(
+            store.rebuildContribution("fulltext"),
+          );
+
+          expect(error).toBeInstanceOf(ContributionRebuildUnsupportedError);
+          expect(error).toMatchObject({
+            code: "CONTRIBUTION_REBUILD_UNSUPPORTED",
+            reason: "shared-storage-in-use",
+            details: {
+              physicalName: contribution.tableName,
+              otherGraphIds: [NEIGHBOR_GRAPH_ID],
+            },
+          });
+
+          // A refusal, not a partial attempt: neither graph's rows were
+          // touched, and the marker still records the stale shape rather
+          // than a fresh stamp over storage nothing verified.
+          expect(await countFulltextRows(store)).toBe(rowsBefore);
+          expect(await neighborHits(neighborStore)).toEqual(neighborBefore);
+          expect(
+            entryFor(await store.verifyContributions(), contribution.tableName)
+              ?.state,
+          ).toBe("stale");
+        });
       });
     });
   });

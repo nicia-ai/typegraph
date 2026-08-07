@@ -7,8 +7,9 @@
 import type { z } from "zod";
 
 import {
-  beginSerializedImport,
-  hasActiveSerializedSnapshotExport,
+  acquireSerializedStreamLease,
+  type SerializedStreamKind,
+  type SnapshotExportContention,
   snapshotExportContention,
 } from "../backend/transaction-resource";
 import {
@@ -88,6 +89,14 @@ import {
  * Nodes are imported first to satisfy edge reference validation.
  * The import runs within a transaction for atomicity when supported.
  *
+ * Refused with a typed {@link ConfigurationError} when the target writes through
+ * a serialized database connection another long-lived interchange operation
+ * holds — the same refusal, codes and `details.heldBy` / `details.requested` as
+ * {@link importGraphStream}. Hand-rolling a stream as `for await (const chunk of
+ * exportGraphStream(source)) await importGraph(target, ...)` on one such
+ * connection is therefore refused on the first chunk instead of nesting a write
+ * transaction inside the export's open snapshot.
+ *
  * @param store - The graph store to import into
  * @param data - Graph data in interchange format
  * @param options - Import configuration
@@ -112,7 +121,56 @@ export async function importGraph<G extends GraphDef>(
   // only exist after parsing, and every internal stage reads them
   // directly.
   const options = ImportOptionsSchema.parse(rawOptions);
+  return withImportStreamLease(store, () =>
+    importGraphData(store, data, options),
+  );
+}
 
+/**
+ * Claims the target connection's exclusive stream lease for the whole of `run`,
+ * or refuses with the holder named.
+ *
+ * GRANULARITY: an in-memory import is not one long-lived transaction — it is a
+ * write transaction followed by a best-effort statistics refresh — but it IS one
+ * long-lived operation on the connection, and it faces exactly the hazard the
+ * streaming guard exists for: an export snapshot holding the single connection
+ * this import must write on, or opening midway through it. A lease for the whole
+ * call is the simplest claim that covers every write the call makes, so that is
+ * what it takes.
+ *
+ * Claimed at each PUBLIC boundary that writes a whole import — this function's
+ * own {@link importGraph} and `trustedImportGraphStream` — and nowhere else.
+ * {@link importGraphStream} already holds the lease for its chunk loop and calls
+ * {@link importGraphData} directly, so a per-chunk import is never refused by
+ * the stream that issued it.
+ */
+export async function withImportStreamLease<G extends GraphDef, T>(
+  store: Store<G>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const lease = acquireSerializedStreamLease(
+    storeBackend(store),
+    "import-stream",
+  );
+  if (!lease.acquired) {
+    throw serializedStreamRefusal({
+      graphId: store.graphId,
+      requested: "import-stream",
+      heldBy: lease.heldBy,
+    });
+  }
+  try {
+    return await run();
+  } finally {
+    lease.release();
+  }
+}
+
+async function importGraphData<G extends GraphDef>(
+  store: Store<G>,
+  data: GraphData,
+  options: ResolvedImportOptions,
+): Promise<ImportResult> {
   // Reject an identity payload aimed at an identity-disabled graph, and
   // runtime-validate the (bounded) identity section, BEFORE any entity write —
   // see assertIdentityImportSupported / validateIdentitySection.
@@ -216,8 +274,10 @@ export async function importGraph<G extends GraphDef>(
 /**
  * Imports a header-first stream of bounded interchange chunks.
  *
- * Each chunk is committed through the same {@link importGraph} implementation
- * as an in-memory import, so validation and conflict semantics stay identical.
+ * Each chunk is committed through the same implementation as an in-memory
+ * {@link importGraph}, so validation and conflict semantics stay identical; the
+ * chunk calls skip only that function's own lease claim, which this loop already
+ * holds on their behalf.
  * Chunks are individually atomic on transactional backends; a consumer needing
  * all-or-nothing behavior can import into a disposable working-copy backend and
  * publish it only after this function succeeds.
@@ -226,14 +286,19 @@ export async function importGraph<G extends GraphDef>(
  * target store rather than retaining every imported node id in memory.
  *
  * Refused with a typed {@link ConfigurationError} when the target writes through
- * a database connection that a snapshot export is holding open — either because
- * this stream came from that export, or because ANY export snapshot is open on
- * that connection when the first chunk arrives (which covers a stream the caller
- * has wrapped). Once accepted, the import holds an import lease on that
- * connection for the whole chunk loop, so an export snapshot that tries to open
- * BETWEEN chunks is the side refused (`INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`
- * from `exportGraphStream`) — this import keeps running instead of stalling
- * against a read transaction its next chunk can never write past.
+ * a serialized database connection that another long-lived interchange stream
+ * already holds — either because this stream came from a snapshot export on that
+ * connection, or because ANY export snapshot or streaming import holds it when
+ * the first chunk arrives (which covers a stream the caller has wrapped). The
+ * error's `details.heldBy` names the holder's kind and `details.code` the
+ * condition: `INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` (or
+ * `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`) behind an export snapshot,
+ * `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS` behind another import.
+ *
+ * Once accepted, the import holds that connection's one stream lease for the
+ * whole chunk loop, so any export snapshot or second import that tries to start
+ * BETWEEN chunks is the side refused — this import keeps running instead of
+ * stalling against a transaction its next chunk can never write past.
  *
  * Connections we cannot observe are not detected: two clients dialed at one
  * server, or two SQLite handles on one file, are independent and are not
@@ -258,12 +323,12 @@ export async function importGraphStream<G extends GraphDef>(
       snapshotExportContention(sourceBackend, targetBackend)
     );
   if (contention !== undefined) {
-    throw serializedSnapshotImportRefusal(
-      store.graphId,
-      contention === "same-sqlite-backend" ?
-        "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT"
-      : "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
-    );
+    throw serializedStreamRefusal({
+      graphId: store.graphId,
+      requested: "import-stream",
+      heldBy: "export-snapshot",
+      detector: contention,
+    });
   }
   const result = emptyImportResult();
   let header: GraphDataHeader | undefined;
@@ -280,21 +345,29 @@ export async function importGraphStream<G extends GraphDef>(
       // stream fails the same way an unwrapped one does instead of stalling
       // behind a transaction that cannot end until this loop does.
       //
-      // ONE SYNCHRONOUS SECTION, no `await` between the check and the lease:
-      // observing an empty export registry and claiming the connection cannot be
-      // interleaved on a single-threaded event loop, so the two long-lived
-      // streams can never both conclude the connection was free. Whoever gets
-      // here second is refused — an export starting mid-import is refused by
-      // `exportGraphStream` reading this lease, so an import whose earlier chunks
-      // are already committed is never aborted for someone else's export.
+      // The claim is EXCLUSIVE and its check-and-register is one synchronous
+      // section inside `acquireSerializedStreamLease`, so the two long-lived
+      // streams can never both conclude the connection was free — and the
+      // holder it reports may be an export snapshot OR another streaming
+      // import, which nests its chunk transactions inside this one's just as
+      // fatally. Whoever gets here second is refused; an export starting
+      // mid-import is refused by `exportGraphStream` claiming the same lease, so
+      // an import whose earlier chunks are already committed is never aborted
+      // for someone else's stream. Nothing between the claim and the assignment
+      // can throw, so the `finally` below owns every release path.
       if (releaseImportLease === undefined) {
-        if (hasActiveSerializedSnapshotExport(targetBackend)) {
-          throw serializedSnapshotImportRefusal(
-            store.graphId,
-            "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
-          );
+        const lease = acquireSerializedStreamLease(
+          targetBackend,
+          "import-stream",
+        );
+        if (!lease.acquired) {
+          throw serializedStreamRefusal({
+            graphId: store.graphId,
+            requested: "import-stream",
+            heldBy: lease.heldBy,
+          });
         }
-        releaseImportLease = beginSerializedImport(targetBackend);
+        releaseImportLease = lease.release;
       }
       switch (chunk.type) {
         case "header": {
@@ -333,7 +406,7 @@ export async function importGraphStream<G extends GraphDef>(
           if (chunk.nodes.length === 0) break;
           mergeImportResult(
             result,
-            await importGraph(
+            await importGraphData(
               store,
               graphDataForChunk(header, chunk.nodes, [], []),
               {
@@ -360,7 +433,7 @@ export async function importGraphStream<G extends GraphDef>(
           if (chunk.edges.length === 0) break;
           mergeImportResult(
             result,
-            await importGraph(
+            await importGraphData(
               store,
               graphDataForChunk(header, [], chunk.edges, []),
               {
@@ -387,7 +460,7 @@ export async function importGraphStream<G extends GraphDef>(
           if (chunk.assertions.length === 0) break;
           mergeImportResult(
             result,
-            await importGraph(
+            await importGraphData(
               store,
               graphDataForChunk(header, [], [], chunk.assertions),
               { ...options, refreshStatistics: false },
@@ -418,35 +491,107 @@ export async function importGraphStream<G extends GraphDef>(
 }
 
 /**
- * The single owner of the refusal raised when a streamed snapshot export and its
- * import target write through one serialized connection — from the pre-flight
- * check on the stream's own backend and from the mid-stream check against the
- * live export registry alike, so both paths state the same detected condition.
+ * The single owner of the refusal raised when two long-lived interchange streams
+ * would run on one serialized database connection — from the import's pre-flight
+ * check on the stream's own backend, from its mid-stream claim, and from
+ * `exportGraphStream`'s claim alike, so every path states the same detected
+ * condition in the same vocabulary.
  *
- * The message describes exactly what is detected: an export snapshot
- * transaction that holds the one connection the import must write on. It claims
- * nothing about connections we cannot observe (two clients dialed at the same
- * server, two SQLite handles on one file), which are independent and are not
- * refused.
+ * The CODE names the condition — which kind of stream holds the connection —
+ * rather than which side was refused. `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`
+ * is not a second condition: it reports that the object-identity DETECTOR
+ * answered (one SQLite backend exporting into itself), which is worth telling
+ * apart because the fix differs — pass a second backend, rather than await
+ * whatever else is running. `details.heldBy`
+ * and `details.requested` then say which pairing was actually refused, so a
+ * same-kind refusal (import behind import, export behind export) is never
+ * reported as something it is not:
  *
- * `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT` is not a distinct condition: it
- * names the object-identity detector for the one refused condition and is
- * retained for compatibility with callers that already branch on it.
+ * | holder          | code                                          |
+ * | --------------- | --------------------------------------------- |
+ * | export snapshot | `INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` (or `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT` when the object-identity detector answered) |
+ * | import stream   | `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`   |
+ *
+ * Every message describes exactly what is detected. None claims anything about
+ * connections we cannot observe (two clients dialed at the same server, two
+ * SQLite handles on one file), which are independent and are not refused.
  */
-function serializedSnapshotImportRefusal(
-  graphId: string,
-  code:
-    | "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT"
-    | "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+export function serializedStreamRefusal(
+  input: Readonly<{
+    graphId: string;
+    requested: SerializedStreamKind;
+    heldBy: SerializedStreamKind;
+    /**
+     * Which detector found the holding export snapshot, when the import's
+     * pre-flight — not the lease — is what answered. Only
+     * `"same-sqlite-backend"` changes the code, because only that detector
+     * identifies a distinguishable situation for the caller: the source and the
+     * target are the same SQLite backend object, which no ordering can fix.
+     */
+    detector?: SnapshotExportContention;
+  }>,
 ): ConfigurationError {
-  return new ConfigurationError(
-    "A snapshot export cannot be streamed into a target that writes through the same serialized database connection: the export's read transaction holds that connection open for the whole stream, so this import can never take the writer slot it needs.",
-    { code, graphId },
-    {
-      suggestion:
-        "Export to a file first, or import the stream into an independent backend.",
-    },
+  const { graphId, requested, heldBy, detector } = input;
+  const code =
+    heldBy === "import-stream" ? SERIALIZED_IMPORT_IN_PROGRESS_CODE
+    : detector === "same-sqlite-backend" ?
+      "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT"
+    : "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT";
+  const { message, suggestion } = serializedStreamRefusalText(
+    requested,
+    heldBy,
   );
+  return new ConfigurationError(
+    message,
+    { code, graphId, requested, heldBy },
+    { suggestion },
+  );
+}
+
+/**
+ * The refusal code for "a streaming import holds the connection this stream
+ * needs", in either of the two orders it can be discovered.
+ */
+const SERIALIZED_IMPORT_IN_PROGRESS_CODE =
+  "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS";
+
+/**
+ * What each of the four pairings actually does to the one connection. Each
+ * message names both streams, because "a stream already holds this connection"
+ * is not actionable without knowing which one.
+ */
+function serializedStreamRefusalText(
+  requested: SerializedStreamKind,
+  heldBy: SerializedStreamKind,
+): Readonly<{ message: string; suggestion: string }> {
+  if (heldBy === "export-snapshot") {
+    return requested === "import-stream" ?
+        {
+          message:
+            "A snapshot export cannot be streamed into a target that writes through the same serialized database connection: the export's read transaction holds that connection open for the whole stream, so this import can never take the writer slot it needs.",
+          suggestion:
+            "Export to a file first, or import the stream into an independent backend.",
+        }
+      : {
+          message:
+            "A snapshot export cannot open on a serialized database connection while another snapshot export is streaming from it: the second export's read transaction would have to nest inside the first one on the single connection they share.",
+          suggestion:
+            "Await the export already in flight before starting the next one, or export from an independent backend.",
+        };
+  }
+  return requested === "export-snapshot" ?
+      {
+        message:
+          "A snapshot export cannot open on a serialized database connection while a streaming import is writing through it: the export's read transaction would hold the one connection the import's next chunk has to write on.",
+        suggestion:
+          "Await the import before exporting, or export from an independent backend.",
+      }
+    : {
+        message:
+          "A streaming import cannot open on a serialized database connection while another streaming import is writing through it: the two imports commit their chunks on the single connection they share, so the second one's chunk transaction would have to nest inside the first one's.",
+        suggestion:
+          "Await the import already in flight before starting the next one, or import into an independent backend.",
+      };
 }
 
 function throwIfStreamChunkFailed(

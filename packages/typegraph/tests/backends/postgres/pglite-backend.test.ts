@@ -68,6 +68,12 @@ const peopleImportGraph = defineGraph({
   nodes: { Person: { type: Person } },
   edges: {},
 });
+/** A SECOND import target on that one client, for the import/import pairing. */
+const secondPeopleImportGraph = defineGraph({
+  id: "pglite_people_import_2",
+  nodes: { Person: { type: Person } },
+  edges: {},
+});
 
 const Document = defineNode("Doc", {
   schema: z.object({ title: z.string(), embedding: embedding(4) }),
@@ -162,6 +168,16 @@ async function* pausingChunks(
   }
 }
 
+/** Pulls an export stream to completion through the iterator already opened on it. */
+async function drainIterator(
+  iterator: AsyncIterator<GraphInterchangeChunk>,
+): Promise<void> {
+  for (;;) {
+    const next = await iterator.next();
+    if (next.done === true) return;
+  }
+}
+
 /** Collects an export stream, releasing its snapshot registration on completion. */
 async function collectExportChunks(
   store: Store<typeof peopleGraph>,
@@ -184,6 +200,8 @@ async function seedSharedClientImportScenario(
   options: Readonly<{ history?: boolean }> = {},
 ): Promise<
   Readonly<{
+    /** Exposed so a test can add a THIRD wrapper on the same connection. */
+    client: PGlite;
     source: Store<typeof peopleGraph>;
     target: Store<typeof peopleImportGraph>;
   }>
@@ -205,7 +223,7 @@ async function seedSharedClientImportScenario(
     targetBackend,
   );
   await source.nodes.Person.create({ name: "Alice" });
-  return { source, target };
+  return { client, source, target };
 }
 
 /**
@@ -430,6 +448,87 @@ describe("PGlite backend", () => {
         success: true,
       });
       expect(await target.nodes.Person.count()).toBe(1);
+    });
+
+    it("refuses a second streaming import through one PGlite client", async () => {
+      // Postgres does not reject a nested BEGIN the way SQLite does — it warns
+      // and folds the statements into the transaction already in progress — so
+      // two imports over this one connection lose their chunk boundaries
+      // SILENTLY, and a chunk rollback takes the other import's committed work
+      // with it. The lease is what turns that into a refusal.
+      const { client, source, target } =
+        await seedSharedClientImportScenario(cleanups);
+      const secondTargetBackend = createPostgresBackend(drizzle(client), {
+        vector: false,
+      });
+      const [secondTarget] = await createStoreWithSchema(
+        secondPeopleImportGraph,
+        secondTargetBackend,
+      );
+      const chunks = await collectExportChunks(source);
+      const paused = createGate();
+      const resume = createGate();
+
+      const firstImport = importGraphStream(
+        target,
+        // Parked after the header: the lease is held, chunks are still to come.
+        pausingChunks(chunks, 1, paused, resume),
+        ImportOptionsSchema.parse({ onConflict: "error" }),
+      );
+      await paused.opened;
+
+      await expect(
+        withGuardTimeout(
+          importGraphStream(
+            secondTarget,
+            replayChunks(chunks),
+            ImportOptionsSchema.parse({ onConflict: "error" }),
+          ),
+        ),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+          graphId: secondPeopleImportGraph.id,
+          requested: "import-stream",
+          heldBy: "import-stream",
+        },
+      });
+
+      resume.open();
+      expect(await withGuardTimeout(firstImport)).toMatchObject({
+        success: true,
+      });
+      expect(await target.nodes.Person.count()).toBe(1);
+      expect(await secondTarget.nodes.Person.count()).toBe(0);
+    });
+
+    it("refuses a second snapshot export from one PGlite client", async () => {
+      // Two EXPORTS were the other pairing neither side checked for. Pulling the
+      // header proves the first snapshot transaction is open — its producer is
+      // inside that transaction and pushed the chunk from there.
+      const { source, target } = await seedSharedClientImportScenario(cleanups);
+      const stream = exportGraphStream(source)[Symbol.asyncIterator]();
+      const header = await withGuardTimeout(stream.next());
+      expect(header.done).toBe(false);
+
+      await expect(withGuardTimeout(exportGraph(target))).rejects.toMatchObject(
+        {
+          name: "ConfigurationError",
+          details: {
+            code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+            graphId: peopleImportGraph.id,
+            requested: "export-snapshot",
+            heldBy: "export-snapshot",
+          },
+        },
+      );
+
+      // The refused export took nothing: the first one runs to completion, and
+      // the connection is free for the next export once it does.
+      await withGuardTimeout(drainIterator(stream));
+      const reexported = await withGuardTimeout(exportGraph(source));
+      expect(reexported.nodes).toHaveLength(1);
     });
 
     it("allows an export once the import's lease is released", async () => {

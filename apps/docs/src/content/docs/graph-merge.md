@@ -174,14 +174,29 @@ assertions, so every chunk belongs to one committed snapshot. A snapshot stream
 cannot be piped directly into a target that writes through the same serialized
 connection: the same SQLite backend, distinct wrappers sharing one better-sqlite3
 handle or one local (`file:`/`:memory:`) libSQL client, a bare `pg`/neon
-`Client`, a `Pool` explicitly configured with `max: 1`, or distinct PGlite
-backend wrappers sharing one in-process connection — materialize it first or
-import it into an independent backend. The exclusion is a mutual lease, not a
-one-time check: an import refuses while any export snapshot is open on its
-connection (even through a user-wrapped stream that no longer identifies its
-source backend), and an export snapshot refuses to open while a streaming import
-is writing through that connection, so whichever long-lived stream starts second
-gets a typed error instead of both hanging. TypeGraph's branch cloner detects
+`Client` (a checked-out `PoolClient` included), a `Pool` explicitly configured
+with `max: 1`, a postgres-js client built with `{ max: 1 }`, distinct PGlite
+backend wrappers sharing one in-process connection, or Cloudflare Durable Object
+storage, whose transaction frame is ambient on the storage object — materialize
+it first or import it into an independent backend. Pooled connections, HTTP
+drivers, remote libSQL, and separate handles on one database are deliberately
+not treated as serialized: each statement gets an independent connection there,
+so refusing would refuse work that succeeds. The exclusion is one **exclusive** lease
+per serialized connection, not a one-time check and not a cross-kind-only rule:
+at most one long-lived interchange stream of any kind holds a given connection,
+so all four pairings are refused — import behind export snapshot (even through a
+user-wrapped stream that no longer identifies its source backend), export
+snapshot behind streaming import, export behind export, and import behind
+import. Whichever long-lived stream starts second gets a typed
+`ConfigurationError` instead of both hanging; its `details.code` names the
+condition holding the connection and `details.requested` / `details.heldBy` name
+the pairing that was refused (see
+[Interchange serialized-connection guard codes](/errors#interchange-serialized-connection-guard-codes)).
+Every long-lived import claims that lease, not only the chunk-streaming one:
+`importGraph` holds it for the whole call and `trustedImportGraph` /
+`trustedImportGraphStream` for the whole trusted session, so those APIs can throw
+this `ConfigurationError` too — new in 0.46 for trusted import, which previously
+threw only `TrustedImportError`. TypeGraph's branch cloner detects
 the shared-client case and materializes its snapshot before importing it.
 Non-transactional backends can export identity-disabled graphs without this
 snapshot guarantee. Identity-enabled stores already require a transactional
@@ -476,27 +491,44 @@ merge applied.
 - **Report-only (default, `provenance: true`)** — `report.provenance.byBranch(id)`
   returns the `{ nodeIds, edgeIds }` that branch contributed. In-memory; it
   evaporates after the call.
-- **Durable (`persistProvenance: true`)** — after the commit, one
-  `{branch, sourceId} → canonical` row per contribution is upserted into a
-  *sidecar* graph on the target's backend (its own namespaced tables; your
-  domain schema is untouched). It is best-effort and post-commit: a persistence
-  failure surfaces as a `warnings` entry, never a failed merge. Re-running the
-  same merge upserts (deterministic ids), never duplicates.
+- **Durable (`persistProvenance: true`)** — one `{branch, sourceId} → canonical`
+  row per contribution is upserted into a *sidecar* graph on the target's
+  backend (its own namespaced tables; your domain schema is untouched). The
+  sidecar is opened and claimed **before** the merge commits, so a sidecar graph
+  id TypeGraph cannot claim refuses the whole merge and leaves the target
+  unmodified; only the row write itself is post-commit and best-effort, where a
+  transient failure surfaces as a `warnings` entry rather than a failed merge.
+  Re-running the same merge upserts (deterministic ids), never duplicates.
 
-`openProvenanceStore` only ever opens a sidecar graph id it can prove it owns.
-A never-seen id is free to claim as long as it holds no rows at all (a plain
-`createStore` writes rows without registering a schema, so an unregistered id
-is not by itself evidence of a free namespace); once claimed, ownership is a
-durable marker row, checked independently of the schema hash, because an
-application is free to define the same `Provenance` shape at an unrelated id.
-Schema committed but marker not yet written — a crash or a concurrent opener
-between those two writes — resumes rather than refusing forever, but only when
-every row already there is a live, valid contribution for this target under
-its own recomputed id; anything else is refused as a collision, under
-`GRAPH_MERGE_PROVENANCE_ID_COLLISION`, naming which of four states was found
-(an application graph, an empty or unrecognized pre-marker sidecar, or an
-exact-schema graph with no marker) so the remediation matches what is actually
-there instead of generic advice.
+`openProvenanceStore` only ever opens a sidecar graph id it can prove it owns,
+and ownership is **marker-first**: a durable `ProvenanceOwner` marker row is the
+sidecar's first write of any kind, committed inside the schema fence *before*
+the sidecar schema is registered. A never-seen id is free to claim only when it
+holds no row in **any** per-graph table — nodes and edges, but equally
+recorded-time history, the revision clock and origins, identity assertions and
+their derived closure and separation, fulltext, and unique keys — because a
+plain `createStore` writes rows without registering a schema, so an unregistered
+id is not by itself evidence of a free namespace. Ownership is then the marker
+alone, checked independently of the schema hash, because an application is free
+to define the same `Provenance` shape at an unrelated id. Because the marker
+comes first, the resumable interrupted state is **marker without schema** (or a
+marker beside a pre-marker legacy schema): that resumes by registering or
+migrating the schema. The opposite state — the exact current sidecar schema with
+no marker — is one TypeGraph cannot produce, and is refused unconditionally
+whatever the graph contains, empty and provenance-shaped included, since
+contents an application could have written are not evidence of authorship.
+
+Refusals carry the code `GRAPH_MERGE_PROVENANCE_ID_COLLISION` and one of five
+`details.reason` values — `application-graph`, `empty-legacy-sidecar`,
+`unupgradeable-legacy-sidecar`, `unowned-exact-schema-graph`, or
+`corrupt-ownership-marker` — so the remediation matches what is actually there
+instead of generic advice; a backend with no transactional schema fence refuses
+an unclaimed sidecar with `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED` (an
+already-owned sidecar still opens there). Under `persistProvenance: true` both
+of those arrive as a typed `InvalidMergeOptionsError` naming
+`details.option: "persistProvenance"`, with the originating `ConfigurationError`
+as its `cause` — see
+[Merge provenance sidecar codes](/errors#merge-provenance-sidecar-codes).
 
 Query persisted provenance back later:
 

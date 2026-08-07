@@ -149,4 +149,23 @@ describe("cost of a current different-ness read", () => {
       separationStatements: 1,
     });
   });
+
+  it("pays one bounded ledger probe only where an empty answer could be an unfilled relation", async () => {
+    const { backend, counts, reset } = relationCountingBackend();
+    const store = await createInitializedStore(graph, backend);
+    const first = await store.nodes.Person.create({ name: "First" });
+    const second = await store.nodes.Person.create({ name: "Second" });
+
+    // This graph holds NO separation row, so "no row for this pair" cannot be
+    // told from "this graph's fill never ran" by the relation alone. The
+    // decision costs one `LIMIT 1` against the ledger — bounded, and unrelated
+    // to class size — and it is the only state that pays it: the case above,
+    // where the graph does have rows, still reads the ledger zero times.
+    reset();
+    expect(await store.identity.areDifferent(first, second)).toBe(false);
+    expect(counts).toEqual({
+      assertionStatements: 1,
+      separationStatements: 1,
+    });
+  });
 });
