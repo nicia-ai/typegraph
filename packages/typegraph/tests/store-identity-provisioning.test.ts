@@ -36,7 +36,11 @@ import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
 } from "../src/backend/sqlite/local";
-import { createSqlSchema } from "../src/query/compiler/schema";
+import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
+import { rebuildIdentityClosureForContext } from "../src/identity/service";
+import { type IdentityTarget } from "../src/identity/sql-target";
+import { createSqlSchema, type SqlSchema } from "../src/query/compiler/schema";
+import { buildKindRegistry } from "../src/registry/builders";
 import {
   ensureSchema,
   getActiveSchema,
@@ -142,6 +146,39 @@ function readSeparationRows(
       `SELECT class_key_low, class_key_high FROM ${SEPARATION_TABLE} ORDER BY class_key_low`,
     )
     .all() as { class_key_low: string; class_key_high: string }[];
+}
+
+/** The SQL schema the store itself derives for this backend's table names. */
+function identitySchema(result: LocalSqliteBackendResult): SqlSchema {
+  return createSqlSchema(result.backend.tableNames);
+}
+
+/**
+ * The fill a boot supplies to `ensureIdentitySchemaStorage`: the same
+ * ledger-driven rebuild `createStoreWithSchema` passes, against whichever
+ * target the provisioning path can offer.
+ */
+async function rebuildSeparationFromLedger(
+  result: LocalSqliteBackendResult,
+  target: IdentityTarget,
+): Promise<void> {
+  await rebuildIdentityClosureForContext<typeof enabledGraph>({
+    backend: target,
+    graphId: GRAPH_ID,
+    registry: buildKindRegistry(enabledGraph),
+    schema: identitySchema(result),
+    sameIdAcrossKinds: "fold",
+  });
+}
+
+/** The same backend with one optional port withheld, as a custom backend may. */
+function backendWithoutPort(
+  backend: GraphBackend,
+  port: "schemaWriteTransaction" | "identityTableDdl",
+): GraphBackend {
+  const withheld: Record<string, unknown> = { ...backend };
+  Reflect.deleteProperty(withheld, port);
+  return withheld as unknown as GraphBackend;
 }
 
 describe("Operational Identity provisioning + enablement gating", () => {
@@ -459,6 +496,100 @@ describe("Operational Identity provisioning + enablement gating", () => {
       await result.backend.close();
     }
   });
+
+  it("reports no owed fill when it filled the derived relation itself", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const [seeded] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      const first = await seeded.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const second = await seeded.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      await seeded.identity.assertDifferent(first, second);
+      const expected = readSeparationRows(result);
+      expect(expected).toHaveLength(1);
+      rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
+
+      const outcome = await ensureIdentitySchemaStorage(
+        result.backend,
+        identitySchema(result),
+        {
+          graphId: GRAPH_ID,
+          enablement: false,
+          recomputeDerivedRelations: (target) =>
+            rebuildSeparationFromLedger(result, target),
+        },
+      );
+
+      // The flag is the contract with the caller's LATE rebuild (the one that
+      // runs at the end of boot, after the schema commit and the
+      // materializers). Having filled the relation inside its own fence, this
+      // call owes the caller nothing — and reporting otherwise would run a
+      // second, unfenced rebuild over the state it just published. `false`
+      // exactly, not merely falsy: an absent flag reads as "no opinion" at the
+      // call site and would silently skip a fill that IS owed elsewhere.
+      expect(outcome.recomputeDerivedRelations).toBe(false);
+      expect(readSeparationRows(result)).toEqual(expected);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  for (const port of ["schemaWriteTransaction", "identityTableDdl"] as const) {
+    it(`provisions the derived relation without ${port}`, async () => {
+      const result = createLocalSqliteBackend();
+      try {
+        const [seeded] = await createStoreWithSchema(
+          enabledGraph,
+          result.backend,
+        );
+        const first = await seeded.nodes.Person.create(
+          { name: "Alice" },
+          { id: "alice" },
+        );
+        const second = await seeded.nodes.Person.create(
+          { name: "Bob" },
+          { id: "bob" },
+        );
+        await seeded.identity.assertDifferent(first, second);
+        const expected = readSeparationRows(result);
+        expect(expected).toHaveLength(1);
+        rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
+
+        // The atomic upgrade needs BOTH ports: the fence to hold the CREATE and
+        // the fill together, and the DDL-as-data to issue inside it without
+        // re-entering the backend's serialized statement queue. A custom
+        // backend implementing neither is a documented, supported shape — it
+        // takes the adjacent-but-not-atomic path and still ends up provisioned
+        // and filled. Assuming the ports are present instead calls `undefined`.
+        const withheld = backendWithoutPort(result.backend, port);
+
+        const outcome = await ensureIdentitySchemaStorage(
+          withheld,
+          identitySchema(result),
+          {
+            graphId: GRAPH_ID,
+            enablement: false,
+            recomputeDerivedRelations: (target) =>
+              rebuildSeparationFromLedger(result, target),
+          },
+        );
+
+        expect(outcome.recomputeDerivedRelations).toBe(false);
+        expect(separationTableExists(result)).toBe(true);
+        expect(readSeparationRows(result)).toEqual(expected);
+      } finally {
+        await result.backend.close();
+      }
+    });
+  }
 
   it("gates a same-id folding flip behind an explicit migration that rebuilds the closure", async () => {
     const result = createLocalSqliteBackend();

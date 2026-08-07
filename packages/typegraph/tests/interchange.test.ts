@@ -261,6 +261,36 @@ async function* chunkStream(
 }
 
 /**
+ * Makes the snapshot transaction's node reads fail once `deliveredReads` of
+ * them have answered, so an export's producer fails MID-STREAM: chunks already
+ * handed to the consumer, the read transaction still open, and the snapshot
+ * registration still held.
+ */
+function failNodeReadsAfter(
+  backend: GraphBackend,
+  deliveredReads: number,
+  error: unknown,
+): void {
+  const runTransaction = backend.transaction;
+  const failing: GraphBackend["transaction"] = (run, options) => {
+    let reads = 0;
+    return runTransaction(
+      (target) =>
+        run({
+          ...target,
+          findNodesByKind: async (params) => {
+            reads += 1;
+            if (reads > deliveredReads) throw error;
+            return target.findNodesByKind(params);
+          },
+        }),
+      options,
+    );
+  };
+  vi.spyOn(backend, "transaction").mockImplementation(failing);
+}
+
+/**
  * Replays chunks, parking the consumer between two of them: `paused` opens once
  * `pauseBefore` chunks have been delivered and the next is being asked for, and
  * nothing more is delivered until `resume` opens. That is the deterministic
@@ -420,13 +450,24 @@ describe("Interchange Round-Trip", () => {
     }
     const header = headerChunk.header;
 
-    await expect(
-      importGraphStream(
-        createStore(testGraph, createTestBackend()),
-        chunkStream([{ type: "nodes", nodes: [] }]),
-        importOptions({ onConflict: "error" }),
-      ),
-    ).rejects.toThrow("must start with a header");
+    // Every chunk kind carries the same requirement, and each states it from
+    // its own branch: a stream that opens with edges or with identity rows is
+    // as headerless as one that opens with nodes, and must say so rather than
+    // dereference the missing header or report the end-of-stream error instead.
+    const headerless: readonly GraphInterchangeChunk[] = [
+      { type: "nodes", nodes: [] },
+      { type: "edges", edges: [] },
+      { type: "identity", assertions: [] },
+    ];
+    for (const chunk of headerless) {
+      await expect(
+        importGraphStream(
+          createStore(testGraph, createTestBackend()),
+          chunkStream([chunk]),
+          importOptions({ onConflict: "error" }),
+        ),
+      ).rejects.toThrow("must start with a header");
+    }
     await expect(
       importGraphStream(
         createStore(testGraph, createTestBackend()),
@@ -437,6 +478,32 @@ describe("Interchange Round-Trip", () => {
         importOptions({ onConflict: "error" }),
       ),
     ).rejects.toThrow("more than one header");
+  });
+
+  it("writes nothing for an empty chunk instead of opening a transaction for it", async () => {
+    // An empty chunk is a no-op, not a write: taking a write transaction for
+    // one would claim the connection's writer slot for a chunk with nothing in
+    // it — exactly the contention the serialized-connection guards exist for.
+    const [headerChunk] = await collectChunks(exportGraphStream(sourceStore));
+    if (headerChunk?.type !== "header") {
+      throw new Error("Expected the export stream to start with a header.");
+    }
+    const targetBackend = createTestBackend();
+    const targetStore = createStore(testGraph, targetBackend);
+    const transaction = vi.spyOn(targetBackend, "transaction");
+
+    const result = await importGraphStream(
+      targetStore,
+      chunkStream([
+        { type: "header", header: headerChunk.header },
+        { type: "nodes", nodes: [] },
+        { type: "edges", edges: [] },
+      ]),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(transaction).not.toHaveBeenCalled();
   });
 
   it("rejects streams that end before emitting a header", async () => {
@@ -497,7 +564,13 @@ describe("Interchange Round-Trip", () => {
   );
 
   it("warns without failing when streamed-import statistics refresh fails", async () => {
-    await sourceStore.nodes.Person.create({ name: "Alice" });
+    // The stream carries a node chunk AND an edge chunk: every per-chunk import
+    // passes `refreshStatistics: false`, so the whole stream refreshes ONCE,
+    // after the last chunk — a per-chunk refresh would re-analyze (and re-warn)
+    // for every chunk of a bulk load.
+    const alice = await sourceStore.nodes.Person.create({ name: "Alice" });
+    const bob = await sourceStore.nodes.Person.create({ name: "Bob" });
+    await sourceStore.edges.knows.create(alice, bob, { since: "2024" });
     const targetStore = createStore(testGraph, createTestBackend());
     const refreshError = new Error("planner unavailable");
     const refreshStatistics = vi
@@ -1696,6 +1769,25 @@ describe("Identity interchange import guards", () => {
     expect(await store.nodes.Person.getById("p1" as never)).toBeUndefined();
   });
 
+  it("rejects an identity-bearing header aimed at an identity-disabled graph with no chunk behind it", async () => {
+    // The header branch owns this refusal. `importGraph` raises the same error
+    // for each chunk it is handed, which hides a missing header check whenever
+    // a chunk follows — a header-only stream (or one whose chunks are all
+    // empty) is refused only if the header itself is checked.
+    const store = createStore(testGraph, createTestBackend());
+
+    await expect(
+      importGraphStream(
+        store,
+        chunkStream([{ type: "header", header: identityStreamHeader }]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "IDENTITY_IMPORT_REQUIRES_PROFILE" },
+    });
+  });
+
   it("runtime-validates a streamed identity header even when no assertions follow", async () => {
     const store = await createInitializedStore(
       identityGraph,
@@ -1987,6 +2079,74 @@ describe("Identity interchange streaming", () => {
     );
   });
 
+  it("refreshes statistics once for a stream whose last chunk is identity", async () => {
+    // The identity chunk is the last write of a stream, and like the node and
+    // edge chunks it must not refresh statistics itself: the single post-loop
+    // refresh covers the whole stream.
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "stats-alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "stats-bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const refreshStatistics = vi.spyOn(target, "refreshStatistics");
+
+    const result = await importGraphStream(
+      target,
+      exportGraphStream(source, { batchSize: 1 }),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.identity).toEqual({ created: 1, skipped: 0 });
+    expect(refreshStatistics).toHaveBeenCalledOnce();
+  });
+
+  it("writes nothing for an empty identity chunk", async () => {
+    const targetBackend = createTestBackend();
+    const target = await createInitializedStore(identityGraph, targetBackend);
+    const transaction = vi.spyOn(targetBackend, "transaction");
+
+    const result = await importGraphStream(
+      target,
+      chunkStream([
+        { type: "header", header: identityStreamHeader },
+        { type: "identity", assertions: [] },
+      ]),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.identity).toEqual({ created: 0, skipped: 0 });
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("omits the identity chunk entirely from an export with no assertions", async () => {
+    // An identity-enabled graph with nothing asserted yet still walks the
+    // assertion pages. An empty page must produce NO chunk: an
+    // `{ assertions: [] }` chunk would set the stream's identity phase (closing
+    // it to further node and edge chunks) for a graph that asserted nothing.
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    await source.nodes.Person.create({ name: "Alice" }, { id: "no-assertion" });
+
+    const chunks = await collectChunks(exportGraphStream(source));
+
+    expect(chunks.map((chunk) => chunk.type)).toEqual(["header", "nodes"]);
+  });
+
   it("rejects nodes emitted after identity assertions", async () => {
     const target = await createInitializedStore(
       identityGraph,
@@ -2103,12 +2263,87 @@ describe("Serialized-connection snapshot streaming guards", () => {
     for (const database of openDatabases.splice(0)) database.close();
   });
 
+  /**
+   * A bounded wait for the failure paths below. Shorter than the suite's
+   * per-test budget on purpose: a producer failure that never reaches the
+   * consumer is a deadlock, and this reports it as one instead of as a slow
+   * test.
+   */
+  const PRODUCER_FAILURE_TIMEOUT_MS = 2000;
+
   function openMigratedDatabase(): Database.Database {
     const database = new Database(":memory:");
     openDatabases.push(database);
     for (const statement of generateSqliteDDL()) database.exec(statement);
     return database;
   }
+
+  it("releases the export's snapshot registration when its producer fails mid-stream", async () => {
+    // The producer's rejection handler is the only place a failed export gives
+    // the connection back. It owes the consumer two things: the error (nothing
+    // else ever settles the chunk the consumer is waiting for) and the released
+    // registration (a stream that is over must not refuse the next import).
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "producer-fail" },
+    );
+    const chunks = await collectChunks(exportGraphStream(source));
+    const producerError = new Error("snapshot read failed mid-stream");
+    failNodeReadsAfter(sourceBackend, 1, producerError);
+
+    const delivered: GraphInterchangeChunk[] = [];
+    const streaming = (async () => {
+      for await (const chunk of exportGraphStream(source)) {
+        delivered.push(chunk);
+      }
+    })();
+
+    await expect(
+      raceTimeout(streaming, PRODUCER_FAILURE_TIMEOUT_MS),
+    ).rejects.toBe(producerError);
+    // Mid-stream: the header and the first node chunk were already consumed
+    // when the next read rejected.
+    expect(delivered.map((chunk) => chunk.type)).toEqual(["header", "nodes"]);
+
+    const imported = await raceTimeout(
+      importGraphStream(
+        target,
+        chunkStream(chunks),
+        importOptions({ onConflict: "error" }),
+      ),
+      PRODUCER_FAILURE_TIMEOUT_MS,
+    );
+    if (imported === TIMEOUT_SENTINEL) {
+      throw new Error(
+        "The import waited on the connection the failed export never released.",
+      );
+    }
+    expect(imported.success).toBe(true);
+    expect(await target.nodes.Person.count()).toBe(1);
+  });
+
+  it("surfaces a non-Error producer failure as an Error carrying it as the cause", async () => {
+    const database = openMigratedDatabase();
+    const backend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, backend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "non-error" });
+    const thrown = "the driver rejected with a string";
+    failNodeReadsAfter(backend, 1, thrown);
+
+    const failure = await raceTimeout(
+      collectChunks(exportGraphStream(source)).catch((error: unknown) => error),
+      PRODUCER_FAILURE_TIMEOUT_MS,
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("Graph export failed.");
+    expect((failure as Error).cause).toBe(thrown);
+  });
 
   it("refuses a snapshot import across two backends over one SQLite handle", async () => {
     // Distinct wrappers, so the object-identity check cannot see them; one

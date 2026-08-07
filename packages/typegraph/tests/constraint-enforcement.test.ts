@@ -1002,6 +1002,44 @@ const protoWhereGraph = defineGraph({
   ontology: [],
 });
 
+/** The well-known symbols a generic consumer probes an unknown object with. */
+const PROBED_SYMBOLS: readonly symbol[] = [
+  Symbol.iterator,
+  Symbol.asyncIterator,
+  Symbol.toPrimitive,
+  Symbol.toStringTag,
+];
+
+/** What each `where` evaluation observed when it probed its builder. */
+const symbolProbes: (readonly unknown[])[] = [];
+
+/** A constraint whose `where` probes the builder the way a library would. */
+const symbolProbeGraph = defineGraph({
+  id: "symbol_probe_where_test",
+  nodes: {
+    Entry: {
+      type: Entry,
+      unique: [
+        {
+          name: "unique_label",
+          fields: ["label"],
+          scope: "kind",
+          collation: "binary",
+          where: (fields) => {
+            const builder = fields as unknown as Readonly<
+              Record<symbol, unknown>
+            >;
+            symbolProbes.push(PROBED_SYMBOLS.map((symbol) => builder[symbol]));
+            return requireDefined(fields["label"]).isNotNull();
+          },
+        },
+      ],
+    },
+  },
+  edges: {},
+  ontology: [],
+});
+
 describe("Partial uniqueness over an absent optional field", () => {
   let backend: GraphBackend;
 
@@ -1035,6 +1073,27 @@ describe("Partial uniqueness over an absent optional field", () => {
       externalId: "ext-2",
     });
     expect(third.externalId).toBe("ext-2");
+  });
+
+  it("answers a well-known symbol as absent instead of as a field", () => {
+    const [constraint] = symbolProbeGraph.nodes.Entry.unique;
+
+    expect(checkWherePredicate(constraint, { label: "first" })).toBe(true);
+
+    // A symbol is never a schema field name, so the builder must answer one the
+    // way a plain object does. Answering with a field builder instead hands
+    // every JS protocol that probes an unknown object — iteration, `ToPrimitive`
+    // string coercion, array-like consumption — a NON-CALLABLE object where it
+    // requires a method, so a `where` callback that merely gets logged or
+    // spread throws a TypeError from inside user code. And a predicate built
+    // from such a read would carry a symbol as its `field`, which reads as
+    // absent for every node: a partial constraint silently applying to nothing.
+    expect(symbolProbes).toHaveLength(1);
+    const probed = requireDefined(symbolProbes.at(-1));
+    expect(probed).toHaveLength(PROBED_SYMBOLS.length);
+    for (const value of probed) {
+      expect(value).toBeUndefined();
+    }
   });
 
   it("evaluates a where clause naming a prototype-member field by own key", () => {

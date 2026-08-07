@@ -225,6 +225,50 @@ describe("serialized import lease", () => {
   });
 });
 
+describe("snapshot export contention", () => {
+  it("allows a pooled Postgres backend to import its own export stream", () => {
+    // A default-size pool hands out an INDEPENDENT connection per checkout, so
+    // an export snapshot held on one checkout does not hold the connection the
+    // import writes through — even when one backend object is passed as both
+    // sides, which is exactly what `store.import(store.export())` looks like.
+    // Object identity alone would refuse that legitimate work; the dialect
+    // check is what confines the identity arm to SQLite, where one backend
+    // object really is one connection.
+    const pool = new Pool({
+      connectionString: "postgres://user@127.0.0.1:1/typegraph_contention",
+    });
+
+    try {
+      const backend = createPostgresBackend(drizzlePostgres(pool), {
+        vector: false,
+      });
+
+      expect(backend.dialect).toBe("postgres");
+      // Preconditions for the arm under test: transactions are on, so the
+      // guard does not short-circuit before the identity check; and the pool is
+      // deliberately unmarked, so the shared-resource arm cannot be what
+      // answers.
+      expect(backend.capabilities.transactions).toBe(true);
+      expect(sharesSerializedTransactionResource(backend, backend)).toBe(false);
+
+      expect(snapshotExportContention(backend, backend)).toBeUndefined();
+    } finally {
+      void pool.end();
+    }
+  });
+
+  it("refuses one SQLite backend exporting into itself", () => {
+    const backend = createTestBackend();
+
+    expect(backend.dialect).toBe("sqlite");
+    // The marked resource would also answer "shared-resource", so this pins
+    // that the more specific detector is the one reported.
+    expect(snapshotExportContention(backend, backend)).toBe(
+      "same-sqlite-backend",
+    );
+  });
+});
+
 /** Stands in for a driver's query method on a hand-built client. */
 function resolveNoRows(): Promise<readonly unknown[]> {
   return Promise.resolve([]);

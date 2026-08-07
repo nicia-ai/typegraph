@@ -25,7 +25,13 @@
  * untouched, an empty or unverifiable pre-marker sidecar is refused with
  * drop-this-id remediation, and a marker-less sidecar this module itself could
  * have written (interrupted creation, interrupted upgrade, or a racing opener)
- * is resumed rather than bricked.
+ * is resumed rather than bricked. Occupancy is asserted in every shape it can
+ * take — `Provenance`-kind node rows, edge rows alone, a registered but EMPTY
+ * graph of a third schema — because each is a row this module's own probes could
+ * mistake for its own. Recognition of a pre-marker row is asserted on each of its
+ * three independent grounds (live, valid for THIS target, stored under its
+ * recomputed id), and is verified EXHAUSTIVELY: a sidecar spanning more than one
+ * read page must have every page checked.
  *
  * A third group covers the ATOMICITY of the ownership claim and the one row state
  * that counts as this module's marker:
@@ -34,7 +40,8 @@
  *     marker write happen inside ONE `schemaWriteTransaction` fence — which is the
  *     only reason adopting a merely-empty id is sound;
  *   - an application row landing BETWEEN the unfenced preflight and the fenced
- *     claim makes the open refuse instead of colonizing the id;
+ *     claim makes the open refuse instead of colonizing the id, and a valid
+ *     MARKER landing in that same window makes the claim write nothing at all;
  *   - a `ProvenanceOwner` row this module cannot verify — tombstoned, malformed,
  *     claiming another target, or under a non-canonical id — is foreign occupancy:
  *     the open refuses and the row is never overwritten or resurrected;
@@ -110,6 +117,13 @@ const ApplicationProvenanceOwner = defineNode("ProvenanceOwner", {
 
 /** The row id the sidecar's durable ownership marker is stored under. */
 const PROVENANCE_OWNER_ROW_ID = "merge-provenance-owner";
+
+/**
+ * Mirrors the module's internal sidecar read-page size — the only boundary the
+ * paginated contents verification has, and therefore the only place a loop that
+ * reads one page and stops can hide an unverified row.
+ */
+const SIDECAR_PAGE_SIZE = 500;
 const PROVENANCE_OWNER = "@nicia-ai/typegraph/merge-provenance";
 
 const careGraph = defineGraph({
@@ -229,6 +243,19 @@ function backendWithoutSchemaFence(backend: GraphBackend): GraphBackend {
   Reflect.deleteProperty(withheld, "schemaWriteTransaction");
   return withheld as unknown as GraphBackend;
 }
+
+/** One pre-marker `Provenance` row as a bulk-create input. */
+type SidecarRowInput = Readonly<{
+  id: string;
+  props: Readonly<{
+    targetGraphId: string;
+    role: "node" | "edge";
+    canonicalId: string;
+    canonicalKind: string;
+    branchId: string;
+    sourceId: string;
+  }>;
+}>;
 
 /** A contribution the sidecar can hold, plus its deterministic row id. */
 const SIDECAR_RECORD = {
@@ -746,6 +773,103 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     ).resolves.toMatchObject({ id: "existing", name: "Existing" });
   });
 
+  it("refuses an unregistered id whose only rows are Provenance-kind", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    // The one occupant a "rows this module could not have written" probe would
+    // excuse. Freeness of an UNREGISTERED id is decided on ANY row, not on
+    // foreign-looking ones: a plain `createStore` application holding
+    // `Provenance` nodes at the sidecar id is still that application's graph,
+    // even when its rows are byte-identical to ones this module would write.
+    const applicationStore = createStore(legacyShapedGraph(), backend);
+    const rowId = await provenanceNodeId(careGraph.id, SIDECAR_RECORD);
+    await applicationStore.nodes.Provenance.create(
+      { targetGraphId: careGraph.id, ...SIDECAR_RECORD },
+      { id: rowId },
+    );
+
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "application-graph",
+      },
+    });
+    // Refused by the unfenced preflight, so nothing is registered and nothing
+    // is claimed — the id is never adopted on the strength of its contents.
+    await expect(
+      backend.getActiveSchema(provenanceGraphId(careGraph.id)),
+    ).resolves.toBeUndefined();
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+  });
+
+  it("refuses an unregistered id whose only rows are EDGE rows", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    const sidecarId = provenanceGraphId(careGraph.id);
+    // The sidecar graph declares no edges at all, so an edge row under its id
+    // can only be an application's — and it is occupancy on its own, with no
+    // node row beside it to make the id look taken.
+    await backend.insertEdge({
+      graphId: sidecarId,
+      kind: "hadEncounter",
+      id: "application-edge",
+      fromKind: "Patient",
+      fromId: "pat-application",
+      toKind: "Encounter",
+      toId: "enc-application",
+      props: { on: "2024-02-02" },
+    });
+
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "application-graph",
+      },
+    });
+    await expect(backend.getActiveSchema(sidecarId)).resolves.toBeUndefined();
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+    await expect(
+      backend.getEdge(sidecarId, "application-edge"),
+    ).resolves.toMatchObject({ id: "application-edge" });
+  });
+
+  it("refuses an EMPTY application graph carrying neither sidecar schema", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    // Registered, no rows, and a schema hash matching neither the owned nor the
+    // pre-marker sidecar shape. Emptiness is evidence only for an id already
+    // known to be sidecar-shaped; this one must read as an application graph
+    // rather than fall through to the legacy sidecar's contents rules, whose
+    // remediation ("drop this id, nothing is lost") would be wrong advice.
+    await createStoreWithSchema(
+      defineGraph({
+        id: provenanceGraphId(careGraph.id),
+        nodes: { Patient: { type: Patient } },
+        edges: {},
+      }),
+      backend,
+    );
+
+    const refusal = await openProvenanceStore(backend, careGraph.id).catch(
+      (error: unknown) => error,
+    );
+    expect(refusal).toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "application-graph",
+      },
+    });
+    expect((refusal as { suggestion?: string }).suggestion).toContain("Rename");
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+  });
+
   it("resumes a sidecar creation whose ownership marker never committed", async () => {
     cleanups = [];
     const backend = await makeBackend();
@@ -874,6 +998,132 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     ).resolves.toMatchObject({ id: "prov_ambiguous-legacy-id" });
     await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
   });
+
+  it("refuses a pre-marker row that claims a DIFFERENT target under our id", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    const [legacyStore] = await createStoreWithSchema(
+      legacyShapedGraph(),
+      backend,
+    );
+    // Everything about this row verifies EXCEPT whose provenance it is: it sits
+    // under the exact id this target's own tuple hashes to, so the recomputed-id
+    // proof alone would accept it and only the target check separates it from
+    // one of ours.
+    const rowId = await provenanceNodeId(careGraph.id, SIDECAR_RECORD);
+    await legacyStore.nodes.Provenance.create(
+      { targetGraphId: "some-other-target", ...SIDECAR_RECORD },
+      { id: rowId },
+    );
+
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "unupgradeable-legacy-sidecar",
+      },
+    });
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+    await expect(
+      legacyStore.nodes.Provenance.getById(rowId as never),
+    ).resolves.toMatchObject({ targetGraphId: "some-other-target" });
+  });
+
+  it("refuses a pre-marker sidecar whose only row is a TOMBSTONE", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    const sidecarId = provenanceGraphId(careGraph.id);
+    const [legacyStore] = await createStoreWithSchema(
+      legacyShapedGraph(),
+      backend,
+    );
+    const rowId = await provenanceNodeId(careGraph.id, SIDECAR_RECORD);
+    await legacyStore.nodes.Provenance.create(
+      { targetGraphId: careGraph.id, ...SIDECAR_RECORD },
+      { id: rowId },
+    );
+    await backend.deleteNode({
+      graphId: sidecarId,
+      kind: "Provenance",
+      id: rowId,
+    });
+
+    // A soft-deleted row is not "no row". Upgrading around it would adopt a
+    // sidecar holding a row the upgrade never verified, and the next
+    // deterministic upsert would silently resurrect somebody's delete.
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "unupgradeable-legacy-sidecar",
+      },
+    });
+    const tombstone = requireDefined(
+      await backend.getNode(sidecarId, "Provenance", rowId),
+    );
+    expect(tombstone.deleted_at).toBeDefined();
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+  });
+
+  it("verifies EVERY page of a sidecar larger than one read page", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    const [legacyStore] = await createStoreWithSchema(
+      legacyShapedGraph(),
+      backend,
+    );
+
+    // Two full read pages plus one row, with the single unverifiable row placed
+    // so that no first page can contain it under ANY ordering the read might
+    // use: its id is the median of the verified ids (out of reach of an id-ASC
+    // and an id-DESC first page alike) and it is written in the middle of the
+    // batch (out of reach of a created_at ordering). A loop that stops after one
+    // page — or that drops its cursor and re-reads page one forever — therefore
+    // never sees it, and would upgrade a sidecar it did not verify.
+    const verified = await Promise.all(
+      Array.from(
+        { length: 2 * SIDECAR_PAGE_SIZE },
+        async (_unused, index): Promise<SidecarRowInput> => {
+          const record = { ...SIDECAR_RECORD, sourceId: `source-${index}` };
+          return {
+            id: await provenanceNodeId(careGraph.id, record),
+            props: { targetGraphId: careGraph.id, ...record },
+          };
+        },
+      ),
+    );
+    const sortedIds = verified
+      .map((row) => row.id)
+      .sort((left, right) =>
+        left < right ? -1
+        : left > right ? 1
+        : 0,
+      );
+    // Same character set, one character longer: sorts immediately after the last
+    // id of the first page and immediately before the first id of the second.
+    const unverifiableId = `${requireDefined(sortedIds[SIDECAR_PAGE_SIZE - 1])}0`;
+    const rows: SidecarRowInput[] = [...verified];
+    rows.splice(SIDECAR_PAGE_SIZE, 0, {
+      id: unverifiableId,
+      props: { targetGraphId: careGraph.id, ...SIDECAR_RECORD },
+    });
+    await legacyStore.nodes.Provenance.bulkCreate(rows);
+
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "unupgradeable-legacy-sidecar",
+      },
+    });
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+  }, 30_000);
 
   it("refuses an exact-schema application graph without the internal owner marker", async () => {
     const backend = await makeBackend();
@@ -1004,6 +1254,39 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     await expect(
       backend.getNode(sidecarId, "Patient", "app-row-mid-claim"),
     ).resolves.toMatchObject({ id: "app-row-mid-claim" });
+  });
+
+  it("writes no second marker when a racing opener claims the id first", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    const sidecarId = provenanceGraphId(careGraph.id);
+    // The one state the FENCED re-inspection can reach that is neither a refusal
+    // nor an unclaimed id: a concurrent opener committed a valid marker between
+    // this open's preflight (which saw a free id) and its fence. That marker is
+    // the same durable claim this open would have made, so the claim must write
+    // nothing at all — a second insert under the canonical marker id is either a
+    // constraint violation or an overwrite of a row this open did not author.
+    const racing = backendRacingTheClaim(backend, async () => {
+      await backend.insertNode({
+        graphId: sidecarId,
+        kind: "ProvenanceOwner",
+        id: PROVENANCE_OWNER_ROW_ID,
+        props: { ...OWNER_MARKER_PROPS },
+      });
+    });
+
+    await expect(
+      openProvenanceStore(racing, careGraph.id),
+    ).resolves.toBeDefined();
+
+    const marker = requireDefined(await readOwnerMarker(backend));
+    expect(parseRowProps(marker.props)).toEqual(OWNER_MARKER_PROPS);
+    // Untouched: still the racer's row, at its insert version and timestamp.
+    expect(marker.version).toBe(1);
+    expect(marker.updated_at).toBe(marker.created_at);
+    await expect(
+      backend.countNodesByKind({ graphId: sidecarId, kind: "ProvenanceOwner" }),
+    ).resolves.toBe(1);
   });
 
   it("refuses a TOMBSTONED ownership marker instead of resurrecting it", async () => {

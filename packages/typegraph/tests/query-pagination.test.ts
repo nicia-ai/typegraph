@@ -289,7 +289,7 @@ describe("Cursor Pagination", () => {
     // ordinary own key.
     const prototypeKeysBefore = Object.getOwnPropertyNames(
       Object.prototype,
-    ).sort();
+    ).toSorted();
     const store = createTestStore();
     await seedTestData(store);
 
@@ -307,7 +307,7 @@ describe("Cursor Pagination", () => {
       .select((ctx) => ctx.__proto__)
       .paginate({ first: 5, after: requireDefined(page1.nextCursor) });
 
-    expect(Object.getOwnPropertyNames(Object.prototype).sort()).toEqual(
+    expect(Object.getOwnPropertyNames(Object.prototype).toSorted()).toEqual(
       prototypeKeysBefore,
     );
     expect(({} as Record<string, unknown>)["name"]).toBeUndefined();
