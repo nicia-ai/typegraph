@@ -110,6 +110,7 @@ import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
   getDurableObjectStorageClient,
+  resolveSqliteClient,
   type SqliteExecutionAdapter,
   type SqliteExecutionProfile,
   type SqliteExecutionProfileHints,
@@ -132,6 +133,7 @@ import {
   nowIso,
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
+import { markSerializedTransactionResource } from "../transaction-resource";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -1116,10 +1118,37 @@ function createSqliteOperationBackend(
   return operationBackend;
 }
 
+/**
+ * Returns the better-sqlite3 `Database` a Drizzle database owns, if that is
+ * what it is driving.
+ *
+ * better-sqlite3 is a single, synchronous connection: every statement from
+ * every wrapper over one `Database` runs on it in order, so an open transaction
+ * on one wrapper is an open transaction for all of them. Duck-typed on
+ * `prepare` + `pragma` (both better-sqlite3 `Database` methods; neither
+ * bun:sqlite nor node:sqlite expose `pragma`) rather than importing the native
+ * addon, which this bundler-friendly module must not depend on. Unrecognized
+ * clients stay unmarked: SEPARATE connections to the same file are genuinely
+ * concurrent under WAL and must not be treated as one serialized resource.
+ */
+function getSerializedSqliteConnection(
+  db: AnySqliteDatabase,
+): object | undefined {
+  const client = resolveSqliteClient(db);
+  if (client === undefined) return undefined;
+  // `prepare` is answered by resolveSqliteClient; `pragma` is the
+  // better-sqlite3 discriminator on top of it.
+  const candidate = client as Readonly<Record<string, unknown>>;
+  return typeof candidate["pragma"] === "function" ? client : undefined;
+}
+
 export function createSqliteBackend(
   db: AnySqliteDatabase,
   options: SqliteBackendOptions = {},
 ): AdapterBackend<AnySqliteDatabase> {
+  // Resolved before the backend exists so marking below is a lookup, never
+  // work that could fail after wrappers already observed an unmarked backend.
+  const serializedConnection = getSerializedSqliteConnection(db);
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? fts5Strategy;
   const profileHints = options.executionProfile ?? {};
@@ -1344,7 +1373,7 @@ export function createSqliteBackend(
     // schema lock is per connection, not per graph.
     ...(capabilities.transactions ?
       {
-        schemaWriteTransaction: <T,>(
+        schemaWriteTransaction: <T>(
           _graphId: string,
           fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
         ) => runSchemaWriteTransaction((target) => fn(target)),
@@ -2083,6 +2112,12 @@ export function createSqliteBackend(
       return Promise.resolve();
     },
   };
+
+  // INVARIANT: mark before any wrapper can observe this backend — see
+  // transaction-resource.ts.
+  if (serializedConnection !== undefined) {
+    markSerializedTransactionResource(backend, serializedConnection);
+  }
 
   return backend;
 }

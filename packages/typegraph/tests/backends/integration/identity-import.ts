@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
+import { snapshotExportContention } from "../../../src/backend/transaction-resource";
 import { type IdentityTransferAssertion } from "../../../src/identity/service";
 import {
   exportGraph,
@@ -10,6 +11,7 @@ import {
   importGraphStream,
 } from "../../../src/interchange";
 import { storeRuntime } from "../../../src/store/runtime-port";
+import { type Store } from "../../../src/store/store";
 import {
   createTestBackend,
   matchingArray,
@@ -29,9 +31,10 @@ import { type IntegrationTestContext } from "./test-context";
  * first when canonicalization regresses on one backend.
  *
  * Source and target graphs are normally separate `graph_id`s on the same
- * per-test backend. The streaming snapshot case uses an independent target:
- * SQLite cannot write through the same connection while the source's
- * repeatable-read export transaction remains open.
+ * per-test backend. The streaming snapshot case picks its target with
+ * {@link createStreamingImportTarget}: same backend where the engine can write
+ * while the export's snapshot transaction is open, an independent backend
+ * where it cannot.
  */
 const InterchangePerson = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -123,6 +126,37 @@ async function seedSource(context: IntegrationTestContext) {
     aliceRef: { kind: "Person", id: alice.id } satisfies Ref,
     authorRef: { kind: "Author", id: author.id } satisfies Ref,
   };
+}
+
+/**
+ * A store the suite's snapshot export can legally be streamed into.
+ *
+ * `importGraphStream` refuses a target that shares the source's SERIALIZED
+ * database connection: the export's repeatable-read transaction holds that one
+ * connection for its whole life, so the import could never take the writer
+ * lock. That is true of SQLite and of PGlite (one in-process instance), and
+ * `snapshotExportContention` — the same predicate the refusal itself consults —
+ * is what says so.
+ *
+ * A pooled PostgreSQL backend is NOT serialized: the export transaction and
+ * the import's writes take different connections from the pool. Those suites
+ * therefore import into a second graph id on the SUITE'S OWN backend, so
+ * PostgreSQL is exercised as the import TARGET. Unconditionally importing into
+ * a fresh in-memory SQLite backend, as this used to, silently reduced every
+ * backend's target coverage to SQLite.
+ */
+async function createStreamingImportTarget(
+  context: IntegrationTestContext,
+): Promise<Store<typeof identityInterchangeTargetGraph>> {
+  const backend = context.getBackend();
+  if (snapshotExportContention(backend, backend) === undefined) {
+    return context.createStore(identityInterchangeTargetGraph);
+  }
+  const [target] = await createStoreWithSchema(
+    identityInterchangeTargetGraph,
+    createTestBackend(),
+  );
+  return target;
 }
 
 export function registerIdentityImportIntegrationTests(
@@ -424,10 +458,7 @@ export function registerIdentityImportIntegrationTests(
       await source.identity.assertSame(alice, author);
       await source.identity.assertSame(alice, bob);
 
-      const [target] = await createStoreWithSchema(
-        identityInterchangeTargetGraph,
-        createTestBackend(),
-      );
+      const target = await createStreamingImportTarget(context);
       const result = await importGraphStream(
         target,
         exportGraphStream(source, { includeTemporal: true, batchSize: 1 }),

@@ -43,6 +43,20 @@ export function hasOwnKey(
 }
 
 /**
+ * Own-key read of a data-keyed bag: an absent key reads `undefined`, never an
+ * inherited `Object.prototype` member. The read companion to {@link hasOwnKey}
+ * (see its doc for why `bag[key]` alone is wrong for these bags), and like it
+ * the single owner — every path reading a data-keyed bag by a data-supplied
+ * key calls here rather than re-spelling the guard.
+ */
+export function readOwnProperty(
+  bag: Readonly<Record<string, unknown>>,
+  key: string,
+): unknown {
+  return hasOwnKey(bag, key) ? bag[key] : undefined;
+}
+
+/**
  * Builds an object dropping any keys whose value is `undefined`.
  *
  * Lets callers construct discriminated-union members and `defineNode` /

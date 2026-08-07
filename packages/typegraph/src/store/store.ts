@@ -31,6 +31,7 @@ import {
   type ContributionRebuildResult,
   type ContributionRebuildScope,
   type ContributionRepairResult,
+  createBackendOverlay,
   createTransactionReadBackend,
   type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
@@ -4888,6 +4889,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Decorates the query execution port so hooks observe each statement the
    * query builder submits to the backend. A selective-projection retry
    * therefore emits two independent start/end pairs with their actual SQL.
+   *
+   * Decoration goes through {@link createBackendOverlay}, which carries the
+   * projection's serialized-resource ownership: the hooked backend still
+   * executes on the source's connection, so it must answer the same "shares one
+   * serialized connection" question as its source.
    */
   #createHookedQueryBackend(
     backend: GraphBackend | TransactionBackend,
@@ -4902,12 +4908,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
     const executeRaw = backend.executeRaw;
     const compileSql = backend.compileSql;
-    // Store backends may be frozen. Copy an allowlist projection so
+    // Store backends may be frozen. Decorate an allowlist projection so
     // execute/executeRaw can be replaced without mutating the source.
     const projected = createGraphBackendProjection(backend as GraphBackend);
 
-    return {
-      ...projected,
+    return createBackendOverlay(projected, {
       execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
         const compiled =
           compileSql === undefined ?
@@ -4928,7 +4933,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               executeRaw<T>(sqlText, params),
             ),
         }),
-    } satisfies GraphBackend;
+    });
   }
 
   async #withQueryHooks<T>(

@@ -3373,9 +3373,15 @@ export async function mergeIncremental<G extends GraphDef>(
   // newer committed value.
   if (options.onBasePropertyConflict !== "flag") {
     return err(
-      new MergeError(
+      new InvalidMergeOptionsError(
         'mergeIncremental() requires onBasePropertyConflict: "flag" (keep-base); a non-keep-base policy could overwrite a newer committed base value with a stale branch value.',
-        { details: {} },
+        {
+          details: {
+            option: "onBasePropertyConflict",
+            accepted: "flag",
+            received: options.onBasePropertyConflict,
+          },
+        },
       ),
     );
   }

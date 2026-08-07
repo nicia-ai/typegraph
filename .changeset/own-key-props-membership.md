@@ -46,13 +46,27 @@ the refusal.
 The convention now has one owner, `hasOwnKey`, applied across graph-merge node and
 edge property resolution, schema-diff property classification, schema-removal
 reconciliation, interchange unknown-property stripping, graph-extension document
-validation, query and index schema-field validation, and the evolve
-pending-removal guard. `in` remains correct, and still in use, when both the key
-and membership question are internal: a discriminated union's tag, a capability
-probe, a brand check, and the deliberate `Object.prototype` lookup in selective
-projection. A user-supplied field name is always checked as an own key, even when
-the schema shape itself is statically known, so names such as `__proto__` and
-`constructor` cannot masquerade as declared fields through `Object.prototype`.
+validation, query and index schema-field validation, the evolve pending-removal
+guard, edge `matchOn` composite-key and match-comparison reads, and
+embedding/fulltext field extraction. `in` remains correct, and still in use,
+when both the key and membership question are internal: a discriminated union's
+tag, a capability probe, a brand check, and the deliberate `Object.prototype`
+lookup in selective projection. A user-supplied field name is always checked as
+an own key, even when the schema shape itself is statically known, so names such
+as `__proto__` and `constructor` cannot masquerade as declared fields through
+`Object.prototype`.
+
+A plain `bag[field]` walks the prototype chain exactly as `field in bag` does, so
+the same misreading reached two more read paths that never used `in` at all. An
+edge's `matchOn` composite key and its per-field match comparison
+(`getOrCreateByEndpoints`, edge upsert dedup) read a caller's stored and input
+props by a schema-declared field name; a field named after a prototype member
+that neither bag carries as an own key now reads as `undefined` on both sides
+instead of the same inherited function, so a match or non-match decision is never
+made on a phantom shared value. `syncEmbeddings` and `computeFulltextContent`
+read a declared embedding or searchable field the same way, so an undeclared
+row no longer surfaces a prototype function as if it were the field's stored
+value there either.
 
 `__proto__`, the case originally reported, is the NARROW variant. Every VALIDATED
 write path blocks it: Zod drops an own `__proto__` key, and `bag["__proto__"] = value`

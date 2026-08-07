@@ -46,7 +46,7 @@ import {
   exportGraphStream,
   importGraph,
   importGraphStream,
-  sharesSerializedTransactionResource,
+  snapshotExportContention,
   storeBackend,
 } from "./typegraph-internal";
 
@@ -148,21 +148,25 @@ export function cloneWorkingCopyStrategy<G extends GraphDef>(
           validateReferences: true,
           batchSize: CLONE_IMPORT_BATCH_SIZE,
         } as const;
+        // When the fresh backend writes through the connection the base's
+        // snapshot export would hold, streaming is exactly what the import
+        // guard refuses — so ask that guard's own predicate, and materialize
+        // the export instead of streaming it when it says so.
         const result =
           (
-            sharesSerializedTransactionResource(
+            snapshotExportContention(
               storeBackend(baseStore),
               storeBackend(freshStore),
-            )
+            ) === undefined
           ) ?
-            await importGraph(
-              freshStore,
-              await exportGraph(baseStore, exportOptions),
-              importOptions,
-            )
-          : await importGraphStream(
+            await importGraphStream(
               freshStore,
               exportGraphStream(baseStore, exportOptions),
+              importOptions,
+            )
+          : await importGraph(
+              freshStore,
+              await exportGraph(baseStore, exportOptions),
               importOptions,
             );
         if (!result.success) {

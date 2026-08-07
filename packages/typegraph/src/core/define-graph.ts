@@ -410,7 +410,19 @@ function defineGraphUnchecked<
   }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
 }
 
-/** @internal Creates a framework-owned graph in a reserved namespace. */
+/**
+ * @internal Marks a graph definition as framework-owned rather than
+ * application-authored.
+ *
+ * It builds exactly what {@link defineGraph} builds — the name records the
+ * caller, it does not reserve anything. There is NO reserved id namespace and
+ * no id validation anywhere: an application may define a graph at any id a
+ * framework-owned graph uses, the merge-provenance sidecar's
+ * `<target>::merge-provenance` convention included. That convention is
+ * protected at RUNTIME instead, by the ownership checks in the single gateway
+ * that opens a sidecar (`openProvenanceStore`), which refuses an id occupied by
+ * anything it cannot prove it owns.
+ */
 export function defineInternalGraph<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,

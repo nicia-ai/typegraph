@@ -1,4 +1,4 @@
-export { sharesSerializedTransactionResource } from "../backend/transaction-resource";
+export { snapshotExportContention } from "../backend/transaction-resource";
 export type {
   GraphBackend,
   TransactionBackend,
@@ -30,6 +30,11 @@ export {
   META_EDGE_EQUIVALENT_TO,
   META_EDGE_SAME_AS,
 } from "../ontology/constants";
+// The provenance ownership probe needs graph-scoped raw SQL to look for rows
+// under a graph id whose schema was never registered.
+export { createSqlSchema } from "../query/compiler/schema";
+export { sql } from "../query/sql-fragment";
+export { asCompiledRowsSql } from "../query/sql-intent";
 export { sortedReplacer } from "../schema/canonical";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
 export {

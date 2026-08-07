@@ -150,16 +150,38 @@ describe("Identity interchange pagination", () => {
       done: false,
       value: { type: "header" },
     });
-    const transactionResult = requireDefined(transaction.mock.results[0]);
-    expect(transactionResult.type).toBe("return");
-    const transactionSettled = Promise.resolve(transactionResult.value).then(
-      () => "fulfilled" as const,
-      () => "rejected" as const,
+    // Identify the export's snapshot transaction by the options only it opens.
+    // Indexing by position would pick up the `create` above, whose write
+    // transaction has already fulfilled and so certifies nothing.
+    const exportTransactionResult = requireDefined(
+      transaction.mock.calls
+        .map((call, index) => ({ options: call[1], index }))
+        .filter(
+          ({ options }) =>
+            options?.isolationLevel === "repeatable_read" &&
+            options.accessMode === "read_only",
+        )
+        .map(({ index }) => transaction.mock.results[index])
+        .at(-1),
+    );
+    expect(exportTransactionResult.type).toBe("return");
+    const transactionSettled = Promise.resolve(
+      exportTransactionResult.value,
+    ).then(
+      () => ({ settled: "fulfilled" as const }),
+      (error: unknown) => ({ settled: "rejected" as const, error }),
     );
 
     await expect(iterator.return?.()).resolves.toMatchObject({ done: true });
     // `return()` does not resolve until the transaction has left its callback;
     // awaiting this would hang if the producer remained blocked on its push.
-    expect(await transactionSettled).toBe("fulfilled");
+    // Cancellation unblocks the producer by REJECTING its in-flight push, so
+    // the snapshot transaction rolls back with that error — asserting
+    // "fulfilled" here would assert the opposite of the intended behavior.
+    const outcome = await transactionSettled;
+    expect(outcome.settled).toBe("rejected");
+    expect(outcome).toMatchObject({
+      error: { message: "Export stream consumer cancelled." },
+    });
   });
 });

@@ -171,10 +171,15 @@ either escape hatch must avoid them for a branchable graph or retain the default
 content-fingerprint validation. On transactional backends, streaming export holds
 one read-only repeatable-read transaction across nodes, edges, and identity
 assertions, so every chunk belongs to one committed snapshot. A snapshot stream
-cannot be piped directly into another graph on the same SQLite backend, or between
-distinct PGlite backend wrappers sharing one in-process connection: materialize it
-first or import it into an independent backend. TypeGraph's branch cloner detects
-the shared-PGlite case and materializes its snapshot before importing it.
+cannot be piped directly into a target that writes through the same serialized
+connection: the same SQLite backend, distinct wrappers sharing one better-sqlite3
+handle, a bare `pg`/neon `Client`, a `Pool` explicitly configured with `max: 1`,
+or distinct PGlite backend wrappers sharing one in-process connection —
+materialize it first or import it into an independent backend. The refusal fires
+even through a user-wrapped stream that no longer identifies its source backend,
+because it also checks the target's connection for any export snapshot still
+open on it. TypeGraph's branch cloner detects the shared-PGlite case and
+materializes its snapshot before importing it.
 Non-transactional backends can export identity-disabled graphs without this
 snapshot guarantee. Identity-enabled stores already require a transactional
 backend at construction, so every identity export has the snapshot guarantee.
@@ -475,6 +480,21 @@ merge applied.
   failure surfaces as a `warnings` entry, never a failed merge. Re-running the
   same merge upserts (deterministic ids), never duplicates.
 
+`openProvenanceStore` only ever opens a sidecar graph id it can prove it owns.
+A never-seen id is free to claim as long as it holds no rows at all (a plain
+`createStore` writes rows without registering a schema, so an unregistered id
+is not by itself evidence of a free namespace); once claimed, ownership is a
+durable marker row, checked independently of the schema hash, because an
+application is free to define the same `Provenance` shape at an unrelated id.
+Schema committed but marker not yet written — a crash or a concurrent opener
+between those two writes — resumes rather than refusing forever, but only when
+every row already there is a live, valid contribution for this target under
+its own recomputed id; anything else is refused as a collision, under
+`GRAPH_MERGE_PROVENANCE_ID_COLLISION`, naming which of four states was found
+(an application graph, an empty or unrecognized pre-marker sidecar, or an
+exact-schema graph with no marker) so the remediation matches what is actually
+there instead of generic advice.
+
 Query persisted provenance back later:
 
 ```typescript
@@ -528,8 +548,9 @@ const result = await mergeIncremental({
 });
 ```
 
-`mergeIncremental()` requires `onBasePropertyConflict: "flag"` so a stale branch
-value can never overwrite a newer committed value during new-vs-base recall.
+`mergeIncremental()` requires `onBasePropertyConflict: "flag"` — any other value
+is refused with `InvalidMergeOptionsError` — so a stale branch value can never
+overwrite a newer committed value during new-vs-base recall.
 If both the branch and the live target changed the same inherited row, the target
 value/deletion wins and the conflict is reported. Both `merge()` and
 `mergeIncremental()` commit **transactionally** and require a
@@ -681,7 +702,7 @@ subclass you can branch on:
 | `BranchError` | `branch()` could not materialize a working copy. |
 | `BaseVersionMismatchError` | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge). |
-| `InvalidMergeOptionsError` | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, or `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it. |
+| `InvalidMergeOptionsError` | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`. |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`. |
 | `MergeConflictError` | A conflict could not be resolved under the configured policy. |
 | `MergeError` | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes. |

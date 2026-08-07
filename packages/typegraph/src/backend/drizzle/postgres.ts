@@ -161,6 +161,7 @@ import {
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
   getPgliteClient,
+  hasFunctionProperty,
   isNeonHttpClient,
   isPgliteDatabase,
   PGLITE_MAX_BIND_PARAMETERS,
@@ -424,6 +425,9 @@ export function createPostgresBackend(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
+  // Resolved before the backend exists so marking it below is a lookup, never
+  // work that could fail after a wrapper already observed an unmarked backend.
+  const serializedClient = getSerializedPostgresClient(db);
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
   // pgvector is compiled into a standalone Postgres server, so it is wired
@@ -717,7 +721,7 @@ export function createPostgresBackend(
     // the absent fence, matching `capabilities.contributions.rebuild`.
     ...(capabilities.transactions ?
       {
-        schemaWriteTransaction: <T,>(
+        schemaWriteTransaction: <T>(
           graphId: string,
           fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
         ) => runSchemaWriteTransaction(graphId, (target) => fn(target)),
@@ -1435,11 +1439,97 @@ export function createPostgresBackend(
     },
   };
 
-  const pgliteClient = getPgliteClient(db);
-  if (pgliteClient !== undefined) {
-    markSerializedTransactionResource(backend, pgliteClient);
+  // INVARIANT: mark before any wrapper can observe this backend — see
+  // transaction-resource.ts.
+  if (serializedClient !== undefined) {
+    markSerializedTransactionResource(backend, serializedClient);
   }
   return backend;
+}
+
+/**
+ * Returns the client object a Drizzle Postgres database serializes ALL of its
+ * statements onto, or `undefined` when statements can run on independent
+ * connections.
+ *
+ * Marked (single connection — an open transaction on one wrapper blocks or
+ * captures every other wrapper's statements):
+ *
+ * - **PGlite** — one in-process WASM Postgres connection.
+ * - **A bare `pg` / `@neondatabase/serverless` `Client`** — one owned socket.
+ *   An export's `BEGIN ... READ ONLY` stays open across the whole stream, so a
+ *   concurrent import's INSERT lands inside it ("cannot execute INSERT in a
+ *   read-only transaction").
+ * - **A `Pool` explicitly configured with `max: 1`** — the export checks out the
+ *   pool's only connection for the duration, so a concurrent import waits for a
+ *   connection that is never released.
+ *
+ * Deliberately NOT marked: a default pool (independent connection per
+ * checkout), postgres-js and neon-http tagged-template clients, and anything
+ * unrecognized. A false positive refuses legitimate concurrent work, so the
+ * predicate requires positive evidence and abstains otherwise. A pool capped at
+ * one connection by means other than an explicit `max` option (a global
+ * `pg.defaults.max`, a driver-specific connection string) is therefore not
+ * detected, and a serialized-connection import there still fails the way it did
+ * before this guard existed.
+ */
+function getSerializedPostgresClient(db: AnyPgDatabase): object | undefined {
+  const pgliteClient = getPgliteClient(db);
+  if (pgliteClient !== undefined) return pgliteClient;
+  const client: unknown = (db as Readonly<{ $client?: unknown }>).$client;
+  if (typeof client !== "object" || client === null) return undefined;
+  const candidate = client as Readonly<Record<string, unknown>>;
+  if (!hasFunctionProperty(candidate, "query")) return undefined;
+  if (isSingleConnectionPgPool(candidate)) return client;
+  return isBarePgClient(candidate) ? client : undefined;
+}
+
+/** Whether a `pg`-shaped client is a pool whose only connection is shared. */
+function isSingleConnectionPgPool(
+  candidate: Readonly<Record<string, unknown>>,
+): boolean {
+  // `options` is a pg.Pool member (pg.Client has none), and holds the resolved
+  // pool configuration. Only an explicit `max: 1` is treated as serialized: the
+  // default is 10, so an absent/other `max` says nothing.
+  const options: unknown = candidate["options"];
+  if (typeof options !== "object" || options === null) return false;
+  return (options as Readonly<Record<string, unknown>>)["max"] === 1;
+}
+
+/** Whether a `pg`-shaped client owns exactly one connection (Client, not Pool). */
+function isBarePgClient(candidate: Readonly<Record<string, unknown>>): boolean {
+  // Refuse every pool marker first: `Pool` exposes checkout accounting and its
+  // resolved `options`; `Client` exposes none of them.
+  if (
+    candidate["options"] !== undefined ||
+    candidate["totalCount"] !== undefined ||
+    candidate["idleCount"] !== undefined ||
+    candidate["waitingCount"] !== undefined
+  ) {
+    return false;
+  }
+  // Positive `pg.Client` evidence: the connection lifecycle pair plus
+  // `escapeIdentifier`, which pg defines on Client and not on Pool.
+  return (
+    hasFunctionProperty(candidate, "connect") &&
+    hasFunctionProperty(candidate, "end") &&
+    hasFunctionProperty(candidate, "escapeIdentifier")
+  );
+}
+
+/**
+ * Exported for unit tests that assert the marking predicate directly against
+ * real `pg` `Client` / `Pool` instances; production code reaches it only
+ * through {@link createPostgresBackend}.
+ *
+ * @internal
+ */
+export function isSerializedPostgresClient(client: unknown): boolean {
+  return (
+    getSerializedPostgresClient({
+      $client: client,
+    } as unknown as AnyPgDatabase) !== undefined
+  );
 }
 
 /**

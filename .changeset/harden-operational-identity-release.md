@@ -1,17 +1,13 @@
 ---
-"@nicia-ai/typegraph": patch
+"@nicia-ai/typegraph": minor
 ---
 
-Harden the Operational Identity release and adjacent write paths found during its
-adversarial review. Identity interchange now exports one repeatable-read snapshot,
-uses target-bound keyset pagination, cancels cleanly, and refuses imports that
-would stream back into the same SQLite database or serialized PGlite connection.
-Graph merge uses injective composite keys, preflights provenance sidecar collisions,
-and refuses merge options it cannot honor instead of ignoring them.
+Harden the Operational Identity release and adjacent write paths found during its adversarial review. Identity interchange now exports one repeatable-read snapshot, uses target-bound keyset pagination pinned to code-point order via the dialect adapter's `binaryText` seam so a `base@V` content token minted on 0.45 still matches its recomputation on PostgreSQL, cancels cleanly, and refuses imports that would stream back into a serialized resource an export snapshot holds open — a PGlite connection, a bare `pg`/neon `Client`, a `Pool` explicitly configured with `max: 1`, or a better-sqlite3 handle, including through a user-wrapped stream that no longer identifies its source backend. Graph merge uses injective composite keys, preflights provenance sidecar collisions, and refuses merge options it cannot honor instead of ignoring them.
 
-Edge identity checks now include kind and endpoint kind on every create, delete,
-and get-or-create path, including tombstoned rows. Node and edge `bulkDelete`
-remain one atomic, hookless bulk operation, so a rolled-back commit cannot emit
-successful per-item hooks. PostgreSQL vector search refuses `efSearch` when the
-selected index or transaction mode cannot apply it rather than silently dropping
-the accepted option.
+Edge identity checks now include kind and endpoint kind on every create, delete, and get-or-create path, including tombstoned rows. Node `bulkDelete` remains one atomic, hookless bulk operation exactly as in 0.45. Edge `bulkDelete` changes behavior in 0.46: 0.45.x looped single deletes and fired per-item `onOperationStart`/`onOperationEnd` hooks for each one, and 0.46 makes it one atomic, hookless single-transaction batch instead, so a consumer relying on those per-item hook events for a batch edge delete must move to the bulk hooks (`onBulkOperationStart`/`onBulkOperationEnd`); an id in the batch that belongs to another edge kind is refused with `ValidationError` carrying `EDGE_IDENTITY_MISMATCH_CODE`, rolling back every delete already applied earlier in the same batch. PostgreSQL vector search refuses `efSearch` when the selected index or transaction mode cannot apply it rather than silently dropping the accepted option.
+
+The merge-provenance sidecar now refuses to open at a graph id occupied by a schema-less application graph — a row-existence probe runs before any write, since an unregistered schema is not evidence of a free namespace — resumes an interrupted or concurrently-in-progress sidecar creation (schema committed, marker not yet written, contents ours-or-nothing) instead of refusing it forever, and reports one of four typed refusal reasons under `GRAPH_MERGE_PROVENANCE_ID_COLLISION` — `application-graph`, `empty-legacy-sidecar`, `unupgradeable-legacy-sidecar`, or `unowned-exact-schema-graph` — each carrying remediation specific to the state actually found. `mergeIncremental`'s refusal of a non-`"flag"` `onBasePropertyConflict` is now a typed `InvalidMergeOptionsError` (`MERGE_ERROR_CODES.invalidOptions`, category `user`) instead of a plain `MergeError`, so it is catchable the same way every other refused merge option is.
+
+Edge `matchOn` composite-key construction and its per-field match comparison, and embedding/fulltext field extraction, now read a props bag by declared own key rather than plain property access, so a field named after an `Object.prototype` member (`toString`, `constructor`, `valueOf`) can no longer resolve to the inherited prototype member instead of the field's actual (absent) value. The remaining NUL-joined cache and bucket keys in edge and node operations, and legacy provenance record ids, are now built with the same injective tuple encoding already used elsewhere, closing the last collision-prone key constructions.
+
+This adds public API surface — `InvalidMergeOptionsError`, `EDGE_IDENTITY_MISMATCH_CODE`, `MERGE_ERROR_CODES.invalidOptions` — and changes edge `bulkDelete`'s hook behavior, so this release ships as a `minor`, not a `patch`.

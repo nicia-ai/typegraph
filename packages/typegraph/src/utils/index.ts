@@ -7,6 +7,7 @@ export {
   freezeDeep,
   hasOwnKey,
   isPlainObject,
+  readOwnProperty,
 } from "./object";
 export { isSqlitePath, normalizePath, parseSqlitePath } from "./path";
 export {

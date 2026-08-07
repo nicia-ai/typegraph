@@ -758,6 +758,17 @@ describe.each(backendMatrix())(
       });
       expect(isErr(result)).toBe(true);
       if (isErr(result)) {
+        // A refused CALLER-SUPPLIED option is a user error with the invalid-options
+        // code, not the generic system-category merge failure: an option this entry
+        // point cannot honor is refused by name, never silently ignored.
+        expect(result.error).toBeInstanceOf(InvalidMergeOptionsError);
+        expect(result.error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
+        expect(result.error.category).toBe("user");
+        expect(result.error.details).toMatchObject({
+          option: "onBasePropertyConflict",
+          accepted: "flag",
+          received: "lastWriteWins",
+        });
         expect(result.error.message).toMatch(/onBasePropertyConflict/);
       }
     });

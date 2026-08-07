@@ -37,7 +37,7 @@ import {
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
-import { hasOwnKey } from "../../utils/object";
+import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
@@ -118,7 +118,7 @@ function buildEdgeEndpointCacheKey(
   kind: string,
   id: string,
 ): string {
-  return `${graphId}\u0000${kind}\u0000${id}`;
+  return encodeTupleKey([graphId, kind, id]);
 }
 
 function buildEdgeFromCacheKey(
@@ -127,7 +127,7 @@ function buildEdgeFromCacheKey(
   fromKind: string,
   fromId: string,
 ): string {
-  return `${graphId}\u0000${edgeKind}\u0000${fromKind}\u0000${fromId}`;
+  return encodeTupleKey([graphId, edgeKind, fromKind, fromId]);
 }
 
 function buildEdgeBetweenCacheKey(
@@ -138,14 +138,20 @@ function buildEdgeBetweenCacheKey(
   toKind: string,
   toId: string,
 ): string {
-  return `${graphId}\u0000${edgeKind}\u0000${fromKind}\u0000${fromId}\u0000${toKind}\u0000${toId}`;
+  return encodeTupleKey([graphId, edgeKind, fromKind, fromId, toKind, toId]);
 }
 
 function buildCountEdgesFromCacheKey(
   params: Parameters<GraphBackend["countEdgesFrom"]>[0],
 ): string {
   const activeOnly = params.activeOnly === true ? "1" : "0";
-  return `${params.graphId}\u0000${params.edgeKind}\u0000${params.fromKind}\u0000${params.fromId}\u0000${activeOnly}`;
+  return encodeTupleKey([
+    params.graphId,
+    params.edgeKind,
+    params.fromKind,
+    params.fromId,
+    activeOnly,
+  ]);
 }
 
 function buildInsertEdgeParams(
@@ -1066,7 +1072,10 @@ function buildEdgeCompositeKey(
     fromId,
     toKind,
     toId,
-    ...sortedFields.flatMap((field) => [field, stableStringify(props[field])]),
+    ...sortedFields.flatMap((field) => [
+      field,
+      stableStringify(readOwnProperty(props, field)),
+    ]),
   ]);
 }
 
@@ -1104,8 +1113,8 @@ function findMatchingEdge(
       const rowProps = rowPropsToObject(row.props);
       const matches = matchOn.every(
         (field) =>
-          stableStringify(rowProps[field]) ===
-          stableStringify(inputProps[field]),
+          stableStringify(readOwnProperty(rowProps, field)) ===
+          stableStringify(readOwnProperty(inputProps, field)),
       );
       if (!matches) continue;
     }

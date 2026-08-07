@@ -3,7 +3,13 @@
  *
  * Tests that graphs can be exported and imported while preserving data integrity.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -13,6 +19,8 @@ import {
   defineNode,
   StaleVersionError,
 } from "../src";
+import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import type { GraphBackend } from "../src/backend/types";
 import {
   ConfigurationError,
@@ -143,6 +151,32 @@ const identitySameBackendTargetGraph = defineGraph({
     },
   },
   identity: { sameIdAcrossKinds: "fold" },
+});
+
+/**
+ * Same shape as `testGraph` under a different id: the import target when both
+ * stores live on ONE SQLite connection.
+ */
+const sameHandleTargetGraph = defineGraph({
+  id: "interchange_same_handle_target",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+    },
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
 });
 
 const DelimitedPerson = defineNode("Person:x", {
@@ -2023,5 +2057,114 @@ describe("Identity interchange streaming", () => {
         importOptions({ onConflict: "error" }),
       ),
     ).rejects.toThrow(ValidationError);
+  });
+});
+
+describe("Serialized-connection snapshot streaming guards", () => {
+  const openDatabases: Database.Database[] = [];
+
+  afterEach(() => {
+    for (const database of openDatabases.splice(0)) database.close();
+  });
+
+  function openMigratedDatabase(): Database.Database {
+    const database = new Database(":memory:");
+    openDatabases.push(database);
+    for (const statement of generateSqliteDDL()) database.exec(statement);
+    return database;
+  }
+
+  it("refuses a snapshot import across two backends over one SQLite handle", async () => {
+    // Distinct wrappers, so the object-identity check cannot see them; one
+    // better-sqlite3 connection, so the export's transaction and the import's
+    // writer lock are the same lock. Before ownership marking, this ran until
+    // the driver failed mid-stream with "cannot start a transaction within a
+    // transaction" — after chunks had already committed.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "same-handle" });
+    const beginExport = vi.spyOn(sourceBackend, "transaction");
+
+    await expect(
+      importGraphStream(
+        target,
+        exportGraphStream(source),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+        graphId: sameHandleTargetGraph.id,
+      },
+    });
+    // Refused before the export opened its snapshot, so nothing was read and
+    // nothing was written.
+    expect(beginExport).not.toHaveBeenCalled();
+    expect(await target.nodes.Person.count()).toBe(0);
+  });
+
+  it("streams between two SQLite connections to one file", async () => {
+    // Separate connections are genuinely concurrent under WAL; refusing them
+    // would refuse work that succeeds.
+    const directory = await mkdtemp(path.join(tmpdir(), "typegraph-stream-"));
+    try {
+      const file = path.join(directory, "graph.db");
+      const sourceDatabase = new Database(file);
+      openDatabases.push(sourceDatabase);
+      sourceDatabase.pragma("journal_mode = WAL");
+      for (const statement of generateSqliteDDL()) {
+        sourceDatabase.exec(statement);
+      }
+      const targetDatabase = new Database(file);
+      openDatabases.push(targetDatabase);
+      const source = createStore(
+        testGraph,
+        createSqliteBackend(drizzle(sourceDatabase)),
+      );
+      const target = createStore(
+        sameHandleTargetGraph,
+        createSqliteBackend(drizzle(targetDatabase)),
+      );
+      await source.nodes.Person.create({ name: "Alice" }, { id: "wal-alice" });
+
+      const result = await importGraphStream(
+        target,
+        exportGraphStream(source),
+        importOptions({ onConflict: "error" }),
+      );
+
+      expect(result.success).toBe(true);
+      expect(await target.nodes.Person.count()).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("streams into the same non-transactional SQLite backend", async () => {
+    // `transactionMode: "none"` exports statement by statement with no read
+    // transaction held, so the deadlock the refusal describes cannot happen.
+    // Refusing here would deny working behavior citing a transaction that does
+    // not exist.
+    const database = openMigratedDatabase();
+    const backend = createSqliteBackend(drizzle(database), {
+      executionProfile: { transactionMode: "none", isSync: true },
+    });
+    expect(backend.capabilities.transactions).toBe(false);
+    const source = createStore(testGraph, backend);
+    const target = createStore(sameHandleTargetGraph, backend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-alice" });
+
+    const result = await importGraphStream(
+      target,
+      exportGraphStream(source),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(await target.nodes.Person.count()).toBe(1);
   });
 });

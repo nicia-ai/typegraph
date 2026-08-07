@@ -1402,6 +1402,12 @@ export type EdgeCollection<
    *
    * Atomic when the backend supports transactions. Silently ignores IDs
    * that don't exist.
+   *
+   * The batch runs as one transaction, checking each id's kind against the
+   * authoritative row as it goes. An id owned by another edge kind is
+   * refused with `ValidationError` carrying `EDGE_IDENTITY_MISMATCH_CODE`;
+   * because the whole batch is one transaction, that refusal rolls back
+   * every delete already applied for an earlier id in the same batch.
    */
   bulkDelete: (ids: readonly EdgeId<E>[]) => Promise<void>;
 

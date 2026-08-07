@@ -6,7 +6,10 @@
  */
 import type { z } from "zod";
 
-import { sharesSerializedTransactionResource } from "../backend/transaction-resource";
+import {
+  hasActiveSerializedSnapshotExport,
+  snapshotExportContention,
+} from "../backend/transaction-resource";
 import {
   type GraphBackend,
   isLiveNodeRow,
@@ -220,6 +223,14 @@ export async function importGraph<G extends GraphDef>(
  *
  * Nodes must precede edges. Once a node chunk commits, edge validation reads the
  * target store rather than retaining every imported node id in memory.
+ *
+ * Refused with a typed {@link ConfigurationError} when the target writes through
+ * a database connection that a snapshot export is holding open — either because
+ * this stream came from that export, or because ANY export snapshot is open on
+ * that connection when a chunk arrives (which covers a stream the caller has
+ * wrapped). Connections we cannot observe are not detected: two clients dialed
+ * at one server, or two SQLite handles on one file, are independent and are not
+ * refused.
  */
 export async function importGraphStream<G extends GraphDef>(
   store: Store<G>,
@@ -229,33 +240,49 @@ export async function importGraphStream<G extends GraphDef>(
   const options = ImportOptionsSchema.parse(rawOptions);
   const sourceBackend = exportStreamBackend(chunks);
   const targetBackend = storeBackend(store);
-  const sameSqliteBackend =
-    sourceBackend === targetBackend && targetBackend.dialect === "sqlite";
-  const sharedSerializedBackend =
-    sourceBackend !== undefined &&
-    sharesSerializedTransactionResource(sourceBackend, targetBackend);
-  if (sameSqliteBackend || sharedSerializedBackend) {
-    throw new ConfigurationError(
-      "A snapshot export cannot be streamed into a target that shares its serialized database connection: the read transaction holds that connection while import requires its writer lock.",
-      {
-        code:
-          sameSqliteBackend ?
-            "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT"
-          : "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
-        graphId: store.graphId,
-      },
-      {
-        suggestion:
-          "Export to a file first, or import the stream into an independent backend.",
-      },
+  // Whether this export would hold the connection the import writes through is
+  // decided by the single owner of that predicate — including the
+  // `transactions: false` abstention, where nothing is held open and refusing
+  // would refuse work that succeeds.
+  const contention =
+    sourceBackend === undefined ? undefined : (
+      snapshotExportContention(sourceBackend, targetBackend)
+    );
+  if (contention !== undefined) {
+    throw serializedSnapshotImportRefusal(
+      store.graphId,
+      contention === "same-sqlite-backend" ?
+        "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT"
+      : "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
     );
   }
   const result = emptyImportResult();
   let header: GraphDataHeader | undefined;
   let receivedEdges = false;
   let receivedIdentity = false;
+  let snapshotRegistryChecked = false;
 
   for await (const chunk of chunks) {
+    // The check above needs the stream to still identify its source backend,
+    // which any user wrapper (a delegating generator, `Readable.from`, a tee)
+    // erases. By the time the FIRST chunk arrives the export's snapshot
+    // transaction is already open and the registry says so itself, so a wrapped
+    // stream fails the same way an unwrapped one does instead of stalling
+    // behind a transaction that cannot end until this loop does.
+    //
+    // Only the first chunk is checked, because this refusal must land before
+    // the import writes anything: an unrelated export opening on that
+    // connection mid-stream is not a reason to abort an import whose earlier
+    // chunks are already committed.
+    if (!snapshotRegistryChecked) {
+      snapshotRegistryChecked = true;
+      if (hasActiveSerializedSnapshotExport(targetBackend)) {
+        throw serializedSnapshotImportRefusal(
+          store.graphId,
+          "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+        );
+      }
+    }
     switch (chunk.type) {
       case "header": {
         if (header !== undefined) {
@@ -362,6 +389,38 @@ export async function importGraphStream<G extends GraphDef>(
     "importGraphStream",
   );
   return { ...result, success: result.errors.length === 0 };
+}
+
+/**
+ * The single owner of the refusal raised when a streamed snapshot export and its
+ * import target write through one serialized connection — from the pre-flight
+ * check on the stream's own backend and from the mid-stream check against the
+ * live export registry alike, so both paths state the same detected condition.
+ *
+ * The message describes exactly what is detected: an export snapshot
+ * transaction that holds the one connection the import must write on. It claims
+ * nothing about connections we cannot observe (two clients dialed at the same
+ * server, two SQLite handles on one file), which are independent and are not
+ * refused.
+ *
+ * `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT` is not a distinct condition: it
+ * names the object-identity detector for the one refused condition and is
+ * retained for compatibility with callers that already branch on it.
+ */
+function serializedSnapshotImportRefusal(
+  graphId: string,
+  code:
+    | "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT"
+    | "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+): ConfigurationError {
+  return new ConfigurationError(
+    "A snapshot export cannot be streamed into a target that writes through the same serialized database connection: the export's read transaction holds that connection open for the whole stream, so this import can never take the writer slot it needs.",
+    { code, graphId },
+    {
+      suggestion:
+        "Export to a file first, or import the stream into an independent backend.",
+    },
+  );
 }
 
 function throwIfStreamChunkFailed(

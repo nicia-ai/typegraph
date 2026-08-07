@@ -3,6 +3,7 @@
  *
  * Exports nodes and edges from a store to the interchange format.
  */
+import { beginSerializedSnapshotExport } from "../backend/transaction-resource";
 import {
   type GraphBackend,
   rowPropsToObject,
@@ -128,6 +129,21 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       channel.push(chunk),
     );
   };
+  // On a serialized backend the snapshot transaction below holds the single
+  // connection for the whole stream. Publish that fact for the duration so a
+  // concurrent import into the same connection is refused rather than left to
+  // wait for a writer slot that cannot free up — this is what the stream's
+  // consumer identity cannot answer once a caller wraps the iterable.
+  // Registration is deliberately inside the generator body: it must begin when
+  // the transaction opens (first pull), not when the iterable is constructed.
+  const releaseSnapshotExport =
+    backend.capabilities.transactions ?
+      beginSerializedSnapshotExport(backend)
+    : () => {
+        // No snapshot transaction is opened here, so none was registered:
+        // a non-transactional export holds nothing against a concurrent
+        // import.
+      };
   const producer = (
     backend.capabilities.transactions ?
       backend.transaction((target) => produce(target), {
@@ -136,9 +152,11 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       })
     : produce(backend)).then(
     () => {
+      releaseSnapshotExport();
       channel.finish();
     },
     (error: unknown) => {
+      releaseSnapshotExport();
       channel.fail(error);
     },
   );

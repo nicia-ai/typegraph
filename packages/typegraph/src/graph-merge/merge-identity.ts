@@ -39,8 +39,8 @@
  */
 import { identityAssertionSemanticKey } from "../identity/assertion-key";
 import {
-  compareIdentityReferences,
   identityReferenceKey,
+  normalizeIdentityPair,
 } from "../identity/reference";
 import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
@@ -504,10 +504,7 @@ export function remapIdentityAssertionEndpoints(
       );
       continue;
     }
-    const [a, b] =
-      compareIdentityReferences(remappedA, remappedB) <= 0 ?
-        [remappedA, remappedB]
-      : [remappedB, remappedA];
+    const [a, b] = normalizeIdentityPair(remappedA, remappedB);
     const result = { ...assertion, a, b };
     // A COMMITTED row's endpoints must never be canonicalized away: the
     // applier cannot rewrite a stored row, so a plan carrying its id with

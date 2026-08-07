@@ -646,7 +646,10 @@ describe("getSharedFieldTypeInfo - object shape intersection", () => {
         "DeclaresPrototypeName",
         {
           schema: z.object({
-            metadata: z.object({ [inheritedField]: z.string() }),
+            metadata: z.object({
+              [inheritedField]: z.string(),
+              value: z.string(),
+            }),
           }),
         },
       ],
@@ -662,6 +665,15 @@ describe("getSharedFieldTypeInfo - object shape intersection", () => {
         "metadata",
       );
 
+      // A vacuous pass (e.g. `info?.shape` undefined for an unrelated reason)
+      // must not be mistaken for the guarantee this test exists to pin: both
+      // `info` and `info.shape` are asserted defined, and a field the two
+      // kinds legitimately share (`value`) must still surface, so the
+      // prototype-named field's absence is proven against a shape that
+      // otherwise works, not an empty one.
+      expect(info).toBeDefined();
+      expect(info?.shape).toBeDefined();
+      expect(info?.shape?.["value"]?.valueType).toBe("string");
       expect(Object.hasOwn(info?.shape ?? {}, inheritedField)).toBe(false);
     } finally {
       Reflect.deleteProperty(Object.prototype, inheritedField);

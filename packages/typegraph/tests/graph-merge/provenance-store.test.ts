@@ -19,12 +19,21 @@
  *   7. `persistProvenanceRecords` collapses hash-identical records for callers that
  *      reach it without going through a merge.
  *
+ * A second group covers OWNERSHIP of the sidecar graph id — which occupant
+ * `openProvenanceStore` may write to, and which refusal it names: a schema-less
+ * application graph (rows but no schema row) and an exact-schema one are refused
+ * untouched, an empty or unverifiable pre-marker sidecar is refused with
+ * drop-this-id remediation, and a marker-less sidecar this module itself could
+ * have written (interrupted creation, interrupted upgrade, or a racing opener)
+ * is resumed rather than bricked.
+ *
  * A final backend-independent block pins the row identity itself: the literal id a
  * contribution hashes to, and that no identifying field is missing from the key
  * every collapse is keyed on.
  */
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
+  createStore,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -83,6 +92,10 @@ const ApplicationProvenanceOwner = defineNode("ProvenanceOwner", {
   }),
 });
 
+/** The row id the sidecar's durable ownership marker is stored under. */
+const PROVENANCE_OWNER_ROW_ID = "merge-provenance-owner";
+const PROVENANCE_OWNER = "@nicia-ai/typegraph/merge-provenance";
+
 const careGraph = defineGraph({
   id: "provenance-test-care",
   nodes: { Patient: { type: Patient }, Encounter: { type: Encounter } },
@@ -94,6 +107,53 @@ type CareGraph = typeof careGraph;
 
 const BRANCH_A = asBranchId("provider-a");
 const BRANCH_B = asBranchId("provider-b");
+
+/**
+ * The graph a caller would define to sit at the sidecar id with the CURRENT
+ * (owner-marker-bearing) sidecar shape. Its serialized schema — and therefore
+ * its hash — is the one `openProvenanceStore` computes for its own graph, which
+ * is what makes it usable both as the "creation crashed after the schema commit"
+ * fixture and as the exact-schema application-graph fixture.
+ */
+function sidecarShapedGraph() {
+  return defineGraph({
+    id: provenanceGraphId(careGraph.id),
+    nodes: {
+      Provenance: { type: ApplicationProvenance },
+      ProvenanceOwner: { type: ApplicationProvenanceOwner },
+    },
+    edges: {},
+  });
+}
+
+/** The pre-marker (legacy) sidecar shape: the `Provenance` kind alone. */
+function legacyShapedGraph() {
+  return defineGraph({
+    id: provenanceGraphId(careGraph.id),
+    nodes: { Provenance: { type: ApplicationProvenance } },
+    edges: {},
+  });
+}
+
+/** Reads the durable ownership marker row straight from the backend. */
+async function readOwnerMarker(
+  backend: GraphBackend,
+): Promise<Readonly<{ id: string }> | undefined> {
+  return backend.getNode(
+    provenanceGraphId(careGraph.id),
+    "ProvenanceOwner",
+    PROVENANCE_OWNER_ROW_ID,
+  );
+}
+
+/** A contribution the sidecar can hold, plus its deterministic row id. */
+const SIDECAR_RECORD = {
+  role: "node",
+  canonicalId: "canonical-resumed",
+  canonicalKind: "Patient",
+  branchId: BRANCH_A,
+  sourceId: "source-resumed",
+} as const;
 
 /** Committed endpoints both branches fork with, so their edges share an identity. */
 const COMMITTED_PATIENT = "pat-committed";
@@ -563,16 +623,177 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     ).resolves.toMatchObject({ id: "existing", name: "Existing" });
   });
 
-  it("refuses an exact-schema application graph without the internal owner marker", async () => {
+  it("refuses a SCHEMA-LESS application graph at the sidecar id without touching it", async () => {
+    cleanups = [];
     const backend = await makeBackend();
     const applicationGraph = defineGraph({
       id: provenanceGraphId(careGraph.id),
-      nodes: {
-        Provenance: { type: ApplicationProvenance },
-        ProvenanceOwner: { type: ApplicationProvenanceOwner },
-      },
+      nodes: { Patient: { type: Patient } },
       edges: {},
     });
+    // Plain `createStore` — documented basic usage — registers NO schema row, so
+    // the sidecar id reads as unregistered while holding application data. An
+    // ownership decision keyed only on the active schema would register the
+    // sidecar schema OVER this graph and write into its namespace.
+    const applicationStore = createStore(applicationGraph, backend);
+    await applicationStore.nodes.Patient.create(
+      { name: "Existing", birthDate: "1970-01-01" },
+      { id: "existing" },
+    );
+
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "application-graph",
+      },
+    });
+
+    // Refused BEFORE any modification: no sidecar schema over the application's
+    // graph id, no ownership marker, and its row untouched.
+    await expect(
+      backend.getActiveSchema(provenanceGraphId(careGraph.id)),
+    ).resolves.toBeUndefined();
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+    await expect(
+      applicationStore.nodes.Patient.getById("existing" as never),
+    ).resolves.toMatchObject({ id: "existing", name: "Existing" });
+  });
+
+  it("resumes a sidecar creation whose ownership marker never committed", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    // Exactly production's FIRST write and nothing after it: the owned sidecar
+    // schema is committed, the marker row is not. Reachable by a crash between
+    // the two separately committed writes.
+    await createStoreWithSchema(sidecarShapedGraph(), backend);
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+
+    const resumed = await openProvenanceStore(backend, careGraph.id);
+    await expect(readOwnerMarker(backend)).resolves.toMatchObject({
+      id: PROVENANCE_OWNER_ROW_ID,
+    });
+    expect(
+      await persistProvenanceRecords(resumed, careGraph.id, [SIDECAR_RECORD]),
+    ).toBe(1);
+
+    // The next open takes the plain owned path (marker present).
+    const reopened = await openProvenanceStore(backend, careGraph.id);
+    expect(await reopened.nodes.Provenance.find()).toHaveLength(1);
+  });
+
+  it("resumes an interrupted upgrade that already carries verified sidecar rows", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    // The legacy-upgrade path has the same two-write window: schema evolved,
+    // marker not yet written, rows already present and verifying.
+    const [staged] = await createStoreWithSchema(sidecarShapedGraph(), backend);
+    const rowId = await provenanceNodeId(careGraph.id, SIDECAR_RECORD);
+    await staged.nodes.Provenance.create(
+      { targetGraphId: careGraph.id, ...SIDECAR_RECORD },
+      { id: rowId },
+    );
+
+    const resumed = await openProvenanceStore(backend, careGraph.id);
+    await expect(
+      resumed.nodes.Provenance.getById(rowId as never),
+    ).resolves.toMatchObject({ id: rowId, canonicalId: "canonical-resumed" });
+    await expect(readOwnerMarker(backend)).resolves.toMatchObject({
+      id: PROVENANCE_OWNER_ROW_ID,
+    });
+  });
+
+  it("does not refuse an opener that raced between the schema and marker writes", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    // Driven sequentially on purpose (a real concurrency test would be flaky):
+    // opener A commits the schema, opener B reads the owned hash with no marker
+    // yet — the interleaving that used to surface as a permanent-looking
+    // collision — and A's marker write lands afterwards.
+    const [openerA] = await createStoreWithSchema(
+      sidecarShapedGraph(),
+      backend,
+    );
+    const openerB = await openProvenanceStore(backend, careGraph.id);
+    await openerA.nodes.ProvenanceOwner.upsertById(PROVENANCE_OWNER_ROW_ID, {
+      owner: PROVENANCE_OWNER,
+      version: 1,
+      targetGraphId: careGraph.id,
+    });
+
+    expect(
+      await persistProvenanceRecords(openerB, careGraph.id, [SIDECAR_RECORD]),
+    ).toBe(1);
+    await expect(
+      openProvenanceStore(backend, careGraph.id),
+    ).resolves.toBeDefined();
+    // Both openers claim the SAME marker id, so the race leaves one marker row.
+    expect(await openerA.nodes.ProvenanceOwner.find()).toHaveLength(1);
+  });
+
+  it("refuses an EMPTY pre-marker sidecar and says to drop that graph id", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    // A real fleet state: the old persist path created the sidecar before
+    // writing records, so a zero-record merge left an empty legacy sidecar.
+    await createStoreWithSchema(legacyShapedGraph(), backend);
+
+    const refusal = await openProvenanceStore(backend, careGraph.id).catch(
+      (error: unknown) => error,
+    );
+    expect(refusal).toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "empty-legacy-sidecar",
+      },
+    });
+    // The remediation must name dropping this id — renaming an application
+    // graph is advice for a state this is not.
+    expect((refusal as { suggestion?: string }).suggestion).toContain(
+      `Drop graph id "${provenanceGraphId(careGraph.id)}"`,
+    );
+  });
+
+  it("refuses a pre-marker sidecar whose rows do not recompute to their ids", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    const [legacyStore] = await createStoreWithSchema(
+      legacyShapedGraph(),
+      backend,
+    );
+    // A row an older release could have written under an ambiguous id: valid
+    // provenance props, but not the id the tuple hashes to today.
+    await legacyStore.nodes.Provenance.create(
+      { targetGraphId: careGraph.id, ...SIDECAR_RECORD },
+      { id: "prov_ambiguous-legacy-id" },
+    );
+
+    const refusal = await openProvenanceStore(backend, careGraph.id).catch(
+      (error: unknown) => error,
+    );
+    expect(refusal).toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "unupgradeable-legacy-sidecar",
+      },
+    });
+    expect((refusal as { suggestion?: string }).suggestion).toContain(
+      "drop it",
+    );
+    // Fail-closed: the unupgradeable sidecar is left exactly as it was.
+    await expect(
+      legacyStore.nodes.Provenance.getById("prov_ambiguous-legacy-id" as never),
+    ).resolves.toMatchObject({ id: "prov_ambiguous-legacy-id" });
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+  });
+
+  it("refuses an exact-schema application graph without the internal owner marker", async () => {
+    const backend = await makeBackend();
+    const applicationGraph = sidecarShapedGraph();
     const [applicationStore] = await createStoreWithSchema(
       applicationGraph,
       backend,
@@ -589,27 +810,34 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
       { id: "application-owned-row" },
     );
 
+    // `unowned-exact-schema-graph` is reachable ONLY on the branch where the
+    // active schema hash EQUALS the sidecar's and the marker is missing, so the
+    // discriminant pins this test to the missing-marker branch rather than to
+    // any hash mismatch. (The same graph definition with no rows is ADOPTED by
+    // the interrupted-creation test above — the other half of that proof.)
     await expect(
       openProvenanceStore(backend, careGraph.id),
     ).rejects.toMatchObject({
       name: "ConfigurationError",
-      details: { code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION" },
+      details: {
+        code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+        reason: "unowned-exact-schema-graph",
+      },
     });
     await expect(
       applicationStore.nodes.Provenance.getById(
         "application-owned-row" as never,
       ),
     ).resolves.toMatchObject({ id: "application-owned-row" });
+    await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
   });
 
   it("upgrades a populated legacy sidecar and preserves its contributions", async () => {
     const backend = await makeBackend();
-    const legacyGraph = defineGraph({
-      id: provenanceGraphId(careGraph.id),
-      nodes: { Provenance: { type: ApplicationProvenance } },
-      edges: {},
-    });
-    const [legacyStore] = await createStoreWithSchema(legacyGraph, backend);
+    const [legacyStore] = await createStoreWithSchema(
+      legacyShapedGraph(),
+      backend,
+    );
     const legacyRecord = {
       role: "node",
       canonicalId: "legacy-canonical",

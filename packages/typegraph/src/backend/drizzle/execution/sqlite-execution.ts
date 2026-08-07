@@ -36,7 +36,7 @@ type PreparedAllStatement = Readonly<{
   reader?: boolean;
 }>;
 
-type SqliteClientWithPrepare = Readonly<{
+export type SqliteClientWithPrepare = Readonly<{
   prepare: (sqlText: string) => PreparedAllStatement;
 }>;
 
@@ -343,7 +343,13 @@ function detectMaxBindParameters(
   }
 }
 
-function resolveSqliteClient(
+/**
+ * Returns the driver client a Drizzle SQLite database prepares statements on,
+ * or `undefined` when it does not expose one. Shared with the
+ * serialized-resource detection in `../sqlite.ts` so both spell "this Drizzle
+ * database owns a `prepare`-capable client" the same way.
+ */
+export function resolveSqliteClient(
   db: AnySqliteDatabase,
 ): SqliteClientWithPrepare | undefined {
   const sqliteClient = (db as SqliteClientCarrier).$client;

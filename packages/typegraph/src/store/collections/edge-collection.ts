@@ -23,6 +23,7 @@ import { type QueryBuilder } from "../../query/builder";
 import type { BatchableQuery } from "../../query/builder/types";
 import { groupBy } from "../../utils/array";
 import { requireDefined } from "../../utils/presence";
+import { encodeTupleKey } from "../../utils/tuple-key";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import {
   assertEdgeIdentityMatches,
@@ -291,7 +292,7 @@ function buildUpsertUpdateEdgeInput(
  * predicate itself uses (`from_kind` + `from_id`).
  */
 function endpointKey(endpointKind: string, id: string): string {
-  return `${endpointKind}\u0000${id}`;
+  return encodeTupleKey([endpointKind, id]);
 }
 
 /**

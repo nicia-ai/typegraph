@@ -13,7 +13,14 @@
  * - Batch-hook contract: batch methods remain deliberately hookless, including
  *   when their transaction rolls back at COMMIT.
  */
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { Client, Pool } from "pg";
+import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -25,6 +32,8 @@ import {
   type QueryHookContext,
   searchable,
 } from "../src";
+import { isSerializedPostgresClient } from "../src/backend/drizzle/postgres";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
 import {
   markSerializedTransactionResource,
@@ -83,6 +92,133 @@ describe("serialized transaction resource ownership", () => {
     expect(first).not.toBe(second);
     expect(sharesSerializedTransactionResource(first, second)).toBe(true);
     expect(sharesSerializedTransactionResource(first, root)).toBe(true);
+  });
+
+  it("carries ownership through a GraphBackend projection", () => {
+    // A `history: true` store runs on an OVERLAY OVER A PROJECTION of its
+    // backend. A projection that dropped the mark left the import guard and
+    // the branch cloner unable to see that the store still writes through the
+    // source's one connection.
+    const root = createTestBackend();
+    const resource = {};
+    markSerializedTransactionResource(root, resource);
+
+    const projected = createGraphBackendProjection(root);
+    const overlaid = createBackendOverlay(projected, {});
+
+    expect(projected).not.toBe(root);
+    expect(sharesSerializedTransactionResource(projected, root)).toBe(true);
+    expect(sharesSerializedTransactionResource(overlaid, root)).toBe(true);
+  });
+
+  it("does not conflate projections of independent backends", () => {
+    const root = createTestBackend();
+    const projectedRoot = createGraphBackendProjection(root);
+    const other = createTestBackend();
+    const projectedOther = createGraphBackendProjection(other);
+
+    expect(sharesSerializedTransactionResource(projectedRoot, root)).toBe(true);
+    expect(
+      sharesSerializedTransactionResource(projectedRoot, projectedOther),
+    ).toBe(false);
+  });
+});
+
+/** Stands in for a driver's query method on a hand-built client. */
+function resolveNoRows(): Promise<readonly unknown[]> {
+  return Promise.resolve([]);
+}
+
+describe("serialized Postgres client detection", () => {
+  // The marking predicate decides whether two backends over one client are
+  // treated as a single serialized connection. It runs against real `pg`
+  // objects here: a connection is never opened, so no server is required, but
+  // the shapes are the driver's own rather than a hand-written stand-in.
+  const CONNECTION_STRING = "postgres://user@127.0.0.1:1/typegraph_probe";
+
+  it("marks a bare pg Client", () => {
+    const client = new Client({ connectionString: CONNECTION_STRING });
+
+    expect(isSerializedPostgresClient(client)).toBe(true);
+  });
+
+  it("does not mark a default pg Pool", () => {
+    const pool = new Pool({ connectionString: CONNECTION_STRING });
+
+    try {
+      expect(isSerializedPostgresClient(pool)).toBe(false);
+    } finally {
+      void pool.end();
+    }
+  });
+
+  it("marks a pg Pool explicitly capped at one connection", () => {
+    // An export checks out the pool's only connection for the whole stream, so
+    // a concurrent import waits for a connection that never comes back.
+    const pool = new Pool({ connectionString: CONNECTION_STRING, max: 1 });
+
+    try {
+      expect(isSerializedPostgresClient(pool)).toBe(true);
+    } finally {
+      void pool.end();
+    }
+  });
+
+  it("abstains on clients it cannot positively identify", () => {
+    // postgres-js is a callable tagged template, neon-http is callable too, and
+    // an arbitrary object proves nothing. Marking any of them would refuse
+    // legitimate concurrent work, so the predicate declines.
+    const taggedTemplate = Object.assign(resolveNoRows, {
+      unsafe: resolveNoRows,
+      begin: resolveNoRows,
+      query: resolveNoRows,
+    });
+
+    expect(isSerializedPostgresClient(taggedTemplate)).toBe(false);
+    expect(isSerializedPostgresClient({ query: resolveNoRows })).toBe(false);
+    expect(isSerializedPostgresClient({})).toBe(false);
+  });
+});
+
+describe("serialized SQLite connection detection", () => {
+  const openDatabases: Database.Database[] = [];
+  const temporaryDirectories: string[] = [];
+
+  afterEach(async () => {
+    for (const database of openDatabases.splice(0)) database.close();
+    for (const directory of temporaryDirectories.splice(0)) {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  function openDatabase(file: string): Database.Database {
+    const database = new Database(file);
+    openDatabases.push(database);
+    return database;
+  }
+
+  it("recognizes two backends over one better-sqlite3 handle", () => {
+    const database = openDatabase(":memory:");
+
+    const first = createSqliteBackend(drizzle(database));
+    const second = createSqliteBackend(drizzle(database));
+
+    expect(first).not.toBe(second);
+    expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+  });
+
+  it("treats separate connections to one file as independent", async () => {
+    // better-sqlite3 serializes PER CONNECTION. Two handles on one WAL file are
+    // genuinely concurrent, so treating them as one serialized resource would
+    // refuse an export/import pair that works.
+    const directory = await mkdtemp(path.join(tmpdir(), "typegraph-sqlite-"));
+    temporaryDirectories.push(directory);
+    const file = path.join(directory, "graph.db");
+
+    const first = createSqliteBackend(drizzle(openDatabase(file)));
+    const second = createSqliteBackend(drizzle(openDatabase(file)));
+
+    expect(sharesSerializedTransactionResource(first, second)).toBe(false);
   });
 });
 
@@ -406,6 +542,34 @@ describe("hook contract: success is reported only after COMMIT", () => {
       expect(await dumpObservableState(store)).not.toEqual(before);
     });
   }
+
+  it("edge bulkDelete fires zero per-item hooks, unlike a single delete", async () => {
+    // `executeEdgeDeleteBatch` (src/store/operations/edge-operations.ts)
+    // deliberately skips `withOperationHooks` for batch throughput. Asserted
+    // as EXACTLY zero events against a single `delete` baseline: a hooked
+    // per-item loop would silently restore per-item hooks and still pass
+    // every other suite.
+    const { store, events } = await buildStore();
+    await store.edges.knows.create(
+      { kind: "Person", id: "person-b" } as never,
+      { kind: "Person", id: "person-a" } as never,
+      { weight: 2 },
+      { id: "knows-2" },
+    );
+    events.length = 0;
+
+    await store.edges.knows.delete("knows-1" as never);
+    expect(events).toEqual(["start:delete:edge", "end:delete:edge"]);
+
+    events.length = 0;
+    await store.edges.knows.bulkDelete(["knows-2" as never]);
+    expect(events).toEqual([]);
+
+    const deleted = await store.edges.knows.getById("knows-2" as never, {
+      temporalMode: "includeTombstones",
+    });
+    expect(deleted?.meta.deletedAt).toBeDefined();
+  });
 
   for (const operation of operations) {
     it(`${operation.name}: commit failure reports onError, never onOperationEnd, and rolls back`, async () => {

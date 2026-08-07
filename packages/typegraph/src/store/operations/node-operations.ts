@@ -66,6 +66,7 @@ import {
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import { requireDefined } from "../../utils/presence";
+import { encodeTupleKey } from "../../utils/tuple-key";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateNodeInput } from "../collections/node-collection";
 import {
@@ -195,10 +196,8 @@ function getNodeRegistration<G extends GraphDef>(graph: G, kind: string) {
   return registration;
 }
 
-const CACHE_KEY_SEPARATOR = "\u0000";
-
 function buildNodeCacheKey(graphId: string, kind: string, id: string): string {
-  return `${graphId}${CACHE_KEY_SEPARATOR}${kind}${CACHE_KEY_SEPARATOR}${id}`;
+  return encodeTupleKey([graphId, kind, id]);
 }
 
 function buildUniqueCacheKey(
@@ -207,7 +206,7 @@ function buildUniqueCacheKey(
   constraintName: string,
   key: string,
 ): string {
-  return `${graphId}${CACHE_KEY_SEPARATOR}${nodeKind}${CACHE_KEY_SEPARATOR}${constraintName}${CACHE_KEY_SEPARATOR}${key}`;
+  return encodeTupleKey([graphId, nodeKind, constraintName, key]);
 }
 
 function buildInsertNodeParams(
@@ -986,7 +985,7 @@ export async function primeBatchValidationCaches(
           ctx.registry,
         );
         for (const kindToCheck of kindsToCheck) {
-          const groupKey = kindToCheck + CACHE_KEY_SEPARATOR + constraint.name;
+          const groupKey = encodeTupleKey([kindToCheck, constraint.name]);
           const group = groups.get(groupKey) ?? {
             nodeKind: kindToCheck,
             constraintName: constraint.name,

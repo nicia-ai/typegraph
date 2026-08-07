@@ -121,7 +121,12 @@ export type AnyPgTransaction = PgTransaction<
 
 export type PostgresExecutionAdapter = SqlExecutionAdapter;
 
-function hasFunctionProperty<K extends string>(
+/**
+ * Duck-typing primitive for the client-shape predicates: `value` carries a
+ * callable `property`. Shared with the serialized-resource detection in
+ * `../postgres.ts` so both spell "has this method" the same way.
+ */
+export function hasFunctionProperty<K extends string>(
   value: unknown,
   property: K,
 ): value is Readonly<Record<K, (...args: readonly unknown[]) => unknown>> {
@@ -655,10 +660,7 @@ function assertWithinBindParameterLimit(
   parameterCount: number,
   maxBindParameters: number | undefined,
 ): void {
-  if (
-    maxBindParameters === undefined ||
-    parameterCount <= maxBindParameters
-  ) {
+  if (maxBindParameters === undefined || parameterCount <= maxBindParameters) {
     return;
   }
   throw new ConfigurationError(

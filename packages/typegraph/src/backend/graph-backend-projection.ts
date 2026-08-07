@@ -1,3 +1,4 @@
+import { inheritSerializedTransactionResource } from "./transaction-resource";
 import { type GraphBackend } from "./types";
 
 /**
@@ -135,7 +136,17 @@ export function projectBackendMembers<
 
   // Keys are constrained to TBackend and values are copied from that same
   // object without reshaping. Optional members remain absent.
-  return Object.fromEntries(entries) as Readonly<Pick<TBackend, TKey>>;
+  const projection = Object.fromEntries(entries) as Readonly<
+    Pick<TBackend, TKey>
+  >;
+  // A projection forwards every statement to the SAME connection as its source,
+  // so it owns the same serialized transaction resource. Inheriting here rather
+  // than at each call site keeps the marker attached through the projections
+  // built deep inside the store (recorded-time capture, hooked query backends),
+  // where an import guard would otherwise see an unmarked backend and let a
+  // read-and-write-through-one-connection stream proceed into a deadlock.
+  inheritSerializedTransactionResource(projection, backend);
+  return projection;
 }
 
 /**
