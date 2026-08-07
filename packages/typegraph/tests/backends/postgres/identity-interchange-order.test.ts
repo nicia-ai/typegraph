@@ -14,9 +14,14 @@
  *
  * These tests are backend-specific wiring rather than query semantics: they
  * assert the collation pinning is present on PostgreSQL, which is by
- * definition not observable on SQLite. Note they can only fail on a database
- * whose `datcollate` is not `C`/`POSIX` — the first test therefore reports the
- * collation it ran under so a vacuous pass is visible.
+ * definition not observable on SQLite. A collation not literally named
+ * `C`/`POSIX` is not necessarily discriminating for a given set of ids, so the
+ * first test does not trust the name: it runs the identical scan with the
+ * collation pin removed (a bare `ORDER BY id`, under the database's default
+ * collation) and only proceeds when that unpinned order provably disagrees
+ * with code-point order. When it does not, the environment cannot tell the
+ * fix from its absence, and the test skips and says so rather than reporting
+ * a vacuous pass.
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
@@ -28,6 +33,11 @@ import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { type GraphBackend } from "../../../src/backend/types";
 import { computeContentComponent } from "../../../src/graph-merge/base-version";
+import {
+  normalizeIdentityAssertionRow,
+  type RawIdentityAssertionRow,
+  toTransferAssertion,
+} from "../../../src/identity/row-codec";
 import { type IdentityTransferAssertion } from "../../../src/identity/service";
 import { exportGraphStream } from "../../../src/interchange";
 import { storeRuntime } from "../../../src/store/runtime-port";
@@ -121,6 +131,50 @@ async function seedAssertions(
   return store;
 }
 
+/**
+ * Reads back the raw ids for {@link ASSERTION_IDS} under a bare `ORDER BY id`
+ * — no `COLLATE` override — so the scan sorts under the database's actual
+ * default collation. Used to prove (or disprove) that this environment's
+ * collation is discriminating for this fixture, independent of what
+ * `datcollate` happens to be named.
+ */
+async function readUnpinnedAssertionIdOrder(
+  graphId: string,
+): Promise<readonly string[]> {
+  const result = await requirePool().query<{ id: string }>(
+    `SELECT id FROM typegraph_identity_assertions
+      WHERE graph_id = $1 AND deleted_at IS NULL AND valid_to IS NULL
+      ORDER BY id`,
+    [graphId],
+  );
+  return result.rows.map((row) => row.id);
+}
+
+/**
+ * Fetches the seeded assertions through a path independent of the code under
+ * test: a raw query against the ledger table with no `ORDER BY` at all (so
+ * nothing here can accidentally inherit code-point order from the pinned
+ * `binaryText` scan), decoded through the same row-codec helpers production
+ * uses. Callers that need a specific order must impose it themselves in JS —
+ * exactly what 0.45's `readIdentityAssertionsForInterchange` did before this
+ * read carried its own `ORDER BY`.
+ */
+async function fetchAssertionsIndependently(
+  graphId: string,
+): Promise<readonly IdentityTransferAssertion[]> {
+  const result = await requirePool().query<RawIdentityAssertionRow>(
+    `SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id, valid_from,
+            valid_to, created_at, updated_at, deleted_at, ended_by_kind,
+            ended_by_id
+       FROM typegraph_identity_assertions
+      WHERE graph_id = $1 AND deleted_at IS NULL AND valid_to IS NULL`,
+    [graphId],
+  );
+  return result.rows.map((row) =>
+    toTransferAssertion(normalizeIdentityAssertionRow(row)),
+  );
+}
+
 describe.runIf(process.env["POSTGRES_URL"])(
   "PostgreSQL identity interchange ordering",
   () => {
@@ -139,21 +193,30 @@ describe.runIf(process.env["POSTGRES_URL"])(
       backend = createPostgresBackend(drizzle(requirePool()));
     });
 
-    it("reads mixed-case assertion ids in code-point order", async () => {
+    it("reads mixed-case assertion ids in code-point order", async (ctx) => {
       const target = requireDefined(backend);
-      const collation = await requirePool().query<{ datcollate: string }>(
-        "SELECT datcollate FROM pg_database WHERE datname = current_database()",
-      );
-      const datcollate = requireDefined(collation.rows[0]).datcollate;
-      // A `C`/`POSIX` database already sorts by code point, so this assertion
-      // would hold with or without the pinning. Surface that rather than
-      // reporting a green run that proved nothing.
-      expect(
-        { datcollate, discriminating: !["C", "POSIX"].includes(datcollate) },
-        "the test database's collation must differ from code-point order for this to be load-bearing",
-      ).toMatchObject({ discriminating: true });
-
       const store = await seedAssertions(target);
+
+      // Naming the collation `C`/`POSIX` is not what matters — whether it
+      // actually reorders THIS fixture's ids is. Run the identical scan with
+      // the collation pin removed (bare `ORDER BY id`) and compare it to
+      // code-point order directly. Only a provable disagreement here makes the
+      // pinned assertion below load-bearing.
+      const unpinnedOrder = await readUnpinnedAssertionIdOrder(graph.id);
+      const unpinnedAlreadyMatchesCodePointOrder =
+        JSON.stringify(unpinnedOrder) === JSON.stringify(CODE_POINT_ORDER);
+      if (unpinnedAlreadyMatchesCodePointOrder) {
+        // Not a silent pass: announce why the discriminating case is absent.
+        console.warn(
+          "[identity-interchange-order] skipped: this database's default " +
+            `collation already orders ${JSON.stringify(ASSERTION_IDS)} as ` +
+            `code-point order (unpinned read: ${JSON.stringify(unpinnedOrder)}). ` +
+            "The pinned and unpinned reads would agree either way, so this " +
+            "run cannot distinguish the fix from its absence.",
+        );
+        ctx.skip();
+        return;
+      }
 
       const page = await storeRuntime(store).readIdentityAssertionPageAtTarget(
         target,
@@ -195,27 +258,41 @@ describe.runIf(process.env["POSTGRES_URL"])(
       const target = requireDefined(backend);
       const store = await seedAssertions(target);
 
-      // The regression this guards: `computeContentComponent` hashes the read's
-      // output positionally, so a locale-ordered read mints a different
-      // `base@V` token than the same content did before — a spurious
-      // BaseVersionMismatchError on an untouched base.
+      // Pin the 0.45 compatibility expectation INDEPENDENTLY of the code
+      // under test: fetch the assertions through a raw query with no
+      // `ORDER BY` at all (so this array cannot inherit order from the pinned
+      // `binaryText` scan), then sort in JS with the exact comparator 0.45's
+      // `readIdentityAssertionsForInterchange` used before this read carried
+      // its own pinned `ORDER BY`. Feeding that into `computeContentComponent`
+      // — the same hashing entry point the production fingerprint uses —
+      // gives an expectation that does not depend on `asRead`'s order at all.
+      const independentlyFetched = await fetchAssertionsIndependently(graph.id);
+      const independentlySorted = [...independentlyFetched].toSorted(
+        (left, right) => compareCodePoints(left.id, right.id),
+      );
+      const expectedContentComponent = await computeContentComponent(
+        target,
+        graph.id,
+        graph,
+        independentlySorted,
+      );
+
+      // The regression this guards: `computeContentComponent` hashes the
+      // read's output positionally, so a locale-ordered read mints a
+      // different `base@V` token than the same content did before — a
+      // spurious BaseVersionMismatchError on an untouched base. `asRead` comes
+      // straight from the production, pinned-SQL path with no re-sort here —
+      // if the collation pin were reverted on a discriminating locale, its
+      // order would follow the database's locale collation instead of
+      // code-point order, disagreeing with `expectedContentComponent` above
+      // and failing this assertion.
       const asRead = await storeRuntime(store).identityAssertionsAtTarget(
         target,
         "state",
       );
-      const codePointOrdered = [...asRead].toSorted((left, right) =>
-        compareCodePoints(left.id, right.id),
-      );
       expect(
         await computeContentComponent(target, graph.id, graph, asRead),
-      ).toBe(
-        await computeContentComponent(
-          target,
-          graph.id,
-          graph,
-          codePointOrdered,
-        ),
-      );
+      ).toBe(expectedContentComponent);
       expect(asRead.map((assertion) => assertion.id)).toEqual(CODE_POINT_ORDER);
     });
 

@@ -36,6 +36,7 @@ import { sharesSerializedTransactionResource } from "../../../src/backend/transa
 import { type GraphBackend } from "../../../src/backend/types";
 import { cloneWorkingCopyStrategy } from "../../../src/graph-merge/working-copy";
 import {
+  exportGraph,
   exportGraphStream,
   type GraphInterchangeChunk,
   importGraphStream,
@@ -47,7 +48,12 @@ import {
   type Store,
 } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
-import { raceTimeout, TIMEOUT_SENTINEL } from "../../concurrency-utils";
+import {
+  createGate,
+  type Gate,
+  raceTimeout,
+  TIMEOUT_SENTINEL,
+} from "../../concurrency-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), email: z.string().optional() }),
@@ -129,6 +135,40 @@ async function* replayChunks(
   for (const chunk of chunks) {
     yield await Promise.resolve(chunk);
   }
+}
+
+/**
+ * Replays already-collected chunks, parking the consumer between two of them:
+ * `paused` opens once `pauseBefore` chunks have been delivered and the next one
+ * is being asked for, and nothing more is delivered until `resume` opens.
+ *
+ * That is the deterministic mid-import moment — chunks committed, chunks still
+ * to come, no export in sight — at which a snapshot export must be refused.
+ */
+async function* pausingChunks(
+  chunks: readonly GraphInterchangeChunk[],
+  pauseBefore: number,
+  paused: Gate,
+  resume: Gate,
+): AsyncIterable<GraphInterchangeChunk> {
+  let delivered = 0;
+  for (const chunk of chunks) {
+    if (delivered === pauseBefore) {
+      paused.open();
+      await resume.opened;
+    }
+    delivered++;
+    yield chunk;
+  }
+}
+
+/** Collects an export stream, releasing its snapshot registration on completion. */
+async function collectExportChunks(
+  store: Store<typeof peopleGraph>,
+): Promise<readonly GraphInterchangeChunk[]> {
+  const chunks: GraphInterchangeChunk[] = [];
+  for await (const chunk of exportGraphStream(store)) chunks.push(chunk);
+  return chunks;
 }
 
 /**
@@ -350,6 +390,65 @@ describe("PGlite backend", () => {
         },
       });
       expect(await target.nodes.Person.count()).toBe(0);
+    });
+
+    it("refuses an export snapshot that opens between import chunks", async () => {
+      // The registry used to be read ONCE, before the first chunk's write. An
+      // export snapshot opening later in the stream was therefore invisible, and
+      // the import's next chunk waited on a read transaction that could not end
+      // until the import did. The import now holds a lease for its whole chunk
+      // loop, so the EXPORT — the stream that started second — is refused, and
+      // the import (whose earlier chunks are already committed) runs to
+      // completion.
+      const { source, target } = await seedSharedClientImportScenario(cleanups);
+      const chunks = await collectExportChunks(source);
+      expect(chunks.length).toBeGreaterThan(1);
+      const paused = createGate();
+      const resume = createGate();
+
+      const importing = importGraphStream(
+        target,
+        // Parked after the header: the lease is held, the node chunk is still
+        // to come.
+        pausingChunks(chunks, 1, paused, resume),
+        ImportOptionsSchema.parse({ onConflict: "error" }),
+      );
+      await paused.opened;
+
+      await expect(withGuardTimeout(exportGraph(source))).rejects.toMatchObject(
+        {
+          name: "ConfigurationError",
+          details: {
+            code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+            graphId: peopleGraph.id,
+          },
+        },
+      );
+
+      resume.open();
+      expect(await withGuardTimeout(importing)).toMatchObject({
+        success: true,
+      });
+      expect(await target.nodes.Person.count()).toBe(1);
+    });
+
+    it("allows an export once the import's lease is released", async () => {
+      // The refusal above must be scoped to a RUNNING import. A lease left
+      // behind would refuse every later export on that connection.
+      const { source, target } = await seedSharedClientImportScenario(cleanups);
+      const chunks = await collectExportChunks(source);
+
+      const result = await importGraphStream(
+        target,
+        replayChunks(chunks),
+        ImportOptionsSchema.parse({ onConflict: "error" }),
+      );
+      expect(result.success).toBe(true);
+
+      const exported = await withGuardTimeout(exportGraph(source));
+      expect(exported.nodes.map((node) => node.properties["name"])).toEqual([
+        "Alice",
+      ]);
     });
 
     it("releases the export registration when the stream completes", async () => {

@@ -1,6 +1,7 @@
 export { snapshotExportContention } from "../backend/transaction-resource";
 export type {
   GraphBackend,
+  NodeRow,
   TransactionBackend,
   TransactionOptions,
 } from "../backend/types";

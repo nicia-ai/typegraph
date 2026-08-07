@@ -3,7 +3,10 @@
  *
  * Exports nodes and edges from a store to the interchange format.
  */
-import { beginSerializedSnapshotExport } from "../backend/transaction-resource";
+import {
+  beginSerializedSnapshotExport,
+  hasActiveSerializedImport,
+} from "../backend/transaction-resource";
 import {
   type GraphBackend,
   rowPropsToObject,
@@ -14,6 +17,7 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
+import { ConfigurationError } from "../errors";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { nowIso } from "../utils/date";
@@ -133,12 +137,14 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
   // connection for the whole stream. Publish that fact for the duration so a
   // concurrent import into the same connection is refused rather than left to
   // wait for a writer slot that cannot free up — this is what the stream's
-  // consumer identity cannot answer once a caller wraps the iterable.
+  // consumer identity cannot answer once a caller wraps the iterable. And if a
+  // streaming import already holds that connection, THIS side is the one
+  // refused: it is the stream that started second.
   // Registration is deliberately inside the generator body: it must begin when
   // the transaction opens (first pull), not when the iterable is constructed.
   const releaseSnapshotExport =
     backend.capabilities.transactions ?
-      beginSerializedSnapshotExport(backend)
+      beginSnapshotExportOrRefuse(store.graphId, backend)
     : () => {
         // No snapshot transaction is opened here, so none was registered:
         // a non-transactional export holds nothing against a concurrent
@@ -172,6 +178,46 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
     channel.cancel();
     await producer;
   }
+}
+
+/**
+ * The refusal code for "a streaming import holds the connection this snapshot
+ * export needs". The import-side counterpart lives in `./import.ts`; the two
+ * codes name the two orders in which the same pairing can be attempted.
+ */
+const SERIALIZED_IMPORT_IN_PROGRESS_CODE =
+  "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS";
+
+/**
+ * Claims the serialized connection for this export's snapshot transaction, or
+ * refuses because a streaming import is already writing through it.
+ *
+ * ONE SYNCHRONOUS SECTION, by construction: the check and the registration sit
+ * in the same function with no `await` between them, and the caller runs it
+ * immediately before opening the transaction. On a single-threaded event loop
+ * that makes "no import held this connection when the snapshot opened" true for
+ * the whole stream — an import cannot slip its own claim in between, and the two
+ * sides cannot both conclude the connection was free.
+ *
+ * Only called when the backend is transactional: a `transactionMode: "none"`
+ * export holds nothing open, interleaves harmlessly with an import's writes, and
+ * must not be refused.
+ */
+function beginSnapshotExportOrRefuse(
+  graphId: string,
+  backend: GraphBackend,
+): () => void {
+  if (hasActiveSerializedImport(backend)) {
+    throw new ConfigurationError(
+      "A snapshot export cannot open on a serialized database connection while a streaming import is writing through it: the export's read transaction would hold the one connection the import's next chunk has to write on.",
+      { code: SERIALIZED_IMPORT_IN_PROGRESS_CODE, graphId },
+      {
+        suggestion:
+          "Await the import before exporting, or export from an independent backend.",
+      },
+    );
+  }
+  return beginSerializedSnapshotExport(backend);
 }
 
 async function produceExportChunks<G extends GraphDef>(

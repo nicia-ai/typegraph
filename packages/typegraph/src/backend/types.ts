@@ -1425,6 +1425,22 @@ export type InternalTransactionOptions = TransactionOptions &
 // ============================================================
 
 /**
+ * The physical names of the four Operational Identity relations: the current
+ * assertion ledger, its recorded-time twin, and the two DERIVED relations
+ * (closure, separation) rebuilt from the ledger.
+ *
+ * Named once so the two ports that speak about them —
+ * {@link GraphBackend.ensureIdentityTables} and
+ * {@link GraphBackend.identityTableDdl} — cannot drift apart.
+ */
+export type IdentityTableNames = Readonly<{
+  identityAssertions: string;
+  recordedIdentityAssertions: string;
+  identityClosure: string;
+  identitySeparation: string;
+}>;
+
+/**
  * The GraphBackend interface abstracts database operations.
  *
  * Implementations should provide:
@@ -1900,14 +1916,34 @@ export type GraphBackend = Readonly<{
    */
   ensureIdentityTables?: (
     this: void,
-    tableNames: Readonly<{
-      identityAssertions: string;
-      recordedIdentityAssertions: string;
-      identityClosure: string;
-      identitySeparation: string;
-    }>,
+    tableNames: IdentityTableNames,
     options: Readonly<{ provisionMissing: boolean }>,
   ) => Promise<readonly string[]>;
+
+  /**
+   * The idempotent CREATE statements for exactly the identity relations —
+   * the same DDL {@link ensureIdentityTables} issues, handed back as data
+   * instead of executed.
+   *
+   * Pure and synchronous: it executes nothing and probes no catalog, so it is
+   * safe to call from inside an already-open transaction, where invoking a
+   * top-level backend method would re-enter the backend's serialized statement
+   * queue and deadlock. That is the whole point. Provisioning a missing DERIVED
+   * relation (closure, separation) on an already-enabled graph has to CREATE it
+   * and FILL it in one transaction, because a created-but-empty derived
+   * relation is readable and answers every question with "nothing" — for the
+   * separation relation, "nothing" means "not separated", which is exactly the
+   * answer that lets a contradictory merge commit.
+   *
+   * A backend that omits this cannot offer that atomicity; callers fall back to
+   * creating and filling back-to-back on the top-level backend.
+   *
+   * @internal
+   */
+  identityTableDdl?: (
+    this: void,
+    tableNames: IdentityTableNames,
+  ) => readonly string[];
 
   /**
    * Look up a recorded materialization for a declared index by its

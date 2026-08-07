@@ -43,6 +43,12 @@ import {
 import { createStore, createStoreWithSchema } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import {
+  createGate,
+  type Gate,
+  raceTimeout,
+  TIMEOUT_SENTINEL,
+} from "./concurrency-utils";
+import {
   createInitializedStore,
   createPlanCaptureBackend,
   createTestBackend,
@@ -250,6 +256,30 @@ async function* chunkStream(
 ): AsyncIterable<GraphInterchangeChunk> {
   for (const chunk of chunks) {
     await Promise.resolve();
+    yield chunk;
+  }
+}
+
+/**
+ * Replays chunks, parking the consumer between two of them: `paused` opens once
+ * `pauseBefore` chunks have been delivered and the next is being asked for, and
+ * nothing more is delivered until `resume` opens. That is the deterministic
+ * mid-import moment — chunks committed, chunks still to come — at which a
+ * snapshot export on the same connection must be refused.
+ */
+async function* pausingChunkStream(
+  chunks: readonly GraphInterchangeChunk[],
+  pauseBefore: number,
+  paused: Gate,
+  resume: Gate,
+): AsyncIterable<GraphInterchangeChunk> {
+  let delivered = 0;
+  for (const chunk of chunks) {
+    if (delivered === pauseBefore) {
+      paused.open();
+      await resume.opened;
+    }
+    delivered++;
     yield chunk;
   }
 }
@@ -2061,6 +2091,12 @@ describe("Identity interchange streaming", () => {
 });
 
 describe("Serialized-connection snapshot streaming guards", () => {
+  /**
+   * A guard that regressed into a wedge instead of a refusal makes the export
+   * and the import wait on one connection, so a bounded wait reports the
+   * regression instead of hanging the suite.
+   */
+  const GUARD_TIMEOUT_MS = 10_000;
   const openDatabases: Database.Database[] = [];
 
   afterEach(() => {
@@ -2105,6 +2141,83 @@ describe("Serialized-connection snapshot streaming guards", () => {
     // nothing was written.
     expect(beginExport).not.toHaveBeenCalled();
     expect(await target.nodes.Person.count()).toBe(0);
+  });
+
+  it("refuses an export snapshot that opens between import chunks", async () => {
+    // The mirror of the refusal above, in the other order. The import's lease is
+    // taken in the same synchronous section that finds no export snapshot open,
+    // so the export starting second is the side refused — and the import, whose
+    // header chunk is already processed, finishes instead of waiting on a read
+    // transaction that cannot end until it does.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "mid-stream" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    expect(chunks.length).toBeGreaterThan(1);
+    const paused = createGate();
+    const resume = createGate();
+
+    const importing = importGraphStream(
+      target,
+      // Parked after the header: the lease is held, the node chunk is still to
+      // come.
+      pausingChunkStream(chunks, 1, paused, resume),
+      importOptions({ onConflict: "error" }),
+    );
+    await paused.opened;
+
+    await expect(exportGraph(source)).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+        graphId: testGraph.id,
+      },
+    });
+
+    resume.open();
+    const settled = await raceTimeout(importing, GUARD_TIMEOUT_MS);
+    if (settled === TIMEOUT_SENTINEL) {
+      throw new Error(
+        `The import did not finish within ${GUARD_TIMEOUT_MS}ms: it is waiting on the connection an export took mid-stream.`,
+      );
+    }
+    expect(settled.success).toBe(true);
+    expect(await target.nodes.Person.count()).toBe(1);
+  });
+
+  it("allows an export while a non-transactional import holds the connection", async () => {
+    // `transactionMode: "none"` exports statement by statement with nothing held
+    // open, so it cannot strand an import's next chunk. Refusing it would deny
+    // working behavior citing a transaction that does not exist — the same
+    // abstention the import-side guard makes.
+    const database = openMigratedDatabase();
+    const backend = createSqliteBackend(drizzle(database), {
+      executionProfile: { transactionMode: "none", isSync: true },
+    });
+    expect(backend.capabilities.transactions).toBe(false);
+    const source = createStore(testGraph, backend);
+    const target = createStore(sameHandleTargetGraph, backend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-lease" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    const paused = createGate();
+    const resume = createGate();
+
+    const importing = importGraphStream(
+      target,
+      pausingChunkStream(chunks, 1, paused, resume),
+      importOptions({ onConflict: "error" }),
+    );
+    await paused.opened;
+
+    const exported = await exportGraph(source);
+    expect(exported.nodes).toHaveLength(1);
+
+    resume.open();
+    const imported = await importing;
+    expect(imported.success).toBe(true);
   });
 
   it("streams between two SQLite connections to one file", async () => {

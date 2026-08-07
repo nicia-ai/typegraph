@@ -9,8 +9,16 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
 import type { GraphBackend } from "../src/backend/types";
-import { CardinalityError } from "../src/errors";
+import { checkWherePredicate, computeUniqueKey } from "../src/constraints";
+import { CardinalityError, UniquenessError } from "../src/errors";
+import { buildKindRegistry } from "../src/registry";
 import { createStore } from "../src/store";
+import {
+  checkUniquenessConstraints,
+  createUniquenessContext,
+  insertUniquenessEntries,
+} from "../src/store/uniqueness";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -753,5 +761,293 @@ describe("Uniqueness Scope: kindWithSubClasses", () => {
     });
 
     expect(service.code).toBe("REUSE-CODE");
+  });
+});
+
+// ============================================================
+// Uniqueness Over Fields Named After Prototype Members
+// ============================================================
+
+/**
+ * A schema may DECLARE a field named after an `Object.prototype` member —
+ * `toString` below is an ordinary optional string field. When such a field is
+ * absent from a props bag, every constraint decision about it must read the
+ * bag's OWN keys; a plain `props.toString` read finds the inherited function
+ * and treats an absent field as a present value.
+ */
+const Entry = defineNode("Entry", {
+  schema: z.object({
+    label: z.string(),
+    toString: z.string().optional(),
+  }),
+});
+
+function protoNamedGraph(id: string, collation: "binary" | "caseInsensitive") {
+  return defineGraph({
+    id,
+    nodes: {
+      Entry: {
+        type: Entry,
+        unique: [
+          {
+            name: "unique_to_string",
+            fields: ["toString"],
+            scope: "kind",
+            collation,
+          },
+        ],
+      },
+    },
+    edges: {},
+    ontology: [],
+  });
+}
+
+const binaryProtoGraph = protoNamedGraph("proto_named_binary", "binary");
+const insensitiveProtoGraph = protoNamedGraph(
+  "proto_named_insensitive",
+  "caseInsensitive",
+);
+
+/** The `where`-less constraint list `defineGraph` normalized for `Entry`. */
+function protoNamedConstraints(graph: typeof binaryProtoGraph) {
+  return graph.nodes.Entry.unique;
+}
+
+describe("Uniqueness key for a field named after a prototype member", () => {
+  const absent: Record<string, unknown> = { label: "first" };
+  const otherAbsent: Record<string, unknown> = { label: "second" };
+  const explicitlyUndefined: Record<string, unknown> = {
+    label: "first",
+    toString: undefined,
+  };
+
+  it("keys an absent field as absent under binary collation", () => {
+    const key = computeUniqueKey(absent, ["toString"], "binary");
+
+    // The inherited `Object.prototype.toString` is a function, which
+    // `JSON.stringify` drops — reading it produced the empty key.
+    expect(key).not.toBe("");
+    expect(key).toBe(
+      computeUniqueKey(explicitlyUndefined, ["toString"], "binary"),
+    );
+  });
+
+  it("keys an absent field as absent under caseInsensitive collation", () => {
+    // Reading the inherited function here threw
+    // "Cannot read properties of undefined (reading 'toLowerCase')".
+    expect(() =>
+      computeUniqueKey(absent, ["toString"], "caseInsensitive"),
+    ).not.toThrow();
+    expect(computeUniqueKey(absent, ["toString"], "caseInsensitive")).toBe(
+      computeUniqueKey(absent, ["toString"], "binary"),
+    );
+  });
+
+  it("collides two bags that both omit the field", () => {
+    for (const collation of ["binary", "caseInsensitive"] as const) {
+      expect(computeUniqueKey(absent, ["toString"], collation)).toBe(
+        computeUniqueKey(otherAbsent, ["toString"], collation),
+      );
+    }
+  });
+
+  it("keeps distinct present values distinct, and distinct from absence", () => {
+    const present = { label: "first", toString: "alpha" };
+    const otherPresent = { label: "second", toString: "beta" };
+
+    for (const collation of ["binary", "caseInsensitive"] as const) {
+      expect(computeUniqueKey(present, ["toString"], collation)).not.toBe(
+        computeUniqueKey(otherPresent, ["toString"], collation),
+      );
+      expect(computeUniqueKey(present, ["toString"], collation)).not.toBe(
+        computeUniqueKey(absent, ["toString"], collation),
+      );
+    }
+
+    // Case folding still applies to a present value.
+    expect(
+      computeUniqueKey(
+        { label: "first", toString: "ALPHA" },
+        ["toString"],
+        "caseInsensitive",
+      ),
+    ).toBe(computeUniqueKey(present, ["toString"], "caseInsensitive"));
+  });
+});
+
+describe("Uniqueness sidecar for a field named after a prototype member", () => {
+  let backend: GraphBackend;
+
+  beforeEach(() => {
+    backend = createTestBackend();
+  });
+
+  function contextFor(graph: typeof binaryProtoGraph) {
+    return createUniquenessContext(graph.id, buildKindRegistry(graph), backend);
+  }
+
+  for (const graph of [binaryProtoGraph, insensitiveProtoGraph]) {
+    const collation = protoNamedConstraints(graph)[0].collation;
+
+    it(`refuses a second node that also omits the field (${collation})`, async () => {
+      const ctx = contextFor(graph);
+      const constraints = protoNamedConstraints(graph);
+
+      await insertUniquenessEntries(
+        ctx,
+        "Entry",
+        "entry-1",
+        { label: "first" },
+        constraints,
+      );
+
+      await expect(
+        checkUniquenessConstraints(
+          ctx,
+          "Entry",
+          "entry-2",
+          { label: "second" },
+          constraints,
+        ),
+      ).rejects.toThrow(UniquenessError);
+    });
+
+    it(`admits a node carrying a value for the field (${collation})`, async () => {
+      const ctx = contextFor(graph);
+      const constraints = protoNamedConstraints(graph);
+
+      await insertUniquenessEntries(
+        ctx,
+        "Entry",
+        "entry-1",
+        { label: "first" },
+        constraints,
+      );
+
+      await expect(
+        checkUniquenessConstraints(
+          ctx,
+          "Entry",
+          "entry-2",
+          { label: "second", toString: "alpha" },
+          constraints,
+        ),
+      ).resolves.toBeUndefined();
+    });
+  }
+});
+
+// ============================================================
+// Partial Uniqueness (`where`) Over Absent Optional Fields
+// ============================================================
+
+const Account = defineNode("Account", {
+  schema: z.object({
+    name: z.string(),
+    externalId: z.string().optional(),
+  }),
+});
+
+const partialUniqueGraph = defineGraph({
+  id: "partial_unique_test",
+  nodes: {
+    Account: {
+      type: Account,
+      unique: [
+        {
+          name: "unique_external_id",
+          fields: ["externalId"],
+          scope: "kind",
+          collation: "binary",
+          where: (fields) => requireDefined(fields["externalId"]).isNotNull(),
+        },
+      ],
+    },
+  },
+  edges: {},
+  ontology: [],
+});
+
+/** Constraints whose `where` names a field called after a prototype member. */
+const protoWhereGraph = defineGraph({
+  id: "proto_named_where_test",
+  nodes: {
+    Entry: {
+      type: Entry,
+      unique: [
+        {
+          name: "unique_when_to_string_null",
+          fields: ["label"],
+          scope: "kind",
+          collation: "binary",
+          // Dot notation cannot name this field: `fields.toString` resolves to
+          // the builder object's inherited `toString` method, which is exactly
+          // the confusion under test.
+          // eslint-disable-next-line @typescript-eslint/dot-notation
+          where: (fields) => requireDefined(fields["toString"]).isNull(),
+        },
+        {
+          name: "unique_when_to_string_present",
+          fields: ["label"],
+          scope: "kind",
+          collation: "binary",
+          // eslint-disable-next-line @typescript-eslint/dot-notation
+          where: (fields) => requireDefined(fields["toString"]).isNotNull(),
+        },
+      ],
+    },
+  },
+  edges: {},
+  ontology: [],
+});
+
+describe("Partial uniqueness over an absent optional field", () => {
+  let backend: GraphBackend;
+
+  beforeEach(() => {
+    backend = createTestBackend();
+  });
+
+  it("does not apply to nodes created without the field", async () => {
+    const store = createStore(partialUniqueGraph, backend);
+
+    // The predicate builder declares every schema field, optional or not, so
+    // naming an absent one reports absence instead of throwing.
+    const first = await store.nodes.Account.create({ name: "first" });
+    const second = await store.nodes.Account.create({ name: "second" });
+
+    expect(first.externalId).toBeUndefined();
+    expect(second.externalId).toBeUndefined();
+  });
+
+  it("still enforces the constraint for nodes carrying the field", async () => {
+    const store = createStore(partialUniqueGraph, backend);
+
+    await store.nodes.Account.create({ name: "first", externalId: "ext-1" });
+
+    await expect(
+      store.nodes.Account.create({ name: "second", externalId: "ext-1" }),
+    ).rejects.toThrow("Uniqueness violation");
+
+    const third = await store.nodes.Account.create({
+      name: "third",
+      externalId: "ext-2",
+    });
+    expect(third.externalId).toBe("ext-2");
+  });
+
+  it("evaluates a where clause naming a prototype-member field by own key", () => {
+    const [whenNull, whenPresent] = protoWhereGraph.nodes.Entry.unique;
+
+    // Absent: the inherited `Object.prototype.toString` read as a present
+    // value, inverting both predicates.
+    expect(checkWherePredicate(whenNull, { label: "first" })).toBe(true);
+    expect(checkWherePredicate(whenPresent, { label: "first" })).toBe(false);
+
+    // Present: unchanged.
+    const carried = { label: "first", toString: "alpha" };
+    expect(checkWherePredicate(whenNull, carried)).toBe(false);
+    expect(checkWherePredicate(whenPresent, carried)).toBe(true);
   });
 });

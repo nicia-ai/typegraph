@@ -81,6 +81,7 @@ import {
   type GraphBackend,
   type HybridSearchParams,
   type HybridSearchRow,
+  type IdentityTableNames,
   type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
@@ -1119,27 +1120,83 @@ function createSqliteOperationBackend(
 }
 
 /**
- * Returns the better-sqlite3 `Database` a Drizzle database owns, if that is
- * what it is driving.
+ * Whether a driver client is a LOCAL `@libsql/client`: one stable connection
+ * that every statement from every wrapper over it runs on, in order.
  *
- * better-sqlite3 is a single, synchronous connection: every statement from
- * every wrapper over one `Database` runs on it in order, so an open transaction
- * on one wrapper is an open transaction for all of them. Duck-typed on
- * `prepare` + `pragma` (both better-sqlite3 `Database` methods; neither
- * bun:sqlite nor node:sqlite expose `pragma`) rather than importing the native
- * addon, which this bundler-friendly module must not depend on. Unrecognized
- * clients stay unmarked: SEPARATE connections to the same file are genuinely
- * concurrent under WAL and must not be treated as one serialized resource.
+ * `protocol === "file"` is the client's own answer to "am I local?" — it covers
+ * `file:` paths, `:memory:` databases, and an embedded replica's local file. A
+ * REMOTE client (`http` / `ws`) opens an independent stream per transaction and
+ * must never be treated as one serialized resource; refusing concurrent work
+ * there would refuse work that succeeds. The libsql methods are required
+ * alongside the protocol so an unrelated object that happens to carry
+ * `protocol: "file"` is not adopted, and none of it imports `@libsql/client`,
+ * which this bundler-friendly module must not depend on.
+ *
+ * Single owner of the local/remote distinction: `../sqlite/libsql.ts` picks its
+ * transaction framing (raw BEGIN/COMMIT on the one local connection vs Drizzle's
+ * per-stream `db.transaction()`) by asking here, so the framing and the
+ * serialized-resource mark cannot drift apart.
+ */
+export function isLocalLibsqlClient(client: unknown): boolean {
+  if (typeof client !== "object" || client === null) return false;
+  const candidate = client as Readonly<Record<string, unknown>>;
+  return (
+    candidate["protocol"] === "file" &&
+    typeof candidate["execute"] === "function" &&
+    typeof candidate["batch"] === "function" &&
+    typeof candidate["executeMultiple"] === "function"
+  );
+}
+
+/**
+ * Returns the single connection a Drizzle database serializes every statement
+ * onto, if its driver is one we can positively identify as such.
+ *
+ * Three drivers qualify:
+ *
+ * - **better-sqlite3**: a single, synchronous connection, so an open transaction
+ *   on one wrapper is an open transaction for all of them. Duck-typed on
+ *   `prepare` + `pragma` (both better-sqlite3 `Database` methods; neither
+ *   bun:sqlite nor node:sqlite expose `pragma`) rather than importing the native
+ *   addon.
+ * - **Cloudflare Durable Object storage** (`drizzle(ctx.storage)`): one storage
+ *   connection whose transaction frame is AMBIENT on the storage object rather
+ *   than a handle passed to the callback (see `runDoSqliteStorageTransaction`:
+ *   `transactionMode: "do-sqlite"` binds the OUTER `db`). A second wrapper's
+ *   writes therefore land inside the first
+ *   wrapper's open export snapshot, and because the DO backend reports
+ *   `capabilities.transactions: true` nothing else abstains for it. Identified by
+ *   {@link getDurableObjectStorageClient}, the same full-shape evidence the
+ *   transaction runner requires, so the framing and the mark cannot drift apart.
+ * - **a local `@libsql/client`**: also one stable connection — which is exactly
+ *   why local clients frame transactions as raw BEGIN/COMMIT on it (see
+ *   {@link isLocalLibsqlClient}). libsql clients expose no `prepare`, so the
+ *   shared prepare-capable resolver cannot see them and the driver client is
+ *   read directly here.
+ *
+ * Unrecognized clients stay unmarked: SEPARATE connections to the same file are
+ * genuinely concurrent under WAL and must not be treated as one serialized
+ * resource.
  */
 function getSerializedSqliteConnection(
   db: AnySqliteDatabase,
 ): object | undefined {
-  const client = resolveSqliteClient(db);
-  if (client === undefined) return undefined;
-  // `prepare` is answered by resolveSqliteClient; `pragma` is the
-  // better-sqlite3 discriminator on top of it.
-  const candidate = client as Readonly<Record<string, unknown>>;
-  return typeof candidate["pragma"] === "function" ? client : undefined;
+  const preparingClient = resolveSqliteClient(db);
+  if (preparingClient !== undefined) {
+    // `prepare` is answered by resolveSqliteClient; `pragma` is the
+    // better-sqlite3 discriminator on top of it. A prepare-capable client is
+    // never a libsql or Durable Object storage client, so this arm is terminal.
+    const candidate = preparingClient as Readonly<Record<string, unknown>>;
+    return typeof candidate["pragma"] === "function" ?
+        preparingClient
+      : undefined;
+  }
+  // The storage object IS the serialized resource: every wrapper built over the
+  // same `ctx.storage` shares its one connection and its ambient transaction.
+  const storageClient = getDurableObjectStorageClient(db);
+  if (storageClient !== undefined) return storageClient;
+  const client = (db as Readonly<{ $client?: unknown }>).$client;
+  return isLocalLibsqlClient(client) ? (client as object) : undefined;
 }
 
 export function createSqliteBackend(
@@ -1351,6 +1408,28 @@ export function createSqliteBackend(
       operationStrategy.buildTableExists(tableName),
     );
     return tableExistsFromRow(rows[0]);
+  }
+
+  /**
+   * The contribution descriptors for exactly the identity relations, under
+   * caller-supplied physical names. Pure — nothing is executed here — and the
+   * single owner of "which DDL belongs to the identity relations", shared by
+   * `ensureIdentityTables` (which runs it) and `identityTableDdl` (which hands
+   * it to a transaction).
+   */
+  function identityContributionsFor(
+    identityTableNames: IdentityTableNames,
+  ): ReturnType<typeof sqliteContributions> {
+    const identityTables = buildSqliteTables({
+      identityAssertions: identityTableNames.identityAssertions,
+      recordedIdentityAssertions: identityTableNames.recordedIdentityAssertions,
+      identityClosure: identityTableNames.identityClosure,
+      identitySeparation: identityTableNames.identitySeparation,
+    });
+    return sqliteContributions(identityTables, fulltextStrategy).filter(
+      (contribution) =>
+        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
+    );
   }
 
   const contributionMaterializer = createContributionMaterializer({
@@ -1612,19 +1691,8 @@ export function createSqliteBackend(
       // exist yet. Ensure them (and their indexes and CHECK constraints)
       // idempotently — CREATE TABLE / CREATE INDEX IF NOT EXISTS — reusing the same contribution
       // DDL bootstrapTables emits, scoped to the identity relations.
-      const identityTables = buildSqliteTables({
-        identityAssertions: identityTableNames.identityAssertions,
-        recordedIdentityAssertions:
-          identityTableNames.recordedIdentityAssertions,
-        identityClosure: identityTableNames.identityClosure,
-        identitySeparation: identityTableNames.identitySeparation,
-      });
-      const identityContributions = sqliteContributions(
-        identityTables,
-        fulltextStrategy,
-      ).filter((contribution) =>
-        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
-      );
+      const identityContributions =
+        identityContributionsFor(identityTableNames);
       const missing = [] as string[];
       for (const contribution of identityContributions) {
         if (!(await contributionTableExists(contribution.tableName))) {
@@ -1643,6 +1711,12 @@ export function createSqliteBackend(
         }
       }
       return missing;
+    },
+
+    identityTableDdl(identityTableNames): readonly string[] {
+      return identityContributionsFor(identityTableNames).flatMap(
+        (contribution) => [...contribution.createDdl],
+      );
     },
 
     // Every fulltext-touching method asserts the durable marker instead

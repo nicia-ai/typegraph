@@ -114,6 +114,7 @@ import {
   type FulltextSearchResult,
   type HybridSearchParams,
   type HybridSearchRow,
+  type IdentityTableNames,
   type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
@@ -164,6 +165,7 @@ import {
   hasFunctionProperty,
   isNeonHttpClient,
   isPgliteDatabase,
+  isPostgresJsClient,
   PGLITE_MAX_BIND_PARAMETERS,
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
@@ -613,6 +615,28 @@ export function createPostgresBackend(
     await ensureTableWithConcurrentCreateRetry(matTable);
   }
 
+  /**
+   * The contribution descriptors for exactly the identity relations, under
+   * caller-supplied physical names. Pure — nothing is executed here — and the
+   * single owner of "which DDL belongs to the identity relations", shared by
+   * `ensureIdentityTables` (which runs it) and `identityTableDdl` (which hands
+   * it to a transaction).
+   */
+  function identityContributionsFor(
+    identityTableNames: IdentityTableNames,
+  ): ReturnType<typeof postgresContributions> {
+    const identityTables = buildPostgresTables({
+      identityAssertions: identityTableNames.identityAssertions,
+      recordedIdentityAssertions: identityTableNames.recordedIdentityAssertions,
+      identityClosure: identityTableNames.identityClosure,
+      identitySeparation: identityTableNames.identitySeparation,
+    });
+    return postgresContributions(identityTables, fulltextStrategy).filter(
+      (contribution) =>
+        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
+    );
+  }
+
   async function getContributionMaterializationRow(
     identity: ContributionMaterializationIdentity,
   ): Promise<ContributionMaterializationRow | undefined> {
@@ -708,8 +732,13 @@ export function createPostgresBackend(
     fulltextStrategy,
     fulltextTableName: tables.fulltextTableName,
     vectorStrategy,
+    // Contribution DDL is `CREATE ... IF NOT EXISTS` reached from every
+    // booting replica, so it carries the same concurrent-create retry the
+    // other create sites use. Without it the loser's 23505 is recorded as
+    // `lastError` on the marker row and reported as a failed materialization,
+    // when the table it wanted is in fact present.
     execDdl: async (statement) => {
-      await db.execute(sql.raw(statement));
+      await executeConcurrentCreateDdl(statement);
     },
     ensureMarkerTable: ensureContributionMaterializationsTableImpl,
     getMarkers: getContributionMaterializationRows,
@@ -898,7 +927,12 @@ export function createPostgresBackend(
     async bootstrapTables(): Promise<void> {
       const statements = generatePostgresDDL(tables, fulltextStrategy);
       for (const statement of statements) {
-        await db.execute(sql.raw(statement));
+        // Cold boot is the single most contended DDL path there is — two
+        // replicas starting at once run exactly this loop against the same
+        // database — so it takes the concurrent-create retry rather than
+        // trusting IF NOT EXISTS, for the reason `executeConcurrentCreateDdl`
+        // documents.
+        await executeConcurrentCreateDdl(statement);
       }
     },
 
@@ -918,19 +952,8 @@ export function createPostgresBackend(
       // DDL bootstrapTables emits, scoped to the identity relations. Stores
       // run this before opening the schema-commit transaction so DDL does not
       // re-enter its per-graph write lock.
-      const identityTables = buildPostgresTables({
-        identityAssertions: identityTableNames.identityAssertions,
-        recordedIdentityAssertions:
-          identityTableNames.recordedIdentityAssertions,
-        identityClosure: identityTableNames.identityClosure,
-        identitySeparation: identityTableNames.identitySeparation,
-      });
-      const identityContributions = postgresContributions(
-        identityTables,
-        fulltextStrategy,
-      ).filter((contribution) =>
-        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
-      );
+      const identityContributions =
+        identityContributionsFor(identityTableNames);
       const missing = [] as string[];
       for (const contribution of identityContributions) {
         if (!(await contributionTableExists(contribution.tableName))) {
@@ -950,6 +973,12 @@ export function createPostgresBackend(
         }
       }
       return missing;
+    },
+
+    identityTableDdl(identityTableNames): readonly string[] {
+      return identityContributionsFor(identityTableNames).flatMap(
+        (contribution) => [...contribution.createDdl],
+      );
     },
 
     // Every fulltext-touching method asserts the durable marker instead
@@ -1463,20 +1492,31 @@ export function createPostgresBackend(
  * - **A `Pool` explicitly configured with `max: 1`** — the export checks out the
  *   pool's only connection for the duration, so a concurrent import waits for a
  *   connection that is never released.
+ * - **A postgres-js client built with `{ max: 1 }`** — the same cap on a
+ *   CALLABLE client. postgres-js's `begin` reserves a connection from its own
+ *   pool for the transaction, so with a pool of one an export snapshot holds the
+ *   only connection every other wrapper's statement needs.
  *
  * Deliberately NOT marked: a default pool (independent connection per
- * checkout), postgres-js and neon-http tagged-template clients, and anything
- * unrecognized. A false positive refuses legitimate concurrent work, so the
- * predicate requires positive evidence and abstains otherwise. A pool capped at
- * one connection by means other than an explicit `max` option (a global
- * `pg.defaults.max`, a driver-specific connection string) is therefore not
- * detected, and a serialized-connection import there still fails the way it did
- * before this guard existed.
+ * checkout), a postgres-js client at default size (`max` defaults to 10), a
+ * neon-http tagged template (session-less HTTP), and anything unrecognized. A
+ * false positive refuses legitimate concurrent work, so the predicate requires
+ * positive evidence and abstains otherwise. A pool capped at one connection by
+ * means other than an explicit `max` option (a global `pg.defaults.max`, a
+ * driver-specific connection string) is therefore not detected, and a
+ * serialized-connection import there still fails the way it did before this
+ * guard existed.
  */
 function getSerializedPostgresClient(db: AnyPgDatabase): object | undefined {
   const pgliteClient = getPgliteClient(db);
   if (pgliteClient !== undefined) return pgliteClient;
   const client: unknown = (db as Readonly<{ $client?: unknown }>).$client;
+  // Callable clients are examined before the object arms: a tagged-template
+  // client is a FUNCTION, so `typeof client !== "object"` would drop it before
+  // its connection cap was ever read.
+  if (typeof client === "function") {
+    return isSingleConnectionCallablePgClient(client) ? client : undefined;
+  }
   if (typeof client !== "object" || client === null) return undefined;
   const candidate = client as Readonly<Record<string, unknown>>;
   if (!hasFunctionProperty(candidate, "query")) return undefined;
@@ -1492,6 +1532,40 @@ function isSingleConnectionPgPool(
   // pool configuration. Only an explicit `max: 1` is treated as serialized: the
   // default is 10, so an absent/other `max` says nothing.
   const options: unknown = candidate["options"];
+  if (typeof options !== "object" || options === null) return false;
+  return (options as Readonly<Record<string, unknown>>)["max"] === 1;
+}
+
+/**
+ * Whether a CALLABLE Postgres client (a tagged-template `Sql`) is capped at one
+ * connection, and is therefore one serialized resource for every wrapper over it.
+ *
+ * Two pieces of positive evidence, both required:
+ *
+ * - {@link isPostgresJsClient} — the driver identity, owned by the execution
+ *   adapter that already discriminates postgres-js from the other callable
+ *   client (neon-http). Without it, `options.max` on an unknown callable means
+ *   nothing we can act on.
+ * - `options.max === 1` — postgres-js exposes its RESOLVED options on the
+ *   callable, and its `max` defaults to 10, so only an explicit cap of one says
+ *   "every statement lands on the same connection". An absent or larger `max`
+ *   abstains: postgres-js at default size hands each `begin` its own connection
+ *   and marking it would refuse concurrent work that succeeds.
+ *
+ * NOT covered: Bun's `SQL`. Nothing in this package positively identifies that
+ * driver (the SQLite side recognizes `BunSQLiteSession`; there is no Postgres
+ * equivalent), and a cap we cannot attribute to a known driver is not evidence.
+ * A `Bun.SQL` capped at one connection remains a known gap (#434).
+ */
+function isSingleConnectionCallablePgClient(client: unknown): boolean {
+  if (client === undefined || client === null) return false;
+  // Read before the driver check narrows the type: postgres-js's `Sql` type
+  // declares no `options` member, so the property is reached through the
+  // untyped client rather than the narrowed one.
+  const options: unknown = (client as Readonly<Record<string, unknown>>)[
+    "options"
+  ];
+  if (!isPostgresJsClient(client)) return false;
   if (typeof options !== "object" || options === null) return false;
   return (options as Readonly<Record<string, unknown>>)["max"] === 1;
 }

@@ -1,4 +1,8 @@
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import {
+  type GraphBackend,
+  type IdentityTableNames,
+  type TransactionBackend,
+} from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
@@ -15,14 +19,10 @@ import {
   purgeAssertionsWithUnregisteredKinds,
   rebuildIdentityClosureForContext,
 } from "./service";
+import { type IdentityTarget } from "./sql-target";
 
 /** The identity relations a schema transition reads, writes, and locks. */
-function identityTableNames(schema: SqlSchema): Readonly<{
-  identityAssertions: string;
-  recordedIdentityAssertions: string;
-  identityClosure: string;
-  identitySeparation: string;
-}> {
+function identityTableNames(schema: SqlSchema): IdentityTableNames {
   return {
     identityAssertions: schema.tables.identityAssertions,
     recordedIdentityAssertions: schema.tables.recordedIdentityAssertions,
@@ -42,6 +42,15 @@ const UPGRADEABLE_DERIVED_RELATIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Rebuilds the derived identity relations from the assertion ledger, against
+ * whichever target the provisioning path can offer — the schema-write
+ * transaction when the backend has one, the top-level backend otherwise.
+ */
+export type RecomputeDerivedRelations = (
+  target: IdentityTarget,
+) => Promise<void>;
+
+/**
  * Ensures the identity relations exist before a schema-commit transaction
  * opens. The preflight runs *inside* that transaction and reads/writes these
  * tables, so issuing their DDL there would re-enter the per-graph write lock
@@ -52,13 +61,34 @@ const UPGRADEABLE_DERIVED_RELATIONS: ReadonlySet<string> = new Set([
  * already-enabled graph those going missing is data loss, not a provisioning
  * gap, so it is refused.
  *
- * Reports whether a derived relation had to be created — the caller owes it a
- * recompute, because an empty derived relation disagrees with the ledger.
+ * THE INVARIANT THIS FUNCTION OWNS: *the separation relation is never readable
+ * in a state that under-reports separations.* A derived relation created empty
+ * is not inert — it is readable, and `isSeparated` reads it as authority. An
+ * empty separation relation answers "not separated" for EVERY pair, which is
+ * precisely the answer that lets `assertSame` fuse two classes a live
+ * `different` assertion separates, and the relation's CHECK-constraint
+ * backstop cannot fire because there are no rows to collapse. The relation's
+ * only safe states are therefore ABSENT (every read raises
+ * `IDENTITY_STORAGE_MISSING` — loud, never a wrong answer) and PRESENT AND
+ * FILLED. So when `recomputeDerivedRelations` is supplied, the CREATE and the
+ * fill are issued inside ONE schema-write transaction: concurrent readers see
+ * the pre-upgrade absence until the commit publishes both together, and
+ * concurrent schema writers queue behind the fence.
+ *
+ * Callers that do NOT supply a recompute get the old contract back — the
+ * relation is created and `recomputeDerivedRelations: true` says the caller
+ * owes the fill. The only such callers are the schema-commit paths, whose fill
+ * runs inside the commit transaction ({@link identitySchemaCommitPreflight}),
+ * bounding the window to that commit instead of a whole boot sequence.
  */
 export async function ensureIdentitySchemaStorage(
   backend: GraphBackend,
   schema: SqlSchema,
-  options: Readonly<{ graphId: string; enablement: boolean }>,
+  options: Readonly<{
+    graphId: string;
+    enablement: boolean;
+    recomputeDerivedRelations?: RecomputeDerivedRelations;
+  }>,
 ): Promise<Readonly<{ recomputeDerivedRelations: boolean }>> {
   const ensureIdentityTables = backend.ensureIdentityTables;
   if (ensureIdentityTables === undefined) {
@@ -77,9 +107,56 @@ export async function ensureIdentitySchemaStorage(
   );
   // Every missing relation is an upgradeable derived one: the first call
   // withheld its DDL (that withholding is what protects a lost ledger), so
-  // ask again now that the refusal above has cleared it.
-  await ensureIdentityTables(tableNames, { provisionMissing: true });
-  return { recomputeDerivedRelations: true };
+  // provision it now that the refusal above has cleared it.
+  const recompute = options.recomputeDerivedRelations;
+  if (recompute === undefined) {
+    await ensureIdentityTables(tableNames, { provisionMissing: true });
+    return { recomputeDerivedRelations: true };
+  }
+  await provisionDerivedRelations(backend, tableNames, options.graphId, {
+    ensureIdentityTables,
+    recompute,
+  });
+  return { recomputeDerivedRelations: false };
+}
+
+/**
+ * Creates the missing derived relations and fills them, atomically where the
+ * backend can.
+ *
+ * The DDL comes from `backend.identityTableDdl` — deliberately data rather
+ * than a call into the top-level backend, because inside the fence a top-level
+ * backend method would re-enter the backend's serialized statement queue.
+ */
+async function provisionDerivedRelations(
+  backend: GraphBackend,
+  tableNames: IdentityTableNames,
+  graphId: string,
+  ports: Readonly<{
+    ensureIdentityTables: NonNullable<GraphBackend["ensureIdentityTables"]>;
+    recompute: RecomputeDerivedRelations;
+  }>,
+): Promise<void> {
+  const fence = backend.schemaWriteTransaction;
+  const identityTableDdl = backend.identityTableDdl;
+  if (fence === undefined || identityTableDdl === undefined) {
+    // A backend that offers neither port cannot make the two steps atomic, so
+    // they are at least adjacent — no boot work runs between them. Both bundled
+    // Drizzle backends implement both ports whenever transactions are enabled,
+    // and identity already refuses a backend without transactions
+    // (`IDENTITY_REQUIRES_ATOMIC_BACKEND`), so this is the custom-backend path.
+    // Residual, stated plainly: on such a backend the relation is briefly
+    // readable while empty.
+    await ports.ensureIdentityTables(tableNames, { provisionMissing: true });
+    await ports.recompute(backend);
+    return;
+  }
+  await fence(graphId, async (target) => {
+    for (const ddl of identityTableDdl(tableNames)) {
+      await target.executeSchemaDdl(ddl);
+    }
+    await ports.recompute(target);
+  });
 }
 
 /**

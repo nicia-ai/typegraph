@@ -156,6 +156,7 @@ export type {
   HardDeleteUniquesByNodeIdsParams,
   HybridSearchParams,
   HybridSearchRow,
+  IdentityTableNames,
   IndexMaterializationBackend,
   IndexMaterializationRow,
   InsertEdgeParams,

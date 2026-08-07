@@ -32,6 +32,7 @@ import {
   UniquenessError,
 } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
+import { readOwnProperty } from "../utils/object";
 import { isPresent } from "../utils/presence";
 
 // ============================================================
@@ -43,6 +44,15 @@ import { isPresent } from "../utils/presence";
  *
  * The key is built by concatenating the specified field values,
  * optionally normalized for case-insensitive comparison.
+ *
+ * Field values are read by declared OWN key ({@link readOwnProperty}): a
+ * constraint may name a field that a props bag does not carry (an absent
+ * optional field), and a plain `props[field]` read would answer such a field
+ * with the inherited `Object.prototype` member when the field is named after
+ * one. A constraint over a field named `toString` then keyed on the inherited
+ * function — `""` under `binary` (the function stringified and dropped by
+ * `JSON.stringify`) and a `TypeError` under `caseInsensitive` — instead of the
+ * null marker every other absent value gets.
  */
 export function computeUniqueKey(
   props: Record<string, unknown>,
@@ -50,7 +60,7 @@ export function computeUniqueKey(
   collation: Collation,
 ): string {
   const values = fields.map((field) => {
-    const value = props[field];
+    const value = readOwnProperty(props, field);
     if (value === undefined || value === null) {
       return UNIQUE_KEY_NULL_MARKER;
     }
@@ -79,7 +89,7 @@ export function checkWherePredicate(
   }
 
   // Build predicate context
-  const predicateBuilder = buildPredicateContext(props);
+  const predicateBuilder = buildPredicateContext();
   const predicate = constraint.where(predicateBuilder);
 
   // Evaluate predicate
@@ -103,32 +113,48 @@ type PredicateContext = Readonly<
 >;
 
 /**
- * Builds a predicate context for where clause evaluation.
+ * Builds the context a constraint's `where` callback names fields on.
+ *
+ * EVERY field name gets a member, because the builder type declares every
+ * schema field as required (`-?` in `UniqueConstraintPredicateBuilder`) —
+ * precisely so a partial constraint can ask whether an OPTIONAL field is
+ * present. Populating the context from the props bag's own keys instead left a
+ * declared-but-absent field with no member, and the callback's access then hit
+ * whatever the context's prototype offered: `Object.prototype.toString` for a
+ * field named `toString` (so naming it threw "isNull is not a function"), and
+ * `undefined` for an ordinary field (so the everyday partial constraint over
+ * `externalId` threw — "Cannot read properties of undefined", or "Expected a
+ * defined value" through `requireDefined` — for every node written without it).
+ *
+ * Answering every name is safe because a name comes from the predicate author
+ * (the code), never from data, and the field's VALUE is still read from the
+ * props bag by own key when the predicate is evaluated — so an absent field
+ * evaluates as null, which is what a partial constraint means by absent. This
+ * is also the shape `serializeWherePredicate` (src/schema/serializer.ts) has
+ * always captured constraints with, so a persisted `where` and an evaluated
+ * `where` now see the same builder.
  */
-function buildPredicateContext(
-  props: Record<string, unknown>,
-): PredicateContext {
-  const context: Record<
-    string,
-    { isNull: () => UniquePredicate; isNotNull: () => UniquePredicate }
-  > = {};
-
-  for (const key of Object.keys(props)) {
-    context[key] = {
-      isNull: () => ({
-        __type: "unique_predicate" as const,
-        field: key,
-        op: "isNull" as const,
-      }),
-      isNotNull: () => ({
-        __type: "unique_predicate" as const,
-        field: key,
-        op: "isNotNull" as const,
-      }),
-    };
-  }
-
-  return context;
+function buildPredicateContext(): PredicateContext {
+  return new Proxy<PredicateContext>(
+    {},
+    {
+      get(_target, property) {
+        if (typeof property === "symbol") return;
+        return {
+          isNull: () => ({
+            __type: "unique_predicate" as const,
+            field: property,
+            op: "isNull" as const,
+          }),
+          isNotNull: () => ({
+            __type: "unique_predicate" as const,
+            field: property,
+            op: "isNotNull" as const,
+          }),
+        };
+      },
+    },
+  );
 }
 
 /**
@@ -156,7 +182,11 @@ function evaluatePredicate(
     return true;
   }
 
-  const value = props[pred.field];
+  // Own-key read: `pred.field` is a schema field name, and a props bag that
+  // does not carry it must read as absent rather than as the inherited
+  // `Object.prototype` member a field named after one would otherwise find
+  // (which reads as present, inverting both `isNull` and `isNotNull`).
+  const value = readOwnProperty(props, pred.field);
   if (pred.op === "isNull") {
     return value === null || value === undefined;
   }

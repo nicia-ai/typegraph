@@ -19,6 +19,7 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { drizzle as drizzlePostgres } from "drizzle-orm/node-postgres";
 import { Client, Pool } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -32,12 +33,21 @@ import {
   type QueryHookContext,
   searchable,
 } from "../src";
-import { isSerializedPostgresClient } from "../src/backend/drizzle/postgres";
+import { type AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
+import {
+  createPostgresBackend,
+  isSerializedPostgresClient,
+} from "../src/backend/drizzle/postgres";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
 import {
+  beginSerializedImport,
+  beginSerializedSnapshotExport,
+  hasActiveSerializedImport,
+  hasActiveSerializedSnapshotExport,
   markSerializedTransactionResource,
   sharesSerializedTransactionResource,
+  snapshotExportContention,
 } from "../src/backend/transaction-resource";
 import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
 import { dumpObservableState } from "./state-snapshot";
@@ -124,9 +134,130 @@ describe("serialized transaction resource ownership", () => {
   });
 });
 
+describe("serialized import lease", () => {
+  // The lease is what makes "an export snapshot may not open while a streaming
+  // import is writing through this connection" answerable from any wrapper, in
+  // either direction. It is registered against the RESOURCE, so the export side
+  // sees it even though it holds a different backend object.
+  it("publishes an import against the resource, not the wrapper", () => {
+    const root = createTestBackend();
+    const resource = {};
+    markSerializedTransactionResource(root, resource);
+    const importing = createBackendOverlay(root, {});
+    const exporting = createBackendOverlay(root, {});
+
+    const release = beginSerializedImport(importing);
+
+    expect(hasActiveSerializedImport(exporting)).toBe(true);
+    // The two registries are separate facts: an import in flight must not read
+    // as an open export snapshot, or an import would refuse itself.
+    expect(hasActiveSerializedSnapshotExport(exporting)).toBe(false);
+
+    release();
+    expect(hasActiveSerializedImport(exporting)).toBe(false);
+  });
+
+  it("keeps the lease until the last holder releases it", () => {
+    const root = createTestBackend();
+    markSerializedTransactionResource(root, {});
+
+    const first = beginSerializedImport(root);
+    const second = beginSerializedImport(root);
+
+    first();
+    expect(hasActiveSerializedImport(root)).toBe(true);
+    // Idempotent: a repeated release must not decrement the other holder's
+    // count away.
+    first();
+    expect(hasActiveSerializedImport(root)).toBe(true);
+
+    second();
+    expect(hasActiveSerializedImport(root)).toBe(false);
+  });
+
+  it("does not conflate independent resources", () => {
+    const first = createTestBackend();
+    const second = createTestBackend();
+    markSerializedTransactionResource(first, {});
+    markSerializedTransactionResource(second, {});
+
+    const release = beginSerializedImport(first);
+
+    expect(hasActiveSerializedImport(second)).toBe(false);
+    release();
+  });
+
+  it("is inert for a backend with no known serialized connection", () => {
+    // A default `pg` Pool hands out an independent connection per checkout, so it
+    // is deliberately unmarked — and an unmarked backend can hold no lease. That
+    // is the documented residual gap (a driver we cannot positively identify
+    // keeps only the identity-based pre-flight), asserted here so it stays
+    // deliberate rather than becoming an accident.
+    const pool = new Pool({
+      connectionString: "postgres://user@127.0.0.1:1/typegraph_lease",
+    });
+
+    try {
+      const unmarked = createPostgresBackend(drizzlePostgres(pool), {
+        vector: false,
+      });
+
+      const release = beginSerializedImport(unmarked);
+
+      expect(hasActiveSerializedImport(unmarked)).toBe(false);
+      release();
+    } finally {
+      void pool.end();
+    }
+  });
+
+  it("reports an export snapshot and an import independently", () => {
+    const root = createTestBackend();
+    markSerializedTransactionResource(root, {});
+
+    const releaseExport = beginSerializedSnapshotExport(root);
+
+    expect(hasActiveSerializedSnapshotExport(root)).toBe(true);
+    expect(hasActiveSerializedImport(root)).toBe(false);
+
+    releaseExport();
+    expect(hasActiveSerializedSnapshotExport(root)).toBe(false);
+  });
+});
+
 /** Stands in for a driver's query method on a hand-built client. */
 function resolveNoRows(): Promise<readonly unknown[]> {
   return Promise.resolve([]);
+}
+
+/**
+ * A tagged-template driver's client is a FUNCTION, so every stand-in for one is
+ * built on its OWN callable: assigning driver markers onto a shared function
+ * would leak them into the next case and make an abstention look like a match.
+ */
+function createCallableClient(
+  properties: Readonly<Record<string, unknown>>,
+): unknown {
+  // `bind` yields a fresh function object, so the driver markers land on this
+  // stand-in only.
+  return Object.assign(resolveNoRows.bind(undefined), properties);
+}
+
+/**
+ * A postgres-js-shaped client: callable, with the `unsafe` raw executor and the
+ * `begin` transaction starter the driver detection reads, plus the resolved
+ * `options` postgres-js exposes on the callable (postgres@3.x). Hand-built
+ * because postgres-js is not a dependency of this package — the shape under test
+ * is the shape the predicate reads.
+ */
+function createPostgresJsClient(
+  options: Readonly<{ max?: number }> | undefined,
+): unknown {
+  return createCallableClient({
+    unsafe: resolveNoRows,
+    begin: resolveNoRows,
+    ...(options === undefined ? {} : { options }),
+  });
 }
 
 describe("serialized Postgres client detection", () => {
@@ -165,10 +296,11 @@ describe("serialized Postgres client detection", () => {
   });
 
   it("abstains on clients it cannot positively identify", () => {
-    // postgres-js is a callable tagged template, neon-http is callable too, and
-    // an arbitrary object proves nothing. Marking any of them would refuse
-    // legitimate concurrent work, so the predicate declines.
-    const taggedTemplate = Object.assign(resolveNoRows, {
+    // A postgres-js client that states no connection cap is at the driver
+    // default (10) and hands each `begin` its own connection; neon-http is
+    // callable too, and an arbitrary object proves nothing. Marking any of them
+    // would refuse legitimate concurrent work, so the predicate declines.
+    const taggedTemplate = createCallableClient({
       unsafe: resolveNoRows,
       begin: resolveNoRows,
       query: resolveNoRows,
@@ -177,6 +309,50 @@ describe("serialized Postgres client detection", () => {
     expect(isSerializedPostgresClient(taggedTemplate)).toBe(false);
     expect(isSerializedPostgresClient({ query: resolveNoRows })).toBe(false);
     expect(isSerializedPostgresClient({})).toBe(false);
+  });
+
+  it("marks a postgres-js client capped at one connection", () => {
+    // `postgres(url, { max: 1 })`: every statement — and every `begin`, which
+    // reserves the sole connection for the transaction — runs on one connection,
+    // so an export snapshot on one wrapper holds the connection another
+    // wrapper's import needs. The client is CALLABLE, and the resolver used to
+    // drop callables before reading their cap.
+    const client = createPostgresJsClient({ max: 1 });
+
+    expect(isSerializedPostgresClient(client)).toBe(true);
+  });
+
+  it("does not mark a postgres-js client that states no single-connection cap", () => {
+    // postgres-js's `max` defaults to 10, so an absent option is a POOL and an
+    // explicit larger cap is a pool too. Either would be refused work that
+    // succeeds.
+    expect(isSerializedPostgresClient(createPostgresJsClient({}))).toBe(false);
+    expect(
+      isSerializedPostgresClient(createPostgresJsClient({ max: 10 })),
+    ).toBe(false);
+    expect(isSerializedPostgresClient(createPostgresJsClient(undefined))).toBe(
+      false,
+    );
+  });
+
+  it("does not mark an unrecognized callable client capped at one connection", () => {
+    // `options.max === 1` on a callable we cannot attribute to a known driver
+    // (no postgres-js `unsafe` + `begin`/`savepoint` surface) is not evidence
+    // about how that driver dispatches statements — e.g. Bun's `SQL`, which
+    // nothing in the package positively identifies, stays a declared gap rather
+    // than becoming a guess.
+    const unknownCallable = createCallableClient({ options: { max: 1 } });
+    // neon-http is callable and has `unsafe`, but its `unsafe` is a fragment
+    // builder and it starts transactions with `transaction`, not `begin` — so it
+    // is not postgres-js and its options say nothing about statement dispatch.
+    const neonHttpShaped = createCallableClient({
+      unsafe: resolveNoRows,
+      transaction: resolveNoRows,
+      options: { max: 1 },
+    });
+
+    expect(isSerializedPostgresClient(unknownCallable)).toBe(false);
+    expect(isSerializedPostgresClient(neonHttpShaped)).toBe(false);
   });
 });
 
@@ -217,6 +393,98 @@ describe("serialized SQLite connection detection", () => {
 
     const first = createSqliteBackend(drizzle(openDatabase(file)));
     const second = createSqliteBackend(drizzle(openDatabase(file)));
+
+    expect(sharesSerializedTransactionResource(first, second)).toBe(false);
+  });
+});
+
+/**
+ * The `ctx.storage` object a Durable Object hands to `drizzle()`: the async and
+ * sync transaction runners plus the SQL API, which together are the evidence
+ * `getDurableObjectStorageClient` requires.
+ */
+function createStorageClient(): object {
+  return {
+    sql: {
+      exec: (): readonly unknown[] => [],
+    },
+    transaction: <T>(run: () => Promise<T>): Promise<T> => run(),
+    transactionSync: <T>(run: () => T): T => run(),
+  };
+}
+
+/** What `drizzle(ctx.storage)` exposes to the backend factory. */
+function createDurableObjectDatabase(storage: object): AnySqliteDatabase {
+  return { $client: storage } as unknown as AnySqliteDatabase;
+}
+
+/**
+ * Cloudflare Durable Object storage (`drizzle(ctx.storage)`) is ONE connection
+ * whose transaction frame is ambient on the storage object, so a second
+ * wrapper's import writes land inside the first wrapper's open export snapshot.
+ * Nothing else abstains for it: the DO backend reports
+ * `capabilities.transactions: true`, so the interchange guard reaches the
+ * shared-resource question and needs an answer.
+ *
+ * A real Durable Object cannot run here (no workerd), so the storage client is
+ * duck-typed to the shape `getDurableObjectStorageClient` requires — which is
+ * also the shape `transactionMode: "do-sqlite"` drives at runtime, so a stand-in
+ * the detector accepts is a stand-in the transaction runner would accept.
+ */
+describe("Durable Object storage serialized-resource detection", () => {
+  it("recognizes two backends over one storage object", () => {
+    const storage = createStorageClient();
+
+    const first = createSqliteBackend(createDurableObjectDatabase(storage));
+    const second = createSqliteBackend(createDurableObjectDatabase(storage));
+
+    expect(first).not.toBe(second);
+    // Precondition for the gap: transactions are on, so the guard does not
+    // short-circuit and the mark is the only thing that can refuse the import.
+    expect(first.capabilities.transactions).toBe(true);
+    expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+    expect(snapshotExportContention(first, second)).toBe("shared-resource");
+  });
+
+  it("carries the mark through the wrappers a history store adds", () => {
+    const storage = createStorageClient();
+    const source = createSqliteBackend(createDurableObjectDatabase(storage));
+    const target = createBackendOverlay(
+      createGraphBackendProjection(
+        createSqliteBackend(createDurableObjectDatabase(storage)),
+      ),
+      {},
+    );
+
+    expect(snapshotExportContention(source, target)).toBe("shared-resource");
+  });
+
+  it("treats separate storage objects as independent", () => {
+    const first = createSqliteBackend(
+      createDurableObjectDatabase(createStorageClient()),
+    );
+    const second = createSqliteBackend(
+      createDurableObjectDatabase(createStorageClient()),
+    );
+
+    expect(sharesSerializedTransactionResource(first, second)).toBe(false);
+  });
+
+  it("does not adopt a client with only part of the storage shape", () => {
+    // better-sqlite3's `db.transaction(fn)` is a wrapper FACTORY, not the DO
+    // async runner; the full shape (async + sync runners plus the SQL API) is
+    // what distinguishes them, and a partial match must abstain rather than mark
+    // an unknown client.
+    const partialStorage = {
+      transaction: <T>(run: () => Promise<T>): Promise<T> => run(),
+    };
+
+    const first = createSqliteBackend(
+      createDurableObjectDatabase(partialStorage),
+    );
+    const second = createSqliteBackend(
+      createDurableObjectDatabase(partialStorage),
+    );
 
     expect(sharesSerializedTransactionResource(first, second)).toBe(false);
   });

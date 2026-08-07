@@ -65,6 +65,7 @@ import {
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { hasOwnKey } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
@@ -190,7 +191,13 @@ type CachedUniqueRow = Awaited<ReturnType<GraphBackend["checkUnique"]>>;
 // Helper Functions
 // ============================================================
 
+// Own-key membership, matching `store.getNodePropsSchema` and the collections
+// proxy: kind names are arbitrary identifiers, so a `toString`-named kind that
+// is NOT registered would otherwise read the inherited function as its
+// registration and fail with a `TypeError` off `registration.type` instead of
+// the `KindNotFoundError` this guard exists to raise.
 function getNodeRegistration<G extends GraphDef>(graph: G, kind: string) {
+  if (!hasOwnKey(graph.nodes, kind)) throw new KindNotFoundError(kind, "node");
   const registration = graph.nodes[kind];
   if (registration === undefined) throw new KindNotFoundError(kind, "node");
   return registration;

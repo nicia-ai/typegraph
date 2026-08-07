@@ -115,6 +115,7 @@ type UnsafeHistoryStoreBackendMember =
   | "executeRaw"
   | "executeStatement"
   | "ensureIdentityTables"
+  | "identityTableDdl"
   | "rebuildContribution"
   | "repairContributions"
   | "schemaWriteTransaction"

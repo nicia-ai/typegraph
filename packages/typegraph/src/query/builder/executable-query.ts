@@ -1017,7 +1017,13 @@ export class ExecutableQuery<
       }
     }
 
-    const cursorContext: Record<string, unknown> = {};
+    // Null-prototype: aliases and JSON-pointer segments are caller data, and a
+    // "__proto__" key on an ordinary object would WRITE INTO Object.prototype
+    // (global pollution) instead of creating an entry. See
+    // store/transaction-receipt.ts createCountBucket for the same rule.
+    const cursorContext: Record<string, unknown> = Object.create(
+      null,
+    ) as Record<string, unknown>;
 
     for (const spec of this.#paginationOrderBy()) {
       const alias = spec.field.alias;
@@ -1090,7 +1096,9 @@ export class ExecutableQuery<
         if (typeof existing_ === "object" && existing_ !== null) {
           current = existing_ as Record<string, unknown>;
         } else {
-          const created: Record<string, unknown> = {};
+          const created: Record<string, unknown> = Object.create(
+            null,
+          ) as Record<string, unknown>;
           current[segment] = created;
           current = created;
         }
@@ -1109,7 +1117,10 @@ export class ExecutableQuery<
     if (typeof existing === "object" && existing !== null) {
       return existing as Record<string, unknown>;
     }
-    const created: Record<string, unknown> = {};
+    const created: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
     cursorContext[alias] = created;
     return created;
   }

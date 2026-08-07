@@ -5941,6 +5941,15 @@ async function prepareStoreWithSchema<G extends GraphDef>(
         serializeSchema(merged, activeRow.version + 1),
       ));
 
+  // Resolved before the provisioning below, which asks whether a schema commit
+  // is already going to rebuild the derived identity relations.
+  const identityGate: IdentitySchemaGate | undefined =
+    identitySemanticsChanged ?
+      identityEnablement ? "enablement"
+      : identityProfileChanged ? "profile"
+      : "ontology"
+    : undefined;
+
   // First enablement over an existing populated database: createStore /
   // createSqliteBackend / createPostgresBackend ran no DDL, so the identity
   // relations the enablement preflight reads/writes may not exist yet.
@@ -5952,27 +5961,47 @@ async function prepareStoreWithSchema<G extends GraphDef>(
   // applied migration) or the tables already exist.
   let identitySchema: SqlSchema | undefined;
   let recomputeIdentityDerivedRelations = false;
-  if (merged.identity !== undefined) {
+  const identityProfile = merged.identity;
+  if (identityProfile !== undefined) {
     // Brand-validate BEFORE the DDL: a counterfeit schema-shaped object must
     // reject with INVALID_SQL_SCHEMA and leave no tables behind — and must
     // not surface as IDENTITY_STORAGE_MISSING on an already enabled graph.
-    identitySchema =
+    const resolvedIdentitySchema =
       options?.schema === undefined ?
         createSqlSchema(backend.tableNames)
       : requireSqlSchema(options.schema, "store schema");
+    identitySchema = resolvedIdentitySchema;
     ({ recomputeDerivedRelations: recomputeIdentityDerivedRelations } =
-      await ensureIdentitySchemaStorage(backend, identitySchema, {
+      await ensureIdentitySchemaStorage(backend, resolvedIdentitySchema, {
         graphId: merged.id,
         enablement: identityEnablement,
+        // A derived relation this library version added, absent from a
+        // database that predates it, is created and FILLED as one unit here —
+        // never created now and filled at the end of boot. Between those two
+        // points sit the schema commit, the history assertion, three
+        // materialization steps and an index build, and for that whole window
+        // an empty separation relation would answer "not separated" to every
+        // concurrent `assertSame`. See `ensureIdentitySchemaStorage`.
+        //
+        // Withheld when a schema commit is gated on an identity SEMANTICS
+        // change: that commit's own preflight rebuilds inside the commit
+        // transaction, under the semantics being committed. Filling here would
+        // instead derive classes from semantics this database has not accepted
+        // yet — and would keep them if the commit were then refused.
+        ...(identityGate === undefined ?
+          {
+            recomputeDerivedRelations: (target) =>
+              rebuildIdentityClosureForContext({
+                backend: target,
+                graphId: merged.id,
+                registry: buildKindRegistry(merged),
+                schema: resolvedIdentitySchema,
+                sameIdAcrossKinds: identityProfile.sameIdAcrossKinds,
+              }),
+          }
+        : {}),
       }));
   }
-
-  const identityGate: IdentitySchemaGate | undefined =
-    identitySemanticsChanged ?
-      identityEnablement ? "enablement"
-      : identityProfileChanged ? "profile"
-      : "ontology"
-    : undefined;
 
   // No identity preflight is passed here — the schema manager derives the
   // mandatory one itself (from `options.schema` when supplied), so no public
@@ -6028,12 +6057,15 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     await materializeSystemIndexesOnBoot(backend, merged.id, result);
   }
 
-  // A derived identity relation this library version added, created empty
-  // above on a database that predates it: recompute it from the assertion
-  // ledger before anything reads or validates it. Once per database — the
-  // relation exists on every later open. An enablement or identity-semantics
-  // change already rebuilds inside its own schema-commit preflight, and a
-  // breaking gate leaves the schema unusable, so neither needs this.
+  // The fill for a derived relation `ensureIdentitySchemaStorage` created but
+  // did not fill itself. That is now only the identity-semantics-change path,
+  // where the fill belongs to the schema commit: this runs after that commit
+  // has rebuilt under the committed semantics, and is idempotent. A breaking
+  // gate leaves the schema unusable, so it is skipped there.
+  //
+  // The ordinary upgrade-on-open path never reaches here — its relation was
+  // created and filled in one fenced transaction before any of the boot steps
+  // above could observe it empty.
   if (
     recomputeIdentityDerivedRelations &&
     identitySchema !== undefined &&

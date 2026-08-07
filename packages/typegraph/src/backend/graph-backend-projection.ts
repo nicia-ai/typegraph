@@ -100,6 +100,7 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "rebuildContribution",
   "ensureFulltextTable",
   "ensureIdentityTables",
+  "identityTableDdl",
   "getReconciliationMarker",
   "setReconciliationMarker",
   "clearGraph",

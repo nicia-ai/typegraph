@@ -193,7 +193,15 @@ function hasPgliteSession(carrier: PgClientCarrier): boolean {
   return transactionSession(carrier)?.constructor?.name === "PgliteSession";
 }
 
-function isPostgresJsClient(candidate: unknown): candidate is PostgresJsClient {
+/**
+ * Single owner of "this callable client is postgres-js". Shared with the
+ * serialized-resource detection in `../postgres.ts`, which reads `options.max`
+ * off the same client shape, so the fast path and the marking predicate cannot
+ * drift about which callables are postgres-js.
+ */
+export function isPostgresJsClient(
+  candidate: unknown,
+): candidate is PostgresJsClient {
   // postgres-js's tagged-template Sql is callable, has `.unsafe` (raw
   // parameterized executor), and has `.begin` (transaction starter). The
   // transaction-scoped `TransactionSql` replaces `.begin` with `.savepoint`;

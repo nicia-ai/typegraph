@@ -422,6 +422,10 @@ function makeWherePredicate(
   op: NullCheckOp,
 ): UniqueWhereCallback {
   return (props) => {
+    // Not a data-keyed bag: `props` is the predicate-builder surface, a total
+    // Proxy whose `get` trap answers every declared field name, so a
+    // prototype-named field cannot fall through to `Object.prototype` here.
+    // (An own-key read would be wrong against a get-trap-only Proxy.)
     const builder = props[field];
     if (builder === undefined) {
       // The runtime predicate object is the source of truth — even if the

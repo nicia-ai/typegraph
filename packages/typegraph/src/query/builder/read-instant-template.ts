@@ -18,6 +18,7 @@
  */
 import { ConfigurationError } from "../../errors";
 import { nowIso } from "../../utils/date";
+import { readOwnProperty } from "../../utils/object";
 import { type ComposableQuery, type QueryAst } from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "../compiler/temporal";
@@ -197,7 +198,10 @@ export function fillTemplateParams(
       return readInstant;
     }
 
-    const value = bindings[name];
+    // Own-key read: a parameter named after an `Object.prototype` member must
+    // read as an absent binding, not as the inherited member (the same guard
+    // `bindSqlValue`'s placeholder path applies).
+    const value = readOwnProperty(bindings, name);
     if (value === undefined) {
       throw new ConfigurationError(`Missing binding for parameter "${name}"`, {
         parameterName: name,

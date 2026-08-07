@@ -7,6 +7,7 @@
 import type { z } from "zod";
 
 import {
+  beginSerializedImport,
   hasActiveSerializedSnapshotExport,
   snapshotExportContention,
 } from "../backend/transaction-resource";
@@ -227,10 +228,18 @@ export async function importGraph<G extends GraphDef>(
  * Refused with a typed {@link ConfigurationError} when the target writes through
  * a database connection that a snapshot export is holding open — either because
  * this stream came from that export, or because ANY export snapshot is open on
- * that connection when a chunk arrives (which covers a stream the caller has
- * wrapped). Connections we cannot observe are not detected: two clients dialed
- * at one server, or two SQLite handles on one file, are independent and are not
- * refused.
+ * that connection when the first chunk arrives (which covers a stream the caller
+ * has wrapped). Once accepted, the import holds an import lease on that
+ * connection for the whole chunk loop, so an export snapshot that tries to open
+ * BETWEEN chunks is the side refused (`INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`
+ * from `exportGraphStream`) — this import keeps running instead of stalling
+ * against a read transaction its next chunk can never write past.
+ *
+ * Connections we cannot observe are not detected: two clients dialed at one
+ * server, or two SQLite handles on one file, are independent and are not
+ * refused. Neither is a connection whose driver we cannot positively identify as
+ * single-connection — see the residual gap documented in
+ * `backend/transaction-resource.ts`.
  */
 export async function importGraphStream<G extends GraphDef>(
   store: Store<G>,
@@ -260,123 +269,140 @@ export async function importGraphStream<G extends GraphDef>(
   let header: GraphDataHeader | undefined;
   let receivedEdges = false;
   let receivedIdentity = false;
-  let snapshotRegistryChecked = false;
+  let releaseImportLease: (() => void) | undefined;
 
-  for await (const chunk of chunks) {
-    // The check above needs the stream to still identify its source backend,
-    // which any user wrapper (a delegating generator, `Readable.from`, a tee)
-    // erases. By the time the FIRST chunk arrives the export's snapshot
-    // transaction is already open and the registry says so itself, so a wrapped
-    // stream fails the same way an unwrapped one does instead of stalling
-    // behind a transaction that cannot end until this loop does.
-    //
-    // Only the first chunk is checked, because this refusal must land before
-    // the import writes anything: an unrelated export opening on that
-    // connection mid-stream is not a reason to abort an import whose earlier
-    // chunks are already committed.
-    if (!snapshotRegistryChecked) {
-      snapshotRegistryChecked = true;
-      if (hasActiveSerializedSnapshotExport(targetBackend)) {
-        throw serializedSnapshotImportRefusal(
-          store.graphId,
-          "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
-        );
+  try {
+    for await (const chunk of chunks) {
+      // The pre-flight check above needs the stream to still identify its source
+      // backend, which any user wrapper (a delegating generator, `Readable.from`,
+      // a tee) erases. By the time the FIRST chunk arrives the export's snapshot
+      // transaction is already open and the registry says so itself, so a wrapped
+      // stream fails the same way an unwrapped one does instead of stalling
+      // behind a transaction that cannot end until this loop does.
+      //
+      // ONE SYNCHRONOUS SECTION, no `await` between the check and the lease:
+      // observing an empty export registry and claiming the connection cannot be
+      // interleaved on a single-threaded event loop, so the two long-lived
+      // streams can never both conclude the connection was free. Whoever gets
+      // here second is refused — an export starting mid-import is refused by
+      // `exportGraphStream` reading this lease, so an import whose earlier chunks
+      // are already committed is never aborted for someone else's export.
+      if (releaseImportLease === undefined) {
+        if (hasActiveSerializedSnapshotExport(targetBackend)) {
+          throw serializedSnapshotImportRefusal(
+            store.graphId,
+            "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+          );
+        }
+        releaseImportLease = beginSerializedImport(targetBackend);
+      }
+      switch (chunk.type) {
+        case "header": {
+          if (header !== undefined) {
+            throw new Error(
+              "Graph interchange stream emitted more than one header.",
+            );
+          }
+          // The header is bounded, so validate it at the runtime stream
+          // boundary. In particular, an invalid identity profile/mode must not
+          // slip through merely because the stream's identity assertion chunk is
+          // empty.
+          validateStreamHeader(chunk.header);
+          // Reject an identity-bearing header aimed at an identity-disabled
+          // graph before any chunk is processed, matching importGraph's guard.
+          assertIdentityImportSupported(
+            store,
+            chunk.header.identity !== undefined,
+          );
+          header = chunk.header;
+          break;
+        }
+        case "nodes": {
+          if (header === undefined) {
+            throw new Error(
+              "Graph interchange stream must start with a header.",
+            );
+          }
+          if (receivedEdges || receivedIdentity) {
+            throw new Error(
+              `Graph interchange stream cannot emit nodes after ${
+                receivedEdges ? "edges" : "identity assertions"
+              }.`,
+            );
+          }
+          if (chunk.nodes.length === 0) break;
+          mergeImportResult(
+            result,
+            await importGraph(
+              store,
+              graphDataForChunk(header, chunk.nodes, [], []),
+              {
+                ...options,
+                refreshStatistics: false,
+              },
+            ),
+          );
+          throwIfStreamChunkFailed(result, options);
+          break;
+        }
+        case "edges": {
+          if (header === undefined) {
+            throw new Error(
+              "Graph interchange stream must start with a header.",
+            );
+          }
+          if (receivedIdentity) {
+            throw new Error(
+              "Graph interchange stream cannot emit edges after identity assertions.",
+            );
+          }
+          receivedEdges = true;
+          if (chunk.edges.length === 0) break;
+          mergeImportResult(
+            result,
+            await importGraph(
+              store,
+              graphDataForChunk(header, [], chunk.edges, []),
+              {
+                ...options,
+                refreshStatistics: false,
+              },
+            ),
+          );
+          throwIfStreamChunkFailed(result, options);
+          break;
+        }
+        case "identity": {
+          if (header === undefined) {
+            throw new Error(
+              "Graph interchange stream must start with a header.",
+            );
+          }
+          if (header.identity === undefined) {
+            throw new Error(
+              "Graph interchange stream emitted identity rows without an identity header.",
+            );
+          }
+          receivedIdentity = true;
+          if (chunk.assertions.length === 0) break;
+          mergeImportResult(
+            result,
+            await importGraph(
+              store,
+              graphDataForChunk(header, [], [], chunk.assertions),
+              { ...options, refreshStatistics: false },
+            ),
+          );
+          throwIfStreamChunkFailed(result, options);
+          break;
+        }
       }
     }
-    switch (chunk.type) {
-      case "header": {
-        if (header !== undefined) {
-          throw new Error(
-            "Graph interchange stream emitted more than one header.",
-          );
-        }
-        // The header is bounded, so validate it at the runtime stream boundary.
-        // In particular, an invalid identity profile/mode must not slip through
-        // merely because the stream's identity assertion chunk is empty.
-        validateStreamHeader(chunk.header);
-        // Reject an identity-bearing header aimed at an identity-disabled graph
-        // before any chunk is processed, matching importGraph's guard.
-        assertIdentityImportSupported(
-          store,
-          chunk.header.identity !== undefined,
-        );
-        header = chunk.header;
-        break;
-      }
-      case "nodes": {
-        if (header === undefined) {
-          throw new Error("Graph interchange stream must start with a header.");
-        }
-        if (receivedEdges || receivedIdentity) {
-          throw new Error(
-            `Graph interchange stream cannot emit nodes after ${
-              receivedEdges ? "edges" : "identity assertions"
-            }.`,
-          );
-        }
-        if (chunk.nodes.length === 0) break;
-        mergeImportResult(
-          result,
-          await importGraph(
-            store,
-            graphDataForChunk(header, chunk.nodes, [], []),
-            {
-              ...options,
-              refreshStatistics: false,
-            },
-          ),
-        );
-        throwIfStreamChunkFailed(result, options);
-        break;
-      }
-      case "edges": {
-        if (header === undefined) {
-          throw new Error("Graph interchange stream must start with a header.");
-        }
-        if (receivedIdentity) {
-          throw new Error(
-            "Graph interchange stream cannot emit edges after identity assertions.",
-          );
-        }
-        receivedEdges = true;
-        if (chunk.edges.length === 0) break;
-        mergeImportResult(
-          result,
-          await importGraph(
-            store,
-            graphDataForChunk(header, [], chunk.edges, []),
-            {
-              ...options,
-              refreshStatistics: false,
-            },
-          ),
-        );
-        throwIfStreamChunkFailed(result, options);
-        break;
-      }
-      case "identity": {
-        if (header === undefined) {
-          throw new Error("Graph interchange stream must start with a header.");
-        }
-        if (header.identity === undefined) {
-          throw new Error(
-            "Graph interchange stream emitted identity rows without an identity header.",
-          );
-        }
-        receivedIdentity = true;
-        if (chunk.assertions.length === 0) break;
-        mergeImportResult(
-          result,
-          await importGraph(
-            store,
-            graphDataForChunk(header, [], [], chunk.assertions),
-            { ...options, refreshStatistics: false },
-          ),
-        );
-        throwIfStreamChunkFailed(result, options);
-        break;
-      }
-    }
+  } finally {
+    // Released as soon as the last chunk is processed (or the loop throws): the
+    // lease exists to keep an export snapshot from opening while a chunk write
+    // is still to come, and the post-loop statistics refresh is not one.
+    releaseImportLease?.();
   }
 
   if (header === undefined) {

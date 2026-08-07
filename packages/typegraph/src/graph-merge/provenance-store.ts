@@ -17,16 +17,20 @@
  * (TypeGraph's cross-store `withTransaction`), deliberately deferred for v1.
  *
  * OWNERSHIP OF THE SIDECAR GRAPH ID. {@link openProvenanceStore} is the only
- * gateway, and it never writes to a graph id it has not established ownership of
- * ({@link inspectSidecarGraphId} decides BEFORE any modification):
+ * gateway, and it never writes provenance to a graph id it has not established
+ * ownership of ({@link inspectSidecarGraphId} decides what may be done):
  *
  *   - unregistered id: free ONLY when it carries no node and no edge row.
  *     A schema-less application graph (plain `createStore`, which registers no
  *     schema row) is still an application graph, so any pre-existing row refuses;
- *   - sidecar schema + live owner marker: owned, open it;
- *   - sidecar schema + NO owner marker: an INTERRUPTED CREATION/UPGRADE, resumed
- *     by writing the marker — but only when the id's durable contents are exactly
- *     what this module could have written and nothing else (see below);
+ *   - a VALID live owner marker for this target: owned, open it;
+ *   - ANY other `ProvenanceOwner`-kind row — tombstoned, schema-invalid, claiming a
+ *     different target, or stored under a different id: foreign occupancy, refused
+ *     with `corrupt-ownership-marker`. A marker this module cannot verify is never
+ *     overwritten or resurrected;
+ *   - sidecar schema + NO owner marker at all: an INTERRUPTED CREATION/UPGRADE,
+ *     resumed by claiming the marker — but only when the id's durable contents are
+ *     exactly what this module could have written and nothing else (see below);
  *   - pre-marker (legacy) schema: upgraded when every `Provenance` row verifies;
  *   - anything else: refused with `GRAPH_MERGE_PROVENANCE_ID_COLLISION` and a
  *     remediation naming the state that was actually found.
@@ -39,10 +43,42 @@
  * schema-shaped: schema-without-marker is resumed only when the graph id holds no
  * node row of any other kind, no edge row at all, and every `Provenance` row is
  * live, valid for THIS target, and stored under its recomputed deterministic id.
- * Zero rows (the crash-right-after-schema-registration state) trivially qualifies;
- * an application graph that copied the sidecar schema and holds its own data does
- * not, and is still refused. Adopting an EMPTY exact-schema application graph is
- * the accepted cost of that rule: it loses nothing, since the graph holds no rows.
+ * Zero rows (the crash-right-after-schema-registration state) trivially qualifies.
+ *
+ * WHY AN EMPTY EXACT-SCHEMA ID MAY BE ADOPTED. "Verified empty" is only evidence of
+ * a free id if nothing can appear between the verification and the claim. It cannot:
+ * the contents check and the marker write happen in ONE fenced transaction
+ * ({@link claimSidecarOwnership} — `backend.schemaWriteTransaction`, the same
+ * per-graph fence a schema commit holds). On SQLite that fence is `BEGIN IMMEDIATE`,
+ * which owns the single writer slot; on PostgreSQL it takes a per-graph advisory
+ * transaction lock and locks the graph's active schema row `FOR UPDATE`, the row
+ * every schema-managed Store write must take `FOR SHARE` — so a competing
+ * application writer either commits first (and this claim then SEES its row and
+ * refuses) or waits until the claim has committed. An empty exact-schema graph is
+ * therefore adopted, which keeps an interrupted creation self-healing, and the
+ * ambiguous "empty now, occupied a moment later" outcome the adoption used to
+ * accept is unreachable rather than merely unlikely. One writer class sits
+ * outside the fence on PostgreSQL at read committed: a schema-LESS raw
+ * `createStore` writer takes no schema-row lock, so its insert can commit
+ * between the claim's read and the claim's commit — such a writer is still
+ * refused whenever its row lands before the claim's fenced re-inspection, but
+ * a row landing inside that window coexists with the claim. SQLite has no such
+ * gap (`BEGIN IMMEDIATE` serializes all writers).
+ *
+ * RESIDUE. The sidecar SCHEMA is registered by `createStoreWithSchema`, which owns
+ * its own transactions and cannot run inside the claim's fence. The unfenced
+ * preflight therefore runs FIRST and refuses an occupied id before any registration,
+ * but a claim that loses the race after the preflight leaves the sidecar schema
+ * registered on a graph id this module does not own. That residue is accepted
+ * because the open still REFUSES and no `Provenance` row and no marker are written:
+ * a schema-version row alone changes no application row and no query result, and the
+ * refusal names the occupant so the operator can drop it.
+ *
+ * The claim needs a transactional schema fence. A backend that exposes none is
+ * refused with `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED` rather than claiming the id
+ * with a check-then-write that a concurrent writer can slip through. Opening an
+ * ALREADY-owned sidecar needs no claim, so read-only use of an existing sidecar
+ * stays available on such a backend.
  */
 
 import { z } from "zod";
@@ -50,7 +86,13 @@ import { z } from "zod";
 import { encodeTupleKey } from "../utils/tuple-key";
 import { parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
-import type { GraphBackend, GraphDef, Node, Store } from "./typegraph-internal";
+import type {
+  GraphBackend,
+  GraphDef,
+  Node,
+  NodeRow,
+  Store,
+} from "./typegraph-internal";
 import {
   asCompiledRowsSql,
   computeSchemaHash,
@@ -168,27 +210,67 @@ export async function openProvenanceStore<G extends GraphDef>(
   const [backend, targetGraphId] =
     args.length === 1 ? [storeBackend(args[0]), args[0].graphId] : args;
   const graph = buildOwnedProvenanceGraph(targetGraphId);
-  const disposition = await inspectSidecarGraphId(
-    backend,
-    graph,
-    targetGraphId,
-  );
-  if (disposition.state === "refuse") {
-    throw provenanceGraphIdCollision(
-      graph.id,
-      targetGraphId,
-      disposition.reason,
-    );
+  // Preflight, unfenced: refuses an occupied id BEFORE `createStoreWithSchema`
+  // can register the sidecar schema over it. It is deliberately not the decision
+  // the claim below relies on — see the module doc's RESIDUE note.
+  const preflight = await inspectSidecarGraphId(backend, graph, targetGraphId);
+  if (preflight.state === "refuse") {
+    throw provenanceGraphIdCollision(graph.id, targetGraphId, preflight.reason);
   }
   const [store] = await createStoreWithSchema(graph, backend);
-  if (disposition.state !== "owned") {
-    await store.nodes.ProvenanceOwner.upsertById(PROVENANCE_OWNER_ID, {
-      owner: PROVENANCE_OWNER,
-      version: PROVENANCE_OWNER_VERSION,
-      targetGraphId,
-    });
+  if (preflight.state !== "owned") {
+    const claim = await claimSidecarOwnership(backend, graph, targetGraphId);
+    if (claim.state === "refuse") {
+      throw provenanceGraphIdCollision(graph.id, targetGraphId, claim.reason);
+    }
   }
   return store as unknown as Store<ProvenanceGraph>;
+}
+
+/**
+ * Re-verifies the sidecar id's contents and writes the ownership marker as ONE
+ * fenced unit, so no writer can occupy the id between the two.
+ *
+ * `backend.schemaWriteTransaction` is the fence: the same per-graph lock a schema
+ * commit holds (SQLite `BEGIN IMMEDIATE`; PostgreSQL `pg_advisory_xact_lock` plus
+ * `SELECT ... FOR UPDATE` on the graph's active schema row, which every
+ * schema-managed Store write takes `FOR SHARE`). It BLOCKS a competing writer
+ * rather than aborting on a serialization failure, so no retry loop is needed.
+ *
+ * The marker is written with the backend's `insertNode` primitive rather than
+ * `store.nodes.ProvenanceOwner.upsertById`: a Store write opens its own
+ * transaction and cannot join this one. An INSERT is also the only write this
+ * claim is ever allowed to make — the marker is claimed only when the id holds no
+ * `ProvenanceOwner` row at all, so an unverifiable marker can never be overwritten
+ * or resurrected. `ProvenanceOwner` declares no unique field, embedding, or
+ * fulltext projection, so the row a Store write would produce is this row.
+ */
+async function claimSidecarOwnership(
+  backend: GraphBackend,
+  graph: ReturnType<typeof buildOwnedProvenanceGraph>,
+  targetGraphId: string,
+): Promise<SidecarDisposition> {
+  const fence = backend.schemaWriteTransaction;
+  if (fence === undefined) {
+    throw provenanceClaimUnfenced(graph.id, targetGraphId);
+  }
+  return fence(graph.id, async (tx) => {
+    const verdict = await inspectSidecarGraphId(tx, graph, targetGraphId);
+    // `owned`: a concurrent opener claimed the id first. Nothing to write, and
+    // its marker is the same durable claim this one would have made.
+    if (verdict.state === "refuse" || verdict.state === "owned") return verdict;
+    await tx.insertNode({
+      graphId: graph.id,
+      kind: PROVENANCE_OWNER_KIND,
+      id: PROVENANCE_OWNER_ID,
+      props: {
+        owner: PROVENANCE_OWNER,
+        version: PROVENANCE_OWNER_VERSION,
+        targetGraphId,
+      },
+    });
+    return verdict;
+  });
 }
 
 /**
@@ -199,6 +281,7 @@ export async function openProvenanceStore<G extends GraphDef>(
  */
 type SidecarRefusalReason =
   | "application-graph"
+  | "corrupt-ownership-marker"
   | "empty-legacy-sidecar"
   | "unupgradeable-legacy-sidecar"
   | "unowned-exact-schema-graph";
@@ -215,36 +298,64 @@ type SidecarContents =
   "empty" | "provenance" | "unrecognized-provenance" | "foreign-rows";
 
 /**
+ * The reads every sidecar probe needs, and nothing else. Satisfied by both a
+ * top-level {@link GraphBackend} and a transaction-scoped backend, so the SAME
+ * inspection runs as the unfenced preflight and again inside the claim's fence —
+ * two callers of one decision rather than two decisions that can disagree.
+ */
+type SidecarInspectionPort = Readonly<
+  Pick<
+    GraphBackend,
+    "getActiveSchema" | "findNodesByKind" | "execute" | "tableNames"
+  >
+>;
+
+/**
  * Decides — WITHOUT writing anything — whether the sidecar graph id is this
  * module's to open. The module doc states the rule this implements.
  */
 async function inspectSidecarGraphId(
-  backend: GraphBackend,
+  port: SidecarInspectionPort,
   graph: ReturnType<typeof buildOwnedProvenanceGraph>,
   targetGraphId: string,
 ): Promise<SidecarDisposition> {
-  const activeSchema = await backend.getActiveSchema(graph.id);
+  const activeSchema = await port.getActiveSchema(graph.id);
+  // An unregistered graph id is NOT evidence of a free namespace: a store booted
+  // with plain `createStore` writes rows and registers no schema row. Only an id
+  // with no schema row AND no durable row of any kind is free.
+  if (
+    activeSchema === undefined &&
+    !(await hasRowsUnderGraphId(port, graph.id, "any"))
+  ) {
+    return { state: "create" };
+  }
+
+  // The id holds something. The ownership marker is the only evidence that can
+  // say it is OURS, and it is consulted the same way on every schema state.
+  const marker = await inspectOwnerMarker(port, graph.id, targetGraphId);
+  if (marker === "foreign") {
+    return { state: "refuse", reason: "corrupt-ownership-marker" };
+  }
+  if (marker === "ours") {
+    // A verified marker is the durable claim; the contents are not re-litigated.
+    // Rows an application later wrote INTO our sidecar do not revoke ownership,
+    // and refusing over them would brick a working sidecar.
+    return { state: "owned" };
+  }
+
   if (activeSchema === undefined) {
-    // An unregistered graph id is NOT evidence of a free namespace: a store
-    // booted with plain `createStore` writes rows and registers no schema row.
-    // Probe the durable rows before claiming the id.
-    return (await hasRowsUnderGraphId(backend, graph.id, "any")) ?
-        { state: "refuse", reason: "application-graph" }
-      : { state: "create" };
+    return { state: "refuse", reason: "application-graph" };
   }
 
   const ownedHash = await computeSchemaHash(
     serializeSchema(graph, activeSchema.version),
   );
   if (activeSchema.schema_hash === ownedHash) {
-    if (await hasProvenanceOwnerMarker(backend, graph.id, targetGraphId)) {
-      return { state: "owned" };
-    }
     // Schema committed, marker not (yet): an interrupted creation/upgrade, or a
     // concurrent opener between its two writes. Resume only if the contents are
     // ours-or-nothing.
     return OWNED_SCHEMA_DISPOSITION[
-      await inspectSidecarContents(backend, graph.id, targetGraphId)
+      await inspectSidecarContents(port, graph.id, targetGraphId)
     ];
   }
 
@@ -255,15 +366,16 @@ async function inspectSidecarGraphId(
     return { state: "refuse", reason: "application-graph" };
   }
   return LEGACY_SCHEMA_DISPOSITION[
-    await inspectSidecarContents(backend, graph.id, targetGraphId)
+    await inspectSidecarContents(port, graph.id, targetGraphId)
   ];
 }
 
 /**
  * Contents → disposition for a graph id carrying the CURRENT sidecar schema
  * without an ownership marker (an interrupted creation/upgrade). `empty` adopts:
- * a crash right after schema registration leaves exactly that, and adopting it
- * loses nothing because the id holds no rows.
+ * a crash right after schema registration leaves exactly that, and — because the
+ * emptiness is re-verified inside the claim's fence — nothing can occupy the id
+ * between that verification and the marker write. See the module doc.
  */
 const OWNED_SCHEMA_DISPOSITION: Readonly<
   Record<SidecarContents, SidecarDisposition>
@@ -311,6 +423,12 @@ const SIDECAR_REFUSALS: Readonly<
     suggestion: () =>
       "Rename the colliding application graph before enabling persisted merge provenance for this target.",
   },
+  "corrupt-ownership-marker": {
+    describe: (graphId, targetGraphId) =>
+      `Graph id "${graphId}" holds a "${PROVENANCE_OWNER_KIND}" row that is not a valid ownership claim for target "${targetGraphId}" — it is soft-deleted, does not validate against the marker schema, names a different target, or sits under a different row id.`,
+    suggestion: (graphId) =>
+      `Do not re-run: an unverifiable marker is never overwritten or resurrected, because it may be an application's row. Inspect the "${PROVENANCE_OWNER_KIND}" rows under graph id "${graphId}" and hard-delete the invalid one, or drop that graph id entirely — persisted provenance is derived, so re-running the merge rebuilds it.`,
+  },
   "empty-legacy-sidecar": {
     describe: (graphId) =>
       `Graph id "${graphId}" holds an EMPTY provenance sidecar from a release that wrote no ownership marker, which cannot be told apart from an application graph of the same shape.`,
@@ -349,19 +467,108 @@ function provenanceGraphIdCollision(
   );
 }
 
-async function hasProvenanceOwnerMarker(
-  backend: GraphBackend,
+/**
+ * Refused when the ownership claim cannot be made atomic. Not a collision: the
+ * id may well be free — the backend simply cannot hold the contents check and
+ * the marker write together, and a check-then-write a concurrent application
+ * writer can slip through is not an ownership claim.
+ */
+function provenanceClaimUnfenced(
   graphId: string,
   targetGraphId: string,
-): Promise<boolean> {
-  const row = await backend.getNode(
-    graphId,
-    PROVENANCE_OWNER_KIND,
-    PROVENANCE_OWNER_ID,
+): ConfigurationError {
+  return new ConfigurationError(
+    `Claiming graph id "${graphId}" for merge provenance requires a transactional schema fence, which this backend does not provide.`,
+    {
+      code: "GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED",
+      graphId,
+      targetGraphId,
+    },
+    {
+      suggestion:
+        "Use a backend that implements schemaWriteTransaction (both bundled Drizzle backends do when transactions are enabled); without it the sidecar's emptiness check and its ownership write cannot be committed as one unit. An ALREADY-owned sidecar opens without a claim.",
+    },
   );
-  if (row === undefined || row.deleted_at !== undefined) return false;
+}
+
+/**
+ * THE ownership predicate: whether one `ProvenanceOwner`-kind row is the marker
+ * this module wrote for THIS target. Every consumer of "is the marker ours?" calls
+ * this one function, so the marker probe and the foreign-occupancy classification
+ * cannot drift into disagreeing.
+ *
+ * Exactly one row state qualifies: live (never soft-deleted), stored under the
+ * canonical marker id, and validating against {@link ProvenanceOwner} — whose
+ * `owner` and `version` are `z.literal`s, so the parse itself pins them — for this
+ * target graph id. Every other `ProvenanceOwner`-kind row is FOREIGN, including a
+ * tombstone: resurrecting one would overwrite a row this module cannot prove it
+ * wrote.
+ */
+function isOwnedMarkerRow(row: NodeRow, targetGraphId: string): boolean {
+  if (row.id !== PROVENANCE_OWNER_ID) return false;
+  if (row.deleted_at !== undefined) return false;
   const parsed = ProvenanceOwner.schema.safeParse(parseRowProps(row.props));
   return parsed.success && parsed.data.targetGraphId === targetGraphId;
+}
+
+/**
+ * What the graph id's `ProvenanceOwner`-kind rows say about ownership.
+ *
+ * `absent` means there is NO such row at all — the only state in which the marker
+ * may be claimed. `foreign` means at least one row exists that
+ * {@link isOwnedMarkerRow} rejects, which is occupancy by something this module
+ * did not write and must not modify.
+ */
+type OwnerMarkerState = "ours" | "absent" | "foreign";
+
+async function inspectOwnerMarker(
+  port: SidecarInspectionPort,
+  graphId: string,
+  targetGraphId: string,
+): Promise<OwnerMarkerState> {
+  let ours = false;
+  for await (const row of readRowsOfKind(
+    port,
+    graphId,
+    PROVENANCE_OWNER_KIND,
+  )) {
+    if (!isOwnedMarkerRow(row, targetGraphId)) return "foreign";
+    ours = true;
+  }
+  return ours ? "ours" : "absent";
+}
+
+/** Rows read per page while classifying a graph id's durable contents. */
+const SIDECAR_PAGE_SIZE = 500;
+
+/**
+ * Every durable row of `kind` under `graphId`, tombstones included. Soft-deleted
+ * and out-of-window rows MUST be visible: a row this module cannot account for is
+ * occupancy whether or not it is currently live.
+ */
+async function* readRowsOfKind(
+  port: SidecarInspectionPort,
+  graphId: string,
+  kind: string,
+): AsyncGenerator<NodeRow> {
+  let after: string | undefined;
+  for (;;) {
+    const rows = await port.findNodesByKind({
+      graphId,
+      kind,
+      temporalMode: "includeTombstones",
+      excludeDeleted: false,
+      orderBy: "id",
+      ...(after === undefined ? {} : { after }),
+      limit: SIDECAR_PAGE_SIZE,
+    });
+    for (const row of rows) {
+      yield row;
+    }
+    if (rows.length < SIDECAR_PAGE_SIZE) return;
+    after = rows.at(-1)?.id;
+    if (after === undefined) return;
+  }
 }
 
 /** One probe row: the SELECT projects a constant, so only its presence matters. */
@@ -375,27 +582,27 @@ type SidecarProbeRow = Readonly<{ present: number }>;
  *
  * `scope: "foreign"` narrows it to rows this module could not have written: node
  * rows of any other kind, plus any edge row at all (the sidecar graph declares no
- * edges). It cannot be expressed through `findNodesByKind`, which needs the kinds
- * of a graph whose schema — by construction, in the case that matters — was never
- * registered.
+ * edges). `ProvenanceOwner` rows are NOT excused here — the marker probe has
+ * already classified every one of them, so a row this raw probe can see and
+ * `findNodesByKind` cannot is unaccounted-for occupancy and must refuse. It cannot
+ * be expressed through `findNodesByKind`, which needs the kinds of a graph whose
+ * schema — by construction, in the case that matters — was never registered.
  */
 async function hasRowsUnderGraphId(
-  backend: GraphBackend,
+  port: SidecarInspectionPort,
   graphId: string,
   scope: "any" | "foreign",
 ): Promise<boolean> {
-  const schema = createSqlSchema(backend.tableNames);
+  const schema = createSqlSchema(port.tableNames);
   const kindFilter =
-    scope === "any" ?
-      sql.empty()
-    : sql` AND kind <> ${PROVENANCE_KIND} AND kind <> ${PROVENANCE_OWNER_KIND}`;
-  const nodeRows = await backend.execute<SidecarProbeRow>(
+    scope === "any" ? sql.empty() : sql` AND kind <> ${PROVENANCE_KIND}`;
+  const nodeRows = await port.execute<SidecarProbeRow>(
     asCompiledRowsSql(
       sql`SELECT 1 AS present FROM ${schema.nodesTable} WHERE graph_id = ${graphId}${kindFilter} LIMIT 1`,
     ),
   );
   if (nodeRows.length > 0) return true;
-  const edgeRows = await backend.execute<SidecarProbeRow>(
+  const edgeRows = await port.execute<SidecarProbeRow>(
     asCompiledRowsSql(
       sql`SELECT 1 AS present FROM ${schema.edgesTable} WHERE graph_id = ${graphId} LIMIT 1`,
     ),
@@ -413,50 +620,48 @@ async function hasRowsUnderGraphId(
  * drift into disagreeing about what "our rows" means.
  */
 async function inspectSidecarContents(
-  backend: GraphBackend,
+  port: SidecarInspectionPort,
   graphId: string,
   targetGraphId: string,
 ): Promise<SidecarContents> {
-  if (await hasRowsUnderGraphId(backend, graphId, "foreign")) {
+  if (await hasRowsUnderGraphId(port, graphId, "foreign")) {
     return "foreign-rows";
   }
 
-  const pageSize = 500;
-  let after: string | undefined;
   let rowCount = 0;
-
-  for (;;) {
-    const rows = await backend.findNodesByKind({
-      graphId,
-      kind: PROVENANCE_KIND,
-      temporalMode: "includeTombstones",
-      excludeDeleted: false,
-      orderBy: "id",
-      ...(after === undefined ? {} : { after }),
-      limit: pageSize,
-    });
-    for (const row of rows) {
-      if (row.deleted_at !== undefined) return "unrecognized-provenance";
-      const parsed = Provenance.schema.safeParse(parseRowProps(row.props));
-      if (!parsed.success || parsed.data.targetGraphId !== targetGraphId) {
-        return "unrecognized-provenance";
-      }
-      const expectedId = await provenanceNodeId(targetGraphId, {
-        role: parsed.data.role,
-        canonicalId: parsed.data.canonicalId,
-        canonicalKind: parsed.data.canonicalKind,
-        branchId: asBranchId(parsed.data.branchId),
-        sourceId: parsed.data.sourceId,
-      });
-      if (row.id !== expectedId) return "unrecognized-provenance";
-      rowCount += 1;
+  for await (const row of readRowsOfKind(port, graphId, PROVENANCE_KIND)) {
+    if (!(await isOwnedProvenanceRow(row, targetGraphId))) {
+      return "unrecognized-provenance";
     }
-    if (rows.length < pageSize) break;
-    after = rows.at(-1)?.id;
-    if (after === undefined) break;
+    rowCount += 1;
   }
-
   return rowCount > 0 ? "provenance" : "empty";
+}
+
+/**
+ * Whether one `Provenance` row is a contribution this module wrote for THIS
+ * target: live, valid against the schema, and stored under the deterministic id
+ * its own props hash to. The recomputed id is what makes this a proof of
+ * authorship rather than a shape check — an application row with plausible props
+ * under an id of its own choosing fails it.
+ */
+async function isOwnedProvenanceRow(
+  row: NodeRow,
+  targetGraphId: string,
+): Promise<boolean> {
+  if (row.deleted_at !== undefined) return false;
+  const parsed = Provenance.schema.safeParse(parseRowProps(row.props));
+  if (!parsed.success || parsed.data.targetGraphId !== targetGraphId) {
+    return false;
+  }
+  const expectedId = await provenanceNodeId(targetGraphId, {
+    role: parsed.data.role,
+    canonicalId: parsed.data.canonicalId,
+    canonicalKind: parsed.data.canonicalKind,
+    branchId: asBranchId(parsed.data.branchId),
+    sourceId: parsed.data.sourceId,
+  });
+  return row.id === expectedId;
 }
 
 /** Separator used by provenance ids written before tuple escaping was added. */

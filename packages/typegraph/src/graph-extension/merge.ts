@@ -24,7 +24,7 @@ import { META_EDGE_IMPLIES, META_EDGE_INVERSE_OF } from "../ontology/constants";
 import { isExternalIri } from "../ontology/external-iri";
 import { type OntologyRelation } from "../ontology/types";
 import { canonicalEqual } from "../schema/canonical";
-import { compactUndefined } from "../utils/object";
+import { compactUndefined, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { unwrap } from "../utils/result";
 import { compileGraphExtension } from "./compiler";
@@ -157,10 +157,15 @@ export function mergeGraphExtension<G extends GraphDef>(
     mergedEdges[name] = registration;
   }
   for (const edge of compiled.edges) {
+    // Own-key membership: extension kind names match
+    // `/^[A-Za-z_][A-Za-z0-9_]*$/`, which admits `toString`, `constructor`, and
+    // `valueOf`. An `in`-style or `!== undefined` probe against a plain record
+    // reports the inherited member as a collision, so a legally-named
+    // extension edge would be rejected for colliding with nothing.
     assertNoCollision(
       edge.kindName,
       "edge",
-      mergedEdges[edge.kindName] !== undefined,
+      hasOwnKey(mergedEdges, edge.kindName),
       graph.id,
     );
     const from = resolveEndpoints(edge.from, nodeKinds, {

@@ -17,7 +17,7 @@
  *    refused with a typed ConfigurationError, not silently returned.
  */
 import type Database from "better-sqlite3";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -27,6 +27,7 @@ import {
   defineNode,
   disjointWith,
   type GraphBackend,
+  IdentityContradictionError,
   MigrationError,
   rebuildIdentityClosure,
   StaleVersionError,
@@ -43,6 +44,7 @@ import {
   migrateSchema,
 } from "../src/schema";
 import { storeRuntime } from "../src/store/runtime-port";
+import { requireDefined } from "../src/utils/presence";
 import { matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -124,6 +126,13 @@ function existingIdentityTables(
 }
 
 const SEPARATION_TABLE = "typegraph_identity_separation";
+
+function separationTableExists(result: LocalSqliteBackendResult): boolean {
+  const rows = rawClient(result)
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+    .all(SEPARATION_TABLE) as { name: string }[];
+  return rows.length > 0;
+}
 
 function readSeparationRows(
   result: LocalSqliteBackendResult,
@@ -341,6 +350,112 @@ describe("Operational Identity provisioning + enablement gating", () => {
         storeRuntime(reopened).validateIdentity(),
       ).resolves.toBeUndefined();
     } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("creates and fills the new derived relation inside one schema-write fence", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const [seeded] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      const first = await seeded.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const second = await seeded.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      await seeded.identity.assertDifferent(first, second);
+      const expected = readSeparationRows(result);
+      expect(expected).toHaveLength(1);
+      rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
+      expect(separationTableExists(result)).toBe(false);
+
+      // The window this asserts against: create the relation now, fill it at
+      // the END of boot. In between sit the schema commit, the history
+      // assertion, the contribution/vector materializers and a system-index
+      // build — and for all of it the relation is present, readable and EMPTY,
+      // so `isSeparated` answers "not separated" for the pair a live
+      // `different` assertion separates. There is no timing to reproduce: the
+      // structural claim is that no observer can ever be in that state, because
+      // the CREATE and the fill are one transaction.
+      const fenceObservations: {
+        separationExistsAtEntry: boolean;
+        inTransactionAtEntry: boolean;
+        rowsAtExit: number;
+        inTransactionAtExit: boolean;
+      }[] = [];
+      const provisionMissingFlags: boolean[] = [];
+
+      const baseEnsureIdentityTables = requireDefined(
+        result.backend.ensureIdentityTables,
+      );
+      vi.spyOn(result.backend, "ensureIdentityTables").mockImplementation(
+        async (tableNames, options) => {
+          provisionMissingFlags.push(options.provisionMissing);
+          return baseEnsureIdentityTables(tableNames, options);
+        },
+      );
+
+      const baseFence = requireDefined(result.backend.schemaWriteTransaction);
+      vi.spyOn(result.backend, "schemaWriteTransaction").mockImplementation(
+        async (graphId, fn) =>
+          baseFence(graphId, async (target) => {
+            const separationExistsAtEntry = separationTableExists(result);
+            const inTransactionAtEntry = rawClient(result).inTransaction;
+            const value = await fn(target);
+            fenceObservations.push({
+              separationExistsAtEntry,
+              inTransactionAtEntry,
+              rowsAtExit:
+                separationTableExists(result) ?
+                  readSeparationRows(result).length
+                : -1,
+              inTransactionAtExit: rawClient(result).inTransaction,
+            });
+            return value;
+          }),
+      );
+
+      const [reopened] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+
+      // Nothing provisioned the relation on the top-level backend: the old
+      // create-early path called `ensureIdentityTables(provisionMissing: true)`
+      // outside any transaction, which is exactly the visibility this forbids.
+      expect(provisionMissingFlags).not.toContain(true);
+
+      // Exactly one fence saw the relation appear, and by the time that fence
+      // returned — still inside its transaction — the rows were already there.
+      const upgradeFences = fenceObservations.filter(
+        (observation) => !observation.separationExistsAtEntry,
+      );
+      expect(upgradeFences).toEqual([
+        {
+          separationExistsAtEntry: false,
+          inTransactionAtEntry: true,
+          rowsAtExit: expected.length,
+          inTransactionAtExit: true,
+        },
+      ]);
+
+      // And the published state is the correct one: the pair reads as
+      // separated, so the merge the empty window would have allowed is refused.
+      expect(readSeparationRows(result)).toEqual(expected);
+      await expect(
+        reopened.identity.assertSame(first, second),
+      ).rejects.toBeInstanceOf(IdentityContradictionError);
+      await expect(
+        storeRuntime(reopened).validateIdentity(),
+      ).resolves.toBeUndefined();
+    } finally {
+      vi.restoreAllMocks();
       await result.backend.close();
     }
   });

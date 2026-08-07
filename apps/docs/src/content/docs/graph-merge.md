@@ -173,13 +173,16 @@ one read-only repeatable-read transaction across nodes, edges, and identity
 assertions, so every chunk belongs to one committed snapshot. A snapshot stream
 cannot be piped directly into a target that writes through the same serialized
 connection: the same SQLite backend, distinct wrappers sharing one better-sqlite3
-handle, a bare `pg`/neon `Client`, a `Pool` explicitly configured with `max: 1`,
-or distinct PGlite backend wrappers sharing one in-process connection —
-materialize it first or import it into an independent backend. The refusal fires
-even through a user-wrapped stream that no longer identifies its source backend,
-because it also checks the target's connection for any export snapshot still
-open on it. TypeGraph's branch cloner detects the shared-PGlite case and
-materializes its snapshot before importing it.
+handle or one local (`file:`/`:memory:`) libSQL client, a bare `pg`/neon
+`Client`, a `Pool` explicitly configured with `max: 1`, or distinct PGlite
+backend wrappers sharing one in-process connection — materialize it first or
+import it into an independent backend. The exclusion is a mutual lease, not a
+one-time check: an import refuses while any export snapshot is open on its
+connection (even through a user-wrapped stream that no longer identifies its
+source backend), and an export snapshot refuses to open while a streaming import
+is writing through that connection, so whichever long-lived stream starts second
+gets a typed error instead of both hanging. TypeGraph's branch cloner detects
+the shared-client case and materializes its snapshot before importing it.
 Non-transactional backends can export identity-disabled graphs without this
 snapshot guarantee. Identity-enabled stores already require a transactional
 backend at construction, so every identity export has the snapshot guarantee.

@@ -102,7 +102,13 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
 // Helper Functions
 // ============================================================
 
+// Own-key membership, matching `store.getEdgePropsSchema` and the collections
+// proxy: kind names are arbitrary identifiers, so a `toString`-named kind that
+// is NOT registered would otherwise read the inherited function as its
+// registration and fail with a `TypeError` off `registration.type` instead of
+// the `KindNotFoundError` this guard exists to raise.
 function getEdgeRegistration<G extends GraphDef>(graph: G, kind: string) {
+  if (!hasOwnKey(graph.edges, kind)) throw new KindNotFoundError(kind, "edge");
   const registration = graph.edges[kind];
   if (registration === undefined) throw new KindNotFoundError(kind, "edge");
   return registration;

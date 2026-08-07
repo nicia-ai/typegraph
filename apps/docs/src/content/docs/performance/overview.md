@@ -243,7 +243,9 @@ const edgesBySource = await store.bulkFindEdgesFrom({
 
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`) skip per-item operation hooks for
-throughput. Query hooks still fire normally. See
+throughput, and the bulk hooks (`onBulkOperationStart` / `onBulkOperationEnd`) do not stand in for them — those fire
+only for node `updateWhere`, so a bulk method emits no hook events at all, neither per-item nor bulk. To observe every
+individual write, call the single-item method instead. Query hooks still fire normally. See
 [Schemas & Stores](/schemas-stores#observability-hooks) for details.
 :::
 
