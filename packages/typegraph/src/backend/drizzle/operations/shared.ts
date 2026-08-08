@@ -1,4 +1,9 @@
-import { getTableName, type SQL, sql } from "drizzle-orm";
+import {
+  getTableName,
+  type SQL,
+  sql,
+  type SQLWrapper,
+} from "drizzle-orm";
 
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import type { SqlDialect } from "../../types";
@@ -110,6 +115,35 @@ export function resolveValidFrom(
 ): string | undefined {
   if (validFrom === null) return undefined;
   return validFrom ?? timestamp;
+}
+
+/**
+ * The `AND valid_from …` conjunction a write carries when its caller ASSERTED
+ * the lower bound the target row already holds (see
+ * {@link UpdateNodeParams.expectedValidFrom} /
+ * {@link UpdateEdgeParams.expectedValidFrom}).
+ *
+ * NULL-SAFE by construction, and that is the whole point of routing both
+ * entities through one builder: `valid_from` is nullable (an open-left window),
+ * and `col = NULL` is UNKNOWN in SQL, so the obvious `AND col = ?` spelling
+ * turns "I checked that this row has no lower bound" into a predicate that
+ * matches NOTHING — an assertion that always fails is as wrong as one that
+ * never runs. The three states are therefore distinct:
+ *
+ *  - `undefined` — the caller asserted nothing; no predicate is emitted.
+ *  - `null` — the caller read an OPEN-LEFT window; emits `IS NULL`.
+ *  - a string — the caller read that bound; emits `= <bound>`.
+ *
+ * One owner: nodes and edges share this function so the two statements cannot
+ * drift into disagreeing about what "the bound I read" means.
+ */
+export function expectedValidFromPredicate(
+  column: SQLWrapper,
+  expected: string | null | undefined,
+): SQL {
+  if (expected === undefined) return sql.empty();
+  if (expected === null) return sql` AND ${column} IS NULL`;
+  return sql` AND ${column} = ${expected}`;
 }
 
 export function quotedColumn(column: { name: string }): SQL {

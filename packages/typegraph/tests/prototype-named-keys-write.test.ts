@@ -22,6 +22,7 @@ import { z } from "zod";
 import { defineGraph } from "../src/core/define-graph";
 import { defineEdge } from "../src/core/edge";
 import { defineNode } from "../src/core/node";
+import { ConfigurationError } from "../src/errors";
 import { validateGraphExtension } from "../src/graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { computeSchemaDiff } from "../src/schema/migration";
@@ -340,22 +341,66 @@ describe("compile-time schema declaring a property named `__proto__`", () => {
     ).toThrow(/tree\.__proto__/);
   });
 
-  it("does not crash on a `z.lazy` whose getter cannot run yet", () => {
-    // Unwrapping a `z.lazy` RUNS its getter, and before this validation existed
-    // no getter ran at definition time. A mutually recursive pair declared
-    // around a `defineNode` call leaves the second schema in its temporal dead
-    // zone when the first one's getter fires — turning a working program into a
-    // ReferenceError would be a worse regression than the defect being fixed,
-    // so the unwrap is skipped rather than propagated. Parse-time behavior is
-    // unchanged either way.
+  it("REFUSES a `z.lazy` whose getter cannot run yet", () => {
+    // Unwrapping a `z.lazy` RUNS its getter, and a mutually recursive pair
+    // declared AROUND a `defineNode` call leaves the second schema in its
+    // temporal dead zone when the first one's getter fires. Skipping the
+    // subtree there was a fail-OPEN: a definition is validated exactly once, so
+    // the branch was never judged later either — see the next case for what got
+    // through. The refusal names the kind and the path so the fix (reorder the
+    // declarations) is obvious from the message alone.
     const First: z.ZodType = z.lazy(() => z.object({ next: Second }));
     expect(() =>
       defineNode("MutuallyRecursive", { schema: z.object({ first: First }) }),
-    ).not.toThrow();
+    ).toThrow(/z\.lazy\(\)/);
+    expect(() =>
+      defineNode("MutuallyRecursive", { schema: z.object({ first: First }) }),
+    ).toThrow(/first/);
     const Second: z.ZodType = z.lazy(() => z.object({ back: First }));
     // Declared after the `defineNode` above on purpose — that ordering is the
     // whole fixture, and the reference keeps it from reading as dead code.
     expect(Second).toBeDefined();
+  });
+
+  it("refuses the POISONED mutually recursive pair instead of dropping its writes", () => {
+    // The defect this closes, end to end. `Second` carries an unstorable
+    // `__proto__`, and it is in its temporal dead zone when `First`'s getter
+    // runs — so the walk used to return nothing for that subtree and the
+    // definition was ACCEPTED. By the time anything parsed against it, `Second`
+    // had initialized and the field was live: every write to it succeeded and
+    // was silently dropped, which is precisely the outcome this validation
+    // exists to make impossible. A subtree that cannot be judged is refused.
+    const First: z.ZodType = z.lazy(() => z.object({ next: Second }));
+    expect(() =>
+      defineNode("PoisonedMutuallyRecursive", {
+        schema: z.object({ first: First }),
+      }),
+    ).toThrow(ConfigurationError);
+    const Second: z.ZodType = z.lazy(() =>
+      z.object({ [PROTO_KEY]: z.string(), back: First.optional() }),
+    );
+    // The premise: once `Second` initializes the poisoned field is real, and
+    // Zod reports SUCCESS while dropping it — nothing downstream would notice.
+    const parsed = Second.safeParse(parseDocument(`{"__proto__":"lost"}`));
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && Object.keys(parsed.data as object)).not.toContain(
+      PROTO_KEY,
+    );
+  });
+
+  it("reaches the unstorable name when the recursive pair is declared FIRST", () => {
+    // The refusal above is about a getter that cannot run, not about recursion:
+    // declaring both consts before the definition — the ordering the error
+    // message asks for — makes every getter resolve, and the walk then reports
+    // the real conflict at its full nested path. Without this case the fix
+    // would be indistinguishable from banning mutual recursion outright.
+    const A: z.ZodType = z.lazy(() => z.object({ toB: B }));
+    const B: z.ZodType = z.lazy(() =>
+      z.object({ [PROTO_KEY]: z.string(), toA: A }),
+    );
+    expect(() =>
+      defineNode("OrderedMutuallyRecursive", { schema: z.object({ a: A }) }),
+    ).toThrow(/a\.toB\.__proto__/);
   });
 
   it("states the nested fixture's premise: Zod drops the nested field too", () => {

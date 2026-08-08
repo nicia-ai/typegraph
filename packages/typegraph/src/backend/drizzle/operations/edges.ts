@@ -12,6 +12,7 @@ import type {
 } from "../../types";
 import {
   edgeColumnList,
+  expectedValidFromPredicate,
   quotedColumn,
   resolveValidFrom,
   sqlNull,
@@ -239,13 +240,21 @@ export function buildUpdateEdge(
 
   const setClause = sql.join(setParts, sql`, `);
   const expectedIdentity = expectedIdentityPredicate(tables, params);
+  // The bound the CALLER read, when it read one. Not part of the immutable
+  // identity above — `valid_from` is mutable — so it is built by the shared
+  // NULL-safe helper both entities use; see
+  // `UpdateEdgeParams.expectedValidFrom`.
+  const expectedValidFrom = expectedValidFromPredicate(
+    edges.validFrom,
+    params.expectedValidFrom,
+  );
 
   if (params.clearDeleted) {
     return sql`
       UPDATE ${edges}
       SET ${setClause}
       WHERE ${edges.graphId} = ${params.graphId}
-        AND ${edges.id} = ${params.id}${expectedIdentity}
+        AND ${edges.id} = ${params.id}${expectedIdentity}${expectedValidFrom}
       RETURNING *
     `;
   }
@@ -254,7 +263,7 @@ export function buildUpdateEdge(
     UPDATE ${edges}
     SET ${setClause}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} = ${params.id}${expectedIdentity}
+      AND ${edges.id} = ${params.id}${expectedIdentity}${expectedValidFrom}
       AND ${edges.deletedAt} IS NULL
     RETURNING *
   `;

@@ -219,6 +219,34 @@ describe("transaction receipt recorder", () => {
     expect(receipt.writes.total).toBe(11);
   });
 
+  it("hands back ORDINARY objects for every bucket, prototype-colliding kinds and all", () => {
+    // The buckets are null-prototype WHILE COUNTING — a `__proto__` kind on a
+    // `{}` accumulator reaches the prototype setter and is dropped. That is an
+    // internal protection, and the receipt is public: the snapshot spreads each
+    // bucket so the own `__proto__` key survives AND `Object.prototype` is
+    // restored. `identity` always did; `nodes` and `edges` did not, so the same
+    // object literal answered `instanceof Object` two different ways.
+    const recorder = createTransactionReceiptRecorder();
+    recorder.recordNode("__proto__", 2);
+    recorder.recordEdge("__proto__", 3);
+
+    const receipt = recorder.snapshot();
+
+    for (const bucket of [
+      receipt.writes.nodes,
+      receipt.writes.edges,
+      receipt.writes.identity,
+    ]) {
+      expect(Object.getPrototypeOf(bucket)).toBe(Object.prototype);
+      expect(bucket instanceof Object).toBe(true);
+    }
+    // ...and the reason the buckets were null-prototype in the first place still
+    // holds: the colliding kind is an own key carrying its count.
+    expect(Object.hasOwn(receipt.writes.nodes, "__proto__")).toBe(true);
+    expect(Object.entries(receipt.writes.nodes)).toEqual([["__proto__", 2]]);
+    expect(Object.entries(receipt.writes.edges)).toEqual([["__proto__", 3]]);
+  });
+
   it("keeps zero-count intents out of the buckets and the total", () => {
     const recorder = createTransactionReceiptRecorder();
     recorder.recordNode("Person", 0);

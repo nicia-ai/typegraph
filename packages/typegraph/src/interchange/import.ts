@@ -3,6 +3,46 @@
  *
  * Imports nodes and edges from the interchange format into a store,
  * with configurable conflict resolution and validation.
+ *
+ * ## A write asserts EVERY component its verdict read
+ *
+ * `onConflict: "update"` is a read-then-write pair: this module PROBES the
+ * stored row, decides from what it finds, and then writes. Under PostgreSQL
+ * READ COMMITTED a concurrent `hardDelete` + recreate re-resolves the probed key
+ * between those two statements, so any part of the verdict that is not restated
+ * in the UPDATE's own `WHERE` is a decision that can land on a row it was never
+ * computed for — and the import reports success, because the write did affect a
+ * row. The failure is invisible and only appears under a race, which is why it
+ * has taken three rounds to enumerate:
+ *
+ *  - the edge's KIND — the probe is keyed on `(graph_id, id)` alone, so the row
+ *    under an id may be a different edge entirely;
+ *  - the edge's ENDPOINTS — kind is not an identity, and an upsert that resolved
+ *    an edge BY its endpoints must say so;
+ *  - the effective `valid_from` of BOTH entities — {@link
+ *    validateUpdateValidityWindow} decides from the stored lower bound, so a
+ *    recreate carrying a different one turns that verdict into a write that
+ *    ignores the document's `validFrom` or persists `valid_to < valid_from`.
+ *
+ * The rest of what these legs read, and where each is asserted:
+ *
+ *  - the row EXISTS (the `getNode` / `getEdge` probe): restated as the
+ *    `(graph_id, kind, id)` / `(graph_id, id)` predicate every UPDATE carries.
+ *  - the row is LIVE (`isLiveNodeRow` / `deleted_at === undefined`, which is what
+ *    routes a tombstone to `skipped` instead of to the update): restated as the
+ *    `deleted_at IS NULL` conjunction on the non-resurrecting UPDATE leg. Import
+ *    never resurrects, so it never builds the `IS NOT NULL` leg.
+ *  - `onConflict: "skip"` / `"error"`: verdict-independent by construction —
+ *    they write nothing.
+ *  - the row's PROPS, read as the `oldProps` side of the uniqueness diff: the
+ *    ONE input with no portable SQL predicate behind it (a props blob is TEXT on
+ *    SQLite and `jsonb` on PostgreSQL, and neither comparison is stable under
+ *    key reordering). It is bounded rather than asserted: the sidecar writes now
+ *    run AFTER the primary update returns a row (see `applyNodeUpdate`), so a
+ *    verdict-invalidating recreate that changes the lower bound takes the
+ *    sidecars with it. The residual window is a recreate that reproduces the
+ *    probed `valid_from` exactly while changing props — noted here so the next
+ *    round starts from the list rather than from the symptom.
  */
 import type { z } from "zod";
 
@@ -15,6 +55,7 @@ import {
 import {
   type GraphBackend,
   isLiveNodeRow,
+  type LiveNodeRow,
   rowPropsToObject,
   type TransactionBackend,
 } from "../backend/types";
@@ -24,7 +65,11 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
-import { type EdgeRegistration, type NodeRegistration } from "../core/types";
+import {
+  type EdgeRegistration,
+  type NodeRegistration,
+  type UniqueConstraint,
+} from "../core/types";
 import {
   ConfigurationError,
   DatabaseOperationError,
@@ -49,6 +94,7 @@ import {
   applyNodeInsertSideEffects,
   applyNodeInsertSideEffectsBatch,
   applyNodeUpdate,
+  type NodeWriteContext,
 } from "../store/operations/node-write-pipeline";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
@@ -1239,27 +1285,25 @@ async function processNodeSlice(
             record(node, { status: "error", error: updateWindowError });
             break;
           }
-          const updateResult = await catchUniquenessError(() =>
-            applyNodeUpdate(
-              writeContext,
-              {
-                existing,
-                schema: schemaEntry.registration.type.schema,
-                validatedProps: props,
-                uniqueConstraints,
-                ...(node.validTo !== undefined && { validTo: node.validTo }),
-              },
-              // The pending-aware overlay, not the raw backend: the update's
-              // uniqueness pre-check must see a unique value already reserved by
-              // an unflushed create EARLIER in this slice, so it degrades to a
-              // per-row error exactly as the sequential path does — rather than
-              // claiming the key on the real backend and colliding with that
-              // create at flush (which would throw and roll back the whole
-              // import). Writes still delegate to the real backend.
-              validationBackend,
-            ),
+          const updateError = await updateImportedNode(
+            writeContext,
+            // The pending-aware overlay, not the raw backend: the update's
+            // uniqueness pre-check must see a unique value already reserved by
+            // an unflushed create EARLIER in this slice, so it degrades to a
+            // per-row error exactly as the sequential path does — rather than
+            // claiming the key on the real backend and colliding with that
+            // create at flush (which would throw and roll back the whole
+            // import). Writes still delegate to the real backend.
+            validationBackend,
+            node,
+            {
+              existing,
+              schema: schemaEntry.registration.type.schema,
+              validatedProps: props,
+              uniqueConstraints,
+            },
           );
-          if (updateResult.ok) {
+          if (updateError === undefined) {
             // The update mutated the real backend's uniqueness rows directly;
             // reconcile the shared prime caches so a later create in this
             // slice sees the post-update reservation state (matching the
@@ -1274,9 +1318,9 @@ async function processNodeSlice(
           }
           record(
             node,
-            updateResult.ok ?
+            updateError === undefined ?
               { status: "updated" }
-            : { status: "error", error: updateResult.error },
+            : { status: "error", error: updateError },
           );
           break;
         }
@@ -1401,6 +1445,87 @@ async function catchUniquenessError<T>(
 }
 
 /**
+ * The stable prefix on every per-row refusal caused by an import UPDATE whose
+ * target stopped matching the row this import made its decision from.
+ *
+ * The node counterpart of {@link EDGE_IDENTITY_CONFLICT_CODE}. Nodes need no
+ * identity code — their probe is kind-scoped and they have no endpoints — but
+ * they do share the temporal half of the class: the update verdict is computed
+ * from the PROBED row's `valid_from`, and a concurrent hard delete + recreate
+ * can replace it between the probe and the write.
+ */
+const NODE_UPDATE_TARGET_CHANGED_CODE =
+  "INTERCHANGE_NODE_UPDATE_TARGET_CHANGED";
+
+/**
+ * Updates an existing node under the effective validity lower bound this import
+ * checked it carries, and reports a write that landed on nothing as a per-row
+ * error.
+ *
+ * THE SINGLE OWNER of the node update leg, called by both the batched slice and
+ * the sequential fallback, so the assertion cannot be threaded through one and
+ * forgotten on the other.
+ *
+ * `expectedValidFrom` is what makes the import's own window check
+ * ({@link validateUpdateValidityWindow}) binding rather than advisory. That
+ * check reads the STORED `valid_from` and decides from it — whether the
+ * document's stated lower bound matches the row's, and whether the document's
+ * `validTo` sits above it. A read-then-write pair keyed on `(graph_id, kind,
+ * id)` alone re-resolves that key between the two under PostgreSQL READ
+ * COMMITTED, so a concurrent hard delete + recreate could leave the write
+ * applying a verdict computed for a row that no longer exists: the document's
+ * `validFrom` silently ignored, or a `valid_to` persisted below the new row's
+ * `valid_from`. Stating the bound puts it in the UPDATE's own `WHERE`.
+ *
+ * NULL-safe by construction: `existing.valid_from` is `undefined` for an
+ * open-left row, and `?? null` turns that into the assertion "this row still has
+ * NO lower bound" rather than into "assert nothing" — the two are different
+ * claims and only one of them is the one this import checked.
+ */
+async function updateImportedNode(
+  writeContext: NodeWriteContext,
+  backend: GraphBackend | TransactionBackend,
+  node: InterchangeNode,
+  args: Readonly<{
+    existing: LiveNodeRow;
+    schema: z.ZodType;
+    validatedProps: Record<string, unknown>;
+    uniqueConstraints: readonly UniqueConstraint[];
+  }>,
+): Promise<string | undefined> {
+  try {
+    const result = await catchUniquenessError(() =>
+      applyNodeUpdate(
+        writeContext,
+        {
+          existing: args.existing,
+          schema: args.schema,
+          validatedProps: args.validatedProps,
+          uniqueConstraints: args.uniqueConstraints,
+          expectedValidFrom: args.existing.valid_from ?? null,
+          ...(node.validTo !== undefined && { validTo: node.validTo }),
+        },
+        backend,
+      ),
+    );
+    return result.ok ? undefined : result.error;
+  } catch (error) {
+    if (
+      !(error instanceof DatabaseOperationError) ||
+      error.details.reason !== "no_row_returned"
+    ) {
+      throw error;
+    }
+    return (
+      `${NODE_UPDATE_TARGET_CHANGED_CODE}: Node "${node.kind}:${node.id}" was ` +
+      "not updated: no live node with that id and validity lower bound " +
+      "remained when the write ran, so the row changed or was removed after " +
+      "this import checked it. Re-export the source and retry."
+    );
+  }
+}
+
+/**
  * The stable prefix on every per-row refusal caused by an incoming edge naming
  * an id that a DIFFERENT edge already occupies, so a caller can recognize the
  * condition without parsing prose — the same `CODE: message` idiom the validity
@@ -1511,6 +1636,17 @@ function edgeIdentityConflict(
  * import HAS checked all five against a row it read, which is exactly the
  * precondition {@link UpdateEdgeParams} states for asserting them.
  *
+ * The effective `valid_from` joins them for a DIFFERENT reason, and the doc on
+ * {@link UpdateEdgeParams.expectedValidFrom} spells it out: the five identity
+ * components are asserted because they are immutable, the bound because it is
+ * NOT. {@link validateUpdateValidityWindow} decides from the row's stored
+ * `valid_from` — whether the document may state a lower bound this update will
+ * not apply, and whether its `validTo` sits above the bound the row keeps — so a
+ * recreate that satisfies all five identity components while carrying a
+ * different bound would still land a verdict computed for a row that is gone.
+ * `?? null` is load-bearing: an open-left row is asserted to still BE open-left,
+ * not asserted about at all.
+ *
  * When the predicate does match nothing, the backend reports it as a
  * `no_row_returned` {@link DatabaseOperationError}. By then this import has
  * already checked the identity against a row it read, so reaching here means the
@@ -1522,6 +1658,7 @@ async function updateImportedEdge(
   graphId: string,
   edge: InterchangeEdge,
   props: Readonly<Record<string, unknown>>,
+  existingValidFrom: string | undefined,
 ): Promise<string | undefined> {
   try {
     await backend.updateEdge({
@@ -1533,6 +1670,7 @@ async function updateImportedEdge(
       toKind: edge.to.kind,
       toId: edge.to.id,
       props,
+      expectedValidFrom: existingValidFrom ?? null,
       ...(edge.validTo !== undefined && { validTo: edge.validTo }),
     });
     return undefined;
@@ -1546,9 +1684,9 @@ async function updateImportedEdge(
     return (
       `${EDGE_IDENTITY_CONFLICT_CODE}: Edge "${edge.id}" of kind "${edge.kind}" ` +
       `from "${edge.from.kind}:${edge.from.id}" to "${edge.to.kind}:${edge.to.id}" ` +
-      "was not updated: no live edge with that id and identity remained when " +
-      "the write ran, so the row changed or was removed after this import " +
-      "checked it. Re-export the source and retry."
+      "was not updated: no live edge with that id, identity and validity lower " +
+      "bound remained when the write ran, so the row changed or was removed " +
+      "after this import checked it. Re-export the source and retry."
     );
   }
 }
@@ -1731,23 +1869,22 @@ async function processNode(
         // Route through the shared write step so the update maintains
         // uniqueness entries, embeddings, and fulltext — the collection API's
         // integrity, which a raw backend.updateNode would skip. A uniqueness
-        // conflict is reported per-row (updateUniquenessEntries throws before
-        // the row is written, so no partial write escapes).
-        const updateResult = await catchUniquenessError(() =>
-          applyNodeUpdate(
-            writeContext,
-            {
-              existing,
-              schema: registration.type.schema,
-              validatedProps: propsResult.data,
-              uniqueConstraints,
-              ...(node.validTo !== undefined && { validTo: node.validTo }),
-            },
-            backend,
-          ),
+        // conflict is reported per-row (the plan phase throws before the row is
+        // written, so no partial write escapes), and so is a write that landed
+        // on nothing because the target changed under us.
+        const updateError = await updateImportedNode(
+          writeContext,
+          backend,
+          node,
+          {
+            existing,
+            schema: registration.type.schema,
+            validatedProps: propsResult.data,
+            uniqueConstraints,
+          },
         );
-        if (!updateResult.ok) {
-          return { status: "error", error: updateResult.error };
+        if (updateError !== undefined) {
+          return { status: "error", error: updateError };
         }
         return { status: "updated" };
       }
@@ -2073,6 +2210,7 @@ async function processEdgeSlice(
             graphId,
             edge,
             props,
+            existing.valid_from,
           );
           if (updateError !== undefined) {
             record(edge, { status: "error", error: updateError });
@@ -2260,6 +2398,7 @@ async function processEdge(
           graphId,
           edge,
           propsResult.data,
+          existing.valid_from,
         );
         if (updateError !== undefined) {
           return { status: "error", error: updateError };

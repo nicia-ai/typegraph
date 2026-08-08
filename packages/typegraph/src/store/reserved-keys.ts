@@ -71,6 +71,9 @@ function formatSchemaPath(segments: readonly string[]): string {
   return segments.join(".");
 }
 
+/** How a refusal names a location that is the schema itself, not a field. */
+const SCHEMA_ROOT_PATH_LABEL = "(schema root)";
+
 /**
  * Every schema reachable one step down from `value` — a schema, an array of
  * them, or a plain object holding them.
@@ -100,8 +103,17 @@ function collectNestedSchemas(value: unknown, found: z.ZodType[]): void {
   }
 }
 
+/** A `z.lazy` whose getter could not run, and where in the schema it sits. */
+type UnresolvableLazy = Readonly<{ path: string; cause: unknown }>;
+
+/** What one walk of a schema found. */
+type SchemaFindings = Readonly<{
+  unstorable: string[];
+  unresolvableLazy: UnresolvableLazy[];
+}>;
+
 /**
- * The inner schema of a `z.lazy`, or nothing when its getter cannot run yet.
+ * The inner schema of a `z.lazy`, or the reason its getter could not run.
  *
  * `z.lazy` is the one shape the structural walk cannot see — its inner schema
  * hangs off a `getter` FUNCTION rather than a `def` value — so it is unwrapped
@@ -109,48 +121,70 @@ function collectNestedSchemas(value: unknown, found: z.ZodType[]): void {
  * way to inspect what it wraps, and the `visited` set in the caller makes the
  * resulting recursion safe for a self-referential schema.
  *
- * But `unwrap()` is the one part of this walk that can throw for a reason that
- * has nothing to do with unstorable names: a mutually recursive pair declared
- * around a `defineNode` call has the second schema still in its temporal dead
- * zone when the first one's getter runs, and before this validation existed no
- * getter ran at definition time at all. Turning that into a crash would be a
- * worse regression than the defect being fixed, so the branch is skipped: a
- * schema that cannot be looked at cannot be judged, and the parse-time behavior
- * is unchanged either way.
+ * The failure is REPORTED rather than swallowed, and that is the whole contract
+ * of this function. `unwrap()` throws when the getter names a binding still in
+ * its temporal dead zone — a mutually recursive pair whose second `z.object`
+ * const is declared AFTER the `defineNode` call that walks the first. Returning
+ * `undefined` there made the walk fail OPEN: the subtree was never judged, and
+ * because a definition is validated exactly once, it was never judged later
+ * either — so a nested `__proto__` under that subtree was accepted at
+ * definition time and then silently dropped by every parse, which is the exact
+ * defect this validation exists to prevent. A branch that cannot be looked at
+ * is refused, not waved through.
  */
-function unwrapLazySchema(schema: z.ZodLazy<z.core.SomeType>): unknown {
+function resolveLazySchema(schema: z.ZodLazy<z.core.SomeType>):
+  | Readonly<{ resolved: true; inner: unknown }>
+  | Readonly<{
+      resolved: false;
+      cause: unknown;
+    }> {
   try {
-    return schema.unwrap();
-  } catch {
-    return undefined;
+    return { resolved: true, inner: schema.unwrap() };
+  } catch (cause) {
+    return { resolved: false, cause };
   }
 }
 
-/** The schemas nested directly inside `schema`. */
-function nestedSchemasOf(schema: z.ZodType): readonly z.ZodType[] {
+/**
+ * The schemas nested directly inside `schema`, recording an unrunnable `z.lazy`
+ * getter in `findings` instead of quietly yielding nothing for it.
+ */
+function nestedSchemasOf(
+  schema: z.ZodType,
+  path: readonly string[],
+  findings: SchemaFindings,
+): readonly z.ZodType[] {
   const found: z.ZodType[] = [];
-  collectNestedSchemas(
-    schema instanceof z.ZodLazy ?
-      unwrapLazySchema(schema)
-    : Object.values(schema.def),
-    found,
-  );
+  if (schema instanceof z.ZodLazy) {
+    const resolution = resolveLazySchema(schema);
+    if (!resolution.resolved) {
+      findings.unresolvableLazy.push({
+        path: formatSchemaPath(path),
+        cause: resolution.cause,
+      });
+      return found;
+    }
+    collectNestedSchemas(resolution.inner, found);
+    return found;
+  }
+  collectNestedSchemas(Object.values(schema.def), found);
   return found;
 }
 
 /**
  * Collects the path of every property named {@link UNSTORABLE_PROPERTY_NAME}
- * anywhere in `schema`, at any depth and behind any wrapper.
+ * anywhere in `schema`, at any depth and behind any wrapper — and the path of
+ * every `z.lazy` that stopped the walk from getting there.
  *
  * `visited` both terminates recursive schemas and keeps a schema reused under
  * several fields from being re-walked; a name is reported once, which is enough
  * to refuse the definition.
  */
-function collectUnstorablePropertyPaths(
+function collectSchemaFindings(
   schema: z.ZodType,
   path: readonly string[],
   visited: Set<z.ZodType>,
-  found: string[],
+  findings: SchemaFindings,
 ): void {
   if (visited.has(schema)) return;
   visited.add(schema);
@@ -161,18 +195,18 @@ function collectUnstorablePropertyPaths(
     for (const [propertyName, field] of Object.entries(schema.shape)) {
       const fieldPath = [...path, propertyName];
       if (isUnstorablePropertyName(propertyName)) {
-        found.push(formatSchemaPath(fieldPath));
+        findings.unstorable.push(formatSchemaPath(fieldPath));
       }
       if (field instanceof z.ZodType) {
-        collectUnstorablePropertyPaths(field, fieldPath, visited, found);
+        collectSchemaFindings(field, fieldPath, visited, findings);
       }
     }
   }
 
   // Runs for a ZodObject too, so its `catchall` is covered; the shape schemas it
   // re-reaches are already in `visited` and cost one set lookup each.
-  for (const nested of nestedSchemasOf(schema)) {
-    collectUnstorablePropertyPaths(nested, path, visited, found);
+  for (const nested of nestedSchemasOf(schema, path, findings)) {
+    collectSchemaFindings(nested, path, visited, findings);
   }
 }
 
@@ -200,6 +234,13 @@ function isReservedPropertyName(name: string): boolean {
  * `kind`, etc.) and the `$`-prefix accessor namespace. Throws a single
  * `ConfigurationError` per conflict class so the user sees all collisions in
  * one pass.
+ *
+ * A FOURTH class is refused here, and it is about the verdict rather than about
+ * a name: a `z.lazy` whose getter cannot run yet. The walk must be able to see
+ * the whole schema to answer at all, this is the only moment it ever runs, and
+ * a branch it could not enter is a branch nothing will ever check. Refusing is
+ * the fail-CLOSED reading of "cannot judge"; returning a clean verdict for a
+ * subtree that was never looked at is the fail-open one.
  *
  * Takes the SCHEMA rather than its top-level key list: the unstorable-name
  * check is recursive, and a caller that could only hand over `Object.keys(
@@ -233,8 +274,38 @@ export function assertSchemaKeysAreFree(
   // written literally sets the shape object's prototype instead of creating
   // the entry — but `z.object({ ["__proto__"]: z.string() })` yields a shape
   // whose `Object.keys` really does contain it.
-  const unstorableConflicts: string[] = [];
-  collectUnstorablePropertyPaths(schema, [], new Set(), unstorableConflicts);
+  const findings: SchemaFindings = { unstorable: [], unresolvableLazy: [] };
+  collectSchemaFindings(schema, [], new Set(), findings);
+
+  // Refused FIRST, because it is the reason the rest of the verdict may be
+  // incomplete: an unrunnable `z.lazy` getter hides everything beneath it, and
+  // a definition is validated exactly once, so "judge it later" is not on
+  // offer. See `resolveLazySchema`.
+  if (findings.unresolvableLazy.length > 0) {
+    const label = entityKind.toLowerCase();
+    const locations = findings.unresolvableLazy.map((lazy) =>
+      lazy.path === "" ? SCHEMA_ROOT_PATH_LABEL : lazy.path,
+    );
+    throw new ConfigurationError(
+      `${entityKind} "${name}" schema contains a z.lazy() whose schema is not available yet at ${label}-definition time: ${locations.join(", ")}`,
+      {
+        [`${label}Type`]: name,
+        conflicts: locations,
+      },
+      {
+        cause: findings.unresolvableLazy[0]?.cause,
+        suggestion:
+          `Declare every schema the lazy getter references BEFORE this ` +
+          `define${entityKind} call — a mutually recursive pair works when ` +
+          `both z.object() consts are initialized first, and the getters then ` +
+          `resolve. TypeGraph must read through the whole schema at definition ` +
+          `time to refuse property names it cannot store, and a getter that ` +
+          `throws leaves that subtree unchecked forever.`,
+      },
+    );
+  }
+
+  const unstorableConflicts = findings.unstorable;
   if (unstorableConflicts.length > 0) {
     const label = entityKind.toLowerCase();
     throw new ConfigurationError(

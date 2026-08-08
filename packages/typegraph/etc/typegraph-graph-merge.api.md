@@ -4823,6 +4823,7 @@ type UpdateEdgeParams = Readonly<{
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;
+    expectedValidFrom?: string | null;
     clearDeleted?: boolean;
 }>;
 
@@ -4834,6 +4835,7 @@ type UpdateNodeParams = Readonly<{
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;
+    expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
 }>;

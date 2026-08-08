@@ -457,7 +457,13 @@ function createEdgeWhereBuilder<E extends AnyEdgeType>(
 function createWhereProxy<TBuilder extends object>(
   getOperand: (key: string) => IndexWhereOperand,
 ): TBuilder {
-  return new Proxy(Object.create(null) as TBuilder, {
+  // An ORDINARY object target, even though the target is never read: a proxy's
+  // target is what `instanceof`, `Object.getPrototypeOf` and every other
+  // internal method resolve against, and this proxy is handed to the CALLER's
+  // `where:` callback. A null-prototype target made `builder instanceof Object`
+  // answer `false` for no benefit — nothing is ever written to it, so it was
+  // not even the `__proto__`-write protection a data-keyed bag exists for.
+  return new Proxy({} as TBuilder, {
     get: (_target, property: string | symbol) => {
       if (typeof property !== "string") return;
       if (property === "then") return;

@@ -785,3 +785,93 @@ describe("selective projection over a declared prototype-named field", () => {
     expect(results).toEqual([{ name: "Alice", inherited: "function" }]);
   });
 });
+
+// ============================================================
+// Prototype parity between the two mappers
+// ============================================================
+
+/**
+ * The alias objects and their `meta` are proxies, and a proxy's TARGET is
+ * caller-observable: `instanceof`, `Object.getPrototypeOf`, and every other
+ * internal method fall through to it, so a null-prototype target cannot be
+ * disguised by the `get` trap that re-supplies `Object.prototype`'s members.
+ * Under the full mapper these are ordinary object literals; the invariant is
+ * that a caller cannot tell which mapper ran.
+ *
+ * Each case asserts the SELECTIVE projection actually engaged (no `_props`
+ * column in the statement that ran) — the same-shaped assertions against the
+ * full mapper pass without the fix and certify nothing.
+ */
+describe("prototype parity between the selective and full mappers", () => {
+  let store: Store<typeof testGraph>;
+  let getLastQuery: () => SqlFragment | string | undefined;
+
+  beforeEach(async () => {
+    const { backend, getLastQuery: getQuery } = createRecordingBackend();
+    getLastQuery = getQuery;
+    store = createStore(testGraph, backend);
+    await store.nodes.Person.create({ name: "Alice", age: 30 });
+  });
+
+  it("hands the select callback ordinary objects for the alias and its meta", async () => {
+    const results = await store
+      .query()
+      .from("Person", "p")
+      .select((ctx) => ({
+        // Reading a projected field is what makes smart selection engage at
+        // all; without it the tracker sees no field and the full mapper runs.
+        name: ctx.p.name,
+        version: ctx.p.meta.version,
+        aliasIsObject: ctx.p instanceof Object,
+        aliasPrototypeIsNull: Object.getPrototypeOf(ctx.p) === null,
+        metaIsObject: ctx.p.meta instanceof Object,
+        metaPrototypeIsNull: Object.getPrototypeOf(ctx.p.meta) === null,
+        contextIsObject: ctx instanceof Object,
+      }))
+      .execute();
+
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
+    expect(sql).toContain('AS "p_name"');
+    expect(sql).not.toContain('AS "p_props"');
+
+    expect(results).toEqual([
+      {
+        name: "Alice",
+        version: 1,
+        aliasIsObject: true,
+        aliasPrototypeIsNull: false,
+        metaIsObject: true,
+        metaPrototypeIsNull: false,
+        contextIsObject: true,
+      },
+    ]);
+  });
+
+  it("keeps a `__proto__` ALIAS an own context key under selective projection", async () => {
+    const results = await store
+      .query()
+      .from("Person", "__proto__")
+      .select((ctx) => ({
+        name: ctx.__proto__.name,
+        // The alias is caller data. Spreading the context bag is what keeps it
+        // an own key instead of handing it to `Object.prototype`'s setter, and
+        // the spread must not cost the alias object its own prototype.
+        aliasIsOwnKey: Object.hasOwn(ctx, "__proto__"),
+        aliasIsObject: ctx.__proto__ instanceof Object,
+        aliasPrototype: Object.getPrototypeOf(ctx.__proto__) as unknown,
+      }))
+      .execute();
+
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
+    expect(sql).not.toContain('AS "__proto___props"');
+
+    expect(results).toEqual([
+      {
+        name: "Alice",
+        aliasIsOwnKey: true,
+        aliasIsObject: true,
+        aliasPrototype: Object.prototype,
+      },
+    ]);
+  });
+});

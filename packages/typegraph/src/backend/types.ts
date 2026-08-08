@@ -499,6 +499,30 @@ export type UpdateNodeParams = Readonly<{
   /** Applied when resurrecting a tombstone; omitted means the resurrection instant. */
   validFrom?: string | null;
   validTo?: string;
+  /**
+   * The effective `valid_from` this write ASSERTS the target row already
+   * carries, stated only by a caller whose decision DEPENDED on it.
+   *
+   * `(graph_id, kind, id)` does not pin a row across time. A caller that
+   * validated the document's window against the bound it probed — interchange
+   * import's `onConflict: "update"` is the case — decided what to write from a
+   * value a concurrent `hardDelete` + recreate can replace between the probe
+   * and the write, so a predicate on identity alone lets that decision land on
+   * a row it was never computed for: the document's stated `validFrom` is
+   * ignored, or a `valid_to` is persisted below the new row's `valid_from`.
+   * Stating the bound here puts it in the UPDATE's own `WHERE`, which is the
+   * only placement the race cannot slip past.
+   *
+   * NULL-SAFE: `null` asserts the row has NO lower bound (`IS NULL`), a string
+   * asserts equality, and omitting it asserts nothing. `null` and `undefined`
+   * are therefore NOT interchangeable here — see `expectedValidFromPredicate`.
+   *
+   * A backend MUST apply the predicate when it is present, on the same terms as
+   * {@link UpdateEdgeParams.kind}: silently ignoring it re-opens the window the
+   * caller stated it to close. A write whose stated bound does not match affects
+   * zero rows and surfaces as a `no_row_returned` `DatabaseOperationError`.
+   */
+  expectedValidFrom?: string | null;
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
   clearDeleted?: boolean;
@@ -641,6 +665,18 @@ export type UpdateEdgeParams = Readonly<{
    */
   validFrom?: string | null;
   validTo?: string;
+  /**
+   * The effective `valid_from` this write asserts the target row already
+   * carries. Same three states, same NULL-safety, and the same MUST-apply
+   * contract as {@link UpdateNodeParams.expectedValidFrom}; stated by the same
+   * kind of caller, one whose verdict READ that bound.
+   *
+   * Separate from the immutable-identity components above because it is not
+   * immutable: a resurrection rewrites `valid_from`. It is asserted for the
+   * opposite reason — precisely because it can change, a decision computed from
+   * it must be fenced against it having changed.
+   */
+  expectedValidFrom?: string | null;
   clearDeleted?: boolean;
 }>;
 

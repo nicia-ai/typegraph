@@ -152,7 +152,12 @@ export function createTrackingContext(
     }
   }
 
-  return context;
+  // Spread at the boundary, for the same reason `buildSelectContext` does: this
+  // context is handed to the CALLER's `select` callback, on the tracking pass as
+  // much as on the execution pass. A callback that asks `ctx instanceof Object`
+  // must get the same answer from both, or the probe explores a branch the
+  // engine will not take.
+  return { ...context };
 }
 
 function createNodeTrackingProxy(

@@ -11,6 +11,7 @@ import type {
 } from "../../types";
 import { toDrizzleSql } from "../execution/types";
 import {
+  expectedValidFromPredicate,
   nodeColumnList,
   quotedColumn,
   resolveValidFrom,
@@ -194,6 +195,14 @@ export function buildUpdateNode(
   }
 
   const setClause = sql.join(setParts, sql`, `);
+  // The bound the CALLER read, when it read one — see
+  // `UpdateNodeParams.expectedValidFrom`. Emitted on both legs: a resurrecting
+  // upsert that decided from the tombstone's window is fenced on the same terms
+  // as a live-row update.
+  const expectedValidFrom = expectedValidFromPredicate(
+    nodes.validFrom,
+    params.expectedValidFrom,
+  );
 
   if (params.clearDeleted) {
     return sql`
@@ -201,7 +210,7 @@ export function buildUpdateNode(
       SET ${setClause}
       WHERE ${nodes.graphId} = ${params.graphId}
         AND ${nodes.kind} = ${params.kind}
-        AND ${nodes.id} = ${params.id}
+        AND ${nodes.id} = ${params.id}${expectedValidFrom}
         AND ${nodes.deletedAt} IS NOT NULL
       RETURNING *
     `;
@@ -212,7 +221,7 @@ export function buildUpdateNode(
     SET ${setClause}
     WHERE ${nodes.graphId} = ${params.graphId}
       AND ${nodes.kind} = ${params.kind}
-      AND ${nodes.id} = ${params.id}
+      AND ${nodes.id} = ${params.id}${expectedValidFrom}
       AND ${nodes.deletedAt} IS NULL
     RETURNING *
   `;

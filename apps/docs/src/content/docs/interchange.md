@@ -465,6 +465,36 @@ row is reported as the same per-row error rather than aborting the import.
 Nodes were never affected: their probe is `getNode(graphId, kind, id)`, which is
 kind-scoped, so a cross-kind id collision simply reads as absent.
 
+#### An update target that changed under the import
+
+`onConflict: "update"` is a read-then-write pair: the import probes the stored
+row, validates the document's validity window against that row's `valid_from`,
+and then writes. Every part of that verdict is restated in the UPDATE's own
+`WHERE` — for edges the five identity components above, and for **both** nodes
+and edges the effective validity lower bound the window check was computed
+from. A concurrent hard-delete-and-recreate between the probe and the write
+therefore matches no row instead of landing a decision computed for a row that
+is gone (which would have ignored a `validFrom` the document stated, or
+persisted a `validTo` below the new row's `validFrom`).
+
+A write that matches no row is reported per row, so an import whose earlier
+rows are already written is not aborted for it:
+
+```typescript
+const result = await importGraph(store, data, { onConflict: "update" });
+const raced = result.errors.filter(
+  (entry) =>
+    entry.error.startsWith("INTERCHANGE_NODE_UPDATE_TARGET_CHANGED") ||
+    entry.error.startsWith("INTERCHANGE_EDGE_KIND_CONFLICT"),
+);
+```
+
+`INTERCHANGE_NODE_UPDATE_TARGET_CHANGED` is the node-side prefix;
+edges reuse `INTERCHANGE_EDGE_KIND_CONFLICT`, whose message now also names the
+validity lower bound. Re-export the source and retry. A node update refused this
+way leaves no partial trace: its uniqueness, fulltext, and embedding sidecars
+are written only after the primary row update reports a match.
+
 ### Unknown Property Handling
 
 When importing data that has properties not defined in your schema:

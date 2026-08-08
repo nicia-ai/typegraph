@@ -334,9 +334,9 @@ function buildRequiredAliasValue(
 ): unknown {
   // Data-keyed: the projected field names are schema property names, and the
   // values behind them arrive as a `JSON.parse`d props bag — which yields
-  // `__proto__` as an ordinary own key. `createGuardedProxy` below re-supplies
-  // `Object.prototype`'s members explicitly, so the null prototype is invisible
-  // to callers.
+  // `__proto__` as an ordinary own key. The null prototype stays INTERNAL:
+  // `createGuardedProxy` below spreads the finished bag onto an ordinary object
+  // before proxying it, so nothing a caller can observe carries it.
   const base = createDataKeyedBag<unknown>();
   // The marker is keyed by SYMBOL, not by data; the cast only reaches the
   // symbol slot of a string-keyed record.
@@ -365,36 +365,61 @@ function buildRequiredAliasValue(
   return createGuardedProxy(base, plan.alias);
 }
 
+/**
+ * Wraps a projected alias (or its `meta`) in the missing-field guard, ON AN
+ * ORDINARY OBJECT.
+ *
+ * The spread is the boundary spread `createDataKeyedBag` documents, applied
+ * HERE rather than at each call site because a proxy's target is itself
+ * caller-observable: the `get` trap below re-supplies `Object.prototype`'s
+ * members explicitly, but `instanceof`, `Object.getPrototypeOf`, and every
+ * other internal method fall through to the TARGET, which no `get` trap can
+ * disguise. Proxying a null-prototype bag therefore made `ctx.p instanceof
+ * Object` answer `false` under smart selection while the full mapper — which
+ * builds ordinary object literals (see `buildSelectableNode`) — answered
+ * `true`: a public behavior that depended on whether the optimizer engaged.
+ *
+ * Spreading is safe precisely where a key-by-key rebuild would not be: it
+ * copies own properties (including the alias marker symbol) with
+ * CreateDataProperty rather than Set, so a projected field named `__proto__`
+ * survives as an own key while `Object.prototype` is restored.
+ *
+ * Callers must therefore hand over a COMPLETE bag — the copy is taken here and
+ * later writes to the original are invisible.
+ */
 function createGuardedProxy(
   target: Record<string, unknown>,
   debugPath: string,
 ): unknown {
-  return new Proxy(target, {
-    get: (object, property: string | symbol, receiver) => {
-      if (typeof property === "symbol") {
-        return Reflect.get(object, property, receiver) as unknown;
-      }
+  return new Proxy(
+    { ...target },
+    {
+      get: (object, property: string | symbol, receiver) => {
+        if (typeof property === "symbol") {
+          return Reflect.get(object, property, receiver) as unknown;
+        }
 
-      if (property === "then" || property === "toJSON") {
-        return;
-      }
+        if (property === "then" || property === "toJSON") {
+          return;
+        }
 
-      // Own keys only: the projected row's keys are data, so `in` here would
-      // answer for `Object.prototype` members the row does not carry. Behavior
-      // is unchanged — such a key falls through to the prototype branch below
-      // and resolves the same way — but the two cases are now distinct.
-      if (hasOwnKey(object, property)) {
-        return Reflect.get(object, property, receiver);
-      }
+        // Own keys only: the projected row's keys are data, so `in` here would
+        // answer for `Object.prototype` members the row does not carry. Behavior
+        // is unchanged — such a key falls through to the prototype branch below
+        // and resolves the same way — but the two cases are now distinct.
+        if (hasOwnKey(object, property)) {
+          return Reflect.get(object, property, receiver);
+        }
 
-      // Deliberately `in`, NOT hasOwnKey: this branch's whole purpose is to
-      // reach inherited `Object.prototype` members (`toString`, `valueOf`, …) so
-      // a projected row still behaves like an object. Leave it alone.
-      if (property in Object.prototype) {
-        return Reflect.get(Object.prototype, property, receiver) as unknown;
-      }
+        // Deliberately `in`, NOT hasOwnKey: this branch's whole purpose is to
+        // reach inherited `Object.prototype` members (`toString`, `valueOf`, …) so
+        // a projected row still behaves like an object. Leave it alone.
+        if (property in Object.prototype) {
+          return Reflect.get(Object.prototype, property, receiver) as unknown;
+        }
 
-      throw new MissingSelectiveFieldError(debugPath, property);
+        throw new MissingSelectiveFieldError(debugPath, property);
+      },
     },
-  });
+  );
 }

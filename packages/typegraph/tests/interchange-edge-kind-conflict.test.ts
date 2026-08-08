@@ -442,7 +442,7 @@ describe("Interchange edge kind conflicts", () => {
     )?.error;
     expect(reported).toContain("INTERCHANGE_EDGE_KIND_CONFLICT");
     expect(reported).toContain(
-      "no live edge with that id and identity remained",
+      "no live edge with that id, identity and validity lower bound remained",
     );
   });
 
@@ -476,7 +476,7 @@ describe("Interchange edge kind conflicts", () => {
     )?.error;
     expect(reported).toContain("INTERCHANGE_EDGE_KIND_CONFLICT");
     expect(reported).toContain(
-      "no live edge with that id and identity remained",
+      "no live edge with that id, identity and validity lower bound remained",
     );
   });
 

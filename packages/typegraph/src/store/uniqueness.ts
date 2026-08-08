@@ -194,33 +194,53 @@ export async function deleteUniquenessEntries(
 }
 
 /**
- * Updates uniqueness entries when a node's props change.
- * Handles cases where:
- * - Constraint now applies (wasn't before)
- * - Constraint no longer applies (was before)
- * - Key value changed
- *
- * @throws ValidationError if updated value violates a constraint
+ * A single constraint's sidecar change, computed once every changed key has
+ * been proven free ({@link planUniquenessUpdate}) and applied only afterwards
+ * ({@link applyUniquenessUpdate}). `oldKey` (undefined = nothing to release) is
+ * deleted; `newKey` (undefined = nothing to reserve) is inserted.
  */
-export async function updateUniquenessEntries(
+type PendingUniqueMutation = Readonly<{
+  constraintName: string;
+  oldKey: string | undefined;
+  newKey: string | undefined;
+}>;
+
+/**
+ * The sidecar writes a node update owes, decided but not yet performed.
+ *
+ * Opaque to its holder on purpose: the only thing a caller does with a plan is
+ * carry it from {@link planUniquenessUpdate} to {@link applyUniquenessUpdate}
+ * across the primary row write that gates it.
+ */
+export type UniquenessUpdatePlan = readonly PendingUniqueMutation[];
+
+/**
+ * Decides the uniqueness-entry changes a node's new props require, WITHOUT
+ * writing any of them.
+ *
+ * Split from {@link applyUniquenessUpdate} so the caller can put the primary
+ * row UPDATE between the two. The conflict verdict has to come first — a node
+ * whose new value is already taken must be refused before its row changes — but
+ * the sidecar WRITES must come after, because the row update can itself match
+ * zero rows (see `UpdateNodeParams.expectedValidFrom`), and a caller that
+ * reports that per-row and commits anyway would otherwise leave this node's
+ * uniqueness reservations moved for a row that never changed. Read first, write
+ * after the gate: the ordering is the atomicity.
+ *
+ * Handles the cases where a constraint starts applying, stops applying, or
+ * keeps applying under a different key.
+ *
+ * @throws UniquenessError if an updated value is already held by another node
+ */
+export async function planUniquenessUpdate(
   ctx: UniquenessContext,
   kind: string,
   id: string,
   oldProps: Record<string, unknown>,
   newProps: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
-): Promise<void> {
-  // A single constraint's sidecar change, computed once every changed key has
-  // been proven free (pass 1) and applied only afterwards (pass 2). `oldKey`
-  // (undefined = nothing to release) is deleted; `newKey` (undefined = nothing
-  // to reserve) is inserted.
-  type PendingUniqueMutation = Readonly<{
-    constraintName: string;
-    oldKey: string | undefined;
-    newKey: string | undefined;
-  }>;
-
-  // Pass 1 — preflight EVERY changed constraint before mutating any sidecar. A
+): Promise<UniquenessUpdatePlan> {
+  // Preflight EVERY changed constraint before mutating any sidecar. A
   // node can carry several unique constraints; mutating them one at a time would
   // let a later constraint's conflict throw AFTER earlier sidecars were already
   // changed, and a caller that catches UniquenessError and still commits the
@@ -284,10 +304,23 @@ export async function updateUniquenessEntries(
     pending.push({ constraintName: constraint.name, oldKey, newKey });
   }
 
-  // Pass 2 — every changed key is proven free, so releasing the old entries and
-  // reserving the new ones can no longer fail on a duplicate mid-way. Release
-  // all before reserving all, so a value moving between this node's constraints
-  // is never transiently double-held.
+  return pending;
+}
+
+/**
+ * Performs the sidecar writes {@link planUniquenessUpdate} decided on.
+ *
+ * Every changed key was proven free while the plan was built, so releasing the
+ * old entries and reserving the new ones can no longer fail on a duplicate
+ * mid-way. Release all before reserving all, so a value moving between this
+ * node's constraints is never transiently double-held.
+ */
+export async function applyUniquenessUpdate(
+  ctx: UniquenessContext,
+  kind: string,
+  id: string,
+  pending: UniquenessUpdatePlan,
+): Promise<void> {
   for (const mutation of pending) {
     if (mutation.oldKey !== undefined) {
       await ctx.backend.deleteUnique({
