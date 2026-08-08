@@ -66,6 +66,7 @@ import {
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+import { runServerSuiteSetup } from "./server-suite-setup";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
@@ -146,13 +147,21 @@ let firstDb: NodePgDatabase | undefined;
 let secondDb: NodePgDatabase | undefined;
 let isPostgresAvailable = false;
 
-function requirePostgres(ctx: { skip: () => void }): Readonly<{
+/**
+ * The suite is gated on `POSTGRES_URL`, and its setup now FAILS rather than
+ * skipping (see ./server-suite-setup.ts), so an unpublished handle here means
+ * setup reported success without publishing one. Throwing keeps that a
+ * failure: a `ctx.skip()` would turn the same state back into the green skip
+ * the setup fix exists to remove.
+ */
+function requirePostgres(): Readonly<{
   first: NodePgDatabase;
   second: NodePgDatabase;
 }> {
   if (!isPostgresAvailable || firstDb === undefined || secondDb === undefined) {
-    ctx.skip();
-    throw new Error("unreachable");
+    throw new Error(
+      "concurrent-constraint-fence: PostgreSQL connections are unavailable after setup reported success.",
+    );
   }
   return { first: firstDb, second: secondDb };
 }
@@ -169,25 +178,20 @@ beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
   const first = createPool();
   const second = createPool();
-  try {
-    await first.query("SELECT 1");
-    await second.query("SELECT 1");
-    await first.query(generatePostgresMigrationSQL());
-    firstPool = first;
-    secondPool = second;
-    firstDb = drizzle(first);
-    secondDb = drizzle(second);
-    isPostgresAvailable = true;
-  } catch (error) {
-    console.error(
-      "concurrent-constraint-fence: Postgres setup failed; skipping suite.",
-      error,
-    );
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    await first.end().catch(() => {});
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    await second.end().catch(() => {});
-  }
+  await runServerSuiteSetup(
+    "concurrent-constraint-fence",
+    [first, second],
+    async () => {
+      await first.query("SELECT 1");
+      await second.query("SELECT 1");
+      await first.query(generatePostgresMigrationSQL());
+      firstPool = first;
+      secondPool = second;
+      firstDb = drizzle(first);
+      secondDb = drizzle(second);
+      isPostgresAvailable = true;
+    },
+  );
 });
 
 afterAll(async () => {
@@ -235,8 +239,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
     it(
       "converges two concurrent getOrCreateByEndpoints onto ONE edge",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async (ctx) => {
-        const live = requirePostgres(ctx);
+      async () => {
+        const live = requirePostgres();
         const setup = createStore(graph, createPostgresBackend(live.first));
         const alice = await setup.nodes.Person.create(
           { name: "Alice" },
@@ -281,8 +285,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
     it(
       "admits exactly one of two concurrent cardinality-one creates",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async (ctx) => {
-        const live = requirePostgres(ctx);
+      async () => {
+        const live = requirePostgres();
         const setup = createStore(graph, createPostgresBackend(live.first));
         const alice = await setup.nodes.Person.create(
           { name: "Alice" },
@@ -319,8 +323,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
     it(
       "admits exactly one of two concurrent sibling-kind inserts sharing a scoped unique key",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async (ctx) => {
-        const live = requirePostgres(ctx);
+      async () => {
+        const live = requirePostgres();
         const storeA = createStore(graph, createPostgresBackend(live.first));
         const storeB = createStore(graph, createPostgresBackend(live.second));
 
@@ -356,8 +360,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
     it(
       "admits exactly one of two concurrent disjoint-kind creates sharing an id",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async (ctx) => {
-        const live = requirePostgres(ctx);
+      async () => {
+        const live = requirePostgres();
         const storeA = createStore(graph, createPostgresBackend(live.first));
         const storeB = createStore(graph, createPostgresBackend(live.second));
 
@@ -386,7 +390,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
     it(
       "lets two concurrent UNCONSTRAINED writes both succeed",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async (ctx) => {
+      async () => {
         // The control, on OUTCOMES only: the fence must not turn independent
         // writes into failures. `knows` is cardinality `many` and a plain
         // `create` runs no probe, so both writers must simply succeed.
@@ -396,7 +400,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         // consistent with a lock that was taken and released. The deterministic
         // absence assertion is `tests/constraint-write-fence.test.ts`, which
         // counts the statements themselves on PGlite.
-        const live = requirePostgres(ctx);
+        const live = requirePostgres();
         const setup = createStore(graph, createPostgresBackend(live.first));
         const alice = await setup.nodes.Person.create(
           { name: "Alice" },

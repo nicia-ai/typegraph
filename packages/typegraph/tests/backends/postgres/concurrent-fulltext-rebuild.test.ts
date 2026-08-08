@@ -49,6 +49,7 @@ import {
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+import { runServerSuiteSetup } from "./server-suite-setup";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
@@ -100,7 +101,14 @@ let rebuildDb: NodePgDatabase | undefined;
 let writerDb: NodePgDatabase | undefined;
 let isPostgresAvailable = false;
 
-function requirePostgres(ctx: { skip: () => void }): Readonly<{
+/**
+ * The suite is gated on `POSTGRES_URL`, and its setup now FAILS rather than
+ * skipping (see ./server-suite-setup.ts), so an unpublished handle here means
+ * setup reported success without publishing one. Throwing keeps that a
+ * failure: a `ctx.skip()` would turn the same state back into the green skip
+ * the setup fix exists to remove.
+ */
+function requirePostgres(): Readonly<{
   rebuild: NodePgDatabase;
   writer: NodePgDatabase;
 }> {
@@ -109,8 +117,9 @@ function requirePostgres(ctx: { skip: () => void }): Readonly<{
     rebuildDb === undefined ||
     writerDb === undefined
   ) {
-    ctx.skip();
-    throw new Error("unreachable");
+    throw new Error(
+      "concurrent-fulltext-rebuild: PostgreSQL connections are unavailable after setup reported success.",
+    );
   }
   return { rebuild: rebuildDb, writer: writerDb };
 }
@@ -127,25 +136,20 @@ beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
   const first = createPool();
   const second = createPool();
-  try {
-    await first.query("SELECT 1");
-    await second.query("SELECT 1");
-    await first.query(generatePostgresMigrationSQL());
-    rebuildPool = first;
-    writerPool = second;
-    rebuildDb = drizzle(first);
-    writerDb = drizzle(second);
-    isPostgresAvailable = true;
-  } catch (error) {
-    console.error(
-      "concurrent-fulltext-rebuild: Postgres setup failed; skipping suite.",
-      error,
-    );
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    await first.end().catch(() => {});
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    await second.end().catch(() => {});
-  }
+  await runServerSuiteSetup(
+    "concurrent-fulltext-rebuild",
+    [first, second],
+    async () => {
+      await first.query("SELECT 1");
+      await second.query("SELECT 1");
+      await first.query(generatePostgresMigrationSQL());
+      rebuildPool = first;
+      writerPool = second;
+      rebuildDb = drizzle(first);
+      writerDb = drizzle(second);
+      isPostgresAvailable = true;
+    },
+  );
 });
 
 afterAll(async () => {
@@ -192,8 +196,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
     it(
       "does not destroy a neighbouring graph's rows committed while it decides",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async (ctx) => {
-        const live = requirePostgres(ctx);
+      async () => {
+        const live = requirePostgres();
         const [rebuilding] = await createStoreWithSchema(
           rebuildingGraph,
           createPostgresBackend(live.rebuild),
@@ -251,8 +255,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
     it(
       "still recreates the storage when it genuinely is the only graph in the table",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async (ctx) => {
-        const live = requirePostgres(ctx);
+      async () => {
+        const live = requirePostgres();
         const [rebuilding] = await createStoreWithSchema(
           rebuildingGraph,
           createPostgresBackend(live.rebuild),

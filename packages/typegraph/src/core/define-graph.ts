@@ -157,7 +157,10 @@ function normalizeEdges(
   for (const [name, entry] of Object.entries(edges)) {
     result[name] = normalizeEdgeEntry(name, entry, allNodeTypes);
   }
-  return result;
+  // Spread at the boundary: this becomes `graph.edges` on the returned (and
+  // publicly reachable) `GraphDef`. See `createDataKeyedBag` in
+  // ../utils/object.ts.
+  return { ...result };
 }
 
 // ============================================================

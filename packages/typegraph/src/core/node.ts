@@ -37,12 +37,7 @@ function validateSchemaKeys(
   schema: z.ZodObject<z.ZodRawShape>,
   name: string,
 ): void {
-  assertSchemaKeysAreFree(
-    "Node",
-    name,
-    Object.keys(schema.shape),
-    RESERVED_NODE_KEYS,
-  );
+  assertSchemaKeysAreFree("Node", name, schema, RESERVED_NODE_KEYS);
 }
 
 /**

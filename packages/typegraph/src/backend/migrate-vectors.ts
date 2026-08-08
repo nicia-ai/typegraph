@@ -356,11 +356,19 @@ export async function migrateLegacyEmbeddings(
     };
   }
 
+  // SPREAD at the boundary. The three maps are null-prototype accumulators
+  // because their keys are slot names built from row data; that protection is
+  // internal, and returning the bags as-is handed a caller three maps with no
+  // `toString` and `instanceof Object === false` — while the early
+  // "nothing to migrate" return above hands back `{}` literals, so the same
+  // exported function answered with two different kinds of object depending on
+  // whether the legacy table existed. Spread copies own properties with
+  // CreateDataProperty, so a `__proto__` slot key survives as an own key.
   return {
     migrated,
-    perField,
-    skippedDimensionMismatch,
-    skippedDecodeError,
+    perField: { ...perField },
+    skippedDimensionMismatch: { ...skippedDimensionMismatch },
+    skippedDecodeError: { ...skippedDecodeError },
     legacyTablePresent: true,
   };
 }

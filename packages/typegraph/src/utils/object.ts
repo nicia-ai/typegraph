@@ -78,6 +78,18 @@ export function readOwnProperty(
  * A plain `{}` remains correct — and stays in use — for records whose keys are
  * statically known: an options object, a discriminated-union member, a fixed
  * lookup table.
+ *
+ * ## Spread it at the boundary
+ *
+ * The null prototype is an INTERNAL write-side protection, not something a
+ * caller asked for. A bag that escapes into a value this library RETURNS must
+ * be copied with a spread — `return { ...bag }` — at that boundary: returned
+ * as-is it has no `toString`, no `hasOwnProperty`, and answers `false` to
+ * `instanceof Object`, which is a public behavior change against every other
+ * object the library hands back. The spread is safe precisely where a
+ * key-by-key rebuild would not be: it copies own properties with
+ * CreateDataProperty rather than Set, so an own `__proto__` key survives the
+ * copy while `Object.prototype` is restored.
  */
 export function createDataKeyedBag<T>(): Record<string, T> {
   return Object.create(null) as Record<string, T>;

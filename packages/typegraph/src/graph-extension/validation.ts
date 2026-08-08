@@ -18,7 +18,12 @@ import { ConfigurationError } from "../errors";
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
-import { RESERVED_EDGE_KEYS, RESERVED_NODE_KEYS } from "../store/reserved-keys";
+import {
+  isUnstorablePropertyName,
+  RESERVED_EDGE_KEYS,
+  RESERVED_NODE_KEYS,
+  UNSTORABLE_PROPERTY_NAME_REASON,
+} from "../store/reserved-keys";
 import {
   compactUndefined,
   createDataKeyedBag,
@@ -408,7 +413,10 @@ function validateNodesSection(
     recorded.add(kindName);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `GraphExtension.nodes`, which
+  // `validateGraphExtension` returns. See `createDataKeyedBag` in
+  // ../utils/object.ts.
+  return { ...result };
 }
 
 function validateNodeDocument(
@@ -532,7 +540,8 @@ function validateEdgesSection(
     recorded.add(kindName);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `GraphExtension.edges`.
+  return { ...result };
 }
 
 function validateEdgeDocument(
@@ -1046,12 +1055,20 @@ function validateGraphExtensionIndexWhere(
  * a field is silently lost. The declaration is refused rather than accepted as
  * a field the storage layer can never honor.
  *
- * The single owner of that question. Both the top-level `properties` map and a
- * nested `object.properties` map ask here: the two maps compile through the same
- * `z.object(...)` (see `buildObjectSchema` in ./compiler.ts), so a name
- * unstorable at the top level is equally unstorable one level down, and a
- * refusal that fired on only one of them would let a document declare a field
- * that validates clean and then vanishes at parse.
+ * This DOCUMENT walker and the Zod-schema walker behind `defineNode` /
+ * `defineEdge` stay separate — one traverses JSON property descriptors, the
+ * other Zod wrappers, and neither structure can be expressed in the other — but
+ * the VERDICT is not duplicated: both ask
+ * {@link isUnstorablePropertyName} and both quote
+ * {@link UNSTORABLE_PROPERTY_NAME_REASON}, so the two refusals cannot drift into
+ * disagreeing about the same field.
+ *
+ * Within this walker it is likewise the single owner. Both the top-level
+ * `properties` map and a nested `object.properties` map ask here: the two maps
+ * compile through the same `z.object(...)` (see `buildObjectSchema` in
+ * ./compiler.ts), so a name unstorable at the top level is equally unstorable
+ * one level down, and a refusal that fired on only one of them would let a
+ * document declare a field that validates clean and then vanishes at parse.
  *
  * @returns `true` when the name was refused (an issue has been pushed).
  */
@@ -1061,10 +1078,10 @@ function refuseUnstorablePropertyName(
   owner: string,
   issues: GraphExtensionIssue[],
 ): boolean {
-  if (propertyName !== "__proto__") return false;
+  if (!isUnstorablePropertyName(propertyName)) return false;
   issues.push({
     path: propertyPath,
-    message: `Property name "__proto__" is not allowed for ${owner}: schema validation cannot carry it.`,
+    message: `Property name "${propertyName}" is not allowed for ${owner}: ${UNSTORABLE_PROPERTY_NAME_REASON}.`,
     code: "RESERVED_PROPERTY_NAME",
   });
   return true;
@@ -1131,7 +1148,9 @@ function validatePropertiesMap(
     result[propertyName] = validated;
   }
 
-  return result;
+  // Spread at the boundary: this becomes `ExtensionNodeDef.properties` on the
+  // returned document.
+  return { ...result };
 }
 
 function validateProperty(
@@ -1564,7 +1583,7 @@ function validateObjectProperty(
 
   return finalizeProperty<ExtensionObjectProperty>(
     "object",
-    { properties: fields },
+    { properties: { ...fields } },
     modifiers,
   );
 }

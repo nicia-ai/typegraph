@@ -420,38 +420,47 @@ await importGraph(store, data, { onConflict: "update" });
 await importGraph(store, data, { onConflict: "error" });
 ```
 
-#### An edge id held by a different kind
+#### An edge id held by a different edge
 
 Edge ids are unique per graph, but the import's existence probe (`getEdge` /
-`getEdges`) is keyed on `(graph_id, id)` with no kind comparison. So a document
-edge of kind `A` whose id is already held by a kind-`B` row finds that row. That
-question — *is this the same edge?* — is prior to *what do we do about the same
-edge?*, so it is answered **before** the conflict strategy and all three
-strategies answer alike: the row is reported as a per-row entry in
-`result.errors`, whose `error` message is prefixed
-`INTERCHANGE_EDGE_KIND_CONFLICT` and names both the stored kind and the stated
-one. The stored row is left untouched.
+`getEdges`) is keyed on `(graph_id, id)` alone. So a document edge whose id is
+already held by a row with a different **immutable identity** — its `kind` or
+either of its endpoints — finds that row. That question — *is this the same
+edge?* — is prior to *what do we do about the same edge?*, so it is answered
+**before** the conflict strategy and all three strategies answer alike: the row
+is reported as a per-row entry in `result.errors`, whose `error` message is
+prefixed `INTERCHANGE_EDGE_KIND_CONFLICT` and names each component that differs
+alongside the value the document stated. The stored row is left untouched.
 
 ```typescript
 const result = await importGraph(store, data, { onConflict: "update" });
-const kindConflicts = result.errors.filter((entry) =>
+const identityConflicts = result.errors.filter((entry) =>
   entry.error.startsWith("INTERCHANGE_EDGE_KIND_CONFLICT"),
 );
 ```
 
+One prefix covers the whole class rather than a second one for endpoint
+mismatches: the condition is a single fact and the recovery is a single action,
+and a caller that had to match two prefixes to catch one condition would
+eventually match only one. The token still reads `…_KIND_CONFLICT` because it is
+the published, branchable string; it now covers every identity component.
+
 `ImportError` carries no `code` field, so the message prefix is the branchable
 token — the same `CODE: message` idiom the validity-window import refusals use.
-Give the incoming edge a distinct id, or import it under the kind the stored row
-already carries.
+Give the incoming edge a distinct id, or import it under the identity the stored
+row already carries.
 
 Previously both non-`error` strategies were silent about this: `update` wrote
-the incoming edge's properties onto the *other kind's* row with nothing in
+the incoming edge's properties onto the *other* row with nothing in
 `result.errors`, and `skip` counted the document's edge as already present when
-no edge of its kind existed anywhere — so it was never created and never
-reported. The update is additionally issued with the expected `kind` in the
-statement's own `WHERE`, so the check cannot be raced by a concurrent
-hard-delete-and-recreate; an update that consequently matches no row is reported
-as the same per-row error rather than aborting the import.
+no matching edge existed anywhere — so it was never created and never reported.
+Comparing `kind` alone closed only half of it: because endpoints are immutable,
+a document naming the incumbent's kind and id but different endpoints still read
+as the same edge, so `update` overwrote the incumbent's properties and silently
+retained its old endpoints. The update is additionally issued with all five
+identity components in the statement's own `WHERE`, so the check cannot be raced
+by a concurrent hard-delete-and-recreate; an update that consequently matches no
+row is reported as the same per-row error rather than aborting the import.
 
 Nodes were never affected: their probe is `getNode(graphId, kind, id)`, which is
 kind-scoped, so a cross-kind id collision simply reads as absent.

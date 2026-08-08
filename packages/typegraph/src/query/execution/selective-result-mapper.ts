@@ -308,7 +308,9 @@ function buildSelectiveContext<
     }
   }
 
-  return context as SelectContext<Aliases, EdgeAliases>;
+  // Spread at the boundary, for the same reason as the non-selective mapper:
+  // this context reaches the caller's `select` callback.
+  return { ...context } as SelectContext<Aliases, EdgeAliases>;
 }
 
 function buildOptionalAliasValue(

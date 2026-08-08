@@ -1,11 +1,11 @@
 /**
  * An interchange edge is matched against a stored row only when that row
- * carries the same kind.
+ * carries the same IMMUTABLE IDENTITY: kind and both endpoints.
  *
  * Edge ids are graph-global, but the import's existence probe (`getEdge` /
- * `getEdges`) is keyed on `(graph_id, id)` with no kind comparison. So a
- * document edge of kind A whose id is already taken by a kind-B row found that
- * row and every conflict strategy treated it as the same edge:
+ * `getEdges`) is keyed on `(graph_id, id)` alone. So a document edge whose id is
+ * already taken by a different edge found that row and every conflict strategy
+ * treated it as the same edge:
  *
  * - `update` called `backend.updateEdge` WITHOUT `kind`, so A's properties were
  *   written onto the kind-B row — a silent cross-kind overwrite with nothing in
@@ -15,6 +15,13 @@
  * - `skip` counted the document's edge as already present when no edge of its
  *   kind was ever there — silent loss, since the id is unique per graph and the
  *   incoming edge can never be created under it either.
+ *
+ * Comparing KIND ALONE closed only half of it. Endpoints are immutable for a
+ * given row, so a document naming the incumbent's kind and id but different
+ * endpoints was still "the same edge" to the comparison: `update` reported
+ * `updated: 1`, overwrote the incumbent's props, and silently kept its old
+ * endpoints. The predicate therefore compares all five components, and the
+ * update states all five in its own `WHERE`.
  *
  * Nodes are structurally safe: their probe is `getNode(graphId, kind, id)`, so
  * a cross-kind id collision reads as absent. That asymmetry is why this was
@@ -112,19 +119,61 @@ function conflictingDocument(
 }
 
 /**
- * Makes the import's existence probe report the contested id under `kind`,
+ * A document whose edge carries the incumbent's KIND but a different endpoint.
+ * The half of the immutable identity a kind-only comparison could not see.
+ */
+function endpointConflictingDocument(
+  repeat: boolean,
+  note = "written by the import",
+): GraphData {
+  const edge = {
+    kind: "knows",
+    id: CONTESTED_ID,
+    from: { kind: "Person", id: "person-a" },
+    to: { kind: "Person", id: "person-c" },
+    properties: { note },
+  };
+  return {
+    formatVersion: "2.0",
+    exportedAt: CANONICAL_TIMESTAMP,
+    source: { type: "external" },
+    nodes: [],
+    edges: repeat ? [edge, edge] : [edge],
+  };
+}
+
+/** The immutable identity components a stored edge row carries. */
+type SpoofedIdentity = Partial<
+  Readonly<{
+    kind: string;
+    from_kind: string;
+    from_id: string;
+    to_kind: string;
+    to_id: string;
+  }>
+>;
+
+/**
+ * Makes the import's existence probe report the contested id under `overrides`,
  * whatever the database actually holds — a deterministic stand-in for the
- * window the `kind` predicate closes: the row the probe read is not the row the
- * write will find.
+ * window the identity predicate closes: the row the probe read is not the row
+ * the write will find.
+ *
+ * Takes the whole identity rather than the kind alone so the same scaffolding
+ * covers both halves; a spoof that could only lie about `kind` would certify
+ * only the half that was already fixed.
  *
  * Wrapped at `transaction()` because the import runs its reads and writes
  * through the TRANSACTION-scoped backend, not the root one a test can spy on
  * directly.
  */
-function spoofProbedEdgeKind(backend: GraphBackend, kind: string): void {
+function spoofProbedEdgeIdentity(
+  backend: GraphBackend,
+  overrides: SpoofedIdentity,
+): void {
   const runTransaction = backend.transaction;
   const spoof = <T extends { id: string; kind: string }>(row: T): T =>
-    row.id === CONTESTED_ID ? { ...row, kind } : row;
+    row.id === CONTESTED_ID ? { ...row, ...overrides } : row;
   vi.spyOn(backend, "transaction").mockImplementation((run, options) =>
     runTransaction(async (target) => {
       const readEdge = target.getEdge;
@@ -157,6 +206,30 @@ async function storedEdge(
   return { kind: row.kind, note: rowPropsToObject(row.props)["note"] };
 }
 
+/**
+ * The stored row's FULL state: props plus the immutable identity. Endpoints are
+ * immutable, so an update that "succeeded" against a mismatched row would leave
+ * the old ones in place — silently discarding the endpoints the document
+ * stated. Asserting them is what catches that.
+ */
+async function storedEdgeState(backend: GraphBackend): Promise<
+  Readonly<{
+    kind: string;
+    from: string;
+    to: string;
+    note: unknown;
+  }>
+> {
+  const row = await backend.getEdge(graph.id, CONTESTED_ID);
+  if (row === undefined) throw new Error("The contested edge disappeared.");
+  return {
+    kind: row.kind,
+    from: `${row.from_kind}:${row.from_id}`,
+    to: `${row.to_kind}:${row.to_id}`,
+    note: rowPropsToObject(row.props)["note"],
+  };
+}
+
 describe("Interchange edge kind conflicts", () => {
   const openDatabases: Database.Database[] = [];
 
@@ -181,6 +254,10 @@ describe("Interchange edge kind conflicts", () => {
       { name: "Bob" },
       { id: "person-b" },
     );
+    // The third endpoint, so an endpoint-conflicting document names a node that
+    // really exists — the refusal must be about identity, not a dangling
+    // reference.
+    await store.nodes.Person.create({ name: "Carol" }, { id: "person-c" });
     // The incumbent: kind `knows`, holding the contested id.
     await store.edges.knows.create(
       alice,
@@ -228,8 +305,8 @@ describe("Interchange edge kind conflicts", () => {
       const reported = result.errors.find(
         (entry) => entry.id === CONTESTED_ID,
       )?.error;
-      expect(reported).toContain('already exists with kind "knows"');
-      expect(reported).toContain('states kind "worksWith"');
+      expect(reported).toContain('kind "knows"');
+      expect(reported).toContain('document states "worksWith"');
     });
 
     it(`refuses a cross-kind id on the ${path} skip path rather than counting it as present`, async () => {
@@ -260,6 +337,71 @@ describe("Interchange edge kind conflicts", () => {
         }),
       );
     });
+
+    it(`refuses a same-kind id whose ENDPOINTS differ on the ${path} update path`, async () => {
+      // Kind alone is not an identity. This document names the incumbent's kind
+      // and the incumbent's id but points somewhere else, and a kind-only
+      // comparison called that the same edge: it reported `updated: 1`, wrote
+      // the document's props onto the incumbent, and silently kept the
+      // incumbent's endpoints — the document's stated `to` simply discarded,
+      // because endpoints are immutable and the update never carried them.
+      const { backend, store } = await seed();
+
+      const result = await importGraph(
+        store,
+        endpointConflictingDocument(repeat),
+        importOptions({ onConflict: "update" }),
+      );
+
+      expect(await storedEdgeState(backend)).toEqual({
+        kind: "knows",
+        from: "Person:person-a",
+        to: "Person:person-b",
+        note: "original",
+      });
+      expect(result.success).toBe(false);
+      expect(result.edges.updated).toBe(0);
+      const reported = result.errors.find(
+        (entry) => entry.id === CONTESTED_ID,
+      )?.error;
+      expect(reported).toContain("INTERCHANGE_EDGE_KIND_CONFLICT");
+      // The message names the component that differs, so "which one?" does not
+      // require re-reading the database.
+      expect(reported).toContain('to "Person:person-b"');
+      expect(reported).toContain('document states "Person:person-c"');
+      // ...and does NOT claim the kind differs, because it does not.
+      expect(reported).not.toContain("kind ");
+    });
+
+    it(`refuses a same-kind id whose ENDPOINTS differ on the ${path} skip path`, async () => {
+      // The arms pair: `skip` counted the document's edge as already present
+      // when no edge with those endpoints was ever there, and the id is unique
+      // per graph, so it could never be created either.
+      const { backend, store } = await seed();
+
+      const result = await importGraph(
+        store,
+        endpointConflictingDocument(repeat),
+        importOptions({ onConflict: "skip" }),
+      );
+
+      expect(await storedEdgeState(backend)).toEqual({
+        kind: "knows",
+        from: "Person:person-a",
+        to: "Person:person-b",
+        note: "original",
+      });
+      expect(result.edges.skipped).toBe(0);
+      expect(result.success).toBe(false);
+      expect(result.errors).toContainEqual(
+        expect.objectContaining({
+          id: CONTESTED_ID,
+          error: expect.stringMatching(
+            /INTERCHANGE_EDGE_KIND_CONFLICT/,
+          ) as unknown as string,
+        }),
+      );
+    });
   }
 
   it("refuses the update when the row stops matching between the probe and the write", async () => {
@@ -276,7 +418,7 @@ describe("Interchange edge kind conflicts", () => {
     // meet. Without the predicate in the statement, this is exactly the silent
     // cross-kind overwrite — a check that had already been passed.
     const { backend, store } = await seed();
-    spoofProbedEdgeKind(backend, "worksWith");
+    spoofProbedEdgeIdentity(backend, { kind: "worksWith" });
 
     const result = await importGraph(
       store,
@@ -299,7 +441,43 @@ describe("Interchange edge kind conflicts", () => {
       (entry) => entry.id === CONTESTED_ID,
     )?.error;
     expect(reported).toContain("INTERCHANGE_EDGE_KIND_CONFLICT");
-    expect(reported).toContain("no live edge with that id and kind remained");
+    expect(reported).toContain(
+      "no live edge with that id and identity remained",
+    );
+  });
+
+  it("refuses the update when the probe lies about the ENDPOINTS rather than the kind", async () => {
+    // The same window, one component over: the probe reports the endpoint the
+    // DOCUMENT states, so the import's own identity check passes, while the
+    // database still holds the row the write will meet. Without the four
+    // endpoint assertions in `UpdateEdgeParams` this is a props overwrite onto
+    // an edge pointing somewhere the import never looked — the endpoint half of
+    // the check left advisory while the kind half was enforced.
+    const { backend, store } = await seed();
+    spoofProbedEdgeIdentity(backend, { to_id: "person-c" });
+
+    const result = await importGraph(
+      store,
+      endpointConflictingDocument(false),
+      importOptions({ onConflict: "update" }),
+    );
+
+    vi.restoreAllMocks();
+    expect(await storedEdgeState(backend)).toEqual({
+      kind: "knows",
+      from: "Person:person-a",
+      to: "Person:person-b",
+      note: "original",
+    });
+    expect(result.success).toBe(false);
+    expect(result.edges.updated).toBe(0);
+    const reported = result.errors.find(
+      (entry) => entry.id === CONTESTED_ID,
+    )?.error;
+    expect(reported).toContain("INTERCHANGE_EDGE_KIND_CONFLICT");
+    expect(reported).toContain(
+      "no live edge with that id and identity remained",
+    );
   });
 
   it("still updates an edge whose stored row carries the SAME kind", async () => {

@@ -45,6 +45,7 @@ import {
   provenanceGraphId,
 } from "../../../src/graph-merge/provenance-store";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+import { runServerSuiteSetup } from "./server-suite-setup";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
@@ -79,7 +80,14 @@ let writerPool: Pool | undefined;
 let claimDb: NodePgDatabase | undefined;
 let isPostgresAvailable = false;
 
-function requirePostgres(ctx: { skip: () => void }): Readonly<{
+/**
+ * The suite is gated on `POSTGRES_URL`, and its setup now FAILS rather than
+ * skipping (see ./server-suite-setup.ts), so an unpublished handle here means
+ * setup reported success without publishing one. Throwing keeps that a
+ * failure: a `ctx.skip()` would turn the same state back into the green skip
+ * the setup fix exists to remove.
+ */
+function requirePostgres(): Readonly<{
   claim: NodePgDatabase;
   writer: Pool;
 }> {
@@ -88,8 +96,9 @@ function requirePostgres(ctx: { skip: () => void }): Readonly<{
     claimDb === undefined ||
     writerPool === undefined
   ) {
-    ctx.skip();
-    throw new Error("unreachable");
+    throw new Error(
+      "concurrent-provenance-claim: PostgreSQL connections are unavailable after setup reported success.",
+    );
   }
   return { claim: claimDb, writer: writerPool };
 }
@@ -106,24 +115,19 @@ beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
   const first = createPool();
   const second = createPool();
-  try {
-    await first.query("SELECT 1");
-    await second.query("SELECT 1");
-    await first.query(generatePostgresMigrationSQL());
-    claimPool = first;
-    writerPool = second;
-    claimDb = drizzle(first);
-    isPostgresAvailable = true;
-  } catch (error) {
-    console.error(
-      "concurrent-provenance-claim: Postgres setup failed; skipping suite.",
-      error,
-    );
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    await first.end().catch(() => {});
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    await second.end().catch(() => {});
-  }
+  await runServerSuiteSetup(
+    "concurrent-provenance-claim",
+    [first, second],
+    async () => {
+      await first.query("SELECT 1");
+      await second.query("SELECT 1");
+      await first.query(generatePostgresMigrationSQL());
+      claimPool = first;
+      writerPool = second;
+      claimDb = drizzle(first);
+      isPostgresAvailable = true;
+    },
+  );
 });
 
 afterAll(async () => {
@@ -159,8 +163,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
     it(
       "does not claim a graph id whose first row commits while it decides",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async (ctx) => {
-        const live = requirePostgres(ctx);
+      async () => {
+        const live = requirePostgres();
         const backend = createPostgresBackend(live.claim);
 
         // A schema-less application row: no schema row, no advisory lock, no
@@ -212,11 +216,11 @@ describe.runIf(process.env["POSTGRES_URL"])(
     it(
       "still claims a genuinely free graph id under the same lock",
       { timeout: CONTENTION_TIMEOUT_MS },
-      async (ctx) => {
+      async () => {
         // The lock excludes writers; it must not exclude the claim itself. With
         // no contention the same path claims the id and writes exactly one
         // marker, so the drain is a wait, never a refusal of its own.
-        const live = requirePostgres(ctx);
+        const live = requirePostgres();
         const backend = createPostgresBackend(live.claim);
 
         await expect(

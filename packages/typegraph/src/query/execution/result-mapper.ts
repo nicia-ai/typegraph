@@ -312,7 +312,15 @@ export function buildSelectContext<
     }
   }
 
-  return context as SelectContext<Aliases, EdgeAliases, RecursiveAliases>;
+  // Spread at the boundary: the context is handed to the CALLER's `select`
+  // callback, and `select((ctx) => ctx)` returns it verbatim as the row. See
+  // `createDataKeyedBag` in ../../utils/object.ts — the spread is what keeps a
+  // `__proto__` alias an own key instead of reaching the prototype setter.
+  return { ...context } as SelectContext<
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases
+  >;
 }
 
 /**

@@ -199,7 +199,9 @@ function validateResolveMap<G extends GraphDef>(
     }
     validated[kind] = config;
   }
-  return validated;
+  // Spread at the boundary: this becomes `NormalizedMergeOptions.resolve`,
+  // returned from the exported `normalizeMergeOptions`.
+  return { ...validated };
 }
 
 /**

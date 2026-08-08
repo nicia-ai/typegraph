@@ -197,8 +197,15 @@ export function planRemovals<G extends GraphDef>(
 
   const newDocument: GraphExtension = Object.freeze({
     ...(document.version === undefined ? {} : { version: document.version }),
-    ...(Object.keys(updatedNodes).length === 0 ? {} : { nodes: updatedNodes }),
-    ...(Object.keys(updatedEdges).length === 0 ? {} : { edges: updatedEdges }),
+    // Spread at the boundary: these land on the returned extension document,
+    // which is public as `graph.extension`. See `createDataKeyedBag` in
+    // ../utils/object.ts.
+    ...(Object.keys(updatedNodes).length === 0 ?
+      {}
+    : { nodes: { ...updatedNodes } }),
+    ...(Object.keys(updatedEdges).length === 0 ?
+      {}
+    : { edges: { ...updatedEdges } }),
     ...(survivingOntology.length === 0 ? {} : { ontology: survivingOntology }),
     ...(survivingIndexes.length === 0 ? {} : { indexes: survivingIndexes }),
   });
@@ -253,10 +260,12 @@ export function stripGraphExtension<G extends GraphDef>(graph: G): G {
     (index) => index.origin !== "runtime",
   );
 
+  // Spread at the boundary: these become `graph.nodes` / `graph.edges` on the
+  // returned (public) `GraphDef`.
   return Object.freeze({
     ...graph,
-    nodes: compileNodes,
-    edges: compileEdges,
+    nodes: { ...compileNodes },
+    edges: { ...compileEdges },
     ontology: compileOntology,
     indexes: compileIndexes.length === 0 ? undefined : compileIndexes,
     extension: undefined,

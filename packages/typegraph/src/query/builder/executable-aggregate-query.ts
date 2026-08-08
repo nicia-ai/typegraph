@@ -235,7 +235,10 @@ export class ExecutableAggregateQuery<
     rows: readonly Record<string, unknown>[],
   ): readonly AggregateResult<R>[] {
     return rows.map((row) => {
-      // Data-keyed: the caller's aggregate/group aliases.
+      // Data-keyed: the caller's aggregate/group aliases. An alias may be
+      // `__proto__` (it is a caller-supplied string), and `result[key] = value`
+      // on a `{}` literal would hand that key to `Object.prototype`'s setter
+      // and drop the value.
       const result = createDataKeyedBag<unknown>();
       for (const key of Object.keys(this.#fields)) {
         const field = this.#fields[key];
@@ -250,7 +253,15 @@ export class ExecutableAggregateQuery<
 
         result[key] = normalizeFieldValue(field, value);
       }
-      return result as AggregateResult<R>;
+      // SPREAD at the boundary. The null-prototype bag is an internal write-side
+      // protection, not something a caller asked for: returned as-is, an
+      // aggregate row had no `toString`, no `hasOwnProperty`, and answered
+      // `false` to `instanceof Object` — a public behavior regression against
+      // every other row this library returns. Spread copies own properties with
+      // CreateDataProperty rather than Set, so a `__proto__` ALIAS survives as
+      // an own key while `Object.prototype` is restored; the same pattern
+      // `rowToNode` and `buildSelectableNode` already use.
+      return { ...result } as AggregateResult<R>;
     });
   }
 }

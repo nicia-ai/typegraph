@@ -233,6 +233,142 @@ describe("compile-time schema declaring a property named `__proto__`", () => {
     ).toThrow(/__proto__/);
   });
 
+  it("refuses a NESTED object field, not just a top-level one", () => {
+    // The depth-0 control above passed while THIS declaration was accepted, and
+    // the nested write was dropped at parse in exactly the same way — the
+    // refusal was checking `Object.keys(schema.shape)` and nothing below it.
+    // The document authoring path had already been made recursive; this is the
+    // Zod path catching up, so the two agree at every depth rather than only at
+    // the first.
+    expect(() =>
+      defineNode("NestedProtoProp", {
+        schema: z.object({
+          payload: z.object({ [PROTO_KEY]: z.string(), ok: z.string() }),
+        }),
+      }),
+    ).toThrow(/payload\.__proto__/);
+  });
+
+  it("refuses a nested field on an EDGE schema too", () => {
+    expect(() =>
+      defineEdge("nestedProtoPropEdge", {
+        schema: z.object({
+          payload: z.object({ [PROTO_KEY]: z.string() }),
+        }),
+      }),
+    ).toThrow(/payload\.__proto__/);
+  });
+
+  it.each([
+    [
+      "optional",
+      z.object({ payload: z.object({ [PROTO_KEY]: z.string() }).optional() }),
+    ],
+    [
+      "nullable",
+      z.object({ payload: z.object({ [PROTO_KEY]: z.string() }).nullable() }),
+    ],
+    [
+      "array element",
+      z.object({ items: z.array(z.object({ [PROTO_KEY]: z.string() })) }),
+    ],
+    [
+      "record value",
+      z.object({
+        bag: z.record(z.string(), z.object({ [PROTO_KEY]: z.number() })),
+      }),
+    ],
+    [
+      "union member",
+      z.object({
+        either: z.union([z.string(), z.object({ [PROTO_KEY]: z.string() })]),
+      }),
+    ],
+    [
+      "default + array, two levels down",
+      z.object({
+        outer: z
+          .object({ inner: z.array(z.object({ [PROTO_KEY]: z.string() })) })
+          .default({ inner: [] }),
+      }),
+    ],
+  ])(
+    "refuses an unstorable field behind a %s wrapper",
+    (_label, schema: z.ZodObject<z.ZodRawShape>) => {
+      // Wrappers name nothing, so they contribute no path segment — but they
+      // must not hide what they wrap. Enumerating them one by one is how this
+      // stays true for the composites the DSL actually produces.
+      expect(() => defineNode("WrappedProtoProp", { schema })).toThrow(
+        /__proto__/,
+      );
+    },
+  );
+
+  it("accepts a nested schema with no unstorable name", () => {
+    // The walk must not cost the schemas it is not about: nesting, arrays,
+    // wrappers and prototype-NAMED-but-storable fields all still define.
+    expect(() =>
+      defineNode("CleanNested", {
+        schema: z.object({
+          payload: z.object({ ok: z.string(), toString: z.string() }),
+          items: z.array(z.object({ id: z.number() })).optional(),
+        }),
+      }),
+    ).not.toThrow();
+  });
+
+  it("terminates on a self-referential schema", () => {
+    // `z.lazy` hides its inner schema behind a getter rather than a `def` value,
+    // so it is unwrapped explicitly; a recursive schema would then walk forever
+    // without the visited set.
+    interface Tree {
+      readonly label: string;
+      readonly children: readonly Tree[];
+    }
+    const Tree: z.ZodType<Tree> = z.lazy(() =>
+      z.object({ label: z.string(), children: z.array(Tree) }),
+    );
+    expect(() =>
+      defineNode("RecursiveClean", { schema: z.object({ tree: Tree }) }),
+    ).not.toThrow();
+
+    const Poisoned: z.ZodType = z.lazy(() =>
+      z.object({ [PROTO_KEY]: z.string(), next: z.array(Poisoned) }),
+    );
+    expect(() =>
+      defineNode("RecursivePoisoned", { schema: z.object({ tree: Poisoned }) }),
+    ).toThrow(/tree\.__proto__/);
+  });
+
+  it("does not crash on a `z.lazy` whose getter cannot run yet", () => {
+    // Unwrapping a `z.lazy` RUNS its getter, and before this validation existed
+    // no getter ran at definition time. A mutually recursive pair declared
+    // around a `defineNode` call leaves the second schema in its temporal dead
+    // zone when the first one's getter fires — turning a working program into a
+    // ReferenceError would be a worse regression than the defect being fixed,
+    // so the unwrap is skipped rather than propagated. Parse-time behavior is
+    // unchanged either way.
+    const First: z.ZodType = z.lazy(() => z.object({ next: Second }));
+    expect(() =>
+      defineNode("MutuallyRecursive", { schema: z.object({ first: First }) }),
+    ).not.toThrow();
+    const Second: z.ZodType = z.lazy(() => z.object({ back: First }));
+    // Declared after the `defineNode` above on purpose — that ordering is the
+    // whole fixture, and the reference keeps it from reading as dead code.
+    expect(Second).toBeDefined();
+  });
+
+  it("states the nested fixture's premise: Zod drops the nested field too", () => {
+    const schema = z.object({
+      payload: z.object({ [PROTO_KEY]: z.string(), ok: z.string() }),
+    });
+    const parsed = schema.safeParse(
+      parseDocument(`{"payload":{"__proto__":"lost","ok":"kept"}}`),
+    );
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && Object.keys(parsed.data.payload)).toEqual(["ok"]);
+  });
+
   it("states the fixture's premise: Zod really does drop the field", () => {
     // If this ever stops holding, the refusal above is no longer warranted and
     // should be revisited rather than kept out of habit.

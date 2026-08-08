@@ -1402,11 +1402,32 @@ async function catchUniquenessError<T>(
 
 /**
  * The stable prefix on every per-row refusal caused by an incoming edge naming
- * an id that a DIFFERENT kind already occupies, so a caller can recognize the
+ * an id that a DIFFERENT edge already occupies, so a caller can recognize the
  * condition without parsing prose — the same `CODE: message` idiom the validity
  * window refusals use.
+ *
+ * ONE code for the whole immutable-identity class — kind AND endpoints — rather
+ * than a second code for endpoint mismatches. The condition is a single fact
+ * ("the row under this id is not the edge this document describes"), the
+ * recovery is a single action ("give it a distinct id, or import it under the
+ * identity the stored row carries"), and a caller that had to match two prefixes
+ * to catch one condition would eventually match only one. The message names
+ * which components differ; the prefix says what class of thing went wrong.
+ *
+ * The token still reads `…_KIND_CONFLICT` because it is a PUBLISHED, branchable
+ * prefix (documented in `interchange.md`) and renaming it would silently break
+ * every caller filtering on it; the constant is named for what it now covers.
  */
-const EDGE_KIND_CONFLICT_CODE = "INTERCHANGE_EDGE_KIND_CONFLICT";
+const EDGE_IDENTITY_CONFLICT_CODE = "INTERCHANGE_EDGE_KIND_CONFLICT";
+
+/** The immutable identity of a stored edge, as the probe reports it. */
+type StoredEdgeIdentity = Readonly<{
+  kind: string;
+  from_kind: string;
+  from_id: string;
+  to_kind: string;
+  to_id: string;
+}>;
 
 /**
  * Whether an existing row is actually the edge this document is describing.
@@ -1414,15 +1435,23 @@ const EDGE_KIND_CONFLICT_CODE = "INTERCHANGE_EDGE_KIND_CONFLICT";
  * THE SINGLE OWNER of that decision, consulted by both edge-import paths (the
  * batched slice and the per-row fallback) before ANY conflict strategy runs.
  *
- * Edge ids are graph-global while every interchange edge states a kind, and the
- * existence probe (`getEdge` / `getEdges`) is keyed on `(graph_id, id)` with no
- * kind comparison — so an incoming edge of kind A whose id is already taken by
- * a kind-B row finds that row and, without this check, was treated as the same
- * edge by all three strategies: `update` wrote A's props onto the kind-B row
- * with nothing in `result.errors`, and `skip` counted the document's edge as
- * already present when nothing of that kind was ever there. Both are silent,
- * and the id is unique per graph, so the incoming edge cannot be created under
- * it either. Reporting is the only honest outcome.
+ * Edge ids are graph-global while every interchange edge states a kind AND both
+ * endpoints, and the existence probe (`getEdge` / `getEdges`) is keyed on
+ * `(graph_id, id)` alone — so an incoming edge whose id is already taken by a
+ * DIFFERENT edge finds that row and, without this check, was treated as the same
+ * edge by all three strategies: `update` wrote the incoming props onto the other
+ * row with nothing in `result.errors`, and `skip` counted the document's edge as
+ * already present when nothing matching was ever there. Both are silent, and the
+ * id is unique per graph, so the incoming edge cannot be created under it
+ * either. Reporting is the only honest outcome.
+ *
+ * Compares the FULL immutable identity — kind and all four endpoint components —
+ * not kind alone. Kind is not an identity: an id already held by an edge of the
+ * same kind pointing somewhere else is just as much "not this edge", and a
+ * kind-only comparison reported `updated: 1` while overwriting that row's props
+ * and silently retaining its old endpoints (endpoints are immutable, so the
+ * document's stated `from`/`to` were simply discarded). Every component is
+ * checked because every component is immutable for a given row.
  *
  * Deliberately checked ABOVE the `onConflict` switch rather than inside each
  * arm: the question "is this the same edge?" is prior to "what do we do about
@@ -1430,36 +1459,61 @@ const EDGE_KIND_CONFLICT_CODE = "INTERCHANGE_EDGE_KIND_CONFLICT";
  * to answer it differently.
  *
  * Nodes need no equivalent: their probe is `getNode(graphId, kind, id)`, which
- * is kind-scoped, so a cross-kind id collision simply reads as absent there.
+ * is kind-scoped, and a node has no endpoints — so a cross-kind id collision
+ * simply reads as absent there.
  */
-function edgeKindConflict(
+function edgeIdentityConflict(
   edge: InterchangeEdge,
-  existing: Readonly<{ kind: string }>,
+  existing: StoredEdgeIdentity,
 ): string | undefined {
-  if (existing.kind === edge.kind) return undefined;
+  const differences = [
+    ...(existing.kind === edge.kind ?
+      []
+    : [`kind "${existing.kind}" (document states "${edge.kind}")`]),
+    ...((
+      existing.from_kind === edge.from.kind && existing.from_id === edge.from.id
+    ) ?
+      []
+    : [
+        `from "${existing.from_kind}:${existing.from_id}" (document states ` +
+          `"${edge.from.kind}:${edge.from.id}")`,
+      ]),
+    ...(existing.to_kind === edge.to.kind && existing.to_id === edge.to.id ?
+      []
+    : [
+        `to "${existing.to_kind}:${existing.to_id}" (document states ` +
+          `"${edge.to.kind}:${edge.to.id}")`,
+      ]),
+  ];
+  if (differences.length === 0) return undefined;
   return (
-    `${EDGE_KIND_CONFLICT_CODE}: Edge "${edge.id}" already exists with kind ` +
-    `"${existing.kind}", but this document states kind "${edge.kind}". Edge ids ` +
-    "are unique per graph, so the incoming edge can neither update nor be " +
-    "created under that id. Give it a distinct id, or import it under the kind " +
-    "the stored row already carries."
+    `${EDGE_IDENTITY_CONFLICT_CODE}: Edge "${edge.id}" already exists with a ` +
+    `different immutable identity — ${differences.join("; ")}. Edge ids are ` +
+    "unique per graph, so the incoming edge can neither update nor be created " +
+    "under that id. Give it a distinct id, or import it under the identity the " +
+    "stored row already carries."
   );
 }
 
 /**
- * Updates an existing edge under the kind the caller checked it carries, and
- * reports a write that landed on nothing as a per-row error.
+ * Updates an existing edge under the full immutable identity the caller checked
+ * it carries, and reports a write that landed on nothing as a per-row error.
  *
- * `kind` is stated so the predicate lives in the UPDATE's own `WHERE` — the
- * contract on {@link UpdateEdgeParams}, and the only placement a concurrent
- * hard-delete-and-recreate cannot slip past, because a read-then-write pair
- * keyed on `(graph_id, id)` alone re-resolves that id between the probe and the
- * write under PostgreSQL READ COMMITTED. Omitting it made the import's own
- * kind check advisory: correct until raced.
+ * All five identity components are stated so the predicate lives in the UPDATE's
+ * own `WHERE` — the contract on {@link UpdateEdgeParams}, and the only placement
+ * a concurrent hard-delete-and-recreate cannot slip past, because a
+ * read-then-write pair keyed on `(graph_id, id)` alone re-resolves that id
+ * between the probe and the write under PostgreSQL READ COMMITTED. Omitting them
+ * made the import's own identity check advisory: correct until raced.
+ *
+ * The endpoints move together with `kind` rather than being left out because
+ * they are "less likely" to be raced: the window is the same window, and this
+ * import HAS checked all five against a row it read, which is exactly the
+ * precondition {@link UpdateEdgeParams} states for asserting them.
  *
  * When the predicate does match nothing, the backend reports it as a
  * `no_row_returned` {@link DatabaseOperationError}. By then this import has
- * already checked the kind against a row it read, so reaching here means the
+ * already checked the identity against a row it read, so reaching here means the
  * target changed underneath us — a per-row fact about one edge, not a reason to
  * abort an import whose earlier rows are already written.
  */
@@ -1474,6 +1528,10 @@ async function updateImportedEdge(
       graphId,
       id: edge.id,
       kind: edge.kind,
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      toKind: edge.to.kind,
+      toId: edge.to.id,
       props,
       ...(edge.validTo !== undefined && { validTo: edge.validTo }),
     });
@@ -1486,10 +1544,11 @@ async function updateImportedEdge(
       throw error;
     }
     return (
-      `${EDGE_KIND_CONFLICT_CODE}: Edge "${edge.id}" of kind "${edge.kind}" was ` +
-      "not updated: no live edge with that id and kind remained when the write " +
-      "ran, so the row changed or was removed after this import checked it. " +
-      "Re-export the source and retry."
+      `${EDGE_IDENTITY_CONFLICT_CODE}: Edge "${edge.id}" of kind "${edge.kind}" ` +
+      `from "${edge.from.kind}:${edge.from.id}" to "${edge.to.kind}:${edge.to.id}" ` +
+      "was not updated: no live edge with that id and identity remained when " +
+      "the write ran, so the row changed or was removed after this import " +
+      "checked it. Re-export the source and retry."
     );
   }
 }
@@ -1973,11 +2032,12 @@ async function processEdgeSlice(
       : await backend.getEdge(graphId, edge.id);
 
     if (existing) {
-      // Prior to every strategy: a row occupying this id under another kind is
-      // not this edge, and none of the three arms may treat it as one.
-      const kindConflict = edgeKindConflict(edge, existing);
-      if (kindConflict !== undefined) {
-        record(edge, { status: "error", error: kindConflict });
+      // Prior to every strategy: a row occupying this id under a different
+      // immutable identity is not this edge, and none of the three arms may
+      // treat it as one.
+      const identityConflict = edgeIdentityConflict(edge, existing);
+      if (identityConflict !== undefined) {
+        record(edge, { status: "error", error: identityConflict });
         continue;
       }
       switch (options.onConflict) {
@@ -2168,9 +2228,9 @@ async function processEdge(
 
   if (existing) {
     // Same prior question as the batched path, answered by the same owner.
-    const kindConflict = edgeKindConflict(edge, existing);
-    if (kindConflict !== undefined) {
-      return { status: "error", error: kindConflict };
+    const identityConflict = edgeIdentityConflict(edge, existing);
+    if (identityConflict !== undefined) {
+      return { status: "error", error: identityConflict };
     }
     switch (options.onConflict) {
       case "skip": {

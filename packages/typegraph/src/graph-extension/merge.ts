@@ -248,10 +248,13 @@ export function mergeGraphExtension<G extends GraphDef>(
 
   // Returned as `G` even though graph-extension kinds aren't in the static
   // type — consumers reach them via the registry.
+  // Spread the two bags at the boundary: they become `graph.nodes` /
+  // `graph.edges` on the returned (public) `GraphDef`. See
+  // `createDataKeyedBag` in ../utils/object.ts.
   return Object.freeze({
     ...graph,
-    nodes: mergedNodes,
-    edges: mergedEdges,
+    nodes: { ...mergedNodes },
+    edges: { ...mergedEdges },
     ontology: mergedOntology,
     indexes: mergedIndexes,
     extension: validatedUnion,

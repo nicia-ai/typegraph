@@ -298,7 +298,9 @@ function serializeNodes<G extends GraphDef>(
     result[kindName] = serializeNodeDef(registration);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `SerializedSchema.nodes`, which
+  // `serializeSchema` returns. See `createDataKeyedBag` in ../utils/object.ts.
+  return { ...result };
 }
 
 /**
@@ -449,7 +451,8 @@ function serializeEdges<G extends GraphDef>(
     result[kindName] = serializeEdgeDef(registration);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `SerializedSchema.edges`.
+  return { ...result };
 }
 
 /**
@@ -506,7 +509,7 @@ function serializeOntology(
   const closures = serializeClosures(relations);
 
   return {
-    metaEdges,
+    metaEdges: { ...metaEdges },
     relations: serializedRelations,
     closures,
   };
@@ -592,7 +595,9 @@ function mapToRecord(
   for (const [key, values] of map) {
     result[key] = [...values];
   }
-  return result;
+  // Spread at the boundary: the closures land in the returned
+  // `SerializedOntology`. See `createDataKeyedBag` in ../utils/object.ts.
+  return { ...result };
 }
 
 /**
