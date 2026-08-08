@@ -35,7 +35,7 @@ export {
 // under a graph id whose schema was never registered.
 export { createSqlSchema } from "../query/compiler/schema";
 export { sql } from "../query/sql-fragment";
-export { asCompiledRowsSql } from "../query/sql-intent";
+export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 export { sortedReplacer } from "../schema/canonical";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
 export {

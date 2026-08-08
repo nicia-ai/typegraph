@@ -26,6 +26,7 @@ import {
   type TransactionBackend,
 } from "../src/backend/types";
 import { createStore } from "../src/store";
+import { createTracingBackend } from "./trace-backend";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), note: z.string().optional() }),
@@ -184,6 +185,44 @@ describe("coalescing upsert freshness", () => {
     // No write: version and updatedAt are the ones the flag-off store left.
     expect(skipped.meta.version).toBe(created?.meta.version);
     expect(skipped.meta.updatedAt).toBe(created?.meta.updatedAt);
+  });
+
+  it("takes the skip decision's evidence inside a transaction, and writes nothing", async () => {
+    // The structural guard behind the freshness cases above. What must hold is
+    // that the read the skip rests on is taken INSIDE a transaction — on SQLite
+    // that transaction is `BEGIN IMMEDIATE`, so no other writer can be between
+    // the evidence and the elided write — and that the skip really is a write
+    // of nothing.
+    //
+    // What this cannot distinguish, and does not claim to: computing the
+    // verdict inside that transaction versus just after it closes. Both read
+    // the same row at the same instant, and a verdict is a pure function of the
+    // row, so nothing in-process can tell them apart. Deciding inside is what
+    // the code does because it keeps the claim and the mechanism identical; the
+    // regression this test exists to catch is the read escaping the transaction
+    // altogether, which is the defect that was actually shipped.
+    const trace = createTracingBackend(raw);
+    const store = createStore(graph, trace.backend, {
+      coalesceUnchangedUpserts: true,
+    });
+    await store.nodes.Person.create({ name: "original" }, { id: ID });
+
+    trace.reset();
+    await store.nodes.Person.upsertById(ID, { name: "original" });
+
+    const begin = trace.calls.indexOf("transaction:begin");
+    const commit = trace.calls.indexOf("transaction:commit");
+    const decisionRead = trace.calls.indexOf("tx.getNode");
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(commit).toBeGreaterThan(begin);
+    // The evidence is read between BEGIN and COMMIT, not on the autocommit
+    // connection before either.
+    expect(decisionRead).toBeGreaterThan(begin);
+    expect(decisionRead).toBeLessThan(commit);
+    // And the transaction that carried it wrote nothing at all.
+    expect(
+      trace.calls.filter((call) => /update|insert|delete/iu.test(call)),
+    ).toEqual([]);
   });
 
   it("resurrects rather than skipping when the row is tombstoned between read and decision", async () => {

@@ -5,20 +5,28 @@
  *
  * ## Invariants this module owns
  *
- * **Kind-scoped edge writes are self-verifying.** Every write issued on behalf
- * of a kind-scoped collection — `update`, soft `delete`, `hardDelete`, and the
- * batch soft delete — carries its expected kind INSIDE the write statement's
- * `WHERE` (see {@link UpdateEdgeParams}'s `kind`). The identity the operation
- * checked and the row the statement mutates are therefore resolved by one
- * predicate in one statement, on every backend and at every isolation level:
- * between the check and the write, no other session's `hardDelete(id)` +
- * `create({ id, kind: other })` can re-point that id at a row this write then
- * mutates. A stated kind that does not match affects zero rows, and the caller
+ * **An edge write lands only on a row satisfying every identity component it
+ * ASSERTED.** Each write issued on behalf of a kind-scoped collection —
+ * `update`, soft `delete`, `hardDelete`, the batch soft delete — carries the
+ * identity it asserted INSIDE the write statement's own `WHERE` (see
+ * {@link UpdateEdgeParams}'s `kind` / `fromKind` / `fromId` / `toKind` /
+ * `toId`). The identity the operation checked and the row the statement mutates
+ * are therefore resolved by one predicate in one statement, on every backend
+ * and at every isolation level: nothing another session does between the check
+ * and the write can re-point that id at a row failing an assertion this write
+ * made. An assertion that does not match affects zero rows, and the caller
  * hears the same `EDGE_IDENTITY_MISMATCH` / not-found refusal it would have
- * heard from the check. Endpoint predicates are NOT carried: endpoints are
- * immutable for a given `(id, kind)` row, so kind alone pins the row identity a
- * write asserts. The node delete cascade states no kind at all — it removes
- * every connected edge whatever its kind — and is deliberately left kind-blind.
+ * heard from the check.
+ *
+ * The scope of the claim is exactly "what it asserted", and no wider. An upsert
+ * that resolved an edge BY its endpoints asserts them and predicates on them,
+ * so a same-kind `hardDelete` + recreate pointing somewhere else is refused.
+ * A plain `update` on a kind-scoped collection asserts only kind — it resolved
+ * the edge by id and never looked at where it points — so a same-kind recreate
+ * with different endpoints is a row it is content to write, and predicating on
+ * endpoints it never checked would refuse legitimate writes instead. The node
+ * delete cascade asserts nothing at all: it removes every connected edge
+ * whatever its kind, and is deliberately left identity-blind.
  *
  * **A declared constraint's probe and the write it guards commit under one
  * per-graph mutual exclusion, on every backend.** Cardinality (`one` /
@@ -77,6 +85,7 @@ import { type UpsertUpdateEdgeInput } from "../collections/edge-collection";
 import {
   checkCardinalityConstraint,
   type ConstraintContext,
+  type ConstraintFenceReason,
   edgeWriteNeedsConstraintFence,
 } from "../constraints";
 import {
@@ -521,12 +530,31 @@ type EdgeConvergenceGuard = Readonly<{
 }>;
 
 /**
- * What a guarded create leg did. `raced` means a competing writer's edge became
- * visible under the fence, so nothing was written and the caller must re-lookup.
+ * A guarded create leg that found a competitor's edge under the fence.
+ *
+ * THROWN rather than returned, and that choice is the whole point: the leg is
+ * wrapped in operation hooks and a write transaction, and both of them read
+ * "did this operation do what it said" from whether the body threw. Returning a
+ * "nothing happened" value instead left `onOperationEnd` reporting a successful
+ * create for an id no row carries, and left the revision clock advancing for a
+ * write that never occurred. Throwing routes the abort through `onError` — the
+ * same report the pre-existing `CardinalityError` retry has always produced for
+ * a losing attempt — and skips the clock advance by construction rather than by
+ * a `didWrite` predicate that a later edit could forget to pass.
+ *
+ * Never escapes {@link executeEdgeGetOrCreateByEndpoints}: the convergence loop
+ * is the only caller that sets the guard, and it is the only code that catches
+ * this.
  */
-type EdgeCreateOutcome =
-  | Readonly<{ outcome: "created"; edge: Edge | undefined }>
-  | Readonly<{ outcome: "raced" }>;
+class EdgeConvergenceRaced extends Error {
+  constructor(kind: string) {
+    super(
+      `A competing writer claimed the ${kind} match key; re-resolving it. ` +
+        `This is internal to getOrCreateByEndpoints and is never returned to a caller.`,
+    );
+    this.name = "EdgeConvergenceRaced";
+  }
+}
 
 /**
  * Executes an edge create operation.
@@ -539,7 +567,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     returnRow?: boolean;
     convergeOn?: EdgeConvergenceGuard;
   }>,
-): Promise<EdgeCreateOutcome> {
+): Promise<Edge | undefined> {
   const kind = input.kind;
   const id = input.id ?? generateId();
   const opContext = ctx.createOperationContext("create", "edge", kind, id);
@@ -550,7 +578,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     ctx,
     opContext,
     backend,
-    async (target): Promise<EdgeCreateOutcome> => {
+    async (target): Promise<Edge | undefined> => {
       if (convergeOn !== undefined) {
         const candidateRows = await target.findEdgesByKind({
           graphId: ctx.graphId,
@@ -568,7 +596,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           convergeOn.props,
         );
         if (liveRow !== undefined || deletedRow !== undefined) {
-          return { outcome: "raced" };
+          throw new EdgeConvergenceRaced(kind);
         }
       }
 
@@ -592,18 +620,16 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         return;
       });
 
-      return {
-        outcome: "created",
-        edge: row === undefined ? undefined : rowToEdge(row),
-      };
+      return row === undefined ? undefined : rowToEdge(row);
     },
     {
       // A create that runs a cardinality probe, or one converging on a match
       // key, decides something the write must not have invalidated. A plain
       // `many` create decides nothing and takes no lock.
       fencesConstraintProbe:
-        convergeOn !== undefined ||
-        edgeWriteNeedsConstraintFence(edgeCardinality(ctx, kind)),
+        convergeOn === undefined ?
+          edgeWriteNeedsConstraintFence(edgeCardinality(ctx, kind))
+        : "edgeMatchKeyConvergence",
     },
   );
 }
@@ -616,10 +642,9 @@ export async function executeEdgeCreate<G extends GraphDef>(
   input: CreateEdgeInput,
   backend: GraphBackend | TransactionBackend,
 ): Promise<Edge> {
-  const result = await executeEdgeCreateInternal(ctx, input, backend, {
+  const edge = await executeEdgeCreateInternal(ctx, input, backend, {
     returnRow: true,
   });
-  const edge = result.outcome === "created" ? result.edge : undefined;
   if (!edge) {
     throw new DatabaseOperationError(
       "Edge create failed: expected created edge row",
@@ -805,10 +830,14 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
 function batchFencesConstraintProbe<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
-): boolean {
-  return inputs.some((input) =>
-    edgeWriteNeedsConstraintFence(edgeCardinality(ctx, input.kind)),
-  );
+): ConstraintFenceReason | undefined {
+  for (const input of inputs) {
+    const reason = edgeWriteNeedsConstraintFence(
+      edgeCardinality(ctx, input.kind),
+    );
+    if (reason !== undefined) return reason;
+  }
+  return undefined;
 }
 
 /**
@@ -949,10 +978,21 @@ async function performEdgeUpdate<G extends GraphDef>(
   // merged props and the effective window, and the same predicate that
   // validated its identity is carried into the statement, so the row this
   // writes is provably the row that was judged.
+  //
+  // Every component `input.identity` ASSERTS is carried, not just kind: an
+  // upsert that resolved this edge by its endpoints asserted them, and a
+  // same-kind recreate with different endpoints would satisfy a kind-only
+  // predicate. The expectation object is the single source for both the
+  // pre-write check and the statement, so the two cannot assert different
+  // things.
   const updateParams: {
     graphId: string;
     id: string;
     kind: string;
+    fromKind?: string;
+    fromId?: string;
+    toKind?: string;
+    toId?: string;
     props: Record<string, unknown>;
     validFrom?: string;
     validTo?: string;
@@ -963,6 +1003,18 @@ async function performEdgeUpdate<G extends GraphDef>(
     kind: input.identity.kind,
     props: validatedProps,
   };
+  if (input.identity.fromKind !== undefined) {
+    updateParams.fromKind = input.identity.fromKind;
+  }
+  if (input.identity.fromId !== undefined) {
+    updateParams.fromId = input.identity.fromId;
+  }
+  if (input.identity.toKind !== undefined) {
+    updateParams.toKind = input.identity.toKind;
+  }
+  if (input.identity.toId !== undefined) {
+    updateParams.toId = input.identity.toId;
+  }
   if (validFrom !== undefined) updateParams.validFrom = validFrom;
   if (validTo !== undefined) updateParams.validTo = validTo;
   if (options?.clearDeleted) updateParams.clearDeleted = true;
@@ -1127,8 +1179,9 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
       // An in-place props update re-derives no constraint verdict: endpoints
       // are immutable, so cardinality cannot change under it.
       fencesConstraintProbe:
-        resurrectCardinality !== undefined &&
-        edgeWriteNeedsConstraintFence(resurrectCardinality.cardinality),
+        resurrectCardinality === undefined ? undefined : (
+          edgeWriteNeedsConstraintFence(resurrectCardinality.cardinality)
+        ),
     },
   );
 }
@@ -1536,18 +1589,18 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   // operation run directly inside it and fire its success hooks before THIS
   // wrapper's COMMIT — the durability contract hooks promise would be false.
   //
-  // The lookup below is therefore only a DISPATCHER: it chooses a leg, and each
-  // leg re-derives its own verdict under the per-graph fence its transaction
-  // holds. The create leg re-runs this very lookup inside that transaction
-  // (`convergeOn`) and reports `raced` instead of inserting a second edge for a
-  // match key a competitor just claimed; a resurrect leg re-checks cardinality
-  // in-transaction. So the probe that authorizes each write and the write
-  // itself commit under one mutual exclusion, even though the dispatcher does
-  // not.
-  //
-  // `undefined` means "the fence saw a competitor" — re-dispatch.
+  // The lookup below is therefore only a DISPATCHER: it chooses a leg, and the
+  // two legs that DERIVE a verdict re-derive it under the per-graph fence their
+  // transaction holds. The create leg re-runs this very lookup inside that
+  // transaction (`convergeOn`) and aborts rather than inserting a second edge
+  // for a match key a competitor just claimed; the resurrect leg re-checks
+  // cardinality in-transaction. The `found` leg writes nothing and derives
+  // nothing, and the `updated` leg writes to an id it resolved here — its
+  // in-transaction re-read and its endpoint-predicated UPDATE are what make
+  // that write land on the row this lookup meant, not a re-derivation of the
+  // dispatcher's choice.
   async function attempt(): Promise<
-    Readonly<{ edge: Edge; action: GetOrCreateAction }> | undefined
+    Readonly<{ edge: Edge; action: GetOrCreateAction }>
   > {
     // Query all edges of this kind between (from, to) including tombstones
     const candidateRows = await backend.findEdgesByKind({
@@ -1583,14 +1636,13 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         returnRow: true,
         convergeOn: { matchOn, props: validatedProps },
       });
-      if (created.outcome === "raced") return undefined;
-      if (created.edge === undefined) {
+      if (created === undefined) {
         throw new DatabaseOperationError(
           "Edge create failed: expected created edge row",
           { operation: "insert", entity: "edge" },
         );
       }
-      return { edge: created.edge, action: "created" };
+      return { edge: created, action: "created" };
     }
 
     // Live match found
@@ -1658,35 +1710,44 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   }
 
   // Convergence loop. Under the fence a losing writer learns about the winner
-  // from its own in-transaction lookup (`raced`) rather than from a constraint
-  // violation, so the ordinary path is one re-dispatch that finds the winner's
-  // edge. The `CardinalityError` arm remains the backstop for the paths the
-  // fence cannot cover — a non-transactional backend, or a competitor whose
-  // write is not a `getOrCreateByEndpoints` at all.
+  // from its own in-transaction lookup ({@link EdgeConvergenceRaced}) rather
+  // than from a constraint violation, so the ordinary path is one re-dispatch
+  // that finds the winner's edge. The `CardinalityError` arm remains the
+  // backstop for the paths the fence cannot cover — a competitor whose write is
+  // not a `getOrCreateByEndpoints` at all.
   //
   // ATTEMPT_LIMIT bounds a pathological ping-pong (a competitor that creates
   // and hard-deletes the same match key repeatedly) rather than spinning; the
-  // last attempt would otherwise be indistinguishable from a livelock.
+  // last attempt would otherwise be indistinguishable from a livelock. On the
+  // FINAL attempt a retryable signal is no longer retryable, so it is reported:
+  // a `CardinalityError` as itself (the caller's own constraint is what failed),
+  // and an exhausted convergence race as the terminal error below, which names
+  // the interference rather than leaking an internal signal.
   const ATTEMPT_LIMIT = 3;
-  let lastCardinalityError: CardinalityError | undefined;
   for (let remaining = ATTEMPT_LIMIT; remaining > 0; remaining -= 1) {
     try {
-      const result = await attempt();
-      if (result !== undefined) return result;
-      lastCardinalityError = undefined;
+      return await attempt();
     } catch (error) {
-      if (!(error instanceof CardinalityError)) throw error;
-      if (remaining === 1) throw error;
-      lastCardinalityError = error;
+      const retryable =
+        error instanceof CardinalityError ||
+        error instanceof EdgeConvergenceRaced;
+      if (!retryable || remaining === 1) {
+        if (!(error instanceof EdgeConvergenceRaced)) throw error;
+        throw new DatabaseOperationError(
+          `getOrCreateByEndpoints for ${kind} between ${fromKind} "${fromId}" ` +
+            `and ${toKind} "${toId}" lost its match key to a competing writer ` +
+            `${String(ATTEMPT_LIMIT)} times without converging. A concurrent ` +
+            `writer is repeatedly creating and removing this edge; serialize ` +
+            `those callers or retry the operation.`,
+          { operation: "insert", entity: "edge" },
+          { cause: error },
+        );
+      }
     }
   }
-  if (lastCardinalityError !== undefined) throw lastCardinalityError;
+  // Unreachable: the loop either returns or throws on its final iteration.
   throw new DatabaseOperationError(
-    `getOrCreateByEndpoints for ${kind} between ${fromKind} "${fromId}" and ` +
-      `${toKind} "${toId}" lost its match key to a competing writer ` +
-      `${String(ATTEMPT_LIMIT)} times without converging. A concurrent writer ` +
-      `is repeatedly creating and removing this edge; serialize those callers ` +
-      `or retry the operation.`,
+    "getOrCreateByEndpoints convergence loop exited without a verdict",
     { operation: "insert", entity: "edge" },
   );
 }
@@ -2060,7 +2121,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       // A bulk getOrCreate always converges on a match key no database key
       // backs, whatever its cardinality — the same reason the single-item path
       // fences unconditionally.
-      { fencesConstraintProbe: true },
+      { fencesConstraintProbe: "edgeMatchKeyConvergence" },
     );
   }
 

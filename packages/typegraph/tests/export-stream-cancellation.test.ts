@@ -232,12 +232,25 @@ describe("Export stream cancellation", () => {
 
     controller.abort();
 
-    await expect(
-      withinBudget(iterator.next(), "the pull after the abandoned abort"),
-    ).rejects.toMatchObject({
+    const reported = await withinBudget(
+      iterator.next().then(
+        () => new Error("the export was not cancelled"),
+        (error: unknown) => error,
+      ),
+      "the pull after the abandoned abort",
+    );
+
+    expect(reported).toMatchObject({
       name: "ExportStreamCancelledError",
       code: "INTERCHANGE_EXPORT_STREAM_ABORTED",
     });
+    // The transactional arm of the capability-scoped message: this backend DID
+    // hold a snapshot and a connection, and the consumer is told both were
+    // given back. The non-transactional arm below says something different,
+    // because for it neither was ever true.
+    expect((reported as Error).message).toContain(
+      "repeatable-read snapshot has been rolled back",
+    );
   });
 
   it("refuses an already-aborted export without opening a transaction", async () => {
@@ -271,6 +284,182 @@ describe("Export stream cancellation", () => {
       "an import after the refused export",
     );
     expect(imported.success).toBe(true);
+  });
+
+  it("settles an abort raised synchronously by the driver while the transaction is opening", async () => {
+    // P1-3. The abort lands in the ONE window a listener registered after
+    // `backend.transaction(...)` returned could not see: inside that call,
+    // synchronously, before it produced a promise. An `AbortSignal` does not
+    // replay `abort` to a listener that arrives late, so the event was
+    // delivered to nobody — the export went on to deliver its header with
+    // `signal.aborted === true`, holding the snapshot AND the connection's
+    // lease for the life of the process.
+    const { sourceBackend, source, target } = await seedSource(4);
+    const controller = new AbortController();
+    const runTransaction = sourceBackend.transaction;
+    vi.spyOn(sourceBackend, "transaction").mockImplementation(
+      (run, options) => {
+        // The driver's own wrapper aborting mid-open: a deadline enforced around
+        // connection checkout, a pool shutting down, a caller's cancellation
+        // plumbed into the adapter.
+        controller.abort(
+          new Error("aborted while the transaction was opening"),
+        );
+        return runTransaction(run, options);
+      },
+    );
+
+    const iterator = exportGraphStream(source, {
+      batchSize: 1,
+      signal: controller.signal,
+    })[Symbol.asyncIterator]();
+
+    // Captured rather than asserted, so the LEASE is checked first: the leak
+    // is the symptom that outlives the process, and it must be the assertion
+    // that reports the regression. (With the subscription made after
+    // `transaction()` returns, this pull resolves with the header instead.)
+    const outcome = await withinBudget(
+      iterator.next().then(
+        (delivered) => ({ delivered }),
+        (error: unknown) => ({ error }),
+      ),
+      "the pull that opens the transaction",
+    );
+
+    // The lease is released: the connection is free for the next stream, even
+    // though this consumer never pulled again.
+    expect(streamLeaseIsFree(sourceBackend)).toBe(true);
+    // ...and the consumer is told, rather than handed a header from a snapshot
+    // that was already cancelled.
+    expect(outcome).toMatchObject({
+      error: {
+        name: "ExportStreamCancelledError",
+        code: "INTERCHANGE_EXPORT_STREAM_ABORTED",
+        details: { graphId: sourceGraph.id },
+      },
+    });
+    // ...and the snapshot really settled — better-sqlite3 refuses a nested
+    // BEGIN, so a write that succeeds proves the rollback ran.
+    vi.restoreAllMocks();
+    await withinBudget(
+      target.nodes.Person.create({ name: "After" }, { id: "after-open-abort" }),
+      "a write on the freed connection",
+    );
+    const imported = await withinBudget(
+      importGraphStream(
+        target,
+        collectedChunks(await collectChunks(exportGraphStream(source))),
+        importOptions,
+      ),
+      "an import after the aborted open",
+    );
+    expect(imported.success).toBe(true);
+  });
+
+  it("settles a non-transactional export aborted during its first read", async () => {
+    // The other branch of the same ordering. A `transactionMode: "none"` export
+    // opens no transaction and claims no lease, so it has nothing to strand —
+    // but it still has to TELL its consumer, and its first read is the same
+    // kind of pre-subscription window the transactional branch had. One
+    // subscription placed before `beginProducer` covers both branches, which is
+    // why there is no second arm here to keep in step.
+    const database = openMigratedDatabase();
+    const backend = createSqliteBackend(drizzle(database), {
+      executionProfile: { transactionMode: "none", isSync: true },
+    });
+    expect(backend.capabilities.transactions).toBe(false);
+    const source = createStore(sourceGraph, backend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-abort" });
+    const controller = new AbortController();
+    const readActiveSchema = backend.getActiveSchema;
+    vi.spyOn(backend, "getActiveSchema").mockImplementation((graphId) => {
+      controller.abort(new Error("aborted during the first read"));
+      return readActiveSchema(graphId);
+    });
+
+    const reported = await withinBudget(
+      collectChunks(
+        exportGraphStream(source, { signal: controller.signal }),
+      ).then(
+        () => new Error("the export was not cancelled"),
+        (error: unknown) => error,
+      ),
+      "the aborted non-transactional export",
+    );
+
+    expect(reported).toMatchObject({
+      name: "ExportStreamCancelledError",
+      code: "INTERCHANGE_EXPORT_STREAM_ABORTED",
+    });
+    // The message is CAPABILITY-scoped: this export never opened a snapshot and
+    // never claimed a connection, so it must not report rolling one back (the
+    // transactional arm above does) — and it owes the consumer what IS true of
+    // it, which is that the chunks delivered were never one point in time.
+    expect((reported as Error).message).toContain(
+      "does not support transactions",
+    );
+    expect((reported as Error).message).not.toContain("has been rolled back");
+
+    // Nothing was ever held, so nothing had to be given back.
+    expect(streamLeaseIsFree(backend)).toBe(true);
+  });
+
+  it("refuses an export whose options getter aborts during parsing", async () => {
+    // The mirror window, on the other side of the subscription: `parse` reads
+    // the caller's options object BEFORE any listener exists, so a getter that
+    // aborts there raises an event the stream can never be told about. Only
+    // re-checking `signal.aborted` after subscribing catches it — which is why
+    // the re-check is not ceremony.
+    const { sourceBackend, source } = await seedSource(2);
+    const controller = new AbortController();
+    const beginExport = vi.spyOn(sourceBackend, "transaction");
+    const options = {
+      signal: controller.signal,
+      get batchSize(): number {
+        controller.abort(new Error("aborted from an options getter"));
+        return 2;
+      },
+    };
+
+    await expect(
+      withinBudget(
+        collectChunks(exportGraphStream(source, options)),
+        "the export whose parse aborted",
+      ),
+    ).rejects.toMatchObject({
+      name: "ExportStreamCancelledError",
+      code: "INTERCHANGE_EXPORT_STREAM_ABORTED",
+    });
+
+    expect(beginExport).not.toHaveBeenCalled();
+    expect(streamLeaseIsFree(sourceBackend)).toBe(true);
+  });
+
+  it("releases the caller's signal when a refused stream never opens", async () => {
+    // Both give-back paths through `beginProducer` run with the subscription
+    // already made, so both owe the caller's signal its listener back. The
+    // lease refusal is the one that takes nothing else.
+    const { sourceBackend, source } = await seedSource(2);
+    const controller = new AbortController();
+    const unsubscribe = vi.spyOn(controller.signal, "removeEventListener");
+    // A stream already holds this connection, so the export below is refused
+    // before it opens anything.
+    const holder = acquireSerializedStreamLease(sourceBackend, "import-stream");
+    expect(holder.acquired).toBe(true);
+
+    try {
+      await expect(
+        withinBudget(
+          collectChunks(
+            exportGraphStream(source, { signal: controller.signal }),
+          ),
+          "the refused export",
+        ),
+      ).rejects.toMatchObject({ name: "ConfigurationError" });
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+    } finally {
+      if (holder.acquired) holder.release();
+    }
   });
 
   it("releases the caller's signal when the stream settles on its own", async () => {

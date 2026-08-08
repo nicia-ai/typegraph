@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph } from "../src/core/define-graph";
+import { defineEdge } from "../src/core/edge";
 import { defineNode } from "../src/core/node";
 import { validateGraphExtension } from "../src/graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
@@ -167,6 +168,83 @@ describe("graph-extension document with a `__proto__` kind name", () => {
       code: "RESERVED_PROPERTY_NAME",
     });
   });
+
+  it("refuses a NESTED object field named `__proto__` on the same grounds", () => {
+    // The nested `object.properties` map compiles through the same
+    // `z.object(...)` as the top-level one (`buildObjectSchema`), so a name Zod
+    // cannot carry at the top level it cannot carry one level down either.
+    // Refusing only the top level let a document declare a nested field that
+    // validated clean and then vanished at parse — the same unstorable field,
+    // accepted instead of refused because the enumeration stopped at depth 0.
+    const document = parseDocument(
+      `{"version":1,"nodes":{"Tag":{"properties":{"payload":{"type":"object","properties":{"__proto__":{"type":"string"},"ok":{"type":"string"}}}}}}}`,
+    );
+
+    const result = validateGraphExtension(document);
+    expect(isErr(result)).toBe(true);
+    if (!isErr(result)) return;
+
+    expect(
+      result.error.issues.map((issue) => ({
+        path: issue.path,
+        code: issue.code,
+      })),
+    ).toContainEqual({
+      path: "/nodes/Tag/properties/payload/properties/__proto__",
+      code: "RESERVED_PROPERTY_NAME",
+    });
+  });
+
+  it("still accepts a nested object whose fields are ordinary names", () => {
+    // The refusal must be the `__proto__` name, not nested objects at large.
+    const document = parseDocument(
+      `{"version":1,"nodes":{"Tag":{"properties":{"payload":{"type":"object","properties":{"ok":{"type":"string"}}}}}}}`,
+    );
+
+    expect(isErr(validateGraphExtension(document))).toBe(false);
+  });
+});
+
+// ============================================================
+// `defineNode` / `defineEdge` — the OTHER authoring path
+// ============================================================
+
+describe("compile-time schema declaring a property named `__proto__`", () => {
+  it("refuses the node definition, as the document path already did", () => {
+    // Zod accepts `__proto__` in a shape and reports parse SUCCESS while
+    // dropping the field from the result — even when it is required. A kind
+    // authored as a JSON document has been refused this declaration since the
+    // read-side fix; `defineNode` accepted the identical unstorable field and
+    // lost writes to it silently. Two authoring paths, one field, one verdict.
+    expect(() =>
+      defineNode("ProtoProp", {
+        // A COMPUTED key: written literally, `__proto__:` sets the shape
+        // object's prototype instead of declaring a field.
+        schema: z.object({ [PROTO_KEY]: z.string(), name: z.string() }),
+      }),
+    ).toThrow(/__proto__/);
+  });
+
+  it("refuses the edge definition on the same grounds", () => {
+    expect(() =>
+      defineEdge("protoPropEdge", {
+        schema: z.object({ [PROTO_KEY]: z.string() }),
+      }),
+    ).toThrow(/__proto__/);
+  });
+
+  it("states the fixture's premise: Zod really does drop the field", () => {
+    // If this ever stops holding, the refusal above is no longer warranted and
+    // should be revisited rather than kept out of habit.
+    const schema = z.object({ [PROTO_KEY]: z.string(), name: z.string() });
+    expect(Object.keys(schema.shape)).toContain(PROTO_KEY);
+
+    const parsed = schema.safeParse(
+      parseDocument(`{"__proto__":"lost","name":"kept"}`),
+    );
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && Object.keys(parsed.data)).toEqual(["name"]);
+  });
 });
 
 // ============================================================
@@ -229,5 +307,73 @@ describe("schema serialization of a kind named `__proto__`", () => {
     // The kind must be visible to the diff, not just the record.
     const diff = computeSchemaDiff(serializeSchema(plainGraph, 1), serialized);
     expect(diff.hasChanges).toBe(true);
+  });
+});
+
+// ============================================================
+// Edge kinds — `defineGraph`'s own accumulator
+// ============================================================
+
+describe("compile-time graph with an edge kind named `__proto__`", () => {
+  it("carries the edge through defineGraph, serialization, and a live store", async () => {
+    // `normalizeEdges` rebuilds `config.edges` into a fresh accumulator (nodes
+    // are passed through by reference and so were never at risk). Built as a
+    // `{}` literal, `result["__proto__"] = registration` reaches
+    // `Object.prototype`'s `__proto__` setter, reparents the accumulator, and
+    // leaves `graph.edges` with NO own keys — the declared edge vanishes
+    // before anything downstream can see it.
+    const protoEdge = defineEdge(PROTO_KEY, {
+      schema: z.object({ since: z.string() }),
+      from: [Person],
+      to: [Person],
+    });
+    const graph = defineGraph({
+      id: "proto_edge_kind",
+      nodes: { Person: { type: Person } },
+      // A COMPUTED key: `{ __proto__: … }` written literally would set the
+      // config object's prototype instead of creating the entry.
+      edges: { [PROTO_KEY]: { type: protoEdge, from: [Person], to: [Person] } },
+    });
+
+    // 1. defineGraph carries it as an OWN key.
+    expect(Object.hasOwn(graph.edges, PROTO_KEY)).toBe(true);
+    expect(Object.keys(graph.edges)).toEqual([PROTO_KEY]);
+
+    // 2. It survives serialization into the persisted schema document, and is
+    //    visible to the diff (not merely present on the record).
+    const serialized = serializeSchema(graph, 1);
+    expect(Object.hasOwn(serialized.edges, PROTO_KEY)).toBe(true);
+    const withoutEdge = defineGraph({
+      id: "proto_edge_kind",
+      nodes: { Person: { type: Person } },
+      edges: {},
+    });
+    const diff = computeSchemaDiff(serializeSchema(withoutEdge, 1), serialized);
+    expect(diff.edges.map((change) => change.kind)).toContain(PROTO_KEY);
+
+    // 3. A live store can create and read an edge of that kind end-to-end.
+    const [store] = await createStoreWithSchema(graph, createTestBackend());
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+
+    const edges = store.edges as unknown as Record<
+      string,
+      Readonly<{
+        create: (
+          from: typeof alice,
+          to: typeof bob,
+          props: { since: string },
+        ) => Promise<{ kind: string }>;
+        find: () => Promise<readonly { since: string }[]>;
+      }>
+    >;
+
+    const created = await edges[PROTO_KEY]?.create(alice, bob, {
+      since: "2024",
+    });
+    expect(created?.kind).toBe(PROTO_KEY);
+
+    const found = await edges[PROTO_KEY]?.find();
+    expect(found?.map((edge) => edge.since)).toEqual(["2024"]);
   });
 });

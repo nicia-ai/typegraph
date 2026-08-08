@@ -500,22 +500,105 @@ try {
 
 `defineGraph()` validates every node kind's `unique` constraints when the graph
 is defined, rather than leaving a broken `where` clause to surface as odd
-behavior on the first write. Two states are refused with `ConfigurationError`:
+behavior on the first write. Three states are refused with `ConfigurationError`:
 
 - A `where` callback that **does not return a predicate** — `details` carries
   `kind` and `constraintName`.
 - A predicate naming a **field the kind's schema does not declare** — `details`
   adds `field` and `declaredFields`.
+- A `where` clause on a kind whose **schema is not an object schema** (it
+  exposes no `.shape`, so there is no declared-field set to check the clause
+  against) — `details` carries `kind` and `constraintName`. Refused rather than
+  left unvalidated, because skipping the check silently would disable this guard
+  for exactly the untyped callers it exists for. A plain `unique: [{ fields }]`
+  on such a schema is *not* refused: it names props by key and evaluates fine
+  against a non-object schema.
 
-Both carry only the class-level code `CONFIGURATION_ERROR`; match them by class,
-not by a `details.code`. The equivalent invariant on the graph-extension
+All three carry only the class-level code `CONFIGURATION_ERROR`; match them by
+class, not by a `details.code`. The equivalent invariant on the graph-extension
 document path does have a stable code, `UNKNOWN_UNIQUE_WHERE_FIELD`.
+
+A constraint built **outside** `defineGraph` never passed this gate, so the
+non-predicate case is refused at evaluation too: `checkWherePredicate` throws the
+same `ConfigurationError` (with `constraintName` and `fields`) on the write path
+instead of treating a broken clause as one that applies to every row. All three
+readers of a `where` clause — definition-time validation, per-write evaluation,
+and persistence-time capture — now agree, because they read it through one
+shared function.
 
 Because the check evaluates the clause, a `where` callback now runs once at
 definition time in addition to its per-write evaluations — keep it pure. The
 check applies to node kinds whose schema exposes an object shape; edge `unique`
 constraints are not validated here. Statically typed callers were already unable
 to name an undeclared field, so this bites untyped or generated definitions.
+
+#### Definition-time `__proto__` property refusal
+
+`defineNode()` / `defineEdge()` refuse a schema that declares a property named
+`__proto__` with a `ConfigurationError` carrying `details.conflicts` and a
+`nodeType` / `edgeType` key. The name is **unstorable**, not merely reserved:
+Zod accepts it in a shape but drops it from every parse result — reporting
+success even when the field is required — so a value written to it is silently
+lost.
+
+It is only reachable through a computed key. `z.object({ __proto__: … })`
+written literally sets the shape object's own prototype instead of creating an
+entry, while `z.object({ ["__proto__"]: z.string() })` yields a shape whose
+`Object.keys` really does contain it.
+
+The graph-extension document path refuses the identical declaration with the
+stable issue code `RESERVED_PROPERTY_NAME`, at any nesting depth — so a nested
+object field named `__proto__` is refused on the same grounds as a top-level
+one. Before this, the two authoring paths disagreed about the same field: a
+typed refusal on the document path, silent data loss on the typed one.
+
+#### `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`
+
+A write guarded by a declared constraint runs its probe and its write under one
+per-graph mutual exclusion. That fence is transaction-scoped on both dialects
+(SQLite's `BEGIN IMMEDIATE`, PostgreSQL's `pg_advisory_xact_lock`), so a backend
+reporting `capabilities.transactions: false` — Cloudflare D1, `drizzle-orm/neon-http`,
+any SQLite backend built with `transactionMode: "none"` — cannot hold it, and the
+write is refused rather than run unfenced. Durable Objects are unaffected.
+
+`details.constraint` names which class needed the fence, because "this backend
+cannot fence constrained writes" is unusable advice while "your
+`cardinality: 'one'` edge cannot be enforced here" is actionable. The
+`suggestion` carries the per-class way forward.
+
+| `details.constraint` | The write it describes |
+| --- | --- |
+| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`. |
+| `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` taking its create leg — the match key is backed by no database key. The bulk form fences its whole batch, so it refuses whatever the outcome would have been. |
+| `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
+| `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind. A `scope: "kind"` unique is backed by the uniques primary key and needs no fence. |
+
+`details.graphId` names the graph. Unconstrained writes on the same backend are
+untouched — see
+[Declared constraints require `transactions`](/backend-setup#declared-constraints-require-transactions)
+for what still works there.
+
+#### Approximate retrieval with a mismatched metric
+
+`.similarTo(vector, k, { approximate: true, metric })` is refused with a
+`ConfigurationError` when `metric` differs from the field's declared metric. An
+ANN structure is built for one metric — `vec0` bakes `distance_metric` into the
+virtual table, libSQL's DiskANN index is built with `metric=…`, pgvector's index
+carries a per-metric operator class — so retrieving by the declared metric and
+re-scoring under the override would return the declared metric's neighbors
+wearing the override's scores. The two options state something that cannot both
+hold, so the option is refused rather than downgraded to an exact scan behind the
+caller's back.
+
+`details` carries `nodeKind`, `fieldPath`, `requestedMetric`, `declaredMetric`,
+and `indexType`; there is no stable `details.code`, so match by class and
+`details`. A slot declared `indexType: "none"` is **not** refused — there is no
+ANN structure to be bound to a metric, and the opt-in compiles to the exact scan,
+a degradation stated on the `approximate` option itself. A mismatched metric with
+no `approximate` is not refused on the query builder either; `store.search.vector`
+and `store.search.hybrid` refuse every mismatched override on their own broader
+rule. See
+[Approximate retrieval](/semantic-search#approximate-retrieval-for-similarto-opt-in).
 
 #### Operational Identity guard codes
 
@@ -630,8 +713,12 @@ for which drivers are recognized as serialized.
 An export stream whose `signal` fires settles with `ExportStreamCancelledError`
 (`code: "INTERCHANGE_EXPORT_STREAM_ABORTED"`) rather than a silent end of stream,
 so a consumer never mistakes a cancelled export for a complete one. It is thrown
-only *after* the snapshot transaction has been rolled back and the connection's
-stream lease released, so receiving it means the connection is already free.
+only *after* the export has given back everything it took, so receiving it means
+the connection is already free. What that was depends on the backend: a
+transactional one rolls back the snapshot and releases the connection's stream
+lease; one without transactions held neither and simply abandons its remaining
+reads, its delivered chunks never having been a single snapshot. The message
+says which.
 `details.graphId` names the exported graph and `cause` carries the signal's own
 `reason` when the caller supplied one. A signal that is already aborted refuses
 the export before any transaction is opened. See
@@ -940,4 +1027,4 @@ try {
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported |
 | `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation |
-| `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired; its snapshot transaction was rolled back and the connection's stream lease released before the error was raised |
+| `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |

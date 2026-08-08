@@ -218,9 +218,14 @@ either omit `validFrom` from the update document, export with
 
 ### Cancelling an export
 
-An export holds one repeatable-read snapshot transaction for its whole life, and
-on a single-connection backend it holds that connection's exclusive
-interchange-stream lease with it. Every *cooperative* exit gives both back,
+On a backend reporting `capabilities.transactions`, an export holds one
+repeatable-read snapshot transaction for its whole life, and on a
+single-connection backend it holds that connection's exclusive
+interchange-stream lease with it. (A backend without transactions — SQLite
+`transactionMode: "none"`, the session-less HTTP Postgres drivers — opens
+neither: its export paginates statement by statement, so a write committed
+mid-stream can appear in the pages that follow. That is a declared capability
+gap, not something the stream papers over.) Every *cooperative* exit gives both back,
 because each one runs the stream's `finally`: `break` or `throw` out of a `for
 await`, and an explicit `iterator.return()`.
 
@@ -262,7 +267,9 @@ Aborting rejects the pull that is in flight — and any later pull from a consum
 that walked away and came back — with
 [`ExportStreamCancelledError`](/errors#exportstreamcancellederror), carrying the
 signal's own reason as `cause`, so a cancelled export is never mistaken for a
-complete one. Aborting a signal *before* the first pull refuses the export
+complete one. The message states what was actually settled: a snapshot rolled
+back and a connection released on a transactional backend, or merely abandoned
+reads on one that never held either. Aborting a signal *before* the first pull refuses the export
 outright: no transaction is opened and no lease claimed. Aborting one that has
 already finished does nothing, so a single controller can safely span a whole
 job. `exportGraph` accepts `signal` too — there it simply makes the call reject
@@ -412,6 +419,42 @@ await importGraph(store, data, { onConflict: "update" });
 // Useful for initial imports where duplicates indicate a problem
 await importGraph(store, data, { onConflict: "error" });
 ```
+
+#### An edge id held by a different kind
+
+Edge ids are unique per graph, but the import's existence probe (`getEdge` /
+`getEdges`) is keyed on `(graph_id, id)` with no kind comparison. So a document
+edge of kind `A` whose id is already held by a kind-`B` row finds that row. That
+question — *is this the same edge?* — is prior to *what do we do about the same
+edge?*, so it is answered **before** the conflict strategy and all three
+strategies answer alike: the row is reported as a per-row entry in
+`result.errors`, whose `error` message is prefixed
+`INTERCHANGE_EDGE_KIND_CONFLICT` and names both the stored kind and the stated
+one. The stored row is left untouched.
+
+```typescript
+const result = await importGraph(store, data, { onConflict: "update" });
+const kindConflicts = result.errors.filter((entry) =>
+  entry.error.startsWith("INTERCHANGE_EDGE_KIND_CONFLICT"),
+);
+```
+
+`ImportError` carries no `code` field, so the message prefix is the branchable
+token — the same `CODE: message` idiom the validity-window import refusals use.
+Give the incoming edge a distinct id, or import it under the kind the stored row
+already carries.
+
+Previously both non-`error` strategies were silent about this: `update` wrote
+the incoming edge's properties onto the *other kind's* row with nothing in
+`result.errors`, and `skip` counted the document's edge as already present when
+no edge of its kind existed anywhere — so it was never created and never
+reported. The update is additionally issued with the expected `kind` in the
+statement's own `WHERE`, so the check cannot be raced by a concurrent
+hard-delete-and-recreate; an update that consequently matches no row is reported
+as the same per-row error rather than aborting the import.
+
+Nodes were never affected: their probe is `getNode(graphId, kind, id)`, which is
+kind-scoped, so a cross-kind id collision simply reads as absent.
 
 ### Unknown Property Handling
 

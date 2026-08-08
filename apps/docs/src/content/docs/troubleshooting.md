@@ -577,9 +577,11 @@ projection is one physical table holding every graph's rows keyed by
 `DELETE ... WHERE graph_id` that `clear()` issues — this graph's index
 content and nothing else — followed by the current `createDdl`, a refill
 from this graph's node rows, and the marker stamp, all in one transaction
-under the same per-graph fence as a schema commit. An interrupted rebuild
-therefore rolls back to the state it started from rather than leaving
-storage attested but empty.
+under the same per-graph fence as a schema commit. That path takes **no
+table lock at all**: the delete is transactional and touches only rows this
+graph owns, so it never makes another graph's writers wait. An interrupted
+rebuild rolls back to the state it started from rather than leaving storage
+attested but empty.
 
 It escalates to dropping and recreating that shared table only when the
 table holds no other graph's rows — the case where the drop takes nothing
@@ -602,14 +604,29 @@ database offline: drop the table out of band, then run
 `store.rebuildContribution("fulltext")` once per graph, each run recreating
 the table from the current DDL and refilling that graph's own rows.
 
-What a rebuild costs, and why it is still the right trade: the transaction
-is held for the whole refill, and on PostgreSQL a `DROP TABLE` takes an
-`ACCESS EXCLUSIVE` lock the rebuild keeps until commit. That blocks more
-than searches — every write to a kind with `searchable()` fields
-maintains the same table, so those block too. On SQLite the rebuild holds
-the write lock for the same span, so concurrent writers wait out their
-busy timeout and then fail. Run it in a maintenance window on a large
-graph.
+What the *recreate* path costs, and why it is still the right trade: the
+transaction is held for the whole refill, and on PostgreSQL the rebuild
+takes `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE` on the shared table and
+keeps it until commit. It takes that lock **before** deciding to drop, not
+merely as a side effect of the `DROP TABLE` — the verdict "no other graph
+has rows here, so dropping this destroys nothing" is only as good as the
+exclusion it was computed under. Ordinary fulltext writes take no advisory
+lock, so the contribution DDL lock excludes other *rebuilds* and nothing
+else: a neighbouring graph's `INSERT` could commit between an unlocked
+probe and the drop, and be destroyed by a rebuild that had already decided
+it was alone. The sequence is therefore probe → `ACCESS EXCLUSIVE` →
+re-probe, and only the re-probe's verdict authorizes a drop. A verdict that
+flips under the lock loses the drop and keeps the lock (PostgreSQL holds
+locks until commit), which is the rare and safe direction to be wrong in.
+The cheap unlocked probe ahead of it exists only to keep the graph-scoped
+path off the relation lock, and can only err toward keeping the table.
+
+The window blocks more than searches — every write to a kind with
+`searchable()` fields maintains the same table, so those block too, for
+every graph on the database. On SQLite the rebuild holds the write lock for
+the same span, so concurrent writers wait out their busy timeout and then
+fail. Run it in a maintenance window on a large graph.
+
 When the storage *shape* is fine and only the content is stale — a field
 gained `searchable()` after data was written, or a `language` changed —
 `store.search.rebuildFulltext()` is the incremental, resumable pass that

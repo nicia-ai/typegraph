@@ -7,6 +7,7 @@ import {
 } from "../indexes/auto-derive";
 import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
+import { createDataKeyedBag } from "../utils/object";
 import {
   type AnyEdgeType,
   type DeleteBehavior,
@@ -138,12 +139,21 @@ function normalizeEdgeEntry(
 
 /**
  * Normalizes all edge entries to EdgeRegistration.
+ *
+ * The accumulator is a {@link createDataKeyedBag}: its keys are EDGE KIND
+ * NAMES, which are data. `isValidKindName` admits `__proto__` exactly as it
+ * admits `toString`, and a graph literal written with a computed key
+ * (`edges: { ["__proto__"]: knows }`) carries it as an own key — so
+ * `result[name] = …` into a `{}` literal would reach `Object.prototype`'s
+ * `__proto__` setter, reparent the accumulator, and drop the declared edge.
+ * `config.nodes` needs no such treatment: it is passed through by reference,
+ * never re-accumulated.
  */
 function normalizeEdges(
   edges: Record<string, EdgeEntry>,
   allNodeTypes: readonly NodeType[],
 ): Record<string, EdgeRegistration> {
-  const result: Record<string, EdgeRegistration> = {};
+  const result = createDataKeyedBag<EdgeRegistration>();
   for (const [name, entry] of Object.entries(edges)) {
     result[name] = normalizeEdgeEntry(name, entry, allNodeTypes);
   }
@@ -469,17 +479,41 @@ function assertUniqueConstraintsAreDeclared(
     const constraints = registration.unique;
     if (constraints === undefined || constraints.length === 0) continue;
 
-    const shape = (registration.type.schema as { shape?: unknown }).shape;
-    if (shape === undefined || typeof shape !== "object" || shape === null) {
-      continue;
-    }
+    const rawShape = (registration.type.schema as { shape?: unknown }).shape;
+    const shape =
+      typeof rawShape === "object" && rawShape !== null ?
+        (rawShape as Readonly<Record<string, unknown>>)
+      : undefined;
 
     for (const constraint of constraints) {
-      assertWhereFieldDeclared(
-        registration.type.kind,
-        constraint,
-        shape as Readonly<Record<string, unknown>>,
-      );
+      // A schema exposing no `.shape` is not an object schema, so there is no
+      // declared-field set to check the clause against. Skipping the check
+      // silently would disable this guard for exactly the callers it was
+      // written for — untyped ones, who are also the only callers who can put
+      // a non-`ZodObject` here (`defineNode` / `defineEdge` and the
+      // graph-extension compiler all produce `z.object(...)`). So the clause is
+      // REFUSED rather than left unvalidated.
+      //
+      // Narrowly: only a constraint that actually carries a `where` is refused.
+      // A plain `unique: [{ fields }]` needs no shape to be meaningful — it
+      // names props by key and evaluates fine against a non-object schema — and
+      // refusing it would break a working, if unusual, untyped graph for no
+      // safety gain.
+      if (shape === undefined) {
+        if (constraint.where === undefined) continue;
+        throw new ConfigurationError(
+          `Unique constraint "${constraint.name}" on node kind "${registration.type.kind}" has a \`where\` clause, but the kind's schema is not an object schema, so its declared fields cannot be checked.`,
+          {
+            kind: registration.type.kind,
+            constraintName: constraint.name,
+          },
+          {
+            suggestion: `Declare the kind with an object schema (\`z.object({ ... })\`) so the \`where\` clause can be validated, or drop the \`where\` clause.`,
+          },
+        );
+      }
+
+      assertWhereFieldDeclared(registration.type.kind, constraint, shape);
     }
   }
 }

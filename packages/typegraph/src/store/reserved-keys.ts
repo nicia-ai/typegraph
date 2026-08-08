@@ -60,6 +60,34 @@ export function assertSchemaKeysAreFree(
   keys: readonly string[],
   reservedStructuralKeys: ReadonlySet<string>,
 ): void {
+  // A field named `__proto__` is UNSTORABLE, not merely reserved: Zod accepts
+  // it in a shape but drops it from every parse result — and reports success
+  // even when the field is required — so a write to it is silently lost.
+  //
+  // `validateGraphExtension` already refuses exactly this declaration for a
+  // kind authored as a JSON document (`RESERVED_PROPERTY_NAME`). Without the
+  // same refusal here the two authoring paths disagreed about the identical
+  // unstorable field: a typed refusal on one, silent data loss on the other.
+  //
+  // Reachable only through a COMPUTED key — `z.object({ __proto__: … })`
+  // written literally sets the shape object's prototype instead of creating
+  // the entry — but `z.object({ ["__proto__"]: z.string() })` yields a shape
+  // whose `Object.keys` really does contain it.
+  const unstorableConflicts = keys.filter((key) => key === "__proto__");
+  if (unstorableConflicts.length > 0) {
+    const label = entityKind.toLowerCase();
+    throw new ConfigurationError(
+      `${entityKind} "${name}" schema declares a property named "__proto__", which schema validation cannot carry.`,
+      {
+        [`${label}Type`]: name,
+        conflicts: unstorableConflicts,
+      },
+      {
+        suggestion: `Rename the property. Zod drops "__proto__" from every parse result, so a value written to it would be silently lost.`,
+      },
+    );
+  }
+
   const structuralConflicts = keys.filter((key) =>
     reservedStructuralKeys.has(key),
   );

@@ -292,10 +292,17 @@ describe("constrained writes take the per-graph write fence", () => {
     await store.nodes.Person.create({ name: "Alice" }, { id: "shared-id" });
 
     expect(graphWriteLockCount(statements)).toBe(1);
+    // Ordered against the PROBE, not just the INSERT — as in the two sibling
+    // cases above. A fence taken after the cross-kind probe would still precede
+    // the INSERT while leaving the verdict computed outside the exclusion it
+    // depends on, which is the whole defect; asserting only INSERT ordering
+    // would let that mutation live.
     const lockIndex = graphWriteLockIndex(statements);
+    const probeIndex = firstIndexMatching(statements, "typegraph_nodes");
     const insertIndex = firstIndexMatching(statements, "INSERT INTO");
     expect(lockIndex).toBeGreaterThanOrEqual(0);
-    expect(insertIndex).toBeGreaterThan(lockIndex);
+    expect(probeIndex).toBeGreaterThan(lockIndex);
+    expect(insertIndex).toBeGreaterThan(probeIndex);
   });
 
   it("fences a shared-scope node UPDATE but not a delete", async () => {

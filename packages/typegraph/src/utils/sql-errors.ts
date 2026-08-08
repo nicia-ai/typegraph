@@ -131,7 +131,7 @@ export type PostgresReadWriteRefusedSqlState =
  * ({@link missingTableMessage}), so an unrelated object in a cause chain that
  * merely mentions one of those phrases is not mistaken for a missing table.
  */
-function* errorChain(error: unknown): Generator<unknown, void, void> {
+export function* errorChain(error: unknown): Generator<unknown, void, void> {
   const seen = new Set<unknown>();
   let current: unknown = error;
   while (current !== undefined && current !== null && !seen.has(current)) {

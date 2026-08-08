@@ -445,11 +445,18 @@ const Shadowed = defineNode("Shadowed", {
   schema: z.object({
     name: z.string(),
     toString: z.string().optional(),
+    // Not an `Object.prototype` member, but exempted by the same tracking
+    // proxies for the same reason (an incidental `JSON.stringify` must not
+    // record a phantom field) — so it needs the same declared-field guard.
+    toJSON: z.string().optional(),
   }),
 });
 
 const shadowedEdge = defineEdge("shadowedEdge", {
-  schema: z.object({ valueOf: z.string().optional() }),
+  schema: z.object({
+    valueOf: z.string().optional(),
+    toJSON: z.string().optional(),
+  }),
 });
 
 const shadowedIntrospector = createSchemaIntrospector(
@@ -513,6 +520,36 @@ describe("declared fields named after Object.prototype members", () => {
     expect(tracker.getAccessedFields()).toContainEqual({
       alias: "e",
       field: "valueOf",
+      isSystemField: false,
+    });
+  });
+
+  it("tracks a DECLARED field named toJSON rather than exempting it", () => {
+    const tracker = new FieldAccessTracker();
+    const context = createShadowedContext(tracker);
+
+    // `toJSON` is exempted unconditionally for kinds that do not declare it, so
+    // that an incidental `JSON.stringify` of the tracking context records
+    // nothing. A kind that DOES declare it stores real data there — a trusted
+    // import writes a caller's props bag verbatim — and an exempted field is
+    // never projected, so the select callback would read `undefined` for a
+    // value the row carries.
+    expect(typeof context.s["toJSON"]).toBe("string");
+    expect(tracker.getAccessedFields()).toContainEqual({
+      alias: "s",
+      field: "toJSON",
+      isSystemField: false,
+    });
+  });
+
+  it("tracks a DECLARED edge field named toJSON rather than exempting it", () => {
+    const tracker = new FieldAccessTracker();
+    const context = createShadowedContext(tracker);
+
+    expect(typeof context.e["toJSON"]).toBe("string");
+    expect(tracker.getAccessedFields()).toContainEqual({
+      alias: "e",
+      field: "toJSON",
       isSystemField: false,
     });
   });

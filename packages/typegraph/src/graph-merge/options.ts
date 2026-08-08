@@ -14,6 +14,7 @@
 
 import { z } from "zod";
 
+import { createDataKeyedBag } from "../utils/object";
 import type { GraphDef } from "./typegraph-internal";
 import type {
   BranchId,
@@ -166,7 +167,8 @@ function validateResolveMap<G extends GraphDef>(
   const configs = resolve as unknown as Readonly<
     Record<string, ResolveConfig<G>>
   >;
-  const validated: Record<string, ResolveConfig<G>> = {};
+  // Data-keyed: node kind names supplied by the caller's resolve map.
+  const validated = createDataKeyedBag<ResolveConfig<G>>();
   for (const [kind, config] of Object.entries(configs)) {
     const parsed = resolveConfigScalarSchema.safeParse({
       threshold: config.threshold,

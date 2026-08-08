@@ -2,6 +2,7 @@
  * ExecutableAggregateQuery - A query with aggregate functions that can be executed.
  */
 import { type GraphDef } from "../../core/define-graph";
+import { createDataKeyedBag } from "../../utils/object";
 import {
   type AggregateExpr,
   type AggregateOrderSpec,
@@ -234,7 +235,8 @@ export class ExecutableAggregateQuery<
     rows: readonly Record<string, unknown>[],
   ): readonly AggregateResult<R>[] {
     return rows.map((row) => {
-      const result: Record<string, unknown> = {};
+      // Data-keyed: the caller's aggregate/group aliases.
+      const result = createDataKeyedBag<unknown>();
       for (const key of Object.keys(this.#fields)) {
         const field = this.#fields[key];
         if (!field) continue;

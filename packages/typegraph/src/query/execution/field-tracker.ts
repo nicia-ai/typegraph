@@ -9,6 +9,7 @@
 import type { KindEntity } from "../../core/types";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../../system-fields";
 import { compareStrings } from "../../utils/compare";
+import { createDataKeyedBag } from "../../utils/object";
 import { mergeEdgeKinds, type SelectiveField, type ValueType } from "../ast";
 import { type QueryBuilderState } from "../builder/types";
 import {
@@ -100,14 +101,17 @@ export function createTrackingContext(
   tracker: FieldAccessTracker,
   options: TrackingContextOptions,
 ): Record<string, unknown> {
-  const context: Record<string, unknown> = {
-    [state.startAlias]: createNodeTrackingProxy(
-      state.startAlias,
-      state.startKinds,
-      tracker,
-      options,
-    ),
-  };
+  // Data-keyed: alias names chosen by the caller's query. The tracking context
+  // must be keyed identically to the real one `buildSelectContext` produces —
+  // a tracking pass that drops an alias the execution pass keeps (or the
+  // reverse) is exactly the probe-vs-engine divergence to avoid.
+  const context = createDataKeyedBag<unknown>();
+  context[state.startAlias] = createNodeTrackingProxy(
+    state.startAlias,
+    state.startKinds,
+    tracker,
+    options,
+  );
 
   for (const traversal of state.traversals) {
     const edgeKindNames = mergeEdgeKinds(traversal);
@@ -163,7 +167,18 @@ function createNodeTrackingProxy(
       get: (_, property: string | symbol) => {
         if (typeof property === "symbol") return;
         if (property === "then") return;
-        if (property === "toJSON") return;
+        // `toJSON` is exempted so an incidental `JSON.stringify` of the
+        // tracking context does not record a phantom field. It is NOT on
+        // `Object.prototype`, but it earns the same rule as the members that
+        // are: a DECLARED field named `toJSON` is stored data, and exempting
+        // it would leave it untracked — the selective projection would omit
+        // the column the select callback just read.
+        if (
+          property === "toJSON" &&
+          !options.schemaIntrospector.hasDeclaredField(kindNames, property)
+        ) {
+          return;
+        }
 
         if (
           OBJECT_PROTOTYPE_PROPERTIES.has(property) &&
@@ -209,7 +224,17 @@ function createEdgeTrackingProxy(
       get: (_, property: string | symbol) => {
         if (typeof property === "symbol") return;
         if (property === "then") return;
-        if (property === "toJSON") return;
+        // See `createNodeTrackingProxy`: a DECLARED `toJSON` is stored data and
+        // must be tracked, not exempted.
+        if (
+          property === "toJSON" &&
+          !options.schemaIntrospector.hasDeclaredEdgeField(
+            edgeKindNames,
+            property,
+          )
+        ) {
+          return;
+        }
 
         if (
           OBJECT_PROTOTYPE_PROPERTIES.has(property) &&

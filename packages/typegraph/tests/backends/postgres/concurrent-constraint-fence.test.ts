@@ -387,11 +387,15 @@ describe.runIf(process.env["POSTGRES_URL"])(
       "lets two concurrent UNCONSTRAINED writes both succeed",
       { timeout: CONTENTION_TIMEOUT_MS },
       async (ctx) => {
-        // The control. The fence must serialize what a constraint depends on,
-        // not turn independent writes into contention — a fix that refused one
-        // of these would be over-application, not enforcement. `knows` is
-        // cardinality `many` and a plain `create` runs no probe, so neither
-        // writer takes the lock at all.
+        // The control, on OUTCOMES only: the fence must not turn independent
+        // writes into failures. `knows` is cardinality `many` and a plain
+        // `create` runs no probe, so both writers must simply succeed.
+        //
+        // This case deliberately does NOT claim the lock is absent — nothing
+        // here observes lock acquisition, and two successes are equally
+        // consistent with a lock that was taken and released. The deterministic
+        // absence assertion is `tests/constraint-write-fence.test.ts`, which
+        // counts the statements themselves on PGlite.
         const live = requirePostgres(ctx);
         const setup = createStore(graph, createPostgresBackend(live.first));
         const alice = await setup.nodes.Person.create(

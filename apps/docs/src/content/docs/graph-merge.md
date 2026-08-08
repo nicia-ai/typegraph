@@ -534,6 +534,30 @@ no marker — is one TypeGraph cannot produce, and is refused unconditionally
 whatever the graph contains, empty and provenance-shaped included, since
 contents an application could have written are not evidence of authorship.
 
+**What a claim costs, on PostgreSQL.** One writer class takes neither the
+per-graph fence nor the graph's active schema row: a schema-less raw
+`createStore` writer, or a direct `backend.insertNode` / `insertEdge` call. At
+READ COMMITTED its insert could commit between the claim's re-inspection and the
+claim's own commit, leaving the marker on an id an application had just made its
+own. To close that, the claim issues
+`LOCK TABLE <nodes>, <edges> IN SHARE ROW EXCLUSIVE MODE` inside the fence and
+before the re-inspection. That mode excludes every `INSERT` / `UPDATE` /
+`DELETE` on those two tables **for every graph on the database** — they are
+shared tables — while still admitting readers. So while a claim runs, every node
+and edge write database-wide waits.
+
+The bound is what makes it acceptable: the lock is taken **only inside a claim**,
+which happens when a sidecar is created, upgraded from the pre-marker schema, or
+resumed after a crash — never on the common path, where an already-owned sidecar
+opens with no fence at all. Its duration is the re-inspection's probes plus one
+`INSERT`, with no caller code and no caller I/O inside it. The mode is
+`SHARE ROW EXCLUSIVE` rather than plain `SHARE` because it must be
+self-exclusive: two concurrent claims on different sidecar ids hold different
+advisory locks, so under `SHARE` both would acquire it and then both request
+`ROW EXCLUSIVE` for their own marker insert — a lock-upgrade deadlock PostgreSQL
+resolves by aborting one of them. SQLite takes no such lock; `BEGIN IMMEDIATE`
+already owns the engine's single writer slot.
+
 Refusals carry the code `GRAPH_MERGE_PROVENANCE_ID_COLLISION` and one of five
 `details.reason` values — `application-graph`, `empty-legacy-sidecar`,
 `unupgradeable-legacy-sidecar`, `unowned-exact-schema-graph`, or

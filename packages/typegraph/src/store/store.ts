@@ -4351,14 +4351,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * `store.search.rebuildFulltext()` reports their ids individually.
    *
    * Atomic: the clear (or drop), recreate, refill, and stamp all run inside
-   * one transaction under the same per-graph fence as a schema commit, with
-   * a database-scoped advisory lock around the shared table's DDL, so an
-   * interrupted rebuild leaves the contribution exactly as it was rather
-   * than attested-but-empty. The cost is that the transaction is held for
-   * the whole refill and Postgres holds an exclusive lock on the table
-   * throughout, so this is a maintenance-window operation on a large
-   * graph. `store.search.rebuildFulltext()` remains the incremental,
-   * resumable way to refresh content when the storage shape is fine.
+   * one transaction under the same per-graph fence as a schema commit, plus
+   * a database-scoped advisory lock serializing this contribution's DDL
+   * across graphs, so an interrupted rebuild leaves the contribution exactly
+   * as it was rather than attested-but-empty.
+   *
+   * The cost differs by path, and only one of them is a maintenance-window
+   * operation. A rebuild that drops and recreates the shared table takes
+   * `ACCESS EXCLUSIVE` on it before deciding to — the verdict "no other
+   * graph has rows here" is only sound under the exclusion the drop needs —
+   * so on PostgreSQL every graph's fulltext writers wait for the whole
+   * refill. That was already true of the drop itself, which holds the same
+   * lock to commit; the exclusion now merely starts a few statements
+   * earlier. The graph-scoped path takes no table lock at all: its
+   * `DELETE ... WHERE graph_id` is transactional and touches only this
+   * graph's rows, so it never makes another graph's writers wait.
+   * `store.search.rebuildFulltext()` remains the incremental, resumable way
+   * to refresh content when the storage shape is fine.
    *
    * @throws {ContributionRebuildUnsupportedError} for `"vector"`, always:
    *   TypeGraph stores the vectors callers supply and never the inputs
@@ -6011,6 +6020,18 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     // predicate must scope the ledger by exactly the kinds the rebuild below
     // derives through, or it asks for a rebuild that cannot converge.
     const identityRegistry = buildKindRegistry(merged);
+    // THE RETURNED OBLIGATION IS DISCARDED HERE, DELIBERATELY. It is non-empty
+    // only on the gated path below (recompute withheld), and it names DDL that
+    // must be issued INSIDE the schema-commit transaction — which this call
+    // site does not own. `prepareIdentitySchemaCommit` re-derives it by calling
+    // `ensureIdentitySchemaStorage` again, from the same backend, schema,
+    // registry and enablement flag, and hands it to the commit preflight that
+    // can honor it. What keeps that safe is the equality of those four inputs,
+    // so a change that lets this site resolve the schema or build the registry
+    // differently from `prepareIdentitySchemaCommit` breaks it — silently, by
+    // provisioning for one shape and filling for another. The call is still
+    // load-bearing for its EFFECT: it runs the idempotent identity DDL before
+    // the commit takes the per-graph write lock.
     await ensureIdentitySchemaStorage(backend, resolvedIdentitySchema, {
       graphId: merged.id,
       enablement: identityEnablement,

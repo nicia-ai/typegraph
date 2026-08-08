@@ -27,6 +27,8 @@ import {
   type GraphBackend,
 } from "../src/backend/types";
 import { createStore } from "../src/store";
+import { type OperationHookContext } from "../src/store/types";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -271,6 +273,136 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(results).toHaveLength(1);
     expect(results[0]?.action).toBe("created");
     expect(reported).toBe(true);
+  });
+
+  it("reports the raced attempt as an error, never as a create that happened", async () => {
+    // A losing attempt writes NOTHING, so it must not be reported as a
+    // completed create. `onOperationEnd` means "this operation did what it
+    // said"; firing it for a generated id that no row carries makes every
+    // hook-based audit trail wrong, and the same "did it write" signal is what
+    // gates the revision clock. Both read the body's outcome, so the abort has
+    // to travel as a failure, not as a value.
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+
+    const ends: string[] = [];
+    const errors: string[] = [];
+    const competitor = createStore(graph, raw);
+    const store = createStore(
+      graph,
+      racingBackend(raw, 2, async () => {
+        await competitor.edges.knows.create(alice, bob, { since: "winner" });
+      }),
+      {
+        hooks: {
+          onOperationEnd: (context) => {
+            ends.push(`${context.operation}:${context.kind}`);
+          },
+          onError: (context) => {
+            // `onError` is typed on the base HookContext; the operation fields
+            // are present for an operation-scoped failure like this one.
+            const scoped = context as Partial<OperationHookContext>;
+            errors.push(`${String(scoped.operation)}:${String(scoped.kind)}`);
+          },
+        },
+      },
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "winner",
+    });
+
+    expect(result.action).toBe("found");
+    // No create ever completed on this store: the only attempt aborted.
+    expect(ends.filter((entry) => entry === "create:knows")).toEqual([]);
+    // And the abort was reported, rather than silently swallowed.
+    expect(errors).toContain("create:knows");
+  });
+
+  it("does not advance the revision clock for a raced no-op", async () => {
+    // The clock is the durable "something changed here" anchor. Advancing it
+    // for an attempt that wrote nothing invalidates every `base@V` token a
+    // consumer holds, for no change at all.
+    //
+    // A plain before/after comparison cannot say WHICH call moved it — the
+    // competitor's create is inside the same window and legitimately does. So
+    // the anchor is read at the instant the competitor commits, from inside the
+    // injection itself: everything after that point is the raced attempt and
+    // the re-dispatch, and neither may move it.
+    const setup = createStore(graph, raw, { revisionTracking: true });
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+
+    const competitor = createStore(graph, raw, { revisionTracking: true });
+    let afterCompetitor: string | undefined;
+    const store = createStore(
+      graph,
+      racingBackend(raw, 2, async () => {
+        await competitor.edges.knows.create(alice, bob, { since: "winner" });
+        afterCompetitor = await competitor.revisionNow();
+      }),
+      { revisionTracking: true },
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "winner",
+    });
+
+    expect(result.action).toBe("found");
+    expect(afterCompetitor).toBeDefined();
+    expect(await setup.revisionNow()).toBe(afterCompetitor);
+  });
+
+  it("reports a terminal error when the match key never settles", async () => {
+    // The convergence loop is bounded: a competitor that keeps claiming and
+    // releasing the same match key would otherwise spin forever. Injected here
+    // by making the create leg's in-transaction guard ALWAYS see a competitor
+    // while the dispatcher's own lookup sees none — a permanent version of the
+    // real interleaving.
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const phantom = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "phantom",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "phantom" },
+      }),
+    );
+
+    let attempts = 0;
+    const store = createStore(graph, {
+      ...raw,
+      // The dispatcher reads through the top level and must see NOTHING, so it
+      // keeps electing to create.
+      findEdgesByKind: () => Promise.resolve([]),
+      transaction: (fn, options) =>
+        raw.transaction(
+          (target) =>
+            fn({
+              ...target,
+              // The guard reads through the transaction and always sees a
+              // competitor, so every attempt aborts.
+              findEdgesByKind: () => {
+                attempts += 1;
+                return Promise.resolve([phantom]);
+              },
+            }),
+          options,
+        ),
+    } satisfies GraphBackend);
+
+    await expect(
+      store.edges.knows.getOrCreateByEndpoints(alice, bob, { since: "x" }),
+    ).rejects.toThrow(/lost its match key/u);
+    // Bounded, and it really did use every attempt before giving up.
+    expect(attempts).toBe(3);
   });
 
   it("leaves the uncontended paths on their existing verdicts", async () => {

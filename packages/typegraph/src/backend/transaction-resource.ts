@@ -77,6 +77,15 @@
  *   (gating the import's claim on `capabilities.transactions` too) would stop a
  *   real snapshot export from being refused mid-import on a mixed-profile
  *   connection, which is the far likelier pairing.
+ * - RESIDUAL GAP: the lease's population is INTERCHANGE STREAMS. Ordinary
+ *   long-lived frames on the same serialized connection — a `store.transaction`
+ *   held across awaits by application code, `schemaWriteTransaction` (the
+ *   provenance claim, the identity DDL fence), `store.evolve()` — neither hold
+ *   nor consult it, so one of those opening while an export snapshot is live
+ *   on the same connection blocks or wedges without a typed error, exactly as
+ *   any two of them always have. Representing every long-lived frame here is a
+ *   different, larger contract (a connection-wide frame lease); the streams
+ *   are covered because they are the pairing users actually compose.
  *
  * ## Inventory of serialized resources
  *

@@ -263,6 +263,54 @@ function backendRacingTheClaim(
   return { ...backend, schemaWriteTransaction: racing };
 }
 
+/**
+ * Records, in order, the SQL every statement and row query the CLAIM's fenced
+ * transaction issues — the only way to see the relation lock, which produces no
+ * rows and no observable state of its own.
+ *
+ * The transaction is proxied, not the top-level backend: the drain and the
+ * re-inspection both run against the fenced transaction, and their ORDER inside
+ * it is the property under test.
+ */
+function backendRecordingFencedSql(backend: GraphBackend): Readonly<{
+  backend: GraphBackend;
+  statements: () => readonly string[];
+}> {
+  const fence = requireDefined(backend.schemaWriteTransaction);
+  const compile = requireDefined(backend.compileSql);
+  const recorded: string[] = [];
+  const recording: NonNullable<GraphBackend["schemaWriteTransaction"]> = (
+    graphId,
+    fn,
+  ) =>
+    fence(graphId, async (tx) =>
+      fn(
+        new Proxy(tx, {
+          get(target, property, _receiver) {
+            if (property === "executeStatement" || property === "execute") {
+              const original = getBackendProperty(
+                target as unknown as GraphBackend,
+                property,
+              ) as (query: never) => Promise<unknown>;
+              return (query: never) => {
+                recorded.push(compile(query).sql);
+                return original(query);
+              };
+            }
+            return getBackendProperty(
+              target as unknown as GraphBackend,
+              property,
+            );
+          },
+        }),
+      ),
+    );
+  return {
+    backend: { ...backend, schemaWriteTransaction: recording },
+    statements: () => [...recorded],
+  };
+}
+
 /** What the injected schema-registration crash throws. */
 const SCHEMA_COMMIT_CRASH = "injected schema-commit crash";
 
@@ -1569,6 +1617,57 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     expect(parseRowProps(marker.props)).toEqual(OWNER_MARKER_PROPS);
     // The schema lands after the marker, on an id the marker already owns.
     await expect(backend.getActiveSchema(sidecarId)).resolves.toBeDefined();
+  });
+
+  it("drains unfenced row writers inside the claim, before its re-inspection", async () => {
+    cleanups = [];
+    const backend = await makeBackend();
+    const recording = backendRecordingFencedSql(backend);
+
+    await expect(
+      openProvenanceStore(recording.backend, careGraph.id),
+    ).resolves.toBeDefined();
+
+    const statements = recording.statements();
+    const lockIndex = statements.findIndex((statement) =>
+      statement.includes("LOCK TABLE"),
+    );
+    const probeIndex = statements.findIndex((statement) =>
+      statement.includes("present"),
+    );
+    expect(probeIndex).toBeGreaterThanOrEqual(0);
+    if (backend.dialect === "postgres") {
+      // The one exclusion that reaches a writer taking NEITHER the per-graph
+      // advisory lock nor the schema row — a schema-less raw `createStore`
+      // insert. It must precede the probe: a drain after the read it authorizes
+      // protects nothing.
+      expect(lockIndex).toBeGreaterThanOrEqual(0);
+      expect(lockIndex).toBeLessThan(probeIndex);
+      const lockStatement = requireDefined(statements[lockIndex]);
+      // SELF-exclusive by design: plain SHARE would let two concurrent claims
+      // both hold it and then deadlock upgrading to ROW EXCLUSIVE for their own
+      // marker INSERT.
+      expect(lockStatement).toContain("IN SHARE ROW EXCLUSIVE MODE");
+      expect(lockStatement).toContain(
+        createSqlSchema(backend.tableNames).tables.nodes,
+      );
+      expect(lockStatement).toContain(
+        createSqlSchema(backend.tableNames).tables.edges,
+      );
+    } else {
+      // SQLite takes no relation lock: `BEGIN IMMEDIATE` already owns the
+      // engine's single writer slot, so the drain is complete before the fence's
+      // callback runs.
+      expect(lockIndex).toBe(-1);
+    }
+
+    // And not at all on the common path: an already-owned sidecar opens with no
+    // fence, so no writer anywhere is ever blocked by a routine open.
+    const reopened = backendRecordingFencedSql(backend);
+    await expect(
+      openProvenanceStore(reopened.backend, careGraph.id),
+    ).resolves.toBeDefined();
+    expect(reopened.statements()).toEqual([]);
   });
 
   it("refuses and writes NOTHING when a row lands between the preflight and the claim", async () => {

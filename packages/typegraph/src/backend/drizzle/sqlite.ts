@@ -1577,10 +1577,17 @@ export function createSqliteBackend(
    * never reaches its own rethrow — the masking that `closeAfterFailure` and the
    * index-materialization claim release exist to prevent, applied here too.
    *
-   * A rollback failure that is NOT an already-closed frame leaves the frame open
-   * on this connection; nothing here can close it (the statement that would is
-   * the one that just failed), so it is reported and the next BEGIN on the
-   * connection fails loudly rather than silently joining it.
+   * The two reasons a ROLLBACK can fail are NOT told apart here, deliberately.
+   * SQLite reports the already-closed frame only as a message ("cannot rollback
+   * - no transaction is active"), with no result code that distinguishes it, so
+   * a classifier would have to match text through whatever wrapper the driver
+   * applied — and it would buy nothing, because the handling is identical
+   * either way: never mask the caller's error, always report. The report
+   * therefore states both possibilities rather than asserting the benign one,
+   * so an operator reading the log is not told "nothing is leaked" about a
+   * failure that did leave the frame open. When it did, nothing here can close
+   * it (the statement that would is the one that just failed) and the next
+   * BEGIN on this connection fails loudly rather than silently joining it.
    */
   async function rollbackFrameQuietly(): Promise<void> {
     try {
@@ -1588,9 +1595,10 @@ export function createSqliteBackend(
     } catch (rollbackError) {
       console.warn(
         "typegraph: ROLLBACK failed while unwinding a failed SQLite " +
-          "transaction; the original failure is the one thrown. SQLite " +
-          "auto-rolls-back on SQLITE_FULL / SQLITE_IOERR / SQLITE_NOMEM, in " +
-          "which case the frame was already closed and nothing is leaked.",
+          "transaction; the original failure is the one thrown. Either the " +
+          "frame was already closed (SQLite auto-rolls-back on SQLITE_FULL / " +
+          "SQLITE_IOERR / SQLITE_NOMEM) and nothing is leaked, or it is still " +
+          "open on this connection, in which case the next BEGIN here fails.",
         rollbackError,
       );
     }

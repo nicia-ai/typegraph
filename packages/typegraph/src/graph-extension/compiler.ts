@@ -23,7 +23,7 @@ import {
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { core as coreOntology } from "../ontology/core-meta-edges";
 import { type MetaEdge, type OntologyRelation } from "../ontology/types";
-import { compactUndefined } from "../utils/object";
+import { compactUndefined, createDataKeyedBag } from "../utils/object";
 import {
   type ExtensionArrayItemType,
   type ExtensionArrayProperty,
@@ -246,7 +246,8 @@ function compileEdge(
 function buildObjectSchema(
   properties: Readonly<Record<string, ExtensionPropertyType>>,
 ): ZodObject<ZodRawShape> {
-  const shape: Record<string, ZodType> = {};
+  // Data-keyed: `propertyName` comes from the extension document.
+  const shape = createDataKeyedBag<ZodType>();
   for (const [propertyName, propertyType] of Object.entries(properties)) {
     shape[propertyName] = applyOptional(
       compileProperty(propertyType),

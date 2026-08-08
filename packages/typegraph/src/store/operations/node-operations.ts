@@ -65,7 +65,7 @@ import {
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
-import { hasOwnKey } from "../../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
@@ -73,6 +73,7 @@ import { type UpsertUpdateNodeInput } from "../collections/node-collection";
 import {
   checkDisjointnessConstraint,
   type ConstraintContext,
+  type ConstraintFenceReason,
   nodeWriteNeedsConstraintFence,
 } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
@@ -205,22 +206,22 @@ function getNodeRegistration<G extends GraphDef>(graph: G, kind: string) {
 }
 
 /**
- * Whether this node write runs a constraint probe no database key repeats at
- * write time, and so must take the per-graph write fence. The classification
- * itself lives with the constraints
- * ({@link file://../constraints.ts nodeWriteNeedsConstraintFence}); this is
- * only the graph-def lookup that feeds it.
+ * WHICH constraint makes this node write one whose probe no database key
+ * repeats at write time, so it must take the per-graph write fence — or be
+ * refused where no fence exists. The classification itself lives with the
+ * constraints ({@link file://../constraints.ts nodeWriteNeedsConstraintFence});
+ * this is only the graph-def lookup that feeds it.
  *
- * A kind this graph does not define answers `false`: choosing the fence must
- * not become the thing that reports an unknown kind, which the write path
+ * A kind this graph does not define answers `undefined`: choosing the fence
+ * must not become the thing that reports an unknown kind, which the write path
  * raises from inside its hooked transaction where `onError` observes it.
  */
 function nodeFencesConstraintProbe<G extends GraphDef>(
   ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
   kind: string,
   operation: "create" | "update",
-): boolean {
-  if (!hasOwnKey(ctx.graph.nodes, kind)) return false;
+): ConstraintFenceReason | undefined {
+  if (!hasOwnKey(ctx.graph.nodes, kind)) return undefined;
   return nodeWriteNeedsConstraintFence(
     ctx.registry,
     kind,
@@ -231,16 +232,19 @@ function nodeFencesConstraintProbe<G extends GraphDef>(
 
 /**
  * A batch fences when ANY item does — one transaction, so one constrained
- * member makes the whole write constrained.
+ * member makes the whole write constrained, and the first such member names the
+ * class a refusal would report.
  */
 function nodeBatchFencesConstraintProbe<G extends GraphDef>(
   ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
   inputs: readonly Readonly<{ kind: string }>[],
   operation: "create" | "update",
-): boolean {
-  return inputs.some((input) =>
-    nodeFencesConstraintProbe(ctx, input.kind, operation),
-  );
+): ConstraintFenceReason | undefined {
+  for (const input of inputs) {
+    const reason = nodeFencesConstraintProbe(ctx, input.kind, operation);
+    if (reason !== undefined) return reason;
+  }
+  return undefined;
 }
 
 function buildNodeCacheKey(graphId: string, kind: string, id: string): string {
@@ -1611,7 +1615,8 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
     kind,
     operation: "update",
   });
-  const patch: Record<string, JsonValue> = {};
+  // Data-keyed: `property` comes from the caller's patch object.
+  const patch = createDataKeyedBag<JsonValue>();
   const unsetProperties: string[] = [];
   for (const [property, value] of Object.entries(parsedPatch)) {
     if (value === undefined) {

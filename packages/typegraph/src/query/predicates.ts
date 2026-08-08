@@ -366,8 +366,21 @@ export type SimilarToOptions = Readonly<{
    * distance scan. This is a SEMANTIC change — results are subject to the
    * index's recall, and predicates composed alongside constrain the ANN
    * candidate set (exact on pgvector/vec0; bounded by over-fetch on
-   * libSQL). A slot declared with `indexType: "none"` falls back to the
-   * exact scan. Default: exact.
+   * libSQL). Default: exact.
+   *
+   * Two states cannot serve it, and they are handled differently on purpose:
+   *
+   * - **A slot declared `indexType: "none"`** has no ANN structure, so the
+   *   opt-in compiles to the exact scan and results are unchanged. A
+   *   DECLARED degradation: the query is still exactly what was asked for,
+   *   only faster or slower.
+   * - **A `metric` override that differs from the field's declared metric**
+   *   is REFUSED with a `ConfigurationError` naming both metrics. An ANN
+   *   structure retrieves only under the metric it was built for, so the two
+   *   options state something that cannot both hold — and serving the exact
+   *   scan instead would silently drop one of them. Omit `metric` (or pass
+   *   the declared one) to keep approximate retrieval, or drop `approximate`
+   *   to scan exactly under the overriding metric.
    */
   approximate?: boolean;
 }>;

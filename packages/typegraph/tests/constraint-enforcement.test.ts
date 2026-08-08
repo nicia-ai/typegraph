@@ -1198,6 +1198,99 @@ describe("uniqueness `where` clauses naming an undeclared field", () => {
     ).toThrow(ConfigurationError);
   });
 
+  it("refuses a `where` clause on a kind whose schema is not an object schema", () => {
+    // The guard's whole purpose is untyped callers — who are also the only
+    // callers who can put a non-`ZodObject` here. Skipping the check when there
+    // is no `.shape` therefore disabled it for exactly the population it was
+    // written for: the clause below names a field nothing declares, and used to
+    // sail through definition and then quietly never apply.
+    const nonObjectKind = {
+      kind: "Blob",
+      schema: z.record(z.string(), z.unknown()),
+    };
+    const registration = {
+      type: nonObjectKind,
+      unique: [
+        {
+          name: "unique_blob",
+          fields: ["anything"],
+          scope: "kind",
+          collation: "binary",
+          where: (fields: Record<string, UntypedFieldBuilder>) =>
+            requireDefined(fields["typoField"]).isNotNull(),
+        },
+      ],
+    } as unknown as { type: typeof Account };
+
+    expect(() =>
+      defineGraph({
+        id: "non_object_schema_where",
+        nodes: { Blob: registration },
+        edges: {},
+        ontology: [],
+      }),
+    ).toThrow(ConfigurationError);
+    expect(() =>
+      defineGraph({
+        id: "non_object_schema_where_2",
+        nodes: { Blob: registration },
+        edges: {},
+        ontology: [],
+      }),
+    ).toThrow(/not an object schema/);
+  });
+
+  it("still accepts a constraint with no `where` on a non-object schema", () => {
+    // The refusal is scoped to the thing that cannot be validated. A plain
+    // `unique: [{ fields }]` names props by key and evaluates fine without a
+    // declared-field set; refusing it would break a working untyped graph for
+    // no safety gain.
+    const registration = {
+      type: { kind: "Blob", schema: z.record(z.string(), z.unknown()) },
+      unique: [
+        {
+          name: "unique_blob",
+          fields: ["anything"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    } as unknown as { type: typeof Account };
+
+    expect(() =>
+      defineGraph({
+        id: "non_object_schema_no_where",
+        nodes: { Blob: registration },
+        edges: {},
+        ontology: [],
+      }),
+    ).not.toThrow();
+  });
+
+  it("refuses a malformed `where` at EVALUATION too, not just at definition", () => {
+    // `defineGraph` refuses a non-predicate callback, so this arm should be
+    // unreachable — it is reached only by handing the store a constraint that
+    // never passed a definition gate. The three readers of a `where` clause
+    // (definition, persistence, evaluation) must not disagree about it: the
+    // other two refuse, so evaluation refuses as well rather than silently
+    // widening a PARTIAL constraint into a TOTAL one, which would enforce
+    // uniqueness over exactly the rows the author excluded.
+    const handBuilt = {
+      name: "unique_external_id",
+      fields: ["externalId"],
+      scope: "kind",
+      collation: "binary",
+      where: () => ({ nope: true }),
+    } as unknown as UniqueConstraint;
+
+    expect(() => checkWherePredicate(handBuilt, { name: "a" })).toThrow(
+      ConfigurationError,
+    );
+    expect(() => checkWherePredicate(handBuilt, { name: "a" })).toThrow(
+      /does not return a predicate/,
+    );
+  });
+
   it("accepts a clause naming a DECLARED optional field, which still evaluates as absent", () => {
     const graph = defineAccountGraph("declared_optional_where", (fields) =>
       requireDefined(fields["externalId"]).isNotNull(),

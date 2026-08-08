@@ -1038,6 +1038,38 @@ function validateGraphExtensionIndexWhere(
 // Properties and refinements
 // ============================================================
 
+/**
+ * Refuses a property name the SCHEMA LAYER cannot carry, at any nesting level.
+ *
+ * Zod accepts `__proto__` in a shape but drops it from every parse result — and
+ * reports success even when the field is required — so a value written to such
+ * a field is silently lost. The declaration is refused rather than accepted as
+ * a field the storage layer can never honor.
+ *
+ * The single owner of that question. Both the top-level `properties` map and a
+ * nested `object.properties` map ask here: the two maps compile through the same
+ * `z.object(...)` (see `buildObjectSchema` in ./compiler.ts), so a name
+ * unstorable at the top level is equally unstorable one level down, and a
+ * refusal that fired on only one of them would let a document declare a field
+ * that validates clean and then vanishes at parse.
+ *
+ * @returns `true` when the name was refused (an issue has been pushed).
+ */
+function refuseUnstorablePropertyName(
+  propertyName: string,
+  propertyPath: string,
+  owner: string,
+  issues: GraphExtensionIssue[],
+): boolean {
+  if (propertyName !== "__proto__") return false;
+  issues.push({
+    path: propertyPath,
+    message: `Property name "__proto__" is not allowed for ${owner}: schema validation cannot carry it.`,
+    code: "RESERVED_PROPERTY_NAME",
+  });
+  return true;
+}
+
 function validatePropertiesMap(
   raw: unknown,
   path: string,
@@ -1062,17 +1094,14 @@ function validatePropertiesMap(
   const result = createDataKeyedBag<ExtensionPropertyType>();
   for (const [propertyName, propertyValue] of Object.entries(raw)) {
     const propertyPath = `${path}/${encodeJsonPointerSegment(propertyName)}`;
-    // A property named `__proto__` is not storable: Zod accepts it in a shape
-    // but drops it from every parse result (and reports success even when the
-    // field is required), so a node written with it would silently lose the
-    // value. Refuse the declaration rather than accept a field the schema
-    // layer cannot honor.
-    if (propertyName === "__proto__") {
-      issues.push({
-        path: propertyPath,
-        message: `Property name "__proto__" is not allowed for ${ownerType} "${ownerName}": schema validation cannot carry it.`,
-        code: "RESERVED_PROPERTY_NAME",
-      });
+    if (
+      refuseUnstorablePropertyName(
+        propertyName,
+        propertyPath,
+        `${ownerType} "${ownerName}"`,
+        issues,
+      )
+    ) {
       continue;
     }
     if (reserved.has(propertyName)) {
@@ -1499,9 +1528,15 @@ function validateObjectProperty(
     return undefined;
   }
 
-  const fields: Record<string, ExtensionObjectFieldProperty> = {};
+  // Data-keyed: nested object field names read out of the document.
+  const fields = createDataKeyedBag<ExtensionObjectFieldProperty>();
   for (const [name, value] of propertiesEntries) {
     const fieldPath = `${path}/properties/${encodeJsonPointerSegment(name)}`;
+    if (
+      refuseUnstorablePropertyName(name, fieldPath, "a nested object", issues)
+    ) {
+      continue;
+    }
     if (!isPlainObject(value)) {
       issues.push({
         path: fieldPath,

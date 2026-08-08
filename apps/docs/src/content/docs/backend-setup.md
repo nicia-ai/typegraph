@@ -794,6 +794,12 @@ interactive runner), so `store.transaction()` is non-atomic on D1. See
 [Limitations](/limitations) for details. For a transactional Cloudflare
 SQLite store, use **Durable Objects** (below) instead.
 
+For the same reason, a write guarded by a **declared constraint** — edge
+cardinality other than `many`, a `disjointWith` axiom, a shared-scope unique, or
+`getOrCreateByEndpoints`'s create leg — is refused on D1 with
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED` rather than committed unfenced. See
+[Declared constraints require `transactions`](#declared-constraints-require-transactions).
+
 ## Cloudflare Durable Objects (SQLite)
 
 A store backed by `drizzle(ctx.storage)` inside a Durable Object is
@@ -891,6 +897,42 @@ open: a standby refuses the read-write transaction itself, and a role without
 `TEMP` refuses the `CREATE TEMP TABLE` inside it. Both refusals reach the caller
 as `UnsupportedBackendCapabilityError`, with the PostgreSQL error retained as
 its `cause`.
+
+### Declared constraints require `transactions`
+
+A **constrained write** — one whose correctness rests on a check-then-write that
+no database key repeats at write time — runs its probe and its write under one
+per-graph mutual exclusion. That fence is a transaction-scoped construct on both
+dialects: SQLite's `BEGIN IMMEDIATE` writer slot, PostgreSQL's
+`pg_advisory_xact_lock` (which outside a transaction is taken and dropped inside
+its own implicit single-statement one, excluding nothing). A backend reporting
+`capabilities.transactions: false` can supply neither, so such a write is
+**refused** rather than run unfenced — a constraint enforced only when nothing
+races is the defect the fence exists to close.
+
+The refusal is a `ConfigurationError` with `details.code`
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, and `details.constraint` naming which
+class needed the fence, because the way forward differs per class:
+
+| `details.constraint` | The write that needs the fence | Way forward without a transactional backend |
+| --- | --- | --- |
+| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive` | Declare the edge `cardinality: "many"` and enforce the limit in application code |
+| `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` (single or bulk) taking its create leg — the match key is backed by no database key | Use `create` with a caller-chosen id, whose uniqueness the edges primary key enforces |
+| `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom | Drop the axiom and keep ids distinct across those kinds yourself |
+| `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind | Scope the constraint to `"kind"`, which the uniques primary key enforces on its own |
+
+This affects **Cloudflare D1**, **`drizzle-orm/neon-http`**, and any SQLite
+backend built with `transactionMode: "none"`. Durable Objects are unaffected —
+`do-sqlite` reports `capabilities.transactions: true` and fences normally.
+
+Unconstrained writes on those backends are untouched and keep working exactly as
+before: a `cardinality: "many"` edge created, updated and deleted; any node
+delete, including one whose kind participates in a disjointness axiom (a delete
+re-derives no cross-kind verdict); a node whose uniques are all `scope: "kind"`;
+and a `getOrCreateByEndpoints` that *finds* an existing edge, or resurrects a
+`many` one — that resurrection is an id-keyed `UPDATE` that re-derives nothing.
+The bulk `getOrCreateByEndpoints` form fences its whole batch, so it refuses on
+those backends whatever the outcome would have been.
 
 ### SQLite ↔ PostgreSQL parity
 

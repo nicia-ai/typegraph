@@ -612,6 +612,27 @@ export type UpdateEdgeParams = Readonly<{
    * field with the same contract.
    */
   kind?: string;
+  /**
+   * The ENDPOINTS this write asserts the target row already carries, stated
+   * only by a write that actually checked them.
+   *
+   * Kind alone does not pin a row's identity. An edge's endpoints are immutable
+   * for a given row, but the ID is not: a concurrent `hardDelete` + recreate
+   * under the SAME kind with DIFFERENT endpoints satisfies a kind-only
+   * predicate, so an upsert that resolved this id BY endpoints could otherwise
+   * write to an edge pointing somewhere it never looked. Carrying them here
+   * closes that, on the same terms and in the same `WHERE` as `kind`.
+   *
+   * All four move together or not at all — they are one assertion. A plain
+   * `update` on a kind-scoped collection states none of them, because it
+   * resolved the edge by id and kind and made no claim about where it points;
+   * predicating on endpoints it never checked would refuse legitimate writes.
+   * The same MUST-apply contract as `kind` binds a backend that receives them.
+   */
+  fromKind?: string;
+  fromId?: string;
+  toKind?: string;
+  toId?: string;
   props: Readonly<Record<string, unknown>>;
   /**
    * Applied when resurrecting a tombstone, where it asserts a COMPLETE window:
@@ -2031,8 +2052,11 @@ export type GraphBackend = Readonly<{
    * separation relation, "nothing" means "not separated", which is exactly the
    * answer that lets a contradictory merge commit.
    *
-   * A backend that omits this cannot offer that atomicity; callers fall back to
-   * creating and filling back-to-back on the top-level backend.
+   * A backend that omits this cannot offer that atomicity. Callers do not fall
+   * back: when a fill is owed, the upgrade is REFUSED with the typed
+   * `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL` error naming this port — creating
+   * and filling back-to-back would publish the readable-empty state the
+   * paragraph above forbids.
    *
    * @internal
    */

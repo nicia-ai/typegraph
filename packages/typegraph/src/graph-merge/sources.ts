@@ -1,3 +1,4 @@
+import { createDataKeyedBag } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Candidate SOURCES (design §4 / §6.1) — the RECALL layer of candidate generation.
@@ -195,7 +196,8 @@ const NODE_SYSTEM_FIELDS: ReadonlySet<string> = new Set(["id", "kind", "meta"]);
  * returned committed node — without a second fetch or any knowledge of the schema.
  */
 function nodeProps(node: Node<NodeType>): Record<string, JsonValue> {
-  const props: Record<string, JsonValue> = {};
+  // Data-keyed: schema property names spread onto the public node.
+  const props = createDataKeyedBag<JsonValue>();
   for (const [key, value] of Object.entries(
     node as unknown as Record<string, unknown>,
   )) {

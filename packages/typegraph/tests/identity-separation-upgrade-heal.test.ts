@@ -212,12 +212,54 @@ function duplicateKeyError(): Error {
   );
 }
 
-/** The fenced upgrade, with the first N attempts losing the catalog race. */
+/**
+ * Replaces `executeSchemaDdl` on a preflight/fence target so its first
+ * `remaining` calls lose the catalog race.
+ *
+ * A Proxy rather than a spread: these targets carry their methods on a
+ * prototype, which a spread would drop.
+ */
+function targetLosingDdlRace<T extends object>(
+  target: T,
+  remaining: { count: number },
+): T {
+  return new Proxy(target, {
+    get(source, property, receiver) {
+      const value: unknown = Reflect.get(source, property, receiver);
+      if (property !== "executeSchemaDdl" || typeof value !== "function") {
+        return value;
+      }
+      return (ddl: string) => {
+        if (remaining.count > 0) {
+          remaining.count -= 1;
+          return Promise.reject(duplicateKeyError());
+        }
+        return (value as (statement: string) => Promise<void>).call(
+          source,
+          ddl,
+        );
+      };
+    },
+  });
+}
+
+/**
+ * The fenced upgrade, with the first N CREATE statements losing the catalog
+ * race.
+ *
+ * The injection is at the DDL STATEMENT, which is where PostgreSQL actually
+ * raises 23505 — the CREATE inside the fence — and no longer at
+ * `schemaWriteTransaction` itself. That distinction is now load-bearing: the
+ * retry fires only for a failure the identity DDL reported, so an equally
+ * 23505-shaped failure from anywhere else in the attempt (the fill, the CAS)
+ * stays loud on the first try rather than being re-run as a presumed race.
+ */
 function backendLosingCreateRace(
   result: LocalSqliteBackendResult,
   failures: number,
 ): Readonly<{ backend: GraphBackend; attempts: () => number }> {
   const fence = requireDefined(result.backend.schemaWriteTransaction);
+  const remaining = { count: failures };
   let attempts = 0;
   return {
     attempts: () => attempts,
@@ -228,8 +270,9 @@ function backendLosingCreateRace(
         fn: Parameters<typeof fence<T>>[1],
       ): Promise<T> => {
         attempts += 1;
-        if (attempts <= failures) return Promise.reject(duplicateKeyError());
-        return fence(graphId, fn);
+        return fence(graphId, (target) =>
+          fn(targetLosingDdlRace(target, remaining)),
+        );
       },
     },
   };
@@ -294,6 +337,36 @@ describe("fenced upgrade against a concurrent creator", () => {
       ).rejects.toThrow(/duplicate key value/);
       expect(racing.attempts()).toBe(2);
       expect(separationTableExists(result)).toBe(false);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("does not re-run the attempt for a duplicate key raised by the FILL", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      await seedSeparatedPairWithoutRelation(result);
+      const racing = backendLosingCreateRace(result, 0);
+
+      // The retry is scoped to the identity DDL, which is the only statement
+      // in the attempt that is idempotent-by-construction. A 23505 from the
+      // closure/separation FILL is a real duplicate write: re-running it would
+      // hide the defect behind an attempt that looks like a lost race, and the
+      // classifier's own contract says so.
+      await expect(
+        ensureIdentitySchemaStorage(
+          racing.backend,
+          createSqlSchema(result.backend.tableNames),
+          {
+            graphId: GRAPH_ID,
+            enablement: false,
+            registry: buildKindRegistry(foldGraph),
+            recomputeDerivedRelations: () =>
+              Promise.reject(duplicateKeyError()),
+          },
+        ),
+      ).rejects.toThrow(/duplicate key value/);
+      expect(racing.attempts()).toBe(1);
     } finally {
       await result.backend.close();
     }
@@ -715,6 +788,82 @@ describe("in-commit provisioning capability", () => {
       // not about the migration itself.
       await migrateSchema(result.backend, foldGraph, activeRow.version);
       expect(separationRowCount(result)).toBe(1);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("completes the schema commit when its in-commit CREATE loses the catalog race", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      await seedSeparatedPairWithoutRelation(result);
+      const activeRow = requireDefined(
+        await getActiveSchema(result.backend, GRAPH_ID),
+      );
+
+      // #445: the commit path issues the SAME idempotent identity DDL as the
+      // fenced path, inside the caller's schema-commit transaction — where
+      // PostgreSQL will accept nothing but a rollback once the CREATE reports
+      // 23505. Two replicas booting at once therefore failed the whole schema
+      // commit on a statement that is a no-op by construction. The commit is
+      // the smallest retryable unit, so it is what gets re-run.
+      const commitWithPreflight = requireDefined(
+        result.backend.commitSchemaVersionWithPreflight,
+      );
+      const remaining = { count: 1 };
+      let commits = 0;
+      const racing: GraphBackend = {
+        ...result.backend,
+        commitSchemaVersionWithPreflight: (params, preflight) => {
+          commits += 1;
+          return commitWithPreflight(params, (target) =>
+            preflight(targetLosingDdlRace(target, remaining)),
+          );
+        },
+      };
+
+      await migrateSchema(racing, foldGraph, activeRow.version);
+
+      // Re-run once, and the second attempt provisioned AND filled the
+      // relation in one commit — the atomicity the in-commit DDL exists for.
+      expect(commits).toBe(2);
+      expect(remaining.count).toBe(0);
+      expect(separationRowCount(result)).toBe(1);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("stays loud when the in-commit CREATE keeps losing", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      await seedSeparatedPairWithoutRelation(result);
+      const activeRow = requireDefined(
+        await getActiveSchema(result.backend, GRAPH_ID),
+      );
+      const commitWithPreflight = requireDefined(
+        result.backend.commitSchemaVersionWithPreflight,
+      );
+      const remaining = { count: 2 };
+      let commits = 0;
+      const racing: GraphBackend = {
+        ...result.backend,
+        commitSchemaVersionWithPreflight: (params, preflight) => {
+          commits += 1;
+          return commitWithPreflight(params, (target) =>
+            preflight(targetLosingDdlRace(target, remaining)),
+          );
+        },
+      };
+
+      // Bounded at one, exactly as on the fenced path: a second failure is no
+      // longer a creator about to commit, and the schema commit must not
+      // silently do nothing.
+      await expect(
+        migrateSchema(racing, foldGraph, activeRow.version),
+      ).rejects.toThrow(/duplicate key value/);
+      expect(commits).toBe(2);
+      expect(separationTableExists(result)).toBe(false);
     } finally {
       await result.backend.close();
     }

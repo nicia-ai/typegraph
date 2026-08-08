@@ -469,6 +469,87 @@ export function resolveEfSearchOverride(
   return tuning.parameter;
 }
 
+/** What one call site needs to decide whether ANN retrieval can be honored. */
+export type ApproximateRetrievalRequest = Readonly<{
+  /** Whether the caller STATED `approximate: true`. */
+  approximate: boolean | undefined;
+  /**
+   * The metric the caller explicitly overrode to, or `undefined` when they
+   * passed none (in which case the slot's declared metric is used and no
+   * mismatch is possible).
+   */
+  requestedMetric: VectorMetric | undefined;
+  /** The metric the slot's storage and ANN structure were built for. */
+  declaredMetric: VectorMetric;
+  /** The slot's index type; `"none"` means there is no ANN structure at all. */
+  indexType: VectorIndexType;
+  /** Kind and field named in the refusal, so a union says WHICH slot refused. */
+  nodeKind: string;
+  fieldPath: string;
+}>;
+
+/**
+ * The single owner of "can this slot serve APPROXIMATE retrieval under the
+ * metric the caller asked for?".
+ *
+ * Every engine materializes metric-specific ANN structures — vec0 bakes
+ * `distance_metric` into the virtual table, libSQL's DiskANN index is built
+ * with `metric=…`, pgvector's index carries a per-metric operator class — so
+ * an ANN structure can only retrieve under the metric it was built for.
+ * Retrieving by the declared metric and re-scoring under an overridden one
+ * returns the declared metric's neighbors wearing the override's scores: the
+ * wrong rows, silently.
+ *
+ * Stating `approximate: true` alongside a mismatched `metric` therefore states
+ * two things that cannot both hold. The option is refused naming both metrics
+ * rather than downgraded to an exact scan behind the caller's back — the same
+ * accepted-or-refused rule {@link resolveEfSearchOverride} applies to
+ * `efSearch`.
+ *
+ * NOT refused, deliberately:
+ *
+ * - `indexType: "none"`. There is no ANN structure to be bound to a metric, so
+ *   `approximate` has nothing to opt into and compiles to the strategy's exact
+ *   scan under whichever metric was asked for. That degradation is stated on
+ *   the public `SimilarToOptions.approximate` option.
+ * - A mismatched metric with NO `approximate`. An exact scan computes any
+ *   metric over the stored vectors correctly, and nothing was stated that the
+ *   engine cannot honor. (`store.search.vector` refuses that override too, on
+ *   its own broader rule — see `assertVectorQueryCompatible` in
+ *   `store/search.ts`. The query builder's exact path is deliberately the
+ *   wider surface; only the *silent* half is closed here.)
+ */
+export function assertApproximateMetricSupported(
+  request: ApproximateRetrievalRequest,
+): void {
+  const {
+    approximate,
+    requestedMetric,
+    declaredMetric,
+    indexType,
+    nodeKind,
+    fieldPath,
+  } = request;
+  if (approximate !== true) return;
+  if (indexType === "none") return;
+  if (requestedMetric === undefined || requestedMetric === declaredMetric) {
+    return;
+  }
+  throw new ConfigurationError(
+    `Approximate retrieval for "${nodeKind}.${fieldPath}" cannot use metric "${requestedMetric}": its ${indexType.toUpperCase()} index is built for "${declaredMetric}", and an ANN structure only retrieves under the metric it was built for.`,
+    {
+      nodeKind,
+      fieldPath,
+      requestedMetric,
+      declaredMetric,
+      indexType,
+    },
+    {
+      suggestion: `Omit metric (or pass "${declaredMetric}") to keep approximate retrieval, or drop approximate to scan exactly under "${requestedMetric}".`,
+    },
+  );
+}
+
 /**
  * Validates a `minScore` floor against its (resolved) metric: it must be finite,
  * and for cosine it must lie in [-1, 1] (a cosine score is the `1 - distance`

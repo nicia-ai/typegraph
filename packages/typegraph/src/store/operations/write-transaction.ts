@@ -42,6 +42,19 @@
  * capture-enabled writer holding the recorded key and a constrained writer
  * holding the sibling would not exclude each other — which is precisely the
  * mutual exclusion the constrained write needs.
+ *
+ * ## Fenced or refused
+ *
+ * A declared constraint's probe and the write it guards commit under one
+ * per-graph mutual exclusion ON EVERY BACKEND. Both halves of the fence are
+ * transaction-scoped constructs — SQLite's `BEGIN IMMEDIATE`, PostgreSQL's
+ * `pg_advisory_xact_lock` — so a backend with no transactions can supply
+ * neither. Such a write is REFUSED
+ * ({@link graphWriteFenceRefusal}, `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`)
+ * rather than run unfenced: a constraint enforced only when nothing races is
+ * the exact failure the fence exists to close, and reporting it as enforced
+ * would make the claim above false wherever it matters most. Unconstrained
+ * writes assert nothing and keep working on those backends.
  */
 import {
   type GraphBackend,
@@ -50,6 +63,7 @@ import {
 } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
+import { type ConstraintFenceReason } from "../constraints";
 import {
   advanceRevisionClock,
   lockRecordedGraphWrite,
@@ -98,10 +112,6 @@ const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
  * manual savepoints inside a managed write are outside the contract.
  */
 const heldGraphWriteLocks = new WeakMap<object, Set<string>>();
-
-function holdsGraphWriteLock(target: object, graphId: string): boolean {
-  return heldGraphWriteLocks.get(target)?.has(graphId) === true;
-}
 
 /**
  * Binds nested typed mutations to one caller-owned transaction commit so a
@@ -175,20 +185,83 @@ export async function lockSchemaVersionForStoreWrite(
  * How a write states whether it needs the per-graph write fence.
  *
  * `fencesConstraintProbe` is an assertion about THIS write's body: "it runs a
- * check-then-act whose verdict no database key repeats at write time". The
- * classification lives with the constraints
- * ({@link file://../constraints.ts edgeWriteNeedsConstraintFence} /
+ * check-then-act whose verdict no database key repeats at write time", and it
+ * names WHICH declared constraint that is. The classification lives with the
+ * constraints ({@link file://../constraints.ts edgeWriteNeedsConstraintFence} /
  * `nodeWriteNeedsConstraintFence`), never inline at a call site, so a new
  * constraint kind cannot teach half the write paths about itself.
  *
- * Default `false`: an unconstrained write — a plain create of a `many`-edge, a
- * node whose uniques are all backed by the uniques primary key, a delete —
- * takes no lock and pays no round trip for one.
+ * `undefined` — the default — is an unconstrained write: a plain create of a
+ * `many`-edge, a node whose uniques are all backed by the uniques primary key,
+ * a delete. It takes no lock and pays no round trip for one.
  */
 type WriteTransactionOptions<T> = Readonly<{
   didWrite?: (result: T) => boolean;
-  fencesConstraintProbe?: boolean;
+  fencesConstraintProbe?: ConstraintFenceReason | undefined;
 }>;
+
+/** What a caller must change to make each refused constraint class writable. */
+const CONSTRAINT_FENCE_ADVICE = {
+  edgeCardinality:
+    'declare the edge `cardinality: "many"` and enforce the limit in application code',
+  edgeMatchKeyConvergence:
+    "use `create` with a caller-chosen id, whose uniqueness the edges primary key enforces, instead of `getOrCreateByEndpoints`",
+  nodeDisjointness:
+    "drop the `disjointWith` axiom and keep ids distinct across those kinds yourself",
+  nodeUniquenessScope:
+    'scope the unique constraint to `"kind"`, which the uniques primary key enforces on its own',
+} as const satisfies Record<ConstraintFenceReason, string>;
+
+/**
+ * Refuses a constrained write on a backend that cannot hold the fence it needs.
+ *
+ * **The capability test is transaction support, on both dialects, because the
+ * fence IS a transaction-scoped construct on both.** SQLite's fence is the
+ * `BEGIN IMMEDIATE` that admits one writer; PostgreSQL's is
+ * `pg_advisory_xact_lock`, which by definition is released at the end of the
+ * transaction that took it — outside one it is acquired and dropped within its
+ * own implicit single-statement transaction and excludes nothing. So "this
+ * backend can fence" and "this write runs inside a transaction" are the same
+ * question, and it is asked exactly the way
+ * {@link lockSchemaVersionForStoreWrite} asks its own: `"transaction" in
+ * backend` distinguishes a TOP-LEVEL backend (where `transaction` is a required
+ * member) from a nested {@link TransactionBackend} (which omits it and is
+ * therefore already inside one, hence already fenced).
+ *
+ * Refused rather than degraded, per the accepted-or-refused rule: the write
+ * declared a constraint the store cannot enforce here, and enforcing it "most
+ * of the time" is the failure mode that produced #428 and #436 in the first
+ * place. A caller who wants the write anyway can have it by not declaring the
+ * constraint — which is what {@link CONSTRAINT_FENCE_ADVICE} says, per class.
+ *
+ * UNCONSTRAINED writes on the same backend are untouched: they assert nothing
+ * the engine has to serialize, so they keep working exactly as before.
+ */
+function graphWriteFenceRefusal(
+  ctx: WriteTransactionContext,
+  backend: GraphBackend | TransactionBackend,
+  reason: ConstraintFenceReason,
+): ConfigurationError | undefined {
+  if (!("transaction" in backend) || backend.capabilities.transactions) {
+    return undefined;
+  }
+
+  return new ConfigurationError(
+    "This backend cannot fence a constrained write: enforcing a declared " +
+      "constraint requires a transaction to scope the per-graph write lock " +
+      "to, and this backend has no transactions.",
+    {
+      code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
+      graphId: ctx.graphId,
+      constraint: reason,
+    },
+    {
+      suggestion:
+        `Use a transactional backend, or ${CONSTRAINT_FENCE_ADVICE[reason]}. ` +
+        "Unconstrained writes need no fence and keep working on this backend.",
+    },
+  );
+}
 
 /**
  * Runs a graph-entity mutation cascade inside a single top-level transaction.
@@ -210,10 +283,12 @@ type WriteTransactionOptions<T> = Readonly<{
  * constrained write and a captured write must exclude each other, which two
  * keys could not arrange.
  *
- * On a non-transactional backend this takes no lock at all, exactly as it takes
- * no transaction: such a backend cannot hold either, and the write proceeds
- * unfenced rather than failing — matching the atomicity the same backend
- * already cannot offer.
+ * A constrained write on a backend with no transactions FAILS CLOSED, before
+ * `fn`, through {@link graphWriteFenceRefusal} — that backend can hold
+ * no fence, and the invariant this module states is that a declared
+ * constraint's probe and the write it guards commit under one per-graph mutual
+ * exclusion on every backend. Fenced or refused; never quietly neither.
+ * Unconstrained writes on the same backend are unaffected.
  */
 export function runInWriteTransaction<T>(
   ctx: WriteTransactionContext,
@@ -226,10 +301,19 @@ export function runInWriteTransaction<T>(
 ): Promise<T> {
   const ownsWriteLock =
     "transaction" in backend && backend.capabilities.transactions;
+  const fenceReason = options?.fencesConstraintProbe;
+  // Rejected rather than thrown: this function is promise-returning, and a
+  // synchronous throw from it would surface differently at a caller that
+  // composes it without `await` than at one that does.
+  const refusal =
+    fenceReason === undefined ? undefined : (
+      graphWriteFenceRefusal(ctx, backend, fenceReason)
+    );
+  if (refusal !== undefined) return Promise.reject(refusal);
   const needsGraphWriteLock =
     ctx.historyEnabled ||
     ctx.revisionTrackingEnabled ||
-    options?.fencesConstraintProbe === true;
+    fenceReason !== undefined;
   return runOptionallyInTransaction(backend, async (target) => {
     await lockSchemaVersionForStoreWrite(ctx, target);
     const session =
@@ -239,20 +323,35 @@ export function runInWriteTransaction<T>(
     // both "this store needs no lock" and "an enclosing frame on this target
     // already holds it" — in the second case the lock is genuinely held, which
     // is a stronger claim than the constructor makes, not a weaker one.
+    //
+    // The claim is registered SYNCHRONOUSLY, before any await: two frames on
+    // one target that both reached this point would otherwise each read an
+    // absent Set, each mint one, and the second `set` would orphan the first —
+    // leaving the first frame's `finally` clearing a Set the map no longer
+    // holds, and the graph marked held forever. Reading-and-registering with no
+    // suspension point in between makes that interleaving unrepresentable.
+    const held = heldGraphWriteLocks.get(target) ?? new Set<string>();
+    heldGraphWriteLocks.set(target, held);
     const acquiresLock =
       needsGraphWriteLock &&
       session?.lock === undefined &&
-      !holdsGraphWriteLock(target, ctx.graphId);
+      !held.has(ctx.graphId);
+    // Marked before the acquisition rather than after it, for the same reason:
+    // a sibling frame that starts while this one is still awaiting the lock
+    // must see the claim, not race it. Its statements queue behind ours on the
+    // one connection either way, so observing an in-flight claim as held is
+    // correct. A failed acquisition retracts the claim.
+    if (acquiresLock) held.add(ctx.graphId);
     const lock =
       acquiresLock ?
-        await lockRecordedGraphWrite(target, ctx.graphId)
+        await lockRecordedGraphWrite(target, ctx.graphId).catch(
+          (error: unknown) => {
+            held.delete(ctx.graphId);
+            throw error;
+          },
+        )
       : (session?.lock ?? uncapturedGraphWriteLock());
     if (session !== undefined) session.lock = lock;
-    const held = heldGraphWriteLocks.get(target) ?? new Set<string>();
-    if (acquiresLock) {
-      held.add(ctx.graphId);
-      heldGraphWriteLocks.set(target, held);
-    }
     const result = await (acquiresLock ?
       fn(target, lock).finally(() => held.delete(ctx.graphId))
     : fn(target, lock));

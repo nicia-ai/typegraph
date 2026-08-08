@@ -23,6 +23,7 @@
  */
 import { type GraphDef } from "../core/define-graph";
 import { getTypeName } from "../ontology/types";
+import { createDataKeyedBag } from "../utils/object";
 import {
   KindHasReferentsError,
   type KindReferent,
@@ -135,7 +136,8 @@ export function planRemovals<G extends GraphDef>(
   const removedNodeKindsSet = new Set(removedNodeKinds);
   const explicitlyRemovedEdgeKindsSet = new Set(explicitlyRemovedEdgeKinds);
   const cascadeEdges = new Set<string>();
-  const updatedEdges: Record<string, ExtensionEdgeDef> = {};
+  // Data-keyed: edge kind names read out of the persisted document.
+  const updatedEdges = createDataKeyedBag<ExtensionEdgeDef>();
 
   for (const [edgeName, edgeDocument] of Object.entries(document.edges ?? {})) {
     if (explicitlyRemovedEdgeKindsSet.has(edgeName)) {
@@ -160,7 +162,8 @@ export function planRemovals<G extends GraphDef>(
   }
 
   // Filter nodes — explicit removals are dropped.
-  const updatedNodes: Record<string, ExtensionNodeDef> = {};
+  // Data-keyed: node kind names read out of the persisted document.
+  const updatedNodes = createDataKeyedBag<ExtensionNodeDef>();
   for (const [nodeName, nodeDocument] of Object.entries(document.nodes ?? {})) {
     if (removedNodeKindsSet.has(nodeName)) continue;
     updatedNodes[nodeName] = nodeDocument;
@@ -229,12 +232,14 @@ export function stripGraphExtension<G extends GraphDef>(graph: G): G {
     extensionKindNames(document);
   const runtimeOntologyKeys = buildGraphExtensionOntologyKeySet(document);
 
-  const compileNodes: Record<string, (typeof graph.nodes)[string]> = {};
+  // Data-keyed: registered node kind names.
+  const compileNodes = createDataKeyedBag<(typeof graph.nodes)[string]>();
   for (const [name, registration] of Object.entries(graph.nodes)) {
     if (runtimeNodeNames.has(name)) continue;
     compileNodes[name] = registration;
   }
-  const compileEdges: Record<string, (typeof graph.edges)[string]> = {};
+  // Data-keyed: registered edge kind names.
+  const compileEdges = createDataKeyedBag<(typeof graph.edges)[string]>();
   for (const [name, registration] of Object.entries(graph.edges)) {
     if (runtimeEdgeNames.has(name)) continue;
     compileEdges[name] = registration;

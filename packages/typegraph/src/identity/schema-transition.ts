@@ -14,7 +14,10 @@ import {
   lockRecordedGraphWrite,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
-import { isPostgresConcurrentDdlRaceError } from "../utils/sql-errors";
+import {
+  errorChain,
+  isPostgresConcurrentDdlRaceError,
+} from "../utils/sql-errors";
 import { separationRebuildRequired } from "./separation";
 import {
   deleteAssertionsTouchingKinds,
@@ -267,45 +270,110 @@ async function provisionDerivedRelations(
       ...(identityTableDdl === undefined ? ["identityTableDdl"] : []),
     ]);
   }
-  await withConcurrentCreateRetry(async () =>
+  await withIdentityDdlRaceRetry(async () =>
     fence(graphId, async (target) => {
       await lockIdentityDdl(target);
-      for (const ddl of identityTableDdl(tableNames)) {
-        await target.executeSchemaDdl(ddl);
-      }
+      await executeIdentityDdl(
+        (ddl) => target.executeSchemaDdl(ddl),
+        identityTableDdl(tableNames),
+      );
       await ports.recompute(target);
     }),
   );
 }
 
 /**
- * Runs a fenced identity upgrade, retrying the WHOLE attempt once if the
- * catalog race lands on it.
+ * Errors already classified as "the identity DDL specifically lost a catalog
+ * race".
+ *
+ * Marked rather than wrapped, so the error a caller finally sees is the
+ * driver's own; looked up through the cause chain because both the schema fence
+ * and the schema-commit primitive wrap whatever their callback throws.
+ */
+const IDENTITY_DDL_RACES = new WeakSet<object>();
+
+function markIdentityDdlRace(error: unknown): unknown {
+  if (typeof error === "object" && error !== null) {
+    IDENTITY_DDL_RACES.add(error);
+  }
+  return error;
+}
+
+function isIdentityDdlRace(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (
+      typeof link === "object" &&
+      link !== null &&
+      IDENTITY_DDL_RACES.has(link)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Issues identity DDL, tagging the one failure that is worth re-running.
+ *
+ * The single place identity DDL meets {@link isPostgresConcurrentDdlRaceError},
+ * and the reason the retry below can be DDL-scoped while still re-running a
+ * whole transaction. That classifier's contract is "idempotent DDL only" — on
+ * any other statement a 23505 is a real duplicate write — so the surrounding
+ * attempt, which also performs the closure/separation FILL, must not be
+ * classified by it directly: a uniqueness failure from the fill would be read
+ * as a catalog race and silently retried. Tagging at the DDL statement itself
+ * keeps the classifier on exactly the statements it is contracted for.
+ */
+async function executeIdentityDdl(
+  execute: (ddl: string) => Promise<void>,
+  statements: readonly string[],
+): Promise<void> {
+  for (const statement of statements) {
+    try {
+      await execute(statement);
+    } catch (error) {
+      if (isPostgresConcurrentDdlRaceError(error)) {
+        throw markIdentityDdlRace(error);
+      }
+      throw error;
+    }
+  }
+}
+
+/**
+ * Runs an identity upgrade attempt, retrying the WHOLE attempt once when its
+ * DDL — and only its DDL — lost a catalog race.
  *
  * PostgreSQL's `IF NOT EXISTS` cannot see another session's uncommitted
  * pg_class row, so a CREATE issued while an unfenced creator
  * (`bootstrapTables`, first-enablement `ensureIdentityTables`) is mid-flight
  * can come back 23505 (or 42701 for an additive column) — and inside a
  * transaction that aborts everything, so the in-place retry
- * `executeConcurrentCreateDdl` uses is not available. The whole attempt is
- * therefore re-run once, against a database where the winner's table is now
- * committed and the CREATE is a no-op. Which failures mean "lost the race" is
- * {@link isPostgresConcurrentDdlRaceError} — the same single owner the backend
- * helper classifies through. Bounded at one: a second such failure is no longer
- * a race, and staying loud is the point.
+ * `executeConcurrentCreateDdl` uses is not available, and neither is any
+ * in-transaction recovery: after the error the transaction can accept nothing
+ * but a rollback. Re-running the attempt from the outside is the only shape
+ * left. The second attempt runs against a database where the winner's relation
+ * is committed, so the CREATE is a no-op.
  *
- * The DDL advisory lock below is what makes this rare rather than routine — it
+ * Retry-worthiness is decided by {@link executeIdentityDdl}'s tag, not by
+ * inspecting the failure here: everything else in an attempt (the fill, the
+ * locks, the CAS) must stay loud on the first failure.
+ *
+ * Bounded at one: a second such failure is no longer a race, and staying loud
+ * is the point.
+ *
+ * The DDL advisory lock is what makes this rare rather than routine — it
  * serializes fenced identity DDL across graphs, which is the collision two
  * graphs upgrading the same database would otherwise hit every time.
  */
-async function withConcurrentCreateRetry(
-  attempt: () => Promise<void>,
-): Promise<void> {
+export async function withIdentityDdlRaceRetry<T>(
+  attempt: () => Promise<T>,
+): Promise<T> {
   try {
-    await attempt();
+    return await attempt();
   } catch (error) {
-    if (!isPostgresConcurrentDdlRaceError(error)) throw error;
-    await attempt();
+    if (!isIdentityDdlRace(error)) throw error;
+    return attempt();
   }
 }
 
@@ -523,6 +591,17 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
  * path, at the moment the DDL is actually needed — never silently skipped,
  * which would let the commit's rebuild write into a relation that does not
  * exist, or (worse, if it were created afterwards) publish it empty.
+ *
+ * This is the SAME idempotent DDL the fenced path issues, so it can lose the
+ * same catalog race — two replicas booting against one database — and it is
+ * issued inside the CALLER's schema-commit transaction, where neither an
+ * in-place retry nor an in-transaction catch is available (PostgreSQL will
+ * accept nothing but a rollback after the error). Hoisting it outside the
+ * transaction is refused for the reason the docblock above gives: a relation
+ * created but not filled reads as "nothing is separated". So it tags the race
+ * through {@link executeIdentityDdl} and the whole commit is re-run once by
+ * {@link withIdentityDdlRaceRetry} at the call sites in `schema/manager.ts`
+ * (#445).
  */
 async function provisionDerivedRelationsInCommit(
   target: SchemaCommitPreflightBackend,
@@ -535,9 +614,7 @@ async function provisionDerivedRelationsInCommit(
     throw identityDerivedUpgradeUnsupportedError(graphId, ["executeSchemaDdl"]);
   }
   await lockIdentityDdl(target);
-  for (const statement of ddl) {
-    await executeSchemaDdl(statement);
-  }
+  await executeIdentityDdl((statement) => executeSchemaDdl(statement), ddl);
 }
 
 /**

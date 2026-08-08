@@ -53,7 +53,28 @@ export type ConstraintContext = Readonly<{
 }>;
 
 /**
- * Whether an edge write of this cardinality runs a probe that needs the fence.
+ * WHICH declared constraint makes a write constrained.
+ *
+ * The classification names the reason rather than answering yes/no, because
+ * the reason is load-bearing twice over: it is what the fence is taken FOR, and
+ * — on a backend that cannot hold the fence — it is what the refusal has to
+ * tell the caller. "This backend cannot fence constrained writes" is unusable
+ * advice; "your `cardinality: 'one'` edge cannot be enforced here" is
+ * actionable, and only the classifier knows which it was.
+ */
+export type ConstraintFenceReason =
+  /** Edge cardinality `one` / `unique` / `oneActive`. */
+  | "edgeCardinality"
+  /** `getOrCreateByEndpoints` converging on a match key no key backs. */
+  | "edgeMatchKeyConvergence"
+  /** A `disjointWith` axiom, probed across kinds the node PK cannot span. */
+  | "nodeDisjointness"
+  /** A unique constraint whose scope spans more than the node's own kind. */
+  | "nodeUniquenessScope";
+
+/**
+ * The constraint that makes an edge write of this cardinality constrained, or
+ * `undefined` when it is not.
  *
  * `many` declares no constraint, so its create runs no cardinality probe and
  * must NOT pay for the lock — the fence is for writes that check something, not
@@ -66,12 +87,15 @@ export type ConstraintContext = Readonly<{
  */
 export function edgeWriteNeedsConstraintFence(
   cardinality: Cardinality,
-): boolean {
-  return cardinality !== "many";
+): ConstraintFenceReason | undefined {
+  return cardinality === "many" ? undefined : "edgeCardinality";
 }
 
 /**
- * Whether a node write of this kind runs a probe that needs the fence.
+ * The constraint that makes a node write of this kind constrained, or
+ * `undefined` when it is not. A kind can qualify on both counts; the reason
+ * reported is the first that applies, which is enough to name the class in a
+ * refusal.
  *
  * Two probe families qualify, and they are reached by different operations:
  *
@@ -94,14 +118,15 @@ export function nodeWriteNeedsConstraintFence(
   kind: string,
   uniqueConstraints: readonly UniqueConstraint[],
   operation: "create" | "update",
-): boolean {
+): ConstraintFenceReason | undefined {
   if (operation === "create" && registry.getDisjointKinds(kind).length > 0) {
-    return true;
+    return "nodeDisjointness";
   }
-  return uniqueConstraints.some(
+  const sharedScope = uniqueConstraints.some(
     (constraint) =>
       getKindsForUniquenessCheck(kind, constraint.scope, registry).length > 1,
   );
+  return sharedScope ? "nodeUniquenessScope" : undefined;
 }
 
 /**

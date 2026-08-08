@@ -586,42 +586,62 @@ export function createNodeCollection<
         return shouldCoalesceUpsert(row, options, runDirtyCheck);
       };
 
-      // INVARIANT: a coalescing upsert elides its write only on evidence it
-      // re-read inside a transaction, after this autocommit observation.
+      // INVARIANT: a coalescing upsert's decision to SKIP is both taken and
+      // executed inside one transaction. The read that justifies the skip and
+      // the skip itself are the same transaction; the skip IS that
+      // transaction's empty commit, and nothing after the commit writes, so
+      // there is no window between deciding and acting for a competitor to
+      // occupy.
       //
       // Coalescing must be an optimization, never a semantic: with the flag
       // off, `executeNodeUpdate` opens a transaction, re-reads, and merges the
       // caller's props over whatever it finds, so a writer that commits between
-      // the read above and the write still has the caller's props applied on
-      // top. Deciding "skip" from that same earlier read gave a DIFFERENT
+      // the autocommit read above and the write still has the caller's props
+      // applied on top. Deciding "skip" from that earlier read gave a DIFFERENT
       // answer — the caller was told its props were stored while the store held
       // the other writer's — so the flag changed the outcome instead of the
-      // cost. Re-reading here restores the equivalence: the losing verdict
-      // falls through to the ordinary write path, whose own in-transaction
-      // re-read merges over the current row.
+      // cost. Deciding inside the transaction restores the equivalence: a
+      // "write" verdict falls through to the ordinary path, whose own
+      // in-transaction re-read merges over the current row.
+      //
+      // Note the shape difference from a plain re-read: the verdict is computed
+      // where `target` is live, not after the transaction closed. Committing
+      // and THEN deciding would narrow the window rather than close it, which
+      // is what the bulk paths avoid by deciding inside `upsertAll`.
       //
       // Only a coalescing store that is ABOUT to skip pays the second read; a
       // store without the flag, or one whose props differ, keeps the single
-      // read and the single write it always had. On SQLite the re-read runs
-      // under `BEGIN IMMEDIATE`, which excludes every other writer for its
-      // duration; on a backend without transactions there is nothing to open
-      // and the decision is as fenced as that backend's writes are — which is
-      // to say not at all, matching the atomicity it already cannot offer.
-      const decisive =
-        existing !== undefined && coalesces(existing) ?
-          await runOptionallyInTransaction(backend, (target) =>
-            target.getNode(graphId, kind, id),
-          )
-        : existing;
+      // read and the single write it always had. On SQLite the transaction is
+      // `BEGIN IMMEDIATE`, which excludes every other writer for its duration;
+      // on a backend without transactions there is nothing to open and the
+      // decision is as fenced as that backend's writes are — which is to say
+      // not at all, matching the atomicity it already cannot offer.
+      type UpsertVerdict =
+        | Readonly<{ verdict: "skip"; row: NodeRow }>
+        | Readonly<{ verdict: "write"; row: NodeRow | undefined }>;
 
-      if (decisive !== undefined) {
-        if (coalesces(decisive)) {
-          return narrowNode<N>(rowToNode(decisive));
-        }
+      const decision: UpsertVerdict =
+        existing !== undefined && coalesces(existing) ?
+          await runOptionallyInTransaction(
+            backend,
+            async (target): Promise<UpsertVerdict> => {
+              const confirmed = await target.getNode(graphId, kind, id);
+              return confirmed !== undefined && coalesces(confirmed) ?
+                  { verdict: "skip", row: confirmed }
+                : { verdict: "write", row: confirmed };
+            },
+          )
+        : { verdict: "write", row: existing };
+
+      if (decision.verdict === "skip") {
+        return narrowNode<N>(rowToNode(decision.row));
+      }
+
+      if (decision.row !== undefined) {
         const result = await executeNodeUpdate(
           buildUpsertUpdateInput(kind, id, data, options),
           backend,
-          { clearDeleted: decisive.deleted_at !== undefined },
+          { clearDeleted: decision.row.deleted_at !== undefined },
         );
         return narrowNode<N>(result);
       }

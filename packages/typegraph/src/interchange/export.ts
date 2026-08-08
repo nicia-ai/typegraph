@@ -106,13 +106,31 @@ export async function exportGraph<G extends GraphDef>(
  * a network, file, or fresh working copy can process one chunk at a time rather
  * than materializing a graph-sized {@link GraphData} value.
  *
+ * ## One snapshot, WHERE THE BACKEND HAS TRANSACTIONS
+ *
+ * On a backend reporting `capabilities.transactions`, the whole export —
+ * header, every node page, every edge page, every identity page — is read
+ * inside ONE `repeatable_read` / `read_only` transaction, so a slow consumer
+ * still gets one point in time rather than a mixture of the graph as it was at
+ * the first chunk and as it is at the last.
+ *
+ * A backend WITHOUT transactions (SQLite `transactionMode: "none"`, the
+ * session-less HTTP Postgres drivers) opens no such transaction: its export
+ * paginates statement by statement, and a write committed mid-stream can appear
+ * in the pages that follow. There is no way to offer the guarantee on an engine
+ * that cannot frame the reads, so it is a declared capability gap rather than
+ * something the stream pretends to. Callers needing a coherent export from such
+ * a backend must quiesce writes for its duration.
+ *
  * ## Stopping a stream you will not finish
  *
- * While the stream is open it holds a repeatable-read snapshot transaction, and
- * on a serialized connection it holds that connection's one EXCLUSIVE stream
+ * While a transactional stream is open it holds that snapshot transaction, and
+ * on a serialized connection it holds the connection's one EXCLUSIVE stream
  * lease with it. Every cooperative exit settles both, because each runs the
  * generator's `finally`: `break` or `throw` out of a `for await`, and an
- * explicit `iterator.return()`.
+ * explicit `iterator.return()`. (A non-transactional stream holds neither, so
+ * it has nothing to strand — but it still owes its consumer an answer, which
+ * the same cancellation path gives it.)
  *
  * A consumer that pulls `next()` and then simply DROPS the iterator has no
  * cooperative exit — async-generator `finally` blocks do not run on garbage
@@ -154,13 +172,49 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
 ): AsyncIterable<GraphInterchangeChunk> {
   const resolved = ExportStreamOptionsSchema.parse(options ?? {});
   const signal = resolved.signal;
-  // Refused BEFORE anything is claimed or opened: an already-aborted signal
-  // must not open a snapshot transaction and take a connection's lease only to
-  // give both back on the next tick.
-  if (signal?.aborted === true) {
-    throw exportStreamCancelled(store.graphId, signal.reason);
-  }
   const channel = createRendezvousChannel<GraphInterchangeChunk>();
+  const abortStream = (): void => {
+    channel.abort(
+      exportStreamCancelled(
+        "mid-stream",
+        store.graphId,
+        signal,
+        backend.capabilities.transactions,
+      ),
+    );
+  };
+  const unsubscribeFromSignal = (): void => {
+    signal?.removeEventListener("abort", abortStream);
+  };
+  // REGISTER, THEN RE-CHECK — and in that order, because the two halves cover
+  // different instants and neither covers both:
+  //
+  // - The listener covers every abort from now on, including one raised
+  //   SYNCHRONOUSLY by the driver inside `backend.transaction(...)` below. That
+  //   is the window this ordering exists for: subscribing after that call
+  //   returned meant such an abort was delivered to nobody — an `AbortSignal`
+  //   does not replay `abort` to a listener that arrives late — and the export
+  //   went on holding its snapshot and its lease with `signal.aborted === true`.
+  // - The re-check covers an abort that already happened, which the event will
+  //   never deliver at all. It is not ceremonial: `parse` above reads the
+  //   caller's options object, and a getter on it can abort the controller
+  //   before this line is reached.
+  //
+  // Nothing between them can yield, so there is no instant at which an abort is
+  // neither seen by the re-check nor delivered to the listener.
+  signal?.addEventListener("abort", abortStream, { once: true });
+  if (signal?.aborted === true) {
+    // Nothing has been claimed or opened yet, so this stream is over before it
+    // started rather than cancelled in flight — and it must leave no listener
+    // on a signal the caller may hold for the rest of the process.
+    unsubscribeFromSignal();
+    throw exportStreamCancelled(
+      "before-open",
+      store.graphId,
+      signal,
+      backend.capabilities.transactions,
+    );
+  }
   const produce = async (
     target: GraphBackend | TransactionBackend,
   ): Promise<void> => {
@@ -168,65 +222,68 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       channel.push(chunk),
     );
   };
-  // On a serialized backend the snapshot transaction below holds the single
-  // connection for the whole stream. Claim that connection's one stream lease
-  // for the duration so a concurrent import — or a SECOND export, whose
-  // snapshot transaction would nest inside this one just as fatally — is
-  // refused rather than left to wait for a slot that cannot free up. This is
-  // what the stream's consumer identity cannot answer once a caller wraps the
-  // iterable. And if another stream already holds that connection, THIS side is
-  // the one refused: it is the stream that started second.
-  // The claim is deliberately inside the generator body: it must begin when the
-  // transaction opens (first pull), not when the iterable is constructed.
-  const releaseSnapshotExport =
-    backend.capabilities.transactions ?
-      claimSnapshotExportLeaseOrRefuse(store.graphId, backend)
-    : () => {
-        // No snapshot transaction is opened here, so nothing was claimed:
-        // a non-transactional export holds nothing against a concurrent
-        // stream.
-      };
-  // `backend.transaction(...)` is a driver call, and a driver can reject
-  // SYNCHRONOUSLY — a closed handle, a pool that refuses the checkout — before
-  // any promise exists. The release below is installed on the promise it
-  // returns, so a synchronous throw would skip it and strand the lease for the
-  // life of the process, refusing every later stream on that connection on
-  // behalf of one that never started. Releasing here (idempotently) and
-  // rethrowing keeps "the lease lives exactly as long as the transaction" true
-  // on that path too.
+  /**
+   * Opens the snapshot and wires the producer, or gives back EVERYTHING this
+   * stream has taken and rethrows.
+   *
+   * On a serialized backend the snapshot transaction holds the single
+   * connection for the whole stream. Claiming that connection's one stream
+   * lease for the duration makes a concurrent import — or a SECOND export,
+   * whose snapshot transaction would nest inside this one just as fatally —
+   * be refused rather than left to wait for a slot that cannot free up. This is
+   * what the stream's consumer identity cannot answer once a caller wraps the
+   * iterable. And if another stream already holds that connection, THIS side is
+   * the one refused: it is the stream that started second. The claim is
+   * deliberately inside the generator body: it must begin when the transaction
+   * opens (first pull), not when the iterable is constructed.
+   *
+   * Two things can stop the stream before it starts, and both give back what
+   * they took. The lease refusal takes nothing but the signal subscription made
+   * above. `backend.transaction(...)` is a driver call, and a driver can reject
+   * SYNCHRONOUSLY — a closed handle, a pool that refuses the checkout — before
+   * any promise exists; the release is installed on the promise it returns, so
+   * a synchronous throw would otherwise skip it and strand the lease for the
+   * life of the process, refusing every later stream on that connection on
+   * behalf of one that never ran a statement.
+   */
   const beginProducer = (): Promise<void> => {
     try {
-      return backend.capabilities.transactions ?
-          backend.transaction((target) => produce(target), {
-            isolationLevel: "repeatable_read",
-            accessMode: "read_only",
-          })
-        : produce(backend);
+      const releaseSnapshotExport =
+        backend.capabilities.transactions ?
+          claimSnapshotExportLeaseOrRefuse(store.graphId, backend)
+        : () => {
+            // No snapshot transaction is opened here, so nothing was claimed:
+            // a non-transactional export holds nothing against a concurrent
+            // stream.
+          };
+      try {
+        const started =
+          backend.capabilities.transactions ?
+            backend.transaction((target) => produce(target), {
+              isolationLevel: "repeatable_read",
+              accessMode: "read_only",
+            })
+          : produce(backend);
+        return started.then(
+          () => {
+            releaseSnapshotExport();
+            channel.finish();
+          },
+          (error: unknown) => {
+            releaseSnapshotExport();
+            channel.fail(error);
+          },
+        );
+      } catch (error) {
+        releaseSnapshotExport();
+        throw error;
+      }
     } catch (error) {
-      releaseSnapshotExport();
+      unsubscribeFromSignal();
       throw error;
     }
   };
-  const producer = beginProducer().then(
-    () => {
-      releaseSnapshotExport();
-      channel.finish();
-    },
-    (error: unknown) => {
-      releaseSnapshotExport();
-      channel.fail(error);
-    },
-  );
-  // The signal is subscribed only once the snapshot is actually open, and in
-  // the SAME synchronous turn that opened it — nothing above yields, so no
-  // abort can be observed in between, and the two paths that throw before this
-  // point (the lease refusal, and a driver that rejects `transaction()`
-  // synchronously) have already given back everything they took. Subscribing
-  // earlier would attach a stream that never started to the caller's signal.
-  const abortStream = (): void => {
-    channel.abort(exportStreamCancelled(store.graphId, signal?.reason));
-  };
-  signal?.addEventListener("abort", abortStream, { once: true });
+  const producer = beginProducer();
 
   try {
     for (;;) {
@@ -236,29 +293,74 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       delivery.acknowledge();
     }
   } finally {
-    // Unsubscribe before unwinding: this stream is settling through a
-    // cooperative path, and a signal the caller reuses for its next export must
-    // not still reach this one — nor keep this generator's scope alive for as
-    // long as the caller holds the signal.
-    signal?.removeEventListener("abort", abortStream);
+    // Unsubscribe FIRST: this stream is settling through a cooperative path, so
+    // an abort arriving during the teardown below must not publish a terminal
+    // error in place of the clean end the consumer is owed — and a signal the
+    // caller reuses for its next export must not still reach this one, nor keep
+    // this generator's scope alive for as long as the caller holds it.
+    unsubscribeFromSignal();
     channel.cancel();
     await producer;
   }
 }
 
 /**
+ * How far the stream had got when the abort landed. Every phase ends the same
+ * way for the caller — nothing is held, start a new export — so they share one
+ * error class and ONE `code`; only the message differs, because a refusal that
+ * claimed nothing must not claim to have rolled anything back.
+ *
+ * - `before-open` — the abort was already visible when the stream was asked for
+ *   its first chunk. No transaction was opened and no lease claimed, whatever
+ *   the backend can do.
+ * - `mid-stream` — the abort arrived from the moment the stream began opening
+ *   onward, INCLUDING synchronously inside `backend.transaction(...)`. What was
+ *   given back depends on what was taken, which is why this phase needs the
+ *   backend's capability to describe itself honestly.
+ */
+type ExportAbortPhase = "before-open" | "mid-stream";
+
+/**
  * The single owner of the error an aborted export stream reports, so the
  * pre-flight refusal and the mid-stream abort state the same condition in the
- * same vocabulary — one code, one message, the signal's own reason as `cause`.
+ * same vocabulary — one code, the signal's own reason as `cause`, and a message
+ * that is true of the phase AND of the backend it describes.
+ *
+ * `framed` is `backend.capabilities.transactions`. A non-transactional export
+ * opened no snapshot and claimed no lease, so telling its consumer that a
+ * snapshot was rolled back and a connection released would describe work that
+ * never happened — and would hide the thing that consumer actually needs to
+ * know, which is that the chunks it did receive were never one point in time.
  */
 function exportStreamCancelled(
+  phase: ExportAbortPhase,
   graphId: string,
-  cause?: unknown,
+  signal: AbortSignal | undefined,
+  framed: boolean,
 ): ExportStreamCancelledError {
+  const message =
+    phase === "before-open" ?
+      "The graph export stream was aborted through its AbortSignal before it opened: no snapshot transaction was started and no database connection claimed."
+    : framed ?
+      "The graph export stream was aborted through its AbortSignal: its repeatable-read snapshot has been rolled back and the connection it held released."
+    : "The graph export stream was aborted through its AbortSignal: its remaining reads were abandoned. This backend does not support transactions, so the export held no snapshot and no connection — and the chunks already delivered were never guaranteed to agree with one another.";
+  const cause: unknown = signal?.reason;
+  // The suggestion must be capability-aware for the same reason the message is:
+  // the class default claims a snapshot rollback, which is false on the
+  // non-transactional arm and for a stream that never opened.
+  const suggestion =
+    phase === "before-open" ?
+      "Start a new export; the aborted one claimed nothing."
+    : framed ?
+      "Start a new export; the aborted one released its snapshot transaction and the connection it held."
+    : "Start a new export; nothing was held, but discard the chunks already delivered unless partial, mutually-inconsistent data is acceptable.";
   return new ExportStreamCancelledError(
-    "The graph export stream was aborted through its AbortSignal: its repeatable-read snapshot has been rolled back and the connection it held released.",
+    message,
     { graphId },
-    cause === undefined ? {} : { cause },
+    {
+      suggestion,
+      ...(cause === undefined ? {} : { cause }),
+    },
   );
 }
 
@@ -530,14 +632,21 @@ function createRendezvousChannel<T>(): RendezvousChannel<T> {
   }
 
   function abort(error: Error): void {
-    // Nothing is held any more: the producer already settled (so the
-    // transaction is committed or rolled back and the lease given back), or it
-    // is already unwinding for someone else. Either way this abort has nothing
-    // to take back and must not restate the outcome. Both arms are defensive
-    // rather than reachable today — the rendezvous parks the producer in `push`
-    // for exactly as long as the consumer is parked at a `yield`, so a settled
-    // producer always means the consumer's pull already resolved and the
-    // generator's `finally` already unsubscribed this stream from its signal.
+    // Nothing is held any more, so this abort has nothing to take back and must
+    // not restate the outcome. The two arms are NOT alike in how they are
+    // reached:
+    //
+    // - `terminal !== undefined` IS reachable. The producer settles
+    //   (`finish`/`fail`) and resolves the consumer's pending take, but the
+    //   generator only resumes to run its `finally` — and unsubscribe — in a
+    //   later microtask. An abort landing in that window finds the outcome
+    //   already published and must leave it alone: the export really did end
+    //   the way `terminal` says, and the consumer has already been handed that
+    //   answer.
+    // - `producerUnwindError !== undefined` is defensive. `cancel()` sets it
+    //   from the generator's `finally`, which unsubscribes BEFORE calling it,
+    //   and the listener is `{ once: true }`, so there is no path today that
+    //   calls `abort` twice or calls it after `cancel`.
     if (terminal !== undefined || producerUnwindError !== undefined) return;
     producerUnwindError = error;
     terminal = { error };

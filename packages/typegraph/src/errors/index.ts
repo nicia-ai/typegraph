@@ -1419,10 +1419,15 @@ export class TrustedImportError extends TypeGraphError {
  * Thrown to a graph export stream's consumer when the caller's `AbortSignal`
  * settled the stream instead of it reaching its end.
  *
- * Raised only after the export's repeatable-read snapshot has been rolled back
- * and the serialized connection's stream lease released, so receiving it means
- * the connection is already usable again. `cause` carries the signal's own
- * `reason` when the caller supplied one.
+ * Raised only after the export has given back everything it took, so receiving
+ * it means the connection is already usable again. WHAT it took depends on the
+ * backend: an export on one reporting `capabilities.transactions` holds a
+ * repeatable-read snapshot (and, on a serialized connection, that connection's
+ * stream lease), and both are settled before this is thrown; an export on a
+ * backend without transactions holds neither, and its remaining reads are
+ * simply abandoned — its already-delivered chunks were never one snapshot to
+ * begin with. The message says which case applies. `cause` carries the signal's
+ * own `reason` when the caller supplied one.
  */
 export class ExportStreamCancelledError extends TypeGraphError {
   constructor(

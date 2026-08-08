@@ -48,6 +48,7 @@ import {
 import { EmbeddingDimensionChangedError } from "../errors";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { createDataKeyedBag } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
 import { LEGACY_EMBEDDINGS_TABLE_NAME } from "./drizzle/schema/sqlite";
@@ -225,9 +226,10 @@ export async function migrateLegacyEmbeddings(
   const upsertEmbedding = backend.upsertEmbedding;
   const ensureVectorSlotContribution = backend.ensureVectorSlotContribution;
 
-  const perField: Record<string, number> = {};
-  const skippedDimensionMismatch: Record<string, number> = {};
-  const skippedDecodeError: Record<string, number> = {};
+  // Data-keyed: slot keys are built from a row's `node_kind` / `field_path`.
+  const perField = createDataKeyedBag<number>();
+  const skippedDimensionMismatch = createDataKeyedBag<number>();
+  const skippedDecodeError = createDataKeyedBag<number>();
   // (kind, field) slots whose per-field table + durable marker this run has
   // already provisioned, mapped to the dimension the table was fixed at.
   // `upsertEmbedding` asserts the marker (#135) and no longer self-creates

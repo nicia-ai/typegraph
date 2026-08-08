@@ -61,7 +61,8 @@
  *     schema commits (which take the same lock), which is what makes two racing
  *     openers safe. The row lock earns its keep on the schema-BEARING states — the
  *     legacy upgrade, and any schema-managed Store write, which takes that row
- *     `FOR SHARE`.
+ *     `FOR SHARE`. Writers that take NEITHER — raw, schema-less ones — are
+ *     excluded by the claim's own relation lock (see below).
  *
  * So a competing writer of those classes either commits first — and this claim
  * then SEES its row and refuses, having written nothing — or waits until the claim
@@ -96,33 +97,35 @@
  * no claim), never whether a write is allowed; every decision that admits a write
  * is re-taken inside the fence.
  *
- * ACCEPTED RESIDUAL: the PostgreSQL read-committed schema-less writer. One writer
- * class sits outside the fence on PostgreSQL: a raw `createStore` writer takes no
- * schema-row lock and no advisory lock, so at read committed its insert can commit
- * between the claim's fenced re-inspection and the claim's commit. Such a writer is
- * refused whenever its row lands BEFORE the re-inspection; a row landing inside
- * that window coexists with the claim. SQLite has no such gap (`BEGIN IMMEDIATE`
- * serializes all writers).
+ * THE UNFENCED-WRITER WINDOW, AND HOW IT IS CLOSED. One writer class takes
+ * neither the advisory lock nor the schema row: a schema-LESS raw `createStore`
+ * writer, or a direct `backend.insertNode`/`insertEdge` call. At PostgreSQL's read
+ * committed its insert could commit between the claim's fenced re-inspection and
+ * the claim's commit, and the claim would mark a graph id it saw empty and an
+ * application saw as its own. That window is CLOSED, not accepted: the claim takes
+ * `LOCK TABLE <nodes>, <edges> IN SHARE ROW EXCLUSIVE MODE` inside the fence and
+ * before the re-inspection, which drains in-flight row writers and holds new ones
+ * off until the marker commits. {@link drainUnfencedRowWriters} states the mode
+ * choice, the deadlock analysis, and the cost — every node/edge write on the
+ * database waits for the duration of a claim, which happens only when a sidecar is
+ * created, upgraded, or resumed. SQLite needs no such lock: `BEGIN IMMEDIATE` owns
+ * the single writer slot.
  *
- * This is not closable at reasonable cost, and deliberately is not closed. Raising
- * the claim to SERIALIZABLE does not help: SSI constrains only transactions that
- * are themselves serializable, and a plain `createStore` writer is not one, so it
- * is never a party to the conflict SSI would detect. Predicate-locking the range
- * instead would mean taking a lock on rows that do not exist for a graph id that
- * has none — `SELECT ... FOR UPDATE` locks matched rows, and an empty result
- * matches nothing — so there is no expressible lock for "no row for this graph id
- * may appear". The remaining option, forcing every raw writer through a per-graph
- * advisory lock, would put a lock acquisition on the hot path of every write in the
- * library to protect one module's claim, which is the wrong trade.
- *
- * The consequence is also bounded. The failure is a visible NAMESPACE COLLISION —
- * an application's rows and this module's marker under one graph id — not
- * corruption: no row is overwritten, no row is lost, and both sides read their own
- * rows back unchanged. And it lands in the same place as the accepted semantics
- * one instant later: an application writing into the sidecar AFTER the claim
- * commits is precisely the marker-boundary case this module already documents as
- * "the application is the intruder in a marked graph". The window makes that
- * outcome reachable a few milliseconds early; it does not create a new one.
+ * What remains is narrower and is stated as a residual rather than closed: a
+ * writer that inserts ONLY into a secondary per-graph relation — identity
+ * assertions, the revision clock, recorded history — under this id, with no node
+ * or edge row in the same transaction and no schema of its own. No TypeGraph write
+ * path does that: those relations are written either atomically with the node or
+ * edge row that produced them (drained by the table lock), or by a schema-managed
+ * or identity-enabled store, which must first register a schema for this id
+ * through the same per-graph advisory lock this claim holds. Reaching it means an
+ * application writing TypeGraph's internal tables by hand. If it were reached, the
+ * failure is a visible NAMESPACE COLLISION — an application's rows and this
+ * module's marker under one graph id — not corruption: no row is overwritten, no
+ * row is lost, and both sides read their own rows back unchanged. It is also the
+ * accepted marker-boundary semantics one instant early: an application writing
+ * into the sidecar AFTER the claim commits is already documented as "the
+ * application is the intruder in a marked graph".
  *
  * The claim needs a transactional schema fence. A backend that exposes none is
  * refused with `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED` rather than claiming the id
@@ -145,6 +148,7 @@ import type {
 } from "./typegraph-internal";
 import {
   asCompiledRowsSql,
+  asCompiledStatementSql,
   computeSchemaHash,
   ConfigurationError,
   createSqlSchema,
@@ -324,6 +328,10 @@ async function claimSidecarOwnership(
     throw provenanceClaimUnfenced(graph.id, targetGraphId);
   }
   return fence(graph.id, async (tx) => {
+    // Before the re-inspection, not after it: the drain is only worth anything
+    // if no row can land between the read it authorizes and this transaction's
+    // commit.
+    await drainUnfencedRowWriters(tx);
     const verdict = await inspectSidecarGraphId(tx, graph, targetGraphId);
     // `owned`: a concurrent opener claimed the id first. Nothing to write, and
     // its marker is the same durable claim this one would have made.
@@ -340,6 +348,90 @@ async function claimSidecarOwnership(
     });
     return verdict;
   });
+}
+
+/**
+ * The claim's own port: the fenced transaction, plus the two members the drain
+ * needs beyond the inspection reads.
+ */
+type SidecarClaimPort = SidecarInspectionPort &
+  Readonly<{
+    dialect: GraphBackend["dialect"];
+    executeStatement: NonNullable<GraphBackend["executeStatement"]>;
+  }>;
+
+/**
+ * Drains — and holds off — the writers the per-graph fence cannot reach, so the
+ * claim's re-inspection reads a state no one can change until it commits.
+ *
+ * The fence excludes every writer that takes the per-graph advisory lock (other
+ * claims, schema commits) or the active schema row (`FOR SHARE` on every
+ * schema-managed Store write). One class takes neither: a schema-LESS raw
+ * `createStore` writer, or a direct `backend.insertNode`/`insertEdge` call. At
+ * PostgreSQL's read committed its INSERT can commit between the re-inspection's
+ * statement snapshot and this transaction's commit, and the claim would then
+ * mark a graph id it saw empty and an application saw as its own.
+ *
+ * A relation lock is the expressible exclusion for "no row may appear", and this
+ * module takes it — the same advisory-then-relation ordering the contribution
+ * teardown uses, and the same reasoning as the identity enablement snapshot's
+ * `LOCK TABLE ... IN SHARE MODE`: a verdict computed from the absence of rows is
+ * only sound if nothing can add one while it is acted on.
+ *
+ * `SHARE ROW EXCLUSIVE` is the minimal mode that works here, and the mode choice
+ * is load-bearing:
+ *
+ *   - it conflicts with `ROW EXCLUSIVE`, so it excludes every INSERT/UPDATE/DELETE
+ *     on these two tables (for EVERY graph — the tables are shared);
+ *   - it is SELF-exclusive, which plain `SHARE` is not. `SHARE` would let two
+ *     concurrent claims (different sidecar ids, different advisory locks) both
+ *     acquire it and then both request `ROW EXCLUSIVE` for their own marker
+ *     INSERT — each blocked by the other's `SHARE`. That is a textbook
+ *     lock-upgrade deadlock, and PostgreSQL would resolve it by aborting one
+ *     claim. Under this mode the second claim waits at the lock, holding nothing
+ *     the first needs;
+ *   - it still admits readers (`ACCESS SHARE`) and row-level lockers
+ *     (`ROW SHARE`), which `EXCLUSIVE` would block for no benefit here.
+ *
+ * COST, stated plainly, because it is real: while this transaction runs, every
+ * node and edge write on the whole database waits. The bound is what makes it
+ * acceptable — the lock is taken ONLY inside the claim, so only when a sidecar is
+ * created, upgraded from the pre-marker schema, or resumed after a crash; never
+ * on the common path, where an already-owned sidecar opens without a fence at
+ * all. Its duration is the re-inspection's probes plus one INSERT, with no user
+ * code and no I/O of the caller's inside it.
+ *
+ * DEADLOCK ANALYSIS, by writer class — the wait graph stays acyclic in each:
+ *
+ *   - a raw, schema-less writer takes `ROW EXCLUSIVE` here and nothing else, so
+ *     the wait is one-directional (this claim waits for it; it never waits for
+ *     anything this claim holds);
+ *   - a schema-MANAGED writer also takes the graph's active schema row
+ *     `FOR SHARE`, which this fence holds `FOR UPDATE` — but it takes that row
+ *     lock FIRST, as the opening statement of its write transaction
+ *     (`lockSchemaVersionForStoreWrite`, run before any row write precisely so a
+ *     rolled-back savepoint cannot drop the fence). It therefore can never be
+ *     holding `ROW EXCLUSIVE` on these tables while waiting on the schema row,
+ *     which is the only shape that would close a cycle;
+ *   - a fence holder for ANOTHER graph id can hold `ROW EXCLUSIVE` here while
+ *     this claim waits, but it never requests another graph's advisory lock;
+ *   - another CLAIM is excluded by this mode's self-exclusivity before it holds
+ *     anything (see above), which is the case a plain `SHARE` would deadlock.
+ *
+ * SQLITE takes no lock: `BEGIN IMMEDIATE` — which every fence transaction here is
+ * opened with — already owns the engine's single writer slot, so the drain is
+ * complete before the callback runs. Unlike the identity path, this fence is
+ * always one TypeGraph opened itself, never one adopted from a caller's
+ * `DEFERRED` transaction, so that premise holds unconditionally.
+ */
+async function drainUnfencedRowWriters(tx: SidecarClaimPort): Promise<void> {
+  if (tx.dialect !== "postgres") return;
+  const schema = createSqlSchema(tx.tableNames);
+  await tx.executeStatement(
+    asCompiledStatementSql(
+      sql`LOCK TABLE ${schema.nodesTable}, ${schema.edgesTable} IN SHARE ROW EXCLUSIVE MODE`,
+    ),
+  );
 }
 
 /**

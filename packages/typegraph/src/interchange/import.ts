@@ -27,6 +27,7 @@ import {
 import { type EdgeRegistration, type NodeRegistration } from "../core/types";
 import {
   ConfigurationError,
+  DatabaseOperationError,
   IdentityContradictionError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   INVERTED_VALIDITY_WINDOW_CODE,
@@ -59,7 +60,7 @@ import {
   assertWritableValidityWindow,
   validateOptionalCanonicalIsoDate,
 } from "../utils/date";
-import { hasOwnKey } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { encodeTupleKey } from "../utils/tuple-key";
 import { exportStreamBackend } from "./stream-source";
 import {
@@ -1400,6 +1401,100 @@ async function catchUniquenessError<T>(
 }
 
 /**
+ * The stable prefix on every per-row refusal caused by an incoming edge naming
+ * an id that a DIFFERENT kind already occupies, so a caller can recognize the
+ * condition without parsing prose — the same `CODE: message` idiom the validity
+ * window refusals use.
+ */
+const EDGE_KIND_CONFLICT_CODE = "INTERCHANGE_EDGE_KIND_CONFLICT";
+
+/**
+ * Whether an existing row is actually the edge this document is describing.
+ *
+ * THE SINGLE OWNER of that decision, consulted by both edge-import paths (the
+ * batched slice and the per-row fallback) before ANY conflict strategy runs.
+ *
+ * Edge ids are graph-global while every interchange edge states a kind, and the
+ * existence probe (`getEdge` / `getEdges`) is keyed on `(graph_id, id)` with no
+ * kind comparison — so an incoming edge of kind A whose id is already taken by
+ * a kind-B row finds that row and, without this check, was treated as the same
+ * edge by all three strategies: `update` wrote A's props onto the kind-B row
+ * with nothing in `result.errors`, and `skip` counted the document's edge as
+ * already present when nothing of that kind was ever there. Both are silent,
+ * and the id is unique per graph, so the incoming edge cannot be created under
+ * it either. Reporting is the only honest outcome.
+ *
+ * Deliberately checked ABOVE the `onConflict` switch rather than inside each
+ * arm: the question "is this the same edge?" is prior to "what do we do about
+ * the same edge?", and answering it per-arm is how two of the three arms came
+ * to answer it differently.
+ *
+ * Nodes need no equivalent: their probe is `getNode(graphId, kind, id)`, which
+ * is kind-scoped, so a cross-kind id collision simply reads as absent there.
+ */
+function edgeKindConflict(
+  edge: InterchangeEdge,
+  existing: Readonly<{ kind: string }>,
+): string | undefined {
+  if (existing.kind === edge.kind) return undefined;
+  return (
+    `${EDGE_KIND_CONFLICT_CODE}: Edge "${edge.id}" already exists with kind ` +
+    `"${existing.kind}", but this document states kind "${edge.kind}". Edge ids ` +
+    "are unique per graph, so the incoming edge can neither update nor be " +
+    "created under that id. Give it a distinct id, or import it under the kind " +
+    "the stored row already carries."
+  );
+}
+
+/**
+ * Updates an existing edge under the kind the caller checked it carries, and
+ * reports a write that landed on nothing as a per-row error.
+ *
+ * `kind` is stated so the predicate lives in the UPDATE's own `WHERE` — the
+ * contract on {@link UpdateEdgeParams}, and the only placement a concurrent
+ * hard-delete-and-recreate cannot slip past, because a read-then-write pair
+ * keyed on `(graph_id, id)` alone re-resolves that id between the probe and the
+ * write under PostgreSQL READ COMMITTED. Omitting it made the import's own
+ * kind check advisory: correct until raced.
+ *
+ * When the predicate does match nothing, the backend reports it as a
+ * `no_row_returned` {@link DatabaseOperationError}. By then this import has
+ * already checked the kind against a row it read, so reaching here means the
+ * target changed underneath us — a per-row fact about one edge, not a reason to
+ * abort an import whose earlier rows are already written.
+ */
+async function updateImportedEdge(
+  backend: GraphBackend | TransactionBackend,
+  graphId: string,
+  edge: InterchangeEdge,
+  props: Readonly<Record<string, unknown>>,
+): Promise<string | undefined> {
+  try {
+    await backend.updateEdge({
+      graphId,
+      id: edge.id,
+      kind: edge.kind,
+      props,
+      ...(edge.validTo !== undefined && { validTo: edge.validTo }),
+    });
+    return undefined;
+  } catch (error) {
+    if (
+      !(error instanceof DatabaseOperationError) ||
+      error.details.reason !== "no_row_returned"
+    ) {
+      throw error;
+    }
+    return (
+      `${EDGE_KIND_CONFLICT_CODE}: Edge "${edge.id}" of kind "${edge.kind}" was ` +
+      "not updated: no live edge with that id and kind remained when the write " +
+      "ran, so the row changed or was removed after this import checked it. " +
+      "Re-export the source and retry."
+    );
+  }
+}
+
+/**
  * Runs a window assertion and reports its refusal as a per-row error message
  * (recorded in the import result) instead of throwing, so one malformed row does
  * not abort the whole import. A window refusal that carries a stable issue code —
@@ -1878,6 +1973,13 @@ async function processEdgeSlice(
       : await backend.getEdge(graphId, edge.id);
 
     if (existing) {
+      // Prior to every strategy: a row occupying this id under another kind is
+      // not this edge, and none of the three arms may treat it as one.
+      const kindConflict = edgeKindConflict(edge, existing);
+      if (kindConflict !== undefined) {
+        record(edge, { status: "error", error: kindConflict });
+        continue;
+      }
       switch (options.onConflict) {
         case "skip": {
           record(edge, {
@@ -1906,12 +2008,16 @@ async function processEdgeSlice(
             record(edge, { status: "error", error: updateWindowError });
             break;
           }
-          await backend.updateEdge({
+          const updateError = await updateImportedEdge(
+            backend,
             graphId,
-            id: edge.id,
+            edge,
             props,
-            ...(edge.validTo !== undefined && { validTo: edge.validTo }),
-          });
+          );
+          if (updateError !== undefined) {
+            record(edge, { status: "error", error: updateError });
+            break;
+          }
           record(edge, { status: "updated" });
           break;
         }
@@ -2061,6 +2167,11 @@ async function processEdge(
   const existing = await backend.getEdge(graphId, edge.id);
 
   if (existing) {
+    // Same prior question as the batched path, answered by the same owner.
+    const kindConflict = edgeKindConflict(edge, existing);
+    if (kindConflict !== undefined) {
+      return { status: "error", error: kindConflict };
+    }
     switch (options.onConflict) {
       case "skip": {
         return {
@@ -2084,12 +2195,15 @@ async function processEdge(
         if (updateWindowError !== undefined) {
           return { status: "error", error: updateWindowError };
         }
-        await backend.updateEdge({
+        const updateError = await updateImportedEdge(
+          backend,
           graphId,
-          id: edge.id,
-          props: propsResult.data,
-          ...(edge.validTo !== undefined && { validTo: edge.validTo }),
-        });
+          edge,
+          propsResult.data,
+        );
+        if (updateError !== undefined) {
+          return { status: "error", error: updateError };
+        }
         return { status: "updated" };
       }
     }
@@ -2144,7 +2258,8 @@ function validateProperties(
         }
         case "strip": {
           // Remove unknown properties
-          const stripped: Record<string, unknown> = {};
+          // Data-keyed: `knownKeys` are schema-declared property names.
+          const stripped = createDataKeyedBag<unknown>();
           for (const key of knownKeys) {
             if (hasOwnKey(properties, key)) {
               stripped[key] = properties[key];

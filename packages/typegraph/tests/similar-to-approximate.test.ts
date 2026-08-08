@@ -15,6 +15,9 @@
  *   default path never does.
  * - DEGRADATION: a slot declared `indexType: "none"` compiles the opt-in
  *   to the strategy's exact scan (no MATCH), with identical results.
+ * - REFUSAL: `approximate: true` alongside a `metric` the slot's ANN
+ *   structure was not built for is refused with a typed error naming both
+ *   metrics, rather than silently downgraded to the exact scan.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -262,11 +265,16 @@ async function runScenario(created: CreatedBackend): Promise<void> {
     );
     expect(flatApproximate).toEqual(flatExact);
 
-    // --- Metric override + approximate: the ANN structure is built for
-    //     the DECLARED metric, so an overridden metric must fall back to
-    //     the exact scan. The corpus makes the failure observable: cosine
-    //     top-1 is mag-far, l2 top-1 is mag-near — ANN-retrieval under
-    //     cosine re-scored as l2 would return mag-far. ---
+    // --- Metric override + approximate: the ANN structure is built for the
+    //     DECLARED metric, so it cannot retrieve under an overridden one.
+    //     Both options were stated and only one can be honored, so the
+    //     predicate is REFUSED naming both metrics instead of quietly
+    //     compiling the exact scan (#433's sibling: an accepted option is
+    //     applied or refused, never ignored). The corpus makes the stakes
+    //     observable: cosine top-1 is mag-far, l2 top-1 is mag-near, so
+    //     ANN-retrieval under cosine re-scored as l2 returns the wrong row —
+    //     which is exactly what a caller who asked for approximate l2 would
+    //     have had no way to see. ---
     function magQuery(options: Readonly<{ approximate?: boolean }>) {
       return store
         .query()
@@ -281,15 +289,28 @@ async function runScenario(created: CreatedBackend): Promise<void> {
         )
         .select((ctx) => ({ id: ctx.d.id }));
     }
+    // The exact path keeps the override: any metric is well-defined over the
+    // stored vectors when the engine scans, and nothing is dropped.
     const l2Exact = await ids(magQuery({}));
     expect(l2Exact).toEqual(["mag-near"]);
-    const l2Approximate = await ids(magQuery({ approximate: true }));
-    expect(l2Approximate).toEqual(["mag-near"]);
-    // The mismatched override compiled to the exact scan, not the ANN form.
-    expect(magQuery({ approximate: true }).toSQL().sql).not.toContain(
-      "tg_ann_src",
+    // The approximate path refuses it, at compile time (before any row is
+    // read), naming both metrics so the caller can see which one to drop.
+    await expect(
+      magQuery({ approximate: true }).execute(),
+    ).rejects.toMatchObject({
+      code: "CONFIGURATION_ERROR",
+      details: {
+        nodeKind: "MagDoc",
+        fieldPath: "embedding",
+        requestedMetric: "l2",
+        declaredMetric: "cosine",
+      },
+    });
+    expect(() => magQuery({ approximate: true }).toSQL()).toThrow(
+      /cannot use metric "l2"/,
     );
-    // Sanity: cosine ranking really does disagree on this corpus.
+    // Sanity: cosine ranking really does disagree on this corpus, so the
+    // refusal is protecting a real wrong answer rather than a hypothetical.
     const cosineTop = await ids(
       store
         .query()
@@ -300,6 +321,22 @@ async function runScenario(created: CreatedBackend): Promise<void> {
         .select((ctx) => ({ id: ctx.d.id })),
     );
     expect(cosineTop).toEqual(["mag-far"]);
+    // The DECLARED degradation stays a degradation: an unindexed slot has no
+    // ANN structure for a metric to be bound to, so the same override with
+    // `approximate` compiles and returns the exact l2 answer.
+    const flatL2Approximate = await ids(
+      store
+        .query()
+        .from("FlatDoc", "d")
+        .whereNode("d", (document) =>
+          document.embedding.similarTo(QUERY_EMBEDDING, 2, {
+            metric: "l2",
+            approximate: true,
+          }),
+        )
+        .select((ctx) => ({ id: ctx.d.id })),
+    );
+    expect(flatL2Approximate.length).toBe(2);
 
     // --- Fusion composition: the approximate vector CTE feeds the same
     //     RRF machinery; fused rankings must match the exact path. ---

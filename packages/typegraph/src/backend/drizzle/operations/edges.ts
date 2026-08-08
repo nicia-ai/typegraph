@@ -145,22 +145,59 @@ export function buildGetEdges(
 }
 
 /**
- * The `AND kind = ?` an edge write carries when its caller stated the kind it
- * expects the row to already have (see {@link UpdateEdgeParams}'s `kind`).
+ * The `AND <column> = ?` conjunction an edge write carries for every immutable
+ * identity component its caller ASSERTED (see {@link UpdateEdgeParams}'s
+ * `kind` / `fromKind` / `fromId` / `toKind` / `toId`).
  *
  * This is what makes a kind-scoped edge write SELF-VERIFYING: the identity the
- * caller checked and the row the statement mutates are resolved by one
- * `WHERE`, in one statement, so no concurrent `hardDelete` + recreate can
- * re-point the id between the check and the write. An absent kind emits no
- * predicate — the node delete cascade legitimately spans kinds.
+ * caller checked and the row the statement mutates are resolved by ONE `WHERE`,
+ * in ONE statement, so nothing a concurrent session does between the check and
+ * the write can re-point the id at a row that fails an assertion this write
+ * made. Kind alone is not sufficient for that: a `hardDelete` + recreate under
+ * the SAME kind with DIFFERENT endpoints slips past a kind-only predicate, and
+ * an upsert that asserted endpoints would then have written to an edge whose
+ * endpoints it never checked.
  *
- * One owner: every edge write statement that accepts an expected kind builds
- * its predicate here, so `UPDATE`, soft `DELETE`, and hard `DELETE` cannot
- * drift into disagreeing about what "the same edge" means.
+ * Only ASSERTED components are emitted. A component the caller left undefined
+ * is one it made no claim about, and inventing a predicate for it would refuse
+ * writes that are legitimate: the node delete cascade states no kind at all
+ * because it removes every connected edge whatever its kind, and a plain
+ * `update` states kind without endpoints because the collection is kind-scoped
+ * and never looked at where the edge points.
+ *
+ * One owner: every edge write statement that accepts an expected identity
+ * builds its predicate here, so `UPDATE`, soft `DELETE`, and hard `DELETE`
+ * cannot drift into disagreeing about what "the same edge" means.
  */
-function expectedKindPredicate(tables: Tables, kind: string | undefined): SQL {
-  if (kind === undefined) return sql.empty();
-  return sql` AND ${tables.edges.kind} = ${kind}`;
+function expectedIdentityPredicate(
+  tables: Tables,
+  expected: Readonly<{
+    kind?: string;
+    fromKind?: string;
+    fromId?: string;
+    toKind?: string;
+    toId?: string;
+  }>,
+): SQL {
+  const { edges } = tables;
+  const parts = [
+    expected.kind === undefined ?
+      undefined
+    : sql` AND ${edges.kind} = ${expected.kind}`,
+    expected.fromKind === undefined ?
+      undefined
+    : sql` AND ${edges.fromKind} = ${expected.fromKind}`,
+    expected.fromId === undefined ?
+      undefined
+    : sql` AND ${edges.fromId} = ${expected.fromId}`,
+    expected.toKind === undefined ?
+      undefined
+    : sql` AND ${edges.toKind} = ${expected.toKind}`,
+    expected.toId === undefined ?
+      undefined
+    : sql` AND ${edges.toId} = ${expected.toId}`,
+  ].filter((part): part is SQL => part !== undefined);
+  return parts.length === 0 ? sql.empty() : sql.join(parts, sql``);
 }
 
 /**
@@ -201,14 +238,14 @@ export function buildUpdateEdge(
   }
 
   const setClause = sql.join(setParts, sql`, `);
-  const expectedKind = expectedKindPredicate(tables, params.kind);
+  const expectedIdentity = expectedIdentityPredicate(tables, params);
 
   if (params.clearDeleted) {
     return sql`
       UPDATE ${edges}
       SET ${setClause}
       WHERE ${edges.graphId} = ${params.graphId}
-        AND ${edges.id} = ${params.id}${expectedKind}
+        AND ${edges.id} = ${params.id}${expectedIdentity}
       RETURNING *
     `;
   }
@@ -217,7 +254,7 @@ export function buildUpdateEdge(
     UPDATE ${edges}
     SET ${setClause}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} = ${params.id}${expectedKind}
+      AND ${edges.id} = ${params.id}${expectedIdentity}
       AND ${edges.deletedAt} IS NULL
     RETURNING *
   `;
@@ -238,7 +275,7 @@ export function buildDeleteEdge(
     UPDATE ${edges}
     SET ${quotedColumn(edges.deletedAt)} = ${timestamp}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} = ${params.id}${expectedKindPredicate(tables, params.kind)}
+      AND ${edges.id} = ${params.id}${expectedIdentityPredicate(tables, params.kind === undefined ? {} : { kind: params.kind })}
       AND ${edges.deletedAt} IS NULL
   `;
 }
@@ -300,7 +337,7 @@ export function buildHardDeleteEdge(
   return sql`
     DELETE FROM ${edges}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} = ${params.id}${expectedKindPredicate(tables, params.kind)}
+      AND ${edges.id} = ${params.id}${expectedIdentityPredicate(tables, params.kind === undefined ? {} : { kind: params.kind })}
   `;
 }
 

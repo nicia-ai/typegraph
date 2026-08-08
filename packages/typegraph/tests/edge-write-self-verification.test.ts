@@ -72,7 +72,14 @@ function substitutingBackend(
   base: GraphBackend,
   method: EdgeWriteMethod,
   endpoints: Readonly<{ fromId: string; toId: string }>,
+  substitute?: Readonly<{ kind: string; fromId: string; toId: string }>,
 ): GraphBackend {
+  // Default: the OTHER kind, same endpoints — the cross-kind substitution.
+  const replacement = substitute ?? {
+    kind: "likes",
+    fromId: endpoints.fromId,
+    toId: endpoints.toId,
+  };
   return {
     ...base,
     transaction: (fn, options) =>
@@ -94,11 +101,11 @@ function substitutingBackend(
                 await source.insertEdge({
                   graphId: graph.id,
                   id: EDGE_ID,
-                  kind: "likes",
+                  kind: replacement.kind,
                   fromKind: "Person",
-                  fromId: endpoints.fromId,
+                  fromId: replacement.fromId,
                   toKind: "Person",
-                  toId: endpoints.toId,
+                  toId: replacement.toId,
                   props: { note: "substituted" },
                 });
               }
@@ -185,6 +192,47 @@ describe("kind-scoped edge writes carry their own identity predicate", () => {
     expect(await store.edges.likes.getById(LIKES_ID)).toBeUndefined();
     const original = await store.edges.knows.getById(KNOWS_ID);
     expect(original?.note).toBe("original");
+  });
+
+  it("refuses a SAME-KIND substitution that moved the endpoints an upsert asserted", async () => {
+    // The case a kind-only predicate cannot see. `getOrCreateByEndpoints`
+    // resolves an edge BY its endpoints, so its update asserts them; a
+    // competitor that hard-deletes and recreates the id under the SAME kind
+    // pointing at a different node satisfies `kind = 'knows'` and would have
+    // been written to. Carrying the endpoints into the same WHERE is what makes
+    // the write land only on a row satisfying everything it asserted.
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const carol = await setup.nodes.Person.create({ name: "Carol" });
+    await setup.edges.knows.create(
+      alice,
+      bob,
+      { note: "original" },
+      {
+        id: EDGE_ID,
+      },
+    );
+
+    const store = createStore(
+      graph,
+      substitutingBackend(
+        raw,
+        "updateEdge",
+        { fromId: alice.id, toId: bob.id },
+        // Same kind, DIFFERENT target endpoint.
+        { kind: "knows", fromId: alice.id, toId: carol.id },
+      ),
+    );
+
+    await expect(
+      store.edges.knows.getOrCreateByEndpoints(
+        alice,
+        bob,
+        { note: "caller" },
+        { ifExists: "update" },
+      ),
+    ).rejects.toThrow(/belongs to knows/u);
   });
 
   it("still refuses a cross-collection write on the ordinary path", async () => {

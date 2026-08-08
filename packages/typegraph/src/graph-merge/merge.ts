@@ -2799,7 +2799,8 @@ export function writeWouldChangeRow(
  * write comparisons operate on the persisted props bag only.
  */
 function nodeProps(node: Node): Record<string, unknown> {
-  const props: Record<string, unknown> = {};
+  // Data-keyed: schema property names spread onto the public node.
+  const props = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(node)) {
     if (key === "id" || key === "kind" || key === "meta") continue;
     props[key] = value;
@@ -2812,7 +2813,8 @@ function nodeProps(node: Node): Record<string, unknown> {
  * write comparisons operate on the persisted props bag only.
  */
 function edgeProps(edge: Edge): Record<string, unknown> {
-  const props: Record<string, unknown> = {};
+  // Data-keyed: schema property names spread onto the public edge.
+  const props = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(edge)) {
     if (
       key === "id" ||

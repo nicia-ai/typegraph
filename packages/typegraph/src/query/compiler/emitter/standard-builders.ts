@@ -14,6 +14,7 @@ import {
 } from "../../ast";
 import { type DialectAdapter } from "../../dialect/types";
 import {
+  assertApproximateMetricSupported,
   vectorMinScoreCondition,
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
@@ -1167,7 +1168,9 @@ type BuildStandardEmbeddingsCteInput = Readonly<{
  * `MATCH … k=`, libSQL `vector_top_k`, pgvector's index-eligible scan) —
  * scoped to the alias's candidate nodes via the same `candidates` pushdown
  * the search facade uses. Semantics become approximate (index recall); a
- * slot declared `indexType: "none"` degrades to the exact scan.
+ * slot declared `indexType: "none"` degrades to the exact scan, and a
+ * `metric` override the slot's ANN structure cannot serve is refused rather
+ * than degraded (see {@link assertApproximateMetricSupported}).
  */
 export function buildStandardEmbeddingsCte(
   input: BuildStandardEmbeddingsCteInput,
@@ -1231,13 +1234,28 @@ export function buildStandardEmbeddingsCte(
     // libSQL's DiskANN index and pgvector's operator class are built for
     // one metric), so retrieving by the declared metric and re-scoring
     // under an overridden one would silently miss the override metric's
-    // true nearest neighbors. A mismatched override falls back to the
-    // exact scan below — correct for any metric, like `indexType: "none"`.
-    // Engines whose `buildSearch` is EXACT (vec0's brute-force C KNN)
-    // serve the non-approximate branch through it as well: identical
-    // results to the SQL distance scan at engine speed (489ms -> 113ms
-    // at 50k on the SQLite lane). The metric gate stays: the engine
-    // form is built for the slot's declared metric.
+    // true nearest neighbors.
+    //
+    // A caller who STATED `approximate: true` for such a slot is refused
+    // ({@link assertApproximateMetricSupported}) rather than quietly served
+    // the exact scan: the two options cannot both be honored, and which one
+    // was dropped is not something the caller can see in the results. Where
+    // nothing was stated the fallback stays silent because nothing is being
+    // ignored — engines whose `buildSearch` is EXACT (vec0's brute-force C
+    // KNN) serve the non-approximate branch through the engine form when the
+    // metric matches (identical results to the SQL distance scan at engine
+    // speed: 489ms -> 113ms at 50k on the SQLite lane) and through the SQL
+    // scan when it does not.
+    if (slotDescriptor !== undefined) {
+      assertApproximateMetricSupported({
+        approximate: vectorPredicate.approximate,
+        requestedMetric: metric,
+        declaredMetric: slotDescriptor.metric,
+        indexType: slotDescriptor.indexType,
+        nodeKind: kind,
+        fieldPath,
+      });
+    }
     const engineFormEligible =
       vectorPredicate.approximate === true ||
       vectorStrategy.searchIsExact === true;

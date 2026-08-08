@@ -80,6 +80,22 @@ export function computeUniqueKey(
 
 /**
  * Checks if a uniqueness constraint's where predicate passes.
+ *
+ * A `where` callback that does not return a predicate is REFUSED here, not
+ * treated as "the constraint always applies". The same malformed clause is a
+ * hard `ConfigurationError` at definition time ({@link assertWhereFieldDeclared})
+ * and at persistence time (`serializeWherePredicate`); a third reading that
+ * silently widened a partial constraint to a total one would let the three
+ * sites disagree about the same clause — the divergence
+ * {@link captureWherePredicate} exists to prevent.
+ *
+ * The arm SHOULD be unreachable: `defineGraph` refuses a non-predicate callback
+ * before any write can evaluate it, `validateGraphExtension` refuses the
+ * document form, and a constraint reconstructed from a persisted schema carries
+ * a callback this module built itself. It is reachable only by handing the
+ * store a constraint object that never passed a definition gate — for which
+ * failing loudly is the correct answer, since the alternative is enforcing
+ * uniqueness over rows the author meant to exclude.
  */
 export function checkWherePredicate(
   constraint: UniqueConstraint,
@@ -89,7 +105,18 @@ export function checkWherePredicate(
     return true; // No where clause, always applies
   }
 
-  return evaluatePredicate(captureWherePredicate(constraint.where), props);
+  const predicate = captureWherePredicate(constraint.where);
+  if (predicate === undefined) {
+    throw new ConfigurationError(
+      `Unique constraint "${constraint.name}" has a \`where\` callback that does not return a predicate.`,
+      { constraintName: constraint.name, fields: [...constraint.fields] },
+      {
+        suggestion: `Return a field predicate, e.g. \`where: (fields) => fields.${constraint.fields[0] ?? "someField"}.isNotNull()\`. A constraint built outside \`defineGraph\` bypasses the definition-time check that normally reports this.`,
+      },
+    );
+  }
+
+  return evaluatePredicate(predicate, props);
 }
 
 type UniquePredicate = Readonly<{
@@ -280,29 +307,18 @@ function buildPredicateContext(): PredicateContext {
 
 /**
  * Evaluates a uniqueness predicate.
+ *
+ * Takes a CAPTURED predicate, not an `unknown`: the "is this really a
+ * predicate?" question belongs to {@link captureWherePredicate}, which is its
+ * single owner. The defensive `return true` arms this function used to carry
+ * were a second, quieter answer to that question — and they answered it the
+ * opposite way, widening a partial constraint into a total one where the owner
+ * refuses.
  */
 function evaluatePredicate(
-  predicate: unknown,
+  pred: UniquePredicate,
   props: Record<string, unknown>,
 ): boolean {
-  if (
-    typeof predicate !== "object" ||
-    predicate === null ||
-    !("__type" in predicate)
-  ) {
-    return true;
-  }
-
-  const pred = predicate as {
-    __type: string;
-    field: string;
-    op: NullCheckOp;
-  };
-
-  if (pred.__type !== "unique_predicate") {
-    return true;
-  }
-
   // Own-key read: `pred.field` is a schema field name, and a props bag that
   // does not carry it must read as absent rather than as the inherited
   // `Object.prototype` member a field named after one would otherwise find

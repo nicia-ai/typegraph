@@ -1737,6 +1737,10 @@ export type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
     kind?: string;
+    fromKind?: string;
+    fromId?: string;
+    toKind?: string;
+    toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;

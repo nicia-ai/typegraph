@@ -491,7 +491,8 @@ function serializeOntology(
   }
 
   // Serialize meta-edges
-  const metaEdges: Record<string, SerializedMetaEdge> = {};
+  // Data-keyed: meta-edge names.
+  const metaEdges = createDataKeyedBag<SerializedMetaEdge>();
   for (const [name, metaEdge] of metaEdgeMap) {
     metaEdges[name] = serializeMetaEdge(metaEdge);
   }
@@ -586,7 +587,8 @@ function serializeClosures(
 function mapToRecord(
   map: ReadonlyMap<string, ReadonlySet<string>>,
 ): Record<string, readonly string[]> {
-  const result: Record<string, readonly string[]> = {};
+  // Data-keyed: the map's keys are kind / meta-edge names.
+  const result = createDataKeyedBag<readonly string[]>();
   for (const [key, values] of map) {
     result[key] = [...values];
   }

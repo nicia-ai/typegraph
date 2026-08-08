@@ -635,7 +635,8 @@ const NON_CONSTRAINING_KEYWORDS = new Set([
 
 /** A copy of `schema` with the non-constraining keywords removed. */
 function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
-  const stripped: Record<string, unknown> = {};
+  // Data-keyed: JSON-Schema keywords parsed out of the persisted document.
+  const stripped = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(schema)) {
     if (!NON_CONSTRAINING_KEYWORDS.has(key)) stripped[key] = value;
   }

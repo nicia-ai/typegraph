@@ -398,9 +398,19 @@ async function writeRecordedClock(
  * enough: it protects the ROW, but the allocated instant has already been
  * computed from the caller's claim and would be returned as if committed,
  * stamping rows with an instant the clock never reached. An allocation that the
- * row declined is refused here instead of reported. On the read-under-lock path
- * the previous value came from this same transaction, so no re-read is needed
- * (and none is paid for by the capture flush).
+ * row declined is refused here instead of reported.
+ *
+ * WHY THE OTHER ARM NEEDS NO RE-READ, and why that is a property rather than an
+ * assumption: when `previousRevision` is absent the value is read by
+ * {@link readRecordedClockParts} AFTER {@link lockRecordedClock}, inside the
+ * same transaction that then writes — a real fence on both dialects
+ * (`pg_advisory_xact_lock`; SQLite's seed-UPSERT or the enclosing
+ * `BEGIN IMMEDIATE`). Those constructs are transaction-scoped, so the fence
+ * would be vacuous on a backend with no transactions — but such a backend can
+ * never reach here: `assertRevisionTrackableBackend` refuses
+ * `revisionTracking` (and therefore `history`, which implies it) at Store
+ * construction unless `capabilities.transactions` is set. Adding the re-read to
+ * that arm would put an unfalsifiable extra SELECT on every captured write.
  */
 async function assertRecordedClockAdvanced(
   target: RecordedClockBackend,

@@ -1309,22 +1309,38 @@ export function createContributionMaterializer(
   }
 
   /**
-   * The DATABASE-scoped critical section for contribution DDL.
+   * The DATABASE-scoped critical section for the contribution ITSELF —
+   * the logical slot, not the relation currently backing it.
    *
    * The schema-write fence is per GRAPH, but the fulltext table is one
    * physical table shared by every graph in the database, so two graphs
    * rebuilding at once are not serialized by that fence at all: they would
-   * race the drop, the recreate, and — worse — each other's reading of
-   * "does another graph still have rows here?". One constant-keyed
-   * transaction-scoped advisory lock removes the race instead of recovering
-   * from it.
+   * race the drop, the recreate, and each other's reading of "does another
+   * graph still have rows here?". One constant-keyed transaction-scoped
+   * advisory lock removes the race instead of recovering from it.
    *
-   * Taken INSIDE the per-graph fence, matching the order the identity DDL
-   * lock uses (per-graph fence first, then the database-scoped DDL lock), so
-   * two paths that take both can never hold one lock each and wait for the
-   * other. Keyed distinctly from `typegraph:identity-ddl`, and in the
-   * two-argument lock space every namespaced TypeGraph lock uses — the
-   * per-graph fence deliberately occupies the one-argument space.
+   * It is NOT interchangeable with the relation lock
+   * {@link lockSharedFulltextTable} takes, and neither replaces the other:
+   *
+   * - A relation lock cannot be taken when the relation does not exist, and
+   *   "the table is missing" is one of the states a rebuild resolves. Two
+   *   rebuilds racing that state have no relation to serialize on.
+   * - A relation lock dies with its relation. The recreate path DROPs the
+   *   table and CREATEs a new one with a new oid, so a second rebuild
+   *   waiting on the old relation is released onto an object that no longer
+   *   exists. An advisory key survives the drop because it names the
+   *   contribution, not the object.
+   *
+   * ORDER: taken FIRST, before any relation lock, on every path that takes
+   * both — and inside the per-graph schema fence, matching the identity DDL
+   * lock's convention (per-graph fence → constant-keyed DDL lock → relation
+   * locks). Nothing else in the system takes this key at all: ordinary
+   * fulltext DML takes only relation-level locks and never an advisory one,
+   * so no path can hold a fulltext relation lock while waiting for this key,
+   * and the wait graph stays acyclic. Keyed distinctly from
+   * `typegraph:identity-ddl`, in the two-argument lock space every
+   * namespaced TypeGraph lock uses — the per-graph fence deliberately
+   * occupies the one-argument space.
    *
    * SQLite needs nothing: `BEGIN IMMEDIATE` already holds the database's
    * single writer slot for the whole fence.
@@ -1336,6 +1352,44 @@ export function createContributionMaterializer(
     await tx.execute(
       asCompiledRowsSql(
         portableSql`SELECT pg_advisory_xact_lock(hashtext(${CONTRIBUTION_DDL_LOCK_KEY}), 0)`,
+      ),
+    );
+  }
+
+  /**
+   * Excludes every writer from the shared fulltext table for the rest of the
+   * rebuild's transaction.
+   *
+   * The teardown VERDICT — "no other graph has rows here, so dropping this
+   * table destroys nothing" — is only as good as the exclusion it was
+   * computed under. Ordinary fulltext DML takes no advisory lock, so the
+   * contribution lock above excludes other REBUILDS and nothing else: a
+   * neighbouring graph's INSERT could commit between an unlocked probe and
+   * the `DROP TABLE`, and be destroyed by a rebuild that had already decided
+   * it was alone. `ACCESS EXCLUSIVE` is the lock scope that matches the
+   * decision's resource — a writer that committed first is visible to the
+   * re-probe (each statement takes a fresh snapshot; the fence sets no
+   * isolation level, so it runs at the session default of READ COMMITTED),
+   * and one that has not committed blocks until this rebuild does.
+   *
+   * Taken only on the path that may drop, and only after the contribution
+   * advisory lock. The graph-scoped path needs nothing: its
+   * `DELETE ... WHERE graph_id` touches only rows this graph owns and is
+   * transactional, so it must not make every other graph's writers wait.
+   *
+   * Same shape as `lockPostgresTrustedImportTables`. SQLite has no relation
+   * lock and needs none: `BEGIN IMMEDIATE` took the database's single writer
+   * slot when the fence opened, so probe, drop and refill already run with
+   * every other writer excluded.
+   */
+  async function lockSharedFulltextTable(
+    tx: SchemaWriteTransactionBackend,
+    tableName: string,
+  ): Promise<void> {
+    if (dialect !== "postgres") return;
+    await tx.executeStatement(
+      asCompiledStatementSql(
+        portableSql`LOCK TABLE ${portableSql.identifier(tableName)} IN ACCESS EXCLUSIVE MODE`,
       ),
     );
   }
@@ -1458,12 +1512,30 @@ export function createContributionMaterializer(
       // pre-fence catalog probe and this lock would belong to whoever
       // created it. Recreating from `createDdl` and clearing this graph's
       // rows serves that state without betting on the probe.
-      const foreignGraphIds =
+      const unlockedForeignGraphIds =
         sharedTableExisted ?
           await readForeignGraphIds(tx, sharedTable, graphId)
         : [];
-      const recreateStorage =
-        sharedTableExisted && foreignGraphIds.length === 0;
+      // Two probes, deliberately. The first is unlocked and cheap, and its
+      // only job is to keep the common case off the relation lock: a
+      // "another graph has rows" verdict can only become MORE true while
+      // this transaction runs, since nothing here deletes another graph's
+      // rows, so acting on it without exclusion is safe. The drop verdict
+      // is the unsafe direction — a writer committing after an unlocked
+      // probe would be destroyed by the drop that probe authorized — so it
+      // is never acted on until it has been re-established while holding
+      // ACCESS EXCLUSIVE. A verdict that flips under the lock loses the
+      // drop and keeps the lock, because PostgreSQL holds locks until
+      // commit: that rebuild then serializes fulltext writers for its
+      // duration, which is the rare and safe direction to be wrong in.
+      const mayRecreate =
+        sharedTableExisted && unlockedForeignGraphIds.length === 0;
+      if (mayRecreate) await lockSharedFulltextTable(tx, sharedTable);
+      const foreignGraphIds =
+        mayRecreate ?
+          await readForeignGraphIds(tx, sharedTable, graphId)
+        : unlockedForeignGraphIds;
+      const recreateStorage = mayRecreate && foreignGraphIds.length === 0;
 
       if (!recreateStorage) {
         // `stale` means the physical table is at a shape the current

@@ -509,7 +509,7 @@ async function hasLiveDifferentAssertions(
   // a registry too large to name in one; a single chunk is the normal case and
   // the loop then runs exactly one probe.
   const chunkSize = identityChunkSize(target, {
-    fixedParameters: IDENTITY_SNAPSHOT_PARAMETERS,
+    fixedParameters: OWED_SEPARATION_PROBE_PARAMETERS,
     maxItems: MAX_REFERENCE_CHUNK_SIZE,
     parametersPerItem: 2,
   });
@@ -524,8 +524,27 @@ async function hasLiveDifferentAssertions(
   return false;
 }
 
-/** How many binds {@link identityAssertionSnapshotSource} contributes. */
+/**
+ * How many binds {@link identityAssertionSnapshotSource} contributes at the
+ * CURRENT coordinate: `graph_id`, `rel`, and the validity instant twice
+ * (`valid_from <=` and `valid_to >`). A recorded coordinate binds two more, and
+ * no caller here uses one.
+ */
 const IDENTITY_SNAPSHOT_PARAMETERS = 4;
+
+/**
+ * Fixed binds in {@link probeOwedSeparation}'s STATEMENT — the snapshot
+ * subquery's own, plus the `graph_id` each of the two closure `LEFT JOIN`s
+ * binds.
+ *
+ * The chunk math budgets for the whole statement, so it must count every bind
+ * the statement carries, not just the subquery's. Budgeting only the subquery's
+ * four left the two join binds unfunded, so on a backend at its bind ceiling the
+ * probe could be built one kind too wide and overrun the limit it was chunked to
+ * respect. Asserted against the rendered statement in
+ * `identity-separation-probe-cost.test.ts`.
+ */
+const OWED_SEPARATION_PROBE_PARAMETERS = IDENTITY_SNAPSHOT_PARAMETERS + 2;
 
 /** The cheap half: does the graph hold ANY live `different` assertion. */
 async function probeAnyLiveDifferent(
