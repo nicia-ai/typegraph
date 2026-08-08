@@ -7,7 +7,7 @@
 import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
 import { compareStrings } from "../utils/compare";
-import { hasOwnKey } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { canonicalEqual, sortedReplacer } from "./canonical";
 import {
@@ -454,7 +454,7 @@ function orderNormalizedSchema(value: unknown): unknown {
     return value.map((item) => orderNormalizedSchema(item));
   }
   if (value !== null && typeof value === "object") {
-    const normalized: Record<string, unknown> = {};
+    const normalized = createDataKeyedBag<unknown>();
     for (const [key, entry] of Object.entries(value)) {
       normalized[key] = normalizedKeywordValue(key, entry);
     }
@@ -492,7 +492,7 @@ function normalizedDependentRequired(value: unknown): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return value;
   }
-  const normalized: Record<string, unknown> = {};
+  const normalized = createDataKeyedBag<unknown>();
   for (const [name, required] of Object.entries(value)) {
     normalized[name] =
       Array.isArray(required) ? sortedByCanonicalForm(required) : required;
@@ -509,7 +509,7 @@ function normalizedSubschemaMap(value: unknown): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return orderNormalizedSchema(value);
   }
-  const normalized: Record<string, unknown> = {};
+  const normalized = createDataKeyedBag<unknown>();
   for (const [name, subschema] of Object.entries(value)) {
     normalized[name] = orderNormalizedSchema(subschema);
   }
@@ -635,7 +635,8 @@ const NON_CONSTRAINING_KEYWORDS = new Set([
 
 /** A copy of `schema` with the non-constraining keywords removed. */
 function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
-  const stripped: Record<string, unknown> = {};
+  // Data-keyed: JSON-Schema keywords parsed out of the persisted document.
+  const stripped = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(schema)) {
     if (!NON_CONSTRAINING_KEYWORDS.has(key)) stripped[key] = value;
   }

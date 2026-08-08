@@ -450,4 +450,47 @@ describe("indexes", () => {
     // Double quotes should be escaped by doubling
     expect(pg).toContain('"idx_with""quote"');
   });
+
+  it("hands the WHERE callback an ordinary object", () => {
+    // The builder is a Proxy, and a proxy's TARGET is what `instanceof` and
+    // `Object.getPrototypeOf` resolve against — no `get` trap can disguise it.
+    // The target was `Object.create(null)`, which bought nothing (nothing is
+    // ever written to it) and cost every caller a builder that answered `false`
+    // to `instanceof Object`.
+    const observed: Readonly<{
+      isObject: boolean;
+      prototype: unknown;
+    }>[] = [];
+
+    const index = defineNodeIndex(Person, {
+      fields: ["email"],
+      where: (w) => {
+        observed.push({
+          isObject: w instanceof Object,
+          prototype: Object.getPrototypeOf(w) as unknown,
+        });
+        return w.isActive.eq(true);
+      },
+    });
+
+    expect(generateIndexDDL(index, "sqlite")).toContain("WHERE");
+    expect(observed).toEqual([{ isObject: true, prototype: Object.prototype }]);
+  });
+
+  it("hands the EDGE WHERE callback an ordinary object too", () => {
+    const observed: boolean[] = [];
+
+    const index = defineEdgeIndex(worksAt, {
+      fields: ["role"],
+      where: (w) => {
+        observed.push(
+          w instanceof Object && Object.getPrototypeOf(w) === Object.prototype,
+        );
+        return w.role.eq("engineer");
+      },
+    });
+
+    expect(generateIndexDDL(index, "sqlite")).toContain("WHERE");
+    expect(observed).toEqual([true]);
+  });
 });

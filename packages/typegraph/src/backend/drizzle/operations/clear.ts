@@ -1,9 +1,11 @@
-import { getTableName, type SQL, sql } from "drizzle-orm";
+import { getTableName, sql } from "drizzle-orm";
 
-import { quotedTableName, type Tables } from "./shared";
+import { buildFulltextGraphDelete } from "../../../query/dialect/fulltext-strategy";
+import { type ExecutableSql } from "../execution/types";
+import { type Tables } from "./shared";
 
 export type ClearGraphStatement = Readonly<{
-  query: SQL;
+  query: ExecutableSql;
   ignoreMissingTable?: boolean;
   requiredTableName?: string;
 }>;
@@ -30,9 +32,11 @@ export function buildClearGraph(
   tables: Tables,
   graphId: string,
 ): readonly ClearGraphStatement[] {
-  const fulltext = quotedTableName(tables.fulltextTableName);
   return [
-    { query: sql`DELETE FROM ${fulltext} WHERE "graph_id" = ${graphId}` },
+    // The fulltext table is shared by every graph in the database, so its
+    // graph-scoped delete is owned by one builder the destructive
+    // contribution rebuild calls too — see `buildFulltextGraphDelete`.
+    { query: buildFulltextGraphDelete(tables.fulltextTableName, graphId) },
     {
       query: sql`DELETE FROM ${tables.recordedIdentityAssertions} WHERE ${tables.recordedIdentityAssertions.graphId} = ${graphId}`,
       ignoreMissingTable: true,

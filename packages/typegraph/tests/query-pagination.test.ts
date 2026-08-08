@@ -279,6 +279,45 @@ describe("Cursor Pagination", () => {
         .paginate({ first: 10, after: "invalid-cursor" }),
     ).rejects.toThrow(ValidationError);
   });
+
+  it("does not pollute Object.prototype when the query alias is __proto__", async () => {
+    // Aliases are caller data and are validated nowhere. The cursor context
+    // used to be a plain object, so `cursorContext["__proto__"]` returned
+    // Object.prototype (typeof "object"), and the per-alias field writes then
+    // landed ON Object.prototype — global prototype pollution from
+    // `.from(kind, "__proto__")`. Null-prototype bags make the alias an
+    // ordinary own key.
+    const prototypeKeysBefore = Object.getOwnPropertyNames(
+      Object.prototype,
+    ).toSorted();
+    const store = createTestStore();
+    await seedTestData(store);
+
+    const page1 = await store
+      .query()
+      .from("Person", "__proto__")
+      .orderBy("__proto__", "name")
+      .select((ctx) => ctx.__proto__)
+      .paginate({ first: 5 });
+
+    const page2 = await store
+      .query()
+      .from("Person", "__proto__")
+      .orderBy("__proto__", "name")
+      .select((ctx) => ctx.__proto__)
+      .paginate({ first: 5, after: requireDefined(page1.nextCursor) });
+
+    expect(Object.getOwnPropertyNames(Object.prototype).toSorted()).toEqual(
+      prototypeKeysBefore,
+    );
+    expect(({} as Record<string, unknown>)["name"]).toBeUndefined();
+    // The cursor still works as a keyset: page 2 continues after page 1.
+    expect(page1.data).toHaveLength(5);
+    expect(page2.data).toHaveLength(5);
+    expect(requireDefined(page2.data[0]).name).not.toBe(
+      requireDefined(page1.data[0]).name,
+    );
+  });
 });
 
 // ============================================================

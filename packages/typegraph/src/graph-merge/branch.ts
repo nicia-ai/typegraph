@@ -59,23 +59,21 @@ export async function branch<G extends GraphDef>(
     const workingCopyStrategy =
       strategy ?? cloneWorkingCopyStrategy<G>(makeBackend);
     const store = await workingCopyStrategy.create(baseStore);
-    // Capture the clone's committed schema row as the merge-time drift
-    // anchor. Version participates so a schema ROUND-TRIP (migrate away and
-    // back, restoring the document hash while its preflights mutated rows)
-    // is still detected.
-    const schemaRow = await storeBackend(store).getActiveSchema(store.graphId);
+    // Ownership of the working copy's BACKEND transferred here: the strategy
+    // closes it only on its own failures, and "only the success path hands the
+    // backend to the caller, who then owns its lifecycle" (see
+    // `cloneWorkingCopyStrategy`). Everything after this line therefore runs
+    // inside `readSchemaAnchor`, which closes it before failing — a `branch()`
+    // that returned `err(...)` from here would drop the only handle to a live
+    // engine (a PGlite instance, a file handle, a connection pool).
+    const schemaAnchor = await readSchemaAnchor(store);
     return ok({
       id,
       base,
       store,
-      ...(schemaRow === undefined ?
+      ...(schemaAnchor === undefined ?
         { schemaAnchor: undefined }
-      : {
-          schemaAnchor: {
-            version: schemaRow.version,
-            hash: schemaRow.schema_hash,
-          },
-        }),
+      : { schemaAnchor }),
     });
   } catch (error) {
     return err(
@@ -83,5 +81,34 @@ export async function branch<G extends GraphDef>(
         cause: error,
       }),
     );
+  }
+}
+
+/**
+ * Captures the clone's committed schema row as the merge-time drift anchor.
+ * Version participates so a schema ROUND-TRIP (migrate away and back, restoring
+ * the document hash while its preflights mutated rows) is still detected.
+ *
+ * Closes the working copy's backend if the read fails. `branch()` reports every
+ * failure as a returned `err(...)` rather than a throw, so the caller never
+ * receives the store and has no handle to close: without this, a backend whose
+ * `getActiveSchema` rejects would leak the engine the strategy just opened. A
+ * close failure must not mask the original error.
+ */
+async function readSchemaAnchor<G extends GraphDef>(
+  store: GraphBranch<G>["store"],
+): Promise<Readonly<{ version: number; hash: string }> | undefined> {
+  try {
+    const schemaRow = await storeBackend(store).getActiveSchema(store.graphId);
+    return schemaRow === undefined ? undefined : (
+        { version: schemaRow.version, hash: schemaRow.schema_hash }
+      );
+  } catch (error) {
+    try {
+      await storeBackend(store).close();
+    } catch {
+      // Intentionally ignored — surface the original failure.
+    }
+    throw error;
   }
 }

@@ -63,6 +63,7 @@ import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createGate, type Gate } from "../../concurrency-utils";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+import { runServerSuiteSetup } from "./server-suite-setup";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
@@ -108,13 +109,21 @@ let pool: Pool | undefined;
 let db: NodePgDatabase | undefined;
 let isPostgresAvailable = false;
 
-function requirePostgres(ctx: { skip: () => void }): Readonly<{
+/**
+ * The suite is gated on `POSTGRES_URL`, and its setup now FAILS rather than
+ * skipping (see ./server-suite-setup.ts), so an unpublished handle here means
+ * setup reported success without publishing one. Throwing keeps that a
+ * failure: a `ctx.skip()` would turn the same state back into the green skip
+ * the setup fix exists to remove.
+ */
+function requirePostgres(): Readonly<{
   pool: Pool;
   db: NodePgDatabase;
 }> {
   if (!isPostgresAvailable || pool === undefined || db === undefined) {
-    ctx.skip();
-    throw new Error("unreachable");
+    throw new Error(
+      "concurrent-create-duplicate-key: PostgreSQL connections are unavailable after setup reported success.",
+    );
   }
   return { pool, db };
 }
@@ -128,20 +137,17 @@ beforeAll(async () => {
     connectionTimeoutMillis: 5000,
     max: 6,
   });
-  try {
-    await candidate.query("SELECT 1");
-    await candidate.query(generatePostgresMigrationSQL());
-    pool = candidate;
-    db = drizzle(candidate);
-    isPostgresAvailable = true;
-  } catch (error) {
-    console.error(
-      "concurrent-create-duplicate-key: Postgres setup failed; skipping suite.",
-      error,
-    );
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    await candidate.end().catch(() => {});
-  }
+  await runServerSuiteSetup(
+    "concurrent-create-duplicate-key",
+    [candidate],
+    async () => {
+      await candidate.query("SELECT 1");
+      await candidate.query(generatePostgresMigrationSQL());
+      pool = candidate;
+      db = drizzle(candidate);
+      isPostgresAvailable = true;
+    },
+  );
 });
 
 afterAll(async () => {
@@ -231,8 +237,8 @@ async function expectAlreadyExists(
 describe.runIf(process.env["POSTGRES_URL"])(
   "concurrent create of the same new id (PostgreSQL)",
   () => {
-    it("reports the losing node batch as already exists, not a driver error", async (ctx) => {
-      const live = requirePostgres(ctx);
+    it("reports the losing node batch as already exists, not a driver error", async () => {
+      const live = requirePostgres();
       const gate = createGate();
       const winner = createStore(graph, createPostgresBackend(live.db));
       const loser = createStore(
@@ -260,8 +266,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
       expect(survivor?.name).toBe("Winner");
     });
 
-    it("reports the losing edge batch as already exists, not a driver error", async (ctx) => {
-      const live = requirePostgres(ctx);
+    it("reports the losing edge batch as already exists, not a driver error", async () => {
+      const live = requirePostgres();
       const setup = createStore(graph, createPostgresBackend(live.db));
       // Distinct emails: the declared `byEmail` constraint treats a shared absent
       // value as one key, which is a different conflict than this case is about.
@@ -313,9 +319,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
       );
     });
 
-    it("reports a losing single node create as already exists too", async (ctx) => {
+    it("reports a losing single node create as already exists too", async () => {
       // Same seam, non-batch path: `create` inserts one row rather than a chunk.
-      const live = requirePostgres(ctx);
+      const live = requirePostgres();
       const gate = createGate();
       const winner = createStore(graph, createPostgresBackend(live.db));
       const loser = createStore(
@@ -340,11 +346,11 @@ describe.runIf(process.env["POSTGRES_URL"])(
       });
     });
 
-    it("still reports a DECLARED uniqueness conflict as UniquenessError", async (ctx) => {
+    it("still reports a DECLARED uniqueness conflict as UniquenessError", async () => {
       // Two DIFFERENT ids claiming one unique key: no primary-key collision at
       // all. The conflict surfaces from the uniqueness relation, and must not be
       // reshaped into a duplicate-identity error by the new translation.
-      const live = requirePostgres(ctx);
+      const live = requirePostgres();
       const gate = createGate();
       const winner = createStore(graph, createPostgresBackend(live.db));
       const loser = createStore(
@@ -367,14 +373,14 @@ describe.runIf(process.env["POSTGRES_URL"])(
       expect((error as UniquenessError).details.constraintName).toBe("byEmail");
     });
 
-    it("does not translate a violated unique INDEX into already exists", async (ctx) => {
+    it("does not translate a violated unique INDEX into already exists", async () => {
       // A `unique: true` index declaration materializes a UNIQUE INDEX on the
       // nodes relation, so violating it raises the SAME SQLSTATE (23505) on the
       // SAME table as a duplicate id. It carries the index's own name rather
       // than the relation's primary key, which is exactly why the classification
       // is scoped to the primary key: this must keep surfacing as the driver
       // failure it was, never as "this id already exists".
-      const live = requirePostgres(ctx);
+      const live = requirePostgres();
       await live.pool.query(
         `CREATE UNIQUE INDEX ${TAG_UNIQUE_INDEX}
            ON typegraph_nodes ((props->>'tag'))

@@ -46,10 +46,51 @@ the refusal.
 The convention now has one owner, `hasOwnKey`, applied across graph-merge node and
 edge property resolution, schema-diff property classification, schema-removal
 reconciliation, interchange unknown-property stripping, graph-extension document
-validation, and the evolve pending-removal guard. `in` remains correct, and still
-in use, where the key set is statically known: a discriminated union's tag, a
-capability probe, a brand check, and the deliberate `Object.prototype` lookup in
-selective projection.
+validation, query and index schema-field validation, the evolve pending-removal
+guard, edge `matchOn` composite-key and match-comparison reads, and
+embedding/fulltext field extraction. `in` remains correct, and still in use,
+when both the key and membership question are internal: a discriminated union's
+tag, a capability probe, a brand check, and the deliberate `Object.prototype`
+lookup in selective projection. A user-supplied field name is always checked as
+an own key, even when the schema shape itself is statically known, so names such
+as `__proto__` and `constructor` cannot masquerade as declared fields through
+`Object.prototype`.
+
+A plain `bag[field]` walks the prototype chain exactly as `field in bag` does, so
+the same misreading reached two more read paths that never used `in` at all. An
+edge's `matchOn` composite key and its per-field match comparison
+(`getOrCreateByEndpoints`, edge upsert dedup) read a caller's stored and input
+props by a schema-declared field name; a field named after a prototype member
+that neither bag carries as an own key now reads as `undefined` on both sides
+instead of the same inherited function, so a match or non-match decision is never
+made on a phantom shared value. `syncEmbeddings` and `computeFulltextContent`
+read a declared embedding or searchable field the same way, so an undeclared
+row no longer surfaces a prototype function as if it were the field's stored
+value there either.
+
+`then` and `toJSON` complete the same class from the other end. They are the two
+names JavaScript itself probes — the thenable check and the `JSON.stringify` hook
+— so every proxy standing in for a row resolved them to `undefined` up front to
+stay safe to await and to serialize. They are also legal schema field names, and
+answering them by NAME before consulting the data made the read side lie: a
+declared field called `toJSON` came back `undefined` through smart selection while
+the full mapper returned the stored string, so the same query answered differently
+depending on whether the optimizer engaged — exactly the equivalence selective
+projection exists to preserve. The predicate builders (query, traversal,
+collection, and index WHERE) made such a field unaddressable outright, and field
+tracking dropped a declared `then`, so the projection could not have carried it.
+
+**A declared `then` or `toJSON` field is now tracked, projected, readable through
+smart selection, and usable in a predicate.** The rule is the one the surrounding
+fixes already follow: ask the data question first — `hasOwnKey` for a
+materialized row, `hasDeclaredField` for a proxy whose key set is the schema —
+and fall back to the probe exemption only once the answer is "not data", which is
+what keeps `await` and `JSON.stringify` working on a partially projected row.
+Returning an own `then` is safe as well as correct: props decode from a JSON
+column, so the value can never be callable, and the thenable check ignores a
+non-callable `then` exactly as it does on the plain objects the full path returns.
+`isInteropProbeKey` owns which names those are, and an ESLint rule bans the bare
+name comparison that used to stand in for the decision.
 
 `__proto__`, the case originally reported, is the NARROW variant. Every VALIDATED
 write path blocks it: Zod drops an own `__proto__` key, and `bag["__proto__"] = value`

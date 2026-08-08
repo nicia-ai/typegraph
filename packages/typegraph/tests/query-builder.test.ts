@@ -580,6 +580,7 @@ describe("Query Compilation to SQL", () => {
     expect(sql).toContain("e.from_id");
     expect(sql).toContain("e.to_id");
     expect(sql).toContain("e.from_id = e.to_id");
+    expect(sql).toContain("e.from_kind = e.to_kind");
   });
 
   it("prunes unused traversal columns for selective projections", () => {

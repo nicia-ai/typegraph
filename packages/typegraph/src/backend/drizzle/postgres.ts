@@ -58,6 +58,8 @@ import {
 import {
   assertVectorSearchLimit,
   buildVectorCapabilities,
+  resolveEfSearchOverride,
+  vectorSearchFrontierTuning,
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
@@ -75,7 +77,7 @@ import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
   isMissingTableError,
-  isPostgresUniqueViolationError,
+  isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -88,6 +90,7 @@ import {
   nowIso,
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
+import { markSerializedTransactionResource } from "../transaction-resource";
 import {
   type AdapterBackend,
   type BackendCapabilities,
@@ -112,6 +115,7 @@ import {
   type FulltextSearchResult,
   type HybridSearchParams,
   type HybridSearchRow,
+  type IdentityTableNames,
   type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
@@ -158,8 +162,11 @@ import {
   type AnyPgDatabase,
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
+  getPgliteClient,
+  hasFunctionProperty,
   isNeonHttpClient,
   isPgliteDatabase,
+  isPostgresJsClient,
   PGLITE_MAX_BIND_PARAMETERS,
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
@@ -421,6 +428,9 @@ export function createPostgresBackend(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
+  // Resolved before the backend exists so marking it below is a lookup, never
+  // work that could fail after a wrapper already observed an unmarked backend.
+  const serializedClient = getSerializedPostgresClient(db);
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
   // pgvector is compiled into a standalone Postgres server, so it is wired
@@ -581,17 +591,24 @@ export function createPostgresBackend(
   // ensure through it instead of issuing DDL on the hot path.
   const matTable = tables.contributionMaterializations;
 
+  /**
+   * Runs one IDEMPOTENT DDL statement — `CREATE ... IF NOT EXISTS` or
+   * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` — with the one-shot retry a
+   * concurrent boot needs.
+   *
+   * PostgreSQL's IF NOT EXISTS check cannot see another session's uncommitted
+   * catalog row. The loser waits for the winner and is then handed the
+   * winner's conflict instead of a harmless notice; retrying after that wait
+   * observes the committed object. Which failures mean that is
+   * {@link isPostgresConcurrentDdlRaceError}'s single decision — anything else
+   * (and anything the retry cannot clear) stays loud.
+   */
   async function executeConcurrentCreateDdl(ddl: string): Promise<void> {
     const statement = sql.raw(ddl);
     try {
       await db.execute(statement);
     } catch (error) {
-      // PostgreSQL's IF NOT EXISTS check cannot see another session's
-      // uncommitted catalog row. The loser waits for the winner and may then
-      // receive 23505 from pg_type/pg_class instead of a harmless notice.
-      // Retrying after that wait observes the committed table. Any unrelated
-      // uniqueness failure remains loud if the retry cannot confirm it.
-      if (!isPostgresUniqueViolationError(error)) throw error;
+      if (!isPostgresConcurrentDdlRaceError(error)) throw error;
       await db.execute(statement);
     }
   }
@@ -604,6 +621,28 @@ export function createPostgresBackend(
 
   async function ensureContributionMaterializationsTableImpl(): Promise<void> {
     await ensureTableWithConcurrentCreateRetry(matTable);
+  }
+
+  /**
+   * The contribution descriptors for exactly the identity relations, under
+   * caller-supplied physical names. Pure — nothing is executed here — and the
+   * single owner of "which DDL belongs to the identity relations", shared by
+   * `ensureIdentityTables` (which runs it) and `identityTableDdl` (which hands
+   * it to a transaction).
+   */
+  function identityContributionsFor(
+    identityTableNames: IdentityTableNames,
+  ): ReturnType<typeof postgresContributions> {
+    const identityTables = buildPostgresTables({
+      identityAssertions: identityTableNames.identityAssertions,
+      recordedIdentityAssertions: identityTableNames.recordedIdentityAssertions,
+      identityClosure: identityTableNames.identityClosure,
+      identitySeparation: identityTableNames.identitySeparation,
+    });
+    return postgresContributions(identityTables, fulltextStrategy).filter(
+      (contribution) =>
+        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
+    );
   }
 
   async function getContributionMaterializationRow(
@@ -701,8 +740,13 @@ export function createPostgresBackend(
     fulltextStrategy,
     fulltextTableName: tables.fulltextTableName,
     vectorStrategy,
+    // Contribution DDL is `CREATE ... IF NOT EXISTS` reached from every
+    // booting replica, so it carries the same concurrent-create retry the
+    // other create sites use. Without it the loser's 23505 is recorded as
+    // `lastError` on the marker row and reported as a failed materialization,
+    // when the table it wanted is in fact present.
     execDdl: async (statement) => {
-      await db.execute(sql.raw(statement));
+      await executeConcurrentCreateDdl(statement);
     },
     ensureMarkerTable: ensureContributionMaterializationsTableImpl,
     getMarkers: getContributionMaterializationRows,
@@ -714,7 +758,7 @@ export function createPostgresBackend(
     // the absent fence, matching `capabilities.contributions.rebuild`.
     ...(capabilities.transactions ?
       {
-        schemaWriteTransaction: <T,>(
+        schemaWriteTransaction: <T>(
           graphId: string,
           fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
         ) => runSchemaWriteTransaction(graphId, (target) => fn(target)),
@@ -771,6 +815,16 @@ export function createPostgresBackend(
       // Advisory lock: hashtext($graphId) is collision-tolerant for the
       // size of an active graph set; collisions just serialize unrelated
       // graphs which is harmless. Held until the transaction commits.
+      //
+      // The ONE-ARGUMENT (bigint) form is deliberate and load-bearing: it
+      // occupies a different lock space than the two-argument (int4, int4)
+      // form every namespaced TypeGraph lock uses (`typegraph:identity`,
+      // `typegraph:identity-ddl`, the recorded-write clock). PostgreSQL stores
+      // the two forms with different locktag field4 values, so a bigint key can
+      // never collide with an (int4, int4) key however the hashes land — the
+      // schema fence is therefore independent of every lock taken INSIDE it.
+      // Normalizing this to the two-argument form would merge the spaces and
+      // put that independence at the mercy of `hashtext` collisions.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
       // Managed entity writers lock this row FOR SHARE. Locking it FOR UPDATE
       // before any emptiness probe makes a writer-first commit wait; a
@@ -891,7 +945,12 @@ export function createPostgresBackend(
     async bootstrapTables(): Promise<void> {
       const statements = generatePostgresDDL(tables, fulltextStrategy);
       for (const statement of statements) {
-        await db.execute(sql.raw(statement));
+        // Cold boot is the single most contended DDL path there is — two
+        // replicas starting at once run exactly this loop against the same
+        // database — so it takes the concurrent-create retry rather than
+        // trusting IF NOT EXISTS, for the reason `executeConcurrentCreateDdl`
+        // documents.
+        await executeConcurrentCreateDdl(statement);
       }
     },
 
@@ -911,19 +970,8 @@ export function createPostgresBackend(
       // DDL bootstrapTables emits, scoped to the identity relations. Stores
       // run this before opening the schema-commit transaction so DDL does not
       // re-enter its per-graph write lock.
-      const identityTables = buildPostgresTables({
-        identityAssertions: identityTableNames.identityAssertions,
-        recordedIdentityAssertions:
-          identityTableNames.recordedIdentityAssertions,
-        identityClosure: identityTableNames.identityClosure,
-        identitySeparation: identityTableNames.identitySeparation,
-      });
-      const identityContributions = postgresContributions(
-        identityTables,
-        fulltextStrategy,
-      ).filter((contribution) =>
-        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
-      );
+      const identityContributions =
+        identityContributionsFor(identityTableNames);
       const missing = [] as string[];
       for (const contribution of identityContributions) {
         if (!(await contributionTableExists(contribution.tableName))) {
@@ -945,6 +993,12 @@ export function createPostgresBackend(
       return missing;
     },
 
+    identityTableDdl(identityTableNames): readonly string[] {
+      return identityContributionsFor(identityTableNames).flatMap(
+        (contribution) => [...contribution.createDdl],
+      );
+    },
+
     // Every fulltext-touching method asserts the durable marker instead
     // of lazily emitting DDL. Steady state performs zero ensure; an
     // uninitialized database throws `StoreNotInitializedError` loudly
@@ -964,16 +1018,18 @@ export function createPostgresBackend(
       // Deployments created before the build-claim columns existed get
       // them additively; fresh installs already have them from the
       // CREATE TABLE above.
+      //
+      // These take the concurrent-DDL retry for the same reason the CREATE
+      // does, and it is the same loop two replicas run at boot: ADD COLUMN IF
+      // NOT EXISTS cannot see another session's uncommitted pg_attribute row,
+      // so the loser waits and is then handed 42701 (or `tuple concurrently
+      // updated`) instead of the notice — a spuriously failed boot (#445).
       const tableName = getTableName(tables.indexMaterializations);
-      await db.execute(
-        sql.raw(
-          `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;`,
-        ),
+      await executeConcurrentCreateDdl(
+        `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;`,
       );
-      await db.execute(
-        sql.raw(
-          `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
-        ),
+      await executeConcurrentCreateDdl(
+        `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
       );
     },
 
@@ -1297,7 +1353,10 @@ export function createPostgresBackend(
 
     async commitSchemaVersionWithPreflight(
       params: CommitSchemaVersionParams,
-      preflight: (target: TransactionBackend) => Promise<void>,
+      // The schema-write target, not the narrowed transaction backend: a
+      // preflight may have to CREATE the storage it then fills, and that DDL
+      // belongs in this transaction rather than before it.
+      preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
     ): Promise<SchemaVersionRow> {
       return runSchemaWriteTransaction(params.graphId, async (target) => {
         await preflight(target);
@@ -1432,7 +1491,142 @@ export function createPostgresBackend(
     },
   };
 
+  // INVARIANT: mark before any wrapper can observe this backend — see
+  // transaction-resource.ts.
+  if (serializedClient !== undefined) {
+    markSerializedTransactionResource(backend, serializedClient);
+  }
   return backend;
+}
+
+/**
+ * Returns the client object a Drizzle Postgres database serializes ALL of its
+ * statements onto, or `undefined` when statements can run on independent
+ * connections.
+ *
+ * Marked (single connection — an open transaction on one wrapper blocks or
+ * captures every other wrapper's statements):
+ *
+ * - **PGlite** — one in-process WASM Postgres connection.
+ * - **A bare `pg` / `@neondatabase/serverless` `Client`** — one owned socket.
+ *   An export's `BEGIN ... READ ONLY` stays open across the whole stream, so a
+ *   concurrent import's INSERT lands inside it ("cannot execute INSERT in a
+ *   read-only transaction").
+ * - **A `Pool` explicitly configured with `max: 1`** — the export checks out the
+ *   pool's only connection for the duration, so a concurrent import waits for a
+ *   connection that is never released.
+ * - **A postgres-js client built with `{ max: 1 }`** — the same cap on a
+ *   CALLABLE client. postgres-js's `begin` reserves a connection from its own
+ *   pool for the transaction, so with a pool of one an export snapshot holds the
+ *   only connection every other wrapper's statement needs.
+ *
+ * Deliberately NOT marked: a default pool (independent connection per
+ * checkout), a postgres-js client at default size (`max` defaults to 10), a
+ * neon-http tagged template (session-less HTTP), and anything unrecognized. A
+ * false positive refuses legitimate concurrent work, so the predicate requires
+ * positive evidence and abstains otherwise. A pool capped at one connection by
+ * means other than an explicit `max` option (a global `pg.defaults.max`, a
+ * driver-specific connection string) is therefore not detected, and a
+ * serialized-connection import there still fails the way it did before this
+ * guard existed.
+ */
+function getSerializedPostgresClient(db: AnyPgDatabase): object | undefined {
+  const pgliteClient = getPgliteClient(db);
+  if (pgliteClient !== undefined) return pgliteClient;
+  const client: unknown = (db as Readonly<{ $client?: unknown }>).$client;
+  // Callable clients are examined before the object arms: a tagged-template
+  // client is a FUNCTION, so `typeof client !== "object"` would drop it before
+  // its connection cap was ever read.
+  if (typeof client === "function") {
+    return isSingleConnectionCallablePgClient(client) ? client : undefined;
+  }
+  if (typeof client !== "object" || client === null) return undefined;
+  const candidate = client as Readonly<Record<string, unknown>>;
+  if (!hasFunctionProperty(candidate, "query")) return undefined;
+  if (isSingleConnectionPgPool(candidate)) return client;
+  return isBarePgClient(candidate) ? client : undefined;
+}
+
+/** Whether a `pg`-shaped client is a pool whose only connection is shared. */
+function isSingleConnectionPgPool(
+  candidate: Readonly<Record<string, unknown>>,
+): boolean {
+  // `options` is a pg.Pool member (pg.Client has none), and holds the resolved
+  // pool configuration. Only an explicit `max: 1` is treated as serialized: the
+  // default is 10, so an absent/other `max` says nothing.
+  const options: unknown = candidate["options"];
+  if (typeof options !== "object" || options === null) return false;
+  return (options as Readonly<Record<string, unknown>>)["max"] === 1;
+}
+
+/**
+ * Whether a CALLABLE Postgres client (a tagged-template `Sql`) is capped at one
+ * connection, and is therefore one serialized resource for every wrapper over it.
+ *
+ * Two pieces of positive evidence, both required:
+ *
+ * - {@link isPostgresJsClient} — the driver identity, owned by the execution
+ *   adapter that already discriminates postgres-js from the other callable
+ *   client (neon-http). Without it, `options.max` on an unknown callable means
+ *   nothing we can act on.
+ * - `options.max === 1` — postgres-js exposes its RESOLVED options on the
+ *   callable, and its `max` defaults to 10, so only an explicit cap of one says
+ *   "every statement lands on the same connection". An absent or larger `max`
+ *   abstains: postgres-js at default size hands each `begin` its own connection
+ *   and marking it would refuse concurrent work that succeeds.
+ *
+ * NOT covered: Bun's `SQL`. Nothing in this package positively identifies that
+ * driver (the SQLite side recognizes `BunSQLiteSession`; there is no Postgres
+ * equivalent), and a cap we cannot attribute to a known driver is not evidence.
+ * A `Bun.SQL` capped at one connection remains a known gap (#434).
+ */
+function isSingleConnectionCallablePgClient(client: unknown): boolean {
+  if (client === undefined || client === null) return false;
+  // Read before the driver check narrows the type: postgres-js's `Sql` type
+  // declares no `options` member, so the property is reached through the
+  // untyped client rather than the narrowed one.
+  const options: unknown = (client as Readonly<Record<string, unknown>>)[
+    "options"
+  ];
+  if (!isPostgresJsClient(client)) return false;
+  if (typeof options !== "object" || options === null) return false;
+  return (options as Readonly<Record<string, unknown>>)["max"] === 1;
+}
+
+/** Whether a `pg`-shaped client owns exactly one connection (Client, not Pool). */
+function isBarePgClient(candidate: Readonly<Record<string, unknown>>): boolean {
+  // Refuse every pool marker first: `Pool` exposes checkout accounting and its
+  // resolved `options`; `Client` exposes none of them.
+  if (
+    candidate["options"] !== undefined ||
+    candidate["totalCount"] !== undefined ||
+    candidate["idleCount"] !== undefined ||
+    candidate["waitingCount"] !== undefined
+  ) {
+    return false;
+  }
+  // Positive `pg.Client` evidence: the connection lifecycle pair plus
+  // `escapeIdentifier`, which pg defines on Client and not on Pool.
+  return (
+    hasFunctionProperty(candidate, "connect") &&
+    hasFunctionProperty(candidate, "end") &&
+    hasFunctionProperty(candidate, "escapeIdentifier")
+  );
+}
+
+/**
+ * Exported for unit tests that assert the marking predicate directly against
+ * real `pg` `Client` / `Pool` instances; production code reaches it only
+ * through {@link createPostgresBackend}.
+ *
+ * @internal
+ */
+export function isSerializedPostgresClient(client: unknown): boolean {
+  return (
+    getSerializedPostgresClient({
+      $client: client,
+    } as unknown as AnyPgDatabase) !== undefined
+  );
 }
 
 /**
@@ -1589,24 +1783,6 @@ function createPostgresOperationBackend(
 
   type VectorSearchRow = Readonly<{ node_id: string; score: number }>;
 
-  // One warning per backend instance when `efSearch` is supplied but the
-  // driver can't hold a transaction to scope `SET LOCAL` to.
-  let efSearchUnsupportedWarned = false;
-  function warnEfSearchUnsupported(): void {
-    if (efSearchUnsupportedWarned) return;
-    efSearchUnsupportedWarned = true;
-    if (typeof console === "undefined" || typeof console.warn !== "function") {
-      return;
-    }
-    console.warn(
-      "[typegraph] efSearch (hnsw.ef_search override) was ignored: this " +
-        "Postgres backend has transactions disabled (e.g. drizzle-orm/neon-http), " +
-        "and SET LOCAL needs a transaction to scope the override. Use a " +
-        "transactional driver (node-postgres / neon-serverless / postgres-js) " +
-        "to apply efSearch.",
-    );
-  }
-
   /** One transaction-local GUC override applied around a vector SELECT. */
   type SearchGucOverride = Readonly<{ name: string; value: string }>;
 
@@ -1623,8 +1799,10 @@ function createPostgresOperationBackend(
    * The transaction-local GUC overrides for one vector search:
    *
    * - `hnsw.ef_search` when the caller supplied `efSearch` (validated
-   *   upstream; warned-and-skipped on transactionless drivers, where
-   *   `SET LOCAL` cannot be scoped).
+   *   upstream; whether it may be applied at all — and under which parameter
+   *   name — is {@link resolveEfSearchOverride}, the predicate the SQLite
+   *   backend reads too, which refuses a non-HNSW slot and a transactionless
+   *   driver where `SET LOCAL` cannot be scoped).
    * - `hnsw.iterative_scan = strict_order` on HNSW slots (pgvector >= 0.8):
    *   the search SQL constrains results to live candidate nodes (and
    *   optionally `minScore`), and a plain HNSW scan yields only `ef_search`
@@ -1644,15 +1822,19 @@ function createPostgresOperationBackend(
     params: Pick<VectorSearchParams, "efSearch" | "indexType">,
   ): Promise<readonly SearchGucOverride[]> {
     const overrides: SearchGucOverride[] = [];
-    if (params.efSearch !== undefined) {
-      if (capabilities.transactions) {
-        overrides.push({
-          name: "hnsw.ef_search",
-          value: String(params.efSearch),
-        });
-      } else {
-        warnEfSearchUnsupported();
-      }
+    const efSearchParameter = resolveEfSearchOverride({
+      efSearch: params.efSearch,
+      indexType: params.indexType,
+      tuning: vectorSearchFrontierTuning(vectorStrategy),
+      transactions: capabilities.transactions,
+      dialect: "PostgreSQL",
+      engine: vectorStrategy?.name ?? "this backend",
+    });
+    if (efSearchParameter !== undefined) {
+      overrides.push({
+        name: efSearchParameter,
+        value: String(params.efSearch),
+      });
     }
     if (
       params.indexType === "hnsw" &&

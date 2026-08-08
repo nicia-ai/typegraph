@@ -496,6 +496,110 @@ try {
 }
 ```
 
+#### Definition-time unique-constraint refusals
+
+`defineGraph()` validates every node kind's `unique` constraints when the graph
+is defined, rather than leaving a broken `where` clause to surface as odd
+behavior on the first write. Three states are refused with `ConfigurationError`:
+
+- A `where` callback that **does not return a predicate** — `details` carries
+  `kind` and `constraintName`.
+- A predicate naming a **field the kind's schema does not declare** — `details`
+  adds `field` and `declaredFields`.
+- A `where` clause on a kind whose **schema is not an object schema** (it
+  exposes no `.shape`, so there is no declared-field set to check the clause
+  against) — `details` carries `kind` and `constraintName`. Refused rather than
+  left unvalidated, because skipping the check silently would disable this guard
+  for exactly the untyped callers it exists for. A plain `unique: [{ fields }]`
+  on such a schema is *not* refused: it names props by key and evaluates fine
+  against a non-object schema.
+
+All three carry only the class-level code `CONFIGURATION_ERROR`; match them by
+class, not by a `details.code`. The equivalent invariant on the graph-extension
+document path does have a stable code, `UNKNOWN_UNIQUE_WHERE_FIELD`.
+
+A constraint built **outside** `defineGraph` never passed this gate, so the
+non-predicate case is refused at evaluation too: `checkWherePredicate` throws the
+same `ConfigurationError` (with `constraintName` and `fields`) on the write path
+instead of treating a broken clause as one that applies to every row. All three
+readers of a `where` clause — definition-time validation, per-write evaluation,
+and persistence-time capture — now agree, because they read it through one
+shared function.
+
+Because the check evaluates the clause, a `where` callback now runs once at
+definition time in addition to its per-write evaluations — keep it pure. The
+check applies to node kinds whose schema exposes an object shape; edge `unique`
+constraints are not validated here. Statically typed callers were already unable
+to name an undeclared field, so this bites untyped or generated definitions.
+
+#### Definition-time `__proto__` property refusal
+
+`defineNode()` / `defineEdge()` refuse a schema that declares a property named
+`__proto__` with a `ConfigurationError` carrying `details.conflicts` and a
+`nodeType` / `edgeType` key. The name is **unstorable**, not merely reserved:
+Zod accepts it in a shape but drops it from every parse result — reporting
+success even when the field is required — so a value written to it is silently
+lost.
+
+It is only reachable through a computed key. `z.object({ __proto__: … })`
+written literally sets the shape object's own prototype instead of creating an
+entry, while `z.object({ ["__proto__"]: z.string() })` yields a shape whose
+`Object.keys` really does contain it.
+
+The graph-extension document path refuses the identical declaration with the
+stable issue code `RESERVED_PROPERTY_NAME`, at any nesting depth — so a nested
+object field named `__proto__` is refused on the same grounds as a top-level
+one. Before this, the two authoring paths disagreed about the same field: a
+typed refusal on the document path, silent data loss on the typed one.
+
+#### `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`
+
+A write guarded by a declared constraint runs its probe and its write under one
+per-graph mutual exclusion. That fence is transaction-scoped on both dialects
+(SQLite's `BEGIN IMMEDIATE`, PostgreSQL's `pg_advisory_xact_lock`), so a backend
+reporting `capabilities.transactions: false` — Cloudflare D1, `drizzle-orm/neon-http`,
+any SQLite backend built with `transactionMode: "none"` — cannot hold it, and the
+write is refused rather than run unfenced. Durable Objects are unaffected.
+
+`details.constraint` names which class needed the fence, because "this backend
+cannot fence constrained writes" is unusable advice while "your
+`cardinality: 'one'` edge cannot be enforced here" is actionable. The
+`suggestion` carries the per-class way forward.
+
+| `details.constraint` | The write it describes |
+| --- | --- |
+| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`. |
+| `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` taking its create leg — the match key is backed by no database key. The bulk form fences its whole batch, so it refuses whatever the outcome would have been. |
+| `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
+| `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind. A `scope: "kind"` unique is backed by the uniques primary key and needs no fence. |
+
+`details.graphId` names the graph. Unconstrained writes on the same backend are
+untouched — see
+[Declared constraints require `transactions`](/backend-setup#declared-constraints-require-transactions)
+for what still works there.
+
+#### Approximate retrieval with a mismatched metric
+
+`.similarTo(vector, k, { approximate: true, metric })` is refused with a
+`ConfigurationError` when `metric` differs from the field's declared metric. An
+ANN structure is built for one metric — `vec0` bakes `distance_metric` into the
+virtual table, libSQL's DiskANN index is built with `metric=…`, pgvector's index
+carries a per-metric operator class — so retrieving by the declared metric and
+re-scoring under the override would return the declared metric's neighbors
+wearing the override's scores. The two options state something that cannot both
+hold, so the option is refused rather than downgraded to an exact scan behind the
+caller's back.
+
+`details` carries `nodeKind`, `fieldPath`, `requestedMetric`, `declaredMetric`,
+and `indexType`; there is no stable `details.code`, so match by class and
+`details`. A slot declared `indexType: "none"` is **not** refused — there is no
+ANN structure to be bound to a metric, and the opt-in compiles to the exact scan,
+a degradation stated on the `approximate` option itself. A mismatched metric with
+no `approximate` is not refused on the query builder either; `store.search.vector`
+and `store.search.hybrid` refuse every mismatched override on their own broader
+rule. See
+[Approximate retrieval](/semantic-search#approximate-retrieval-for-similarto-opt-in).
+
 #### Operational Identity guard codes
 
 Operational Identity lifecycle failures use stable `details.code` values on
@@ -506,11 +610,13 @@ Operational Identity lifecycle failures use stable `details.code` values on
 | `IDENTITY_REQUIRES_ATOMIC_BACKEND` | The selected adapter cannot provide the interactive transaction required by identity writes. |
 | `IDENTITY_REQUIRES_STATEMENT_EXECUTION` | The backend cannot execute the raw statements Operational Identity issues internally. |
 | `IDENTITY_NOT_ENABLED` | `store.identity`, `tx.identity`, `StoreView.identity`, or an identity-expanded query option was reached on a graph without `identity: { ... }` — normally caught at compile time; this is the runtime guard for a widened or `any`-typed handle. |
-| `IDENTITY_STORAGE_MISSING` | An identity relation disappeared after enablement; restore ledgers or recreate and rebuild the derived closure before serving traffic. |
+| `IDENTITY_STORAGE_MISSING` | An identity relation disappeared after enablement, or exists without this graph's fill. Restore ledgers, or recreate and rebuild the derived closure, before serving traffic. `details.reason: "unfilled"` marks the second case: the separation relation is present but holds no row for this graph while the ledger holds a live `different` assertion across two distinct identity classes — reopen the Store (the open runs the fill) or run `rebuildIdentityClosure(store)`. A Store handle opened while the relation did not exist keeps failing until it is reopened, which is deliberate: the alternative is a confident "not separated" the moment another graph's upgrade creates the shared relation. |
+| `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL` | The backend cannot publish the derived separation relation's upgrade — the `CREATE` and the fill — as one commit, on a graph that owes rows. `details.missingPorts` names what is absent: `schemaWriteTransaction` / `identityTableDdl` on the fenced path, or `executeSchemaDdl` on the schema-commit path. Refused rather than degraded, because a relation created empty and filled afterwards reads as "nothing is separated" in between. Both bundled Drizzle backends implement all three when transactions are enabled, so this is a custom-backend path. |
 | `IDENTITY_ENABLEMENT_PENDING` | First enablement is pending because `autoMigrate` is disabled. |
 | `IDENTITY_PROFILE_MIGRATION_PENDING` | A `sameIdAcrossKinds` change (a breaking `fold`↔`ignore` flip, or disabling identity) has not been applied — either it is breaking, or `autoMigrate` is disabled. |
 | `IDENTITY_SCHEMA_MIGRATION_PENDING` | An identity-relevant ontology change is pending because `autoMigrate` is disabled. |
 | `IDENTITY_SEPARATION_VIOLATION` | The derived separation relation refused a write that would place both endpoints of a current `different` assertion in one identity class. The database-level backstop beneath identity validation; reaching it means an earlier guard let a contradiction through. |
+| `IDENTITY_TRANSACTION_NOT_WRITE_FENCED` | SQLite refused an identity write because the enclosing transaction was begun `DEFERRED` and another connection committed before it could take the writer slot. Only reachable through `store.withTransaction(externalTx)` / `store.withRecordedTransaction(externalTx)`, where the caller owns the `BEGIN` — TypeGraph's own transactions open `BEGIN IMMEDIATE` and hold the slot from the start. SQLite cannot upgrade a stale snapshot in place, so roll back and re-run the transaction, opening it with `BEGIN IMMEDIATE`. |
 | `IDENTITY_SCHEMA_CONTRADICTION` | Existing nodes or assertions contradict the proposed identity profile or ontology, or the materialized closure disagrees with the assertions it was derived from. Run `rebuildIdentityClosure(store)` to recover from a closure mismatch. |
 | `IDENTITY_IMPORT_REQUIRES_PROFILE` | An interchange document carries an `identity` section but the target graph does not have the profile enabled. |
 | `IDENTITY_MERGE_REQUIRES_PROFILE` | A branch carries identity changes but the merge target graph does not have the profile enabled. |
@@ -541,6 +647,82 @@ assertion's id structurally in `details.issues[].assertionId`, and
 | `IDENTITY_IMPORT_ENDED_BY_WITHOUT_END` | An assertion names an `endedBy` cause but carries no `validTo`; only an ended assertion has a cause. |
 | `IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT` | An assertion's `endedBy` names a node that is not one of its own endpoints; a deletion cascade only ends assertions that touch the deleted node. |
 | `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
+
+#### Merge provenance sidecar codes
+
+`persistProvenance: true` writes to a *sidecar* graph beside the merge target,
+and `openProvenanceStore` refuses any sidecar graph id it cannot prove it owns.
+Both refusals are `ConfigurationError`s with a stable `details.code`, and both
+carry `details.graphId` (the sidecar id) and `details.targetGraphId`:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `GRAPH_MERGE_PROVENANCE_ID_COLLISION` | The sidecar graph id is occupied by something this library did not write. `details.reason` names which state was found, and the suggestion is specific to it. |
+| `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED` | The backend exposes no transactional schema fence (`schemaWriteTransaction`), so the id's emptiness check and its ownership-marker write cannot commit as one unit. Not a collision — the id may well be free. An already-owned sidecar still opens on such a backend, so read-only use of an existing sidecar stays available. |
+
+The five `details.reason` values on `GRAPH_MERGE_PROVENANCE_ID_COLLISION`:
+
+| `details.reason` | The state that was found |
+| --- | --- |
+| `application-graph` | The id holds rows (in any per-graph table) or a schema that is not the sidecar's, so it belongs to an application. Rename the colliding graph or point the merge elsewhere. |
+| `empty-legacy-sidecar` | A pre-marker sidecar with no rows at all, which carries no evidence of authorship and is indistinguishable from an application graph of the same shape. |
+| `unupgradeable-legacy-sidecar` | A pre-marker sidecar whose rows do not verify as provenance this library wrote for *this* target, so it cannot be upgraded to an owned sidecar. |
+| `unowned-exact-schema-graph` | The current sidecar schema with no ownership marker. Because the marker is written *first*, this library cannot have produced this state; contents are not consulted, so an empty or provenance-shaped occupant is refused too. |
+| `corrupt-ownership-marker` | A `ProvenanceOwner` row that is not a valid live claim for this target — soft-deleted, schema-invalid, naming a different target, or stored under a different row id. It is never overwritten or resurrected, because it may be an application's row. |
+
+Under `persistProvenance: true` these arrive wrapped: the sidecar is opened and
+claimed **before** the merge commits, and either code refuses the merge as an
+`InvalidMergeOptionsError` (`details.option: "persistProvenance"`,
+`details.provenanceErrorCode` echoing the code above, the `ConfigurationError`
+as `cause`) with the target left unmodified. Only transient row-write failures
+after the commit degrade to a `warnings` entry.
+
+#### Interchange serialized-connection guard codes
+
+Two long-lived interchange streams cannot share one serialized database
+connection: an export snapshot holds a read transaction for the whole stream and
+a streaming import writes a transaction per chunk on that same connection, so
+the second one either nests a `BEGIN` or waits for a slot that never frees. The
+lease is **exclusive** — one stream of any kind per connection — so all four
+pairings refuse with a `ConfigurationError` rather than hanging:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` | An export snapshot holds the connection, detected through the shared serialized resource the two backend wrappers were marked with. |
+| `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT` | The same condition, reported by the object-identity detector: one SQLite backend is exporting into itself. Worth telling apart because the fix differs — pass a second backend rather than await whatever else is running. |
+| `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS` | A streaming import holds the connection, in either order of discovery. |
+
+The code names *what holds the connection*; `details.requested` and
+`details.heldBy` (each `"export-snapshot"` or `"import-stream"`) name which
+pairing was actually refused, so a same-kind refusal is never reported as
+something it is not. `details.graphId` names the graph the refused stream was
+for.
+
+`"import-stream"` is the kind of every long-lived import, not only
+`importGraphStream`: `importGraph` holds the lease for the whole call, and
+`trustedImportGraph` / `trustedImportGraphStream` hold it for the whole trusted
+session — so those APIs throw this `ConfigurationError` as well as their own
+`TrustedImportError`. Connections TypeGraph cannot observe are not refused: two
+clients dialed at one server, or two SQLite handles on one file, are genuinely
+independent. See
+[Scaling branches and interchange](/graph-merge#scaling-branches-and-interchange)
+for which drivers are recognized as serialized.
+
+#### `ExportStreamCancelledError`
+
+An export stream whose `signal` fires settles with `ExportStreamCancelledError`
+(`code: "INTERCHANGE_EXPORT_STREAM_ABORTED"`) rather than a silent end of stream,
+so a consumer never mistakes a cancelled export for a complete one. It is thrown
+only *after* the export has given back everything it took, so receiving it means
+the connection is already free. What that was depends on the backend: a
+transactional one rolls back the snapshot and releases the connection's stream
+lease; one without transactions held neither and simply abandons its remaining
+reads, its delivered chunks never having been a single snapshot. The message
+says which.
+`details.graphId` names the exported graph and `cause` carries the signal's own
+`reason` when the caller supplied one. A signal that is already aborted refuses
+the export before any transaction is opened. See
+[Cancelling an export](/interchange#cancelling-an-export).
 
 #### Recorded-capture guard codes
 
@@ -844,3 +1026,5 @@ try {
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported |
+| `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation |
+| `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |

@@ -40,6 +40,8 @@ import {
 import {
   assertVectorSearchLimit,
   buildVectorCapabilities,
+  resolveEfSearchOverride,
+  vectorSearchFrontierTuning,
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
@@ -81,6 +83,7 @@ import {
   type GraphBackend,
   type HybridSearchParams,
   type HybridSearchRow,
+  type IdentityTableNames,
   type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
@@ -110,6 +113,9 @@ import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
   getDurableObjectStorageClient,
+  isBetterSqlite3Client,
+  isBunSqliteClient,
+  isSqlJsClient,
   type SqliteExecutionAdapter,
   type SqliteExecutionProfile,
   type SqliteExecutionProfileHints,
@@ -132,6 +138,7 @@ import {
   nowIso,
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
+import { markSerializedTransactionResource } from "../transaction-resource";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -818,6 +825,21 @@ function createSqliteOperationBackend(
           params: VectorSearchParams,
         ): Promise<readonly VectorSearchResult[]> {
           assertVectorSearchLimit(params.limit);
+          // Apply-or-refuse for the per-search ANN frontier. No SQLite engine
+          // TypeGraph bundles has one (sqlite-vec's vec0 takes only `k`;
+          // libSQL's `vector_top_k` takes only (index, query, k)), so the
+          // shared predicate refuses `efSearch` here with the engine's own
+          // reason instead of accepting it and searching as if it were never
+          // passed. `undefined` — the overwhelmingly common case — returns
+          // without touching anything.
+          resolveEfSearchOverride({
+            efSearch: params.efSearch,
+            indexType: params.indexType,
+            tuning: vectorSearchFrontierTuning(vectorStrategy),
+            transactions: capabilities.transactions,
+            dialect: "SQLite",
+            engine: vectorStrategy.name,
+          });
           // Deliberately NOT marker-gated: search is read-only (no DDL
           // hazard to gate), and its params carry the caller's runtime
           // metric override, which legitimately diverges from the
@@ -867,6 +889,19 @@ function createSqliteOperationBackend(
               // the fulltext depth is validated inside
               // buildFulltextSearch).
               assertVectorSearchLimit(params.vector.k);
+              // The hybrid statement's vector leg carries the same option on
+              // the same engine, so it takes the same refusal. This path built
+              // its own `VectorSearchParams` and dropped
+              // `params.vector.efSearch` while doing so — the silent ignore in
+              // its second location.
+              resolveEfSearchOverride({
+                efSearch: params.vector.efSearch,
+                indexType: params.vector.indexType,
+                tuning: vectorSearchFrontierTuning(vectorStrategy),
+                transactions: capabilities.transactions,
+                dialect: "SQLite",
+                engine: vectorStrategy.name,
+              });
               const slot = vectorSlotFromParams({
                 graphId: params.graphId,
                 nodeKind: params.nodeKind,
@@ -1116,10 +1151,109 @@ function createSqliteOperationBackend(
   return operationBackend;
 }
 
+/**
+ * Whether a driver client is a LOCAL `@libsql/client`: one stable connection
+ * that every statement from every wrapper over it runs on, in order.
+ *
+ * `protocol === "file"` is the client's own answer to "am I local?" — it covers
+ * `file:` paths, `:memory:` databases, and an embedded replica's local file. A
+ * REMOTE client (`http` / `ws`) opens an independent stream per transaction and
+ * must never be treated as one serialized resource; refusing concurrent work
+ * there would refuse work that succeeds. The libsql methods are required
+ * alongside the protocol so an unrelated object that happens to carry
+ * `protocol: "file"` is not adopted, and none of it imports `@libsql/client`,
+ * which this bundler-friendly module must not depend on.
+ *
+ * Single owner of the local/remote distinction: `../sqlite/libsql.ts` picks its
+ * transaction framing (raw BEGIN/COMMIT on the one local connection vs Drizzle's
+ * per-stream `db.transaction()`) by asking here, so the framing and the
+ * serialized-resource mark cannot drift apart.
+ */
+export function isLocalLibsqlClient(client: unknown): boolean {
+  if (typeof client !== "object" || client === null) return false;
+  const candidate = client as Readonly<Record<string, unknown>>;
+  return (
+    candidate["protocol"] === "file" &&
+    typeof candidate["execute"] === "function" &&
+    typeof candidate["batch"] === "function" &&
+    typeof candidate["executeMultiple"] === "function"
+  );
+}
+
+/**
+ * Returns the single connection a Drizzle database serializes every statement
+ * onto, if its driver is one we can positively identify as such.
+ *
+ * Five drivers qualify, each by its own named predicate — a driver is marked on
+ * evidence of WHAT IT IS, never on the absence of a disqualifier:
+ *
+ * - **better-sqlite3** ({@link isBetterSqlite3Client}): a single, synchronous
+ *   connection, so an open transaction on one wrapper is an open transaction
+ *   for all of them.
+ * - **bun:sqlite** ({@link isBunSqliteClient}): the same one synchronous
+ *   connection, reached through `drizzle-orm/bun-sqlite`.
+ * - **sql.js** ({@link isSqlJsClient}): one in-WASM database handle; every
+ *   wrapper's statements run on it in order.
+ * - **Cloudflare Durable Object storage** (`drizzle(ctx.storage)`): one storage
+ *   connection whose transaction frame is AMBIENT on the storage object rather
+ *   than a handle passed to the callback (see `runDoSqliteStorageTransaction`:
+ *   `transactionMode: "do-sqlite"` binds the OUTER `db`). A second wrapper's
+ *   writes therefore land inside the first
+ *   wrapper's open export snapshot, and because the DO backend reports
+ *   `capabilities.transactions: true` nothing else abstains for it. Identified by
+ *   {@link getDurableObjectStorageClient}, the same full-shape evidence the
+ *   transaction runner requires, so the framing and the mark cannot drift apart.
+ * - **a local `@libsql/client`**: also one stable connection — which is exactly
+ *   why local clients frame transactions as raw BEGIN/COMMIT on it (see
+ *   {@link isLocalLibsqlClient}). libsql clients expose no `prepare`, so no
+ *   prepare-capable predicate can see them and the driver client is read
+ *   directly here.
+ *
+ * Unrecognized clients stay unmarked: SEPARATE connections to the same file are
+ * genuinely concurrent under WAL and must not be treated as one serialized
+ * resource, and a driver whose dispatch we cannot attribute proves nothing.
+ * The full classification — marked, deliberately unmarked, and the remaining
+ * gaps — is the inventory in `../transaction-resource.ts`.
+ */
+function getSerializedSqliteConnection(
+  db: AnySqliteDatabase,
+): object | undefined {
+  const client = (db as Readonly<{ $client?: unknown }>).$client;
+  if (
+    isBetterSqlite3Client(client) ||
+    isBunSqliteClient(client) ||
+    isSqlJsClient(client)
+  ) {
+    return client as object;
+  }
+  // The storage object IS the serialized resource: every wrapper built over the
+  // same `ctx.storage` shares its one connection and its ambient transaction.
+  const storageClient = getDurableObjectStorageClient(db);
+  if (storageClient !== undefined) return storageClient;
+  return isLocalLibsqlClient(client) ? (client as object) : undefined;
+}
+
+/**
+ * Whether two backends built over `client` would be treated as one serialized
+ * connection. The marking predicate itself, exposed for the driver-shape unit
+ * tests (mirrors `isSerializedPostgresClient`); production code reaches it only
+ * through {@link createSqliteBackend}.
+ */
+export function isSerializedSqliteClient(client: unknown): boolean {
+  return (
+    getSerializedSqliteConnection({
+      $client: client,
+    } as unknown as AnySqliteDatabase) !== undefined
+  );
+}
+
 export function createSqliteBackend(
   db: AnySqliteDatabase,
   options: SqliteBackendOptions = {},
 ): AdapterBackend<AnySqliteDatabase> {
+  // Resolved before the backend exists so marking below is a lookup, never
+  // work that could fail after wrappers already observed an unmarked backend.
+  const serializedConnection = getSerializedSqliteConnection(db);
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? fts5Strategy;
   const profileHints = options.executionProfile ?? {};
@@ -1324,6 +1458,28 @@ export function createSqliteBackend(
     return tableExistsFromRow(rows[0]);
   }
 
+  /**
+   * The contribution descriptors for exactly the identity relations, under
+   * caller-supplied physical names. Pure — nothing is executed here — and the
+   * single owner of "which DDL belongs to the identity relations", shared by
+   * `ensureIdentityTables` (which runs it) and `identityTableDdl` (which hands
+   * it to a transaction).
+   */
+  function identityContributionsFor(
+    identityTableNames: IdentityTableNames,
+  ): ReturnType<typeof sqliteContributions> {
+    const identityTables = buildSqliteTables({
+      identityAssertions: identityTableNames.identityAssertions,
+      recordedIdentityAssertions: identityTableNames.recordedIdentityAssertions,
+      identityClosure: identityTableNames.identityClosure,
+      identitySeparation: identityTableNames.identitySeparation,
+    });
+    return sqliteContributions(identityTables, fulltextStrategy).filter(
+      (contribution) =>
+        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
+    );
+  }
+
   const contributionMaterializer = createContributionMaterializer({
     dialect: "sqlite",
     fulltextStrategy,
@@ -1344,7 +1500,7 @@ export function createSqliteBackend(
     // schema lock is per connection, not per graph.
     ...(capabilities.transactions ?
       {
-        schemaWriteTransaction: <T,>(
+        schemaWriteTransaction: <T>(
           _graphId: string,
           fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
         ) => runSchemaWriteTransaction((target) => fn(target)),
@@ -1410,6 +1566,45 @@ export function createSqliteBackend(
   }
 
   /**
+   * Rolls the manually framed transaction back on the failure path WITHOUT ever
+   * throwing: the caller rethrows the original error immediately after.
+   *
+   * SQLite rolls a transaction back by itself on some errors (SQLITE_FULL,
+   * SQLITE_IOERR, SQLITE_NOMEM), so by the time this runs the frame can already
+   * be gone and the ROLLBACK fails with "cannot rollback - no transaction is
+   * active". A bare `await ROLLBACK; throw error` replaces the caller's
+   * actionable failure ("disk image is malformed") with that secondary one and
+   * never reaches its own rethrow — the masking that `closeAfterFailure` and the
+   * index-materialization claim release exist to prevent, applied here too.
+   *
+   * The two reasons a ROLLBACK can fail are NOT told apart here, deliberately.
+   * SQLite reports the already-closed frame only as a message ("cannot rollback
+   * - no transaction is active"), with no result code that distinguishes it, so
+   * a classifier would have to match text through whatever wrapper the driver
+   * applied — and it would buy nothing, because the handling is identical
+   * either way: never mask the caller's error, always report. The report
+   * therefore states both possibilities rather than asserting the benign one,
+   * so an operator reading the log is not told "nothing is leaked" about a
+   * failure that did leave the frame open. When it did, nothing here can close
+   * it (the statement that would is the one that just failed) and the next
+   * BEGIN on this connection fails loudly rather than silently joining it.
+   */
+  async function rollbackFrameQuietly(): Promise<void> {
+    try {
+      await runFrameStatement(sql`ROLLBACK`);
+    } catch (rollbackError) {
+      console.warn(
+        "typegraph: ROLLBACK failed while unwinding a failed SQLite " +
+          "transaction; the original failure is the one thrown. Either the " +
+          "frame was already closed (SQLite auto-rolls-back on SQLITE_FULL / " +
+          "SQLITE_IOERR / SQLITE_NOMEM) and nothing is leaked, or it is still " +
+          "open on this connection, in which case the next BEGIN here fails.",
+        rollbackError,
+      );
+    }
+  }
+
+  /**
    * Runs `fn` inside a SQLite write transaction (BEGIN IMMEDIATE) so that
    * the read-then-write inside `commitSchemaVersion` / `setActiveVersion`
    * is serialized against concurrent writers — a deferred BEGIN would let
@@ -1452,7 +1647,7 @@ export function createSqliteBackend(
           await runFrameStatement(sql`COMMIT`);
           return result;
         } catch (error) {
-          await runFrameStatement(sql`ROLLBACK`);
+          await rollbackFrameQuietly();
           throw error;
         }
       });
@@ -1583,19 +1778,8 @@ export function createSqliteBackend(
       // exist yet. Ensure them (and their indexes and CHECK constraints)
       // idempotently — CREATE TABLE / CREATE INDEX IF NOT EXISTS — reusing the same contribution
       // DDL bootstrapTables emits, scoped to the identity relations.
-      const identityTables = buildSqliteTables({
-        identityAssertions: identityTableNames.identityAssertions,
-        recordedIdentityAssertions:
-          identityTableNames.recordedIdentityAssertions,
-        identityClosure: identityTableNames.identityClosure,
-        identitySeparation: identityTableNames.identitySeparation,
-      });
-      const identityContributions = sqliteContributions(
-        identityTables,
-        fulltextStrategy,
-      ).filter((contribution) =>
-        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
-      );
+      const identityContributions =
+        identityContributionsFor(identityTableNames);
       const missing = [] as string[];
       for (const contribution of identityContributions) {
         if (!(await contributionTableExists(contribution.tableName))) {
@@ -1614,6 +1798,12 @@ export function createSqliteBackend(
         }
       }
       return missing;
+    },
+
+    identityTableDdl(identityTableNames): readonly string[] {
+      return identityContributionsFor(identityTableNames).flatMap(
+        (contribution) => [...contribution.createDdl],
+      );
     },
 
     // Every fulltext-touching method asserts the durable marker instead
@@ -1930,7 +2120,10 @@ export function createSqliteBackend(
 
     async commitSchemaVersionWithPreflight(
       params: CommitSchemaVersionParams,
-      preflight: (target: TransactionBackend) => Promise<void>,
+      // The schema-write target, not the narrowed transaction backend: a
+      // preflight may have to CREATE the storage it then fills, and that DDL
+      // belongs in this transaction rather than before it.
+      preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
     ): Promise<SchemaVersionRow> {
       return runSchemaWriteTransaction(async (target) => {
         await preflight(target);
@@ -2025,7 +2218,7 @@ export function createSqliteBackend(
             await runFrameStatement(sql`COMMIT`);
             return result;
           } catch (error) {
-            await runFrameStatement(sql`ROLLBACK`);
+            await rollbackFrameQuietly();
             throw error;
           }
         });
@@ -2083,6 +2276,12 @@ export function createSqliteBackend(
       return Promise.resolve();
     },
   };
+
+  // INVARIANT: mark before any wrapper can observe this backend — see
+  // transaction-resource.ts.
+  if (serializedConnection !== undefined) {
+    markSerializedTransactionResource(backend, serializedConnection);
+  }
 
   return backend;
 }

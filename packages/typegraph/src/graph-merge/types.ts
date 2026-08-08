@@ -341,9 +341,9 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
    * the value contributed by the highest-weight branch wins. Ties fall back to
    * {@link branchOrder} (then canonical value order); branches absent from the map
    * default to weight `0`. Ignored by every other policy. Keyed by
-   * {@link BranchId}, like {@link branchOrder}. Without this map,
-   * `"provenanceWeighted"` has no weights to consult and degrades to
-   * `"lastWriteWins"` semantics.
+   * {@link BranchId}, like {@link branchOrder}. A non-empty map is required when
+   * either property-conflict policy is `"provenanceWeighted"`; otherwise option
+   * validation refuses the merge rather than silently changing policy.
    */
   provenanceWeights?: ReadonlyMap<BranchId, number>;
 }>;
@@ -352,14 +352,14 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
  * Object-form arguments for {@link mergeIncremental} (§6.6). The two same-typed
  * stores are NAMED so `forkPoint` (the frozen ancestor the branches forked from, the
  * diff reference) and `target` (the live committed graph that base lookups and the
- * commit land on) cannot be swapped. `options.target` is ignored — `target` is the
- * explicit arg.
+ * commit land on) cannot be swapped. The target is deliberately absent from the
+ * options type because the named `target` argument is authoritative.
  */
 export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
   forkPoint: Store<G>;
   target: Store<G>;
   branches: readonly GraphBranch<G>[];
-  options?: MergeOptions<G>;
+  options?: Omit<MergeOptions<G>, "target">;
 }>;
 
 /**

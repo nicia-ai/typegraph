@@ -661,3 +661,217 @@ describe("Smart Select Integration", () => {
     ).toBe(true);
   });
 });
+
+// ============================================================
+// Declared fields named after Object.prototype members
+// ============================================================
+
+/**
+ * A schema may DECLARE a field named after an `Object.prototype` member —
+ * `z.object({ toString: z.string() })` is an ordinary schema, and the field is
+ * ordinary data through Zod, storage, and the JSON round-trip. The tracking
+ * proxy must therefore treat such a name as a field ACCESS, not as a prototype
+ * member: classifying it as the latter left the field untracked, so the
+ * selective projection never selected it and the guarded result proxy served
+ * the inherited member in place of the stored value.
+ */
+const Shadow = defineNode("Shadow", {
+  schema: z.object({
+    name: z.string(),
+    toString: z.string().optional(),
+  }),
+});
+
+/**
+ * Endpoints for the edge case. A kind declaring `toString` cannot be created
+ * from a plain object literal that OMITS the field — Zod reads the shape key
+ * off the input with an ordinary `input[key]`, which finds
+ * `Object.prototype.toString` and rejects the "function" — so the edge test
+ * uses a kind with no shadowed field of its own.
+ */
+const Plain = defineNode("Plain", {
+  schema: z.object({ name: z.string() }),
+});
+
+const shadowedBy = defineEdge("shadowedBy", {
+  schema: z.object({
+    valueOf: z.string().optional(),
+  }),
+});
+
+const shadowGraph = defineGraph({
+  id: "smart_select_shadowed_fields",
+  nodes: { Shadow: { type: Shadow }, Plain: { type: Plain } },
+  edges: {
+    shadowedBy: {
+      type: shadowedBy,
+      from: [Plain],
+      to: [Plain],
+      cardinality: "many",
+    },
+  },
+});
+
+describe("selective projection over a declared prototype-named field", () => {
+  let store: Store<typeof shadowGraph>;
+  let getLastQuery: () => SqlFragment | string | undefined;
+
+  beforeEach(() => {
+    const { backend, getLastQuery: getQuery } = createRecordingBackend();
+    getLastQuery = getQuery;
+    store = createStore(shadowGraph, backend);
+  });
+
+  it("returns the STORED value for a node field named toString", async () => {
+    await store.nodes.Shadow.create({ name: "Alice", toString: "STORED" });
+
+    const results = await store
+      .query()
+      .from("Shadow", "s")
+      .select((ctx) => ({ name: ctx.s.name, shadowed: ctx.s.toString }))
+      .execute();
+
+    // The projection must SELECT the field — proof the tracker classified the
+    // access as a field rather than as an inherited prototype member.
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
+    expect(sql).toContain('AS "s_toString"');
+    expect(sql).not.toContain('AS "s_props"');
+
+    expect(results).toEqual([{ name: "Alice", shadowed: "STORED" }]);
+  });
+
+  it("returns the STORED value for an edge field named valueOf", async () => {
+    const alice = await store.nodes.Plain.create({ name: "Alice" });
+    const bob = await store.nodes.Plain.create({ name: "Bob" });
+    await store.edges.shadowedBy.create(
+      { kind: "Plain", id: alice.id },
+      { kind: "Plain", id: bob.id },
+      { valueOf: "EDGE-STORED" },
+    );
+
+    const results = await store
+      .query()
+      .from("Plain", "s")
+      .traverse("shadowedBy", "e")
+      .to("Plain", "t")
+      .select((ctx) => ({ name: ctx.s.name, shadowed: ctx.e.valueOf }))
+      .execute();
+
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
+    expect(sql).toContain('AS "e_valueOf"');
+
+    expect(results).toEqual([{ name: "Alice", shadowed: "EDGE-STORED" }]);
+  });
+
+  it("still serves the inherited member for an UNDECLARED prototype name", async () => {
+    await store.nodes.Shadow.create({ name: "Alice", toString: "STORED" });
+
+    const results = await store
+      .query()
+      .from("Shadow", "s")
+      .select((ctx) => {
+        // `valueOf` is not declared on Shadow, so it stays a prototype member:
+        // the tracker must not record it, and the result proxy answers with the
+        // inherited function rather than throwing MissingSelectiveFieldError.
+        const alias = ctx.s as unknown as Record<string, unknown>;
+        // eslint-disable-next-line @typescript-eslint/dot-notation
+        const inherited = alias["valueOf"];
+        return { name: ctx.s.name, inherited: typeof inherited };
+      })
+      .execute();
+
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
+    expect(sql).not.toContain('AS "s_valueOf"');
+    expect(results).toEqual([{ name: "Alice", inherited: "function" }]);
+  });
+});
+
+// ============================================================
+// Prototype parity between the two mappers
+// ============================================================
+
+/**
+ * The alias objects and their `meta` are proxies, and a proxy's TARGET is
+ * caller-observable: `instanceof`, `Object.getPrototypeOf`, and every other
+ * internal method fall through to it, so a null-prototype target cannot be
+ * disguised by the `get` trap that re-supplies `Object.prototype`'s members.
+ * Under the full mapper these are ordinary object literals; the invariant is
+ * that a caller cannot tell which mapper ran.
+ *
+ * Each case asserts the SELECTIVE projection actually engaged (no `_props`
+ * column in the statement that ran) — the same-shaped assertions against the
+ * full mapper pass without the fix and certify nothing.
+ */
+describe("prototype parity between the selective and full mappers", () => {
+  let store: Store<typeof testGraph>;
+  let getLastQuery: () => SqlFragment | string | undefined;
+
+  beforeEach(async () => {
+    const { backend, getLastQuery: getQuery } = createRecordingBackend();
+    getLastQuery = getQuery;
+    store = createStore(testGraph, backend);
+    await store.nodes.Person.create({ name: "Alice", age: 30 });
+  });
+
+  it("hands the select callback ordinary objects for the alias and its meta", async () => {
+    const results = await store
+      .query()
+      .from("Person", "p")
+      .select((ctx) => ({
+        // Reading a projected field is what makes smart selection engage at
+        // all; without it the tracker sees no field and the full mapper runs.
+        name: ctx.p.name,
+        version: ctx.p.meta.version,
+        aliasIsObject: ctx.p instanceof Object,
+        aliasPrototypeIsNull: Object.getPrototypeOf(ctx.p) === null,
+        metaIsObject: ctx.p.meta instanceof Object,
+        metaPrototypeIsNull: Object.getPrototypeOf(ctx.p.meta) === null,
+        contextIsObject: ctx instanceof Object,
+      }))
+      .execute();
+
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
+    expect(sql).toContain('AS "p_name"');
+    expect(sql).not.toContain('AS "p_props"');
+
+    expect(results).toEqual([
+      {
+        name: "Alice",
+        version: 1,
+        aliasIsObject: true,
+        aliasPrototypeIsNull: false,
+        metaIsObject: true,
+        metaPrototypeIsNull: false,
+        contextIsObject: true,
+      },
+    ]);
+  });
+
+  it("keeps a `__proto__` ALIAS an own context key under selective projection", async () => {
+    const results = await store
+      .query()
+      .from("Person", "__proto__")
+      .select((ctx) => ({
+        name: ctx.__proto__.name,
+        // The alias is caller data. Spreading the context bag is what keeps it
+        // an own key instead of handing it to `Object.prototype`'s setter, and
+        // the spread must not cost the alias object its own prototype.
+        aliasIsOwnKey: Object.hasOwn(ctx, "__proto__"),
+        aliasIsObject: ctx.__proto__ instanceof Object,
+        aliasPrototype: Object.getPrototypeOf(ctx.__proto__) as unknown,
+      }))
+      .execute();
+
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
+    expect(sql).not.toContain('AS "__proto___props"');
+
+    expect(results).toEqual([
+      {
+        name: "Alice",
+        aliasIsOwnKey: true,
+        aliasIsObject: true,
+        aliasPrototype: Object.prototype,
+      },
+    ]);
+  });
+});

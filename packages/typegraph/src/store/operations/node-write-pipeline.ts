@@ -40,12 +40,14 @@ import {
 } from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
-  checkUniquenessConstraints,
   createUniquenessContext,
   deleteUniquenessEntries,
   insertUniquenessEntries,
   insertUniquenessEntriesBatch,
-  updateUniquenessEntries,
+  planUniquenessReinsert,
+  planUniquenessUpdate,
+  type UniquenessUpdatePlan,
+  withUniquenessTransition,
 } from "../uniqueness";
 
 type Backend = GraphBackend | TransactionBackend;
@@ -278,10 +280,66 @@ export type NodeUpdateTarget =
   | Readonly<{ existing: NodeRow; clearDeleted: true }>;
 
 /**
+ * Decides a node update's uniqueness transition, writing nothing.
+ *
+ * Two shapes behind one seam. A live row diffs its old and new keys; a
+ * resurrecting update (`clearDeleted` on a tombstoned row) cannot, because the
+ * soft delete already removed its entries — the diff would skip an unchanged
+ * key and leave the resurrected node holding NO reservation, so a later create
+ * could silently duplicate the value. It re-reserves every applying key
+ * instead. Both refuse a conflict before returning, and both hand the caller a
+ * plan that only {@link withUniquenessTransition} may carry out.
+ */
+async function planNodeUpdateUniqueness(
+  ctx: NodeWriteContext,
+  args: Readonly<{
+    existing: NodeRow;
+    validatedProps: Record<string, unknown>;
+    uniqueConstraints: readonly UniqueConstraint[];
+  }>,
+  backend: Backend,
+): Promise<UniquenessUpdatePlan> {
+  const { kind, id } = args.existing;
+
+  if (args.existing.deleted_at !== undefined) {
+    return planUniquenessReinsert(
+      uniquenessContext(ctx, backend),
+      kind,
+      id,
+      args.validatedProps,
+      args.uniqueConstraints,
+    );
+  }
+
+  return planUniquenessUpdate(
+    uniquenessContext(ctx, backend),
+    kind,
+    id,
+    parseRowProps(args.existing),
+    args.validatedProps,
+    args.uniqueConstraints,
+  );
+}
+
+/**
  * Applies a node update: uniqueness maintenance (diff-based for a live row;
  * check-and-reinsert for a resurrecting update, whose entries the soft delete
  * removed), the core row update, then embedding and fulltext sync. Returns
  * the updated row.
+ *
+ * ## The row write and its uniqueness transition are ONE unit
+ *
+ * Both can fail — the row write matches nothing when `expectedValidFrom` or the
+ * `deleted_at` fence stopped holding, the uniqueness claim loses a race for a
+ * key — and a caller that catches either PER ROW and commits the rest of the
+ * transaction (interchange import) must never be left with half of the pair
+ * applied. {@link withUniquenessTransition} owns that sequencing and documents
+ * why claim/gate/release is the only order that works; this function just hands
+ * it the plan and the write.
+ *
+ * The embedding and fulltext syncs stay AFTER the gate: they are derived data
+ * with no claim to make, so a row write that lands on nothing must not rewrite
+ * a fulltext row or re-embed props no row ever received.
  */
 export async function applyNodeUpdate(
   ctx: NodeWriteContext,
@@ -291,42 +349,25 @@ export async function applyNodeUpdate(
     uniqueConstraints: readonly UniqueConstraint[];
     validFrom?: string | null;
     validTo?: string;
+    /** See {@link UpdateNodeParams.expectedValidFrom}. */
+    expectedValidFrom?: string | null;
   }> &
     NodeUpdateTarget,
   backend: Backend,
 ): Promise<NodeRow> {
   const { kind, id } = args.existing;
-  if (args.existing.deleted_at === undefined) {
-    await updateUniquenessEntries(
-      uniquenessContext(ctx, backend),
-      kind,
-      id,
-      parseRowProps(args.existing),
-      args.validatedProps,
-      args.uniqueConstraints,
-    );
-  } else {
-    // Resurrecting update (clearDeleted on a tombstoned row): the soft delete
-    // already removed this node's uniqueness entries, so the diff-based path
-    // would skip an unchanged key entirely and the resurrected node would
-    // hold NO reservation — a later create could then silently duplicate the
-    // value. Re-check and re-insert for the new props instead, exactly as
-    // applyNodeResurrect does.
-    await checkUniquenessConstraints(
-      uniquenessContext(ctx, backend),
-      kind,
-      id,
-      args.validatedProps,
-      args.uniqueConstraints,
-    );
-    await insertUniquenessEntries(
-      uniquenessContext(ctx, backend),
-      kind,
-      id,
-      args.validatedProps,
-      args.uniqueConstraints,
-    );
-  }
+
+  // Read-only phase: decide the sidecar changes, refuse a conflict, write
+  // nothing.
+  const plan = await planNodeUpdateUniqueness(
+    ctx,
+    {
+      existing: args.existing,
+      validatedProps: args.validatedProps,
+      uniqueConstraints: args.uniqueConstraints,
+    },
+    backend,
+  );
 
   const updateParams: {
     graphId: string;
@@ -335,6 +376,7 @@ export async function applyNodeUpdate(
     props: Record<string, unknown>;
     validFrom?: string | null;
     validTo?: string;
+    expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
   } = {
@@ -346,9 +388,18 @@ export async function applyNodeUpdate(
   };
   if (args.validFrom !== undefined) updateParams.validFrom = args.validFrom;
   if (args.validTo !== undefined) updateParams.validTo = args.validTo;
+  if (args.expectedValidFrom !== undefined) {
+    updateParams.expectedValidFrom = args.expectedValidFrom;
+  }
   if (args.clearDeleted) updateParams.clearDeleted = true;
 
-  const row = await backend.updateNode(updateParams);
+  const row = await withUniquenessTransition(
+    uniquenessContext(ctx, backend),
+    kind,
+    id,
+    plan,
+    () => backend.updateNode(updateParams),
+  );
 
   await Promise.all([
     syncEmbeddings(
@@ -465,28 +516,33 @@ export async function applyNodeResurrect(
 ): Promise<NodeRow> {
   const { kind, id } = args.existing;
   const props = parseRowProps(args.existing);
-  await checkUniquenessConstraints(
+  // One unit, exactly as `applyNodeUpdate`, and for the same reason: the
+  // resurrecting UPDATE carries `deleted_at IS NOT NULL`, so a peer that revived
+  // this tombstone first makes it match zero rows — and the reservations that
+  // revival is entitled to are the peer's, not this caller's.
+  // `withUniquenessTransition` gives them back when the gate refuses.
+  const plan = await planUniquenessReinsert(
     uniquenessContext(ctx, backend),
     kind,
     id,
     props,
     args.uniqueConstraints,
   );
-  await insertUniquenessEntries(
+  const row = await withUniquenessTransition(
     uniquenessContext(ctx, backend),
     kind,
     id,
-    props,
-    args.uniqueConstraints,
+    plan,
+    () =>
+      backend.updateNode({
+        graphId: ctx.graphId,
+        kind,
+        id,
+        props,
+        incrementVersion: true,
+        clearDeleted: true,
+      }),
   );
-  const row = await backend.updateNode({
-    graphId: ctx.graphId,
-    kind,
-    id,
-    props,
-    incrementVersion: true,
-    clearDeleted: true,
-  });
   await Promise.all([
     syncEmbeddings(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
     syncFulltext(nodeSyncContext(ctx, kind, id, backend), args.schema, props),

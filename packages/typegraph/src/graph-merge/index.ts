@@ -16,6 +16,7 @@ export {
   BaseVersionMismatchError,
   BranchError,
   IdentityMergeConflictError,
+  InvalidMergeOptionsError,
   MERGE_ERROR_CODES,
   MergeConflictError,
   MergeError,

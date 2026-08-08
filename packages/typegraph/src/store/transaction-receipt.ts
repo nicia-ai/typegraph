@@ -190,16 +190,18 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
     },
 
     snapshot(recorded): TransactionReceipt {
-      // Object.assign onto a fresh null-prototype bucket (rather than spread)
-      // keeps prototype-colliding kind names readable on the returned receipt.
+      // Spread, not `Object.assign` onto a fresh null-prototype bucket. Both
+      // keep a prototype-colliding kind name readable, but the receipt is
+      // RETURNED to the caller, and a spread is the boundary copy that also
+      // restores `Object.prototype` (see `createDataKeyedBag`'s "Spread it at
+      // the boundary"): it copies own properties with CreateDataProperty rather
+      // than Set, so a `__proto__` kind survives as an own key while
+      // `receipt.writes.nodes instanceof Object` still answers `true` — as
+      // `identity` on the next line always did.
       return Object.freeze({
         writes: Object.freeze({
-          nodes: Object.freeze(
-            Object.assign(createCountBucket(), counters.nodes),
-          ),
-          edges: Object.freeze(
-            Object.assign(createCountBucket(), counters.edges),
-          ),
+          nodes: Object.freeze({ ...counters.nodes }),
+          edges: Object.freeze({ ...counters.edges }),
           identity: Object.freeze({ ...counters.identity }),
           total: counters.total,
         }),

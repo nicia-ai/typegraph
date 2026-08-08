@@ -7,6 +7,7 @@ export {
   freezeDeep,
   hasOwnKey,
   isPlainObject,
+  readOwnProperty,
 } from "./object";
 export { isSqlitePath, normalizePath, parseSqlitePath } from "./path";
 export {
@@ -23,3 +24,4 @@ export {
   unwrapOr,
 } from "./result";
 export { isMissingTableError } from "./sql-errors";
+export { encodeTupleKey } from "./tuple-key";

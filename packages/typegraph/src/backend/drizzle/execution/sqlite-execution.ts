@@ -343,13 +343,106 @@ function detectMaxBindParameters(
   }
 }
 
+/**
+ * The single spelling of "this object prepares statements": returns it as a
+ * property bag when it does, `undefined` otherwise. Every driver predicate
+ * below and {@link resolveSqliteClient} read it, so "prepare-capable" cannot
+ * drift between the execution path and the serialized-resource marking.
+ */
+function preparingClient(
+  client: unknown,
+): Readonly<Record<string, unknown>> | undefined {
+  if (typeof client !== "object" || client === null) return undefined;
+  const candidate = client as Readonly<Record<string, unknown>>;
+  return typeof candidate["prepare"] === "function" ? candidate : undefined;
+}
+
+/** Whether every named member of `client` is a function. */
+function hasMethods(
+  client: Readonly<Record<string, unknown>>,
+  methods: readonly string[],
+): boolean {
+  return methods.every((method) => typeof client[method] === "function");
+}
+
+/**
+ * Whether a driver client is better-sqlite3's `Database`.
+ *
+ * `pragma` is the discriminator: better-sqlite3 exposes it as a method, and
+ * none of the other prepare-capable SQLite clients (bun:sqlite, sql.js,
+ * node:sqlite) has any counterpart. Duck-typed rather than `instanceof`, so
+ * the native addon is never imported by this bundler-friendly module.
+ */
+export function isBetterSqlite3Client(client: unknown): boolean {
+  const candidate = preparingClient(client);
+  return candidate !== undefined && hasMethods(candidate, ["pragma"]);
+}
+
+/**
+ * Whether a driver client is a `bun:sqlite` `Database` — what
+ * `drizzle-orm/bun-sqlite` exposes as `$client`.
+ *
+ * ONE synchronous connection: every statement from every wrapper over it runs
+ * on it, in order, exactly like better-sqlite3.
+ *
+ * Structural, never the session's constructor name (which bundlers rename):
+ * verified against `bun-types` 1.3.x `bun:sqlite`, a `Database` carries
+ * `query` (the cached-statement factory better-sqlite3 does not have),
+ * `prepare`, `run`/`exec`, `serialize`, and a `filename` string — where
+ * better-sqlite3 names that property `name` and sql.js has neither. The
+ * combination is not satisfied by any other client this package can meet.
+ */
+export function isBunSqliteClient(client: unknown): boolean {
+  const candidate = preparingClient(client);
+  return (
+    candidate !== undefined &&
+    hasMethods(candidate, ["query", "run", "exec", "serialize"]) &&
+    typeof candidate["filename"] === "string"
+  );
+}
+
+/**
+ * Whether a driver client is a `sql.js` `Database` — what
+ * `drizzle-orm/sql-js` takes as its client.
+ *
+ * ONE in-WASM database handle, executed synchronously in-process, so two
+ * wrappers over it serialize exactly as two wrappers over one better-sqlite3
+ * handle do.
+ *
+ * Structural evidence (verified against `@types/sql.js` 1.4.x): `export`
+ * (dump the database to bytes) and `getRowsModified` are sql.js's own API and
+ * exist on no other SQLite client — better-sqlite3 and bun:sqlite spell the
+ * dump `serialize` and have no rows-modified method at all — alongside the
+ * `prepare`/`exec`/`run` trio every driver has.
+ */
+export function isSqlJsClient(client: unknown): boolean {
+  const candidate = preparingClient(client);
+  return (
+    candidate !== undefined &&
+    hasMethods(candidate, ["exec", "run", "export", "getRowsModified"])
+  );
+}
+
+/**
+ * Returns the driver client a Drizzle SQLite database prepares statements on
+ * for TypeGraph's COMPILED execution path, or `undefined` when it has none it
+ * can drive.
+ *
+ * sql.js is excluded deliberately: its `prepare` returns a sql.js `Statement`
+ * (`bind`/`step`/`getAsObject`/`free`) with no `all()`, so the compiled path's
+ * `prepared.all(...params)` would throw on the first statement. Drizzle's own
+ * sql-js session drives that statement shape correctly, so an excluded client
+ * falls back to the Drizzle path and works instead of failing — the abstention
+ * is what makes the advertised sql.js support real. Every other
+ * prepare-capable client returns statements with `all()` (better-sqlite3,
+ * bun:sqlite).
+ */
 function resolveSqliteClient(
   db: AnySqliteDatabase,
 ): SqliteClientWithPrepare | undefined {
   const sqliteClient = (db as SqliteClientCarrier).$client;
-  if (typeof sqliteClient !== "object" || sqliteClient === null) return;
-  const candidate = sqliteClient as Record<string, unknown>;
-  if (typeof candidate["prepare"] !== "function") return;
+  if (preparingClient(sqliteClient) === undefined) return;
+  if (isSqlJsClient(sqliteClient)) return;
   return sqliteClient as SqliteClientWithPrepare;
 }
 

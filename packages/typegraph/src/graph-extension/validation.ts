@@ -18,9 +18,15 @@ import { ConfigurationError } from "../errors";
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
-import { RESERVED_EDGE_KEYS, RESERVED_NODE_KEYS } from "../store/reserved-keys";
+import {
+  isUnstorablePropertyName,
+  RESERVED_EDGE_KEYS,
+  RESERVED_NODE_KEYS,
+  UNSTORABLE_PROPERTY_NAME_REASON,
+} from "../store/reserved-keys";
 import {
   compactUndefined,
+  createDataKeyedBag,
   freezeDeep,
   hasOwnKey,
   isPlainObject,
@@ -374,7 +380,10 @@ function validateNodesSection(
     return undefined;
   }
 
-  const result: Record<string, ExtensionNodeDef> = {};
+  // Kind names are DATA: `isValidKindName` admits `__proto__`, so a `{}`
+  // accumulator would answer that write with the prototype setter and drop the
+  // kind — silently, since the document is otherwise valid.
+  const result = createDataKeyedBag<ExtensionNodeDef>();
   const recorded = new Set<string>();
 
   for (const [kindName, rawNode] of Object.entries(rawNodes)) {
@@ -404,7 +413,10 @@ function validateNodesSection(
     recorded.add(kindName);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `GraphExtension.nodes`, which
+  // `validateGraphExtension` returns. See `createDataKeyedBag` in
+  // ../utils/object.ts.
+  return { ...result };
 }
 
 function validateNodeDocument(
@@ -497,7 +509,8 @@ function validateEdgesSection(
     return undefined;
   }
 
-  const result: Record<string, ExtensionEdgeDef> = {};
+  // Kind names are DATA — see the node section for why `{}` loses `__proto__`.
+  const result = createDataKeyedBag<ExtensionEdgeDef>();
   const recorded = new Set<string>();
 
   for (const [kindName, rawEdge] of Object.entries(rawEdges)) {
@@ -527,7 +540,8 @@ function validateEdgesSection(
     recorded.add(kindName);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `GraphExtension.edges`.
+  return { ...result };
 }
 
 function validateEdgeDocument(
@@ -1033,6 +1047,46 @@ function validateGraphExtensionIndexWhere(
 // Properties and refinements
 // ============================================================
 
+/**
+ * Refuses a property name the SCHEMA LAYER cannot carry, at any nesting level.
+ *
+ * Zod accepts `__proto__` in a shape but drops it from every parse result — and
+ * reports success even when the field is required — so a value written to such
+ * a field is silently lost. The declaration is refused rather than accepted as
+ * a field the storage layer can never honor.
+ *
+ * This DOCUMENT walker and the Zod-schema walker behind `defineNode` /
+ * `defineEdge` stay separate — one traverses JSON property descriptors, the
+ * other Zod wrappers, and neither structure can be expressed in the other — but
+ * the VERDICT is not duplicated: both ask
+ * {@link isUnstorablePropertyName} and both quote
+ * {@link UNSTORABLE_PROPERTY_NAME_REASON}, so the two refusals cannot drift into
+ * disagreeing about the same field.
+ *
+ * Within this walker it is likewise the single owner. Both the top-level
+ * `properties` map and a nested `object.properties` map ask here: the two maps
+ * compile through the same `z.object(...)` (see `buildObjectSchema` in
+ * ./compiler.ts), so a name unstorable at the top level is equally unstorable
+ * one level down, and a refusal that fired on only one of them would let a
+ * document declare a field that validates clean and then vanishes at parse.
+ *
+ * @returns `true` when the name was refused (an issue has been pushed).
+ */
+function refuseUnstorablePropertyName(
+  propertyName: string,
+  propertyPath: string,
+  owner: string,
+  issues: GraphExtensionIssue[],
+): boolean {
+  if (!isUnstorablePropertyName(propertyName)) return false;
+  issues.push({
+    path: propertyPath,
+    message: `Property name "${propertyName}" is not allowed for ${owner}: ${UNSTORABLE_PROPERTY_NAME_REASON}.`,
+    code: "RESERVED_PROPERTY_NAME",
+  });
+  return true;
+}
+
 function validatePropertiesMap(
   raw: unknown,
   path: string,
@@ -1052,9 +1106,21 @@ function validatePropertiesMap(
 
   const reserved =
     ownerType === "node" ? RESERVED_NODE_KEYS : RESERVED_EDGE_KEYS;
-  const result: Record<string, ExtensionPropertyType> = {};
+  // Property names are DATA, and unrestricted apart from the reserved list and
+  // the `$` prefix — `__proto__` reaches here from any JSON document.
+  const result = createDataKeyedBag<ExtensionPropertyType>();
   for (const [propertyName, propertyValue] of Object.entries(raw)) {
     const propertyPath = `${path}/${encodeJsonPointerSegment(propertyName)}`;
+    if (
+      refuseUnstorablePropertyName(
+        propertyName,
+        propertyPath,
+        `${ownerType} "${ownerName}"`,
+        issues,
+      )
+    ) {
+      continue;
+    }
     if (reserved.has(propertyName)) {
       issues.push({
         path: propertyPath,
@@ -1082,7 +1148,9 @@ function validatePropertiesMap(
     result[propertyName] = validated;
   }
 
-  return result;
+  // Spread at the boundary: this becomes `ExtensionNodeDef.properties` on the
+  // returned document.
+  return { ...result };
 }
 
 function validateProperty(
@@ -1479,9 +1547,15 @@ function validateObjectProperty(
     return undefined;
   }
 
-  const fields: Record<string, ExtensionObjectFieldProperty> = {};
+  // Data-keyed: nested object field names read out of the document.
+  const fields = createDataKeyedBag<ExtensionObjectFieldProperty>();
   for (const [name, value] of propertiesEntries) {
     const fieldPath = `${path}/properties/${encodeJsonPointerSegment(name)}`;
+    if (
+      refuseUnstorablePropertyName(name, fieldPath, "a nested object", issues)
+    ) {
+      continue;
+    }
     if (!isPlainObject(value)) {
       issues.push({
         path: fieldPath,
@@ -1509,7 +1583,7 @@ function validateObjectProperty(
 
   return finalizeProperty<ExtensionObjectProperty>(
     "object",
-    { properties: fields },
+    { properties: { ...fields } },
     modifiers,
   );
 }

@@ -26,6 +26,7 @@
  */
 import { type GraphBackend } from "../../backend/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
+import { readOwnProperty } from "../../utils/object";
 import {
   type BetweenPredicate,
   type ComparisonOp,
@@ -132,7 +133,7 @@ function substitutePredicateExpression(
 
     case "string_op": {
       if (isParameterRef(expr.pattern)) {
-        const value = bindings[expr.pattern.name];
+        const value = readOwnProperty(bindings, expr.pattern.name);
         if (value === undefined) {
           throw new ConfigurationError(
             `Missing binding for parameter "${expr.pattern.name}"`,
@@ -220,11 +221,16 @@ function substitutePredicateExpression(
   }
 }
 
+// Own-key reads throughout this module: `bindings` is a caller-supplied
+// data-keyed bag and `name` is a `param()` name, so a raw read would answer a
+// parameter named after an `Object.prototype` member with the inherited member
+// — defeating the missing-binding check and binding a function into the
+// statement. `bindSqlValue`'s placeholder path already guards this way.
 function resolveBinding(
   bindings: Readonly<Record<string, unknown>>,
   name: string,
 ): unknown {
-  const value = bindings[name];
+  const value = readOwnProperty(bindings, name);
   if (value === undefined) {
     throw new ConfigurationError(`Missing binding for parameter "${name}"`, {
       parameterName: name,
@@ -650,7 +656,7 @@ function validateBindings(
 
   const missing: string[] = [];
   for (const name of expectedNames) {
-    if (bindings[name] === undefined) {
+    if (readOwnProperty(bindings, name) === undefined) {
       missing.push(name);
     }
   }
@@ -675,7 +681,7 @@ function validateBindings(
   // Validate value types upfront so both the fast path (executeRaw) and the
   // fallback path (AST substitution) reject the same invalid inputs.
   for (const name of expectedNames) {
-    const value = bindings[name];
+    const value = readOwnProperty(bindings, name);
     if (listParameters.has(name)) {
       validateListBinding(name, value, listParameters.get(name));
       continue;

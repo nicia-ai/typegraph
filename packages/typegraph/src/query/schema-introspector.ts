@@ -5,6 +5,7 @@ import {
   getSearchableMetadata,
   type SearchableMetadata,
 } from "../core/searchable";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { type ValueType } from "./ast";
 
@@ -67,6 +68,31 @@ export type SchemaIntrospector = Readonly<{
     fieldName: string,
   ) => FieldTypeInfo | undefined;
   /**
+   * True iff at least one kind in `kindNames` DECLARES `fieldName` as an own
+   * key of its schema shape.
+   *
+   * The single owner of "is this name a schema field?", asked by any layer that
+   * must tell a field access apart from something else the name could mean —
+   * today the select-tracking proxies, which would otherwise classify a
+   * DECLARED field named `toString` / `constructor` / `valueOf` as an inherited
+   * `Object.prototype` member and never track it.
+   *
+   * Deliberately ANY rather than every: a name one kind of a polymorphic alias
+   * declares is a field access, not a prototype access. Whether the field has a
+   * usable type across all of them is a separate question, answered by
+   * {@link SchemaIntrospector.getSharedFieldTypeInfo}, which stays `undefined`
+   * unless every kind agrees.
+   */
+  hasDeclaredField: (
+    kindNames: readonly string[],
+    fieldName: string,
+  ) => boolean;
+  /** Edge counterpart of {@link SchemaIntrospector.hasDeclaredField}. */
+  hasDeclaredEdgeField: (
+    edgeKindNames: readonly string[],
+    fieldName: string,
+  ) => boolean;
+  /**
    * True iff every kind in `kindNames` has at least one `searchable()`
    * field. For polymorphic aliases, `$fulltext` is available only when
    * every resolved kind has searchable content — otherwise `.matches()`
@@ -104,13 +130,17 @@ export function createSchemaIntrospector(
     FieldTypeInfo | undefined
   >();
   const searchableCache = new Map<string, boolean>();
+  const declaredFieldCache = new Map<string, boolean>();
+  const declaredEdgeFieldCache = new Map<string, boolean>();
 
   function getFieldTypeInfo(
     kindName: string,
     fieldName: string,
   ): FieldTypeInfo | undefined {
     const shape = getShapeForKind(kindName);
-    return shape?.[fieldName];
+    return shape !== undefined && hasOwnKey(shape, fieldName) ?
+        shape[fieldName]
+      : undefined;
   }
 
   function getSharedFieldTypeInfo(
@@ -139,7 +169,9 @@ export function createSchemaIntrospector(
     fieldName: string,
   ): FieldTypeInfo | undefined {
     const shape = getShapeForEdgeKind(edgeKindName);
-    return shape?.[fieldName];
+    return shape !== undefined && hasOwnKey(shape, fieldName) ?
+        shape[fieldName]
+      : undefined;
   }
 
   function getSharedEdgeFieldTypeInfo(
@@ -229,6 +261,38 @@ export function createSchemaIntrospector(
     return resolved;
   }
 
+  function hasDeclaredField(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): boolean {
+    const cacheKey = sharedCacheKey(kindNames, fieldName);
+    const cached = declaredFieldCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const declared = kindNames.some((kindName) => {
+      const shape = getShapeForKind(kindName);
+      return shape !== undefined && hasOwnKey(shape, fieldName);
+    });
+    declaredFieldCache.set(cacheKey, declared);
+    return declared;
+  }
+
+  function hasDeclaredEdgeField(
+    edgeKindNames: readonly string[],
+    fieldName: string,
+  ): boolean {
+    const cacheKey = sharedCacheKey(edgeKindNames, fieldName);
+    const cached = declaredEdgeFieldCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const declared = edgeKindNames.some((edgeKindName) => {
+      const shape = getShapeForEdgeKind(edgeKindName);
+      return shape !== undefined && hasOwnKey(shape, fieldName);
+    });
+    declaredEdgeFieldCache.set(cacheKey, declared);
+    return declared;
+  }
+
   function hasSearchableField(kindNames: readonly string[]): boolean {
     const cacheKey = [...kindNames].toSorted().join("|");
     const cached = searchableCache.get(cacheKey);
@@ -252,6 +316,8 @@ export function createSchemaIntrospector(
     getSharedFieldTypeInfo,
     getEdgeFieldTypeInfo,
     getSharedEdgeFieldTypeInfo,
+    hasDeclaredField,
+    hasDeclaredEdgeField,
     hasSearchableField,
   };
 }
@@ -511,7 +577,7 @@ function intersectShapes(
   }
 
   const keys = Object.keys(first).filter((key) =>
-    rest.every((shape) => key in shape),
+    rest.every((shape) => hasOwnKey(shape, key)),
   );
 
   const entries = keys

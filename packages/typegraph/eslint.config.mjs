@@ -56,10 +56,29 @@ const BACKEND_OVERLAY_RESTRICTIONS = [
   },
 ];
 
+const INTEROP_PROBE_MESSAGE =
+  'Do not compare a property key against "then" / "toJSON" inline. These ' +
+  "are legal schema field names, so a trap that answers them by NAME before " +
+  "consulting its own keys (or the schema's declared fields) drops a stored " +
+  "value — the read-side twin of the prototype-member membership bug hasOwnKey " +
+  "fixes. Look the key up as data FIRST, then fall back to isInteropProbeKey " +
+  "from src/utils/object, which owns this decision and documents the ordering.";
+
+// Protocol-key ratchet: the one comparison form that reintroduces the class.
+// Set-membership spellings are centralized in isInteropProbeKey, so banning the
+// inline comparison leaves exactly one owner of the decision.
+const INTEROP_PROBE_RESTRICTIONS = [
+  {
+    selector:
+      "BinaryExpression[operator=/^(===|!==|==|!=)$/] > Literal[value=/^(then|toJSON)$/]",
+    message: INTEROP_PROBE_MESSAGE,
+  },
+];
+
 // Determinism guardrail for the whole library source. NOTE: flat-config rule
 // entries REPLACE, not merge — any later block that sets no-restricted-syntax
-// for a subset of src must spread these selectors back in (see the query
-// compiler block below).
+// for a subset of src must spread SOURCE_WIDE_RESTRICTIONS back in (see the
+// query compiler block below).
 const DETERMINISM_RESTRICTIONS = [
   {
     selector:
@@ -75,6 +94,14 @@ const DETERMINISM_RESTRICTIONS = [
     selector: 'MemberExpression[object.name="Intl"]',
     message: LOCALE_API_MESSAGE,
   },
+];
+
+// Every no-restricted-syntax block below starts from this list: both guardrails
+// apply to the whole library source, and a block that set only one of them
+// would silently switch the other off for its files.
+const SOURCE_WIDE_RESTRICTIONS = [
+  ...DETERMINISM_RESTRICTIONS,
+  ...INTEROP_PROBE_RESTRICTIONS,
 ];
 
 export default [
@@ -157,7 +184,7 @@ export default [
     rules: {
       "no-restricted-syntax": [
         "error",
-        ...DETERMINISM_RESTRICTIONS,
+        ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...BACKEND_OVERLAY_RESTRICTIONS,
       ],
@@ -173,7 +200,7 @@ export default [
     rules: {
       "no-restricted-syntax": [
         "error",
-        ...DETERMINISM_RESTRICTIONS,
+        ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_OVERLAY_RESTRICTIONS,
@@ -215,7 +242,7 @@ export default [
     rules: {
       "no-restricted-syntax": [
         "error",
-        ...DETERMINISM_RESTRICTIONS,
+        ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_OVERLAY_RESTRICTIONS,
@@ -239,7 +266,7 @@ export default [
     rules: {
       "no-restricted-syntax": [
         "error",
-        ...DETERMINISM_RESTRICTIONS,
+        ...SOURCE_WIDE_RESTRICTIONS,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_OVERLAY_RESTRICTIONS,
       ],
@@ -256,7 +283,7 @@ export default [
     rules: {
       "no-restricted-syntax": [
         "error",
-        ...DETERMINISM_RESTRICTIONS,
+        ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
       ],
@@ -268,11 +295,12 @@ export default [
       "src/store/operations/node-operations.ts",
       "src/store/recorded-capture.ts",
       "src/store/recorded-read-service.ts",
+      "src/store/store.ts",
     ],
     rules: {
       "no-restricted-syntax": [
         "error",
-        ...DETERMINISM_RESTRICTIONS,
+        ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
       ],
     },

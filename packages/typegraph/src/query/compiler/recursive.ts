@@ -20,6 +20,7 @@ import {
   compileIdentityClassCte,
   planIdentityFrontierExpansion,
 } from "./identity-traversal";
+import { compileInverseTraversalDuplicateGuard } from "./inverse-traversal-guard";
 import {
   createTemporalFilterPass,
   runCompilerPass,
@@ -273,9 +274,10 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
     temporalFilterPass,
   );
 
-  // Identity expansion reads its class relation from outside the recursive term,
-  // so it is evaluated once for the whole traversal rather than per expanded
-  // (frontier row, edge) pair.
+  // A historical read reconstructs its class relation from outside the recursive
+  // term, so the ledger fixed point is evaluated once for the whole traversal
+  // rather than per expanded (frontier row, edge) pair. A current read emits no
+  // such relation: its step seeks the closure from the worktable row itself.
   const identityClassCte = compileIdentityClassCte({
     ast,
     ctx,
@@ -463,8 +465,12 @@ function compileRecursiveCte(
   const identityFrontierExpansion =
     traversal.includeIdentityMembers === true ?
       planIdentityFrontierExpansion({
+        ast,
+        ctx,
+        graphId,
         previousId: previousIdColumn,
         previousKind: previousKindColumn,
+        temporalFilterPass,
       })
     : undefined;
 
@@ -474,6 +480,10 @@ function compileRecursiveCte(
     edgeTemporalFilter,
     nodeTemporalFilter,
     maxDepthCondition,
+    // Conditions the frontier widening cannot state in a join condition —
+    // currently the member-visibility guard. Every branch of the recursive term
+    // carries them, because every branch reads the widened frontier.
+    ...(identityFrontierExpansion?.whereClauses ?? []),
   ];
   if (cycleCheck !== undefined) {
     recursiveBaseWhereClauses.push(cycleCheck);
@@ -592,19 +602,11 @@ function compileRecursiveCte(
     const inverseJoinKindField = direction === "out" ? "to_kind" : "from_kind";
     const inverseTargetKindField =
       direction === "out" ? "from_kind" : "to_kind";
-    const overlappingKinds = inverseEdgeKinds.filter((kind) =>
-      directEdgeKinds.includes(kind),
+    const duplicateGuard = compileInverseTraversalDuplicateGuard(
+      directEdgeKinds,
+      inverseEdgeKinds,
+      (overlappingKinds) => compileKindFilter(overlappingKinds, "e.kind"),
     );
-
-    // Exclude a TRUE self-loop (both endpoints the same node) from the inverse
-    // branch so it is traversed once, not twice. Node identity is (kind, id),
-    // not id alone: under sameIdAcrossKinds folding a real edge between folded
-    // peers has from_id = to_id with from_kind <> to_kind, and must NOT be
-    // suppressed or a direction:"both" traversal would never cross it.
-    const duplicateGuard =
-      overlappingKinds.length > 0 ?
-        sql`NOT (e.from_id = e.to_id AND e.from_kind = e.to_kind AND ${compileKindFilter(overlappingKinds, "e.kind")})`
-      : undefined;
 
     const inverseBranch = compileRecursiveBranch({
       joinField: inverseJoinField,

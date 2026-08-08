@@ -121,7 +121,12 @@ export type AnyPgTransaction = PgTransaction<
 
 export type PostgresExecutionAdapter = SqlExecutionAdapter;
 
-function hasFunctionProperty<K extends string>(
+/**
+ * Duck-typing primitive for the client-shape predicates: `value` carries a
+ * callable `property`. Shared with the serialized-resource detection in
+ * `../postgres.ts` so both spell "has this method" the same way.
+ */
+export function hasFunctionProperty<K extends string>(
   value: unknown,
   property: K,
 ): value is Readonly<Record<K, (...args: readonly unknown[]) => unknown>> {
@@ -167,9 +172,15 @@ function isPgliteClient(candidate: unknown): candidate is NodePgClient {
  */
 export const PGLITE_MAX_BIND_PARAMETERS = 32_767;
 
+/** Returns the PGlite client that owns a root Drizzle database, if present. */
+export function getPgliteClient(db: AnyPgDatabase): object | undefined {
+  const client = (db as PgClientCarrier).$client;
+  return isPgliteClient(client) ? client : undefined;
+}
+
 /** Detects a root Drizzle database backed by PGlite without importing it. */
 export function isPgliteDatabase(db: AnyPgDatabase): boolean {
-  return isPgliteClient((db as PgClientCarrier).$client);
+  return getPgliteClient(db) !== undefined;
 }
 
 function transactionSession(
@@ -182,7 +193,15 @@ function hasPgliteSession(carrier: PgClientCarrier): boolean {
   return transactionSession(carrier)?.constructor?.name === "PgliteSession";
 }
 
-function isPostgresJsClient(candidate: unknown): candidate is PostgresJsClient {
+/**
+ * Single owner of "this callable client is postgres-js". Shared with the
+ * serialized-resource detection in `../postgres.ts`, which reads `options.max`
+ * off the same client shape, so the fast path and the marking predicate cannot
+ * drift about which callables are postgres-js.
+ */
+export function isPostgresJsClient(
+  candidate: unknown,
+): candidate is PostgresJsClient {
   // postgres-js's tagged-template Sql is callable, has `.unsafe` (raw
   // parameterized executor), and has `.begin` (transaction starter). The
   // transaction-scoped `TransactionSql` replaces `.begin` with `.savepoint`;
@@ -649,10 +668,7 @@ function assertWithinBindParameterLimit(
   parameterCount: number,
   maxBindParameters: number | undefined,
 ): void {
-  if (
-    maxBindParameters === undefined ||
-    parameterCount <= maxBindParameters
-  ) {
+  if (maxBindParameters === undefined || parameterCount <= maxBindParameters) {
     return;
   }
   throw new ConfigurationError(

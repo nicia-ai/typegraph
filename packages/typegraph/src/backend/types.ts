@@ -25,6 +25,7 @@ import {
 } from "../query/sql-intent";
 import { type SerializedSchema } from "../schema/types";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
+import { inheritSerializedTransactionResource } from "./transaction-resource";
 
 // ============================================================
 // Vector Search Types
@@ -100,6 +101,51 @@ export type FilteredApproximateSearch = Readonly<{
 }>;
 
 /**
+ * Whether an engine exposes a PER-SEARCH knob for the ANN candidate frontier —
+ * the parameter {@link VectorSearchParams.efSearch} maps onto.
+ *
+ * Declared, never inferred: `efSearch` is an accepted option, so a backend that
+ * cannot apply it must refuse it rather than ignore it (AGENTS.md contract
+ * discipline). This capability is what the shared refusal predicate reads, and
+ * what a caller reads to know whether passing `efSearch` will be honored.
+ *
+ * - **pgvector**: `hnsw.ef_search`, applied per search with `SET LOCAL` inside
+ *   the search's own transaction — hence `requiresTransactionScope`, since a
+ *   session-wide `SET` would leak the override into concurrent searches.
+ * - **sqlite-vec**: `tunable: false`. A vec0 KNN takes `k` and nothing else;
+ *   there is no frontier to widen.
+ * - **libSQL DiskANN**: `tunable: false`. `vector_top_k(idx, q, k)` is a table
+ *   function with no per-query parameters; DiskANN's `search_l` is fixed at
+ *   index-creation time.
+ */
+export type VectorSearchFrontierTuning =
+  | Readonly<{
+      tunable: true;
+      /** Engine-native parameter `efSearch` maps to (`"hnsw.ef_search"`). */
+      parameter: string;
+      /**
+       * The one index type whose search honors the parameter. `efSearch` on a
+       * slot of any other index type is refused, not ignored: an IVFFlat or
+       * brute-force slot would silently discard it.
+       */
+      indexType: VectorIndexType;
+      /**
+       * `true` when applying the parameter needs a transaction to scope it to
+       * the one search. A backend that reports `transactions: false` refuses
+       * `efSearch` rather than leaking a session-wide setting.
+       */
+      requiresTransactionScope: boolean;
+    }>
+  | Readonly<{
+      tunable: false;
+      /**
+       * Why this engine has no per-search frontier knob — surfaced in the
+       * refusal's details so the state is named rather than implied.
+       */
+      reason: string;
+    }>;
+
+/**
  * Vector search capabilities.
  */
 export type VectorCapabilities = Readonly<{
@@ -119,6 +165,14 @@ export type VectorCapabilities = Readonly<{
    * an engine promise it does not keep.
    */
   filteredApproximateSearch: FilteredApproximateSearch;
+  /**
+   * Whether a per-search ANN frontier override (`efSearch`) can be applied.
+   * See {@link VectorSearchFrontierTuning}.
+   *
+   * Required, so a new vector strategy must state whether it honors the
+   * option instead of inheriting silence — the exact defect this closes.
+   */
+  searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // ============================================================
@@ -445,6 +499,30 @@ export type UpdateNodeParams = Readonly<{
   /** Applied when resurrecting a tombstone; omitted means the resurrection instant. */
   validFrom?: string | null;
   validTo?: string;
+  /**
+   * The effective `valid_from` this write ASSERTS the target row already
+   * carries, stated only by a caller whose decision DEPENDED on it.
+   *
+   * `(graph_id, kind, id)` does not pin a row across time. A caller that
+   * validated the document's window against the bound it probed — interchange
+   * import's `onConflict: "update"` is the case — decided what to write from a
+   * value a concurrent `hardDelete` + recreate can replace between the probe
+   * and the write, so a predicate on identity alone lets that decision land on
+   * a row it was never computed for: the document's stated `validFrom` is
+   * ignored, or a `valid_to` is persisted below the new row's `valid_from`.
+   * Stating the bound here puts it in the UPDATE's own `WHERE`, which is the
+   * only placement the race cannot slip past.
+   *
+   * NULL-SAFE: `null` asserts the row has NO lower bound (`IS NULL`), a string
+   * asserts equality, and omitting it asserts nothing. `null` and `undefined`
+   * are therefore NOT interchangeable here — see `expectedValidFromPredicate`.
+   *
+   * A backend MUST apply the predicate when it is present, on the same terms as
+   * {@link UpdateEdgeParams.kind}: silently ignoring it re-opens the window the
+   * caller stated it to close. A write whose stated bound does not match affects
+   * zero rows and surfaces as a `no_row_returned` `DatabaseOperationError`.
+   */
+  expectedValidFrom?: string | null;
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
   clearDeleted?: boolean;
@@ -534,6 +612,51 @@ export type TrustedImportSession = Readonly<{
 export type UpdateEdgeParams = Readonly<{
   graphId: string;
   id: string;
+  /**
+   * The kind this write ASSERTS the target row already carries.
+   *
+   * Edge ids are graph-global while public collections are kind-scoped, so a
+   * kind-scoped write has an expected kind and must not land on a row carrying
+   * a different one. Stating it here puts the predicate in the write
+   * statement's own `WHERE`, which is the only placement a concurrent
+   * `hardDelete` + recreate cannot slip past: a read-then-write pair keyed on
+   * `(graph_id, id)` alone re-resolves that id between the read and the write
+   * under PostgreSQL READ COMMITTED. A write whose stated kind does not match
+   * affects zero rows.
+   *
+   * A backend MUST apply the predicate when it is present — silently ignoring
+   * it re-opens the window the caller stated it to close, and the ignoring
+   * backend looks correct until it is raced.
+   * `tests/edge-write-self-verification.test.ts` asserts the behavior against
+   * the built-in backends.
+   *
+   * Omitted where the operation legitimately spans kinds: the node delete
+   * cascade removes every connected edge whatever its kind, so it states none.
+   * {@link DeleteEdgeParams} and {@link HardDeleteEdgeParams} carry the same
+   * field with the same contract.
+   */
+  kind?: string;
+  /**
+   * The ENDPOINTS this write asserts the target row already carries, stated
+   * only by a write that actually checked them.
+   *
+   * Kind alone does not pin a row's identity. An edge's endpoints are immutable
+   * for a given row, but the ID is not: a concurrent `hardDelete` + recreate
+   * under the SAME kind with DIFFERENT endpoints satisfies a kind-only
+   * predicate, so an upsert that resolved this id BY endpoints could otherwise
+   * write to an edge pointing somewhere it never looked. Carrying them here
+   * closes that, on the same terms and in the same `WHERE` as `kind`.
+   *
+   * All four move together or not at all — they are one assertion. A plain
+   * `update` on a kind-scoped collection states none of them, because it
+   * resolved the edge by id and kind and made no claim about where it points;
+   * predicating on endpoints it never checked would refuse legitimate writes.
+   * The same MUST-apply contract as `kind` binds a backend that receives them.
+   */
+  fromKind?: string;
+  fromId?: string;
+  toKind?: string;
+  toId?: string;
   props: Readonly<Record<string, unknown>>;
   /**
    * Applied when resurrecting a tombstone, where it asserts a COMPLETE window:
@@ -542,6 +665,18 @@ export type UpdateEdgeParams = Readonly<{
    */
   validFrom?: string | null;
   validTo?: string;
+  /**
+   * The effective `valid_from` this write asserts the target row already
+   * carries. Same three states, same NULL-safety, and the same MUST-apply
+   * contract as {@link UpdateNodeParams.expectedValidFrom}; stated by the same
+   * kind of caller, one whose verdict READ that bound.
+   *
+   * Separate from the immutable-identity components above because it is not
+   * immutable: a resurrection rewrites `valid_from`. It is asserted for the
+   * opposite reason — precisely because it can change, a decision computed from
+   * it must be fenced against it having changed.
+   */
+  expectedValidFrom?: string | null;
   clearDeleted?: boolean;
 }>;
 
@@ -551,6 +686,8 @@ export type UpdateEdgeParams = Readonly<{
 export type DeleteEdgeParams = Readonly<{
   graphId: string;
   id: string;
+  /** See {@link UpdateEdgeParams.kind}. */
+  kind?: string;
 }>;
 
 /**
@@ -568,6 +705,8 @@ export type HardDeleteNodeParams = Readonly<{
 export type HardDeleteEdgeParams = Readonly<{
   graphId: string;
   id: string;
+  /** See {@link UpdateEdgeParams.kind}. */
+  kind?: string;
 }>;
 
 /** Parameters for a batched edge delete (soft or hard). */
@@ -696,9 +835,19 @@ export type VectorSearchParams = Readonly<{
    * trades latency for recall. The floor for the over-fetch to fill its
    * candidate set is `efSearch >= limit`; ~2–4× is the high-recall
    * target. Applied transaction-locally (`SET LOCAL`) on the Postgres
-   * HNSW path only. No-op on backends without an HNSW frontier knob
-   * (sqlite-vec) and ignored — with a one-time warning — on Postgres
-   * backends without transactions (e.g. `drizzle-orm/neon-http`).
+   * HNSW path only.
+   *
+   * APPLIED OR REFUSED, never ignored. Read
+   * `capabilities.vector.searchFrontierTuning` to know which you get:
+   *
+   * - `tunable: false` (sqlite-vec, libSQL DiskANN — no per-search frontier
+   *   knob exists): `UnsupportedBackendCapabilityError`.
+   * - a slot whose index type is not the tunable one (pgvector IVFFlat or
+   *   brute-force): `ConfigurationError`.
+   * - `requiresTransactionScope` on a backend reporting
+   *   `transactions: false` (for example `drizzle-orm/neon-http`):
+   *   `UnsupportedBackendCapabilityError`, because `SET LOCAL` has no frame
+   *   to be local to.
    */
   efSearch?: number;
 }>;
@@ -1423,6 +1572,22 @@ export type InternalTransactionOptions = TransactionOptions &
 // ============================================================
 
 /**
+ * The physical names of the four Operational Identity relations: the current
+ * assertion ledger, its recorded-time twin, and the two DERIVED relations
+ * (closure, separation) rebuilt from the ledger.
+ *
+ * Named once so the two ports that speak about them —
+ * {@link GraphBackend.ensureIdentityTables} and
+ * {@link GraphBackend.identityTableDdl} — cannot drift apart.
+ */
+export type IdentityTableNames = Readonly<{
+  identityAssertions: string;
+  recordedIdentityAssertions: string;
+  identityClosure: string;
+  identitySeparation: string;
+}>;
+
+/**
  * The GraphBackend interface abstracts database operations.
  *
  * Implementations should provide:
@@ -1703,15 +1868,21 @@ export type GraphBackend = Readonly<{
    * Internal schema-lifecycle seam for features whose data preflight must
    * commit atomically with the schema CAS. The callback runs in the same
    * write transaction after the schema write fence is acquired and before the
-   * version write; it receives only the ordinary transaction backend, so
-   * callers cannot bypass the CAS.
+   * version write; it receives no schema-version write methods, so callers
+   * cannot bypass the CAS.
+   *
+   * The preflight target is a {@link SchemaCommitPreflightBackend}: the
+   * transaction backend plus the schema-write DDL primitive, because a
+   * transition may have to CREATE the storage its own preflight then fills —
+   * and creating it outside this transaction would publish it empty whenever
+   * the commit is refused.
    *
    * @internal
    */
   commitSchemaVersionWithPreflight?: (
     this: void,
     params: CommitSchemaVersionParams,
-    preflight: (target: TransactionBackend) => Promise<void>,
+    preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
   ) => Promise<SchemaVersionRow>;
   /**
    * Atomically flips the active schema pointer to an existing version,
@@ -1898,14 +2069,37 @@ export type GraphBackend = Readonly<{
    */
   ensureIdentityTables?: (
     this: void,
-    tableNames: Readonly<{
-      identityAssertions: string;
-      recordedIdentityAssertions: string;
-      identityClosure: string;
-      identitySeparation: string;
-    }>,
+    tableNames: IdentityTableNames,
     options: Readonly<{ provisionMissing: boolean }>,
   ) => Promise<readonly string[]>;
+
+  /**
+   * The idempotent CREATE statements for exactly the identity relations —
+   * the same DDL {@link ensureIdentityTables} issues, handed back as data
+   * instead of executed.
+   *
+   * Pure and synchronous: it executes nothing and probes no catalog, so it is
+   * safe to call from inside an already-open transaction, where invoking a
+   * top-level backend method would re-enter the backend's serialized statement
+   * queue and deadlock. That is the whole point. Provisioning a missing DERIVED
+   * relation (closure, separation) on an already-enabled graph has to CREATE it
+   * and FILL it in one transaction, because a created-but-empty derived
+   * relation is readable and answers every question with "nothing" — for the
+   * separation relation, "nothing" means "not separated", which is exactly the
+   * answer that lets a contradictory merge commit.
+   *
+   * A backend that omits this cannot offer that atomicity. Callers do not fall
+   * back: when a fill is owed, the upgrade is REFUSED with the typed
+   * `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL` error naming this port — creating
+   * and filling back-to-back would publish the readable-empty state the
+   * paragraph above forbids.
+   *
+   * @internal
+   */
+  identityTableDdl?: (
+    this: void,
+    tableNames: IdentityTableNames,
+  ) => readonly string[];
 
   /**
    * Look up a recorded materialization for a declared index by its
@@ -2219,9 +2413,10 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly ContributionProbeEntry[]>;
 
   /**
-   * Destructively rebuild one search projection's storage: drop it,
-   * recreate it from the current `createDdl`, reconstruct its content,
-   * and stamp the durable marker at the current signature.
+   * Destructively rebuild one search projection for one graph: clear that
+   * graph's rows from the projection's storage, ensure the storage matches
+   * the current `createDdl`, reconstruct the graph's content, and stamp the
+   * durable marker at the current signature.
    *
    * This is the repair `repairContributions` deliberately refuses to
    * perform, and it must never be reachable from it. A `stale`
@@ -2229,9 +2424,17 @@ export type GraphBackend = Readonly<{
    * idempotent `CREATE ... IF NOT EXISTS` in the ordinary ensure path
    * no-ops; re-stamping the marker there would leave it blessing a table
    * whose shape is wrong, which is exactly what the drift guard exists
-   * to prevent. Only a drop makes the recreate meaningful, and dropping
-   * is a decision the caller states rather than one a flag named `force`
-   * implies.
+   * to prevent. Only a drop makes the recreate meaningful, and destroying
+   * content is a decision the caller states rather than one a flag named
+   * `force` implies.
+   *
+   * The fulltext projection's storage is one physical table shared by every
+   * graph in the database, while this call is fenced per graph.
+   * Implementations must therefore scope the teardown to `graphId` and may
+   * drop the storage only when doing so destroys no other graph's rows;
+   * when the recorded shape is stale and the drop that would repair it is
+   * not available, they refuse (`shared-storage-in-use`) rather than
+   * re-stamp a shape nothing verified.
    *
    * Runs the whole sequence inside one transaction under the same
    * per-graph fence as a schema commit, so an interrupted rebuild leaves
@@ -2660,6 +2863,25 @@ export type SchemaWriteTransactionBackend = TransactionBackend &
   }>;
 
 /**
+ * The target a schema-commit preflight runs against: a transaction backend
+ * that MAY also carry the schema-write DDL primitive.
+ *
+ * Optional, deliberately. Both bundled backends pass the same
+ * {@link SchemaWriteTransactionBackend} their `schemaWriteTransaction` exposes,
+ * so DDL is available there; a custom backend may implement
+ * {@link GraphBackend.commitSchemaVersionWithPreflight} over a transaction that
+ * cannot run DDL. Declaring the port as present-or-absent lets a preflight that
+ * needs it refuse with a typed error naming the capability, instead of calling
+ * `undefined` — or, far worse, skipping the DDL and continuing.
+ *
+ * @internal
+ */
+export type SchemaCommitPreflightBackend = TransactionBackend &
+  Readonly<{
+    executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+  }>;
+
+/**
  * Builds the actual runtime projection exposed as `TransactionContext.backend`.
  * This is an explicit object rather than a type-only narrowing so portable
  * callers cannot discover write or arbitrary-SQL methods on the underlying
@@ -2743,7 +2965,7 @@ export function createBackendOverlay<
     return Object.hasOwn(overlay, property);
   }
 
-  return new Proxy(target, {
+  const decoratedBackend = new Proxy(target, {
     get(targetObject, property) {
       if (hasOverlayProperty(property)) {
         return Reflect.get(overlay, property, overlay);
@@ -2796,6 +3018,8 @@ export function createBackendOverlay<
       return Reflect.deleteProperty(targetObject, property);
     },
   });
+  inheritSerializedTransactionResource(decoratedBackend, target);
+  return decoratedBackend;
 }
 
 /**

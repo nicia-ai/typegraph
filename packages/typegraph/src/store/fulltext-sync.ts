@@ -17,6 +17,7 @@ import {
   getSearchableFields,
   type SearchableFieldInfo,
 } from "../core/searchable";
+import { readOwnProperty } from "../utils/object";
 
 export { getSearchableFields } from "../core/searchable";
 
@@ -56,7 +57,7 @@ export function computeFulltextContent(
 
   const parts: string[] = [];
   for (const field of searchableFields) {
-    const value = props[field.fieldPath];
+    const value = readOwnProperty(props, field.fieldPath);
     if (typeof value === "string" && value.length > 0) {
       parts.push(value);
     }

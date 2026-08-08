@@ -1,4 +1,4 @@
-import { hasOwnKey } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Node-level delete/modify conflict resolution (design §6.2, T8a).
@@ -468,7 +468,7 @@ function threeWayMergeProps(
   props: Record<string, JsonValue>;
   conflicts: PropertyConflict[];
 }> {
-  const merged: Record<string, JsonValue> = {};
+  const merged = createDataKeyedBag<JsonValue>();
   const conflicts: PropertyConflict[] = [];
 
   // Every property the base OR any fork carries. Base keys are included so a key

@@ -261,7 +261,12 @@ export type OperationHookContext = HookContext &
     id: string;
   }>;
 
-/** Context for one set-based collection mutation. */
+/**
+ * Context for one set-based collection mutation. Node `updateWhere` is the only
+ * mutation that reports one: the `operation` union is the exhaustive list of
+ * what `onBulkOperationStart` / `onBulkOperationEnd` observe, so a batch method
+ * absent from it (every `bulk*`, including `bulkDelete`) emits no bulk event.
+ */
 export type BulkOperationHookContext = HookContext &
   Readonly<{
     operation: "updateWhere";
@@ -272,8 +277,11 @@ export type BulkOperationHookContext = HookContext &
 /**
  * Observability hooks for monitoring store operations.
  *
- * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip
- * per-item operation hooks for throughput. Query hooks still fire normally.
+ * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`,
+ * `bulkDelete`) skip per-item operation hooks for throughput, and the bulk
+ * hooks below do not stand in for them — those fire only for node
+ * `updateWhere`, so a batch method emits no hook events at all, neither
+ * per-item nor bulk. Query hooks still fire normally.
  *
  * @example
  * ```typescript
@@ -1340,8 +1348,10 @@ export type EdgeCollection<
    * last-write-wins: the first item creates or updates the edge, and every later
    * copy is an update over the value the earlier item wrote. This holds whether
    * or not the edge existed before the batch. An update never repoints an edge,
-   * so the endpoints of the first write stand — a later copy's `from` / `to` are
-   * ignored exactly as they are for an id that already existed.
+   * so every item's `from` / `to` must exactly restate the endpoints already
+   * owned by that id (including an earlier item in the same batch). A mismatch
+   * is refused with `ValidationError` carrying
+   * `EDGE_IDENTITY_MISMATCH_CODE`; it is never silently ignored.
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
@@ -1399,6 +1409,12 @@ export type EdgeCollection<
    *
    * Atomic when the backend supports transactions. Silently ignores IDs
    * that don't exist.
+   *
+   * The batch runs as one transaction, checking each id's kind against the
+   * authoritative row as it goes. An id owned by another edge kind is
+   * refused with `ValidationError` carrying `EDGE_IDENTITY_MISMATCH_CODE`;
+   * because the whole batch is one transaction, that refusal rolls back
+   * every delete already applied for an earlier id in the same batch.
    */
   bulkDelete: (ids: readonly EdgeId<E>[]) => Promise<void>;
 

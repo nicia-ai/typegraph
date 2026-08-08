@@ -24,6 +24,24 @@ import { ConfigurationError } from "../errors";
 const SQLITE_MISSING_TABLE_PATTERN = "no such table";
 const SQLITE_GENERIC_ERROR_CODE = "SQLITE_ERROR";
 const SQLITE_NOT_AUTHORIZED_CODE = "SQLITE_AUTH";
+
+/**
+ * SQLite's EXTENDED result code for "this read transaction cannot become a
+ * write transaction": the connection began a DEFERRED transaction, took a read
+ * snapshot, and another connection has committed since. SQLite refuses the
+ * upgrade because honoring it would let the writer act on a stale view; the
+ * only recovery is `ROLLBACK` and a fresh transaction (SQLite's own rule — the
+ * failure is not retryable in place).
+ *
+ * It is the one code that names the DEFERRED frame itself. A transaction opened
+ * `BEGIN IMMEDIATE` holds the writer slot from the start and can never produce
+ * it, and plain `SQLITE_BUSY` says something else entirely ("another writer
+ * holds the slot right now"), so this code alone can be attributed to how the
+ * transaction was begun. The numeric spelling is accepted for libSQL, which
+ * surfaces only `rawCode`/`extendedCode` over a remote connection.
+ */
+const SQLITE_STALE_SNAPSHOT_CODE = "SQLITE_BUSY_SNAPSHOT";
+const SQLITE_STALE_SNAPSHOT_EXTENDED_CODE = 517;
 const DRIZZLE_QUERY_ERROR_PREFIX = "Failed query:";
 const POSTGRES_UNDEFINED_RELATION_PATTERN =
   /\b(?:relation|table)\s+"[^"]+"\s+does not exist\b/i;
@@ -37,6 +55,39 @@ const POSTGRES_UNDEFINED_RELATION_PATTERN =
  */
 const POSTGRES_UNDEFINED_TABLE_CODE = "42P01";
 const POSTGRES_UNIQUE_VIOLATION_CODE = "23505";
+
+/**
+ * SQLSTATEs a racing IDEMPOTENT DDL statement loses with — the ones that mean
+ * "another session is committing the very thing this statement asks for", not
+ * "this statement is wrong".
+ *
+ * PostgreSQL's `IF NOT EXISTS` is not a concurrency primitive: the existence
+ * check cannot see another session's uncommitted catalog rows, so the loser
+ * waits for the winner and is then handed the conflict the winner's commit
+ * produced — `unique_violation` (23505) from `pg_type`/`pg_class` for a racing
+ * CREATE, `duplicate_column` (42701) for a racing `ALTER TABLE ... ADD COLUMN
+ * IF NOT EXISTS`. Retrying once after that wait observes the committed object
+ * and succeeds; a failure the retry cannot clear stays loud.
+ */
+const POSTGRES_CONCURRENT_DDL_RACE_SQL_STATES = [
+  POSTGRES_UNIQUE_VIOLATION_CODE,
+  "42701",
+] as const;
+
+/**
+ * The one concurrent-DDL race PostgreSQL reports with no SQLSTATE of its own:
+ * `heap_update` losing a catalog row to a concurrent updater raises
+ * `elog(ERROR, "tuple concurrently updated")`, which carries the catch-all
+ * `internal_error` (XX000).
+ *
+ * XX000 alone is far too broad to retry on — it covers genuine server faults —
+ * so this shape is identified by SQLSTATE AND message together. Matching the
+ * message is sound here specifically because `elog` emits it through
+ * `errmsg_internal`, which is NOT run through gettext: unlike an `ereport`
+ * message, it reads identically under every `lc_messages`.
+ */
+const POSTGRES_INTERNAL_ERROR_CODE = "XX000";
+const POSTGRES_CONCURRENT_TUPLE_UPDATE_MESSAGE = "tuple concurrently updated";
 
 /**
  * PostgreSQL failures that mean a temporary table cannot be created here:
@@ -80,7 +131,7 @@ export type PostgresReadWriteRefusedSqlState =
  * ({@link missingTableMessage}), so an unrelated object in a cause chain that
  * merely mentions one of those phrases is not mistaken for a missing table.
  */
-function* errorChain(error: unknown): Generator<unknown, void, void> {
+export function* errorChain(error: unknown): Generator<unknown, void, void> {
   const seen = new Set<unknown>();
   let current: unknown = error;
   while (current !== undefined && current !== null && !seen.has(current)) {
@@ -211,21 +262,46 @@ export function isMissingTableError(error: unknown): boolean {
   return false;
 }
 
+/** Whether one chain link is the un-coded `tuple concurrently updated` race. */
+function isPostgresConcurrentTupleUpdate(link: unknown): boolean {
+  if (!canReadProperty(link)) return false;
+  if (Reflect.get(link, "code") !== POSTGRES_INTERNAL_ERROR_CODE) return false;
+  return (
+    messageProperty(link)?.includes(
+      POSTGRES_CONCURRENT_TUPLE_UPDATE_MESSAGE,
+    ) === true
+  );
+}
+
 /**
- * Whether PostgreSQL reported a uniqueness violation anywhere in a driver's
- * error-cause chain. `CREATE TABLE IF NOT EXISTS` can surface this code when
- * two sessions concurrently insert the same internal catalog rows; callers
- * handling that specific idempotent DDL race can retry once after the winner
- * commits.
+ * Whether PostgreSQL refused an IDEMPOTENT DDL statement because another
+ * session was concurrently committing the same catalog change — the single
+ * owner of "this DDL lost a race and is worth one retry".
+ *
+ * Every idempotent-DDL site in the codebase classifies through this one
+ * function: the Postgres backend's `executeConcurrentCreateDdl` (bootstrap
+ * tables, contribution materialization, identity relations, the index
+ * materialization table and its additive columns) and the identity
+ * schema-transition retry. A second copy of the predicate would drift the
+ * moment one site learned about a new race SQLSTATE — as `ALTER TABLE ... ADD
+ * COLUMN IF NOT EXISTS` (42701) did (#445).
+ *
+ * Callers MUST use it only around DDL that is a no-op when the object already
+ * exists. On any other statement 23505/42701 are real defects, and retrying
+ * them would hide a duplicate write.
  */
-export function isPostgresUniqueViolationError(error: unknown): boolean {
+export function isPostgresConcurrentDdlRaceError(error: unknown): boolean {
   for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
     if (
-      canReadProperty(link) &&
-      Reflect.get(link, "code") === POSTGRES_UNIQUE_VIOLATION_CODE
+      isSqlStateIn(
+        Reflect.get(link, "code"),
+        POSTGRES_CONCURRENT_DDL_RACE_SQL_STATES,
+      )
     ) {
       return true;
     }
+    if (isPostgresConcurrentTupleUpdate(link)) return true;
   }
   return false;
 }
@@ -425,6 +501,29 @@ export function isSqliteNotAuthorizedError(error: unknown): boolean {
       message.toLowerCase().includes("not authorized")
     ) {
       return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether SQLite refused a write because the enclosing DEFERRED transaction's
+ * read snapshot went stale before it could take the writer slot
+ * ({@link SQLITE_STALE_SNAPSHOT_CODE}).
+ *
+ * Classified structurally — the extended result code in either spelling a
+ * driver reports it (better-sqlite3's symbolic `code`, libSQL's numeric
+ * `rawCode`/`extendedCode`) — and never by message: SQLite renders this as the
+ * bare, indistinguishable "database is locked".
+ */
+export function isSqliteStaleSnapshotError(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (sqliteErrorCode(link) === SQLITE_STALE_SNAPSHOT_CODE) return true;
+    if (!canReadProperty(link)) continue;
+    for (const field of SQLITE_EXTENDED_CODE_FIELDS) {
+      if (Reflect.get(link, field) === SQLITE_STALE_SNAPSHOT_EXTENDED_CODE) {
+        return true;
+      }
     }
   }
   return false;

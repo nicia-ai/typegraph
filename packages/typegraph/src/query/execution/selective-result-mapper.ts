@@ -8,6 +8,7 @@
 
 import type { KindEntity } from "../../core/types";
 import { compareStrings, hasOwnKey, normalizePath } from "../../utils";
+import { createDataKeyedBag, isInteropProbeKey } from "../../utils/object";
 import { mergeEdgeKinds, type SelectiveField, type Traversal } from "../ast";
 import type {
   AliasMap,
@@ -283,7 +284,8 @@ function buildSelectiveContext<
   plans: readonly AliasPlan[],
   traversals: readonly Traversal[],
 ): SelectContext<Aliases, EdgeAliases> {
-  const context: Record<string, unknown> = {};
+  // Data-keyed: alias names chosen by the caller's query.
+  const context = createDataKeyedBag<unknown>();
 
   for (const plan of plans) {
     const value =
@@ -306,7 +308,9 @@ function buildSelectiveContext<
     }
   }
 
-  return context as SelectContext<Aliases, EdgeAliases>;
+  // Spread at the boundary, for the same reason as the non-selective mapper:
+  // this context reaches the caller's `select` callback.
+  return { ...context } as SelectContext<Aliases, EdgeAliases>;
 }
 
 function buildOptionalAliasValue(
@@ -328,19 +332,25 @@ function buildRequiredAliasValue(
   row: Record<string, unknown>,
   plan: AliasPlan,
 ): unknown {
-  const base: Record<string, unknown> = {
-    [SELECTABLE_ALIAS_MARKER]: {
-      alias: plan.alias,
-      kind: plan.kind,
-    } satisfies SelectableAliasMarker,
-  };
+  // Data-keyed: the projected field names are schema property names, and the
+  // values behind them arrive as a `JSON.parse`d props bag — which yields
+  // `__proto__` as an ordinary own key. The null prototype stays INTERNAL:
+  // `createGuardedProxy` below spreads the finished bag onto an ordinary object
+  // before proxying it, so nothing a caller can observe carries it.
+  const base = createDataKeyedBag<unknown>();
+  // The marker is keyed by SYMBOL, not by data; the cast only reaches the
+  // symbol slot of a string-keyed record.
+  (base as Record<symbol, unknown>)[SELECTABLE_ALIAS_MARKER] = {
+    alias: plan.alias,
+    kind: plan.kind,
+  } satisfies SelectableAliasMarker;
 
   for (const field of plan.systemFields) {
     base[field.field] = nullToUndefined(row[field.outputName]);
   }
 
   if (plan.metaFields.length > 0) {
-    const meta: Record<string, unknown> = {};
+    const meta = createDataKeyedBag<unknown>();
     for (const field of plan.metaFields) {
       meta[field.metaKey] = nullToUndefined(row[field.outputName]);
     }
@@ -355,36 +365,74 @@ function buildRequiredAliasValue(
   return createGuardedProxy(base, plan.alias);
 }
 
+/**
+ * Wraps a projected alias (or its `meta`) in the missing-field guard, ON AN
+ * ORDINARY OBJECT.
+ *
+ * The spread is the boundary spread `createDataKeyedBag` documents, applied
+ * HERE rather than at each call site because a proxy's target is itself
+ * caller-observable: the `get` trap below re-supplies `Object.prototype`'s
+ * members explicitly, but `instanceof`, `Object.getPrototypeOf`, and every
+ * other internal method fall through to the TARGET, which no `get` trap can
+ * disguise. Proxying a null-prototype bag therefore made `ctx.p instanceof
+ * Object` answer `false` under smart selection while the full mapper — which
+ * builds ordinary object literals (see `buildSelectableNode`) — answered
+ * `true`: a public behavior that depended on whether the optimizer engaged.
+ *
+ * Spreading is safe precisely where a key-by-key rebuild would not be: it
+ * copies own properties (including the alias marker symbol) with
+ * CreateDataProperty rather than Set, so a projected field named `__proto__`
+ * survives as an own key while `Object.prototype` is restored.
+ *
+ * Callers must therefore hand over a COMPLETE bag — the copy is taken here and
+ * later writes to the original are invisible.
+ */
 function createGuardedProxy(
   target: Record<string, unknown>,
   debugPath: string,
 ): unknown {
-  return new Proxy(target, {
-    get: (object, property: string | symbol, receiver) => {
-      if (typeof property === "symbol") {
-        return Reflect.get(object, property, receiver) as unknown;
-      }
+  return new Proxy(
+    { ...target },
+    {
+      get: (object, property: string | symbol, receiver) => {
+        if (typeof property === "symbol") {
+          return Reflect.get(object, property, receiver) as unknown;
+        }
 
-      if (property === "then" || property === "toJSON") {
-        return;
-      }
+        // Own keys FIRST — before any protocol-name exemption. The projected
+        // row's keys are data, so `in` here would answer for `Object.prototype`
+        // members the row does not carry, and a name-identity short-circuit
+        // ahead of this branch would answer for a field the row DOES carry.
+        // Smart selection must be indistinguishable from the full mapper, whose
+        // plain objects hand back an own `then` / `toJSON` like any other
+        // property; a schema may declare either name, and such a field survives
+        // validation and the JSON round-trip as ordinary data. The boundary
+        // spread above preserves that: it copies own properties with
+        // CreateDataProperty, so every projected field — `__proto__` included —
+        // is still an own key of the target this branch reads.
+        if (hasOwnKey(object, property)) {
+          return Reflect.get(object, property, receiver);
+        }
 
-      // Own keys only: the projected row's keys are data, so `in` here would
-      // answer for `Object.prototype` members the row does not carry. Behavior
-      // is unchanged — such a key falls through to the prototype branch below
-      // and resolves the same way — but the two cases are now distinct.
-      if (hasOwnKey(object, property)) {
-        return Reflect.get(object, property, receiver);
-      }
+        // Reached only once the row is known NOT to carry the key: resolve the
+        // language's own probes to `undefined` so a partially projected row is
+        // not mistaken for a thenable by `await` and `JSON.stringify` still
+        // works on it. Returning stored data above is safe for `then` because
+        // props decode from JSON and can never be callable — the thenable check
+        // ignores a non-callable `then`, exactly as it does on the full path.
+        if (isInteropProbeKey(property)) {
+          return;
+        }
 
-      // Deliberately `in`, NOT hasOwnKey: this branch's whole purpose is to
-      // reach inherited `Object.prototype` members (`toString`, `valueOf`, …) so
-      // a projected row still behaves like an object. Leave it alone.
-      if (property in Object.prototype) {
-        return Reflect.get(Object.prototype, property, receiver) as unknown;
-      }
+        // Deliberately `in`, NOT hasOwnKey: this branch's whole purpose is to
+        // reach inherited `Object.prototype` members (`toString`, `valueOf`, …) so
+        // a projected row still behaves like an object. Leave it alone.
+        if (property in Object.prototype) {
+          return Reflect.get(Object.prototype, property, receiver) as unknown;
+        }
 
-      throw new MissingSelectiveFieldError(debugPath, property);
+        throw new MissingSelectiveFieldError(debugPath, property);
+      },
     },
-  });
+  );
 }

@@ -149,6 +149,22 @@ write latency for a high-concurrency, single-graph workload. Partition that
 workload across graphs or leave revision tracking off when the content-fingerprint
 fallback is acceptable.
 
+Turning revision tracking off does **not** turn off all serialization.
+*Constrained* writes now take the same per-graph mutual exclusion regardless of
+`revisionTracking` or `history`, because their check-then-write is only sound if
+nothing else writes the graph in between: edge cardinality (`one`, `unique`,
+`oneActive`, and the `getOrCreateByEndpoints` create and resurrect legs),
+node-kind disjointness on create, and a `kindWithSubClasses` uniqueness
+constraint that actually expands to more than one kind — a scope covering a
+single kind probes exactly the row the uniques table's primary key then
+reserves, so that key is already its fence. Everything else — an unconstrained
+create, a delete, a cardinality-`many` edge — pays nothing, so the cost is
+proportional to the constraints you actually declared. On PostgreSQL that
+exclusion is the same transaction-scoped advisory lock; on SQLite it is the
+`BEGIN IMMEDIATE` writer slot the backend already takes. A backend running
+without transactions (D1, `neon-http`, or `transactionMode: "none"`) has neither
+and cannot be fenced.
+
 This unlocks:
 
 - Many concurrent agent, importer, or review branches without base-version
@@ -168,10 +184,39 @@ larger architectural step; they are not hidden behind a micro-optimization.
 Revision tracking covers writes through the Store API. Direct backend writes and
 raw graph-table writes through `tx.sql` bypass the anchor, so applications using
 either escape hatch must avoid them for a branchable graph or retain the default
-content-fingerprint validation. Streaming export is likewise not a transactional
-backup snapshot: concurrent writes can produce a stream that spans multiple
-committed graph states. Use a database snapshot or quiesce writes when backup
-consistency matters.
+content-fingerprint validation. On transactional backends, streaming export holds
+one read-only repeatable-read transaction across nodes, edges, and identity
+assertions, so every chunk belongs to one committed snapshot. A snapshot stream
+cannot be piped directly into a target that writes through the same serialized
+connection: the same SQLite backend, distinct wrappers sharing one better-sqlite3
+handle or one local (`file:`/`:memory:`) libSQL client, a bare `pg`/neon
+`Client` (a checked-out `PoolClient` included), a `Pool` explicitly configured
+with `max: 1`, a postgres-js client built with `{ max: 1 }`, distinct PGlite
+backend wrappers sharing one in-process connection, or Cloudflare Durable Object
+storage, whose transaction frame is ambient on the storage object — materialize
+it first or import it into an independent backend. Pooled connections, HTTP
+drivers, remote libSQL, and separate handles on one database are deliberately
+not treated as serialized: each statement gets an independent connection there,
+so refusing would refuse work that succeeds. The exclusion is one **exclusive** lease
+per serialized connection, not a one-time check and not a cross-kind-only rule:
+at most one long-lived interchange stream of any kind holds a given connection,
+so all four pairings are refused — import behind export snapshot (even through a
+user-wrapped stream that no longer identifies its source backend), export
+snapshot behind streaming import, export behind export, and import behind
+import. Whichever long-lived stream starts second gets a typed
+`ConfigurationError` instead of both hanging; its `details.code` names the
+condition holding the connection and `details.requested` / `details.heldBy` name
+the pairing that was refused (see
+[Interchange serialized-connection guard codes](/errors#interchange-serialized-connection-guard-codes)).
+Every long-lived import claims that lease, not only the chunk-streaming one:
+`importGraph` holds it for the whole call and `trustedImportGraph` /
+`trustedImportGraphStream` for the whole trusted session, so those APIs can throw
+this `ConfigurationError` too — new in 0.46 for trusted import, which previously
+threw only `TrustedImportError`. TypeGraph's branch cloner detects
+the shared-client case and materializes its snapshot before importing it.
+Non-transactional backends can export identity-disabled graphs without this
+snapshot guarantee. Identity-enabled stores already require a transactional
+backend at construction, so every identity export has the snapshot guarantee.
 
 ## Entity resolution
 
@@ -462,12 +507,68 @@ merge applied.
 - **Report-only (default, `provenance: true`)** — `report.provenance.byBranch(id)`
   returns the `{ nodeIds, edgeIds }` that branch contributed. In-memory; it
   evaporates after the call.
-- **Durable (`persistProvenance: true`)** — after the commit, one
-  `{branch, sourceId} → canonical` row per contribution is upserted into a
-  *sidecar* graph on the target's backend (its own namespaced tables; your
-  domain schema is untouched). It is best-effort and post-commit: a persistence
-  failure surfaces as a `warnings` entry, never a failed merge. Re-running the
-  same merge upserts (deterministic ids), never duplicates.
+- **Durable (`persistProvenance: true`)** — one `{branch, sourceId} → canonical`
+  row per contribution is upserted into a *sidecar* graph on the target's
+  backend (its own namespaced tables; your domain schema is untouched). The
+  sidecar is opened and claimed **before** the merge commits, so a sidecar graph
+  id TypeGraph cannot claim refuses the whole merge and leaves the target
+  unmodified; only the row write itself is post-commit and best-effort, where a
+  transient failure surfaces as a `warnings` entry rather than a failed merge.
+  Re-running the same merge upserts (deterministic ids), never duplicates.
+
+`openProvenanceStore` only ever opens a sidecar graph id it can prove it owns,
+and ownership is **marker-first**: a durable `ProvenanceOwner` marker row is the
+sidecar's first write of any kind, committed inside the schema fence *before*
+the sidecar schema is registered. A never-seen id is free to claim only when it
+holds no row in **any** per-graph table — nodes and edges, but equally
+recorded-time history, the revision clock and origins, identity assertions and
+their derived closure and separation, fulltext, and unique keys — because a
+plain `createStore` writes rows without registering a schema, so an unregistered
+id is not by itself evidence of a free namespace. Ownership is then the marker
+alone, checked independently of the schema hash, because an application is free
+to define the same `Provenance` shape at an unrelated id. Because the marker
+comes first, the resumable interrupted state is **marker without schema** (or a
+marker beside a pre-marker legacy schema): that resumes by registering or
+migrating the schema. The opposite state — the exact current sidecar schema with
+no marker — is one TypeGraph cannot produce, and is refused unconditionally
+whatever the graph contains, empty and provenance-shaped included, since
+contents an application could have written are not evidence of authorship.
+
+**What a claim costs, on PostgreSQL.** One writer class takes neither the
+per-graph fence nor the graph's active schema row: a schema-less raw
+`createStore` writer, or a direct `backend.insertNode` / `insertEdge` call. At
+READ COMMITTED its insert could commit between the claim's re-inspection and the
+claim's own commit, leaving the marker on an id an application had just made its
+own. To close that, the claim issues
+`LOCK TABLE <nodes>, <edges> IN SHARE ROW EXCLUSIVE MODE` inside the fence and
+before the re-inspection. That mode excludes every `INSERT` / `UPDATE` /
+`DELETE` on those two tables **for every graph on the database** — they are
+shared tables — while still admitting readers. So while a claim runs, every node
+and edge write database-wide waits.
+
+The bound is what makes it acceptable: the lock is taken **only inside a claim**,
+which happens when a sidecar is created, upgraded from the pre-marker schema, or
+resumed after a crash — never on the common path, where an already-owned sidecar
+opens with no fence at all. Its duration is the re-inspection's probes plus one
+`INSERT`, with no caller code and no caller I/O inside it. The mode is
+`SHARE ROW EXCLUSIVE` rather than plain `SHARE` because it must be
+self-exclusive: two concurrent claims on different sidecar ids hold different
+advisory locks, so under `SHARE` both would acquire it and then both request
+`ROW EXCLUSIVE` for their own marker insert — a lock-upgrade deadlock PostgreSQL
+resolves by aborting one of them. SQLite takes no such lock; `BEGIN IMMEDIATE`
+already owns the engine's single writer slot.
+
+Refusals carry the code `GRAPH_MERGE_PROVENANCE_ID_COLLISION` and one of five
+`details.reason` values — `application-graph`, `empty-legacy-sidecar`,
+`unupgradeable-legacy-sidecar`, `unowned-exact-schema-graph`, or
+`corrupt-ownership-marker` — so the remediation matches what is actually there
+instead of generic advice; a backend with no transactional schema fence refuses
+an unclaimed sidecar with `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED` (an
+already-owned sidecar still opens there). Under `persistProvenance: true` both
+of those arrive as a typed `InvalidMergeOptionsError` naming
+`details.option: "persistProvenance"`, with the originating `ConfigurationError`
+as its `cause` — see
+[Merge provenance sidecar codes](/errors#merge-provenance-sidecar-codes).
 
 Query persisted provenance back later:
 
@@ -522,8 +623,15 @@ const result = await mergeIncremental({
 });
 ```
 
-`mergeIncremental()` requires `onBasePropertyConflict: "flag"` so a stale branch
-value can never overwrite a newer committed value during new-vs-base recall.
+`mergeIncremental()` requires `onBasePropertyConflict: "flag"` — any other value
+is refused with `InvalidMergeOptionsError` — so a stale branch value can never
+overwrite a newer committed value during new-vs-base recall.
+The `forkPoint` must stay **frozen for the duration of the call**: every branch
+diff is computed against it, and the commit transaction re-reads its `base@V`
+before applying anything, so a write landing on the fork point mid-merge is
+refused with `BaseVersionMismatchError` instead of committing diffs against an
+ancestor that no longer exists. Only the `target` may advance while the merge
+runs.
 If both the branch and the live target changed the same inherited row, the target
 value/deletion wins and the conflict is reported. Both `merge()` and
 `mergeIncremental()` commit **transactionally** and require a
@@ -675,6 +783,7 @@ subclass you can branch on:
 | `BranchError` | `branch()` could not materialize a working copy. |
 | `BaseVersionMismatchError` | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge). |
+| `InvalidMergeOptionsError` | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`. |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`. |
 | `MergeConflictError` | A conflict could not be resolved under the configured policy. |
 | `MergeError` | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes. |

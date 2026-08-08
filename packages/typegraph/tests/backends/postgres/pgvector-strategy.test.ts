@@ -357,5 +357,14 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
       mode: "iterative-scan",
       guaranteesFullPage: false,
     });
+    // The one bundled engine with a per-search frontier: `hnsw.ef_search`,
+    // honored by HNSW slots only and scoped to the search's own transaction.
+    // Every other combination is a refusal, not a silent drop (#433).
+    expect(pgvectorStrategy.capabilities.searchFrontierTuning).toEqual({
+      tunable: true,
+      parameter: "hnsw.ef_search",
+      indexType: "hnsw",
+      requiresTransactionScope: true,
+    });
   });
 });

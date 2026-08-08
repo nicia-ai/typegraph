@@ -197,11 +197,18 @@ describe("cascade edge deletion batches", () => {
 });
 
 // ============================================================
-// Delete preflight elimination
+// Delete gate and transaction recheck
 // ============================================================
 
 describe("delete round trips", () => {
-  it("edge delete and hard delete read the row once (gate only)", async () => {
+  // The in-transaction recheck read these paths used to make is GONE: the
+  // DELETE / UPDATE statements now carry the expected kind in their own WHERE
+  // (see UpdateEdgeParams.kind), so the write is its own recheck and a second
+  // `getEdge` would re-derive a verdict the statement already enforces. The
+  // gate outside the transaction stays — it is what keeps an absent or
+  // wrong-kind edge from opening an empty transaction and from firing hooks —
+  // so each path is one read plus one write instead of two reads plus one.
+  it("edge delete and hard delete gate once; the write carries its own kind predicate", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
       const { backend, counts } = withCallCounts(rawBackend);
@@ -267,7 +274,7 @@ describe("delete round trips", () => {
   });
 
   it("a stale gate read degrades to a guarded no-op, recorded history intact", async () => {
-    // Simulates the race the removed preflight used to absorb: the gate
+    // Simulates the race the transaction recheck must absorb: the gate
     // sees a live row, but the row is tombstoned before the write
     // transaction runs. The tombstone UPDATE's `deleted_at IS NULL`
     // guard makes it a 0-row no-op, and the recorded-capture touch of

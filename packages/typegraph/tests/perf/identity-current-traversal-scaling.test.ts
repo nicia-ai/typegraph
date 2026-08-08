@@ -67,7 +67,10 @@ const POSTGRES_CASES: readonly Case[] = [
 
 /**
  * Graph sizes for the single-start-row hop: the frontier is one row, so what
- * these vary is the size of the identity population the class relation covers.
+ * these vary is the size of the identity population around it. They used to
+ * measure the cost model's caveat — a graph-wide class relation a narrow hop
+ * paid for anyway — and now measure its absence (typegraph#432). The asserted
+ * form of the same property is `tests/identity-frontier-bounded.test.ts`.
  */
 const SINGLE_SOURCE_CASES: readonly Case[] = [
   { fanOut: 1, sources: 1000 },
@@ -170,10 +173,10 @@ async function measure(
 }
 
 /**
- * The same hop from a single start row. The class relation is built for the whole
- * graph, so this is the shape that pays for it without benefiting from the
- * removed per-source rescan — the cost model's stated caveat, measured rather
- * than asserted.
+ * The same hop from a single start row: the shape that benefits from none of the
+ * removed per-source rescan, so it is where a class relation built wider than the
+ * frontier shows up as pure overhead. Measured rather than asserted here; the
+ * assertion lives in `tests/identity-frontier-bounded.test.ts`.
  */
 async function measureSingleSource(
   store: Awaited<ReturnType<typeof openStore>>,

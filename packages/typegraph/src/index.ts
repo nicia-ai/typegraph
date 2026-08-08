@@ -200,6 +200,7 @@ export type {
   UpsertFulltextBatchParams,
   VectorCapabilities,
   VectorOperationBackend,
+  VectorSearchFrontierTuning,
 } from "./backend/types";
 export {
   type RowProps,
@@ -361,11 +362,13 @@ export {
   DatabaseOperationError,
   DisjointError,
   EagerMaterializationError,
+  EDGE_IDENTITY_MISMATCH_CODE,
   EdgeNotFoundError,
   EmbeddingDimensionChangedError,
   EndpointError,
   EndpointNotFoundError,
   ENTITY_ALREADY_EXISTS_CODE,
+  ExportStreamCancelledError,
   // Error utility functions
   getErrorSuggestion,
   GraphAlgorithmConvergenceError,

@@ -9,8 +9,21 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
 import type { GraphBackend } from "../src/backend/types";
-import { CardinalityError } from "../src/errors";
+import { checkWherePredicate, computeUniqueKey } from "../src/constraints";
+import { type UniqueConstraint } from "../src/core/types";
+import {
+  CardinalityError,
+  ConfigurationError,
+  UniquenessError,
+} from "../src/errors";
+import { buildKindRegistry } from "../src/registry";
 import { createStore } from "../src/store";
+import {
+  checkUniquenessConstraints,
+  createUniquenessContext,
+  insertUniquenessEntries,
+} from "../src/store/uniqueness";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -753,5 +766,548 @@ describe("Uniqueness Scope: kindWithSubClasses", () => {
     });
 
     expect(service.code).toBe("REUSE-CODE");
+  });
+});
+
+// ============================================================
+// Uniqueness Over Fields Named After Prototype Members
+// ============================================================
+
+/**
+ * A schema may DECLARE a field named after an `Object.prototype` member —
+ * `toString` below is an ordinary optional string field. When such a field is
+ * absent from a props bag, every constraint decision about it must read the
+ * bag's OWN keys; a plain `props.toString` read finds the inherited function
+ * and treats an absent field as a present value.
+ */
+const Entry = defineNode("Entry", {
+  schema: z.object({
+    label: z.string(),
+    toString: z.string().optional(),
+  }),
+});
+
+function protoNamedGraph(id: string, collation: "binary" | "caseInsensitive") {
+  return defineGraph({
+    id,
+    nodes: {
+      Entry: {
+        type: Entry,
+        unique: [
+          {
+            name: "unique_to_string",
+            fields: ["toString"],
+            scope: "kind",
+            collation,
+          },
+        ],
+      },
+    },
+    edges: {},
+    ontology: [],
+  });
+}
+
+const binaryProtoGraph = protoNamedGraph("proto_named_binary", "binary");
+const insensitiveProtoGraph = protoNamedGraph(
+  "proto_named_insensitive",
+  "caseInsensitive",
+);
+
+/** The `where`-less constraint list `defineGraph` normalized for `Entry`. */
+function protoNamedConstraints(graph: typeof binaryProtoGraph) {
+  return graph.nodes.Entry.unique;
+}
+
+describe("Uniqueness key for a field named after a prototype member", () => {
+  const absent: Record<string, unknown> = { label: "first" };
+  const otherAbsent: Record<string, unknown> = { label: "second" };
+  const explicitlyUndefined: Record<string, unknown> = {
+    label: "first",
+    toString: undefined,
+  };
+
+  it("keys an absent field as absent under binary collation", () => {
+    const key = computeUniqueKey(absent, ["toString"], "binary");
+
+    // The inherited `Object.prototype.toString` is a function, which
+    // `JSON.stringify` drops — reading it produced the empty key.
+    expect(key).not.toBe("");
+    expect(key).toBe(
+      computeUniqueKey(explicitlyUndefined, ["toString"], "binary"),
+    );
+  });
+
+  it("keys an absent field as absent under caseInsensitive collation", () => {
+    // Reading the inherited function here threw
+    // "Cannot read properties of undefined (reading 'toLowerCase')".
+    expect(() =>
+      computeUniqueKey(absent, ["toString"], "caseInsensitive"),
+    ).not.toThrow();
+    expect(computeUniqueKey(absent, ["toString"], "caseInsensitive")).toBe(
+      computeUniqueKey(absent, ["toString"], "binary"),
+    );
+  });
+
+  it("collides two bags that both omit the field", () => {
+    for (const collation of ["binary", "caseInsensitive"] as const) {
+      expect(computeUniqueKey(absent, ["toString"], collation)).toBe(
+        computeUniqueKey(otherAbsent, ["toString"], collation),
+      );
+    }
+  });
+
+  it("keeps distinct present values distinct, and distinct from absence", () => {
+    const present = { label: "first", toString: "alpha" };
+    const otherPresent = { label: "second", toString: "beta" };
+
+    for (const collation of ["binary", "caseInsensitive"] as const) {
+      expect(computeUniqueKey(present, ["toString"], collation)).not.toBe(
+        computeUniqueKey(otherPresent, ["toString"], collation),
+      );
+      expect(computeUniqueKey(present, ["toString"], collation)).not.toBe(
+        computeUniqueKey(absent, ["toString"], collation),
+      );
+    }
+
+    // Case folding still applies to a present value.
+    expect(
+      computeUniqueKey(
+        { label: "first", toString: "ALPHA" },
+        ["toString"],
+        "caseInsensitive",
+      ),
+    ).toBe(computeUniqueKey(present, ["toString"], "caseInsensitive"));
+  });
+});
+
+describe("Uniqueness sidecar for a field named after a prototype member", () => {
+  let backend: GraphBackend;
+
+  beforeEach(() => {
+    backend = createTestBackend();
+  });
+
+  function contextFor(graph: typeof binaryProtoGraph) {
+    return createUniquenessContext(graph.id, buildKindRegistry(graph), backend);
+  }
+
+  for (const graph of [binaryProtoGraph, insensitiveProtoGraph]) {
+    const collation = protoNamedConstraints(graph)[0].collation;
+
+    it(`refuses a second node that also omits the field (${collation})`, async () => {
+      const ctx = contextFor(graph);
+      const constraints = protoNamedConstraints(graph);
+
+      await insertUniquenessEntries(
+        ctx,
+        "Entry",
+        "entry-1",
+        { label: "first" },
+        constraints,
+      );
+
+      await expect(
+        checkUniquenessConstraints(
+          ctx,
+          "Entry",
+          "entry-2",
+          { label: "second" },
+          constraints,
+        ),
+      ).rejects.toThrow(UniquenessError);
+    });
+
+    it(`admits a node carrying a value for the field (${collation})`, async () => {
+      const ctx = contextFor(graph);
+      const constraints = protoNamedConstraints(graph);
+
+      await insertUniquenessEntries(
+        ctx,
+        "Entry",
+        "entry-1",
+        { label: "first" },
+        constraints,
+      );
+
+      await expect(
+        checkUniquenessConstraints(
+          ctx,
+          "Entry",
+          "entry-2",
+          { label: "second", toString: "alpha" },
+          constraints,
+        ),
+      ).resolves.toBeUndefined();
+    });
+  }
+});
+
+// ============================================================
+// Partial Uniqueness (`where`) Over Absent Optional Fields
+// ============================================================
+
+const Account = defineNode("Account", {
+  schema: z.object({
+    name: z.string(),
+    externalId: z.string().optional(),
+  }),
+});
+
+const partialUniqueGraph = defineGraph({
+  id: "partial_unique_test",
+  nodes: {
+    Account: {
+      type: Account,
+      unique: [
+        {
+          name: "unique_external_id",
+          fields: ["externalId"],
+          scope: "kind",
+          collation: "binary",
+          where: (fields) => requireDefined(fields["externalId"]).isNotNull(),
+        },
+      ],
+    },
+  },
+  edges: {},
+  ontology: [],
+});
+
+/** Constraints whose `where` names a field called after a prototype member. */
+const protoWhereGraph = defineGraph({
+  id: "proto_named_where_test",
+  nodes: {
+    Entry: {
+      type: Entry,
+      unique: [
+        {
+          name: "unique_when_to_string_null",
+          fields: ["label"],
+          scope: "kind",
+          collation: "binary",
+          // Dot notation cannot name this field: `fields.toString` resolves to
+          // the builder object's inherited `toString` method, which is exactly
+          // the confusion under test.
+          // eslint-disable-next-line @typescript-eslint/dot-notation
+          where: (fields) => requireDefined(fields["toString"]).isNull(),
+        },
+        {
+          name: "unique_when_to_string_present",
+          fields: ["label"],
+          scope: "kind",
+          collation: "binary",
+          // eslint-disable-next-line @typescript-eslint/dot-notation
+          where: (fields) => requireDefined(fields["toString"]).isNotNull(),
+        },
+      ],
+    },
+  },
+  edges: {},
+  ontology: [],
+});
+
+/** The well-known symbols a generic consumer probes an unknown object with. */
+const PROBED_SYMBOLS: readonly symbol[] = [
+  Symbol.iterator,
+  Symbol.asyncIterator,
+  Symbol.toPrimitive,
+  Symbol.toStringTag,
+];
+
+/** What each `where` evaluation observed when it probed its builder. */
+const symbolProbes: (readonly unknown[])[] = [];
+
+/** A constraint whose `where` probes the builder the way a library would. */
+const symbolProbeGraph = defineGraph({
+  id: "symbol_probe_where_test",
+  nodes: {
+    Entry: {
+      type: Entry,
+      unique: [
+        {
+          name: "unique_label",
+          fields: ["label"],
+          scope: "kind",
+          collation: "binary",
+          where: (fields) => {
+            const builder = fields as unknown as Readonly<
+              Record<symbol, unknown>
+            >;
+            symbolProbes.push(PROBED_SYMBOLS.map((symbol) => builder[symbol]));
+            return requireDefined(fields["label"]).isNotNull();
+          },
+        },
+      ],
+    },
+  },
+  edges: {},
+  ontology: [],
+});
+
+describe("Partial uniqueness over an absent optional field", () => {
+  let backend: GraphBackend;
+
+  beforeEach(() => {
+    backend = createTestBackend();
+  });
+
+  it("does not apply to nodes created without the field", async () => {
+    const store = createStore(partialUniqueGraph, backend);
+
+    // The predicate builder declares every schema field, optional or not, so
+    // naming an absent one reports absence instead of throwing.
+    const first = await store.nodes.Account.create({ name: "first" });
+    const second = await store.nodes.Account.create({ name: "second" });
+
+    expect(first.externalId).toBeUndefined();
+    expect(second.externalId).toBeUndefined();
+  });
+
+  it("still enforces the constraint for nodes carrying the field", async () => {
+    const store = createStore(partialUniqueGraph, backend);
+
+    await store.nodes.Account.create({ name: "first", externalId: "ext-1" });
+
+    await expect(
+      store.nodes.Account.create({ name: "second", externalId: "ext-1" }),
+    ).rejects.toThrow("Uniqueness violation");
+
+    const third = await store.nodes.Account.create({
+      name: "third",
+      externalId: "ext-2",
+    });
+    expect(third.externalId).toBe("ext-2");
+  });
+
+  it("answers a well-known symbol as absent instead of as a field", () => {
+    const [constraint] = symbolProbeGraph.nodes.Entry.unique;
+
+    expect(checkWherePredicate(constraint, { label: "first" })).toBe(true);
+
+    // A symbol is never a schema field name, so the builder must answer one the
+    // way a plain object does. Answering with a field builder instead hands
+    // every JS protocol that probes an unknown object — iteration, `ToPrimitive`
+    // string coercion, array-like consumption — a NON-CALLABLE object where it
+    // requires a method, so a `where` callback that merely gets logged or
+    // spread throws a TypeError from inside user code. And a predicate built
+    // from such a read would carry a symbol as its `field`, which reads as
+    // absent for every node: a partial constraint silently applying to nothing.
+    // The callback runs once per evaluation AND once at definition time, where
+    // `defineGraph` captures the clause to check its field is declared. Every
+    // recorded probe — from either caller — must answer the same way.
+    expect(symbolProbes.length).toBeGreaterThanOrEqual(1);
+    for (const probed of symbolProbes) {
+      expect(probed).toHaveLength(PROBED_SYMBOLS.length);
+      for (const value of probed) {
+        expect(value).toBeUndefined();
+      }
+    }
+  });
+
+  it("evaluates a where clause naming a prototype-member field by own key", () => {
+    const [whenNull, whenPresent] = protoWhereGraph.nodes.Entry.unique;
+
+    // Absent: the inherited `Object.prototype.toString` read as a present
+    // value, inverting both predicates.
+    expect(checkWherePredicate(whenNull, { label: "first" })).toBe(true);
+    expect(checkWherePredicate(whenPresent, { label: "first" })).toBe(false);
+
+    // Present: unchanged.
+    const carried = { label: "first", toString: "alpha" };
+    expect(checkWherePredicate(whenNull, carried)).toBe(false);
+    expect(checkWherePredicate(whenPresent, carried)).toBe(true);
+  });
+});
+
+// ============================================================
+// Undeclared `where` Fields Are Refused at Definition Time
+// ============================================================
+
+/**
+ * The uniqueness predicate builder is a TOTAL Proxy: it answers for every
+ * name, because the builder type declares every schema field as required so a
+ * partial constraint can ask whether an OPTIONAL one is present. That totality
+ * is correct and must stay — but it means a TYPO'D field name cannot be caught
+ * at the builder. For a typed caller the type system catches it
+ * (`UniqueConstraintPredicateBuilder` declares exactly the schema's fields and
+ * has no index signature); an untyped JavaScript caller had no guard at all and
+ * got a predicate that quietly never applied — a partial constraint enforcing
+ * nothing, reported as success.
+ *
+ * `defineGraph` is where that is refused: the one gate every constraint passes
+ * before a write can evaluate it, so the refusal covers every write path rather
+ * than the subset of `checkWherePredicate` call sites that happen to hold a
+ * schema. It mirrors `validateGraphExtension`'s `UNKNOWN_UNIQUE_WHERE_FIELD`,
+ * which already holds this invariant for kinds declared as JSON documents.
+ */
+
+type UntypedFieldBuilder = Readonly<{
+  isNull: () => unknown;
+  isNotNull: () => unknown;
+}>;
+
+/**
+ * Builds the graph the way an untyped caller would: the constraint is cast to
+ * the declared type, which is exactly what an untyped call site does implicitly.
+ */
+function defineAccountGraph(
+  id: string,
+  where: (fields: Record<string, UntypedFieldBuilder>) => unknown,
+): unknown {
+  const constraint: UniqueConstraint = {
+    name: "unique_external_id",
+    fields: ["externalId"],
+    scope: "kind",
+    collation: "binary",
+    where: where as NonNullable<UniqueConstraint["where"]>,
+  };
+
+  // The registration is cast to its constraint-free shape: that is precisely
+  // what an untyped call site has — a `unique` array TypeScript never checked.
+  const registration = { type: Account, unique: [constraint] } as unknown as {
+    type: typeof Account;
+  };
+
+  return defineGraph({
+    id,
+    nodes: { Account: registration },
+    edges: {},
+    ontology: [],
+  });
+}
+
+describe("uniqueness `where` clauses naming an undeclared field", () => {
+  it("refuses the graph definition, naming the field and the declared set", () => {
+    expect(() =>
+      defineAccountGraph("undeclared_where_field", (fields) =>
+        requireDefined(fields["externaId"]).isNotNull(),
+      ),
+    ).toThrow(/externaId/);
+
+    expect(() =>
+      defineAccountGraph("undeclared_where_field_2", (fields) =>
+        requireDefined(fields["externaId"]).isNotNull(),
+      ),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("refuses a `where` callback that returns something other than a predicate", () => {
+    expect(() =>
+      defineAccountGraph("non_predicate_where", () => ({ nope: true })),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("refuses a `where` clause on a kind whose schema is not an object schema", () => {
+    // The guard's whole purpose is untyped callers — who are also the only
+    // callers who can put a non-`ZodObject` here. Skipping the check when there
+    // is no `.shape` therefore disabled it for exactly the population it was
+    // written for: the clause below names a field nothing declares, and used to
+    // sail through definition and then quietly never apply.
+    const nonObjectKind = {
+      kind: "Blob",
+      schema: z.record(z.string(), z.unknown()),
+    };
+    const registration = {
+      type: nonObjectKind,
+      unique: [
+        {
+          name: "unique_blob",
+          fields: ["anything"],
+          scope: "kind",
+          collation: "binary",
+          where: (fields: Record<string, UntypedFieldBuilder>) =>
+            requireDefined(fields["typoField"]).isNotNull(),
+        },
+      ],
+    } as unknown as { type: typeof Account };
+
+    expect(() =>
+      defineGraph({
+        id: "non_object_schema_where",
+        nodes: { Blob: registration },
+        edges: {},
+        ontology: [],
+      }),
+    ).toThrow(ConfigurationError);
+    expect(() =>
+      defineGraph({
+        id: "non_object_schema_where_2",
+        nodes: { Blob: registration },
+        edges: {},
+        ontology: [],
+      }),
+    ).toThrow(/not an object schema/);
+  });
+
+  it("still accepts a constraint with no `where` on a non-object schema", () => {
+    // The refusal is scoped to the thing that cannot be validated. A plain
+    // `unique: [{ fields }]` names props by key and evaluates fine without a
+    // declared-field set; refusing it would break a working untyped graph for
+    // no safety gain.
+    const registration = {
+      type: { kind: "Blob", schema: z.record(z.string(), z.unknown()) },
+      unique: [
+        {
+          name: "unique_blob",
+          fields: ["anything"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    } as unknown as { type: typeof Account };
+
+    expect(() =>
+      defineGraph({
+        id: "non_object_schema_no_where",
+        nodes: { Blob: registration },
+        edges: {},
+        ontology: [],
+      }),
+    ).not.toThrow();
+  });
+
+  it("refuses a malformed `where` at EVALUATION too, not just at definition", () => {
+    // `defineGraph` refuses a non-predicate callback, so this arm should be
+    // unreachable — it is reached only by handing the store a constraint that
+    // never passed a definition gate. The three readers of a `where` clause
+    // (definition, persistence, evaluation) must not disagree about it: the
+    // other two refuse, so evaluation refuses as well rather than silently
+    // widening a PARTIAL constraint into a TOTAL one, which would enforce
+    // uniqueness over exactly the rows the author excluded.
+    const handBuilt = {
+      name: "unique_external_id",
+      fields: ["externalId"],
+      scope: "kind",
+      collation: "binary",
+      where: () => ({ nope: true }),
+    } as unknown as UniqueConstraint;
+
+    expect(() => checkWherePredicate(handBuilt, { name: "a" })).toThrow(
+      ConfigurationError,
+    );
+    expect(() => checkWherePredicate(handBuilt, { name: "a" })).toThrow(
+      /does not return a predicate/,
+    );
+  });
+
+  it("accepts a clause naming a DECLARED optional field, which still evaluates as absent", () => {
+    const graph = defineAccountGraph("declared_optional_where", (fields) =>
+      requireDefined(fields["externalId"]).isNotNull(),
+    ) as typeof partialUniqueGraph;
+
+    const [constraint] = graph.nodes.Account.unique;
+
+    // The 0.46 behavior this refusal must not disturb: a DECLARED but absent
+    // optional field evaluates as absent rather than throwing or being refused.
+    expect(checkWherePredicate(requireDefined(constraint), { name: "a" })).toBe(
+      false,
+    );
+    expect(
+      checkWherePredicate(requireDefined(constraint), {
+        name: "a",
+        externalId: "ext-1",
+      }),
+    ).toBe(true);
   });
 });

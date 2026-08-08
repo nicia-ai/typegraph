@@ -36,6 +36,59 @@ export function createUniquenessContext(
 }
 
 /**
+ * Probes ONE constraint's key across every kind its scope covers.
+ *
+ * THE SINGLE OWNER of "is this key available to this node?" — the conflict
+ * verdict and the ownership reading are one read, so no caller can consult one
+ * without the other. {@link checkUniquenessConstraints} is this probe run for
+ * its refusal alone; the plan builders below additionally keep what it read.
+ *
+ * @returns whether THIS node already holds the key live under its OWN kind, in
+ *   which case a claim would be a no-op and a compensating release would strip
+ *   a reservation the node is entitled to.
+ * @throws UniquenessError when a DIFFERENT node holds the key under any kind in
+ *   scope.
+ */
+async function probeUniqueKey(
+  ctx: UniquenessContext,
+  kind: string,
+  id: string,
+  constraint: UniqueConstraint,
+  key: string,
+): Promise<boolean> {
+  const kindsToCheck = getKindsForUniquenessCheck(
+    kind,
+    constraint.scope,
+    ctx.registry,
+  );
+
+  // `let` earns its place: the loop must visit EVERY kind in scope to reach its
+  // refusal, so the ownership reading cannot be an early return.
+  let heldByThisNode = false;
+  for (const kindToCheck of kindsToCheck) {
+    const existing = await ctx.backend.checkUnique({
+      graphId: ctx.graphId,
+      nodeKind: kindToCheck,
+      constraintName: constraint.name,
+      key,
+    });
+
+    if (existing === undefined) continue;
+    if (existing.node_id !== id) {
+      throw new UniquenessError({
+        constraintName: constraint.name,
+        kind: kindToCheck,
+        existingId: existing.node_id,
+        newId: id,
+        fields: constraint.fields,
+      });
+    }
+    if (kindToCheck === kind) heldByThisNode = true;
+  }
+  return heldByThisNode;
+}
+
+/**
  * Checks uniqueness constraints for a new or existing node.
  *
  * @throws ValidationError if any constraint is violated
@@ -52,36 +105,13 @@ export async function checkUniquenessConstraints(
       continue;
     }
 
-    const key = computeUniqueKey(
-      props,
-      constraint.fields,
-      constraint.collation,
-    );
-
-    const kindsToCheck = getKindsForUniquenessCheck(
+    await probeUniqueKey(
+      ctx,
       kind,
-      constraint.scope,
-      ctx.registry,
+      id,
+      constraint,
+      computeUniqueKey(props, constraint.fields, constraint.collation),
     );
-
-    for (const kindToCheck of kindsToCheck) {
-      const existing = await ctx.backend.checkUnique({
-        graphId: ctx.graphId,
-        nodeKind: kindToCheck,
-        constraintName: constraint.name,
-        key,
-      });
-
-      if (existing && existing.node_id !== id) {
-        throw new UniquenessError({
-          constraintName: constraint.name,
-          kind: kindToCheck,
-          existingId: existing.node_id,
-          newId: id,
-          fields: constraint.fields,
-        });
-      }
-    }
   }
 }
 
@@ -194,41 +224,59 @@ export async function deleteUniquenessEntries(
 }
 
 /**
- * Updates uniqueness entries when a node's props change.
- * Handles cases where:
- * - Constraint now applies (wasn't before)
- * - Constraint no longer applies (was before)
- * - Key value changed
+ * A single constraint's sidecar transition, decided by a plan builder and
+ * carried out by {@link withUniquenessTransition}.
  *
- * @throws ValidationError if updated value violates a constraint
+ * The two keys move at DIFFERENT times relative to the primary row write, so
+ * they are named for when they move rather than for old/new:
+ * `claim` is reserved BEFORE the write (it is the write's conflict gate),
+ * `release` is given up AFTER it (it is history the write supersedes).
  */
-export async function updateUniquenessEntries(
+type PendingUniqueMutation = Readonly<{
+  constraintName: string;
+  /** The key to give up once the primary write lands; undefined = none. */
+  release: string | undefined;
+  /**
+   * The key to reserve before the primary write; undefined = none, either
+   * because the constraint stopped applying or because {@link probeUniqueKey}
+   * found this node already holding it live.
+   */
+  claim: string | undefined;
+}>;
+
+/**
+ * The sidecar transition a node write owes, decided but not yet performed.
+ *
+ * Opaque to its holder on purpose: the only thing a caller does with a plan is
+ * hand it to {@link withUniquenessTransition} together with the primary row
+ * write it belongs to.
+ */
+export type UniquenessUpdatePlan = readonly PendingUniqueMutation[];
+
+/**
+ * Decides the uniqueness-entry changes a node's new props require, WITHOUT
+ * writing any of them.
+ *
+ * Preflights EVERY changed constraint before anything is written. A node can
+ * carry several unique constraints; probing them one at a time as they are
+ * applied would let a later constraint's conflict throw after earlier sidecars
+ * already moved. Probing all of them first means a refusal here happens with
+ * zero writes, and the probes are independent per `constraintName`, so one
+ * constraint's verdict is unaffected by the others' still-unapplied changes.
+ *
+ * Handles the cases where a constraint starts applying, stops applying, or
+ * keeps applying under a different key.
+ *
+ * @throws UniquenessError if an updated value is already held by another node
+ */
+export async function planUniquenessUpdate(
   ctx: UniquenessContext,
   kind: string,
   id: string,
   oldProps: Record<string, unknown>,
   newProps: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
-): Promise<void> {
-  // A single constraint's sidecar change, computed once every changed key has
-  // been proven free (pass 1) and applied only afterwards (pass 2). `oldKey`
-  // (undefined = nothing to release) is deleted; `newKey` (undefined = nothing
-  // to reserve) is inserted.
-  type PendingUniqueMutation = Readonly<{
-    constraintName: string;
-    oldKey: string | undefined;
-    newKey: string | undefined;
-  }>;
-
-  // Pass 1 — preflight EVERY changed constraint before mutating any sidecar. A
-  // node can carry several unique constraints; mutating them one at a time would
-  // let a later constraint's conflict throw AFTER earlier sidecars were already
-  // changed, and a caller that catches UniquenessError and still commits the
-  // transaction (e.g. importGraph's onConflict: "update", which reports the
-  // conflict per-row) would leave those earlier sidecars mutated while the row
-  // stays unchanged. Checking every new key first means the throw happens with
-  // zero writes. Checks are independent per `constraintName`, so a constraint's
-  // preflight is unaffected by the still-unapplied mutations of the others.
+): Promise<UniquenessUpdatePlan> {
   const pending: PendingUniqueMutation[] = [];
   for (const constraint of constraints) {
     const oldApplies = checkWherePredicate(constraint, oldProps);
@@ -253,61 +301,186 @@ export async function updateUniquenessEntries(
       continue;
     }
 
-    // Check the new key for conflicts with OTHER nodes.
-    if (newApplies && newKey !== undefined) {
-      const kindsToCheck = getKindsForUniquenessCheck(
-        kind,
-        constraint.scope,
-        ctx.registry,
+    // Probe the new key: refuse a value another node holds, and note a value
+    // this node somehow holds already so the transition neither re-claims nor
+    // releases it.
+    const alreadyHeld =
+      newKey === undefined ? false : (
+        await probeUniqueKey(ctx, kind, id, constraint, newKey)
       );
 
-      for (const kindToCheck of kindsToCheck) {
-        const existing = await ctx.backend.checkUnique({
-          graphId: ctx.graphId,
-          nodeKind: kindToCheck,
-          constraintName: constraint.name,
-          key: newKey,
-        });
-
-        if (existing && existing.node_id !== id) {
-          throw new UniquenessError({
-            constraintName: constraint.name,
-            kind: kindToCheck,
-            existingId: existing.node_id,
-            newId: id,
-            fields: constraint.fields,
-          });
-        }
-      }
-    }
-
-    pending.push({ constraintName: constraint.name, oldKey, newKey });
+    pending.push({
+      constraintName: constraint.name,
+      release: oldKey,
+      claim: alreadyHeld ? undefined : newKey,
+    });
   }
 
-  // Pass 2 — every changed key is proven free, so releasing the old entries and
-  // reserving the new ones can no longer fail on a duplicate mid-way. Release
-  // all before reserving all, so a value moving between this node's constraints
-  // is never transiently double-held.
-  for (const mutation of pending) {
-    if (mutation.oldKey !== undefined) {
-      await ctx.backend.deleteUnique({
-        graphId: ctx.graphId,
-        nodeKind: kind,
-        constraintName: mutation.constraintName,
-        key: mutation.oldKey,
-      });
-    }
+  return pending;
+}
+
+/**
+ * The plan a RESURRECTING write needs: every applying constraint re-reserved
+ * from scratch.
+ *
+ * A tombstoned node holds no live reservations — {@link deleteUniquenessEntries}
+ * released them at soft-delete time — so the diff-based
+ * {@link planUniquenessUpdate} cannot be used here: it would skip an unchanged
+ * key and leave the revived node holding NO reservation, letting a later create
+ * silently duplicate the value.
+ *
+ * @throws UniquenessError if a key this node held was taken while it was
+ *   tombstoned
+ */
+export async function planUniquenessReinsert(
+  ctx: UniquenessContext,
+  kind: string,
+  id: string,
+  props: Record<string, unknown>,
+  constraints: readonly UniqueConstraint[],
+): Promise<UniquenessUpdatePlan> {
+  const pending: PendingUniqueMutation[] = [];
+  for (const constraint of constraints) {
+    if (!checkWherePredicate(constraint, props)) continue;
+
+    const key = computeUniqueKey(
+      props,
+      constraint.fields,
+      constraint.collation,
+    );
+    const alreadyHeld = await probeUniqueKey(ctx, kind, id, constraint, key);
+
+    pending.push({
+      constraintName: constraint.name,
+      release: undefined,
+      claim: alreadyHeld ? undefined : key,
+    });
   }
-  for (const mutation of pending) {
-    if (mutation.newKey !== undefined) {
+  return pending;
+}
+
+/** Gives up the reservations named by `keys`, in plan order. */
+async function releaseUniqueKeys(
+  ctx: UniquenessContext,
+  kind: string,
+  keys: readonly Readonly<{ constraintName: string; key: string }>[],
+): Promise<void> {
+  for (const entry of keys) {
+    await ctx.backend.deleteUnique({
+      graphId: ctx.graphId,
+      nodeKind: kind,
+      constraintName: entry.constraintName,
+      key: entry.key,
+    });
+  }
+}
+
+/**
+ * Reserves the plan's new keys, runs the primary row write they gate, and undoes
+ * the reservations if that write does not land.
+ */
+async function claimUniqueKeysThen<T>(
+  ctx: UniquenessContext,
+  kind: string,
+  id: string,
+  plan: UniquenessUpdatePlan,
+  gatedWrite: () => Promise<T>,
+): Promise<T> {
+  const claimed: Readonly<{ constraintName: string; key: string }>[] = [];
+  try {
+    for (const mutation of plan) {
+      if (mutation.claim === undefined) continue;
       await ctx.backend.insertUnique({
         graphId: ctx.graphId,
         nodeKind: kind,
         constraintName: mutation.constraintName,
-        key: mutation.newKey,
+        key: mutation.claim,
         nodeId: id,
         concreteKind: kind,
       });
+      claimed.push({
+        constraintName: mutation.constraintName,
+        key: mutation.claim,
+      });
     }
+    return await gatedWrite();
+  } catch (error) {
+    // Compensate, not swallow: the reservations this transition took are given
+    // back and the original failure is rethrown, so the caller sees the SAME
+    // error it would have seen with no reservation attempted at all.
+    //
+    // The give-back is exact because of what a claim can be. `probeUniqueKey`
+    // refuses a key another node holds and reports one THIS node already holds
+    // (which the plan then does not claim), so every claimed key was free or
+    // tombstoned beforehand and releasing it restores precisely that. And no
+    // peer can have taken it in between: this transaction holds the row.
+    //
+    // One detail is restored in kind rather than exactly: a claim that took over
+    // a TOMBSTONED reservation rewrites its recorded owner, and the give-back
+    // re-tombstones it under THIS node's id instead of the previous holder's.
+    // The key reads as free either way — `checkUnique` skips tombstoned rows —
+    // and the one reader that looks at them, `getOrCreateByConstraint`'s
+    // resurrect-by-key lookup, writes the props it was called with onto whatever
+    // row it revives, so the reservation and the row holding the value stay
+    // consistent. Which tombstone that lookup revives can differ. If the
+    // compensation itself fails the row is genuinely half-written, and the
+    // error that then surfaces is a raw backend failure no per-row consumer
+    // catches — the enclosing transaction aborts, which is the only honest
+    // outcome left.
+    await releaseUniqueKeys(ctx, kind, claimed);
+    throw error;
   }
+}
+
+/**
+ * Runs one node's primary row write with its uniqueness transition wrapped
+ * around it, so the pair commits or fails AS ONE UNIT.
+ *
+ * ## Why the sequence is claim, gate, release
+ *
+ * A node update is two independently fallible writes — the row itself and its
+ * uniqueness entries — with no rollback between them: nothing here is
+ * savepoint-protected (see `operations/write-transaction.ts`), and the backends
+ * this supports do not all have savepoints to reach for. Sequencing is the only
+ * atomicity available, and only ONE sequence makes both failures leave zero net
+ * effect:
+ *
+ *  - **Claim first.** `insertUnique` is an upsert that reports the key's final
+ *    owner, so claiming IS the conflict gate — and once this transaction holds
+ *    the row, no concurrent writer can take the key from under it. Probing and
+ *    then claiming later leaves a window (wide open under PostgreSQL READ
+ *    COMMITTED, where a peer commits between the two) in which the claim fails
+ *    AFTER the row was already updated.
+ *  - **Then the row write.** It can legitimately match nothing —
+ *    `expectedValidFrom`, `deleted_at` — and callers that catch that per row and
+ *    commit the rest (interchange import) must not be left with reservations for
+ *    a row that never changed. A refusal here compensates the claims away.
+ *  - **Release last.** Giving up the old key before the row write would free a
+ *    value for a write that may never land; giving it up after is safe because
+ *    nothing can fail on it.
+ *
+ * The predecessor of this helper ordered the whole sidecar transition after the
+ * row write, which closed the second failure and left the first: a caught
+ * `UniquenessError` then reported `updated: 0` for a row whose props HAD
+ * changed, whose old reservation was gone, and whose new one belonged to someone
+ * else.
+ */
+export async function withUniquenessTransition<T>(
+  ctx: UniquenessContext,
+  kind: string,
+  id: string,
+  plan: UniquenessUpdatePlan,
+  gatedWrite: () => Promise<T>,
+): Promise<T> {
+  const result = await claimUniqueKeysThen(ctx, kind, id, plan, gatedWrite);
+  await releaseUniqueKeys(
+    ctx,
+    kind,
+    plan.flatMap((mutation) =>
+      mutation.release === undefined ?
+        []
+      : [{ constraintName: mutation.constraintName, key: mutation.release }],
+    ),
+  );
+  return result;
 }

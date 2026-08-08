@@ -12,6 +12,7 @@ import {
   type CommitSchemaVersionParams,
   type GraphBackend,
   type PopulatedSchemaKind,
+  type SchemaCommitPreflightBackend,
   type SchemaKindEmptinessProbe,
   type SchemaVersionRow,
   type TransactionBackend,
@@ -36,6 +37,7 @@ import {
   identityKindCascadeNeeded,
   identityKindCascadePreflight,
   identitySchemaCommitPreflight,
+  withIdentityDdlRaceRetry,
 } from "../identity/schema-transition";
 import {
   createSqlSchema,
@@ -791,7 +793,15 @@ export async function initializeSchema<G extends GraphDef>(
     ...(options?.schema === undefined ? {} : { schema: options.schema }),
   });
   const commitWithPreflight = requireCommitWithPreflight(backend, graph);
-  return commitWithPreflight(commit, preflight);
+  // The preflight issues idempotent identity DDL INSIDE this transaction (see
+  // `provisionDerivedRelationsInCommit`), so two replicas booting at once can
+  // lose the catalog race here — and PostgreSQL will accept nothing but a
+  // rollback afterwards, which makes the whole attempt the smallest retryable
+  // unit. Safe to re-run: the failed attempt rolled back entirely, `commit` is
+  // precomputed and immutable, and the CAS still decides correctness — if a
+  // writer really did commit in between, the retry surfaces `StaleVersionError`
+  // instead of silently succeeding.
+  return withIdentityDdlRaceRetry(() => commitWithPreflight(commit, preflight));
 }
 
 export type MigrateSchemaOptions = Readonly<{
@@ -1008,9 +1018,13 @@ async function prepareIdentityKindCascade<G extends GraphDef>(
 
 /**
  * Ensures identity storage exists and builds the preflight the schema commit
- * runs inside its own transaction. The DDL must happen *before* the commit
- * transaction opens — issuing it inside would re-enter the per-graph write lock
- * the commit holds.
+ * runs inside its own transaction.
+ *
+ * Enablement DDL happens *before* the commit transaction opens — issuing it
+ * inside would re-enter the per-graph write lock the commit holds. A DERIVED
+ * relation this transition still owes is the opposite case: its DDL travels
+ * into the preflight as data (`provisionInCommit`) so the CREATE and the fill
+ * are one commit, and a refused commit leaves no readable-empty relation.
  */
 async function prepareIdentitySchemaCommit<G extends GraphDef>(
   backend: GraphBackend,
@@ -1020,7 +1034,9 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
     schema?: SqlSchema;
     droppedNodeKinds?: readonly string[];
   }>,
-): Promise<(transactionBackend: TransactionBackend) => Promise<void>> {
+): Promise<
+  (transactionBackend: SchemaCommitPreflightBackend) => Promise<void>
+> {
   // Brand-validate before any DDL or commit: a schema-shaped plain object
   // from an untyped caller can expose custom names to provisioning while its
   // SQL fragments target the default tables, landing the closure where the
@@ -1030,20 +1046,34 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
     options.schema === undefined ?
       createSqlSchema(backend.tableNames)
     : requireSqlSchema(options.schema, "The schema option");
-  await ensureIdentitySchemaStorage(backend, schema, {
+  // Built once and shared with the preflight below: the predicate that decides
+  // whether a fill is owed must scope the ledger by exactly the kinds the
+  // preflight's rebuild derives through.
+  const registry = buildKindRegistry(target);
+  // The SECOND call for this transition on the store-open path — `createStore`
+  // already ran one (see the discard note there) and threw its obligation away,
+  // because only this one runs where the obligation can be honored: inside the
+  // commit transaction, via the preflight below. That makes the two calls'
+  // inputs a coupling, not a coincidence: `backend`, `schema`, `registry` and
+  // `enablement` must agree with the earlier call or provisioning and filling
+  // would be decided for different shapes. `ensureIdentitySchemaStorage` is
+  // idempotent, so re-running it costs the probe and no writes.
+  const provisioning = await ensureIdentitySchemaStorage(backend, schema, {
     graphId: target.id,
     enablement: options.enablement,
+    registry,
   });
   return identitySchemaCommitPreflight(
     {
       graphId: target.id,
-      registry: buildKindRegistry(target),
+      registry,
       schema,
       sameIdAcrossKinds: target.identity?.sameIdAcrossKinds ?? "ignore",
     },
     {
       enablement: options.enablement,
       droppedNodeKinds: options.droppedNodeKinds ?? [],
+      provisionDerivedRelations: provisioning.provisionInCommit,
     },
   );
 }
@@ -1244,7 +1274,7 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
   currentVersion: number,
-  preflight: (target: TransactionBackend) => Promise<void>,
+  preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
 ): Promise<SchemaVersionRow> {
   if (backend.commitSchemaVersionWithPreflight === undefined) {
     // Match the graph-validation ordering of the plain path: reject a
@@ -1252,10 +1282,11 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
     buildKindRegistry(graph);
   }
   const commitWithPreflight = requireCommitWithPreflight(backend, graph);
-  return commitWithPreflight(
-    await buildNewSchemaVersionCommit(graph, currentVersion),
-    preflight,
-  );
+  // Same catalog-race retry as `initializeSchema`, for the same in-transaction
+  // identity DDL. The commit payload is built once, outside the retry, so a
+  // re-run commits the identical version and hash rather than recomputing one.
+  const commit = await buildNewSchemaVersionCommit(graph, currentVersion);
+  return withIdentityDdlRaceRetry(() => commitWithPreflight(commit, preflight));
 }
 
 /**

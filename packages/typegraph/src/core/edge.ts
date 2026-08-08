@@ -57,12 +57,7 @@ function validateSchemaKeys(
   schema: z.ZodObject<z.ZodRawShape>,
   name: string,
 ): void {
-  assertSchemaKeysAreFree(
-    "Edge",
-    name,
-    Object.keys(schema.shape),
-    RESERVED_EDGE_KEYS,
-  );
+  assertSchemaKeysAreFree("Edge", name, schema, RESERVED_EDGE_KEYS);
 }
 
 /**

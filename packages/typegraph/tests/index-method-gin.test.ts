@@ -36,7 +36,31 @@ const Document = defineNode("Doc", {
   }),
 });
 
+function prototypeNameWhere(row: unknown): unknown {
+  if ((typeof row !== "object" && typeof row !== "function") || row === null) {
+    throw new TypeError("Expected an index WHERE row proxy");
+  }
+  const operand: unknown = Reflect.get(row, "toString");
+  if (typeof operand !== "object" || operand === null) {
+    throw new TypeError("Expected an index WHERE field operand");
+  }
+  const equals: unknown = Reflect.get(operand, "eq");
+  if (typeof equals !== "function") {
+    throw new TypeError("Expected an index WHERE equality operation");
+  }
+  return Reflect.apply(equals, operand, ["not-a-field"]);
+}
+
 describe("defineNodeIndex method validation", () => {
+  it("rejects inherited prototype names in a partial-index predicate", () => {
+    expect(() =>
+      defineNodeIndex(Document, {
+        fields: ["title"],
+        where: prototypeNameWhere as never,
+      }),
+    ).toThrow('Unknown field "toString"');
+  });
+
   it("canonicalizes btree (explicit or default) to an absent method", () => {
     const explicit = defineNodeIndex(Document, {
       fields: ["title"],
@@ -286,6 +310,15 @@ describe("defineEdgeIndex GIN-family methods", () => {
       labels: z.array(z.string()),
       note: z.string(),
     }),
+  });
+
+  it("rejects inherited prototype names in a partial-index predicate", () => {
+    expect(() =>
+      defineEdgeIndex(Tagged, {
+        fields: ["note"],
+        where: prototypeNameWhere as never,
+      }),
+    ).toThrow('Unknown field "toString"');
   });
 
   it("carries gin/trigram onto an edge declaration with a method-name suffix", () => {

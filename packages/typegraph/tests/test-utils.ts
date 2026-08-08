@@ -213,6 +213,22 @@ export type PlanCaptureHarness = Readonly<{
 export function createPlanCaptureBackend(): PlanCaptureHarness {
   const { backend: raw, db } = createLocalSqliteBackend();
   const captured: CapturedStatement[] = [];
+  function captureTarget(target: TransactionBackend): TransactionBackend {
+    return {
+      ...target,
+      async execute<T>(query: Parameters<TransactionBackend["execute"]>[0]) {
+        const compiled = target.compileSql?.(query);
+        if (compiled) {
+          captured.push({ sql: compiled.sql, params: compiled.params });
+        }
+        return target.execute<T>(query);
+      },
+      async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
+        captured.push({ sql: sqlText, params });
+        return requireDefined(target.executeRaw)<T>(sqlText, params);
+      },
+    };
+  }
   const backend: GraphBackend = {
     ...raw,
     async execute(query) {
@@ -229,6 +245,8 @@ export function createPlanCaptureBackend(): PlanCaptureHarness {
       captured.push({ sql: sqlText, params });
       return requireDefined(raw.executeRaw)<T>(sqlText, params);
     },
+    transaction: (fn, options) =>
+      raw.transaction((target) => fn(captureTarget(target)), options),
   };
   backendsToClose.push(raw);
   const client = (db as unknown as { $client: Database.Database }).$client;

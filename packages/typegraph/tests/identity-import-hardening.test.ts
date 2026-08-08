@@ -875,13 +875,59 @@ describe("importGraph identity failure reporting", () => {
         }),
       ]),
     );
-    // The assertion applied before the failing one stays committed.
+    // The assertion applied before the failing one stays committed and must be
+    // counted. Replacing the progress-bearing error tag with the old bare
+    // rethrow makes this assertion fail while the ledger assertion below still
+    // proves the partial write itself survived.
+    expect(result.identity).toEqual({ created: 1, skipped: 0 });
     expect(
       await store.identity.areSame(
         { kind: "Person", id: "contra-a" },
         { kind: "Person", id: "contra-b" },
       ),
     ).toBe(true);
+  });
+
+  it("counts assertions skipped before a later assertion fails", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { person, author } = await seedPair(store);
+    await store.identity.assertSame(person, author);
+    const exported = await exportGraph(store);
+    const existing = requireDefined(exported.identity?.assertions[0]);
+    const conflicting: IdentityTransferAssertion = {
+      id: "different-after-skip",
+      relation: "different",
+      a: existing.a,
+      b: existing.b,
+      validFrom: CANONICAL_TIMESTAMP,
+    };
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        assertions: [existing, conflicting],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    // Removing `skipped` from the progress tag makes this report zero even
+    // though the first assertion was recognized and skipped before failure.
+    expect(result.identity).toEqual({ created: 0, skipped: 1 });
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "different-after-skip",
+        }),
+      ]),
+    );
   });
 
   it("refuses a same assertion that an earlier assertion in the same batch forbids", async () => {

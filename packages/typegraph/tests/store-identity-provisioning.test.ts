@@ -17,7 +17,7 @@
  *    refused with a typed ConfigurationError, not silently returned.
  */
 import type Database from "better-sqlite3";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -27,6 +27,7 @@ import {
   defineNode,
   disjointWith,
   type GraphBackend,
+  IdentityContradictionError,
   MigrationError,
   rebuildIdentityClosure,
   StaleVersionError,
@@ -35,7 +36,11 @@ import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
 } from "../src/backend/sqlite/local";
-import { createSqlSchema } from "../src/query/compiler/schema";
+import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
+import { rebuildIdentityClosureForContext } from "../src/identity/service";
+import { type IdentityTarget } from "../src/identity/sql-target";
+import { createSqlSchema, type SqlSchema } from "../src/query/compiler/schema";
+import { buildKindRegistry } from "../src/registry/builders";
 import {
   ensureSchema,
   getActiveSchema,
@@ -43,6 +48,7 @@ import {
   migrateSchema,
 } from "../src/schema";
 import { storeRuntime } from "../src/store/runtime-port";
+import { requireDefined } from "../src/utils/presence";
 import { matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -125,6 +131,13 @@ function existingIdentityTables(
 
 const SEPARATION_TABLE = "typegraph_identity_separation";
 
+function separationTableExists(result: LocalSqliteBackendResult): boolean {
+  const rows = rawClient(result)
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+    .all(SEPARATION_TABLE) as { name: string }[];
+  return rows.length > 0;
+}
+
 function readSeparationRows(
   result: LocalSqliteBackendResult,
 ): readonly Readonly<{ class_key_low: string; class_key_high: string }>[] {
@@ -133,6 +146,39 @@ function readSeparationRows(
       `SELECT class_key_low, class_key_high FROM ${SEPARATION_TABLE} ORDER BY class_key_low`,
     )
     .all() as { class_key_low: string; class_key_high: string }[];
+}
+
+/** The SQL schema the store itself derives for this backend's table names. */
+function identitySchema(result: LocalSqliteBackendResult): SqlSchema {
+  return createSqlSchema(result.backend.tableNames);
+}
+
+/**
+ * The fill a boot supplies to `ensureIdentitySchemaStorage`: the same
+ * ledger-driven rebuild `createStoreWithSchema` passes, against whichever
+ * target the provisioning path can offer.
+ */
+async function rebuildSeparationFromLedger(
+  result: LocalSqliteBackendResult,
+  target: IdentityTarget,
+): Promise<void> {
+  await rebuildIdentityClosureForContext<typeof enabledGraph>({
+    backend: target,
+    graphId: GRAPH_ID,
+    registry: buildKindRegistry(enabledGraph),
+    schema: identitySchema(result),
+    sameIdAcrossKinds: "fold",
+  });
+}
+
+/** The same backend with one optional port withheld, as a custom backend may. */
+function backendWithoutPort(
+  backend: GraphBackend,
+  port: "schemaWriteTransaction" | "identityTableDdl",
+): GraphBackend {
+  const withheld: Record<string, unknown> = { ...backend };
+  Reflect.deleteProperty(withheld, port);
+  return withheld as unknown as GraphBackend;
 }
 
 describe("Operational Identity provisioning + enablement gating", () => {
@@ -340,6 +386,250 @@ describe("Operational Identity provisioning + enablement gating", () => {
       await expect(
         storeRuntime(reopened).validateIdentity(),
       ).resolves.toBeUndefined();
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("creates and fills the new derived relation inside one schema-write fence", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const [seeded] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      const first = await seeded.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const second = await seeded.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      await seeded.identity.assertDifferent(first, second);
+      const expected = readSeparationRows(result);
+      expect(expected).toHaveLength(1);
+      rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
+      expect(separationTableExists(result)).toBe(false);
+
+      // The window this asserts against: create the relation now, fill it at
+      // the END of boot. In between sit the schema commit, the history
+      // assertion, the contribution/vector materializers and a system-index
+      // build — and for all of it the relation is present, readable and EMPTY,
+      // so `isSeparated` answers "not separated" for the pair a live
+      // `different` assertion separates. There is no timing to reproduce: the
+      // structural claim is that no observer can ever be in that state, because
+      // the CREATE and the fill are one transaction.
+      const fenceObservations: {
+        separationExistsAtEntry: boolean;
+        inTransactionAtEntry: boolean;
+        rowsAtExit: number;
+        inTransactionAtExit: boolean;
+      }[] = [];
+      const provisionMissingFlags: boolean[] = [];
+
+      const baseEnsureIdentityTables = requireDefined(
+        result.backend.ensureIdentityTables,
+      );
+      vi.spyOn(result.backend, "ensureIdentityTables").mockImplementation(
+        async (tableNames, options) => {
+          provisionMissingFlags.push(options.provisionMissing);
+          return baseEnsureIdentityTables(tableNames, options);
+        },
+      );
+
+      const baseFence = requireDefined(result.backend.schemaWriteTransaction);
+      vi.spyOn(result.backend, "schemaWriteTransaction").mockImplementation(
+        async (graphId, fn) =>
+          baseFence(graphId, async (target) => {
+            const separationExistsAtEntry = separationTableExists(result);
+            const inTransactionAtEntry = rawClient(result).inTransaction;
+            const value = await fn(target);
+            fenceObservations.push({
+              separationExistsAtEntry,
+              inTransactionAtEntry,
+              rowsAtExit:
+                separationTableExists(result) ?
+                  readSeparationRows(result).length
+                : -1,
+              inTransactionAtExit: rawClient(result).inTransaction,
+            });
+            return value;
+          }),
+      );
+
+      const [reopened] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+
+      // Nothing provisioned the relation on the top-level backend: the old
+      // create-early path called `ensureIdentityTables(provisionMissing: true)`
+      // outside any transaction, which is exactly the visibility this forbids.
+      expect(provisionMissingFlags).not.toContain(true);
+
+      // Exactly one fence saw the relation appear, and by the time that fence
+      // returned — still inside its transaction — the rows were already there.
+      const upgradeFences = fenceObservations.filter(
+        (observation) => !observation.separationExistsAtEntry,
+      );
+      expect(upgradeFences).toEqual([
+        {
+          separationExistsAtEntry: false,
+          inTransactionAtEntry: true,
+          rowsAtExit: expected.length,
+          inTransactionAtExit: true,
+        },
+      ]);
+
+      // And the published state is the correct one: the pair reads as
+      // separated, so the merge the empty window would have allowed is refused.
+      expect(readSeparationRows(result)).toEqual(expected);
+      await expect(
+        reopened.identity.assertSame(first, second),
+      ).rejects.toBeInstanceOf(IdentityContradictionError);
+      await expect(
+        storeRuntime(reopened).validateIdentity(),
+      ).resolves.toBeUndefined();
+    } finally {
+      vi.restoreAllMocks();
+      await result.backend.close();
+    }
+  });
+
+  it("owes the commit nothing when it filled the derived relation itself", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      const [seeded] = await createStoreWithSchema(
+        enabledGraph,
+        result.backend,
+      );
+      const first = await seeded.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const second = await seeded.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      await seeded.identity.assertDifferent(first, second);
+      const expected = readSeparationRows(result);
+      expect(expected).toHaveLength(1);
+      rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
+
+      const outcome = await ensureIdentitySchemaStorage(
+        result.backend,
+        identitySchema(result),
+        {
+          graphId: GRAPH_ID,
+          enablement: false,
+          registry: buildKindRegistry(enabledGraph),
+          recomputeDerivedRelations: (target) =>
+            rebuildSeparationFromLedger(result, target),
+        },
+      );
+
+      // `provisionInCommit` is the DDL a schema commit must issue inside its
+      // own transaction. Having created AND filled the relation inside its own
+      // fence, this call owes that commit nothing — handing back DDL here would
+      // re-issue a CREATE for a relation that is already published and filled.
+      expect(outcome.provisionInCommit).toEqual([]);
+      expect(readSeparationRows(result)).toEqual(expected);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  for (const port of ["schemaWriteTransaction", "identityTableDdl"] as const) {
+    it(`refuses the derived-relation upgrade without ${port}`, async () => {
+      const result = createLocalSqliteBackend();
+      try {
+        const [seeded] = await createStoreWithSchema(
+          enabledGraph,
+          result.backend,
+        );
+        const first = await seeded.nodes.Person.create(
+          { name: "Alice" },
+          { id: "alice" },
+        );
+        const second = await seeded.nodes.Person.create(
+          { name: "Bob" },
+          { id: "bob" },
+        );
+        await seeded.identity.assertDifferent(first, second);
+        expect(readSeparationRows(result)).toHaveLength(1);
+        rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
+
+        // The atomic upgrade needs BOTH ports: the fence to hold the CREATE and
+        // the fill together, and the DDL-as-data to issue inside it without
+        // re-entering the backend's serialized statement queue. A backend
+        // missing either cannot publish the two as one commit, and the
+        // degraded alternative it used to take — create, then fill — leaves the
+        // relation readable and EMPTY in between, where every pair reads as
+        // "not separated". That is refused, loudly and by capability name,
+        // rather than performed with a weaker guarantee than the invariant
+        // requires.
+        const withheld = backendWithoutPort(result.backend, port);
+
+        await expect(
+          ensureIdentitySchemaStorage(withheld, identitySchema(result), {
+            graphId: GRAPH_ID,
+            enablement: false,
+            registry: buildKindRegistry(enabledGraph),
+            recomputeDerivedRelations: (target) =>
+              rebuildSeparationFromLedger(result, target),
+          }),
+        ).rejects.toThrow(
+          expect.objectContaining({
+            name: "ConfigurationError",
+            details: matchingObject({
+              code: "IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL",
+              graphId: GRAPH_ID,
+              missingPorts: [port],
+            }),
+          }),
+        );
+
+        // A refusal, not a partial attempt: the relation stays ABSENT, which is
+        // the one non-answering state. Every read of it raises
+        // IDENTITY_STORAGE_MISSING instead of quietly reporting no separations.
+        expect(separationTableExists(result)).toBe(false);
+      } finally {
+        await result.backend.close();
+      }
+    });
+  }
+
+  it("provisions without the atomic ports when the graph owes no rows", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      // Same upgrade, same missing ports — but this graph has never asserted a
+      // `different`, so its separation projection is EMPTY. Creating the
+      // relation empty is not a compromise here, it is the correct content, so
+      // there is nothing for the fence to make atomic and the refusal above
+      // would be gratuitous.
+      await createStoreWithSchema(enabledGraph, result.backend);
+      rawClient(result).exec(`DROP TABLE ${SEPARATION_TABLE}`);
+
+      const withheld = backendWithoutPort(
+        backendWithoutPort(result.backend, "schemaWriteTransaction"),
+        "identityTableDdl",
+      );
+      const outcome = await ensureIdentitySchemaStorage(
+        withheld,
+        identitySchema(result),
+        {
+          graphId: GRAPH_ID,
+          enablement: false,
+          registry: buildKindRegistry(enabledGraph),
+          recomputeDerivedRelations: (target) =>
+            rebuildSeparationFromLedger(result, target),
+        },
+      );
+
+      expect(outcome.provisionInCommit).toEqual([]);
+      expect(separationTableExists(result)).toBe(true);
+      expect(readSeparationRows(result)).toEqual([]);
     } finally {
       await result.backend.close();
     }
