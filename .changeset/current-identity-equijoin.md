@@ -11,15 +11,13 @@ frontier row to the edge row. Both engines were free to enumerate
 *frontier rows × edges of the matching kind* and probe the closure per pair, which
 cost quadratically in graph size.
 
-The closure is now projected once per statement into the same
-`(seed_kind, seed_id, kind, id)` relation a historical read already builds from
-the assertion ledger — a self-join on the class label, filtered to members visible
-now — and each traversal step joins it, so the candidate edge is reached by the
-same ordinary indexed equality a traversal without identity expansion uses. One
-compiler path serves both coordinates and both emitters. On SQLite a hop over
-100,000 matching edges from a 500-row frontier drops from 51.6 s to 77 ms, and
-`EXPLAIN QUERY PLAN` seeks `typegraph_edges_from_idx` where it used to scan every
-matching edge per source row; PostgreSQL drops from 9.2 s to 61 ms.
+Each traversal step now widens its frontier onto the closure's class members with
+an outer join, so the candidate edge is reached by the same ordinary indexed
+equality a traversal without identity expansion uses. One compiler path serves
+both coordinates and both emitters. On SQLite a hop over 100,000 matching edges
+from a 500-row frontier drops from 51.6 s to 77 ms, and `EXPLAIN QUERY PLAN`
+seeks `typegraph_edges_from_idx` where it used to scan every matching edge per
+source row; PostgreSQL drops from 9.2 s to 61 ms.
 
 A traversal at a **historical** coordinate reaches its candidate edge through the
 same step, so it gains the same join order: on SQLite an `asOf` hop over 100,000
@@ -28,7 +26,8 @@ is the ledger reconstruction, still tracked in typegraph#310.
 
 Results are unchanged at every coordinate: physical edges stay deduplicated, and
 member visibility, the `sameIdAcrossKinds` profile and the read instant are all
-resolved exactly where they were. The relation covers the whole identity
-population rather than just the frontier, so a hop from a single start row now
-pays one pass over that population instead of one pass over the candidate edges —
-the cost model in the identity guide states the tradeoff.
+resolved exactly where they were. The class members a current-coordinate step
+joins are reached by seeking the closure from the frontier row, so the cost of
+the widening tracks the frontier and its classes rather than the identity
+population — see the follow-up changeset, which replaced the graph-wide relation
+this change first shipped with that seek.
