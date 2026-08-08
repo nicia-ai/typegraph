@@ -8,6 +8,10 @@
     "monorepo.md",
     "typegraph-spec.md",
     ".changeset/**",
+    // Local Claude worktrees can contain complete repository copies and are
+    // already git-ignored; linting them duplicates diagnostics from unrelated
+    // branches and makes the result depend on workstation state.
+    ".claude/**",
     ".pnpm-store/**",
     "**/node_modules/**",
     // Git-ignored local scratch space (see .gitignore).

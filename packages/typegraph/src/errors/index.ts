@@ -212,6 +212,17 @@ export const IMMUTABLE_VALIDITY_LOWER_BOUND_CODE =
   "IMMUTABLE_VALIDITY_LOWER_BOUND";
 
 /**
+ * Stable {@link ValidationIssue.code} for an edge-id ownership mismatch.
+ *
+ * Edge ids are graph-global. A collection-scoped write therefore has to prove
+ * that the stored row has the collection's kind and, when the caller supplies
+ * endpoints, the same immutable endpoints. This refusal prevents a collection
+ * from mutating another kind's row and prevents an upsert from silently
+ * ignoring an attempted repoint.
+ */
+export const EDGE_IDENTITY_MISMATCH_CODE = "EDGE_IDENTITY_MISMATCH";
+
+/**
  * The stable {@link ValidationIssue.code} every "this id is already taken"
  * create refusal carries, whichever way the create found out: its own existence
  * probe, or the engine refusing the INSERT. `ValidationError`'s own code is the
@@ -234,7 +245,7 @@ export type ValidationErrorDetails = Readonly<{
   /** Kind/type name of the entity */
   kind?: string;
   /** Operation being performed */
-  operation?: "create" | "update";
+  operation?: "create" | "update" | "delete" | "hardDelete";
   /** Entity ID if updating */
   id?: string;
   /** Individual validation issues */
@@ -1157,9 +1168,19 @@ export class ConfigurationError extends TypeGraphError {
  *   stamp could not be made atomic. Running them unfenced could leave
  *   storage attested but empty, or a concurrent schema writer
  *   interleaved with the drop.
+ * - `shared-storage-in-use` — the contribution's recorded shape is stale,
+ *   so only recreating its storage repairs it, but that storage is one
+ *   table holding other graphs' rows as well. Their content is derived
+ *   from their own nodes through their own schemas, so this process cannot
+ *   put it back. A rebuild that dropped anyway would leave every other
+ *   graph's search silently empty; one that re-stamped this graph's marker
+ *   without the drop would bless a physical shape nothing verified.
  */
 export type ContributionRebuildRefusal =
-  "vector-source-unavailable" | "no-drop-ddl" | "no-schema-fence";
+  | "vector-source-unavailable"
+  | "no-drop-ddl"
+  | "no-schema-fence"
+  | "shared-storage-in-use";
 
 const CONTRIBUTION_REBUILD_REFUSAL_MESSAGE: Readonly<
   Record<ContributionRebuildRefusal, string>
@@ -1174,6 +1195,11 @@ const CONTRIBUTION_REBUILD_REFUSAL_MESSAGE: Readonly<
   "no-schema-fence":
     "This backend exposes no transactional schema fence, so a rebuild's " +
     "drop, recreate, refill, and marker stamp cannot be made atomic.",
+  "shared-storage-in-use":
+    "This contribution's storage is provisioned at a different shape than " +
+    "the current declaration, and the only repair — recreating it — would " +
+    "destroy fulltext content belonging to other graphs that share the same " +
+    "table and can only be rebuilt from their own processes.",
 };
 
 const CONTRIBUTION_REBUILD_REFUSAL_SUGGESTION: Readonly<
@@ -1191,6 +1217,12 @@ const CONTRIBUTION_REBUILD_REFUSAL_SUGGESTION: Readonly<
     "Use a backend that implements schemaWriteTransaction, or perform the " +
     "drop and recreate out of band during a maintenance window and then run " +
     "store.repairContributions() followed by store.search.rebuildFulltext().",
+  "shared-storage-in-use":
+    "Recreate the shared table during a maintenance window with every graph " +
+    "that uses it offline: drop it out of band, then run " +
+    'store.rebuildContribution("fulltext") once per graph on this database. ' +
+    "Each run recreates the table from the current DDL and refills that " +
+    "graph's rows from its own nodes.",
 };
 
 /**
@@ -1380,6 +1412,38 @@ export class TrustedImportError extends TypeGraphError {
       cause: options?.cause,
     });
     this.name = "TrustedImportError";
+  }
+}
+
+/**
+ * Thrown to a graph export stream's consumer when the caller's `AbortSignal`
+ * settled the stream instead of it reaching its end.
+ *
+ * Raised only after the export has given back everything it took, so receiving
+ * it means the connection is already usable again. WHAT it took depends on the
+ * backend: an export on one reporting `capabilities.transactions` holds a
+ * repeatable-read snapshot (and, on a serialized connection, that connection's
+ * stream lease), and both are settled before this is thrown; an export on a
+ * backend without transactions holds neither, and its remaining reads are
+ * simply abandoned — its already-delivered chunks were never one snapshot to
+ * begin with. The message says which case applies. `cause` carries the signal's
+ * own `reason` when the caller supplied one.
+ */
+export class ExportStreamCancelledError extends TypeGraphError {
+  constructor(
+    message: string,
+    details: Readonly<Record<string, unknown>> = {},
+    options?: Readonly<{ cause?: unknown; suggestion?: string }>,
+  ) {
+    super(message, "INTERCHANGE_EXPORT_STREAM_ABORTED", {
+      details,
+      category: "user",
+      suggestion:
+        options?.suggestion ??
+        "Start a new export; the aborted one released its snapshot transaction and the connection it held.",
+      cause: options?.cause,
+    });
+    this.name = "ExportStreamCancelledError";
   }
 }
 

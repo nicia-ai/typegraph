@@ -31,10 +31,12 @@ import {
   type ContributionRebuildResult,
   type ContributionRebuildScope,
   type ContributionRepairResult,
+  createBackendOverlay,
   createTransactionReadBackend,
   type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
   runOptionallyInTransaction,
+  type SchemaCommitPreflightBackend,
   type SchemaVersionRow,
   type TransactionBackend,
   type TransactionOptions,
@@ -102,6 +104,7 @@ import {
   loadAssertionsByIds,
   loadCurrentStructuralClasses,
   lockIdentityGraph,
+  readIdentityAssertionPageAtTarget,
   readIdentityAssertionsForInterchange,
   rebuildIdentityClosureForContext,
   refKey,
@@ -209,6 +212,7 @@ import {
   executeEdgeCreateBatch,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
+  executeEdgeDeleteBatch,
   executeEdgeFindByEndpoints,
   executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
@@ -221,6 +225,7 @@ import {
   executeNodeCreateBatch,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
+  executeNodeDeleteBatch,
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
@@ -1039,6 +1044,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.readCurrentIdentityAssertions(mode, options),
       identityAssertionsAtTarget: (target, mode) =>
         this.identityAssertionsAtTarget(target, mode),
+      readIdentityAssertionPageAtTarget: (target, mode, options) =>
+        this.readIdentityAssertionPageAtTarget(target, mode, options),
       lockIdentityImportTarget: (target) =>
         this.lockIdentityImportTarget(target),
       foldImportedIdentityNodes: (target, references) =>
@@ -1159,10 +1166,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
   }
 
-  /** @internal Validates/rebuilds identity under schema-transition locks. */
-  async identitySchemaPreflight(target: TransactionBackend): Promise<void> {
+  /**
+   * @internal Validates/rebuilds identity under schema-transition locks.
+   *
+   * `provisionDerivedRelations` carries the DDL `ensureIdentitySchemaStorage`
+   * deliberately did not run outside this transaction, so an evolution that
+   * fails leaves no half-published derived relation behind.
+   */
+  async identitySchemaPreflight(
+    target: SchemaCommitPreflightBackend,
+    provisionDerivedRelations: readonly string[],
+  ): Promise<void> {
     await identitySchemaCommitPreflight(this.#identityContext(this.#backend), {
       enablement: false,
+      provisionDerivedRelations,
     })(target);
   }
 
@@ -1232,6 +1249,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return readIdentityAssertionsForInterchange(
       this.#identityContext(target),
       mode,
+    );
+  }
+
+  /** @internal Reads one bounded identity-assertion page at a bound target. */
+  readIdentityAssertionPageAtTarget(
+    target: GraphBackend | TransactionBackend,
+    mode: "state" | "archival",
+    options: Readonly<{
+      nodeKinds?: readonly string[];
+      includeDeleted?: boolean;
+      after?: string;
+      limit: number;
+    }>,
+  ): ReturnType<typeof readIdentityAssertionPageAtTarget> {
+    if (this.#graph.identity === undefined) {
+      return Promise.resolve({ assertions: [], done: true });
+    }
+    return readIdentityAssertionPageAtTarget(
+      this.#identityContext(target),
+      target,
+      mode,
+      options,
     );
   }
 
@@ -1755,6 +1794,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       }),
       executeDelete: (kind, id, backend) =>
         executeNodeDelete(ctx, kind, id, backend),
+      executeDeleteBatch: (kind, ids, backend) =>
+        executeNodeDeleteBatch(ctx, kind, ids, backend),
       executeHardDelete: (kind, id, backend) =>
         executeNodeHardDelete(ctx, kind, id, backend),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
@@ -1837,9 +1878,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           edgeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
-      executeDelete: (id, backend) => executeEdgeDelete(ctx, id, backend),
-      executeHardDelete: (id, backend) =>
-        executeEdgeHardDelete(ctx, id, backend),
+      executeDelete: (kind, id, backend) =>
+        executeEdgeDelete(ctx, kind, id, backend),
+      executeDeleteBatch: (kind, ids, backend) =>
+        executeEdgeDeleteBatch(ctx, kind, ids, backend),
+      executeHardDelete: (kind, id, backend) =>
+        executeEdgeHardDelete(ctx, kind, id, backend),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByEndpoints: (
@@ -3704,19 +3748,26 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // `isBackwardsCompatible` check would over-restrict ADD-required-
     // on-empty / TIGHTEN-on-empty modifications that the classifier
     // already approved.
-    // Ensure the identity relations exist on the top-level backend BEFORE
-    // the schema-commit transaction — the preflight runs inside that
-    // transaction and reads/writes them, and issuing DDL there would
-    // re-enter the per-graph write lock the commit holds. Idempotent, so a
-    // no-op when identity is already enabled (the common evolve case).
-    if (identityCandidate !== undefined) {
-      // Any derived relation this provisions is rebuilt by the commit
-      // preflight below, so the recompute it reports is already owed.
-      await ensureIdentitySchemaStorage(this.#baseBackend, this.#sqlSchema(), {
-        graphId: this.graphId,
-        enablement: false,
-      });
-    }
+    // Check the identity relations BEFORE the schema-commit transaction: a
+    // missing ledger is refused here rather than surfacing as a raw "no such
+    // table" from inside the commit. Any DERIVED relation the transition still
+    // owes comes back as DDL and is issued inside the commit transaction
+    // below, so an evolution that fails or is refused leaves nothing behind.
+    const identityProvisioning =
+      identityCandidate === undefined ? undefined : (
+        await ensureIdentitySchemaStorage(
+          this.#baseBackend,
+          this.#sqlSchema(),
+          {
+            graphId: this.graphId,
+            enablement: false,
+            // The evolved graph's registry — the one the candidate's own
+            // preflight rebuilds through, so the predicate and the fill agree
+            // on which assertions count.
+            registry: buildKindRegistry(merged),
+          },
+        )
+      );
     const committed =
       identityCandidate === undefined ?
         classification.requireEmpty.length > 0 ?
@@ -3737,7 +3788,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               this.graphId,
               classification,
             );
-            await identityCandidate.identitySchemaPreflight(target);
+            await identityCandidate.identitySchemaPreflight(
+              target,
+              identityProvisioning?.provisionInCommit ?? [],
+            );
           },
         );
     // Provision per-field vector tables + durable markers for any embedding
@@ -4260,9 +4314,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Destructively rebuilds one search projection's storage: drops it,
-   * recreates it from the current DDL, reconstructs its content from the
-   * node rows, and stamps the durable marker at the current signature.
+   * Destructively rebuilds one search projection for THIS graph: clears the
+   * graph's rows from the projection's storage, recreates that storage from
+   * the current DDL when recreating it is safe, reconstructs the content
+   * from the node rows, and stamps the durable marker at the current
+   * signature.
+   *
+   * **Scoped to this graph.** The fulltext table is one physical table
+   * holding every graph's rows, keyed by `graph_id`, and this method is
+   * fenced per graph — so it removes only this graph's rows
+   * (`DELETE ... WHERE graph_id`, the same statement `clear()` uses) and
+   * escalates to dropping and recreating the table only when no other graph
+   * has rows in it. That drop is the one repair for storage provisioned at a
+   * shape the current DDL no longer produces; when another graph's content
+   * is in the way it is refused
+   * ({@link ContributionRebuildUnsupportedError}, reason
+   * `shared-storage-in-use`) rather than taken, because fulltext content is
+   * reconstructed from a graph's own nodes through its own schema and no
+   * other process can put back what the drop would destroy.
    *
    * The top rung of the health ladder, and the repair
    * {@link Store.repairContributions} deliberately refuses to perform.
@@ -4270,25 +4339,35 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * exists at the *old* shape, so the ordinary ensure path's idempotent
    * `CREATE ... IF NOT EXISTS` no-ops and re-stamping the marker there
    * would leave it blessing a table whose shape is wrong, which is
-   * exactly what the drift guard exists to prevent. Only a drop makes
-   * the recreate meaningful, and dropping is a decision stated at the
-   * call site rather than reached through a flag named `force`.
+   * exactly what the drift guard exists to prevent. Only a recreate makes
+   * the ensure meaningful, and destroying content is a decision stated at
+   * the call site rather than reached through a flag named `force`.
    *
-   * **This drops storage.** For `"fulltext"` nothing is permanently lost:
-   * the searchable content is derived from node properties TypeGraph
-   * already stores, so the refill reconstructs it in the same
-   * transaction. Nodes whose stored `props` cannot be read as an object
-   * are counted in `skipped` and are absent from the rebuilt index —
+   * **This destroys this graph's index content.** For `"fulltext"` nothing
+   * is permanently lost: the searchable content is derived from node
+   * properties TypeGraph already stores, so the refill reconstructs it in
+   * the same transaction. Nodes whose stored `props` cannot be read as an
+   * object are counted in `skipped` and are absent from the rebuilt index —
    * `store.search.rebuildFulltext()` reports their ids individually.
    *
-   * Atomic: the drop, recreate, refill, and stamp all run inside one
-   * transaction under the same per-graph fence as a schema commit, so an
-   * interrupted rebuild leaves the contribution exactly as it was rather
-   * than attested-but-empty. The cost is that the transaction is held for
-   * the whole refill and Postgres holds an exclusive lock on the table
-   * throughout, so this is a maintenance-window operation on a large
-   * graph. `store.search.rebuildFulltext()` remains the incremental,
-   * resumable way to refresh content when the storage shape is fine.
+   * Atomic: the clear (or drop), recreate, refill, and stamp all run inside
+   * one transaction under the same per-graph fence as a schema commit, plus
+   * a database-scoped advisory lock serializing this contribution's DDL
+   * across graphs, so an interrupted rebuild leaves the contribution exactly
+   * as it was rather than attested-but-empty.
+   *
+   * The cost differs by path, and only one of them is a maintenance-window
+   * operation. A rebuild that drops and recreates the shared table takes
+   * `ACCESS EXCLUSIVE` on it before deciding to — the verdict "no other
+   * graph has rows here" is only sound under the exclusion the drop needs —
+   * so on PostgreSQL every graph's fulltext writers wait for the whole
+   * refill. That was already true of the drop itself, which holds the same
+   * lock to commit; the exclusion now merely starts a few statements
+   * earlier. The graph-scoped path takes no table lock at all: its
+   * `DELETE ... WHERE graph_id` is transactional and touches only this
+   * graph's rows, so it never makes another graph's writers wait.
+   * `store.search.rebuildFulltext()` remains the incremental, resumable way
+   * to refresh content when the storage shape is fine.
    *
    * @throws {ContributionRebuildUnsupportedError} for `"vector"`, always:
    *   TypeGraph stores the vectors callers supply and never the inputs
@@ -4297,9 +4376,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *   `store.reembedVectorField(kind, fieldPath, { embed })` is the
    *   sanctioned destructive path — it takes the callback that can
    *   regenerate what the drop destroys. Also thrown when the active
-   *   strategy declares no teardown DDL, or the backend has no
-   *   transactional schema fence to make the sequence atomic. Every one
-   *   of these refuses before anything is dropped.
+   *   strategy declares no teardown DDL, when the backend has no
+   *   transactional schema fence to make the sequence atomic, and when the
+   *   recorded shape is stale but the storage that would have to be
+   *   recreated holds another graph's rows (`shared-storage-in-use`). Every
+   *   one of these refuses before anything is dropped or deleted.
    * @throws {ConfigurationError} when the backend cannot rebuild
    *   strategy-owned contributions at all.
    */
@@ -4856,6 +4937,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Decorates the query execution port so hooks observe each statement the
    * query builder submits to the backend. A selective-projection retry
    * therefore emits two independent start/end pairs with their actual SQL.
+   *
+   * Decoration goes through {@link createBackendOverlay}, which carries the
+   * projection's serialized-resource ownership: the hooked backend still
+   * executes on the source's connection, so it must answer the same "shares one
+   * serialized connection" question as its source.
    */
   #createHookedQueryBackend(
     backend: GraphBackend | TransactionBackend,
@@ -4870,12 +4956,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
     const executeRaw = backend.executeRaw;
     const compileSql = backend.compileSql;
-    // Store backends may be frozen. Copy an allowlist projection so
+    // Store backends may be frozen. Decorate an allowlist projection so
     // execute/executeRaw can be replaced without mutating the source.
     const projected = createGraphBackendProjection(backend as GraphBackend);
 
-    return {
-      ...projected,
+    return createBackendOverlay(projected, {
       execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
         const compiled =
           compileSql === undefined ?
@@ -4896,7 +4981,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               executeRaw<T>(sqlText, params),
             ),
         }),
-    } satisfies GraphBackend;
+    });
   }
 
   async #withQueryHooks<T>(
@@ -5904,38 +5989,83 @@ async function prepareStoreWithSchema<G extends GraphDef>(
         serializeSchema(merged, activeRow.version + 1),
       ));
 
-  // First enablement over an existing populated database: createStore /
-  // createSqliteBackend / createPostgresBackend ran no DDL, so the identity
-  // relations the enablement preflight reads/writes may not exist yet.
-  // Ensure them on the top-level backend BEFORE the schema-commit
-  // transaction — running the DDL inside the preflight would re-enter the
-  // backend's per-graph write lock the commit already holds. Idempotent
-  // (CREATE TABLE / CREATE INDEX IF NOT EXISTS), so it is a harmless no-op
-  // when the schema turns out to be pending (finding: enablement requires an
-  // applied migration) or the tables already exist.
-  let identitySchema: SqlSchema | undefined;
-  let recomputeIdentityDerivedRelations = false;
-  if (merged.identity !== undefined) {
-    // Brand-validate BEFORE the DDL: a counterfeit schema-shaped object must
-    // reject with INVALID_SQL_SCHEMA and leave no tables behind — and must
-    // not surface as IDENTITY_STORAGE_MISSING on an already enabled graph.
-    identitySchema =
-      options?.schema === undefined ?
-        createSqlSchema(backend.tableNames)
-      : requireSqlSchema(options.schema, "store schema");
-    ({ recomputeDerivedRelations: recomputeIdentityDerivedRelations } =
-      await ensureIdentitySchemaStorage(backend, identitySchema, {
-        graphId: merged.id,
-        enablement: identityEnablement,
-      }));
-  }
-
+  // Resolved before the provisioning below, which asks whether a schema commit
+  // is already going to rebuild the derived identity relations.
   const identityGate: IdentitySchemaGate | undefined =
     identitySemanticsChanged ?
       identityEnablement ? "enablement"
       : identityProfileChanged ? "profile"
       : "ontology"
     : undefined;
+
+  // First enablement over an existing populated database: createStore /
+  // createSqliteBackend / createPostgresBackend ran no DDL, so the identity
+  // relations the enablement preflight reads/writes may not exist yet.
+  // Ensure them BEFORE the schema-commit transaction — running enablement DDL
+  // inside the preflight would re-enter the backend's per-graph write lock the
+  // commit already holds. Idempotent (CREATE TABLE / CREATE INDEX IF NOT
+  // EXISTS), so it is a harmless no-op when the schema turns out to be pending
+  // (finding: enablement requires an applied migration) or the tables already
+  // exist.
+  const identityProfile = merged.identity;
+  if (identityProfile !== undefined) {
+    // Brand-validate BEFORE the DDL: a counterfeit schema-shaped object must
+    // reject with INVALID_SQL_SCHEMA and leave no tables behind — and must
+    // not surface as IDENTITY_STORAGE_MISSING on an already enabled graph.
+    const resolvedIdentitySchema =
+      options?.schema === undefined ?
+        createSqlSchema(backend.tableNames)
+      : requireSqlSchema(options.schema, "store schema");
+    // One registry for the decision and the derivation it predicts: the
+    // predicate must scope the ledger by exactly the kinds the rebuild below
+    // derives through, or it asks for a rebuild that cannot converge.
+    const identityRegistry = buildKindRegistry(merged);
+    // THE RETURNED OBLIGATION IS DISCARDED HERE, DELIBERATELY. It is non-empty
+    // only on the gated path below (recompute withheld), and it names DDL that
+    // must be issued INSIDE the schema-commit transaction — which this call
+    // site does not own. `prepareIdentitySchemaCommit` re-derives it by calling
+    // `ensureIdentitySchemaStorage` again, from the same backend, schema,
+    // registry and enablement flag, and hands it to the commit preflight that
+    // can honor it. What keeps that safe is the equality of those four inputs,
+    // so a change that lets this site resolve the schema or build the registry
+    // differently from `prepareIdentitySchemaCommit` breaks it — silently, by
+    // provisioning for one shape and filling for another. The call is still
+    // load-bearing for its EFFECT: it runs the idempotent identity DDL before
+    // the commit takes the per-graph write lock.
+    await ensureIdentitySchemaStorage(backend, resolvedIdentitySchema, {
+      graphId: merged.id,
+      enablement: identityEnablement,
+      registry: identityRegistry,
+      // A derived relation this library version added, absent from (or left
+      // empty in) a database that predates it, is created and FILLED as one
+      // unit here — never created now and filled at the end of boot. Between
+      // those two points sit the schema commit, the history assertion, three
+      // materialization steps and an index build, and for that whole window an
+      // empty separation relation would answer "not separated" to every
+      // concurrent `assertSame`. See `ensureIdentitySchemaStorage`.
+      //
+      // Withheld when a schema commit is gated on an identity SEMANTICS
+      // change: that commit's own preflight creates AND rebuilds inside the
+      // commit transaction, under the semantics being committed. Filling here
+      // would instead derive classes from semantics this database has not
+      // accepted yet — and would keep them if the commit were then refused.
+      // Nothing is provisioned on that path either, so a refused commit leaves
+      // the relation absent rather than readable-empty, and the next open of a
+      // graph whose semantics ARE committed heals it here.
+      ...(identityGate === undefined ?
+        {
+          recomputeDerivedRelations: (target) =>
+            rebuildIdentityClosureForContext({
+              backend: target,
+              graphId: merged.id,
+              registry: identityRegistry,
+              schema: resolvedIdentitySchema,
+              sameIdAcrossKinds: identityProfile.sameIdAcrossKinds,
+            }),
+        }
+      : {}),
+    });
+  }
 
   // No identity preflight is passed here — the schema manager derives the
   // mandatory one itself (from `options.schema` when supplied), so no public
@@ -5991,26 +6121,14 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     await materializeSystemIndexesOnBoot(backend, merged.id, result);
   }
 
-  // A derived identity relation this library version added, created empty
-  // above on a database that predates it: recompute it from the assertion
-  // ledger before anything reads or validates it. Once per database — the
-  // relation exists on every later open. An enablement or identity-semantics
-  // change already rebuilds inside its own schema-commit preflight, and a
-  // breaking gate leaves the schema unusable, so neither needs this.
-  if (
-    recomputeIdentityDerivedRelations &&
-    identitySchema !== undefined &&
-    merged.identity !== undefined &&
-    result.status !== "breaking"
-  ) {
-    await rebuildIdentityClosureForContext({
-      backend,
-      graphId: merged.id,
-      registry: buildKindRegistry(merged),
-      schema: identitySchema,
-      sameIdAcrossKinds: merged.identity.sameIdAcrossKinds,
-    });
-  }
+  // No late derived-relation fill runs here, and that absence is the point.
+  // Boot has exactly two provisioning sites now, each of which publishes a
+  // CREATE and its fill as one transaction: the fence above (no identity
+  // semantics change) and the schema commit's own preflight (there is one).
+  // A fill deferred to this point would have spent the whole commit + history
+  // + materialization + index-build sequence answering "not separated" for
+  // every pair — and would have been skipped entirely whenever the commit it
+  // belonged to was refused, leaving that answer permanent.
 
   return {
     graph: merged,

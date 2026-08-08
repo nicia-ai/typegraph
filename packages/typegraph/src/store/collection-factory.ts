@@ -85,6 +85,11 @@ export type NodeOperations = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
@@ -152,6 +157,13 @@ export type EdgeOperations = Readonly<{
   executeUpdate: (
     input: {
       id: string;
+      identity: Readonly<{
+        kind: string;
+        fromKind?: string;
+        fromId?: string;
+        toKind?: string;
+        toId?: string;
+      }>;
       props: Partial<Record<string, unknown>>;
       validTo?: string;
     },
@@ -169,10 +181,17 @@ export type EdgeOperations = Readonly<{
    */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
+    kind: string,
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeHardDelete: (
+    kind: string,
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;

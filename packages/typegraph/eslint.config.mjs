@@ -268,6 +268,7 @@ export default [
       "src/store/operations/node-operations.ts",
       "src/store/recorded-capture.ts",
       "src/store/recorded-read-service.ts",
+      "src/store/store.ts",
     ],
     rules: {
       "no-restricted-syntax": [

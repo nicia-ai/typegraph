@@ -156,6 +156,7 @@ export type {
   HardDeleteUniquesByNodeIdsParams,
   HybridSearchParams,
   HybridSearchRow,
+  IdentityTableNames,
   IndexMaterializationBackend,
   IndexMaterializationRow,
   InsertEdgeParams,
@@ -179,6 +180,7 @@ export type {
   RemovalMaterializationBackend,
   RowProps,
   SchemaCommitBackend,
+  SchemaCommitPreflightBackend,
   SchemaKindEmptinessProbe,
   SchemaReadBackend,
   SchemaVersionRow,
@@ -206,6 +208,7 @@ export type {
   VectorIndexType,
   VectorMetric,
   VectorOperationBackend,
+  VectorSearchFrontierTuning,
   VectorSearchParams,
   VectorSearchResult,
 } from "./types";

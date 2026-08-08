@@ -1,4 +1,4 @@
-import { hasOwnKey } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * `merge()` orchestrator (design §7.2, T11).
@@ -80,7 +80,12 @@ import {
   INHERITED_EDGE_ORIGIN,
   repointEdges,
 } from "./edge-repoint";
-import { BaseVersionMismatchError, describeCause, MergeError } from "./errors";
+import {
+  BaseVersionMismatchError,
+  describeCause,
+  InvalidMergeOptionsError,
+  MergeError,
+} from "./errors";
 import {
   assertIdentityEndpointsNotDeleted,
   assertIdentityPeersStable,
@@ -109,6 +114,7 @@ import {
 } from "./node-key";
 import type { NormalizedMergeOptions } from "./options";
 import { normalizeMergeOptions } from "./options";
+import type { ProvenanceGraph } from "./provenance-store";
 import {
   contributionKey,
   openProvenanceStore,
@@ -163,6 +169,7 @@ import {
   storeBackend,
   storeRuntime,
   transactionBackend,
+  TypeGraphError,
 } from "./typegraph-internal";
 import type {
   BaseAmbiguity,
@@ -772,10 +779,9 @@ function buildProvenanceIndex(
 }
 
 /**
- * Empty per-branch trust weights — the fallback when the caller supplies no
- * {@link MergeOptions.provenanceWeights}. With empty weights the
- * `"provenanceWeighted"` policy degrades to the stable branch order (its
- * documented tie-break), i.e. `"lastWriteWins"` semantics.
+ * Empty per-branch trust weights used by policies that do not consult weights.
+ * Option validation requires a non-empty map whenever `"provenanceWeighted"`
+ * is selected, so this value is never a silent fallback for that policy.
  */
 const EMPTY_WEIGHTS: ProvenanceWeights = new Map<BranchId, number>();
 
@@ -1457,12 +1463,35 @@ function pickClusterCanonical(
  * survive; writing it as `undefined` makes the row write drop it (the props column
  * is JSON-serialized, which omits `undefined`), so the fork's deletion is applied
  * instead of being silently reverted to the base value.
+ *
+ * The bag is null-prototype ({@link createDataKeyedBag}) because its keys are
+ * DATA — property names read off committed rows, and `trustedImportGraph`
+ * writes a caller's bag verbatim, so a stored bag CAN carry an own `__proto__`
+ * (`JSON.parse` mints it as ordinary own data). Writing the deletion marker for
+ * that key into a `{}` literal does not create an entry: it invokes
+ * `Object.prototype`'s `__proto__` setter, which with `undefined` as the value
+ * is a silent no-op. The tombstone this function exists to write would simply
+ * not be written.
+ *
+ * SCOPE OF THE CLAIM, measured rather than assumed: no reachable write carries
+ * an own `__proto__` back into a committed row anyway — Zod drops the key in
+ * strip AND loose mode, so the base value does not survive a merge commit with
+ * or without the tombstone, and `branch()`'s validating clone refuses such a
+ * base outright. So this is the function honoring its own contract
+ * independently of what a distant layer happens to strip, NOT a user-visible
+ * defect being fixed: the end state is currently identical either way, which is
+ * why no end-to-end test guards it (one would pass under the mutation). The
+ * live-ammunition key for the deletion contract is a DECLARED prototype-named
+ * field such as `toString`, which this file's tests cover.
  */
 function commitModificationProps(
   baseProps: Readonly<Record<string, unknown>>,
   forkProps: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
-  const props: Record<string, unknown> = { ...forkProps };
+  const props = createDataKeyedBag<unknown>();
+  for (const key of Object.keys(forkProps)) {
+    props[key] = forkProps[key];
+  }
   for (const key of Object.keys(baseProps)) {
     if (!hasOwnKey(forkProps, key)) {
       props[key] = undefined;
@@ -2038,11 +2067,73 @@ async function validateBaseVersions<G extends GraphDef>(
 /** Normalizes options, converting an invalid-option throw into a typed result. */
 function tryNormalize<G extends GraphDef>(
   optionsInput: MergeOptions<G>,
+  refusedOptions: readonly (keyof MergeOptions<G>)[] = [],
 ): Result<NormalizedMergeOptions<G>, MergeError> {
+  const refusedOption = refusedOptions.find((option) =>
+    hasOwnKey(optionsInput, option),
+  );
+  if (refusedOption !== undefined) {
+    return err(
+      new InvalidMergeOptionsError(
+        `This merge operation does not accept options.${refusedOption}.`,
+        { details: { option: refusedOption } },
+      ),
+    );
+  }
+
   try {
     return ok(normalizeMergeOptions(optionsInput));
   } catch (error) {
-    return err(new MergeError("Invalid merge options.", { cause: error }));
+    return err(
+      new InvalidMergeOptionsError("Invalid merge options.", { cause: error }),
+    );
+  }
+}
+
+/**
+ * Opens (creating if needed) the target's provenance sidecar BEFORE the merge
+ * mutates anything, converting a refusal into a typed merge result.
+ *
+ * `openProvenanceStore` refuses two classes of state — an occupied sidecar graph
+ * id (`GRAPH_MERGE_PROVENANCE_ID_COLLISION`) and a backend that cannot fence the
+ * ownership claim (`GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED`) — and both are pure
+ * configuration verdicts: they are as true before the merge as after it, and
+ * nothing the merge does changes them. Reporting them post-commit as a warning
+ * would leave the caller with a committed graph and an option it stated,
+ * TypeGraph accepted, and then silently dropped. They are therefore refusals of
+ * `options.persistProvenance` itself, carried as `InvalidMergeOptionsError`
+ * (`category: "user"`, catchable exactly like every other refused merge option)
+ * with the originating `ConfigurationError` as its cause.
+ *
+ * Any OTHER failure is a backend failure, not a verdict about the option, and is
+ * wrapped as a plain `MergeError` — still pre-commit, because a merge whose
+ * provenance sidecar cannot be reached should not commit half a contract either.
+ */
+async function tryOpenProvenanceStore<G extends GraphDef>(
+  target: Store<G>,
+): Promise<Result<Store<ProvenanceGraph>, MergeError>> {
+  try {
+    return ok(await openProvenanceStore(target));
+  } catch (error) {
+    const code =
+      error instanceof TypeGraphError ?
+        (error.details as Readonly<{ code?: unknown }> | undefined)?.code
+      : undefined;
+    const details = {
+      option: "persistProvenance",
+      graphId: provenanceGraphId(target.graphId),
+      targetGraphId: target.graphId,
+      ...(typeof code === "string" ? { provenanceErrorCode: code } : {}),
+    };
+    const message = `options.persistProvenance was requested but the merge-provenance sidecar cannot be opened: ${describeCause(error)}`;
+    return err(
+      (
+        code === "GRAPH_MERGE_PROVENANCE_ID_COLLISION" ||
+          code === "GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED"
+      ) ?
+        new InvalidMergeOptionsError(message, { details, cause: error })
+      : new MergeError(message, { details, cause: error }),
+    );
   }
 }
 
@@ -2060,7 +2151,7 @@ async function resolveMerge<G extends GraphDef>(
   branches: readonly GraphBranch<G>[],
   options: NormalizedMergeOptions<G>,
   useBaseSources: boolean,
-  incremental?: IncrementalConfig,
+  incremental?: IncrementalConfig<G>,
   expectedBaseVersion?: BaseVersion,
 ): Promise<Result<MergeReport<G>, MergeError>> {
   // Reserved BranchIds are used for non-user contributions. Reject real branches
@@ -2136,6 +2227,25 @@ async function resolveMerge<G extends GraphDef>(
         ),
       );
     }
+  }
+
+  // (1c) provenance sidecar precondition. `persistProvenance` is an ACCEPTED
+  // option, so whether it can be honored must be settled before the merge
+  // mutates anything: which occupant holds the sidecar graph id, and whether the
+  // backend can fence the ownership claim, are configuration facts that are true
+  // now and unchanged by the merge. Opening the sidecar here refuses those states
+  // with their typed error — a merge that cannot persist provenance never commits
+  // — and leaves the post-commit write with only the failure modes that are
+  // genuinely transient. The handle is REUSED below rather than re-opened, so the
+  // write cannot re-litigate ownership and reach a configuration verdict there.
+  // The open is idempotent and claims only this module's own sidecar graph, so a
+  // merge that later fails leaves an owned, empty sidecar and no target change.
+  const provenanceStore =
+    options.persistProvenance ?
+      await tryOpenProvenanceStore(target)
+    : undefined;
+  if (provenanceStore !== undefined && isErr(provenanceStore)) {
+    return provenanceStore;
   }
 
   try {
@@ -2358,6 +2468,7 @@ async function resolveMerge<G extends GraphDef>(
           stagedNewByKind,
           options,
           introspectionKinds,
+          forkPoint: incremental.forkPoint,
           ...(identityGuard === undefined ?
             {}
           : { identityPeerProbe: identityGuard }),
@@ -2380,14 +2491,18 @@ async function resolveMerge<G extends GraphDef>(
 
     const warnings = [...plan.warnings];
     let provenancePersisted: MergeReport<G>["provenancePersisted"];
-    if (options.persistProvenance) {
-      // POST-COMMIT, best-effort: the graph is already committed, so a provenance
-      // write failure must NOT fail the merge — it surfaces as a warning. The
-      // sidecar node ids are deterministic, so this UPSERTS (idempotent re-runs).
+    if (provenanceStore !== undefined && !isErr(provenanceStore)) {
+      // POST-COMMIT, best-effort — and now ONLY for transient failures: the
+      // sidecar was opened and claimed before the merge committed, so every
+      // configuration verdict has already been taken. What is left here is a row
+      // write against a graph this module owns, whose failures are backend
+      // failures (a dropped connection, a lock timeout, a full disk). The graph
+      // is already committed, so those must NOT fail the merge — they surface as
+      // a warning. The sidecar node ids are deterministic, so this UPSERTS
+      // (idempotent re-runs).
       try {
-        const provenanceStore = await openProvenanceStore(target);
         const count = await persistProvenanceRecords(
-          provenanceStore,
+          provenanceStore.data,
           target.graphId,
           plan.provenanceRecords,
         );
@@ -2534,9 +2649,21 @@ export async function mergeAgainstBase<G extends GraphDef>(
 
 // --- mergeIncremental: full fork-point-vs-live-target entry point (§6.6) -------
 
+/**
+ * The fork-point premise {@link mergeIncremental} established BEFORE planning:
+ * this store, at this `base@V`, is the immutable ancestor every branch diff was
+ * computed against. Carried into the commit so it can be re-established at the
+ * point of no return (see {@link assertForkPointUnchanged}).
+ */
+type ForkPointPrecondition<G extends GraphDef> = Readonly<{
+  store: Store<G>;
+  version: BaseVersion;
+}>;
+
 /** Internal config carried into {@link resolveMerge} for incremental mode. */
-type IncrementalConfig = Readonly<{
+type IncrementalConfig<G extends GraphDef> = Readonly<{
   targetBranchId: BranchId;
+  forkPoint: ForkPointPrecondition<G>;
 }>;
 
 /**
@@ -2672,7 +2799,8 @@ export function writeWouldChangeRow(
  * write comparisons operate on the persisted props bag only.
  */
 function nodeProps(node: Node): Record<string, unknown> {
-  const props: Record<string, unknown> = {};
+  // Data-keyed: schema property names spread onto the public node.
+  const props = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(node)) {
     if (key === "id" || key === "kind" || key === "meta") continue;
     props[key] = value;
@@ -2685,7 +2813,8 @@ function nodeProps(node: Node): Record<string, unknown> {
  * write comparisons operate on the persisted props bag only.
  */
 function edgeProps(edge: Edge): Record<string, unknown> {
-  const props: Record<string, unknown> = {};
+  // Data-keyed: schema property names spread onto the public edge.
+  const props = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(edge)) {
     if (
       key === "id" ||
@@ -2941,6 +3070,12 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
   options: NormalizedMergeOptions<G>;
   introspectionKinds: ReadonlyMap<string, readonly UniqueIntrospection[]>;
   plannedBaseMatchKeys: ReadonlySet<MergeKey>;
+  /**
+   * The fork point and the `base@V` every branch declared against it, checked
+   * before planning and re-checked at the commit (see
+   * {@link assertForkPointUnchanged}).
+   */
+  forkPoint: ForkPointPrecondition<G>;
   /**
    * `(kind, id) -> version` for every committed target node observed while
    * planning (the target-branch diff enumeration). The commit-time guard
@@ -3258,6 +3393,55 @@ async function assertInheritedEdgesUnchanged<G extends GraphDef>(
 }
 
 /**
+ * Re-establishes `mergeIncremental()`'s fork-point premise at the point of no
+ * return — the incremental analogue of the snapshot path's
+ * {@link assertTargetUnchanged}.
+ *
+ * `mergeIncremental()` reads the fork point's `base@V` BEFORE planning, refuses
+ * any branch that declares a different one, and then derives the whole plan
+ * from fork-point→branch diffs. A write landing on the fork point in that
+ * window makes every one of those diffs describe an ancestor that no longer
+ * exists — and nothing downstream notices, because the incremental commit
+ * deliberately does NOT re-check the TARGET's `base@V` (an advancing target is
+ * the feature). Re-reading the fork point here turns that into a typed refusal
+ * instead of a committed plan derived from state that is gone.
+ *
+ * The token is recomputed by {@link computeBaseVersion} — the same and only
+ * definition of a store's `base@V` that produced the value being compared, so
+ * there is no second spelling of the comparison to drift. The SCHEMA half needs
+ * no separate re-check: `computeSchemaComponent` hashes the serialized graph
+ * with the version excluded, making it a pure function of the in-memory graph
+ * definition, which is exactly why `assertTargetUnchanged` re-checks only the
+ * content half too. The fork point's active schema VERSION is covered anyway —
+ * it is part of the revision-anchored token.
+ *
+ * The re-read goes through the fork point's OWN backend rather than this
+ * transaction: the fork point is a different store, and what must hold is its
+ * COMMITTED state. Deliberately no advisory lock either — the fork point is
+ * immutable by contract, so this detects a violated contract rather than
+ * excluding a legal writer, and taking the graph write lock on a second
+ * connection would deadlock against this very transaction whenever the fork
+ * point and the target share one database.
+ */
+async function assertForkPointUnchanged<G extends GraphDef>(
+  precondition: ForkPointPrecondition<G>,
+): Promise<void> {
+  const liveVersion = await computeBaseVersion(precondition.store);
+  if (liveVersion === precondition.version) return;
+  throw new BaseVersionMismatchError(
+    "The mergeIncremental() fork point was modified between the fork-point precondition and the commit transaction; every branch diff was computed against the previous fork-point state, so the resolved plan was not applied.",
+    {
+      details: {
+        expectedForkPointBase: precondition.version,
+        liveForkPointBase: liveVersion,
+      },
+      suggestion:
+        "Keep the fork-point store immutable for the duration of the merge (it is the diff reference, not a merge target), then re-run mergeIncremental().",
+    },
+  );
+}
+
+/**
  * The full incremental commit path (§6.6). The planner has already folded the live
  * target in as a preferred synthetic branch, so this path preflights destructive
  * row hazards inside the target transaction and then applies the normal merge plan.
@@ -3287,6 +3471,13 @@ async function commitIncrementalPlan<G extends GraphDef>(
       if (target.revisionTrackingEnabled) {
         await lockRecordedGraphWrite(transactionBackend(tx), target.graphId);
       }
+      // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
+      // against is re-read here, so a write to it in the plan→commit window
+      // refuses the merge instead of committing diffs against a fork point
+      // that has moved. Runs first: it is the premise every later guard's
+      // baseline was derived under, and on a revision-anchored fork point it
+      // is an O(1) read.
+      await assertForkPointUnchanged(guard.forkPoint);
       const nodesApi = tx.nodes as unknown as TxNodes;
       const edgesApi = tx.edges as unknown as TxEdges;
       // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
@@ -3330,19 +3521,28 @@ async function commitIncrementalPlan<G extends GraphDef>(
  * through the same three-way merge planner.
  *
  * Object-form args so the two same-typed stores (`forkPoint`, `target`) cannot be
- * swapped. `options.target` is ignored — `target` is the explicit arg.
+ * swapped. The named `target` is authoritative; an untyped caller that also
+ * supplies `options.target` is refused rather than silently ignored.
  *
  * Preconditions (typed errors): every branch forked from `forkPoint`
  * (`branch.base === computeBaseVersion(forkPoint)`); `forkPoint` and `target` share a
  * schema hash (schema drift is fatal; target CONTENT may have advanced); and
  * `onBasePropertyConflict` is `"flag"` (keep-base for committed-row conflicts).
+ *
+ * The fork-point precondition is not merely an entry check: it is re-verified
+ * inside the commit transaction, so `forkPoint` must stay immutable for the
+ * duration of the call. A write to it while the merge is in flight makes every
+ * branch diff describe an ancestor that no longer exists, and is refused with
+ * `BaseVersionMismatchError` rather than committed (see
+ * {@link assertForkPointUnchanged}). The TARGET, by contrast, may advance
+ * throughout — that is what "incremental" means.
  */
 export async function mergeIncremental<G extends GraphDef>(
   args: MergeIncrementalArguments<G>,
 ): Promise<Result<MergeReport<G>, MergeError>> {
   const { forkPoint, target, branches } = args;
 
-  const normalized = tryNormalize(args.options ?? {});
+  const normalized = tryNormalize(args.options ?? {}, ["target"]);
   if (isErr(normalized)) {
     return err(normalized.error);
   }
@@ -3353,9 +3553,15 @@ export async function mergeIncremental<G extends GraphDef>(
   // newer committed value.
   if (options.onBasePropertyConflict !== "flag") {
     return err(
-      new MergeError(
+      new InvalidMergeOptionsError(
         'mergeIncremental() requires onBasePropertyConflict: "flag" (keep-base); a non-keep-base policy could overwrite a newer committed base value with a stale branch value.',
-        { details: {} },
+        {
+          details: {
+            option: "onBasePropertyConflict",
+            accepted: "flag",
+            received: options.onBasePropertyConflict,
+          },
+        },
       ),
     );
   }
@@ -3392,6 +3598,12 @@ export async function mergeIncremental<G extends GraphDef>(
     [targetBranch, ...branches],
     options,
     true,
-    { targetBranchId: COMMITTED_TARGET_BRANCH },
+    {
+      targetBranchId: COMMITTED_TARGET_BRANCH,
+      // The fork-point precondition just validated, carried to the commit so
+      // it is re-established there rather than assumed to have held for the
+      // whole of planning (see `assertForkPointUnchanged`).
+      forkPoint: { store: forkPoint, version: forkVersion },
+    },
   );
 }

@@ -26,6 +26,7 @@ import {
 } from "../query/schema-introspector";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../system-fields";
 import { fnv1aBase36 } from "../utils/hash";
+import { hasOwnKey } from "../utils/object";
 import { getNodeScopeColumns } from "./compiler";
 import {
   type EdgeIndexConfig,
@@ -398,7 +399,7 @@ function createNodeWhereBuilder<N extends NodeType>(
       };
     }
 
-    if (!(key in shape)) {
+    if (!hasOwnKey(shape, key)) {
       throw new Error(
         `Unknown field "${key}" in node index WHERE clause for "${node.kind}"`,
       );
@@ -434,7 +435,7 @@ function createEdgeWhereBuilder<E extends AnyEdgeType>(
       };
     }
 
-    if (!(key in shape)) {
+    if (!hasOwnKey(shape, key)) {
       throw new Error(
         `Unknown field "${key}" in edge index WHERE clause for "${edge.kind}"`,
       );

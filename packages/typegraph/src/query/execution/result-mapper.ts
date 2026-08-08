@@ -5,6 +5,7 @@
  */
 import { type NodeType } from "../../core/types";
 import { normalizePath } from "../../utils";
+import { createDataKeyedBag } from "../../utils/object";
 import { stripIdentityPathTokens } from "../../utils/path";
 import { type Traversal } from "../ast";
 import type {
@@ -92,8 +93,14 @@ export function transformPathColumns(
 }
 
 // Reserved keys that cannot be overwritten by user props
-const RESERVED_NODE_KEYS = new Set(["id", "kind", "meta"]);
-const RESERVED_EDGE_KEYS = new Set(["id", "kind", "fromId", "toId", "meta"]);
+const RESERVED_NODE_KEYS: ReadonlySet<string> = new Set(["id", "kind", "meta"]);
+const RESERVED_EDGE_KEYS: ReadonlySet<string> = new Set([
+  "id",
+  "kind",
+  "fromId",
+  "toId",
+  "meta",
+]);
 
 /**
  * Converts null to undefined for consistent typing.
@@ -104,19 +111,28 @@ function nullToUndefined<T>(value: T | null | undefined): T | undefined {
 }
 
 /**
- * Assigns props to a target object, excluding reserved keys to prevent runtime
- * collisions with system fields (id, kind, meta, etc).
+ * The props to spread onto a selectable node/edge, with reserved keys dropped
+ * so user props cannot collide with system fields (id, kind, meta, …).
+ *
+ * The accumulator is a {@link createDataKeyedBag} and the caller SPREADS the
+ * result rather than assigning key-by-key onto the public object: `props` comes
+ * straight off `JSON.parse` of the row's props column, which yields `__proto__`
+ * as an ordinary own key, and `target[key] = value` would hand that key to
+ * `Object.prototype`'s setter and drop the value. Spreading (a
+ * `CreateDataProperty`, not a `Set`) carries it as an own key while leaving the
+ * public result on `Object.prototype`, exactly as `rowToNode` already does.
  */
-function assignPropsExcludingReserved(
-  target: Record<string, unknown>,
+function propsExcludingReserved(
   props: Record<string, unknown>,
-  reservedKeys: Set<string>,
-): void {
+  reservedKeys: ReadonlySet<string>,
+): Record<string, unknown> {
+  const kept = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(props)) {
     if (!reservedKeys.has(key)) {
-      target[key] = value;
+      kept[key] = value;
     }
   }
+  return kept;
 }
 
 /**
@@ -162,9 +178,9 @@ export function buildSelectableNode(
       updatedAt,
       deletedAt,
     },
+    ...propsExcludingReserved(rawProps, RESERVED_NODE_KEYS),
   };
 
-  assignPropsExcludingReserved(result, rawProps, RESERVED_NODE_KEYS);
   return result as SelectableNode<NodeType>;
 }
 
@@ -236,9 +252,9 @@ function buildSelectableEdge(
       updatedAt,
       deletedAt,
     },
+    ...propsExcludingReserved(rawProps, RESERVED_EDGE_KEYS),
   };
 
-  assignPropsExcludingReserved(result, rawProps, RESERVED_EDGE_KEYS);
   return result as SelectableEdge;
 }
 
@@ -256,17 +272,19 @@ export function buildSelectContext<
   startAlias: string,
   traversals: readonly Traversal[],
 ): SelectContext<Aliases, EdgeAliases, RecursiveAliases> {
-  // Build the start node as initial context entry
-  const context: Record<
-    string,
+  // Data-keyed: alias names chosen by the caller's query, which the kind-name
+  // pattern admits `__proto__` for. (The computed-key literal this replaced was
+  // itself safe — a computed key is a `CreateDataProperty` — but the traversal
+  // assignments below are not, so the whole bag is built the one right way.)
+  const context = createDataKeyedBag<
     | SelectableNode<NodeType>
     | SelectableEdge
     | number
     | readonly string[]
     | undefined
-  > = {
-    [startAlias]: buildSelectableNode(row, startAlias),
-  };
+  >();
+  // Build the start node as initial context entry
+  context[startAlias] = buildSelectableNode(row, startAlias);
 
   // Build traversal nodes and edges
   for (const traversal of traversals) {
@@ -294,7 +312,15 @@ export function buildSelectContext<
     }
   }
 
-  return context as SelectContext<Aliases, EdgeAliases, RecursiveAliases>;
+  // Spread at the boundary: the context is handed to the CALLER's `select`
+  // callback, and `select((ctx) => ctx)` returns it verbatim as the row. See
+  // `createDataKeyedBag` in ../../utils/object.ts — the spread is what keeps a
+  // `__proto__` alias an own key instead of reaching the prototype setter.
+  return { ...context } as SelectContext<
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases
+  >;
 }
 
 /**

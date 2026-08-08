@@ -378,6 +378,17 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
       });
     });
 
+    it("declares that a vec0 KNN has no frontier to tune", () => {
+      // `k` IS the page size, not a frontier around it, and vec0 exposes no
+      // other search parameter — so an `efSearch` can only be refused. The
+      // declaration is what the backend's refusal reads (#433).
+      expect(sqliteVecStrategy.capabilities.searchFrontierTuning).toEqual({
+        tunable: false,
+        reason:
+          "a vec0 KNN takes only `k` (the page size); sqlite-vec exposes no ANN frontier parameter",
+      });
+    });
+
     it("fills the page even when the surviving candidates rank last", () => {
       const s = slot("hnsw");
       createStorage(s);

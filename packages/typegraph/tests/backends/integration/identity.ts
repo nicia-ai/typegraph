@@ -827,6 +827,43 @@ export function registerIdentityIntegrationTests(
       ]);
     });
 
+    it("bulk deletion detaches every deleted identity member", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "bulk-delete-alice" },
+      );
+      const aliceCompany = await store.nodes.Company.create(
+        { name: "Alice LLC" },
+        { id: "bulk-delete-alice-company" },
+      );
+      const bob = await store.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bulk-delete-bob" },
+      );
+      const bobCompany = await store.nodes.Company.create(
+        { name: "Bob LLC" },
+        { id: "bulk-delete-bob-company" },
+      );
+      await store.identity.assertSame(alice, aliceCompany);
+      await store.identity.assertSame(bob, bobCompany);
+
+      await store.nodes.Person.bulkDelete([alice.id, bob.id]);
+
+      for (const [person, company] of [
+        [alice, aliceCompany],
+        [bob, bobCompany],
+      ] as const) {
+        const rows = await readAssertionRows(store, person);
+        expect(rows).toHaveLength(1);
+        expect(rows.every((row) => isEndedRow(row))).toBe(true);
+        expect(await store.identity.assertionsOf(company)).toEqual([]);
+        expect(await store.identity.membersOf(company)).toEqual([
+          { kind: "Company", id: company.id },
+        ]);
+      }
+    });
+
     it("repairs corrupted derived closure without changing truth", async () => {
       const store = context.getStore();
       const person = await store.nodes.Person.create({ name: "Alice" });

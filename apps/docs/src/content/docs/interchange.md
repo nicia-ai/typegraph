@@ -192,6 +192,7 @@ recorded as an `entityType: "identity"` entry in `result.errors`.
 | `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields |
 | `includeDeleted` | `boolean` | `false` | Include soft-deleted records |
 | `identityMode` | `"state" \| "archival"` | `"state"` | Export current identity assertions, or current plus ended assertions |
+| `signal` | `AbortSignal` | none | Cancel the export: roll its snapshot transaction back and release the connection. See [Cancelling an export](#cancelling-an-export) |
 
 **Round-trip caveat:** with the default `includeTemporal: false`, exported
 records carry no `validFrom`/`validTo`. On import, an omitted `validFrom`
@@ -214,6 +215,71 @@ document imported into a fresh graph creates those rows with their stated bounds
 and is unaffected. To update props over existing rows from a temporal export,
 either omit `validFrom` from the update document, export with
 `includeTemporal: false`, or import into a fresh graph and swap it in.
+
+### Cancelling an export
+
+On a backend reporting `capabilities.transactions`, an export holds one
+repeatable-read snapshot transaction for its whole life, and on a
+single-connection backend it holds that connection's exclusive
+interchange-stream lease with it. (A backend without transactions — SQLite
+`transactionMode: "none"`, the session-less HTTP Postgres drivers — opens
+neither: its export paginates statement by statement, so a write committed
+mid-stream can appear in the pages that follow. That is a declared capability
+gap, not something the stream papers over.) Every *cooperative* exit gives both back,
+because each one runs the stream's `finally`: `break` or `throw` out of a `for
+await`, and an explicit `iterator.return()`.
+
+A consumer that pulls `next()` and then simply **drops the iterator** has no
+cooperative exit. Async-generator `finally` blocks do not run on garbage
+collection, so that snapshot transaction stays open for the life of the process
+— and on a serialized connection every later export and every later import is
+then refused for a stream nobody is reading. If you might abandon an iterator,
+pass a `signal`:
+
+```typescript
+const controller = new AbortController();
+const iterator = exportGraphStream(store, {
+  batchSize: 1000,
+  signal: controller.signal,
+})[Symbol.asyncIterator]();
+
+try {
+  for (;;) {
+    const next = await Promise.race([
+      iterator.next(),
+      deadline(30_000), // resolves to a sentinel, leaving the pull in flight
+    ]);
+    if (next === TIMED_OUT) {
+      // Do NOT just walk away: this is the leak. Aborting rolls the snapshot
+      // back and frees the connection.
+      controller.abort(new Error("export deadline exceeded"));
+      break;
+    }
+    if (next.done === true) break;
+    await write(next.value);
+  }
+} finally {
+  controller.abort();
+}
+```
+
+Aborting rejects the pull that is in flight — and any later pull from a consumer
+that walked away and came back — with
+[`ExportStreamCancelledError`](/errors#exportstreamcancellederror), carrying the
+signal's own reason as `cause`, so a cancelled export is never mistaken for a
+complete one. The message states what was actually settled: a snapshot rolled
+back and a connection released on a transactional backend, or merely abandoned
+reads on one that never held either. Aborting a signal *before* the first pull refuses the export
+outright: no transaction is opened and no lease claimed. Aborting one that has
+already finished does nothing, so a single controller can safely span a whole
+job. `exportGraph` accepts `signal` too — there it simply makes the call reject
+instead of running to completion.
+
+There is deliberately no garbage-collection fallback. A `FinalizationRegistry`
+cannot close this gap: any cleanup state able to settle an abandoned stream has
+to reach the stream's internals, and a registry holds its state strongly, so
+doing so would keep the abandoned stream reachable and the finalizer would never
+run. The signal is the mechanism.
 
 ## Importing Data
 
@@ -353,6 +419,51 @@ await importGraph(store, data, { onConflict: "update" });
 // Useful for initial imports where duplicates indicate a problem
 await importGraph(store, data, { onConflict: "error" });
 ```
+
+#### An edge id held by a different edge
+
+Edge ids are unique per graph, but the import's existence probe (`getEdge` /
+`getEdges`) is keyed on `(graph_id, id)` alone. So a document edge whose id is
+already held by a row with a different **immutable identity** — its `kind` or
+either of its endpoints — finds that row. That question — *is this the same
+edge?* — is prior to *what do we do about the same edge?*, so it is answered
+**before** the conflict strategy and all three strategies answer alike: the row
+is reported as a per-row entry in `result.errors`, whose `error` message is
+prefixed `INTERCHANGE_EDGE_KIND_CONFLICT` and names each component that differs
+alongside the value the document stated. The stored row is left untouched.
+
+```typescript
+const result = await importGraph(store, data, { onConflict: "update" });
+const identityConflicts = result.errors.filter((entry) =>
+  entry.error.startsWith("INTERCHANGE_EDGE_KIND_CONFLICT"),
+);
+```
+
+One prefix covers the whole class rather than a second one for endpoint
+mismatches: the condition is a single fact and the recovery is a single action,
+and a caller that had to match two prefixes to catch one condition would
+eventually match only one. The token still reads `…_KIND_CONFLICT` because it is
+the published, branchable string; it now covers every identity component.
+
+`ImportError` carries no `code` field, so the message prefix is the branchable
+token — the same `CODE: message` idiom the validity-window import refusals use.
+Give the incoming edge a distinct id, or import it under the identity the stored
+row already carries.
+
+Previously both non-`error` strategies were silent about this: `update` wrote
+the incoming edge's properties onto the *other* row with nothing in
+`result.errors`, and `skip` counted the document's edge as already present when
+no matching edge existed anywhere — so it was never created and never reported.
+Comparing `kind` alone closed only half of it: because endpoints are immutable,
+a document naming the incumbent's kind and id but different endpoints still read
+as the same edge, so `update` overwrote the incumbent's properties and silently
+retained its old endpoints. The update is additionally issued with all five
+identity components in the statement's own `WHERE`, so the check cannot be raced
+by a concurrent hard-delete-and-recreate; an update that consequently matches no
+row is reported as the same per-row error rather than aborting the import.
+
+Nodes were never affected: their probe is `getNode(graphId, kind, id)`, which is
+kind-scoped, so a cross-kind id collision simply reads as absent.
 
 ### Unknown Property Handling
 
@@ -518,6 +629,22 @@ if (!result.success) {
   }
 }
 ```
+
+### Serialized-connection refusals
+
+Row-level failures are reported in `result.errors`, but one class of failure is
+thrown instead: two long-lived interchange streams cannot share a single
+serialized database connection, so whichever starts second is refused with a
+typed `ConfigurationError`. The lease is exclusive — one stream of any kind per
+connection — and every long-lived import claims it, so `importGraph`,
+`importGraphStream`, `trustedImportGraph`, and `trustedImportGraphStream` can all
+throw it, as can `exportGraphStream` when an import already holds the connection
+— there, on the stream's first pull, since the claim begins when the snapshot
+transaction opens rather than when the iterable is constructed. The codes (`INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT`,
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`,
+`INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`) and the `details.requested` /
+`details.heldBy` pairing they carry are documented in
+[Interchange serialized-connection guard codes](/errors#interchange-serialized-connection-guard-codes).
 
 ## Best Practices
 

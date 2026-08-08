@@ -10,6 +10,7 @@ import { type NamedOntologyRelation } from "../ontology/validation";
 import { buildValidatedKindRegistry } from "../registry/build-validated";
 import type { KindRegistry } from "../registry/kind-registry";
 import { type EdgeEndpointKinds } from "../registry/validate-implies";
+import { hasOwnKey } from "../utils/object";
 import {
   type SerializedClosures,
   type SerializedEdgeDef,
@@ -94,13 +95,22 @@ export function deserializeSchema(
     version: schema.version,
     generatedAt: schema.generatedAt,
 
-    getNode: (name) => schema.nodes[name],
+    // Own-key reads, for the same reason {@link buildEdgeEndpointKinds} below
+    // uses a `Map`: `schema` is parsed out of a stored JSON document and the
+    // caller supplies the name, so a raw read hands back an `Object.prototype`
+    // member typed as a definition for any name no kind is registered under.
+    getNode: (name) =>
+      hasOwnKey(schema.nodes, name) ? schema.nodes[name] : undefined,
     getNodeNames: () => nodeNames,
 
-    getEdge: (name) => schema.edges[name],
+    getEdge: (name) =>
+      hasOwnKey(schema.edges, name) ? schema.edges[name] : undefined,
     getEdgeNames: () => edgeNames,
 
-    getMetaEdge: (name) => schema.ontology.metaEdges[name],
+    getMetaEdge: (name) =>
+      hasOwnKey(schema.ontology.metaEdges, name) ?
+        schema.ontology.metaEdges[name]
+      : undefined,
     getMetaEdgeNames: () => metaEdgeNames,
 
     getRelations: () => schema.ontology.relations,

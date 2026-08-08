@@ -11,6 +11,7 @@
  */
 import type { KindEntity } from "../core/types";
 import { canonicalEqual } from "../schema/canonical";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { type IncompatibleChange, IncompatibleChangeError } from "./errors";
 import {
@@ -103,8 +104,17 @@ export function classifyModifications(
     }
   };
 
+  // Own-key reads below: extension kind names match
+  // `/^[A-Za-z_][A-Za-z0-9_]*$/`, which admits `toString`, `constructor`, and
+  // `valueOf`. A raw read would answer such a name with the inherited
+  // `Object.prototype` member, so a brand-new kind would be classified as a
+  // MODIFICATION of an existing one and read its shape off a function.
   for (const [name, nextNode] of Object.entries(next.nodes ?? {})) {
-    const existingNode = existing.nodes?.[name];
+    const existingNodes = existing.nodes;
+    const existingNode =
+      existingNodes !== undefined && hasOwnKey(existingNodes, name) ?
+        existingNodes[name]
+      : undefined;
     if (existingNode === undefined) continue;
     classifyNode(name, existingNode, nextNode, {
       recordIncompatible,
@@ -114,7 +124,11 @@ export function classifyModifications(
     });
   }
   for (const [name, nextEdge] of Object.entries(next.edges ?? {})) {
-    const existingEdge = existing.edges?.[name];
+    const existingEdges = existing.edges;
+    const existingEdge =
+      existingEdges !== undefined && hasOwnKey(existingEdges, name) ?
+        existingEdges[name]
+      : undefined;
     if (existingEdge === undefined) continue;
     classifyEdge(name, existingEdge, nextEdge, {
       recordIncompatible,

@@ -34,6 +34,7 @@ import { type AnySqliteDatabase } from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
 import {
   createSqliteBackend,
+  isLocalLibsqlClient,
   type SqliteTables,
   tables as defaultTables,
 } from "../drizzle/sqlite";
@@ -86,14 +87,21 @@ export type LibsqlBackendResult = Readonly<{
  *
  * Handles DDL execution and configures the correct execution profile.
  * Local clients (`client.protocol === "file"`, covering `file:` paths and
- * `:memory:` databases) run transactions as raw BEGIN/COMMIT statements on
- * the client's single stable connection (`transactionMode: "sql"`):
- * `client.transaction()` permanently hands that connection to the
- * transaction and lazily opens a fresh one afterwards, which for an
- * in-memory database is a fresh, empty database. Remote clients (`http` /
+ * `:memory:` databases — see `isLocalLibsqlClient`) run transactions as raw
+ * BEGIN/COMMIT statements on the client's single stable connection
+ * (`transactionMode: "sql"`): `client.transaction()` permanently hands that
+ * connection to the transaction and lazily opens a fresh one afterwards, which
+ * for an in-memory database is a fresh, empty database. Remote clients (`http` /
  * `ws`) run each transaction on its own stream via Drizzle's
  * `db.transaction()` (`transactionMode: "drizzle"`). The caller retains
  * ownership of the client and is responsible for closing it.
+ *
+ * Because that single local connection is also what makes a snapshot export and
+ * a concurrent write mutually exclusive, `createSqliteBackend` marks the backend
+ * with a local client as its serialized transaction resource — so two backends
+ * over ONE local client are recognized as one connection by the streaming
+ * import guard and the working-copy cloner. Remote clients are deliberately not
+ * marked.
  *
  * @param client - An `@libsql/client` Client instance
  * @param options - Configuration options
@@ -121,7 +129,7 @@ export async function createLibsqlBackend(
   const backend = createSqliteBackend(db, {
     executionProfile: {
       isSync: false,
-      transactionMode: client.protocol === "file" ? "sql" : "drizzle",
+      transactionMode: isLocalLibsqlClient(client) ? "sql" : "drizzle",
     },
     tables,
     // libSQL ships native vector search in core — no extension to load —

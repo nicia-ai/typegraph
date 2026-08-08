@@ -1,3 +1,4 @@
+import { assertWhereFieldDeclared } from "../constraints";
 import { ConfigurationError } from "../errors/index";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import {
@@ -6,6 +7,7 @@ import {
 } from "../indexes/auto-derive";
 import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
+import { createDataKeyedBag } from "../utils/object";
 import {
   type AnyEdgeType,
   type DeleteBehavior,
@@ -137,16 +139,28 @@ function normalizeEdgeEntry(
 
 /**
  * Normalizes all edge entries to EdgeRegistration.
+ *
+ * The accumulator is a {@link createDataKeyedBag}: its keys are EDGE KIND
+ * NAMES, which are data. `isValidKindName` admits `__proto__` exactly as it
+ * admits `toString`, and a graph literal written with a computed key
+ * (`edges: { ["__proto__"]: knows }`) carries it as an own key — so
+ * `result[name] = …` into a `{}` literal would reach `Object.prototype`'s
+ * `__proto__` setter, reparent the accumulator, and drop the declared edge.
+ * `config.nodes` needs no such treatment: it is passed through by reference,
+ * never re-accumulated.
  */
 function normalizeEdges(
   edges: Record<string, EdgeEntry>,
   allNodeTypes: readonly NodeType[],
 ): Record<string, EdgeRegistration> {
-  const result: Record<string, EdgeRegistration> = {};
+  const result = createDataKeyedBag<EdgeRegistration>();
   for (const [name, entry] of Object.entries(edges)) {
     result[name] = normalizeEdgeEntry(name, entry, allNodeTypes);
   }
-  return result;
+  // Spread at the boundary: this becomes `graph.edges` on the returned (and
+  // publicly reachable) `GraphDef`. See `createDataKeyedBag` in
+  // ../utils/object.ts.
+  return { ...result };
 }
 
 // ============================================================
@@ -353,6 +367,17 @@ export function defineGraph<
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
 ): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
+  return defineGraphUnchecked(config);
+}
+
+function defineGraphUnchecked<
+  const TNodes extends Record<string, NodeRegistration<NodeType>>,
+  const TEdges extends Record<string, EdgeEntry>,
+  const TOntology extends readonly OntologyRelation[],
+  const TIdentity extends GraphIdentityConfig | undefined = undefined,
+>(
+  config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
+): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
   const defaults = {
     onNodeDelete: config.defaults?.onNodeDelete ?? "restrict",
     temporalMode: config.defaults?.temporalMode ?? "current",
@@ -360,6 +385,7 @@ export function defineGraph<
 
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
+  assertUniqueConstraintsAreDeclared(config.nodes);
   // Vector indexes are auto-derived from `embedding()` brands on node
   // schemas (see `autoDeriveVectorIndexes`). Explicit declarations
   // passed via `defineGraph({ indexes })` win on (kind, fieldPath)
@@ -399,11 +425,101 @@ export function defineGraph<
   }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
 }
 
+/**
+ * @internal Marks a graph definition as framework-owned rather than
+ * application-authored.
+ *
+ * It builds exactly what {@link defineGraph} builds — the name records the
+ * caller, it does not reserve anything. There is NO reserved id namespace and
+ * no id validation anywhere: an application may define a graph at any id a
+ * framework-owned graph uses, the merge-provenance sidecar's
+ * `<target>::merge-provenance` convention included. That convention is
+ * protected at RUNTIME instead, by the ownership checks in the single gateway
+ * that opens a sidecar (`openProvenanceStore`), which refuses an id occupied by
+ * anything it cannot prove it owns.
+ */
+export function defineInternalGraph<
+  const TNodes extends Record<string, NodeRegistration<NodeType>>,
+  const TEdges extends Record<string, EdgeEntry>,
+  const TOntology extends readonly OntologyRelation[],
+  const TIdentity extends GraphIdentityConfig | undefined = undefined,
+>(
+  config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
+): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
+  return defineGraphUnchecked(config);
+}
+
 // Sharing one frozen empty Set keeps the canonical-form hash stable
 // across graphs that never deprecate any kinds.
 const EMPTY_DEPRECATED_KINDS: ReadonlySet<string> = Object.freeze(
   new Set<string>(),
 );
+
+// ============================================================
+// Unique Constraint Validation
+// ============================================================
+
+/**
+ * Refuses any uniqueness constraint whose `where` clause names a field its kind
+ * does not declare.
+ *
+ * `defineGraph` is the one gate every constraint passes before a write can
+ * evaluate it — the store reads constraints off `registration.unique`, and the
+ * only other way a registration is built is `mergeGraphExtension`, whose
+ * documents `validateGraphExtension` already refuses on the same grounds
+ * (`UNKNOWN_UNIQUE_WHERE_FIELD`). Validating here therefore covers every write
+ * path at once, instead of at each `checkWherePredicate` call site.
+ *
+ * Typed callers are already guarded by `UniqueConstraintPredicateBuilder`,
+ * which declares exactly the schema's fields; this is the runtime half, for
+ * untyped callers whose typo would otherwise produce a constraint that quietly
+ * never applies.
+ */
+function assertUniqueConstraintsAreDeclared(
+  nodes: Record<string, NodeRegistration>,
+): void {
+  for (const registration of Object.values(nodes)) {
+    const constraints = registration.unique;
+    if (constraints === undefined || constraints.length === 0) continue;
+
+    const rawShape = (registration.type.schema as { shape?: unknown }).shape;
+    const shape =
+      typeof rawShape === "object" && rawShape !== null ?
+        (rawShape as Readonly<Record<string, unknown>>)
+      : undefined;
+
+    for (const constraint of constraints) {
+      // A schema exposing no `.shape` is not an object schema, so there is no
+      // declared-field set to check the clause against. Skipping the check
+      // silently would disable this guard for exactly the callers it was
+      // written for — untyped ones, who are also the only callers who can put
+      // a non-`ZodObject` here (`defineNode` / `defineEdge` and the
+      // graph-extension compiler all produce `z.object(...)`). So the clause is
+      // REFUSED rather than left unvalidated.
+      //
+      // Narrowly: only a constraint that actually carries a `where` is refused.
+      // A plain `unique: [{ fields }]` needs no shape to be meaningful — it
+      // names props by key and evaluates fine against a non-object schema — and
+      // refusing it would break a working, if unusual, untyped graph for no
+      // safety gain.
+      if (shape === undefined) {
+        if (constraint.where === undefined) continue;
+        throw new ConfigurationError(
+          `Unique constraint "${constraint.name}" on node kind "${registration.type.kind}" has a \`where\` clause, but the kind's schema is not an object schema, so its declared fields cannot be checked.`,
+          {
+            kind: registration.type.kind,
+            constraintName: constraint.name,
+          },
+          {
+            suggestion: `Declare the kind with an object schema (\`z.object({ ... })\`) so the \`where\` clause can be validated, or drop the \`where\` clause.`,
+          },
+        );
+      }
+
+      assertWhereFieldDeclared(registration.type.kind, constraint, shape);
+    }
+  }
+}
 
 // ============================================================
 // Index Normalization

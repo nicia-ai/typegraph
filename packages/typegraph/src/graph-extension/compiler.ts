@@ -23,7 +23,7 @@ import {
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { core as coreOntology } from "../ontology/core-meta-edges";
 import { type MetaEdge, type OntologyRelation } from "../ontology/types";
-import { compactUndefined } from "../utils/object";
+import { compactUndefined, createDataKeyedBag } from "../utils/object";
 import {
   type ExtensionArrayItemType,
   type ExtensionArrayProperty,
@@ -246,7 +246,8 @@ function compileEdge(
 function buildObjectSchema(
   properties: Readonly<Record<string, ExtensionPropertyType>>,
 ): ZodObject<ZodRawShape> {
-  const shape: Record<string, ZodType> = {};
+  // Data-keyed: `propertyName` comes from the extension document.
+  const shape = createDataKeyedBag<ZodType>();
   for (const [propertyName, propertyType] of Object.entries(properties)) {
     shape[propertyName] = applyOptional(
       compileProperty(propertyType),
@@ -422,6 +423,10 @@ function makeWherePredicate(
   op: NullCheckOp,
 ): UniqueWhereCallback {
   return (props) => {
+    // Not a data-keyed bag: `props` is the predicate-builder surface, a total
+    // Proxy whose `get` trap answers every declared field name, so a
+    // prototype-named field cannot fall through to `Object.prototype` here.
+    // (An own-key read would be wrong against a get-trap-only Proxy.)
     const builder = props[field];
     if (builder === undefined) {
       // The runtime predicate object is the source of truth — even if the

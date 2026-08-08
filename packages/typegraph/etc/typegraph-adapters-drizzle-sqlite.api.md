@@ -3131,6 +3131,7 @@ type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 type DeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -3843,7 +3844,7 @@ type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: TransactionBackend) => Promise<void>) => Promise<SchemaVersionRow>;
+    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
@@ -3868,14 +3869,10 @@ type GraphBackend = Readonly<{
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
-    ensureIdentityTables?: (this: void, tableNames: Readonly<{
-        identityAssertions: string;
-        recordedIdentityAssertions: string;
-        identityClosure: string;
-        identitySeparation: string;
-    }>, options: Readonly<{
+    ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
+    identityTableDdl?: (this: void, tableNames: IdentityTableNames) => readonly string[];
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -3961,6 +3958,7 @@ type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables"
 type HardDeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -4018,6 +4016,14 @@ type HybridSearchRow = Readonly<{
     fulltextRank?: number;
     fulltextScore?: number;
     snippet?: string;
+}>;
+
+// @public
+type IdentityTableNames = Readonly<{
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
 }>;
 
 // @public
@@ -5285,6 +5291,11 @@ type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable
 
 // @public
 type RowProps = string | Readonly<Record<string, unknown>>;
+
+// @internal
+type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
+    executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+}>;
 
 // @public (undocumented)
 type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
@@ -8695,6 +8706,11 @@ export const uniques: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
 type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
+    fromKind?: string;
+    fromId?: string;
+    toKind?: string;
+    toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;
@@ -8784,6 +8800,7 @@ type VectorCapabilities = Readonly<{
     indexTypes: readonly VectorIndexType[];
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
+    searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // @public
@@ -8820,6 +8837,17 @@ type VectorMetric = "cosine" | "l2" | "inner_product";
 
 // @public (undocumented)
 type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "deleteEmbeddingBatch" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
+
+// @public
+type VectorSearchFrontierTuning = Readonly<{
+    tunable: true;
+    parameter: string;
+    indexType: VectorIndexType;
+    requiresTransactionScope: boolean;
+}> | Readonly<{
+    tunable: false;
+    reason: string;
+}>;
 
 // @public
 type VectorSearchParams = Readonly<{

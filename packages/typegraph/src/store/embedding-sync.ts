@@ -12,6 +12,7 @@ import {
   type ResolvedEmbeddingField,
   resolveEmbeddingFields,
 } from "../core/embedding";
+import { readOwnProperty } from "../utils/object";
 
 // ============================================================
 // Types
@@ -97,7 +98,7 @@ export async function syncEmbeddings(
   }
 
   for (const field of embeddingFields) {
-    const value = props[field.fieldPath];
+    const value = readOwnProperty(props, field.fieldPath);
 
     if (isValidEmbeddingValue(value)) {
       // Upsert the embedding
@@ -160,7 +161,7 @@ export async function syncEmbeddingsBatchForKind(
     const rows: { nodeId: string; embedding: readonly number[] }[] = [];
     const deletionIds: string[] = [];
     for (const item of items) {
-      const value = item.props[field.fieldPath];
+      const value = readOwnProperty(item.props, field.fieldPath);
       if (isValidEmbeddingValue(value)) {
         rows.push({ nodeId: item.nodeId, embedding: value });
       } else if (value === undefined) {

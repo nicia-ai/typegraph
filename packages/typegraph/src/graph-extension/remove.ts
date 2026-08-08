@@ -23,6 +23,7 @@
  */
 import { type GraphDef } from "../core/define-graph";
 import { getTypeName } from "../ontology/types";
+import { createDataKeyedBag } from "../utils/object";
 import {
   KindHasReferentsError,
   type KindReferent,
@@ -135,7 +136,8 @@ export function planRemovals<G extends GraphDef>(
   const removedNodeKindsSet = new Set(removedNodeKinds);
   const explicitlyRemovedEdgeKindsSet = new Set(explicitlyRemovedEdgeKinds);
   const cascadeEdges = new Set<string>();
-  const updatedEdges: Record<string, ExtensionEdgeDef> = {};
+  // Data-keyed: edge kind names read out of the persisted document.
+  const updatedEdges = createDataKeyedBag<ExtensionEdgeDef>();
 
   for (const [edgeName, edgeDocument] of Object.entries(document.edges ?? {})) {
     if (explicitlyRemovedEdgeKindsSet.has(edgeName)) {
@@ -160,7 +162,8 @@ export function planRemovals<G extends GraphDef>(
   }
 
   // Filter nodes — explicit removals are dropped.
-  const updatedNodes: Record<string, ExtensionNodeDef> = {};
+  // Data-keyed: node kind names read out of the persisted document.
+  const updatedNodes = createDataKeyedBag<ExtensionNodeDef>();
   for (const [nodeName, nodeDocument] of Object.entries(document.nodes ?? {})) {
     if (removedNodeKindsSet.has(nodeName)) continue;
     updatedNodes[nodeName] = nodeDocument;
@@ -194,8 +197,15 @@ export function planRemovals<G extends GraphDef>(
 
   const newDocument: GraphExtension = Object.freeze({
     ...(document.version === undefined ? {} : { version: document.version }),
-    ...(Object.keys(updatedNodes).length === 0 ? {} : { nodes: updatedNodes }),
-    ...(Object.keys(updatedEdges).length === 0 ? {} : { edges: updatedEdges }),
+    // Spread at the boundary: these land on the returned extension document,
+    // which is public as `graph.extension`. See `createDataKeyedBag` in
+    // ../utils/object.ts.
+    ...(Object.keys(updatedNodes).length === 0 ?
+      {}
+    : { nodes: { ...updatedNodes } }),
+    ...(Object.keys(updatedEdges).length === 0 ?
+      {}
+    : { edges: { ...updatedEdges } }),
     ...(survivingOntology.length === 0 ? {} : { ontology: survivingOntology }),
     ...(survivingIndexes.length === 0 ? {} : { indexes: survivingIndexes }),
   });
@@ -229,12 +239,14 @@ export function stripGraphExtension<G extends GraphDef>(graph: G): G {
     extensionKindNames(document);
   const runtimeOntologyKeys = buildGraphExtensionOntologyKeySet(document);
 
-  const compileNodes: Record<string, (typeof graph.nodes)[string]> = {};
+  // Data-keyed: registered node kind names.
+  const compileNodes = createDataKeyedBag<(typeof graph.nodes)[string]>();
   for (const [name, registration] of Object.entries(graph.nodes)) {
     if (runtimeNodeNames.has(name)) continue;
     compileNodes[name] = registration;
   }
-  const compileEdges: Record<string, (typeof graph.edges)[string]> = {};
+  // Data-keyed: registered edge kind names.
+  const compileEdges = createDataKeyedBag<(typeof graph.edges)[string]>();
   for (const [name, registration] of Object.entries(graph.edges)) {
     if (runtimeEdgeNames.has(name)) continue;
     compileEdges[name] = registration;
@@ -248,10 +260,12 @@ export function stripGraphExtension<G extends GraphDef>(graph: G): G {
     (index) => index.origin !== "runtime",
   );
 
+  // Spread at the boundary: these become `graph.nodes` / `graph.edges` on the
+  // returned (public) `GraphDef`.
   return Object.freeze({
     ...graph,
-    nodes: compileNodes,
-    edges: compileEdges,
+    nodes: { ...compileNodes },
+    edges: { ...compileEdges },
     ontology: compileOntology,
     indexes: compileIndexes.length === 0 ? undefined : compileIndexes,
     extension: undefined,

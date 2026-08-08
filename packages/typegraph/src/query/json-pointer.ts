@@ -1,5 +1,7 @@
 // JSON Pointer utilities and types.
 
+import { readOwnProperty } from "../utils/object";
+
 export const MAX_JSON_POINTER_DEPTH = 5 as const;
 
 export type JsonPointer = string & { readonly __jsonPointer: unique symbol };
@@ -189,6 +191,13 @@ export function parseJsonPointer(pointer: JsonPointer): readonly string[] {
 /**
  * Resolves the value at a JSON pointer within a plain JS value, returning
  * `undefined` if any segment is missing or traverses a non-object.
+ *
+ * Segments are read by OWN key: the values walked here are data (a props bag
+ * parsed out of a JSON column, a caller's probe record) and the segments are
+ * data too — they come from schema field names. A raw read would answer a
+ * segment named after an `Object.prototype` member ("toString") with the
+ * inherited member instead of `undefined`, so a missing field would resolve to
+ * a function for every value.
  */
 export function resolveJsonPointer(
   value: unknown,
@@ -198,7 +207,7 @@ export function resolveJsonPointer(
   for (const segment of parseJsonPointer(pointer)) {
     if (current === null || current === undefined) return undefined;
     if (typeof current !== "object") return undefined;
-    current = (current as Record<string, unknown>)[segment];
+    current = readOwnProperty(current as Record<string, unknown>, segment);
   }
   return current;
 }

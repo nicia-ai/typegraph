@@ -8,6 +8,7 @@ import { type z } from "zod";
 import {
   type GraphBackend,
   rowPropsToObject,
+  runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
@@ -183,6 +184,11 @@ export type NodeCollectionConfig = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
@@ -312,6 +318,7 @@ export function createNodeCollection<
     executeUpdateWhere: executeNodeUpdateWhere,
     executeUpsertUpdate: executeNodeUpsertUpdate,
     executeDelete: executeNodeDelete,
+    executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
     temporalRowMatcher,
     createQuery,
@@ -562,27 +569,79 @@ export function createNodeCollection<
     ): Promise<Node<N>> {
       const existing = await backend.getNode(graphId, kind, id);
 
-      if (existing) {
-        // Coalesce a value-identical replay: skip the write entirely (no
-        // updateNode, no recorded capture, no revision advance, no hooks) and
-        // resolve with the existing node. See
-        // BaseStoreOptions.coalesceUnchangedUpserts.
+      // Coalesce a value-identical replay: skip the write entirely (no
+      // updateNode, no recorded capture, no revision advance, no hooks) and
+      // resolve with the existing node. See
+      // BaseStoreOptions.coalesceUnchangedUpserts.
+      const coalesces = (row: NonNullable<typeof existing>): boolean => {
         const runDirtyCheck =
           config.upsertDirtyCheck &&
           (() =>
             requireDefined(config.upsertDirtyCheck)(
               kind,
               id,
-              rowPropsToObject(existing.props),
+              rowPropsToObject(row.props),
               data,
             ));
-        if (shouldCoalesceUpsert(existing, options, runDirtyCheck)) {
-          return narrowNode<N>(rowToNode(existing));
-        }
+        return shouldCoalesceUpsert(row, options, runDirtyCheck);
+      };
+
+      // INVARIANT: a coalescing upsert's decision to SKIP is both taken and
+      // executed inside one transaction. The read that justifies the skip and
+      // the skip itself are the same transaction; the skip IS that
+      // transaction's empty commit, and nothing after the commit writes, so
+      // there is no window between deciding and acting for a competitor to
+      // occupy.
+      //
+      // Coalescing must be an optimization, never a semantic: with the flag
+      // off, `executeNodeUpdate` opens a transaction, re-reads, and merges the
+      // caller's props over whatever it finds, so a writer that commits between
+      // the autocommit read above and the write still has the caller's props
+      // applied on top. Deciding "skip" from that earlier read gave a DIFFERENT
+      // answer — the caller was told its props were stored while the store held
+      // the other writer's — so the flag changed the outcome instead of the
+      // cost. Deciding inside the transaction restores the equivalence: a
+      // "write" verdict falls through to the ordinary path, whose own
+      // in-transaction re-read merges over the current row.
+      //
+      // Note the shape difference from a plain re-read: the verdict is computed
+      // where `target` is live, not after the transaction closed. Committing
+      // and THEN deciding would narrow the window rather than close it, which
+      // is what the bulk paths avoid by deciding inside `upsertAll`.
+      //
+      // Only a coalescing store that is ABOUT to skip pays the second read; a
+      // store without the flag, or one whose props differ, keeps the single
+      // read and the single write it always had. On SQLite the transaction is
+      // `BEGIN IMMEDIATE`, which excludes every other writer for its duration;
+      // on a backend without transactions there is nothing to open and the
+      // decision is as fenced as that backend's writes are — which is to say
+      // not at all, matching the atomicity it already cannot offer.
+      type UpsertVerdict =
+        | Readonly<{ verdict: "skip"; row: NodeRow }>
+        | Readonly<{ verdict: "write"; row: NodeRow | undefined }>;
+
+      const decision: UpsertVerdict =
+        existing !== undefined && coalesces(existing) ?
+          await runOptionallyInTransaction(
+            backend,
+            async (target): Promise<UpsertVerdict> => {
+              const confirmed = await target.getNode(graphId, kind, id);
+              return confirmed !== undefined && coalesces(confirmed) ?
+                  { verdict: "skip", row: confirmed }
+                : { verdict: "write", row: confirmed };
+            },
+          )
+        : { verdict: "write", row: existing };
+
+      if (decision.verdict === "skip") {
+        return narrowNode<N>(rowToNode(decision.row));
+      }
+
+      if (decision.row !== undefined) {
         const result = await executeNodeUpdate(
           buildUpsertUpdateInput(kind, id, data, options),
           backend,
-          { clearDeleted: existing.deleted_at !== undefined },
+          { clearDeleted: decision.row.deleted_at !== undefined },
         );
         return narrowNode<N>(result);
       }
@@ -845,10 +904,10 @@ export function createNodeCollection<
         return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const { results, mutations } =
-        backend.capabilities.transactions && "transaction" in backend ?
-          await backend.transaction(async (txBackend) => upsertAll(txBackend))
-        : await upsertAll(backend);
+      const { results, mutations } = await runOptionallyInTransaction(
+        backend,
+        (target) => upsertAll(target),
+      );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real
       // mutations count toward the threshold. A no-op inside a caller
@@ -881,18 +940,7 @@ export function createNodeCollection<
 
     async bulkDelete(ids: readonly NodeId<N>[]): Promise<void> {
       if (ids.length === 0) return;
-      const deleteAll = async (
-        target: GraphBackend | TransactionBackend,
-      ): Promise<void> => {
-        for (const id of ids) {
-          await executeNodeDelete(kind, id, target);
-        }
-      };
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => deleteAll(txBackend));
-        return;
-      }
-      await deleteAll(backend);
+      await executeNodeDeleteBatch(kind, ids, backend);
     },
 
     async findByConstraint(

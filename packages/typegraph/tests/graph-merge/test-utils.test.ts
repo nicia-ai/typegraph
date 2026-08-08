@@ -11,6 +11,7 @@ import { z } from "zod";
 import {
   BaseVersionMismatchError,
   BranchError,
+  InvalidMergeOptionsError,
   MergeConflictError,
   MergeError,
   SimilarityUnavailableError,
@@ -152,10 +153,19 @@ describe("MergeError hierarchy", () => {
     expect(error.suggestion).toContain("Re-branch");
   });
 
+  it("InvalidMergeOptionsError is a user error with a stable code", () => {
+    const error = new InvalidMergeOptionsError("invalid options");
+
+    expect(error).toBeInstanceOf(MergeError);
+    expect(error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
+    expect(error.category).toBe("user");
+  });
+
   it("error codes are mutually distinct", () => {
     const codes = [
       new MergeError("a").code,
       new BranchError("b").code,
+      new InvalidMergeOptionsError("invalid").code,
       new SimilarityUnavailableError("c").code,
       new MergeConflictError("d").code,
       new BaseVersionMismatchError("e").code,

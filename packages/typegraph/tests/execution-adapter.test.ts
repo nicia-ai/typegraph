@@ -258,6 +258,44 @@ describe("sqlite execution adapter", () => {
       });
     });
 
+    it("routes sql.js through Drizzle instead of the compiled path", async () => {
+      // sql.js `prepare()` returns a Statement with bind/step/getAsObject and
+      // NO `all()`, so driving it from the compiled path throws on the first
+      // statement — the advertised sql.js support could never have executed a
+      // query. The client is positively identified and excluded, and Drizzle's
+      // own sql-js session (which drives that statement shape correctly) runs
+      // the query instead.
+      const prepare = vi.fn(() => ({
+        bind: () => true,
+        step: () => false,
+        getAsObject: () => ({}),
+        free: () => true,
+      }));
+      const all = vi.fn(() => [{ value: 1 }]);
+      const db = {
+        $client: {
+          prepare,
+          exec: () => [],
+          run: () => ({}),
+          export: () => new Uint8Array(),
+          getRowsModified: () => 0,
+        },
+        get: () => ({}),
+        all,
+      } as unknown as AnySqliteDatabase;
+
+      const adapter = createSqliteExecutionAdapter(db);
+
+      expect(adapter.profile.supportsCompiledExecution).toBe(false);
+      expect(adapter.executeCompiled).toBeUndefined();
+      await expect(
+        adapter.execute<{ value: number }>(sql`SELECT 1 AS value`),
+      ).resolves.toEqual([{ value: 1 }]);
+      expect(all).toHaveBeenCalledOnce();
+      // The sql.js Statement was never asked for rows it cannot return.
+      expect(prepare).not.toHaveBeenCalled();
+    });
+
     it("keeps detected D1 limits and transaction mode authoritative", () => {
       const db = {
         session: { constructor: { name: "SQLiteD1Session" } },

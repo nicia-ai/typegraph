@@ -542,7 +542,7 @@ export type ContributionProbeResult = Readonly<{
 export type ContributionProbeState = "ready" | "degraded" | "building";
 
 // @public
-export type ContributionRebuildRefusal = "vector-source-unavailable" | "no-drop-ddl" | "no-schema-fence";
+export type ContributionRebuildRefusal = "vector-source-unavailable" | "no-drop-ddl" | "no-schema-fence" | "shared-storage-in-use";
 
 // @public
 export type ContributionRebuildResult = Readonly<{
@@ -1105,6 +1105,7 @@ export type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 type DeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -1314,6 +1315,9 @@ export type Edge<E extends AnyEdgeType = EdgeType, From extends NodeType = NodeT
 
 // @public
 const EDGE_BATCH_READ_NAMES: readonly ["batchFindFrom", "batchFindTo", "batchFindByEndpoints"];
+
+// @public
+export const EDGE_IDENTITY_MISMATCH_CODE = "EDGE_IDENTITY_MISMATCH";
 
 // @public
 const EDGE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findFrom", "findTo", "bulkFindFrom", "bulkFindTo", "findByEndpoints"];
@@ -1817,6 +1821,14 @@ type ExistsSubquery = Readonly<{
     subquery: QueryAst;
     negated: boolean;
 }>;
+
+// @public
+export class ExportStreamCancelledError extends TypeGraphError {
+    constructor(message: string, details?: Readonly<Record<string, unknown>>, options?: Readonly<{
+        cause?: unknown;
+        suggestion?: string;
+    }>);
+}
 
 // @public
 type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
@@ -2343,7 +2355,7 @@ export type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: TransactionBackend) => Promise<void>) => Promise<SchemaVersionRow>;
+    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
@@ -2368,14 +2380,10 @@ export type GraphBackend = Readonly<{
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
-    ensureIdentityTables?: (this: void, tableNames: Readonly<{
-        identityAssertions: string;
-        recordedIdentityAssertions: string;
-        identityClosure: string;
-        identitySeparation: string;
-    }>, options: Readonly<{
+    ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
+    identityTableDdl?: (this: void, tableNames: IdentityTableNames) => readonly string[];
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -2595,6 +2603,7 @@ type GroupBySpec = Readonly<{
 type HardDeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -2874,6 +2883,14 @@ export type IdentitySeparationViolationErrorDetails = Readonly<{
         kind: string;
         id: string;
     }>;
+}>;
+
+// @public
+type IdentityTableNames = Readonly<{
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
 }>;
 
 // @public
@@ -4919,6 +4936,11 @@ export function sameAs(kindA: NodeType, kindBOrIri: NodeType | string): Ontology
 // @public (undocumented)
 export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;
 
+// @internal
+type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
+    executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+}>;
+
 // @public
 export class SchemaContentConflictError extends TypeGraphError {
     constructor(details: SchemaContentConflictErrorDetails, options?: {
@@ -4971,6 +4993,8 @@ type SchemaIntrospector = Readonly<{
     getSharedFieldTypeInfo: (kindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
     getEdgeFieldTypeInfo: (edgeKindName: string, fieldName: string) => FieldTypeInfo | undefined;
     getSharedEdgeFieldTypeInfo: (edgeKindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
+    hasDeclaredField: (kindNames: readonly string[], fieldName: string) => boolean;
+    hasDeclaredEdgeField: (edgeKindNames: readonly string[], fieldName: string) => boolean;
     hasSearchableField: (kindNames: readonly string[]) => boolean;
 }>;
 
@@ -5643,6 +5667,33 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
+    readIdentityAssertionPageAtTarget: (target: GraphBackend | TransactionBackend, mode: "state" | "archival", options: Readonly<{
+        nodeKinds?: readonly string[];
+        includeDeleted?: boolean;
+        after?: string;
+        limit: number;
+    }>) => Promise<Readonly<{
+        assertions: readonly Readonly<{
+            id: string;
+            relation: "same" | "different";
+            a: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            b: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            validFrom: string;
+            validTo?: string | undefined;
+            endedBy?: Readonly<{
+                kind: string;
+                id: string;
+            }> | undefined;
+        }>[];
+        nextAfter?: string;
+        done: boolean;
+    }>>;
     lockIdentityImportTarget: (target: GraphBackend | TransactionBackend) => Promise<void>;
     foldImportedIdentityNodes: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
         kind: string;
@@ -6295,7 +6346,7 @@ type UniqueRow = Readonly<{
 }>;
 
 // @public (undocumented)
-type UnsafeHistoryStoreBackendMember = "clearGraph" | "commitSchemaVersionWithPreflight" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "rebuildContribution" | "repairContributions" | "schemaWriteTransaction" | "transaction" | "trustedImport";
+type UnsafeHistoryStoreBackendMember = "clearGraph" | "commitSchemaVersionWithPreflight" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "identityTableDdl" | "rebuildContribution" | "repairContributions" | "schemaWriteTransaction" | "transaction" | "trustedImport";
 
 // @public
 export class UnsupportedBackendCapabilityError extends TypeGraphError {
@@ -6321,6 +6372,11 @@ export type UpdateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
 type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
+    fromKind?: string;
+    fromId?: string;
+    toKind?: string;
+    toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;
@@ -6430,7 +6486,7 @@ export class ValidationError extends TypeGraphError {
 export type ValidationErrorDetails = Readonly<{
     entityType?: KindEntity;
     kind?: string;
-    operation?: "create" | "update";
+    operation?: "create" | "update" | "delete" | "hardDelete";
     id?: string;
     issues: readonly ValidationIssue[];
 }>;
@@ -6485,6 +6541,7 @@ export type VectorCapabilities = Readonly<{
     indexTypes: readonly VectorIndexType[];
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
+    searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // @public
@@ -6524,6 +6581,17 @@ type VectorMetricType = "cosine" | "l2" | "inner_product";
 
 // @public (undocumented)
 export type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "deleteEmbeddingBatch" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
+
+// @public
+export type VectorSearchFrontierTuning = Readonly<{
+    tunable: true;
+    parameter: string;
+    indexType: VectorIndexType;
+    requiresTransactionScope: boolean;
+}> | Readonly<{
+    tunable: false;
+    reason: string;
+}>;
 
 // @public (undocumented)
 export type VectorSearchHit<N = Node> = Readonly<{

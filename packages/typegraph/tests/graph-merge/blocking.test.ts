@@ -228,6 +228,51 @@ describe("blockNodes unique-constraint short-circuit", () => {
     }
   });
 
+  it("treats a prototype-named unique field as absent, matching enforcement", () => {
+    // constraintSignature must read the node's props by OWN key: a node
+    // without a declared "toString" field inherits Object.prototype.toString,
+    // and a raw read would mint a unique signature for a value the
+    // commit-time uniqueness check (computeUniqueKey, own-key) treats as
+    // missing. Nodes are hand-built because Zod itself reads a bag's absent
+    // prototype-named key through the prototype chain, so such a node cannot
+    // be produced through create().
+    const constraint: UniqueIntrospection = {
+      name: "proto_unique",
+      fields: ["toString"],
+      scope: "kind",
+      collation: "binary",
+    };
+    const noBlock: Pick<ResolveConfig, "block"> = {};
+    const absent = { id: "proto-absent", name: "A" } as unknown as Node<
+      typeof Patient
+    >;
+    const presentX = { id: "proto-x", toString: "X" } as unknown as Node<
+      typeof Patient
+    >;
+    const presentX2 = { id: "proto-x-2", toString: "X" } as unknown as Node<
+      typeof Patient
+    >;
+
+    const buckets = blockNodes([absent, presentX, presentX2], noBlock, [
+      constraint,
+    ]);
+
+    // The absent-field node has NO unique signature — it must fall to the
+    // unblocked bucket, not co-bucket on the inherited function.
+    expect(buckets.get(UNBLOCKED_BUCKET_KEY)?.map((node) => node.id)).toEqual([
+      "proto-absent",
+    ]);
+    // Own "toString" values still bucket normally.
+    const uniqueBuckets = [...buckets.entries()].filter(([key]) =>
+      isUniqueBucketKey(key),
+    );
+    expect(uniqueBuckets).toHaveLength(1);
+    expect(uniqueBuckets[0]?.[1].map((node) => node.id).sort()).toEqual([
+      "proto-x",
+      "proto-x-2",
+    ]);
+  });
+
   it("places a node in BOTH its block bucket and its unique bucket (union, not composite)", async () => {
     const harness = await makePatientStore(patientGraphWithUnique);
     try {

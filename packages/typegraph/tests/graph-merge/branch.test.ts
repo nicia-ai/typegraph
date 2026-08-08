@@ -370,6 +370,60 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(closeCount).toBe(closesBefore + 1);
   });
 
+  it("closes the working copy when the post-clone schema-anchor read fails", async () => {
+    const { baseStore } = await seedBase();
+    const fixture = await entry.make();
+    cleanups.push(fixture.cleanup);
+
+    // The clone SUCCEEDS, so the strategy's own cleanup is out of the picture
+    // and the working copy's backend belongs to `branch()` from that moment on
+    // ("only the success path hands the backend to the caller, who then owns
+    // its lifecycle"). The very next step — reading the clone's active schema
+    // row for the drift anchor — then fails. `branch()` reports failures as
+    // `err(...)`, so the caller never receives the store and has no handle to
+    // close: anything `branch()` does not close here leaks a live engine (a
+    // PGlite instance, a file handle, a pool) for the rest of the process.
+    let closeCount = 0;
+    let anchorReadFails = false;
+    const failure = new Error("schema anchor read boom");
+    const tracked: GraphBackend = new Proxy(fixture.backend, {
+      get(target, property, _receiver) {
+        if (property === "close") {
+          return async () => {
+            closeCount += 1;
+            await target.close();
+          };
+        }
+        if (property === "getActiveSchema" && anchorReadFails) {
+          return () => Promise.reject(failure);
+        }
+        return getBackendProperty(target, property);
+      },
+    });
+
+    const result = await branch<G>(
+      baseStore,
+      () => Promise.reject(new Error("makeBackend must not be called")),
+      undefined,
+      {
+        create: async (source) => {
+          const [store] = await createStoreWithSchema(source.graph, tracked);
+          // `create()` resolving IS the ownership transfer, so arm the failure
+          // exactly there — the clone's own reads must succeed.
+          anchorReadFails = true;
+          return store;
+        },
+      },
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error.name).toBe("BranchError");
+      expect(result.error.cause).toBe(failure);
+    }
+    expect(closeCount).toBe(1);
+  });
+
   it("accepts an explicit working-copy strategy override", async () => {
     const { baseStore, aliceId } = await seedBase();
     const strategy = cloneWorkingCopyStrategy<G>(() => makeBackend());

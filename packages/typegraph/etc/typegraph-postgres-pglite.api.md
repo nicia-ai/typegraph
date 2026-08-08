@@ -517,6 +517,7 @@ type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 type DeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -1453,7 +1454,7 @@ type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: TransactionBackend) => Promise<void>) => Promise<SchemaVersionRow>;
+    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
@@ -1478,14 +1479,10 @@ type GraphBackend = Readonly<{
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
-    ensureIdentityTables?: (this: void, tableNames: Readonly<{
-        identityAssertions: string;
-        recordedIdentityAssertions: string;
-        identityClosure: string;
-        identitySeparation: string;
-    }>, options: Readonly<{
+    ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
+    identityTableDdl?: (this: void, tableNames: IdentityTableNames) => readonly string[];
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -1616,6 +1613,7 @@ type GroupBySpec = Readonly<{
 type HardDeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -1810,6 +1808,14 @@ export type IdentityReadFacade<G extends GraphDef> = Readonly<{
 
 // @public
 export type IdentityRelation = "same" | "different";
+
+// @public
+type IdentityTableNames = Readonly<{
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
+}>;
 
 // @public
 type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
@@ -3223,6 +3229,11 @@ type ResolvePathAlias<PC, A extends string> = PC extends string ? PC : PC extend
 // @public
 type RowProps = string | Readonly<Record<string, unknown>>;
 
+// @internal
+type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
+    executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+}>;
+
 // @public
 type SchemaDiff = Readonly<{
     fromVersion: number;
@@ -3258,6 +3269,8 @@ type SchemaIntrospector = Readonly<{
     getSharedFieldTypeInfo: (kindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
     getEdgeFieldTypeInfo: (edgeKindName: string, fieldName: string) => FieldTypeInfo | undefined;
     getSharedEdgeFieldTypeInfo: (edgeKindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
+    hasDeclaredField: (kindNames: readonly string[], fieldName: string) => boolean;
+    hasDeclaredEdgeField: (edgeKindNames: readonly string[], fieldName: string) => boolean;
     hasSearchableField: (kindNames: readonly string[]) => boolean;
 }>;
 
@@ -3798,6 +3811,33 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
+    readIdentityAssertionPageAtTarget: (target: GraphBackend | TransactionBackend, mode: "state" | "archival", options: Readonly<{
+        nodeKinds?: readonly string[];
+        includeDeleted?: boolean;
+        after?: string;
+        limit: number;
+    }>) => Promise<Readonly<{
+        assertions: readonly Readonly<{
+            id: string;
+            relation: "same" | "different";
+            a: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            b: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            validFrom: string;
+            validTo?: string | undefined;
+            endedBy?: Readonly<{
+                kind: string;
+                id: string;
+            }> | undefined;
+        }>[];
+        nextAfter?: string;
+        done: boolean;
+    }>>;
     lockIdentityImportTarget: (target: GraphBackend | TransactionBackend) => Promise<void>;
     foldImportedIdentityNodes: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
         kind: string;
@@ -4346,6 +4386,11 @@ type UniqueRow = Readonly<{
 type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
+    fromKind?: string;
+    fromId?: string;
+    toKind?: string;
+    toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;
@@ -4467,6 +4512,7 @@ type VectorCapabilities = Readonly<{
     indexTypes: readonly VectorIndexType[];
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
+    searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // @public
@@ -4506,6 +4552,17 @@ type VectorMetricType = "cosine" | "l2" | "inner_product";
 
 // @public (undocumented)
 type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "deleteEmbeddingBatch" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
+
+// @public
+type VectorSearchFrontierTuning = Readonly<{
+    tunable: true;
+    parameter: string;
+    indexType: VectorIndexType;
+    requiresTransactionScope: boolean;
+}> | Readonly<{
+    tunable: false;
+    reason: string;
+}>;
 
 // @public (undocumented)
 type VectorSearchHit<N = Node> = Readonly<{

@@ -1,11 +1,13 @@
+export { snapshotExportContention } from "../backend/transaction-resource";
 export type {
   GraphBackend,
+  NodeRow,
   TransactionBackend,
   TransactionOptions,
 } from "../backend/types";
 export { computeUniqueKey } from "../constraints";
 export {
-  defineGraph,
+  defineInternalGraph,
   getEdgeKinds,
   getNodeKinds,
   type GetNodeType,
@@ -15,19 +17,25 @@ export {
 export { defineNode } from "../core/node";
 export type { EdgeId, JsonValue, NodeId, NodeType } from "../core/types";
 export {
+  ConfigurationError,
   IdentityContradictionError,
   NodeNotFoundError,
   TypeGraphError,
   type TypeGraphErrorOptions,
 } from "../errors";
 export type { IdentityTransferAssertion } from "../identity/service";
-export { exportGraphStream } from "../interchange/export";
-export { importGraphStream } from "../interchange/import";
+export { exportGraph, exportGraphStream } from "../interchange/export";
+export { importGraph, importGraphStream } from "../interchange/import";
 export { computeTransitiveClosure, isReachable } from "../ontology/closures";
 export {
   META_EDGE_EQUIVALENT_TO,
   META_EDGE_SAME_AS,
 } from "../ontology/constants";
+// The provenance ownership probe needs graph-scoped raw SQL to look for rows
+// under a graph id whose schema was never registered.
+export { createSqlSchema } from "../query/compiler/schema";
+export { sql } from "../query/sql-fragment";
+export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 export { sortedReplacer } from "../schema/canonical";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
 export {

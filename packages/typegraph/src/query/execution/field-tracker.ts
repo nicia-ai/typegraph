@@ -9,6 +9,7 @@
 import type { KindEntity } from "../../core/types";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../../system-fields";
 import { compareStrings } from "../../utils/compare";
+import { createDataKeyedBag } from "../../utils/object";
 import { mergeEdgeKinds, type SelectiveField, type ValueType } from "../ast";
 import { type QueryBuilderState } from "../builder/types";
 import {
@@ -42,6 +43,20 @@ export type TrackingContextOptions = Readonly<{
 // Constants
 // ============================================================
 
+/**
+ * Names the tracking proxies answer with the inherited `Object.prototype`
+ * member, so a select callback that stringifies or type-tests an alias object
+ * during tracking behaves like it would against a real result object.
+ *
+ * A name on this list is a prototype member only while the schema does NOT
+ * declare a field by that name — `z.object({ toString: z.string() })` is an
+ * ordinary schema, and its field is ordinary data. Membership is therefore
+ * decided by {@link SchemaIntrospector.hasDeclaredField}, the same own-key
+ * question `hasOwnKey` answers everywhere else; a declared name never reaches
+ * this list. Classifying it here instead left the field untracked, so the
+ * selective projection never selected it and the guarded result proxy served
+ * the inherited member in place of the stored value.
+ */
 const OBJECT_PROTOTYPE_PROPERTIES = new Set<string>([
   "__proto__",
   "constructor",
@@ -86,14 +101,17 @@ export function createTrackingContext(
   tracker: FieldAccessTracker,
   options: TrackingContextOptions,
 ): Record<string, unknown> {
-  const context: Record<string, unknown> = {
-    [state.startAlias]: createNodeTrackingProxy(
-      state.startAlias,
-      state.startKinds,
-      tracker,
-      options,
-    ),
-  };
+  // Data-keyed: alias names chosen by the caller's query. The tracking context
+  // must be keyed identically to the real one `buildSelectContext` produces —
+  // a tracking pass that drops an alias the execution pass keeps (or the
+  // reverse) is exactly the probe-vs-engine divergence to avoid.
+  const context = createDataKeyedBag<unknown>();
+  context[state.startAlias] = createNodeTrackingProxy(
+    state.startAlias,
+    state.startKinds,
+    tracker,
+    options,
+  );
 
   for (const traversal of state.traversals) {
     const edgeKindNames = mergeEdgeKinds(traversal);
@@ -149,9 +167,23 @@ function createNodeTrackingProxy(
       get: (_, property: string | symbol) => {
         if (typeof property === "symbol") return;
         if (property === "then") return;
-        if (property === "toJSON") return;
+        // `toJSON` is exempted so an incidental `JSON.stringify` of the
+        // tracking context does not record a phantom field. It is NOT on
+        // `Object.prototype`, but it earns the same rule as the members that
+        // are: a DECLARED field named `toJSON` is stored data, and exempting
+        // it would leave it untracked — the selective projection would omit
+        // the column the select callback just read.
+        if (
+          property === "toJSON" &&
+          !options.schemaIntrospector.hasDeclaredField(kindNames, property)
+        ) {
+          return;
+        }
 
-        if (OBJECT_PROTOTYPE_PROPERTIES.has(property)) {
+        if (
+          OBJECT_PROTOTYPE_PROPERTIES.has(property) &&
+          !options.schemaIntrospector.hasDeclaredField(kindNames, property)
+        ) {
           if (property === "constructor") return Object;
           if (property === "__proto__") return Object.prototype;
           return Reflect.get(Object.prototype, property) as unknown;
@@ -192,9 +224,25 @@ function createEdgeTrackingProxy(
       get: (_, property: string | symbol) => {
         if (typeof property === "symbol") return;
         if (property === "then") return;
-        if (property === "toJSON") return;
+        // See `createNodeTrackingProxy`: a DECLARED `toJSON` is stored data and
+        // must be tracked, not exempted.
+        if (
+          property === "toJSON" &&
+          !options.schemaIntrospector.hasDeclaredEdgeField(
+            edgeKindNames,
+            property,
+          )
+        ) {
+          return;
+        }
 
-        if (OBJECT_PROTOTYPE_PROPERTIES.has(property)) {
+        if (
+          OBJECT_PROTOTYPE_PROPERTIES.has(property) &&
+          !options.schemaIntrospector.hasDeclaredEdgeField(
+            edgeKindNames,
+            property,
+          )
+        ) {
           if (property === "constructor") return Object;
           if (property === "__proto__") return Object.prototype;
           return Reflect.get(Object.prototype, property) as unknown;

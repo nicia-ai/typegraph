@@ -635,6 +635,7 @@ type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 type DeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -1615,7 +1616,7 @@ type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: TransactionBackend) => Promise<void>) => Promise<SchemaVersionRow>;
+    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
@@ -1640,14 +1641,10 @@ type GraphBackend = Readonly<{
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
-    ensureIdentityTables?: (this: void, tableNames: Readonly<{
-        identityAssertions: string;
-        recordedIdentityAssertions: string;
-        identityClosure: string;
-        identitySeparation: string;
-    }>, options: Readonly<{
+    ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
+    identityTableDdl?: (this: void, tableNames: IdentityTableNames) => readonly string[];
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -1789,6 +1786,7 @@ type GroupBySpec = Readonly<{
 type HardDeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -1971,6 +1969,14 @@ type IdentityReadFacade<G extends GraphDef> = Readonly<{
 
 // @public
 type IdentityRelation = "same" | "different";
+
+// @public
+type IdentityTableNames = Readonly<{
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
+}>;
 
 // @public
 type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
@@ -2206,6 +2212,15 @@ type InternalWeaklyConnectedComponentsOptions<G extends GraphDef> = InternalTemp
 
 // @public (undocumented)
 type InternalWeightedShortestPathOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<WeightedShortestPathOptions<G>, keyof TemporalAlgorithmOptions>;
+
+// @public
+export class InvalidMergeOptionsError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_INVALID_OPTIONS";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
 
 // @public (undocumented)
 type IsDynamicEdgeType<E> = E extends Readonly<{
@@ -2495,6 +2510,7 @@ export function merge<G extends GraphDef>(store: Store<G>, branches: readonly Gr
 // @public
 export const MERGE_ERROR_CODES: {
     readonly merge: "GRAPH_MERGE_ERROR";
+    readonly invalidOptions: "GRAPH_MERGE_INVALID_OPTIONS";
     readonly branch: "GRAPH_MERGE_BRANCH_ERROR";
     readonly similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE";
     readonly conflict: "GRAPH_MERGE_CONFLICT";
@@ -2533,6 +2549,8 @@ export type MergedCounts = Readonly<{
 // @public
 export class MergeError extends TypeGraphError {
     constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    protected static readonly errorCategory: TypeGraphErrorOptions["category"];
 }
 
 // @public
@@ -2550,7 +2568,7 @@ export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
     forkPoint: Store<G>;
     target: Store<G>;
     branches: readonly GraphBranch<G>[];
-    options?: MergeOptions<G>;
+    options?: Omit<MergeOptions<G>, "target">;
 }>;
 
 // @public
@@ -3600,6 +3618,11 @@ export type Result<T, E = Error> = Readonly<{
 // @public
 type RowProps = string | Readonly<Record<string, unknown>>;
 
+// @internal
+type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
+    executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+}>;
+
 // @public
 type SchemaDiff = Readonly<{
     fromVersion: number;
@@ -3635,6 +3658,8 @@ type SchemaIntrospector = Readonly<{
     getSharedFieldTypeInfo: (kindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
     getEdgeFieldTypeInfo: (edgeKindName: string, fieldName: string) => FieldTypeInfo | undefined;
     getSharedEdgeFieldTypeInfo: (edgeKindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
+    hasDeclaredField: (kindNames: readonly string[], fieldName: string) => boolean;
+    hasDeclaredEdgeField: (edgeKindNames: readonly string[], fieldName: string) => boolean;
     hasSearchableField: (kindNames: readonly string[]) => boolean;
 }>;
 
@@ -4191,6 +4216,33 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
+    readIdentityAssertionPageAtTarget: (target: GraphBackend | TransactionBackend, mode: "state" | "archival", options: Readonly<{
+        nodeKinds?: readonly string[];
+        includeDeleted?: boolean;
+        after?: string;
+        limit: number;
+    }>) => Promise<Readonly<{
+        assertions: readonly Readonly<{
+            id: string;
+            relation: "same" | "different";
+            a: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            b: Readonly<{
+                kind: string;
+                id: string;
+            }>;
+            validFrom: string;
+            validTo?: string | undefined;
+            endedBy?: Readonly<{
+                kind: string;
+                id: string;
+            }> | undefined;
+        }>[];
+        nextAfter?: string;
+        done: boolean;
+    }>>;
     lockIdentityImportTarget: (target: GraphBackend | TransactionBackend) => Promise<void>;
     foldImportedIdentityNodes: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
         kind: string;
@@ -4763,6 +4815,11 @@ export function unwrap<T, E>(result: Result<T, E>): T;
 type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
+    fromKind?: string;
+    fromId?: string;
+    toKind?: string;
+    toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;
@@ -4897,6 +4954,7 @@ type VectorCapabilities = Readonly<{
     indexTypes: readonly VectorIndexType[];
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
+    searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // @public
@@ -4936,6 +4994,17 @@ type VectorMetricType = "cosine" | "l2" | "inner_product";
 
 // @public (undocumented)
 type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "deleteEmbeddingBatch" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
+
+// @public
+type VectorSearchFrontierTuning = Readonly<{
+    tunable: true;
+    parameter: string;
+    indexType: VectorIndexType;
+    requiresTransactionScope: boolean;
+}> | Readonly<{
+    tunable: false;
+    reason: string;
+}>;
 
 // @public (undocumented)
 type VectorSearchHit<N = Node> = Readonly<{

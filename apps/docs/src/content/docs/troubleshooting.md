@@ -501,7 +501,7 @@ it. Start at the top of this table and stop as soon as the projection is
 | --- | --- | --- | --- |
 | 1. Probe | `store.probeContributions()` | Nothing | You want to know whether search is coherent right now. Safe on a read path, on a replica, and under a least-privilege role |
 | 2. Repair | `store.repairContributions()` | Marker rows and idempotent `CREATE ... IF NOT EXISTS` | The probe reports `degraded` and `verifyContributions()` says `missing-marker` or `failed-materialization` — storage is intact and only the bookkeeping is wrong |
-| 3. Rebuild | `store.rebuildContribution("fulltext")` | **Drops and recreates storage** | `verifyContributions()` says `stale` or `orphaned-marker`, which repair reports as `requires-rebuild` |
+| 3. Rebuild | `store.rebuildContribution("fulltext")` | **Deletes and refills this graph's rows**; drops and recreates the shared storage only when no other graph has rows in it | `verifyContributions()` says `stale` or `orphaned-marker`, which repair reports as `requires-rebuild` |
 
 **Rung 1 — the read-only probe.** One entry per search projection the
 graph declares, so a caller can decide whether to issue a query without
@@ -571,30 +571,75 @@ await adminStore.rebuildContribution("fulltext");
 // createStoreWithSchema() now opens normally again.
 ```
 
-It drops the storage, recreates it from the current `createDdl`,
-reconstructs the content from the node rows, and stamps the marker — all
-in one transaction under the same per-graph fence as a schema commit. An
-interrupted rebuild therefore rolls back to the state it started from
-rather than leaving storage attested but empty.
+**The rebuild is scoped to the graph you call it on.** The fulltext
+projection is one physical table holding every graph's rows keyed by
+`graph_id`, so the default teardown is the same
+`DELETE ... WHERE graph_id` that `clear()` issues — this graph's index
+content and nothing else — followed by the current `createDdl`, a refill
+from this graph's node rows, and the marker stamp, all in one transaction
+under the same per-graph fence as a schema commit. That path takes **no
+table lock at all**: the delete is transactional and touches only rows this
+graph owns, so it never makes another graph's writers wait. An interrupted
+rebuild rolls back to the state it started from rather than leaving storage
+attested but empty.
 
-What that costs, and why it is still the right trade: the transaction is
-held for the whole refill, and on PostgreSQL the `DROP TABLE` takes an
-`ACCESS EXCLUSIVE` lock the rebuild keeps until commit. That blocks more
-than searches — every write to a kind with `searchable()` fields
-maintains the same table, so those block too. On SQLite the rebuild holds
-the write lock for the same span, so concurrent writers wait out their
-busy timeout and then fail. Run it in a maintenance window on a large
-graph.
+It escalates to dropping and recreating that shared table only when the
+table holds no other graph's rows — the case where the drop takes nothing
+with it. That escalation is the one repair for storage provisioned at a
+shape the current DDL no longer produces, and because the DDL it issues is
+database-global it runs under a database-scoped advisory lock
+(`typegraph:contribution-ddl`; a no-op on SQLite, whose fence already holds
+the single writer slot) rather than only the per-graph fence.
+
+**When the shared table is in use by another graph, a `stale` rebuild
+refuses.** Only recreating the storage repairs a `stale` shape, so if that
+storage still holds rows belonging to other graphs the call throws
+`ContributionRebuildUnsupportedError` with
+`reason: "shared-storage-in-use"` rather than destroying content it cannot
+reconstruct — those rows are derived from other graphs' nodes through their
+own schemas — or re-stamping this graph's marker over a physical shape
+nothing verified. `details.otherGraphIds` names the graphs that are in the
+way. The sanctioned repair is a maintenance window with every graph on that
+database offline: drop the table out of band, then run
+`store.rebuildContribution("fulltext")` once per graph, each run recreating
+the table from the current DDL and refilling that graph's own rows.
+
+What the *recreate* path costs, and why it is still the right trade: the
+transaction is held for the whole refill, and on PostgreSQL the rebuild
+takes `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE` on the shared table and
+keeps it until commit. It takes that lock **before** deciding to drop, not
+merely as a side effect of the `DROP TABLE` — the verdict "no other graph
+has rows here, so dropping this destroys nothing" is only as good as the
+exclusion it was computed under. Ordinary fulltext writes take no advisory
+lock, so the contribution DDL lock excludes other *rebuilds* and nothing
+else: a neighbouring graph's `INSERT` could commit between an unlocked
+probe and the drop, and be destroyed by a rebuild that had already decided
+it was alone. The sequence is therefore probe → `ACCESS EXCLUSIVE` →
+re-probe, and only the re-probe's verdict authorizes a drop. A verdict that
+flips under the lock loses the drop and keeps the lock (PostgreSQL holds
+locks until commit), which is the rare and safe direction to be wrong in.
+The cheap unlocked probe ahead of it exists only to keep the graph-scoped
+path off the relation lock, and can only err toward keeping the table.
+
+The window blocks more than searches — every write to a kind with
+`searchable()` fields maintains the same table, so those block too, for
+every graph on the database. On SQLite the rebuild holds the write lock for
+the same span, so concurrent writers wait out their busy timeout and then
+fail. Run it in a maintenance window on a large graph.
+
 When the storage *shape* is fine and only the content is stale — a field
 gained `searchable()` after data was written, or a `language` changed —
 `store.search.rebuildFulltext()` is the incremental, resumable pass that
 transacts per page instead.
 
-Nothing is permanently lost for fulltext: the searchable text is derived
-from node properties TypeGraph already stores. Nodes whose stored `props`
-cannot be read as an object are counted in `skipped` and are absent from
-the rebuilt index; `store.search.rebuildFulltext()` reports their ids
-individually.
+Nothing is permanently lost for the graph you rebuild: its searchable text
+is derived from node properties TypeGraph already stores. Other graphs on
+the same database are not in reach either — their rows are kept by the
+graph-scoped delete, and the drop that would take them never runs (a
+`stale` shape that could only be repaired by that drop refuses instead).
+Nodes whose stored `props` cannot be read as an object are counted in
+`skipped` and are absent from the rebuilt index;
+`store.search.rebuildFulltext()` reports their ids individually.
 
 **Vector contributions cannot be rebuilt, and the call refuses rather
 than trying.** `rebuildContribution("vector")` always throws

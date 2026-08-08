@@ -794,6 +794,12 @@ interactive runner), so `store.transaction()` is non-atomic on D1. See
 [Limitations](/limitations) for details. For a transactional Cloudflare
 SQLite store, use **Durable Objects** (below) instead.
 
+For the same reason, a write guarded by a **declared constraint** — edge
+cardinality other than `many`, a `disjointWith` axiom, a shared-scope unique, or
+`getOrCreateByEndpoints`'s create leg — is refused on D1 with
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED` rather than committed unfenced. See
+[Declared constraints require `transactions`](#declared-constraints-require-transactions).
+
 ## Cloudflare Durable Objects (SQLite)
 
 A store backed by `drizzle(ctx.storage)` inside a Durable Object is
@@ -892,6 +898,42 @@ open: a standby refuses the read-write transaction itself, and a role without
 as `UnsupportedBackendCapabilityError`, with the PostgreSQL error retained as
 its `cause`.
 
+### Declared constraints require `transactions`
+
+A **constrained write** — one whose correctness rests on a check-then-write that
+no database key repeats at write time — runs its probe and its write under one
+per-graph mutual exclusion. That fence is a transaction-scoped construct on both
+dialects: SQLite's `BEGIN IMMEDIATE` writer slot, PostgreSQL's
+`pg_advisory_xact_lock` (which outside a transaction is taken and dropped inside
+its own implicit single-statement one, excluding nothing). A backend reporting
+`capabilities.transactions: false` can supply neither, so such a write is
+**refused** rather than run unfenced — a constraint enforced only when nothing
+races is the defect the fence exists to close.
+
+The refusal is a `ConfigurationError` with `details.code`
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, and `details.constraint` naming which
+class needed the fence, because the way forward differs per class:
+
+| `details.constraint` | The write that needs the fence | Way forward without a transactional backend |
+| --- | --- | --- |
+| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive` | Declare the edge `cardinality: "many"` and enforce the limit in application code |
+| `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` (single or bulk) taking its create leg — the match key is backed by no database key | Use `create` with a caller-chosen id, whose uniqueness the edges primary key enforces |
+| `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom | Drop the axiom and keep ids distinct across those kinds yourself |
+| `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind | Scope the constraint to `"kind"`, which the uniques primary key enforces on its own |
+
+This affects **Cloudflare D1**, **`drizzle-orm/neon-http`**, and any SQLite
+backend built with `transactionMode: "none"`. Durable Objects are unaffected —
+`do-sqlite` reports `capabilities.transactions: true` and fences normally.
+
+Unconstrained writes on those backends are untouched and keep working exactly as
+before: a `cardinality: "many"` edge created, updated and deleted; any node
+delete, including one whose kind participates in a disjointness axiom (a delete
+re-derives no cross-kind verdict); a node whose uniques are all `scope: "kind"`;
+and a `getOrCreateByEndpoints` that *finds* an existing edge, or resurrects a
+`many` one — that resurrection is an id-keyed `UPDATE` that re-derives nothing.
+The bulk `getOrCreateByEndpoints` form fences its whole batch, so it refuses on
+those backends whatever the outcome would have been.
+
 ### SQLite ↔ PostgreSQL parity
 
 The **query language is fully portable** between SQLite and PostgreSQL. Predicates (comparison, string/`ILIKE`,
@@ -913,7 +955,7 @@ TypeGraph choosing separate query semantics per backend:
 | Vector index type `ivfflat`                            | ✗                                                 | ✓                                          | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`)                       |
 | Filtered approximate search **guarantees** a full page | ✓ `sqlite-vec` / ✗ `libsql-native`                | ✗ (`pgvector` recovers, but is bounded)    | Only `sqlite-vec` guarantees it; the others can return **fewer than `limit`** rows under heavy filtering — see below      |
 | Per-query fulltext `language` override                 | ✗                                                 | ✓                                          | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query               |
-| HNSW `efSearch` query tuning                           | ✗                                                 | ✓                                          | Silent no-op on SQLite; Postgres applies `hnsw.ef_search`. Performance only — same results                                |
+| HNSW `efSearch` query tuning                           | ✗                                                 | ✓ transactional HNSW drivers               | Refused, never ignored: `UnsupportedBackendCapabilityError` with `details.capability` `vector.searchFrontierTuning` on **any** SQLite backend (vector and hybrid alike — neither `sqlite-vec`'s `vec0` KNN nor `libsql-native`'s DiskANN has a per-search frontier), and on transaction-less Postgres or a non-HNSW slot |
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
 | TypeGraph Identity Profile                             | ✓ transactional drivers                           | ✓ transactional drivers                    | Enabled graphs fail fast on non-atomic drivers; identity-disabled graphs retain their ordinary path                      |
 
@@ -955,8 +997,15 @@ filter to every row; or declare the field's index as `"none"` so it is always br
 
 Vector and fulltext capabilities are populated from the configured strategy, so the matrix above reflects the
 bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`). A custom strategy advertising
-different `metrics`/`indexTypes`/`filteredApproximateSearch` shifts these rows accordingly — always check
-`backend.capabilities` at runtime rather than hard-coding the dialect.
+different `metrics`/`indexTypes`/`filteredApproximateSearch`/`searchFrontierTuning` shifts these rows accordingly —
+always check `backend.capabilities` at runtime rather than hard-coding the dialect.
+
+`searchFrontierTuning` is **required** on a vector strategy's capabilities, so a strategy must state whether it has a
+per-search ANN frontier knob rather than inheriting silence. It is a discriminated union: `{ tunable: true, parameter,
+indexType, requiresTransactionScope }` names the engine parameter `efSearch` maps to (`pgvector`: `hnsw.ef_search`, on
+an `hnsw` slot, needing a transaction to scope it), while `{ tunable: false, reason }` names why the engine has no such
+knob and is what makes `efSearch` a typed refusal there. A hand-written strategy that omits the field no longer
+compiles.
 
 Both bundled backends advertise `windowFunctions: true`. Vector, fulltext, and hybrid relevance-ranking
 queries use `ROW_NUMBER()` internally and throw `ConfigurationError` before SQL generation if a custom backend profile
@@ -1124,19 +1173,27 @@ reopen it through a managed factory before resuming version-fenced writes.
 - **`store.probeContributions()` is the read-only readiness check;
   `store.rebuildContribution()` is the destructive last resort.**
   The two bracket `repairContributions()` into one escalation ladder:
-  probe (writes nothing) → repair (non-destructive) → rebuild (drops and
-  recreates storage). The probe reports one `ready` / `degraded` entry per
+  probe (writes nothing) → repair (non-destructive) → rebuild
+  (destructive, but scoped to the calling graph). The probe reports one
+  `ready` / `degraded` entry per
   search projection and is safe on a read path, on a replica, and under
   the least-privilege role — it shares the detection logic of the other
   two rather than reimplementing it, so it cannot disagree with the gate
   the hot path actually consults. The rebuild is the only repair for a
   `stale` contribution, whose table exists at a shape the current
-  `createDdl` no longer produces; it runs drop → recreate → refill →
-  stamp inside one transaction under the schema-write fence, and refuses
+  `createDdl` no longer produces; it deletes and refills only the calling
+  graph's rows in the shared fulltext table, escalating to drop → recreate
+  when that table holds no other graph's rows (under a database-scoped DDL
+  advisory lock, since that DDL is database-global), and runs the whole
+  sequence inside one transaction under the schema-write fence. It refuses
   with `ContributionRebuildUnsupportedError` for vector storage, whose
-  embeddings exist only in the table it would drop. Run rebuilds through
+  embeddings exist only in the table it would drop
+  (`reason: "vector-source-unavailable"`), and for a `stale` shape whose
+  storage still holds other graphs' rows
+  (`reason: "shared-storage-in-use"`, naming them in
+  `details.otherGraphIds`). Run rebuilds through
   the DDL-capable migration role, in a maintenance window: the
-  transaction is held for the whole refill, and on PostgreSQL the drop's
+  transaction is held for the whole refill, and on PostgreSQL a drop's
   `ACCESS EXCLUSIVE` lock blocks both searches and writes to any kind with
   `searchable()` fields until it commits. Reach it from a `createStore()`
   Store — the managed factory's boot step refuses to open while a

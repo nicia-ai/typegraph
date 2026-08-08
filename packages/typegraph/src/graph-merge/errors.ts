@@ -16,6 +16,7 @@ import { TypeGraphError } from "./typegraph-internal";
  */
 export const MERGE_ERROR_CODES = {
   merge: "GRAPH_MERGE_ERROR",
+  invalidOptions: "GRAPH_MERGE_INVALID_OPTIONS",
   branch: "GRAPH_MERGE_BRANCH_ERROR",
   similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE",
   conflict: "GRAPH_MERGE_CONFLICT",
@@ -59,13 +60,28 @@ function toTypeGraphErrorOptions(
  * for the orchestrator (comparison-ceiling overruns, commit failures, etc.).
  */
 export class MergeError extends TypeGraphError {
+  protected static readonly errorCategory: TypeGraphErrorOptions["category"] =
+    "system";
+
   constructor(message: string, options: MergeErrorOptions = {}) {
+    const errorClass = new.target;
     super(
       message,
       MERGE_ERROR_CODES.merge,
-      toTypeGraphErrorOptions("system", options),
+      toTypeGraphErrorOptions(errorClass.errorCategory, options),
     );
     this.name = "MergeError";
+  }
+}
+
+/** Raised when caller-supplied merge options are invalid or unsupported. */
+export class InvalidMergeOptionsError extends MergeError {
+  protected static override readonly errorCategory = "user";
+  override readonly code = MERGE_ERROR_CODES.invalidOptions;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "InvalidMergeOptionsError";
   }
 }
 

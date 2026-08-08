@@ -15,11 +15,14 @@ import {
   defineGraph,
   defineNode,
   type GraphBackend,
+  renderPostgres,
   type TransactionBackend,
 } from "../src";
+import { separationRebuildRequired } from "../src/identity/separation";
 import { MAX_REFERENCE_CHUNK_SIZE } from "../src/identity/sql-target";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { type SqlFragment } from "../src/query/sql-fragment";
+import { buildKindRegistry } from "../src/registry";
 import { requireDefined } from "../src/utils/presence";
 import { createInitializedStore, createTestBackend } from "./test-utils";
 
@@ -148,5 +151,88 @@ describe("cost of a current different-ness read", () => {
       assertionStatements: 0,
       separationStatements: 1,
     });
+  });
+
+  it("pays one bounded ledger probe only where an empty answer could be an unfilled relation", async () => {
+    const { backend, counts, reset } = relationCountingBackend();
+    const store = await createInitializedStore(graph, backend);
+    const first = await store.nodes.Person.create({ name: "First" });
+    const second = await store.nodes.Person.create({ name: "Second" });
+
+    // This graph holds NO separation row, so "no row for this pair" cannot be
+    // told from "this graph's fill never ran" by the relation alone. The
+    // decision costs one `LIMIT 1` against the ledger — bounded, and unrelated
+    // to class size — and it is the only state that pays it: the case above,
+    // where the graph does have rows, still reads the ledger zero times.
+    reset();
+    expect(await store.identity.areDifferent(first, second)).toBe(false);
+    expect(counts).toEqual({
+      assertionStatements: 1,
+      separationStatements: 1,
+    });
+  });
+});
+
+describe("owed-separation probe bind budget", () => {
+  /**
+   * A graph with three identity-active kinds, so the kind list is chunked
+   * rather than emitted whole at the budget below.
+   */
+  const Alpha = defineNode("Alpha", { schema: z.object({ name: z.string() }) });
+  const Beta = defineNode("Beta", { schema: z.object({ name: z.string() }) });
+  const Gamma = defineNode("Gamma", { schema: z.object({ name: z.string() }) });
+  const threeKindGraph = defineGraph({
+    id: "identity_probe_bind_budget",
+    nodes: {
+      Alpha: { type: Alpha },
+      Beta: { type: Beta },
+      Gamma: { type: Gamma },
+    },
+    edges: {},
+    identity: { sameIdAcrossKinds: "fold" },
+  });
+
+  /**
+   * The exact ceiling the correctly-budgeted probe fits in: six fixed binds
+   * (the snapshot subquery's four plus the two closure joins' `graph_id`) and
+   * one chunk of two kinds, each bound on both endpoints.
+   *
+   * Chosen to be the boundary. Under-counting the fixed binds by the two join
+   * binds computes a chunk of all three kinds, which needs twelve — so the
+   * assertion below is what tells a wrong constant from a right one.
+   */
+  const BIND_BUDGET = 10;
+
+  it("keeps every probe statement inside the backend's bind ceiling", async () => {
+    const captured: number[] = [];
+    // Stub, not a real backend: the probe's chunk math reads only
+    // `capabilities.maxBindParameters`, and what is under test is how wide the
+    // statement it builds is — not what the database answers. The first probe
+    // reports a live `different` so the exact probe actually runs.
+    const target = {
+      dialect: "sqlite" as const,
+      capabilities: { maxBindParameters: BIND_BUDGET },
+      execute: (compiled: SqlFragment) => {
+        captured.push(renderPostgres(compiled).params.length);
+        return Promise.resolve([{ present: 1 }]);
+      },
+      executeStatement: () => Promise.resolve(undefined),
+    };
+
+    const registry = buildKindRegistry(threeKindGraph);
+    await separationRebuildRequired(
+      target as unknown as Parameters<typeof separationRebuildRequired>[0],
+      createSqlSchema(createTestBackend().tableNames),
+      threeKindGraph.id,
+      { relationExists: false, registry },
+    );
+
+    expect(captured.length).toBeGreaterThan(1);
+    for (const parameterCount of captured) {
+      expect(parameterCount).toBeLessThanOrEqual(BIND_BUDGET);
+    }
+    // The widest statement really did reach the ceiling, so the bound above is
+    // a boundary rather than slack.
+    expect(Math.max(...captured)).toBe(BIND_BUDGET);
   });
 });

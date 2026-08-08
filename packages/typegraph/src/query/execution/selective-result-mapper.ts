@@ -8,6 +8,7 @@
 
 import type { KindEntity } from "../../core/types";
 import { compareStrings, hasOwnKey, normalizePath } from "../../utils";
+import { createDataKeyedBag } from "../../utils/object";
 import { mergeEdgeKinds, type SelectiveField, type Traversal } from "../ast";
 import type {
   AliasMap,
@@ -283,7 +284,8 @@ function buildSelectiveContext<
   plans: readonly AliasPlan[],
   traversals: readonly Traversal[],
 ): SelectContext<Aliases, EdgeAliases> {
-  const context: Record<string, unknown> = {};
+  // Data-keyed: alias names chosen by the caller's query.
+  const context = createDataKeyedBag<unknown>();
 
   for (const plan of plans) {
     const value =
@@ -306,7 +308,9 @@ function buildSelectiveContext<
     }
   }
 
-  return context as SelectContext<Aliases, EdgeAliases>;
+  // Spread at the boundary, for the same reason as the non-selective mapper:
+  // this context reaches the caller's `select` callback.
+  return { ...context } as SelectContext<Aliases, EdgeAliases>;
 }
 
 function buildOptionalAliasValue(
@@ -328,19 +332,25 @@ function buildRequiredAliasValue(
   row: Record<string, unknown>,
   plan: AliasPlan,
 ): unknown {
-  const base: Record<string, unknown> = {
-    [SELECTABLE_ALIAS_MARKER]: {
-      alias: plan.alias,
-      kind: plan.kind,
-    } satisfies SelectableAliasMarker,
-  };
+  // Data-keyed: the projected field names are schema property names, and the
+  // values behind them arrive as a `JSON.parse`d props bag — which yields
+  // `__proto__` as an ordinary own key. `createGuardedProxy` below re-supplies
+  // `Object.prototype`'s members explicitly, so the null prototype is invisible
+  // to callers.
+  const base = createDataKeyedBag<unknown>();
+  // The marker is keyed by SYMBOL, not by data; the cast only reaches the
+  // symbol slot of a string-keyed record.
+  (base as Record<symbol, unknown>)[SELECTABLE_ALIAS_MARKER] = {
+    alias: plan.alias,
+    kind: plan.kind,
+  } satisfies SelectableAliasMarker;
 
   for (const field of plan.systemFields) {
     base[field.field] = nullToUndefined(row[field.outputName]);
   }
 
   if (plan.metaFields.length > 0) {
-    const meta: Record<string, unknown> = {};
+    const meta = createDataKeyedBag<unknown>();
     for (const field of plan.metaFields) {
       meta[field.metaKey] = nullToUndefined(row[field.outputName]);
     }

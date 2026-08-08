@@ -40,8 +40,15 @@
 
 import { BranchError } from "./errors";
 import type { GraphBackend, GraphDef, Store } from "./typegraph-internal";
-import { createStoreWithSchema } from "./typegraph-internal";
-import { exportGraphStream, importGraphStream } from "./typegraph-internal";
+import {
+  createStoreWithSchema,
+  exportGraph,
+  exportGraphStream,
+  importGraph,
+  importGraphStream,
+  snapshotExportContention,
+  storeBackend,
+} from "./typegraph-internal";
 
 /**
  * Batch size for the clone's `importGraphStream` pass. Large enough to keep
@@ -129,21 +136,39 @@ export function cloneWorkingCopyStrategy<G extends GraphDef>(
             revisionTracking: baseStore.revisionTrackingEnabled,
           },
         );
-        const result = await importGraphStream(
-          freshStore,
-          exportGraphStream(baseStore, {
-            includeMeta: true,
-            includeTemporal: true,
-            includeDeleted: false,
-            batchSize: CLONE_IMPORT_BATCH_SIZE,
-          }),
-          {
-            onConflict: "error",
-            onUnknownProperty: "error",
-            validateReferences: true,
-            batchSize: CLONE_IMPORT_BATCH_SIZE,
-          },
-        );
+        const exportOptions = {
+          includeMeta: true,
+          includeTemporal: true,
+          includeDeleted: false,
+          batchSize: CLONE_IMPORT_BATCH_SIZE,
+        } as const;
+        const importOptions = {
+          onConflict: "error",
+          onUnknownProperty: "error",
+          validateReferences: true,
+          batchSize: CLONE_IMPORT_BATCH_SIZE,
+        } as const;
+        // When the fresh backend writes through the connection the base's
+        // snapshot export would hold, streaming is exactly what the import
+        // guard refuses — so ask that guard's own predicate, and materialize
+        // the export instead of streaming it when it says so.
+        const result =
+          (
+            snapshotExportContention(
+              storeBackend(baseStore),
+              storeBackend(freshStore),
+            ) === undefined
+          ) ?
+            await importGraphStream(
+              freshStore,
+              exportGraphStream(baseStore, exportOptions),
+              importOptions,
+            )
+          : await importGraph(
+              freshStore,
+              await exportGraph(baseStore, exportOptions),
+              importOptions,
+            );
         if (!result.success) {
           throw new BranchError(
             "Clone import failed: the working copy could not be seeded from the base store. The backend returned by makeBackend() must be empty.",

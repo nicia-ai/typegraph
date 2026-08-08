@@ -1,3 +1,4 @@
+import { readOwnProperty } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Pluggable, symmetric candidate-pair similarity scoring (design §8, T6).
@@ -112,9 +113,17 @@ function clampScore(value: number): number {
  * Reads a single schema field off a node. `Node<N>` spreads its schema
  * properties at the top level (e.g. `node.name`, not `node.props.name`), so a
  * field is indexed directly on the node.
+ *
+ * Own-key read: `fields` is an unvalidated `readonly string[]` off the caller's
+ * `similarity` config, so it may name a field the node does not carry. A raw
+ * read would answer such a field named after an `Object.prototype` member
+ * ("toString") with the inherited function, which {@link stringifyFieldValue}
+ * renders identically for EVERY node — collapsing distinct entities into one
+ * cluster at similarity 1.0. Absent must read absent, exactly as
+ * `constraintSignature` in `blocking.ts` reads it.
  */
 function readField(node: Node<NodeType>, field: string): unknown {
-  return (node as unknown as Record<string, unknown>)[field];
+  return readOwnProperty(node, field);
 }
 
 /**

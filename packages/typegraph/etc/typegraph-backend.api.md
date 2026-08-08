@@ -292,6 +292,7 @@ export type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 export type DeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -824,7 +825,7 @@ export type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: TransactionBackend) => Promise<void>) => Promise<SchemaVersionRow>;
+    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
@@ -849,14 +850,10 @@ export type GraphBackend = Readonly<{
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
-    ensureIdentityTables?: (this: void, tableNames: Readonly<{
-        identityAssertions: string;
-        recordedIdentityAssertions: string;
-        identityClosure: string;
-        identitySeparation: string;
-    }>, options: Readonly<{
+    ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
+    identityTableDdl?: (this: void, tableNames: IdentityTableNames) => readonly string[];
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -945,6 +942,7 @@ export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getEd
 export type HardDeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -1002,6 +1000,14 @@ export type HybridSearchRow = Readonly<{
     fulltextRank?: number;
     fulltextScore?: number;
     snippet?: string;
+}>;
+
+// @public
+export type IdentityTableNames = Readonly<{
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
 }>;
 
 // @public
@@ -1441,6 +1447,13 @@ export function rowPropsToObject(props: RowProps): Record<string, unknown>;
 // @public (undocumented)
 export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;
 
+// Warning: (ae-internal-missing-underscore) The name "SchemaCommitPreflightBackend" should be prefixed with an underscore because the declaration is marked as @internal
+//
+// @internal
+export type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
+    executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+}>;
+
 // @public (undocumented)
 export type SchemaKindEmptinessProbe = Readonly<{
     entity: "node" | "edge";
@@ -1723,6 +1736,11 @@ export type UniqueRow = Readonly<{
 export type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
+    fromKind?: string;
+    fromId?: string;
+    toKind?: string;
+    toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;
@@ -1815,6 +1833,7 @@ export type VectorCapabilities = Readonly<{
     indexTypes: readonly VectorIndexType[];
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
+    searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // @public
@@ -1860,6 +1879,17 @@ export function vectorPhysicalName(prefix: string, graphId: string, nodeKind: st
 
 // @public
 export function vectorScoreExpression(distanceExpression: SqlFragment, metric: VectorMetric): SqlFragment;
+
+// @public
+export type VectorSearchFrontierTuning = Readonly<{
+    tunable: true;
+    parameter: string;
+    indexType: VectorIndexType;
+    requiresTransactionScope: boolean;
+}> | Readonly<{
+    tunable: false;
+    reason: string;
+}>;
 
 // @public
 export type VectorSearchParams = Readonly<{

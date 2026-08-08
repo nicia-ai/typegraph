@@ -1,3 +1,4 @@
+import { readOwnProperty } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Per-kind blocking (design §9 phase 2): bucket a kind's NEW nodes by a cheap
@@ -103,7 +104,11 @@ function constraintSignature(
 ): string | undefined {
   const props = node as unknown as Record<string, unknown>;
   for (const field of constraint.fields) {
-    const value = props[field];
+    // Own-key read: a constraint over a prototype-named field ("toString")
+    // must see an absent value as absent here, exactly as computeUniqueKey
+    // below does — a raw read would mint a signature for a value the
+    // commit-time uniqueness check treats as missing.
+    const value = readOwnProperty(props, field);
     if (value === undefined || value === null) {
       return undefined;
     }

@@ -509,7 +509,44 @@ This is a semantic change, never applied silently: results are subject to
 the index's recall. Composed predicates constrain the ANN candidate set —
 exactly on pgvector and sqlite-vec, bounded by over-fetch on libSQL
 DiskANN. A kind declared with `indexType: "none"` keeps the exact scan even
-with the opt-in.
+with the opt-in — a declared degradation, since there is no ANN structure
+for `approximate` to opt into and the results are exactly what was asked
+for.
+
+**A `metric` override that differs from the field's declared metric is
+refused when `approximate: true` is stated.** Every engine materializes
+metric-specific ANN structures — `vec0` bakes `distance_metric` into the
+virtual table, libSQL's DiskANN index is built with `metric=…`, pgvector's
+index carries a per-metric operator class — so an ANN structure only
+retrieves under the metric it was built for. Retrieving by the declared
+metric and re-scoring under the override returns the declared metric's
+neighbors wearing the override's scores: the wrong rows, silently. The two
+options state something that cannot both hold, so the call throws a
+`ConfigurationError` naming both metrics rather than quietly serving the
+exact scan:
+
+```typescript
+// Refused: the HNSW index is built for cosine.
+d.embedding.similarTo(queryEmbedding, 10, {
+  approximate: true,
+  metric: "l2",
+});
+```
+
+`details` carries `nodeKind`, `fieldPath`, `requestedMetric`,
+`declaredMetric`, and `indexType`. Omit `metric` (or pass the declared one)
+to keep approximate retrieval, or drop `approximate` to scan exactly under
+the overriding metric. A slot declared `indexType: "none"` is not refused:
+there is no ANN structure to be bound to a metric.
+
+Note the deliberate asymmetry with the facade. `store.search.vector` and
+`store.search.hybrid` refuse **every** metric override that differs from
+the declared one, whether or not `approximate` was stated — their rule is
+broader because vector storage is built for the declared metric and the
+facade is the guided surface. The query builder's *exact* path stays wider
+on purpose: an exact scan computes any metric over the stored vectors
+correctly, and nothing was stated there that the engine cannot honor. Only
+the silent half — the combination that cannot be served — is closed here.
 
 ### Scoped facade search: filters, pagination, subclasses
 
@@ -823,14 +860,21 @@ leaks to the next query on a pooled connection. Omitting it preserves
 today's behavior exactly — no transaction is opened. It applies to the
 **Postgres HNSW** path only:
 
-- **sqlite-vec** has no equivalent frontier knob and ignores `efSearch`
-  (no-op).
+- **SQLite backends refuse it.** Neither `sqlite-vec` — whose `vec0` KNN
+  takes only `k`, the page size — nor `libsql-native`, whose DiskANN
+  `vector_top_k` fixes `search_l` at index-creation time, has a per-search
+  frontier to set. Supplying `efSearch` to either, on the vector path or
+  the hybrid path, is refused with `UnsupportedBackendCapabilityError`
+  (`details.capability` `vector.searchFrontierTuning`, `details.reason`
+  naming the engine's limitation) rather than searching as if the option
+  had not been passed.
 - **Transaction-less Postgres drivers** (`drizzle-orm/neon-http`) can't
-  scope `SET LOCAL`, so `efSearch` is ignored with a one-time warning —
-  use a transactional driver (`node-postgres` / `neon-serverless` /
-  `postgres-js`) to apply it.
-- It tunes HNSW only; IVFFlat's analogous knob (`ivfflat.probes`) is not
-  yet exposed.
+  scope `SET LOCAL`, so a search that supplies `efSearch` is refused with
+  `UnsupportedBackendCapabilityError`. Use a transactional driver
+  (`node-postgres` / `neon-serverless` / `postgres-js`) to apply it.
+- It tunes HNSW only. Supplying it for IVFFlat is refused with a
+  `ConfigurationError`; IVFFlat's analogous knob (`ivfflat.probes`) is not yet
+  exposed.
 
 ## Troubleshooting
 

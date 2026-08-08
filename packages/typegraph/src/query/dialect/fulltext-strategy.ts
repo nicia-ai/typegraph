@@ -215,6 +215,53 @@ export type FulltextStrategy = Readonly<{
 }>;
 
 // ============================================================
+// Shared graph-scoped statements
+// ============================================================
+
+/**
+ * Deletes every fulltext row one graph contributed.
+ *
+ * The fulltext table is DATABASE-global: one physical table whose rows are
+ * keyed by `graph_id` and shared by every graph in the database. "Remove this
+ * graph's fulltext content" therefore has more than one caller — `clearGraph`
+ * and the destructive contribution rebuild — and it is one exported statement
+ * both use rather than two spellings that would be free to drift.
+ */
+export function buildFulltextGraphDelete(
+  tableName: string,
+  graphId: string,
+): SqlFragment {
+  return sql`
+    DELETE FROM ${sql.identifier(tableName)}
+    WHERE "graph_id" = ${graphId}
+  `;
+}
+
+/**
+ * The graph ids OTHER than `graphId` that currently have rows in the shared
+ * fulltext table, capped at `limit` (the probe only needs to know whether the
+ * set is empty, plus a few names for the operator-facing message).
+ *
+ * The predicate behind "would tearing this table down destroy content this
+ * process cannot put back?". Fulltext content is derived from a graph's own
+ * node rows through its own schema, so only the graph that owns those rows
+ * can reconstruct them — another graph's rows are exactly the content a
+ * `DROP TABLE` must never take with it.
+ */
+export function buildForeignFulltextGraphProbe(
+  tableName: string,
+  graphId: string,
+  limit: number,
+): SqlFragment {
+  return sql`
+    SELECT DISTINCT "graph_id"
+    FROM ${sql.identifier(tableName)}
+    WHERE "graph_id" <> ${graphId}
+    LIMIT ${limit}
+  `;
+}
+
+// ============================================================
 // Internal helpers
 // ============================================================
 

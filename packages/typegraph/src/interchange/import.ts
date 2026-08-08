@@ -7,6 +7,12 @@
 import type { z } from "zod";
 
 import {
+  acquireSerializedStreamLease,
+  type SerializedStreamKind,
+  type SnapshotExportContention,
+  snapshotExportContention,
+} from "../backend/transaction-resource";
+import {
   type GraphBackend,
   isLiveNodeRow,
   rowPropsToObject,
@@ -21,6 +27,7 @@ import {
 import { type EdgeRegistration, type NodeRegistration } from "../core/types";
 import {
   ConfigurationError,
+  DatabaseOperationError,
   IdentityContradictionError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   INVERTED_VALIDITY_WINDOW_CODE,
@@ -28,7 +35,10 @@ import {
   UniquenessError,
   ValidationError,
 } from "../errors";
-import { IDENTITY_IMPORT_FAILED_ASSERTION } from "../identity/service";
+import {
+  IDENTITY_IMPORT_FAILED_ASSERTION,
+  IDENTITY_IMPORT_PROGRESS,
+} from "../identity/service";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   createNodeBatchValidationBackend,
@@ -50,7 +60,9 @@ import {
   assertWritableValidityWindow,
   validateOptionalCanonicalIsoDate,
 } from "../utils/date";
-import { hasOwnKey } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
+import { encodeTupleKey } from "../utils/tuple-key";
+import { exportStreamBackend } from "./stream-source";
 import {
   type GraphData,
   type GraphDataHeader,
@@ -78,6 +90,14 @@ import {
  * Nodes are imported first to satisfy edge reference validation.
  * The import runs within a transaction for atomicity when supported.
  *
+ * Refused with a typed {@link ConfigurationError} when the target writes through
+ * a serialized database connection another long-lived interchange operation
+ * holds — the same refusal, codes and `details.heldBy` / `details.requested` as
+ * {@link importGraphStream}. Hand-rolling a stream as `for await (const chunk of
+ * exportGraphStream(source)) await importGraph(target, ...)` on one such
+ * connection is therefore refused on the first chunk instead of nesting a write
+ * transaction inside the export's open snapshot.
+ *
  * @param store - The graph store to import into
  * @param data - Graph data in interchange format
  * @param options - Import configuration
@@ -102,7 +122,56 @@ export async function importGraph<G extends GraphDef>(
   // only exist after parsing, and every internal stage reads them
   // directly.
   const options = ImportOptionsSchema.parse(rawOptions);
+  return withImportStreamLease(store, () =>
+    importGraphData(store, data, options),
+  );
+}
 
+/**
+ * Claims the target connection's exclusive stream lease for the whole of `run`,
+ * or refuses with the holder named.
+ *
+ * GRANULARITY: an in-memory import is not one long-lived transaction — it is a
+ * write transaction followed by a best-effort statistics refresh — but it IS one
+ * long-lived operation on the connection, and it faces exactly the hazard the
+ * streaming guard exists for: an export snapshot holding the single connection
+ * this import must write on, or opening midway through it. A lease for the whole
+ * call is the simplest claim that covers every write the call makes, so that is
+ * what it takes.
+ *
+ * Claimed at each PUBLIC boundary that writes a whole import — this function's
+ * own {@link importGraph} and `trustedImportGraphStream` — and nowhere else.
+ * {@link importGraphStream} already holds the lease for its chunk loop and calls
+ * {@link importGraphData} directly, so a per-chunk import is never refused by
+ * the stream that issued it.
+ */
+export async function withImportStreamLease<G extends GraphDef, T>(
+  store: Store<G>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const lease = acquireSerializedStreamLease(
+    storeBackend(store),
+    "import-stream",
+  );
+  if (!lease.acquired) {
+    throw serializedStreamRefusal({
+      graphId: store.graphId,
+      requested: "import-stream",
+      heldBy: lease.heldBy,
+    });
+  }
+  try {
+    return await run();
+  } finally {
+    lease.release();
+  }
+}
+
+async function importGraphData<G extends GraphDef>(
+  store: Store<G>,
+  data: GraphData,
+  options: ResolvedImportOptions,
+): Promise<ImportResult> {
   // Reject an identity payload aimed at an identity-disabled graph, and
   // runtime-validate the (bounded) identity section, BEFORE any entity write —
   // see assertIdentityImportSupported / validateIdentitySection.
@@ -206,14 +275,39 @@ export async function importGraph<G extends GraphDef>(
 /**
  * Imports a header-first stream of bounded interchange chunks.
  *
- * Each chunk is committed through the same {@link importGraph} implementation
- * as an in-memory import, so validation and conflict semantics stay identical.
+ * Each chunk is committed through the same implementation as an in-memory
+ * {@link importGraph}, so validation and conflict semantics stay identical; the
+ * chunk calls skip only that function's own lease claim, which this loop already
+ * holds on their behalf.
  * Chunks are individually atomic on transactional backends; a consumer needing
  * all-or-nothing behavior can import into a disposable working-copy backend and
  * publish it only after this function succeeds.
  *
  * Nodes must precede edges. Once a node chunk commits, edge validation reads the
  * target store rather than retaining every imported node id in memory.
+ *
+ * Refused with a typed {@link ConfigurationError} when the target writes through
+ * a serialized database connection that another long-lived interchange stream
+ * already holds — either because this stream came from a snapshot export on that
+ * connection, or because ANY export snapshot or streaming import holds it when
+ * the first chunk arrives (which covers a stream the caller has wrapped). The
+ * error's `details.heldBy` names the holder's kind and `details.code` the
+ * condition: `INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` (or
+ * `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`) behind an export snapshot,
+ * `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS` behind another import.
+ *
+ * Once accepted, the import holds that connection's one stream lease for the
+ * whole call — every chunk AND the trailing statistics refresh, which is a
+ * write like any other — so any export snapshot or second import that tries to
+ * start while a write of this import is still to come is the side refused, and
+ * this import keeps running instead of stalling against a transaction it can
+ * never write past.
+ *
+ * Connections we cannot observe are not detected: two clients dialed at one
+ * server, or two SQLite handles on one file, are independent and are not
+ * refused. Neither is a connection whose driver we cannot positively identify as
+ * single-connection — see the residual gap documented in
+ * `backend/transaction-resource.ts`.
  */
 export async function importGraphStream<G extends GraphDef>(
   store: Store<G>,
@@ -221,118 +315,296 @@ export async function importGraphStream<G extends GraphDef>(
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
   const options = ImportOptionsSchema.parse(rawOptions);
+  const sourceBackend = exportStreamBackend(chunks);
+  const targetBackend = storeBackend(store);
+  // Whether this export would hold the connection the import writes through is
+  // decided by the single owner of that predicate — including the
+  // `transactions: false` abstention, where nothing is held open and refusing
+  // would refuse work that succeeds.
+  const contention =
+    sourceBackend === undefined ? undefined : (
+      snapshotExportContention(sourceBackend, targetBackend)
+    );
+  if (contention !== undefined) {
+    throw serializedStreamRefusal({
+      graphId: store.graphId,
+      requested: "import-stream",
+      heldBy: "export-snapshot",
+      detector: contention,
+    });
+  }
   const result = emptyImportResult();
   let header: GraphDataHeader | undefined;
   let receivedEdges = false;
   let receivedIdentity = false;
+  let releaseImportLease: (() => void) | undefined;
 
-  for await (const chunk of chunks) {
-    switch (chunk.type) {
-      case "header": {
-        if (header !== undefined) {
-          throw new Error(
-            "Graph interchange stream emitted more than one header.",
-          );
-        }
-        // The header is bounded, so validate it at the runtime stream boundary.
-        // In particular, an invalid identity profile/mode must not slip through
-        // merely because the stream's identity assertion chunk is empty.
-        validateStreamHeader(chunk.header);
-        // Reject an identity-bearing header aimed at an identity-disabled graph
-        // before any chunk is processed, matching importGraph's guard.
-        assertIdentityImportSupported(
-          store,
-          chunk.header.identity !== undefined,
+  try {
+    for await (const chunk of chunks) {
+      // The pre-flight check above needs the stream to still identify its source
+      // backend, which any user wrapper (a delegating generator, `Readable.from`,
+      // a tee) erases. By the time the FIRST chunk arrives the export's snapshot
+      // transaction is already open and the registry says so itself, so a wrapped
+      // stream fails the same way an unwrapped one does instead of stalling
+      // behind a transaction that cannot end until this loop does.
+      //
+      // The claim is EXCLUSIVE and its check-and-register is one synchronous
+      // section inside `acquireSerializedStreamLease`, so the two long-lived
+      // streams can never both conclude the connection was free — and the
+      // holder it reports may be an export snapshot OR another streaming
+      // import, which nests its chunk transactions inside this one's just as
+      // fatally. Whoever gets here second is refused; an export starting
+      // mid-import is refused by `exportGraphStream` claiming the same lease, so
+      // an import whose earlier chunks are already committed is never aborted
+      // for someone else's stream. Nothing between the claim and the assignment
+      // can throw, so the `finally` below owns every release path.
+      if (releaseImportLease === undefined) {
+        const lease = acquireSerializedStreamLease(
+          targetBackend,
+          "import-stream",
         );
-        header = chunk.header;
-        break;
+        if (!lease.acquired) {
+          throw serializedStreamRefusal({
+            graphId: store.graphId,
+            requested: "import-stream",
+            heldBy: lease.heldBy,
+          });
+        }
+        releaseImportLease = lease.release;
       }
-      case "nodes": {
-        if (header === undefined) {
-          throw new Error("Graph interchange stream must start with a header.");
-        }
-        if (receivedEdges || receivedIdentity) {
-          throw new Error(
-            `Graph interchange stream cannot emit nodes after ${
-              receivedEdges ? "edges" : "identity assertions"
-            }.`,
-          );
-        }
-        if (chunk.nodes.length === 0) break;
-        mergeImportResult(
-          result,
-          await importGraph(
+      switch (chunk.type) {
+        case "header": {
+          if (header !== undefined) {
+            throw new Error(
+              "Graph interchange stream emitted more than one header.",
+            );
+          }
+          // The header is bounded, so validate it at the runtime stream
+          // boundary. In particular, an invalid identity profile/mode must not
+          // slip through merely because the stream's identity assertion chunk is
+          // empty.
+          validateStreamHeader(chunk.header);
+          // Reject an identity-bearing header aimed at an identity-disabled
+          // graph before any chunk is processed, matching importGraph's guard.
+          assertIdentityImportSupported(
             store,
-            graphDataForChunk(header, chunk.nodes, [], []),
-            {
-              ...options,
-              refreshStatistics: false,
-            },
-          ),
-        );
-        throwIfStreamChunkFailed(result, options);
-        break;
-      }
-      case "edges": {
-        if (header === undefined) {
-          throw new Error("Graph interchange stream must start with a header.");
-        }
-        if (receivedIdentity) {
-          throw new Error(
-            "Graph interchange stream cannot emit edges after identity assertions.",
+            chunk.header.identity !== undefined,
           );
+          header = chunk.header;
+          break;
         }
-        receivedEdges = true;
-        if (chunk.edges.length === 0) break;
-        mergeImportResult(
-          result,
-          await importGraph(
-            store,
-            graphDataForChunk(header, [], chunk.edges, []),
-            {
-              ...options,
-              refreshStatistics: false,
-            },
-          ),
-        );
-        throwIfStreamChunkFailed(result, options);
-        break;
-      }
-      case "identity": {
-        if (header === undefined) {
-          throw new Error("Graph interchange stream must start with a header.");
-        }
-        if (header.identity === undefined) {
-          throw new Error(
-            "Graph interchange stream emitted identity rows without an identity header.",
+        case "nodes": {
+          if (header === undefined) {
+            throw new Error(
+              "Graph interchange stream must start with a header.",
+            );
+          }
+          if (receivedEdges || receivedIdentity) {
+            throw new Error(
+              `Graph interchange stream cannot emit nodes after ${
+                receivedEdges ? "edges" : "identity assertions"
+              }.`,
+            );
+          }
+          if (chunk.nodes.length === 0) break;
+          mergeImportResult(
+            result,
+            await importGraphData(
+              store,
+              graphDataForChunk(header, chunk.nodes, [], []),
+              {
+                ...options,
+                refreshStatistics: false,
+              },
+            ),
           );
+          throwIfStreamChunkFailed(result, options);
+          break;
         }
-        receivedIdentity = true;
-        if (chunk.assertions.length === 0) break;
-        mergeImportResult(
-          result,
-          await importGraph(
-            store,
-            graphDataForChunk(header, [], [], chunk.assertions),
-            { ...options, refreshStatistics: false },
-          ),
-        );
-        throwIfStreamChunkFailed(result, options);
-        break;
+        case "edges": {
+          if (header === undefined) {
+            throw new Error(
+              "Graph interchange stream must start with a header.",
+            );
+          }
+          if (receivedIdentity) {
+            throw new Error(
+              "Graph interchange stream cannot emit edges after identity assertions.",
+            );
+          }
+          receivedEdges = true;
+          if (chunk.edges.length === 0) break;
+          mergeImportResult(
+            result,
+            await importGraphData(
+              store,
+              graphDataForChunk(header, [], chunk.edges, []),
+              {
+                ...options,
+                refreshStatistics: false,
+              },
+            ),
+          );
+          throwIfStreamChunkFailed(result, options);
+          break;
+        }
+        case "identity": {
+          if (header === undefined) {
+            throw new Error(
+              "Graph interchange stream must start with a header.",
+            );
+          }
+          if (header.identity === undefined) {
+            throw new Error(
+              "Graph interchange stream emitted identity rows without an identity header.",
+            );
+          }
+          receivedIdentity = true;
+          if (chunk.assertions.length === 0) break;
+          mergeImportResult(
+            result,
+            await importGraphData(
+              store,
+              graphDataForChunk(header, [], [], chunk.assertions),
+              { ...options, refreshStatistics: false },
+            ),
+          );
+          throwIfStreamChunkFailed(result, options);
+          break;
+        }
       }
     }
+    if (header === undefined) {
+      throw new Error(
+        "Graph interchange stream ended before emitting a header.",
+      );
+    }
+    // The trailing ANALYZE is a WRITE on the target connection, exactly like
+    // the chunks were, so it belongs inside the lease rather than after it.
+    // Releasing at the end of the chunk loop instead left this write outside
+    // every guard: on a serialized connection an export snapshot opening in
+    // that window takes the one connection ANALYZE has to run on and does not
+    // give it back until the export ends, and the refresh's best-effort
+    // handling swallowed the result as a warning. The lease now spans every
+    // write this call makes — the same span `withImportStreamLease` gives
+    // `importGraph`, whose refresh has always been inside it.
+    await refreshStatisticsAfterImport(
+      store,
+      options,
+      result,
+      "importGraphStream",
+    );
+  } finally {
+    // One release for every exit — the loop's, the missing-header throw, and
+    // the refresh's — so "the lease lives exactly as long as the writes" holds
+    // on the error paths too.
+    releaseImportLease?.();
   }
-
-  if (header === undefined) {
-    throw new Error("Graph interchange stream ended before emitting a header.");
-  }
-  await refreshStatisticsAfterImport(
-    store,
-    options,
-    result,
-    "importGraphStream",
-  );
   return { ...result, success: result.errors.length === 0 };
+}
+
+/**
+ * The single owner of the refusal raised when two long-lived interchange streams
+ * would run on one serialized database connection — from the import's pre-flight
+ * check on the stream's own backend, from its mid-stream claim, and from
+ * `exportGraphStream`'s claim alike, so every path states the same detected
+ * condition in the same vocabulary.
+ *
+ * The CODE names the condition — which kind of stream holds the connection —
+ * rather than which side was refused. `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`
+ * is not a second condition: it reports that the object-identity DETECTOR
+ * answered (one SQLite backend exporting into itself), which is worth telling
+ * apart because the fix differs — pass a second backend, rather than await
+ * whatever else is running. `details.heldBy`
+ * and `details.requested` then say which pairing was actually refused, so a
+ * same-kind refusal (import behind import, export behind export) is never
+ * reported as something it is not:
+ *
+ * | holder          | code                                          |
+ * | --------------- | --------------------------------------------- |
+ * | export snapshot | `INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` (or `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT` when the object-identity detector answered) |
+ * | import stream   | `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`   |
+ *
+ * Every message describes exactly what is detected. None claims anything about
+ * connections we cannot observe (two clients dialed at the same server, two
+ * SQLite handles on one file), which are independent and are not refused.
+ */
+export function serializedStreamRefusal(
+  input: Readonly<{
+    graphId: string;
+    requested: SerializedStreamKind;
+    heldBy: SerializedStreamKind;
+    /**
+     * Which detector found the holding export snapshot, when the import's
+     * pre-flight — not the lease — is what answered. Only
+     * `"same-sqlite-backend"` changes the code, because only that detector
+     * identifies a distinguishable situation for the caller: the source and the
+     * target are the same SQLite backend object, which no ordering can fix.
+     */
+    detector?: SnapshotExportContention;
+  }>,
+): ConfigurationError {
+  const { graphId, requested, heldBy, detector } = input;
+  const code =
+    heldBy === "import-stream" ? SERIALIZED_IMPORT_IN_PROGRESS_CODE
+    : detector === "same-sqlite-backend" ?
+      "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT"
+    : "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT";
+  const { message, suggestion } = serializedStreamRefusalText(
+    requested,
+    heldBy,
+  );
+  return new ConfigurationError(
+    message,
+    { code, graphId, requested, heldBy },
+    { suggestion },
+  );
+}
+
+/**
+ * The refusal code for "a streaming import holds the connection this stream
+ * needs", in either of the two orders it can be discovered.
+ */
+const SERIALIZED_IMPORT_IN_PROGRESS_CODE =
+  "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS";
+
+/**
+ * What each of the four pairings actually does to the one connection. Each
+ * message names both streams, because "a stream already holds this connection"
+ * is not actionable without knowing which one.
+ */
+function serializedStreamRefusalText(
+  requested: SerializedStreamKind,
+  heldBy: SerializedStreamKind,
+): Readonly<{ message: string; suggestion: string }> {
+  if (heldBy === "export-snapshot") {
+    return requested === "import-stream" ?
+        {
+          message:
+            "A snapshot export cannot be streamed into a target that writes through the same serialized database connection: the export's read transaction holds that connection open for the whole stream, so this import can never take the writer slot it needs.",
+          suggestion:
+            "Export to a file first, or import the stream into an independent backend.",
+        }
+      : {
+          message:
+            "A snapshot export cannot open on a serialized database connection while another snapshot export is streaming from it: the second export's read transaction would have to nest inside the first one on the single connection they share.",
+          suggestion:
+            "Await the export already in flight before starting the next one, or export from an independent backend.",
+        };
+  }
+  return requested === "export-snapshot" ?
+      {
+        message:
+          "A snapshot export cannot open on a serialized database connection while a streaming import is writing through it: the export's read transaction would hold the one connection the import's next chunk has to write on.",
+        suggestion:
+          "Await the import before exporting, or export from an independent backend.",
+      }
+    : {
+        message:
+          "A streaming import cannot open on a serialized database connection while another streaming import is writing through it: the two imports commit their chunks on the single connection they share, so the second one's chunk transaction would have to nest inside the first one's.",
+        suggestion:
+          "Await the import already in flight before starting the next one, or import into an independent backend.",
+      };
 }
 
 function throwIfStreamChunkFailed(
@@ -545,9 +817,9 @@ function isIdentityAssertionValidationError(
  * thrown import — discarding the valid node and edge work alongside it.
  *
  * Assertions the coordinator applied before the failing one stay committed,
- * exactly as rows accepted before a failing node do. They are not reflected in
- * `result.identity.created`: the coordinator reports counts only on success, so
- * the counts under-report rather than invent a number.
+ * exactly as rows accepted before a failing node do. The tagged error carries
+ * the coordinator's completed counts so the returned result describes those
+ * durable partial effects accurately.
  */
 async function importIdentitySection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
@@ -568,8 +840,33 @@ async function importIdentitySection<G extends GraphDef>(
   } catch (error) {
     const entry = asIdentityImportError(identity.assertions, graphId, error);
     if (entry === undefined) throw error;
+    const progress = identityImportProgress(error);
+    result.identity.created += progress.created;
+    result.identity.skipped += progress.skipped;
     errors.push(entry);
   }
+}
+
+function identityImportProgress(
+  error: unknown,
+): Readonly<{ created: number; skipped: number }> {
+  if (typeof error !== "object" || error === null) {
+    return { created: 0, skipped: 0 };
+  }
+  const progress = (error as Record<PropertyKey, unknown>)[
+    IDENTITY_IMPORT_PROGRESS
+  ];
+  if (
+    typeof progress !== "object" ||
+    progress === null ||
+    !("created" in progress) ||
+    typeof progress.created !== "number" ||
+    !("skipped" in progress) ||
+    typeof progress.skipped !== "number"
+  ) {
+    return { created: 0, skipped: 0 };
+  }
+  return { created: progress.created, skipped: progress.skipped };
 }
 
 function validateStreamHeader(header: GraphDataHeader): void {
@@ -628,6 +925,20 @@ function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.errors.push(...source.errors);
 }
 
+/**
+ * Refreshes planner statistics after a mutating import.
+ *
+ * CALLED UNDER THE TARGET CONNECTION'S STREAM LEASE by every surface: ANALYZE
+ * is a write, and a write that runs outside the lease can be stranded by an
+ * export snapshot that takes the one connection it needs. `importGraph` holds
+ * the lease through {@link withImportStreamLease} for its whole call;
+ * `importGraphStream` holds its chunk-loop lease across this call too.
+ *
+ * Best-effort: by this point the import is committed, so a failed statistics
+ * refresh must not convert the completed (non-atomic on some backends,
+ * non-retryable) import into a thrown failure — it degrades to a warning, and
+ * the caller can run `store.refreshStatistics()`.
+ */
 async function refreshStatisticsAfterImport<G extends GraphDef>(
   store: Store<G>,
   options: ResolvedImportOptions,
@@ -1086,6 +1397,159 @@ async function catchUniquenessError<T>(
       return { ok: false, error: error.message };
     }
     throw error;
+  }
+}
+
+/**
+ * The stable prefix on every per-row refusal caused by an incoming edge naming
+ * an id that a DIFFERENT edge already occupies, so a caller can recognize the
+ * condition without parsing prose — the same `CODE: message` idiom the validity
+ * window refusals use.
+ *
+ * ONE code for the whole immutable-identity class — kind AND endpoints — rather
+ * than a second code for endpoint mismatches. The condition is a single fact
+ * ("the row under this id is not the edge this document describes"), the
+ * recovery is a single action ("give it a distinct id, or import it under the
+ * identity the stored row carries"), and a caller that had to match two prefixes
+ * to catch one condition would eventually match only one. The message names
+ * which components differ; the prefix says what class of thing went wrong.
+ *
+ * The token still reads `…_KIND_CONFLICT` because it is a PUBLISHED, branchable
+ * prefix (documented in `interchange.md`) and renaming it would silently break
+ * every caller filtering on it; the constant is named for what it now covers.
+ */
+const EDGE_IDENTITY_CONFLICT_CODE = "INTERCHANGE_EDGE_KIND_CONFLICT";
+
+/** The immutable identity of a stored edge, as the probe reports it. */
+type StoredEdgeIdentity = Readonly<{
+  kind: string;
+  from_kind: string;
+  from_id: string;
+  to_kind: string;
+  to_id: string;
+}>;
+
+/**
+ * Whether an existing row is actually the edge this document is describing.
+ *
+ * THE SINGLE OWNER of that decision, consulted by both edge-import paths (the
+ * batched slice and the per-row fallback) before ANY conflict strategy runs.
+ *
+ * Edge ids are graph-global while every interchange edge states a kind AND both
+ * endpoints, and the existence probe (`getEdge` / `getEdges`) is keyed on
+ * `(graph_id, id)` alone — so an incoming edge whose id is already taken by a
+ * DIFFERENT edge finds that row and, without this check, was treated as the same
+ * edge by all three strategies: `update` wrote the incoming props onto the other
+ * row with nothing in `result.errors`, and `skip` counted the document's edge as
+ * already present when nothing matching was ever there. Both are silent, and the
+ * id is unique per graph, so the incoming edge cannot be created under it
+ * either. Reporting is the only honest outcome.
+ *
+ * Compares the FULL immutable identity — kind and all four endpoint components —
+ * not kind alone. Kind is not an identity: an id already held by an edge of the
+ * same kind pointing somewhere else is just as much "not this edge", and a
+ * kind-only comparison reported `updated: 1` while overwriting that row's props
+ * and silently retaining its old endpoints (endpoints are immutable, so the
+ * document's stated `from`/`to` were simply discarded). Every component is
+ * checked because every component is immutable for a given row.
+ *
+ * Deliberately checked ABOVE the `onConflict` switch rather than inside each
+ * arm: the question "is this the same edge?" is prior to "what do we do about
+ * the same edge?", and answering it per-arm is how two of the three arms came
+ * to answer it differently.
+ *
+ * Nodes need no equivalent: their probe is `getNode(graphId, kind, id)`, which
+ * is kind-scoped, and a node has no endpoints — so a cross-kind id collision
+ * simply reads as absent there.
+ */
+function edgeIdentityConflict(
+  edge: InterchangeEdge,
+  existing: StoredEdgeIdentity,
+): string | undefined {
+  const differences = [
+    ...(existing.kind === edge.kind ?
+      []
+    : [`kind "${existing.kind}" (document states "${edge.kind}")`]),
+    ...((
+      existing.from_kind === edge.from.kind && existing.from_id === edge.from.id
+    ) ?
+      []
+    : [
+        `from "${existing.from_kind}:${existing.from_id}" (document states ` +
+          `"${edge.from.kind}:${edge.from.id}")`,
+      ]),
+    ...(existing.to_kind === edge.to.kind && existing.to_id === edge.to.id ?
+      []
+    : [
+        `to "${existing.to_kind}:${existing.to_id}" (document states ` +
+          `"${edge.to.kind}:${edge.to.id}")`,
+      ]),
+  ];
+  if (differences.length === 0) return undefined;
+  return (
+    `${EDGE_IDENTITY_CONFLICT_CODE}: Edge "${edge.id}" already exists with a ` +
+    `different immutable identity — ${differences.join("; ")}. Edge ids are ` +
+    "unique per graph, so the incoming edge can neither update nor be created " +
+    "under that id. Give it a distinct id, or import it under the identity the " +
+    "stored row already carries."
+  );
+}
+
+/**
+ * Updates an existing edge under the full immutable identity the caller checked
+ * it carries, and reports a write that landed on nothing as a per-row error.
+ *
+ * All five identity components are stated so the predicate lives in the UPDATE's
+ * own `WHERE` — the contract on {@link UpdateEdgeParams}, and the only placement
+ * a concurrent hard-delete-and-recreate cannot slip past, because a
+ * read-then-write pair keyed on `(graph_id, id)` alone re-resolves that id
+ * between the probe and the write under PostgreSQL READ COMMITTED. Omitting them
+ * made the import's own identity check advisory: correct until raced.
+ *
+ * The endpoints move together with `kind` rather than being left out because
+ * they are "less likely" to be raced: the window is the same window, and this
+ * import HAS checked all five against a row it read, which is exactly the
+ * precondition {@link UpdateEdgeParams} states for asserting them.
+ *
+ * When the predicate does match nothing, the backend reports it as a
+ * `no_row_returned` {@link DatabaseOperationError}. By then this import has
+ * already checked the identity against a row it read, so reaching here means the
+ * target changed underneath us — a per-row fact about one edge, not a reason to
+ * abort an import whose earlier rows are already written.
+ */
+async function updateImportedEdge(
+  backend: GraphBackend | TransactionBackend,
+  graphId: string,
+  edge: InterchangeEdge,
+  props: Readonly<Record<string, unknown>>,
+): Promise<string | undefined> {
+  try {
+    await backend.updateEdge({
+      graphId,
+      id: edge.id,
+      kind: edge.kind,
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      toKind: edge.to.kind,
+      toId: edge.to.id,
+      props,
+      ...(edge.validTo !== undefined && { validTo: edge.validTo }),
+    });
+    return undefined;
+  } catch (error) {
+    if (
+      !(error instanceof DatabaseOperationError) ||
+      error.details.reason !== "no_row_returned"
+    ) {
+      throw error;
+    }
+    return (
+      `${EDGE_IDENTITY_CONFLICT_CODE}: Edge "${edge.id}" of kind "${edge.kind}" ` +
+      `from "${edge.from.kind}:${edge.from.id}" to "${edge.to.kind}:${edge.to.id}" ` +
+      "was not updated: no live edge with that id and identity remained when " +
+      "the write ran, so the row changed or was removed after this import " +
+      "checked it. Re-export the source and retry."
+    );
   }
 }
 
@@ -1568,6 +2032,14 @@ async function processEdgeSlice(
       : await backend.getEdge(graphId, edge.id);
 
     if (existing) {
+      // Prior to every strategy: a row occupying this id under a different
+      // immutable identity is not this edge, and none of the three arms may
+      // treat it as one.
+      const identityConflict = edgeIdentityConflict(edge, existing);
+      if (identityConflict !== undefined) {
+        record(edge, { status: "error", error: identityConflict });
+        continue;
+      }
       switch (options.onConflict) {
         case "skip": {
           record(edge, {
@@ -1596,12 +2068,16 @@ async function processEdgeSlice(
             record(edge, { status: "error", error: updateWindowError });
             break;
           }
-          await backend.updateEdge({
+          const updateError = await updateImportedEdge(
+            backend,
             graphId,
-            id: edge.id,
+            edge,
             props,
-            ...(edge.validTo !== undefined && { validTo: edge.validTo }),
-          });
+          );
+          if (updateError !== undefined) {
+            record(edge, { status: "error", error: updateError });
+            break;
+          }
           record(edge, { status: "updated" });
           break;
         }
@@ -1751,6 +2227,11 @@ async function processEdge(
   const existing = await backend.getEdge(graphId, edge.id);
 
   if (existing) {
+    // Same prior question as the batched path, answered by the same owner.
+    const identityConflict = edgeIdentityConflict(edge, existing);
+    if (identityConflict !== undefined) {
+      return { status: "error", error: identityConflict };
+    }
     switch (options.onConflict) {
       case "skip": {
         return {
@@ -1774,12 +2255,15 @@ async function processEdge(
         if (updateWindowError !== undefined) {
           return { status: "error", error: updateWindowError };
         }
-        await backend.updateEdge({
+        const updateError = await updateImportedEdge(
+          backend,
           graphId,
-          id: edge.id,
-          props: propsResult.data,
-          ...(edge.validTo !== undefined && { validTo: edge.validTo }),
-        });
+          edge,
+          propsResult.data,
+        );
+        if (updateError !== undefined) {
+          return { status: "error", error: updateError };
+        }
         return { status: "updated" };
       }
     }
@@ -1834,7 +2318,8 @@ function validateProperties(
         }
         case "strip": {
           // Remove unknown properties
-          const stripped: Record<string, unknown> = {};
+          // Data-keyed: `knownKeys` are schema-declared property names.
+          const stripped = createDataKeyedBag<unknown>();
           for (const key of knownKeys) {
             if (hasOwnKey(properties, key)) {
               stripped[key] = properties[key];
@@ -1900,5 +2385,5 @@ function formatZodError(error: z.ZodError): string {
 // ============================================================
 
 function makeNodeKey(kind: string, id: string): string {
-  return `${kind}:${id}`;
+  return encodeTupleKey([kind, id]);
 }

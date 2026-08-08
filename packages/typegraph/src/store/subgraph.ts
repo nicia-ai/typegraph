@@ -48,6 +48,7 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
+import { hasOwnKey } from "../utils/object";
 import { buildReachableCte } from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
 import {
@@ -665,7 +666,15 @@ function buildProjectionPlan(
   const fullKinds: string[] = [];
 
   for (const kind of kinds) {
-    const selection = projectionMap?.[kind];
+    // Own-key read: `projectionMap` is the caller's `project.nodes` /
+    // `project.edges` record and `kind` is a graph kind name, so a kind named
+    // after an `Object.prototype` member ("toString") would otherwise read the
+    // inherited function as this kind's field selection instead of "no
+    // projection declared".
+    const selection =
+      projectionMap !== undefined && hasOwnKey(projectionMap, kind) ?
+        projectionMap[kind]
+      : undefined;
     if (selection === undefined) {
       fullKinds.push(kind);
       continue;

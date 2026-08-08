@@ -167,6 +167,30 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       endedBy?: Readonly<{ kind: string; id: string }> | undefined;
     }>[]
   >;
+  readIdentityAssertionPageAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    mode: "state" | "archival",
+    options: Readonly<{
+      nodeKinds?: readonly string[];
+      includeDeleted?: boolean;
+      after?: string;
+      limit: number;
+    }>,
+  ) => Promise<
+    Readonly<{
+      assertions: readonly Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{ kind: string; id: string }>;
+        b: Readonly<{ kind: string; id: string }>;
+        validFrom: string;
+        validTo?: string | undefined;
+        endedBy?: Readonly<{ kind: string; id: string }> | undefined;
+      }>[];
+      nextAfter?: string;
+      done: boolean;
+    }>
+  >;
   lockIdentityImportTarget: (
     target: GraphBackend | TransactionBackend,
   ) => Promise<void>;

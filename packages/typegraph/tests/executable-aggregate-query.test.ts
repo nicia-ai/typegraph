@@ -429,6 +429,71 @@ describe("ExecutableAggregateQuery.execute", () => {
     expect(results[1]).toEqual({ category: "Books", count: 25 });
   });
 
+  it("returns rows that are ordinary objects, prototype and all", async () => {
+    // The row is accumulated into a NULL-PROTOTYPE bag, because an aggregate
+    // alias is a caller-supplied string and `row[alias] = value` on a `{}`
+    // literal would hand a `__proto__` alias to the prototype setter. That
+    // protection is internal: returned as-is, the row had no `toString`, no
+    // `hasOwnProperty`, and answered `false` to `instanceof Object` — a public
+    // behavior change against every other row this library returns. The bag is
+    // therefore spread at the boundary.
+    const mockBackend = {
+      capabilities: MOCK_BACKEND_CAPABILITIES,
+      execute: vi
+        .fn()
+        .mockResolvedValue([{ category: "Electronics", count: 10 }]),
+    };
+
+    const query = createQueryBuilder<typeof graph>(graph.id, registry, {
+      backend: mockBackend as never,
+    })
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        count: count("p"),
+      });
+
+    const rows = await query.execute();
+    const row = requireDefined(rows[0], "aggregate row");
+
+    expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+    expect(typeof row.toString).toBe("function");
+    expect(row instanceof Object).toBe(true);
+    expect(Object.hasOwn(row, "category")).toBe(true);
+  });
+
+  it("keeps a `__proto__` ALIAS as an own key on the returned row", async () => {
+    // The half a key-by-key rebuild onto a `{}` literal would lose. Spread is a
+    // CreateDataProperty, so the alias survives as data AND the prototype is
+    // restored; `Object.prototype` itself is not touched.
+    const protoAlias = "__proto__";
+    const mockBackend = {
+      capabilities: MOCK_BACKEND_CAPABILITIES,
+      execute: vi.fn().mockResolvedValue([{ [protoAlias]: 7 }]),
+    };
+
+    const query = createQueryBuilder<typeof graph>(graph.id, registry, {
+      backend: mockBackend as never,
+    })
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({ [protoAlias]: count("p") });
+
+    const rows = await query.execute();
+    const row = requireDefined(rows[0], "aggregate row") as Record<
+      string,
+      unknown
+    >;
+
+    expect(Object.hasOwn(row, protoAlias)).toBe(true);
+    expect(row[protoAlias]).toBe(7);
+    expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+    // ...and the alias is DATA, not a reparenting: the row's prototype is the
+    // ordinary one, and a fresh object is unaffected.
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+  });
+
   it("maps only requested fields from results", async () => {
     const mockBackend = {
       capabilities: MOCK_BACKEND_CAPABILITIES,

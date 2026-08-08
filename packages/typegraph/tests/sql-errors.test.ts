@@ -23,8 +23,9 @@ import { tables as sqliteTables } from "../src/backend/drizzle/sqlite";
 import {
   isDuplicatePrimaryKeyError,
   isMissingTableError,
-  isPostgresUniqueViolationError,
+  isPostgresConcurrentDdlRaceError,
   isSqliteNotAuthorizedError,
+  isSqliteStaleSnapshotError,
 } from "../src/utils/sql-errors";
 
 /**
@@ -264,12 +265,12 @@ describe("isMissingTableError", () => {
   });
 });
 
-describe("isPostgresUniqueViolationError", () => {
+describe("isPostgresConcurrentDdlRaceError", () => {
   it("detects direct and Drizzle-wrapped SQLSTATE 23505 errors", () => {
     const direct = pgError("duplicate catalog row", "23505");
-    expect(isPostgresUniqueViolationError(direct)).toBe(true);
+    expect(isPostgresConcurrentDdlRaceError(direct)).toBe(true);
     expect(
-      isPostgresUniqueViolationError(
+      isPostgresConcurrentDdlRaceError(
         drizzleQueryError(
           "CREATE TABLE IF NOT EXISTS typegraph_kind_removals",
           {
@@ -281,12 +282,94 @@ describe("isPostgresUniqueViolationError", () => {
     ).toBe(true);
   });
 
+  it("detects the duplicate-column race an ADD COLUMN IF NOT EXISTS loses", () => {
+    // #445: two replicas booting at once run the same additive ALTER; the
+    // loser sees 42701, not 23505.
+    expect(
+      isPostgresConcurrentDdlRaceError(
+        pgError('column "claim_token" of relation "m" already exists', "42701"),
+      ),
+    ).toBe(true);
+    expect(
+      isPostgresConcurrentDdlRaceError(
+        drizzleQueryError(
+          'ALTER TABLE "typegraph_index_materializations" ADD COLUMN IF NOT EXISTS "claim_token" text',
+          postgresJsLikeError("column already exists", "42701"),
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("detects the un-coded `tuple concurrently updated` catalog race", () => {
+    expect(
+      isPostgresConcurrentDdlRaceError(
+        pgError("tuple concurrently updated", "XX000"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not retry an unrelated internal error carrying the same XX000", () => {
+    // XX000 is PostgreSQL's catch-all: retrying on the SQLSTATE alone would
+    // swallow genuine server faults, so the message must agree.
+    expect(
+      isPostgresConcurrentDdlRaceError(
+        pgError("could not read block 3 in file base/1/2: I/O error", "XX000"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not classify the race message without its SQLSTATE", () => {
+    expect(
+      isPostgresConcurrentDdlRaceError(new Error("tuple concurrently updated")),
+    ).toBe(false);
+  });
+
   it("does not classify unrelated database failures", () => {
     expect(
-      isPostgresUniqueViolationError(pgError("permission denied", "42501")),
+      isPostgresConcurrentDdlRaceError(pgError("permission denied", "42501")),
     ).toBe(false);
     expect(
-      isPostgresUniqueViolationError(new Error("SQLITE_CONSTRAINT_UNIQUE")),
+      isPostgresConcurrentDdlRaceError(new Error("SQLITE_CONSTRAINT_UNIQUE")),
+    ).toBe(false);
+  });
+});
+
+describe("isSqliteStaleSnapshotError", () => {
+  it("detects the deferred-frame upgrade refusal in both driver spellings", () => {
+    // #447: better-sqlite3 reports the symbolic extended code; libSQL over a
+    // remote connection reports only the numeric one. The MESSAGE is the same
+    // useless "database is locked" in both, which is why neither is matched on.
+    expect(
+      isSqliteStaleSnapshotError(
+        Object.assign(new Error("database is locked"), {
+          code: "SQLITE_BUSY_SNAPSHOT",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isSqliteStaleSnapshotError(
+        drizzleQueryError("INSERT INTO typegraph_identity_assertions", {
+          message: "database is locked",
+          rawCode: 517,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not classify a plain busy timeout or an unrelated lock failure", () => {
+    // SQLITE_BUSY says another writer holds the slot right now — a different
+    // statement about a different condition, and not attributable to how this
+    // transaction was begun.
+    expect(
+      isSqliteStaleSnapshotError(
+        Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" }),
+      ),
+    ).toBe(false);
+    expect(isSqliteStaleSnapshotError(new Error("database is locked"))).toBe(
+      false,
+    );
+    expect(
+      isSqliteStaleSnapshotError(pgError("deadlock detected", "40P01")),
     ).toBe(false);
   });
 });

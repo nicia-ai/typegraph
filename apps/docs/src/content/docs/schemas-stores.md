@@ -2635,8 +2635,10 @@ type OperationHookContext = HookContext &
   }>;
 ```
 
-> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item
-operation hooks for throughput. Query hooks still fire normally.
+> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`) skip per-item
+operation hooks for throughput, and the set-based bulk hooks (`onBulkOperationStart` / `onBulkOperationEnd`) do not
+stand in for them — those fire only for node `updateWhere`, so a batch method emits no hook events at all, neither
+per-item nor bulk. Call the single-item method to observe each write. Query hooks still fire normally.
 
 **Example:**
 

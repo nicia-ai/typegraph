@@ -1,4 +1,4 @@
-import { hasOwnKey } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Edge repoint to canonical + set-dedupe cascade (design §6.3 / §6.4 rule 5, T9).
@@ -588,7 +588,7 @@ function unionEdgeProps(
     }
   }
 
-  const props: Record<string, JsonValue> = {};
+  const props = createDataKeyedBag<JsonValue>();
   const conflicts: PropertyConflict[] = [];
 
   for (const property of [...propertyNames].sort((left, right) =>

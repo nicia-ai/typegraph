@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { embedding } from "../src/core/embedding";
+import { resolveFieldTypeInfoAtJsonPointer } from "../src/query/field-type-info";
+import { type JsonPointer } from "../src/query/json-pointer";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";
 
 // ============================================================
@@ -632,6 +634,51 @@ describe("getSharedFieldTypeInfo - object shape intersection", () => {
     expect(info?.shape?.["extra"]).toBeUndefined();
     expect(info?.shape?.["other"]).toBeUndefined();
   });
+
+  it("does not treat a prototype-polluted member as a shared field", () => {
+    const inheritedField = "inheritedSharedField";
+    Object.defineProperty(Object.prototype, inheritedField, {
+      configurable: true,
+      value: { valueType: "string" },
+    });
+    const prototypeKinds = new Map<string, { schema: z.ZodType }>([
+      [
+        "DeclaresPrototypeName",
+        {
+          schema: z.object({
+            metadata: z.object({
+              [inheritedField]: z.string(),
+              value: z.string(),
+            }),
+          }),
+        },
+      ],
+      [
+        "OmitsPrototypeName",
+        { schema: z.object({ metadata: z.object({ value: z.string() }) }) },
+      ],
+    ]);
+    try {
+      const prototypeIntrospector = createSchemaIntrospector(prototypeKinds);
+      const info = prototypeIntrospector.getSharedFieldTypeInfo(
+        ["DeclaresPrototypeName", "OmitsPrototypeName"],
+        "metadata",
+      );
+
+      // A vacuous pass (e.g. `info?.shape` undefined for an unrelated reason)
+      // must not be mistaken for the guarantee this test exists to pin: both
+      // `info` and `info.shape` are asserted defined, and a field the two
+      // kinds legitimately share (`value`) must still surface, so the
+      // prototype-named field's absence is proven against a shape that
+      // otherwise works, not an empty one.
+      expect(info).toBeDefined();
+      expect(info?.shape).toBeDefined();
+      expect(info?.shape?.["value"]?.valueType).toBe("string");
+      expect(Object.hasOwn(info?.shape ?? {}, inheritedField)).toBe(false);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, inheritedField);
+    }
+  });
 });
 
 // ============================================================
@@ -639,6 +686,41 @@ describe("getSharedFieldTypeInfo - object shape intersection", () => {
 // ============================================================
 
 describe("edge cases", () => {
+  it("does not resolve inherited node or edge fields", () => {
+    const nodeKinds = new Map([
+      ["Node", { schema: z.object({ value: z.string() }) }],
+    ]);
+    const edgeKinds = new Map([
+      ["Edge", { schema: z.object({ weight: z.number() }) }],
+    ]);
+    const introspector = createSchemaIntrospector(nodeKinds, edgeKinds);
+
+    expect(
+      introspector.getFieldTypeInfo("Node", "constructor"),
+    ).toBeUndefined();
+    expect(
+      introspector.getEdgeFieldTypeInfo("Edge", "toString"),
+    ).toBeUndefined();
+  });
+
+  it("does not traverse inherited object fields in a JSON pointer", () => {
+    const nodeKinds = new Map([
+      [
+        "Node",
+        { schema: z.object({ metadata: z.object({ value: z.string() }) }) },
+      ],
+    ]);
+    const introspector = createSchemaIntrospector(nodeKinds);
+    const metadata = introspector.getFieldTypeInfo("Node", "metadata");
+
+    expect(() =>
+      resolveFieldTypeInfoAtJsonPointer(
+        metadata,
+        "/constructor" as JsonPointer,
+      ),
+    ).toThrow(/not defined on object schema/);
+  });
+
   it("handles non-object schema", () => {
     const nodeKinds = new Map([["StringNode", { schema: z.string() }]]);
     const introspector = createSchemaIntrospector(nodeKinds);

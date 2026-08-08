@@ -6,6 +6,8 @@
  * differently-ordered keys produce identical canonical strings.
  */
 
+import { createDataKeyedBag } from "../utils/object";
+
 /**
  * `JSON.stringify` replacer that sorts object keys recursively.
  *
@@ -14,10 +16,20 @@
  *
  * Arrays are passed through unchanged — array order is semantically
  * meaningful and must not be normalized.
+ *
+ * The re-keyed object is null-prototype ({@link createDataKeyedBag}): every key
+ * here is DATA — a kind name, a property name, a JSON-Schema keyword — and
+ * `sorted["__proto__"] = value` on a `{}` literal reaches the prototype setter
+ * instead of creating an entry. The key would then be missing from the
+ * canonical string, so a schema declaring such a property would hash and
+ * compare equal to one that does not: `computeSchemaHash` would report
+ * "unchanged" and `computeSchemaDiff` would find no change to migrate. Output
+ * is byte-identical for every value without such a key, so no existing
+ * schema's hash moves.
  */
 export function sortedReplacer(_key: string, value: unknown): unknown {
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-    const sorted: Record<string, unknown> = {};
+    const sorted = createDataKeyedBag<unknown>();
     for (const key of Object.keys(value).toSorted()) {
       sorted[key] = (value as Record<string, unknown>)[key];
     }

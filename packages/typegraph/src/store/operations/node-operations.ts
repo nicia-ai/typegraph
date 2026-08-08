@@ -65,12 +65,16 @@ import {
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { createDataKeyedBag, hasOwnKey } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
+import { encodeTupleKey } from "../../utils/tuple-key";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateNodeInput } from "../collections/node-collection";
 import {
   checkDisjointnessConstraint,
   type ConstraintContext,
+  type ConstraintFenceReason,
+  nodeWriteNeedsConstraintFence,
 } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
@@ -189,16 +193,62 @@ type CachedUniqueRow = Awaited<ReturnType<GraphBackend["checkUnique"]>>;
 // Helper Functions
 // ============================================================
 
+// Own-key membership, matching `store.getNodePropsSchema` and the collections
+// proxy: kind names are arbitrary identifiers, so a `toString`-named kind that
+// is NOT registered would otherwise read the inherited function as its
+// registration and fail with a `TypeError` off `registration.type` instead of
+// the `KindNotFoundError` this guard exists to raise.
 function getNodeRegistration<G extends GraphDef>(graph: G, kind: string) {
+  if (!hasOwnKey(graph.nodes, kind)) throw new KindNotFoundError(kind, "node");
   const registration = graph.nodes[kind];
   if (registration === undefined) throw new KindNotFoundError(kind, "node");
   return registration;
 }
 
-const CACHE_KEY_SEPARATOR = "\u0000";
+/**
+ * WHICH constraint makes this node write one whose probe no database key
+ * repeats at write time, so it must take the per-graph write fence — or be
+ * refused where no fence exists. The classification itself lives with the
+ * constraints ({@link file://../constraints.ts nodeWriteNeedsConstraintFence});
+ * this is only the graph-def lookup that feeds it.
+ *
+ * A kind this graph does not define answers `undefined`: choosing the fence
+ * must not become the thing that reports an unknown kind, which the write path
+ * raises from inside its hooked transaction where `onError` observes it.
+ */
+function nodeFencesConstraintProbe<G extends GraphDef>(
+  ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
+  kind: string,
+  operation: "create" | "update",
+): ConstraintFenceReason | undefined {
+  if (!hasOwnKey(ctx.graph.nodes, kind)) return undefined;
+  return nodeWriteNeedsConstraintFence(
+    ctx.registry,
+    kind,
+    getNodeRegistration(ctx.graph, kind).unique ?? [],
+    operation,
+  );
+}
+
+/**
+ * A batch fences when ANY item does — one transaction, so one constrained
+ * member makes the whole write constrained, and the first such member names the
+ * class a refusal would report.
+ */
+function nodeBatchFencesConstraintProbe<G extends GraphDef>(
+  ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
+  inputs: readonly Readonly<{ kind: string }>[],
+  operation: "create" | "update",
+): ConstraintFenceReason | undefined {
+  for (const input of inputs) {
+    const reason = nodeFencesConstraintProbe(ctx, input.kind, operation);
+    if (reason !== undefined) return reason;
+  }
+  return undefined;
+}
 
 function buildNodeCacheKey(graphId: string, kind: string, id: string): string {
-  return `${graphId}${CACHE_KEY_SEPARATOR}${kind}${CACHE_KEY_SEPARATOR}${id}`;
+  return encodeTupleKey([graphId, kind, id]);
 }
 
 function buildUniqueCacheKey(
@@ -207,7 +257,7 @@ function buildUniqueCacheKey(
   constraintName: string,
   key: string,
 ): string {
-  return `${graphId}${CACHE_KEY_SEPARATOR}${nodeKind}${CACHE_KEY_SEPARATOR}${constraintName}${CACHE_KEY_SEPARATOR}${key}`;
+  return encodeTupleKey([graphId, nodeKind, constraintName, key]);
 }
 
 function buildInsertNodeParams(
@@ -986,7 +1036,7 @@ export async function primeBatchValidationCaches(
           ctx.registry,
         );
         for (const kindToCheck of kindsToCheck) {
-          const groupKey = kindToCheck + CACHE_KEY_SEPARATOR + constraint.name;
+          const groupKey = encodeTupleKey([kindToCheck, constraint.name]);
           const group = groups.get(groupKey) ?? {
             nodeKind: kindToCheck,
             constraintName: constraint.name,
@@ -1304,6 +1354,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       if (row === undefined) return;
       return rowToNode(row);
     },
+    {
+      fencesConstraintProbe: nodeFencesConstraintProbe(ctx, kind, "create"),
+    },
   );
 }
 
@@ -1347,26 +1400,37 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 ): Promise<void> {
   if (inputs.length === 0) return;
 
-  await runInWriteTransaction(ctx, backend, async (target, lock) => {
-    const identity = ctx.identity;
-    if (identity !== undefined) await identity.lock(target);
-    const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
+  await runInWriteTransaction(
+    ctx,
+    backend,
+    async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
+      const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
 
-    const partition = partitionCreates(preparedCreates);
-    await withAlreadyExistsTranslation("node", () =>
-      runInsertBatch(
-        nodeInsertDispatch(target),
-        partition.inserts.map((prepared) => prepared.insertParams),
+      const partition = partitionCreates(preparedCreates);
+      await withAlreadyExistsTranslation("node", () =>
+        runInsertBatch(
+          nodeInsertDispatch(target),
+          partition.inserts.map((prepared) => prepared.insertParams),
+        ),
+      );
+      for (const prepared of partition.resurrections) {
+        await resurrectPreparedNode(ctx, target, lock, prepared);
+      }
+      await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
+      if (identity !== undefined) {
+        await identity.foldCreated(target, foldReferences(preparedCreates));
+      }
+    },
+    {
+      fencesConstraintProbe: nodeBatchFencesConstraintProbe(
+        ctx,
+        inputs,
+        "create",
       ),
-    );
-    for (const prepared of partition.resurrections) {
-      await resurrectPreparedNode(ctx, target, lock, prepared);
-    }
-    await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
-    if (identity !== undefined) {
-      await identity.foldCreated(target, foldReferences(preparedCreates));
-    }
-  });
+    },
+  );
 }
 
 /**
@@ -1386,48 +1450,59 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
 
-  return runInWriteTransaction(ctx, backend, async (target, lock) => {
-    const identity = ctx.identity;
-    if (identity !== undefined) await identity.lock(target);
-    const preparedCreates = await prepareBatchCreates(
-      ctx,
-      inputs,
-      target,
-      options,
-    );
-
-    const partition = partitionCreates(preparedCreates);
-    const inserted = await withAlreadyExistsTranslation("node", () =>
-      runInsertBatchReturning(
-        nodeInsertDispatch(target),
-        partition.inserts.map((prepared) => prepared.insertParams),
-      ),
-    );
-    const resurrected: BackendNodeRow[] = [];
-    for (const prepared of partition.resurrections) {
-      resurrected.push(
-        await resurrectPreparedNode(ctx, target, lock, prepared),
+  return runInWriteTransaction(
+    ctx,
+    backend,
+    async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
+      const preparedCreates = await prepareBatchCreates(
+        ctx,
+        inputs,
+        target,
+        options,
       );
-    }
-    await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
-    const byReference = new Map(
-      [...inserted, ...resurrected].map((row) => [
-        refKey({ kind: row.kind, id: row.id }),
-        row,
-      ]),
-    );
-    const rows = preparedCreates.map((prepared) =>
-      requireDefined(
-        byReference.get(refKey({ kind: prepared.kind, id: prepared.id })),
-        `Missing written row for ${prepared.kind} ${prepared.id}`,
-      ),
-    );
-    if (identity !== undefined) {
-      await identity.foldCreated(target, foldReferences(preparedCreates));
-    }
 
-    return rows.map((row) => rowToNode(row));
-  });
+      const partition = partitionCreates(preparedCreates);
+      const inserted = await withAlreadyExistsTranslation("node", () =>
+        runInsertBatchReturning(
+          nodeInsertDispatch(target),
+          partition.inserts.map((prepared) => prepared.insertParams),
+        ),
+      );
+      const resurrected: BackendNodeRow[] = [];
+      for (const prepared of partition.resurrections) {
+        resurrected.push(
+          await resurrectPreparedNode(ctx, target, lock, prepared),
+        );
+      }
+      await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
+      const byReference = new Map(
+        [...inserted, ...resurrected].map((row) => [
+          refKey({ kind: row.kind, id: row.id }),
+          row,
+        ]),
+      );
+      const rows = preparedCreates.map((prepared) =>
+        requireDefined(
+          byReference.get(refKey({ kind: prepared.kind, id: prepared.id })),
+          `Missing written row for ${prepared.kind} ${prepared.id}`,
+        ),
+      );
+      if (identity !== undefined) {
+        await identity.foldCreated(target, foldReferences(preparedCreates));
+      }
+
+      return rows.map((row) => rowToNode(row));
+    },
+    {
+      fencesConstraintProbe: nodeBatchFencesConstraintProbe(
+        ctx,
+        inputs,
+        "create",
+      ),
+    },
+  );
 }
 
 // ============================================================
@@ -1468,6 +1543,13 @@ export async function executeNodeUpdate<G extends GraphDef>(
         ]);
       }
       return node;
+    },
+    {
+      fencesConstraintProbe: nodeFencesConstraintProbe(
+        ctx,
+        input.kind,
+        "update",
+      ),
     },
   );
 }
@@ -1533,7 +1615,8 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
     kind,
     operation: "update",
   });
-  const patch: Record<string, JsonValue> = {};
+  // Data-keyed: `property` comes from the caller's patch object.
+  const patch = createDataKeyedBag<JsonValue>();
   const unsetProperties: string[] = [];
   for (const [property, value] of Object.entries(parsedPatch)) {
     if (value === undefined) {
@@ -1753,7 +1836,13 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
         );
         return { affectedCount: result.affectedCount };
       },
-      { didWrite: (result) => result.affectedCount > 0 },
+      {
+        didWrite: (result) => result.affectedCount > 0,
+        // The set update re-checks every changed unique key across the
+        // constraint's scope before rebuilding the sidecars, so a shared-scope
+        // constraint makes it a constrained write like any other update.
+        fencesConstraintProbe: nodeFencesConstraintProbe(ctx, kind, "update"),
+      },
     ),
   );
 }
@@ -1768,23 +1857,36 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
-  return runInWriteTransaction(ctx, backend, async (target, lock) => {
-    const identity = ctx.identity;
-    if (options?.clearDeleted && identity !== undefined) {
-      await identity.lock(target);
-    }
-    const node = await performNodeUpdateWithResurrectionRecovery(
-      ctx,
-      input,
-      target,
-      lock,
-      options,
-    );
-    if (options?.clearDeleted && identity !== undefined) {
-      await identity.foldCreated(target, [{ kind: input.kind, id: input.id }]);
-    }
-    return node;
-  });
+  return runInWriteTransaction(
+    ctx,
+    backend,
+    async (target, lock) => {
+      const identity = ctx.identity;
+      if (options?.clearDeleted && identity !== undefined) {
+        await identity.lock(target);
+      }
+      const node = await performNodeUpdateWithResurrectionRecovery(
+        ctx,
+        input,
+        target,
+        lock,
+        options,
+      );
+      if (options?.clearDeleted && identity !== undefined) {
+        await identity.foldCreated(target, [
+          { kind: input.kind, id: input.id },
+        ]);
+      }
+      return node;
+    },
+    {
+      fencesConstraintProbe: nodeFencesConstraintProbe(
+        ctx,
+        input.kind,
+        "update",
+      ),
+    },
+  );
 }
 
 // ============================================================
@@ -1840,6 +1942,62 @@ export async function executeNodeDelete<G extends GraphDef>(
         await identity.detachDeleted(target, { kind, id }, "soft");
       }
     },
+  );
+}
+
+/**
+ * Soft-deletes a batch without per-item operation hooks.
+ *
+ * Batch collection methods deliberately omit per-item hooks for throughput.
+ * Owning the write transaction here also prevents a per-item success from
+ * being reported before the batch's outer COMMIT.
+ */
+export async function executeNodeDeleteBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  ids: readonly string[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  await runInWriteTransaction(
+    ctx,
+    backend,
+    async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
+      const registration = getNodeRegistration(ctx.graph, kind);
+      const writeContext = createNodeWriteContext(
+        ctx.graphId,
+        ctx.registry,
+        lock,
+      );
+      let affectedCount = 0;
+
+      for (const id of ids) {
+        // This is both the existence gate and the concurrency-correct
+        // pre-image consumed by uniqueness cleanup. It must stay inside the
+        // batch transaction after the graph write lock is held.
+        const preflight = await target.getNode(ctx.graphId, kind, id);
+        if (!preflight || !isLiveNodeRow(preflight)) continue;
+
+        await applyNodeSoftDelete(
+          writeContext,
+          {
+            existing: preflight,
+            schema: registration.type.schema,
+            uniqueConstraints: registration.unique ?? [],
+            onDelete: registration.onDelete,
+          },
+          target,
+        );
+        if (identity !== undefined) {
+          await identity.detachDeleted(target, { kind, id }, "soft");
+        }
+        affectedCount += 1;
+      }
+
+      return affectedCount;
+    },
+    { didWrite: (affectedCount) => affectedCount > 0 },
   );
 }
 
@@ -2616,133 +2774,149 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     ctx.registry,
   );
 
-  // Step 2: Batch-check existing keys
-  const existingByKey =
-    uniqueKeys.length > 0 ?
-      await batchCheckUniqueAcrossKinds(
-        backend,
-        ctx.graphId,
-        constraint.name,
-        uniqueKeys,
-        kindsToCheck,
-        true,
-      )
-    : new Map<
-        string,
-        {
-          node_id: string;
-          concrete_kind: string;
-          deleted_at: string | undefined;
-        }
-      >();
-
-  // Step 3: Partition into toCreate, toFetch, and duplicates
-  const toCreate: { index: number; input: CreateNodeInput }[] = [];
-  const toFetch: {
-    index: number;
-    nodeId: string;
-    concreteKind: string;
-    validatedProps: Record<string, unknown>;
-    isSoftDeleted: boolean;
-  }[] = [];
-  const duplicateOf: { index: number; sourceIndex: number }[] = [];
-  const seenKeys = new Map<string, number>();
-
-  for (const [index, { validatedProps, key }] of validated.entries()) {
-    if (key === undefined) {
-      toCreate.push({ index, input: { kind, props: validatedProps } });
-      continue;
-    }
-
-    const previousIndex = seenKeys.get(key);
-    if (previousIndex !== undefined) {
-      duplicateOf.push({ index, sourceIndex: previousIndex });
-      continue;
-    }
-
-    seenKeys.set(key, index);
-
-    const existing = existingByKey.get(key);
-    if (existing === undefined) {
-      toCreate.push({ index, input: { kind, props: validatedProps } });
-    } else {
-      toFetch.push({
-        index,
-        nodeId: existing.node_id,
-        concreteKind: existing.concrete_kind,
-        validatedProps,
-        isSoftDeleted: existing.deleted_at !== undefined,
-      });
-    }
-  }
-
   type Result = Readonly<{ node: Node; action: GetOrCreateAction }>;
-  const results: Result[] = Array.from({ length: items.length });
 
-  // Step 4: Execute creates
-  if (toCreate.length > 0) {
-    const createInputs = toCreate.map((entry) => entry.input);
-    const createdNodes = await executeNodeCreateBatch(
-      ctx,
-      createInputs,
-      backend,
-      { propsPreValidated: true },
-    );
-    for (const [batchIndex, entry] of toCreate.entries()) {
-      results[entry.index] = {
-        node: requireDefined(createdNodes[batchIndex]),
-        action: "created",
-      };
+  // Steps 2-6 are one convergence attempt: the batch probe runs outside any
+  // transaction and each write leg opens its own, so a concurrent create can
+  // reserve a key between them. The uniques primary key catches that and raises
+  // `UniquenessError`; re-running the whole attempt converges on the winner's
+  // row. Without this the single-item path retried and the batch failed
+  // outright, which is the asymmetry #428 called out.
+  async function attempt(): Promise<Result[]> {
+    // Step 2: Batch-check existing keys
+    const existingByKey =
+      uniqueKeys.length > 0 ?
+        await batchCheckUniqueAcrossKinds(
+          backend,
+          ctx.graphId,
+          constraint.name,
+          uniqueKeys,
+          kindsToCheck,
+          true,
+        )
+      : new Map<
+          string,
+          {
+            node_id: string;
+            concrete_kind: string;
+            deleted_at: string | undefined;
+          }
+        >();
+
+    // Step 3: Partition into toCreate, toFetch, and duplicates
+    const toCreate: { index: number; input: CreateNodeInput }[] = [];
+    const toFetch: {
+      index: number;
+      nodeId: string;
+      concreteKind: string;
+      validatedProps: Record<string, unknown>;
+      isSoftDeleted: boolean;
+    }[] = [];
+    const duplicateOf: { index: number; sourceIndex: number }[] = [];
+    const seenKeys = new Map<string, number>();
+
+    for (const [index, { validatedProps, key }] of validated.entries()) {
+      if (key === undefined) {
+        toCreate.push({ index, input: { kind, props: validatedProps } });
+        continue;
+      }
+
+      const previousIndex = seenKeys.get(key);
+      if (previousIndex !== undefined) {
+        duplicateOf.push({ index, sourceIndex: previousIndex });
+        continue;
+      }
+
+      seenKeys.set(key, index);
+
+      const existing = existingByKey.get(key);
+      if (existing === undefined) {
+        toCreate.push({ index, input: { kind, props: validatedProps } });
+      } else {
+        toFetch.push({
+          index,
+          nodeId: existing.node_id,
+          concreteKind: existing.concrete_kind,
+          validatedProps,
+          isSoftDeleted: existing.deleted_at !== undefined,
+        });
+      }
     }
-  }
 
-  // Step 5: Handle existing nodes (fetch/update/resurrect)
-  for (const entry of toFetch) {
-    const { index, concreteKind, validatedProps, isSoftDeleted, nodeId } =
-      entry;
+    const results: Result[] = Array.from({ length: items.length });
 
-    const existingRow = await backend.getNode(
-      ctx.graphId,
-      concreteKind,
-      nodeId,
-    );
-
-    if (existingRow === undefined) {
-      const node = await executeNodeCreate(
+    // Step 4: Execute creates
+    if (toCreate.length > 0) {
+      const createInputs = toCreate.map((entry) => entry.input);
+      const createdNodes = await executeNodeCreateBatch(
         ctx,
-        { kind, props: validatedProps },
+        createInputs,
         backend,
         { propsPreValidated: true },
       );
-      results[index] = { node, action: "created" };
-      continue;
+      for (const [batchIndex, entry] of toCreate.entries()) {
+        results[entry.index] = {
+          node: requireDefined(createdNodes[batchIndex]),
+          action: "created",
+        };
+      }
     }
 
-    if (isSoftDeleted || ifExists === "update") {
-      const node = await executeNodeUpsertUpdate(
-        ctx,
-        {
-          kind: concreteKind,
-          id: existingRow.id as UpdateNodeInput["id"],
-          props: validatedProps,
-        },
-        backend,
-        { clearDeleted: isSoftDeleted },
+    // Step 5: Handle existing nodes (fetch/update/resurrect)
+    for (const entry of toFetch) {
+      const { index, concreteKind, validatedProps, isSoftDeleted, nodeId } =
+        entry;
+
+      const existingRow = await backend.getNode(
+        ctx.graphId,
+        concreteKind,
+        nodeId,
       );
-      results[index] = {
-        node,
-        action: isSoftDeleted ? "resurrected" : "updated",
-      };
-    } else {
-      results[index] = { node: rowToNode(existingRow), action: "found" };
+
+      if (existingRow === undefined) {
+        const node = await executeNodeCreate(
+          ctx,
+          { kind, props: validatedProps },
+          backend,
+          { propsPreValidated: true },
+        );
+        results[index] = { node, action: "created" };
+        continue;
+      }
+
+      if (isSoftDeleted || ifExists === "update") {
+        const node = await executeNodeUpsertUpdate(
+          ctx,
+          {
+            kind: concreteKind,
+            id: existingRow.id as UpdateNodeInput["id"],
+            props: validatedProps,
+          },
+          backend,
+          { clearDeleted: isSoftDeleted },
+        );
+        results[index] = {
+          node,
+          action: isSoftDeleted ? "resurrected" : "updated",
+        };
+      } else {
+        results[index] = { node: rowToNode(existingRow), action: "found" };
+      }
     }
+
+    // Step 6: Resolve within-batch duplicates by copying the first occurrence's result
+    for (const { index, sourceIndex } of duplicateOf) {
+      const sourceResult = requireDefined(results[sourceIndex]);
+      results[index] = { node: sourceResult.node, action: "found" };
+    }
+
+    return results;
   }
 
-  // Step 6: Resolve within-batch duplicates by copying the first occurrence's result
-  for (const { index, sourceIndex } of duplicateOf) {
-    const sourceResult = requireDefined(results[sourceIndex]);
-    results[index] = { node: sourceResult.node, action: "found" };
+  try {
+    return await attempt();
+  } catch (error) {
+    if (!(error instanceof UniquenessError)) throw error;
+    return attempt();
   }
-
-  return results;
 }
