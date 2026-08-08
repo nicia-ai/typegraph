@@ -140,8 +140,8 @@ function resolveLazySchema(schema: z.ZodLazy<z.core.SomeType>):
     }> {
   try {
     return { resolved: true, inner: schema.unwrap() };
-  } catch (cause) {
-    return { resolved: false, cause };
+  } catch (error) {
+    return { resolved: false, cause: error };
   }
 }
 

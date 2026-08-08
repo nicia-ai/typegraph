@@ -1502,6 +1502,7 @@ async function updateImportedNode(
           schema: args.schema,
           validatedProps: args.validatedProps,
           uniqueConstraints: args.uniqueConstraints,
+          // eslint-disable-next-line unicorn/no-null -- `expectedValidFrom` distinguishes "assert IS NULL" (null) from "assert nothing" (undefined); see UpdateNodeParams.
           expectedValidFrom: args.existing.valid_from ?? null,
           ...(node.validTo !== undefined && { validTo: node.validTo }),
         },
@@ -1670,6 +1671,7 @@ async function updateImportedEdge(
       toKind: edge.to.kind,
       toId: edge.to.id,
       props,
+      // eslint-disable-next-line unicorn/no-null -- `expectedValidFrom` distinguishes "assert IS NULL" (null) from "assert nothing" (undefined); see UpdateEdgeParams.
       expectedValidFrom: existingValidFrom ?? null,
       ...(edge.validTo !== undefined && { validTo: edge.validTo }),
     });
