@@ -4,6 +4,7 @@
 import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../../core/types";
 import { EndpointError, KindNotFoundError } from "../../errors";
+import { isInteropProbeKey } from "../../utils/object";
 import {
   type NodePredicate,
   type RecursiveCyclePolicy,
@@ -432,14 +433,25 @@ export class TraversalBuilder<
       get: (_, property: string | symbol) => {
         // Handle symbols and special properties to avoid infinite loops
         if (typeof property === "symbol") return;
-        if (property === "then") return;
-        if (property === "toJSON") return;
 
         // System fields
         if (property === "id") return idAccessor;
         if (property === "kind") return kindAccessor;
         if (property === "fromId") return fromIdAccessor;
         if (property === "toId") return toIdAccessor;
+
+        // A DECLARED field wins over the interop exemption: `then` and `toJSON`
+        // are legal schema field names, so only an UNDECLARED probe resolves to
+        // `undefined`.
+        if (
+          isInteropProbeKey(property) &&
+          !this.#config.schemaIntrospector.hasDeclaredEdgeField(
+            allEdgeKinds,
+            property,
+          )
+        ) {
+          return;
+        }
 
         // Schema properties
         return buildFieldAccessor(property);

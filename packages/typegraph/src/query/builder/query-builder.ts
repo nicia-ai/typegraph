@@ -16,6 +16,7 @@ import {
   type TemporalMode,
 } from "../../core/types";
 import { ConfigurationError, KindNotFoundError } from "../../errors";
+import { isInteropProbeKey } from "../../utils/object";
 import {
   type AggregateExpr,
   type FieldRef,
@@ -1288,13 +1289,29 @@ export class QueryBuilder<
       get: (_, property: string | symbol) => {
         // Handle symbols and special properties to avoid infinite loops
         if (typeof property === "symbol") return;
-        if (property === "then") return;
-        if (property === "toJSON") return;
 
         // System fields
         if (property === "id") return idAccessor;
         if (property === "kind") return kindAccessor;
         if (property === "$fulltext") return fulltextAccessor;
+
+        // A DECLARED field wins over the interop exemption: `toJSON` and `then`
+        // are legal schema field names, and the accessor type offers them, so
+        // resolving them to `undefined` here made a declared field
+        // unaddressable in a predicate. Only an UNDECLARED probe resolves to
+        // `undefined`, keeping the accessor safe to await or stringify.
+        if (
+          isInteropProbeKey(property) &&
+          !(
+            kindNames !== undefined &&
+            this.#config.schemaIntrospector.hasDeclaredField(
+              kindNames,
+              property,
+            )
+          )
+        ) {
+          return;
+        }
 
         // Schema properties
         return this.#getFieldBuilderForProperty(kindNames, property, alias);
@@ -1437,14 +1454,27 @@ export class QueryBuilder<
       get: (_, property: string | symbol) => {
         // Handle symbols and special properties to avoid infinite loops
         if (typeof property === "symbol") return;
-        if (property === "then") return;
-        if (property === "toJSON") return;
 
         // System fields
         if (property === "id") return idAccessor;
         if (property === "kind") return kindAccessor;
         if (property === "fromId") return fromIdAccessor;
         if (property === "toId") return toIdAccessor;
+
+        // A DECLARED field wins over the interop exemption — see
+        // #createNodeAccessor.
+        if (
+          isInteropProbeKey(property) &&
+          !(
+            edgeKindNames !== undefined &&
+            this.#config.schemaIntrospector.hasDeclaredEdgeField(
+              edgeKindNames,
+              property,
+            )
+          )
+        ) {
+          return;
+        }
 
         // Schema properties
         return this.#getFieldBuilderForEdgeProperty(
