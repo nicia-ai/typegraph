@@ -9,8 +9,10 @@ PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
 DEFAULT_POSTGRES_URL="postgresql://typegraph:typegraph@localhost:5432/typegraph_test"
 
 # If POSTGRES_URL is already set (e.g., in CI), use the existing database
+EXTERNAL_POSTGRES=0
 if [[ -n "$POSTGRES_URL" ]]; then
   echo "Using existing PostgreSQL at $POSTGRES_URL"
+  EXTERNAL_POSTGRES=1
 else
   # Start PostgreSQL locally. `up -d --wait` is idempotent, so a container
   # left warm by a previous run is reused as-is, and the container is left
@@ -44,24 +46,42 @@ fi
 #
 # The worker cap exists for the CONNECTION BUDGET, not for isolation: every
 # worker holds at least one pool against the same server, and the graph-merge
-# property fixtures keep several backends alive at once. The bundled
-# docker-compose.yml raises max_connections to 400, which gives 6 workers
-# comfortable headroom; an externally supplied POSTGRES_URL (CI) must budget
-# its own server the same way or lower the cap ("sorry, too many clients
-# already" is the symptom of getting this wrong). Graph-merge fixtures
-# additionally isolate per-fixture schemas.
+# property fixtures keep several backends alive at once. Parallelism is
+# therefore tied to WHO provisioned the server:
+#
+# - The bundled docker-compose.yml raises max_connections to 400, which gives
+#   6 workers comfortable headroom, so the compose path defaults to
+#   min(6, cores).
+# - An externally supplied POSTGRES_URL has an UNKNOWN budget — a stock
+#   server's max_connections=100 cannot absorb six workers' pools, and "sorry,
+#   too many clients already" mid-suite is the failure mode — so it defaults
+#   to the pre-parallel behaviour of ONE worker. An owner who has budgeted
+#   their server states the cap explicitly via TYPEGRAPH_PG_MAX_WORKERS
+#   (CI does: it raises max_connections on its service container first, and
+#   the workflow sets the cap beside that step).
+#
+# Graph-merge fixtures additionally isolate per-fixture schemas.
 #
 # With POSTGRES_URL set, the graph-merge backendMatrix() gains its
 # server-Postgres entry, so those suites run on SQLite, PGlite, AND the
 # production pg driver in this lane.
 CORES="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-MAX_WORKERS="${TYPEGRAPH_PG_MAX_WORKERS:-$(( CORES < 6 ? CORES : 6 ))}"
+if [[ -n "${TYPEGRAPH_PG_MAX_WORKERS:-}" ]]; then
+  MAX_WORKERS="$TYPEGRAPH_PG_MAX_WORKERS"
+elif [[ "$EXTERNAL_POSTGRES" == "1" ]]; then
+  MAX_WORKERS=1
+else
+  MAX_WORKERS=$(( CORES < 6 ? CORES : 6 ))
+fi
 
 # The graph-merge and pglite vitest projects serialize their files by
 # default to keep PGlite startup latency out of the default lane; this
-# lane provisions the connection budget those files need to run
-# file-parallel, so it opts them back in (see vitest.config.ts).
-export TYPEGRAPH_HEAVY_FILE_PARALLELISM=1
+# lane opts them back in only when it actually runs multi-worker (see
+# vitest.config.ts) — with one worker the opt-in would change nothing but
+# still advertise a parallelism the connection budget never approved.
+if [[ "$MAX_WORKERS" -gt 1 ]]; then
+  export TYPEGRAPH_HEAVY_FILE_PARALLELISM=1
+fi
 
 echo "Running PostgreSQL tests ($MAX_WORKERS workers)..."
 vitest_args=(

@@ -158,13 +158,34 @@ Consequences worth knowing:
   with `WITH (FORCE)`. Concurrent lanes (for example one per worktree) must use
   separate base databases.
 - The per-suite databases are deliberately left behind so a failure stays
-  inspectable; the next run recreates them. The Docker lane is ephemeral, so
-  this only accumulates on a long-lived external server.
+  inspectable; the next run recreates them. The Docker container is also left
+  running between runs (`up -d --wait` reuses it idempotently), both to skip
+  the start/stop cycle and so one invocation's exit cannot tear the server out
+  from under a concurrent invocation. Set `TYPEGRAPH_POSTGRES_DOWN=1` to
+  restore teardown-on-exit, or stop it manually with
+  `docker compose -f packages/typegraph/docker-compose.yml down`. A warm
+  server carries no state a run depends on — the per-suite databases are
+  dropped and recreated — but leftovers from inspection do accumulate until
+  the container is recreated.
 
-`scripts/test-postgres.sh` still passes `--no-file-parallelism`, now purely for
-the connection budget (`max_connections` is 100 and each worker holds pools),
-not for isolation. Reproducing a single failure with a parallel invocation of a
-few files is safe.
+The lane runs its suites **file-parallel**, and the worker count follows who
+provisioned the server. The bundled `docker-compose.yml` starts PostgreSQL
+with `max_connections=400`, which affords `min(6, cores)` workers (each worker
+holds at least one pool, and graph-merge property fixtures keep several
+backends alive at once). An externally supplied `POSTGRES_URL` has an unknown
+connection budget, so it defaults to **one** worker — the pre-parallel
+behaviour — until you state a cap explicitly with `TYPEGRAPH_PG_MAX_WORKERS`
+after budgeting your server the same way (CI does exactly this: it raises
+`max_connections` on its service container, then sets the cap beside that
+step). "sorry, too many clients already" mid-suite is the symptom of a cap
+your server cannot fund. The graph-merge and pglite vitest projects, which
+serialize their files in the default SQLite lane, opt back into parallelism
+only when the lane actually runs multi-worker. Reproducing a single failure
+with a parallel invocation of a few files remains safe at any worker count —
+isolation comes from the per-suite databases, never from serialization. The
+one-invocation-per-`POSTGRES_URL` restriction above still applies: worker
+parallelism is *within* an invocation, and concurrent invocations still race
+on database names.
 
 ## Coverage
 

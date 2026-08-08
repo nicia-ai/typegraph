@@ -383,6 +383,11 @@ jobs:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
           VITEST_SHARD: ${{ matrix.shard }}
+          # An externally supplied POSTGRES_URL defaults to ONE worker because
+          # the script cannot know the server's connection budget. This job
+          # raised max_connections to 400 in the step above, so it states the
+          # cap that budget affords (the runners have 4 cores).
+          TYPEGRAPH_PG_MAX_WORKERS: 4
 
       - name: Run PostgreSQL perf sanity
         if: ${{ matrix.shard == '1/2' }}
