@@ -274,9 +274,10 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
     temporalFilterPass,
   );
 
-  // Identity expansion reads its class relation from outside the recursive term,
-  // so it is evaluated once for the whole traversal rather than per expanded
-  // (frontier row, edge) pair.
+  // A historical read reconstructs its class relation from outside the recursive
+  // term, so the ledger fixed point is evaluated once for the whole traversal
+  // rather than per expanded (frontier row, edge) pair. A current read emits no
+  // such relation: its step seeks the closure from the worktable row itself.
   const identityClassCte = compileIdentityClassCte({
     ast,
     ctx,
@@ -464,8 +465,12 @@ function compileRecursiveCte(
   const identityFrontierExpansion =
     traversal.includeIdentityMembers === true ?
       planIdentityFrontierExpansion({
+        ast,
+        ctx,
+        graphId,
         previousId: previousIdColumn,
         previousKind: previousKindColumn,
+        temporalFilterPass,
       })
     : undefined;
 
@@ -475,6 +480,10 @@ function compileRecursiveCte(
     edgeTemporalFilter,
     nodeTemporalFilter,
     maxDepthCondition,
+    // Conditions the frontier widening cannot state in a join condition —
+    // currently the member-visibility guard. Every branch of the recursive term
+    // carries them, because every branch reads the widened frontier.
+    ...(identityFrontierExpansion?.whereClauses ?? []),
   ];
   if (cycleCheck !== undefined) {
     recursiveBaseWhereClauses.push(cycleCheck);

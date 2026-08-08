@@ -389,8 +389,12 @@ export function buildStandardTraversalCte(
   const identityFrontierExpansion =
     traversal.includeIdentityMembers === true ?
       planIdentityFrontierExpansion({
+        ast,
+        ctx,
+        graphId,
         previousId: previousIdColumn,
         previousKind: previousKindColumn,
+        temporalFilterPass,
       })
     : undefined;
 
@@ -446,6 +450,10 @@ export function buildStandardTraversalCte(
   ): SqlFragment {
     const whereClauses = [
       ...baseWhereClauses,
+      // Conditions the frontier widening cannot state in a join condition —
+      // currently the member-visibility guard. Every branch of the step carries
+      // them, because every branch reads the widened frontier.
+      ...(identityFrontierExpansion?.whereClauses ?? []),
       compileKindFilter(sql.raw("e.kind"), branch.edgeKinds),
       compileKindFilter(sql.raw(`e.${branch.targetKindField}`), nodeKinds),
     ];

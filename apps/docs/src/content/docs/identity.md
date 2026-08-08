@@ -230,18 +230,19 @@ traversal supports the same option.
 TypeGraph does not perform automatic graph-wide expansion and collection reads
 such as `getById` have no identity option.
 
-Both coordinates reach membership the same way — a single materialized relation
-of `(seed, member)` pairs, evaluated once per statement, which each traversal
-step joins so the candidate edge is reached by an ordinary indexed equality.
-What differs is where that relation's rows come from, and what building it
-costs.
+Both coordinates reach the candidate edge the same way — an ordinary indexed
+equality on the class member, never a membership test evaluated per candidate
+edge. How each one reaches the class differs, because what a class costs to
+compute differs.
 
-At the **current** coordinate they come from the materialized closure, joined to
-itself on the class label and filtered to members visible now. There is nothing
-to reconstruct, so the relation costs one pass over the closure. Measured on
-SQLite with *n* Person nodes, each folded with a Company and an Alias peer
-sharing its id (a three-member class per source), all *n* acting as source rows
-and every edge leaving the Company peer:
+At the **current** coordinate the maintained closure already *is* the class
+relation, so each traversal step seeks into it from its own frontier rows: the
+frontier row's class through the closure's primary key, that class's members
+through the class index, each member's node for its visibility. Cost is
+proportional to the frontier and the size of its classes — never to how many
+identity classes the graph holds. Measured on SQLite with *n* Person nodes, each
+folded with a Company and an Alias peer sharing its id (a three-member class per
+source), all *n* acting as source rows and every edge leaving the Company peer:
 
 | source rows | fan-out | matching edges | before | after |
 | --- | --- | --- | --- | --- |
@@ -261,9 +262,11 @@ A **historical** hop — one under `asOf`, `asOfRecorded`, or a non-current
 only the present. Its rows come from a reconstruction of identity classes out of
 the assertion ledger, and under `sameIdAcrossKinds: "fold"` that reconstruction
 also has to consider the structural same-id relation, which is proportional to
-the number of live nodes in the graph. Measured on the narrow-edge fixture that
-isolates the term (SQLite, *n* Person nodes each folded with a Company peer, all
-*n* acting as source rows, fan-out 1):
+the number of live nodes in the graph. No frontier row narrows that fixed point,
+so it is built once per statement into a materialized relation every traversal
+step joins. Measured on the narrow-edge fixture that isolates the term (SQLite,
+*n* Person nodes each folded with a Company peer, all *n* acting as source rows,
+fan-out 1):
 
 | *n* | before | after |
 | --- | --- | --- |
@@ -274,15 +277,15 @@ isolates the term (SQLite, *n* Person nodes each folded with a Company peer, all
 
 Growth is linear in graph size where it used to quadruple per doubling.
 
-One caveat applies to both coordinates and is worth planning around: the relation
-is built for the whole graph, so an expanded traversal from a handful of nodes
-still pays one pass over the identity population rather than a cost proportional
-to how little you asked for. What a narrow-frontier hop used to pay instead was a
-pass over the candidate edges, so which is cheaper depends on the graph — on
-SQLite a single-start-row hop over 50,000 folded triples measures 208 ms against
-77 ms before, while PostgreSQL improves on the same shape (223 ms against
-310 ms). Both are linear in graph size; neither grows with the number of source
-rows.
+The caveat that remains is the historical one, and it is worth planning around: a
+past-coordinate hop rebuilds the whole graph's classes even when you asked about
+one node, so its floor is a pass over the identity population regardless of how
+narrow the frontier is. A **current** hop has no such floor — a single-start-row
+hop over 50,000 folded triples measures 1 ms on SQLite against 387 ms when the
+class relation was still built graph-wide, and nine unrelated 501-member classes
+cost it nothing at all (0.5 ms on SQLite, 2.4 ms on PostgreSQL, against 564 ms
+and 568 ms). Pick the coordinate you actually need: reading the present is the
+cheaper question by a wide margin.
 
 ## Interchange and branch merge
 

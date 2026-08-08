@@ -1,17 +1,24 @@
 /**
  * Structural guards on the SQL an identity-expanded traversal compiles to.
  *
- * The performance property #310 and #270 ask for is not "the traversal is fast"
- * but "the identity class relation is emitted once, from a position a planner
- * cannot re-evaluate per row, and the candidate edge is reached by an equality
- * the engine can drive an index from". Timings drift with machine and data; the
- * shape does not, so it is pinned here — and pinned for both dialects, because a
- * single compiler path is what keeps the two backends equivalent.
+ * The performance property #310, #270 and #432 ask for is not "the traversal is
+ * fast" but "no relation larger than the traversal needs is built, and the
+ * candidate edge is reached by an equality the engine can drive an index from".
+ * Timings drift with machine and data; the shape does not, so it is pinned here —
+ * and pinned for both dialects, because a single compiler path is what keeps the
+ * two backends equivalent.
  *
- * Both read coordinates are covered. They differ only in where the class
- * relation's rows come from — the materialized closure now, a reconstruction
- * from the assertion ledger at a past instant — and that difference is asserted
- * explicitly, because everything downstream of it is deliberately identical.
+ * The two read coordinates are deliberately different strategies, so each has its
+ * own shape to pin:
+ *
+ * - **Historical** reconstructs identity classes from the assertion ledger, a
+ *   recursive fixed point no frontier row narrows. It is hoisted into one
+ *   materialized relation per statement and read through an outer join (#310).
+ * - **Current** needs no reconstruction — the maintained closure is the answer —
+ *   so each step *seeks* it from its own frontier rows. Building the peer
+ *   relation graph-wide instead costs the sum of the squares of every class size
+ *   before a frontier predicate applies (#432), so the guard is that the seek is
+ *   keyed by the frontier and the closure is never joined to itself unkeyed.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -60,6 +67,18 @@ const EXPANDED_STEPS: Readonly<Record<TraversalShape, number>> = {
   recursive: 1,
   single: 1,
 };
+
+/**
+ * The frontier column each expanded step of a shape widens from — the previous
+ * relation's own id column, which is what makes a current-coordinate closure
+ * seek bounded by the frontier rather than by the identity population.
+ */
+const FRONTIER_ID_COLUMNS: Readonly<Record<TraversalShape, readonly string[]>> =
+  {
+    chained: ["cte_person.person_id", "cte_middle.middle_id"],
+    recursive: ["r.friend_id"],
+    single: ["cte_person.person_id"],
+  };
 
 function compileIdentityTraversalSql(
   input: Readonly<{
@@ -111,6 +130,124 @@ function countOccurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
+/**
+ * The **historical** shape: one class relation for the whole statement, declared
+ * materialized, read by every step through an outer join, and reaching the
+ * candidate edge by an equality on the class member.
+ */
+function expectHoistedClassRelation(
+  sqlText: string,
+  shape: TraversalShape,
+): void {
+  const steps = EXPANDED_STEPS[shape];
+
+  // The ledger fixed point is evaluated once per statement.
+  expect(
+    countOccurrences(
+      sqlText,
+      `"${IDENTITY_CLASS_CTE_ALIAS}"(seed_kind, seed_id, kind, id) AS MATERIALIZED (`,
+    ),
+  ).toBe(1);
+
+  // Every step reads it through an outer join, not a correlated subquery: a
+  // reference inside EXISTS is what an engine rebuilds per candidate row.
+  expect(
+    countOccurrences(
+      sqlText,
+      `LEFT JOIN "${IDENTITY_CLASS_CTE_ALIAS}" "identity_peer"`,
+    ),
+  ).toBe(steps);
+  expect(sqlText).not.toMatch(/EXISTS \([^)]*identity_peer_class/);
+
+  // ...and reaches the candidate edge by an equality on the class member, which
+  // is what lets the engine seek the edge index.
+  expect(countOccurrences(sqlText, `COALESCE("identity_peer".id,`)).toBe(steps);
+}
+
+/**
+ * The **current** shape: no hoisted relation at all, and per step a chain of
+ * seeks each keyed by the row before it, starting from the frontier.
+ */
+function expectFrontierKeyedClosureSeeks(
+  sqlText: string,
+  shape: TraversalShape,
+): void {
+  const steps = EXPANDED_STEPS[shape];
+
+  // A relation over the whole closure is exactly the graph-wide cost #432
+  // removes, and it cannot be reintroduced without this assertion moving.
+  expect(sqlText).not.toContain(IDENTITY_CLASS_CTE_ALIAS);
+
+  // Per step: the frontier row's class through the closure primary key, that
+  // class's members through the class index, the member's node for its
+  // visibility. Two closure references per step and no more — a third would be a
+  // self-join the frontier does not key.
+  expect({
+    closureReferences: countOccurrences(sqlText, `"${CLOSURE_TABLE}"`),
+    memberJoins: countOccurrences(
+      sqlText,
+      `LEFT JOIN "${CLOSURE_TABLE}" identity_peer\n` +
+        `        ON identity_peer.graph_id = identity_seed_class.graph_id\n` +
+        `       AND identity_peer.class_kind = identity_seed_class.class_kind\n` +
+        `       AND identity_peer.class_id = identity_seed_class.class_id`,
+    ),
+    seedJoins: countOccurrences(
+      sqlText,
+      `LEFT JOIN "${CLOSURE_TABLE}" identity_seed_class`,
+    ),
+    visibilityJoins: countOccurrences(
+      sqlText,
+      `LEFT JOIN "typegraph_nodes" identity_peer_node`,
+    ),
+  }).toEqual({
+    closureReferences: 2 * steps,
+    memberJoins: steps,
+    seedJoins: steps,
+    visibilityJoins: steps,
+  });
+
+  // The seek is keyed by the frontier row itself. This is the property: unkeyed,
+  // the same joins enumerate every class in the graph before a predicate
+  // applies.
+  expect(
+    FRONTIER_ID_COLUMNS[shape].filter((frontierId) =>
+      sqlText.includes(`AND identity_seed_class.member_id = ${frontierId}`),
+    ),
+  ).toEqual(FRONTIER_ID_COLUMNS[shape]);
+
+  // A member row is admitted only with a visible node behind it, and only a
+  // frontier row in no class reaches the self fallback.
+  expect({
+    fallbacks: countOccurrences(sqlText, `COALESCE(identity_peer.member_id,`),
+    visibilityGuards: countOccurrences(
+      sqlText,
+      "(identity_peer.member_id IS NULL OR identity_peer_node.id IS NOT NULL)",
+    ),
+  }).toEqual({ fallbacks: steps, visibilityGuards: steps });
+}
+
+/**
+ * Where the class rows come from, counted per shape rather than asserted once:
+ * only the historical relation walks the assertion ledger, and only a recursive
+ * traversal adds a second fixed point of its own. Pinning both numbers together
+ * is what distinguishes "the current coordinate seeks the closure" from "its
+ * reconstruction silently reappeared inside a recursive step".
+ */
+function expectClassRowSource(
+  sqlText: string,
+  coordinate: "current" | "historical",
+  shape: TraversalShape,
+): void {
+  expect({
+    recursions: countOccurrences(sqlText, "WITH RECURSIVE"),
+    seeds: countOccurrences(sqlText, "seeds(seed_kind, seed_id) AS ("),
+  }).toEqual({
+    recursions:
+      (coordinate === "historical" ? 1 : 0) + (shape === "recursive" ? 1 : 0),
+    seeds: coordinate === "historical" ? 1 : 0,
+  });
+}
+
 describe("identity traversal SQL shape", () => {
   for (const dialect of DIALECTS) {
     describe(`${dialect} dialect`, () => {
@@ -119,56 +256,23 @@ describe("identity traversal SQL shape", () => {
           const asOf = coordinate === "historical" ? AS_OF : undefined;
 
           for (const shape of ["single", "chained", "recursive"] as const) {
-            it(`emits one materialized class relation for a ${shape} traversal`, () => {
+            const reaches =
+              coordinate === "historical" ?
+                "hoists one class relation for"
+              : "seeks the closure from the frontier of";
+            const assertShape =
+              coordinate === "historical" ?
+                expectHoistedClassRelation
+              : expectFrontierKeyedClosureSeeks;
+
+            it(`${reaches} a ${shape} traversal`, () => {
               const sqlText = compileIdentityTraversalSql({
                 ...(asOf === undefined ? {} : { asOf }),
                 dialect,
                 shape,
               });
-
-              // Exactly one class relation, declared as a materialized CTE.
-              expect(
-                countOccurrences(
-                  sqlText,
-                  `"${IDENTITY_CLASS_CTE_ALIAS}"(seed_kind, seed_id, kind, id) AS MATERIALIZED (`,
-                ),
-              ).toBe(1);
-
-              // Every step reads it through an outer join, not a correlated
-              // subquery: a reference inside EXISTS is what an engine rebuilds
-              // per candidate row.
-              expect(
-                countOccurrences(
-                  sqlText,
-                  `LEFT JOIN "${IDENTITY_CLASS_CTE_ALIAS}" "identity_peer"`,
-                ),
-              ).toBe(EXPANDED_STEPS[shape]);
-              expect(sqlText).not.toMatch(/EXISTS \([^)]*identity_peer_class/);
-
-              // ...and reaches the candidate edge by an equality on the class
-              // member, which is what lets the engine seek the edge index.
-              expect(
-                countOccurrences(sqlText, `COALESCE("identity_peer".id,`),
-              ).toBe(EXPANDED_STEPS[shape]);
-
-              // The relation's source, counted per shape rather than asserted
-              // once: only the historical relation walks the assertion ledger,
-              // and only a recursive traversal adds a second fixed point of its
-              // own. Pinning both numbers together is what distinguishes "the
-              // current coordinate reads the closure" from "its reconstruction
-              // silently reappeared inside a recursive step".
-              expect({
-                recursions: countOccurrences(sqlText, "WITH RECURSIVE"),
-                seeds: countOccurrences(
-                  sqlText,
-                  "seeds(seed_kind, seed_id) AS (",
-                ),
-              }).toEqual({
-                recursions:
-                  (coordinate === "historical" ? 1 : 0) +
-                  (shape === "recursive" ? 1 : 0),
-                seeds: coordinate === "historical" ? 1 : 0,
-              });
+              assertShape(sqlText, shape);
+              expectClassRowSource(sqlText, coordinate, shape);
             });
           }
 
@@ -198,13 +302,13 @@ describe("identity traversal SQL shape", () => {
         });
       }
 
-      it("builds the current-coordinate relation from the materialized closure", () => {
+      it("reads the current-coordinate class straight from the closure", () => {
         const sqlText = compileIdentityTraversalSql({
           dialect,
           shape: "single",
         });
 
-        // Two closure references: a class label per seed, joined to that
+        // Two closure references: the frontier row's class label, then that
         // class's members. No ledger reconstruction — the closure already
         // encodes the graph's sameIdAcrossKinds profile.
         expect(countOccurrences(sqlText, `"${CLOSURE_TABLE}"`)).toBe(2);

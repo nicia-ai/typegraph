@@ -68,6 +68,7 @@ vitest_args+=(
   # resolves its URL through `provisionPostgresTestDatabase` is missing here.
   tests/backends/l2-score-scale-parity.test.ts
   tests/hybrid-single-statement.test.ts
+  tests/identity-frontier-bounded.test.ts
   tests/search-filter-pushdown.test.ts
   tests/search-liveness.test.ts
   tests/similar-to-approximate.test.ts
