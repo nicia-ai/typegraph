@@ -105,6 +105,7 @@ import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
   validateOptionalCanonicalIsoDate,
+  type ValidityLowerBoundFence,
 } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { encodeTupleKey } from "../utils/tuple-key";
@@ -1277,12 +1278,12 @@ async function processNodeSlice(
             record(node, { status: "skipped", liveTarget: false });
             break;
           }
-          const updateWindowError = validateUpdateValidityWindow(
+          const updateWindow = validateUpdateValidityWindow(
             node,
             existing.valid_from,
           );
-          if (updateWindowError !== undefined) {
-            record(node, { status: "error", error: updateWindowError });
+          if (!updateWindow.ok) {
+            record(node, { status: "error", error: updateWindow.error });
             break;
           }
           const updateError = await updateImportedNode(
@@ -1301,6 +1302,7 @@ async function processNodeSlice(
               schema: schemaEntry.registration.type.schema,
               validatedProps: props,
               uniqueConstraints,
+              windowFence: updateWindow.value,
             },
           );
           if (updateError === undefined) {
@@ -1422,7 +1424,13 @@ type ProcessResult =
   | { status: "skipped"; liveTarget: boolean }
   | { status: "error"; error: string };
 
-type UniquenessGuardResult<T> =
+/**
+ * What a guard hands back when its refusal is a PER-ROW fact: either the value
+ * the guard produced, or the message recorded against that row while the import
+ * keeps going. Shared by the uniqueness guard and the window guard so the two
+ * per-row recoveries have one shape.
+ */
+type PerRowGuardResult<T> =
   Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: string }>;
 
 /**
@@ -1433,7 +1441,7 @@ type UniquenessGuardResult<T> =
  */
 async function catchUniquenessError<T>(
   fn: () => Promise<T>,
-): Promise<UniquenessGuardResult<T>> {
+): Promise<PerRowGuardResult<T>> {
   try {
     return { ok: true, value: await fn() };
   } catch (error) {
@@ -1466,21 +1474,23 @@ const NODE_UPDATE_TARGET_CHANGED_CODE =
  * the sequential fallback, so the assertion cannot be threaded through one and
  * forgotten on the other.
  *
- * `expectedValidFrom` is what makes the import's own window check
- * ({@link validateUpdateValidityWindow}) binding rather than advisory. That
- * check reads the STORED `valid_from` and decides from it — whether the
- * document's stated lower bound matches the row's, and whether the document's
- * `validTo` sits above it. A read-then-write pair keyed on `(graph_id, kind,
- * id)` alone re-resolves that key between the two under PostgreSQL READ
- * COMMITTED, so a concurrent hard delete + recreate could leave the write
- * applying a verdict computed for a row that no longer exists: the document's
- * `validFrom` silently ignored, or a `valid_to` persisted below the new row's
- * `valid_from`. Stating the bound puts it in the UPDATE's own `WHERE`.
+ * The `windowFence` is what makes the import's own window check
+ * ({@link validateUpdateValidityWindow}) binding rather than advisory. When that
+ * check reads the STORED `valid_from` — because the document stated a lower
+ * bound to compare against it, or a lone `validTo` to invert against it — it
+ * hands back an `expectedValidFrom` predicate, and a read-then-write pair keyed
+ * on `(graph_id, kind, id)` alone would otherwise re-resolve that key between the
+ * two under PostgreSQL READ COMMITTED: a concurrent hard delete + recreate could
+ * leave the write applying a verdict computed for a row that no longer exists —
+ * the document's `validFrom` silently ignored, or a `valid_to` persisted below
+ * the new row's `valid_from`. The fence puts the bound in the UPDATE's own
+ * `WHERE`.
  *
- * NULL-safe by construction: `existing.valid_from` is `undefined` for an
- * open-left row, and `?? null` turns that into the assertion "this row still has
- * NO lower bound" rather than into "assert nothing" — the two are different
- * claims and only one of them is the one this import checked.
+ * A document naming NEITHER bound gets an empty fence, and that is the point: its
+ * verdict never looked at the row's lower bound, so a recreate that moved the
+ * bound changed nothing this write decided, and refusing the props update would
+ * refuse a write the equivalent `store.nodes.*.update` performs. The
+ * `deleted_at IS NULL` fence of the live-row update still applies.
  */
 async function updateImportedNode(
   writeContext: NodeWriteContext,
@@ -1491,6 +1501,7 @@ async function updateImportedNode(
     schema: z.ZodType;
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
+    windowFence: ValidityLowerBoundFence;
   }>,
 ): Promise<string | undefined> {
   try {
@@ -1502,8 +1513,7 @@ async function updateImportedNode(
           schema: args.schema,
           validatedProps: args.validatedProps,
           uniqueConstraints: args.uniqueConstraints,
-          // eslint-disable-next-line unicorn/no-null -- `expectedValidFrom` distinguishes "assert IS NULL" (null) from "assert nothing" (undefined); see UpdateNodeParams.
-          expectedValidFrom: args.existing.valid_from ?? null,
+          ...args.windowFence,
           ...(node.validTo !== undefined && { validTo: node.validTo }),
         },
         backend,
@@ -1519,9 +1529,9 @@ async function updateImportedNode(
     }
     return (
       `${NODE_UPDATE_TARGET_CHANGED_CODE}: Node "${node.kind}:${node.id}" was ` +
-      "not updated: no live node with that id and validity lower bound " +
-      "remained when the write ran, so the row changed or was removed after " +
-      "this import checked it. Re-export the source and retry."
+      "not updated: no live node matching the id and the validity bound this " +
+      "import checked remained when the write ran, so the row changed or was " +
+      "removed after it was checked. Re-export the source and retry."
     );
   }
 }
@@ -1645,8 +1655,12 @@ function edgeIdentityConflict(
  * not apply, and whether its `validTo` sits above the bound the row keeps — so a
  * recreate that satisfies all five identity components while carrying a
  * different bound would still land a verdict computed for a row that is gone.
- * `?? null` is load-bearing: an open-left row is asserted to still BE open-left,
- * not asserted about at all.
+ *
+ * Which is why the bound arrives as the guard's own `windowFence` rather than as
+ * a value this function re-derives: it is present exactly when the verdict read
+ * it. A document naming neither `validFrom` nor `validTo` read nothing, so it is
+ * fenced on identity alone and a recreate that only moved the bound no longer
+ * refuses its props update.
  *
  * When the predicate does match nothing, the backend reports it as a
  * `no_row_returned` {@link DatabaseOperationError}. By then this import has
@@ -1659,7 +1673,7 @@ async function updateImportedEdge(
   graphId: string,
   edge: InterchangeEdge,
   props: Readonly<Record<string, unknown>>,
-  existingValidFrom: string | undefined,
+  windowFence: ValidityLowerBoundFence,
 ): Promise<string | undefined> {
   try {
     await backend.updateEdge({
@@ -1671,8 +1685,7 @@ async function updateImportedEdge(
       toKind: edge.to.kind,
       toId: edge.to.id,
       props,
-      // eslint-disable-next-line unicorn/no-null -- `expectedValidFrom` distinguishes "assert IS NULL" (null) from "assert nothing" (undefined); see UpdateEdgeParams.
-      expectedValidFrom: existingValidFrom ?? null,
+      ...windowFence,
       ...(edge.validTo !== undefined && { validTo: edge.validTo }),
     });
     return undefined;
@@ -1686,25 +1699,27 @@ async function updateImportedEdge(
     return (
       `${EDGE_IDENTITY_CONFLICT_CODE}: Edge "${edge.id}" of kind "${edge.kind}" ` +
       `from "${edge.from.kind}:${edge.from.id}" to "${edge.to.kind}:${edge.to.id}" ` +
-      "was not updated: no live edge with that id, identity and validity lower " +
-      "bound remained when the write ran, so the row changed or was removed " +
-      "after this import checked it. Re-export the source and retry."
+      "was not updated: no live edge matching the identity and the validity " +
+      "bound this import checked remained when the write ran, so the row " +
+      "changed or was removed after it was checked. Re-export the source and " +
+      "retry."
     );
   }
 }
 
 /**
- * Runs a window assertion and reports its refusal as a per-row error message
+ * Runs a window guard and reports its refusal as a per-row error message
  * (recorded in the import result) instead of throwing, so one malformed row does
- * not abort the whole import. A window refusal that carries a stable issue code —
+ * not abort the whole import. On success the guard's own verdict comes back, so
+ * a write leg fences on what the guard decided rather than on a second spelling
+ * of it. A window refusal that carries a stable issue code —
  * {@link INVERTED_VALIDITY_WINDOW_CODE} or
  * {@link IMMUTABLE_VALIDITY_LOWER_BOUND_CODE} — is prefixed with it, so the
  * refusal is recognizable without parsing prose.
  */
-function windowErrorOf(assert: () => void): string | undefined {
+function windowResultOf<T>(assert: () => T): PerRowGuardResult<T> {
   try {
-    assert();
-    return undefined;
+    return { ok: true, value: assert() };
   } catch (error) {
     if (error instanceof ValidationError) {
       const coded = error.details.issues.find(
@@ -1712,10 +1727,21 @@ function windowErrorOf(assert: () => void): string | undefined {
           issue.code === INVERTED_VALIDITY_WINDOW_CODE ||
           issue.code === IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
       );
-      if (coded !== undefined) return `${coded.code}: ${error.message}`;
+      if (coded !== undefined) {
+        return { ok: false, error: `${coded.code}: ${error.message}` };
+      }
     }
-    return error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
+}
+
+/** {@link windowResultOf} for a guard whose only output is its refusal. */
+function windowErrorOf(assert: () => void): string | undefined {
+  const result = windowResultOf(assert);
+  return result.ok ? undefined : result.error;
 }
 
 /**
@@ -1783,6 +1809,12 @@ function validateValidityWindow(
  * props under a bound it ignored. `null` is a confirmed open-left window rather
  * than a stated bound (see `InterchangeNodeSchema`'s `validFrom`) and asserts
  * nothing.
+ *
+ * Returns the guard's own {@link ValidityLowerBoundFence}, which all four update
+ * legs carry verbatim into their write. Import used to assert the probed
+ * `valid_from` unconditionally instead — a second spelling of a decision the
+ * verdict owns — which refused a props-only document (one naming neither bound)
+ * whenever a concurrent recreate moved a bound this verdict never looked at.
  */
 function validateUpdateValidityWindow(
   entity: Readonly<{
@@ -1792,15 +1824,24 @@ function validateUpdateValidityWindow(
     validTo?: string | undefined;
   }>,
   storedValidFrom: string | undefined,
-): string | undefined {
-  return windowErrorOf(() => {
+): PerRowGuardResult<ValidityLowerBoundFence> {
+  const verdict = windowResultOf(() =>
     assertWritableValidityWindow(
       `${entity.kind} "${entity.id}"`,
       entity.validFrom ?? undefined,
-      { effectiveValidFrom: storedValidFrom, appliesStatedValidFrom: false },
+      {
+        effectiveValidFrom: storedValidFrom,
+        appliesStatedValidFrom: false,
+        // Import updates a LIVE row in place, so the effective bound is always
+        // the one the row already stores.
+        effectiveBoundIsStored: true,
+      },
       entity.validTo,
-    );
-  });
+    ),
+  );
+  return verdict.ok ?
+      { ok: true, value: verdict.value.storedLowerBoundFence }
+    : verdict;
 }
 
 async function processNode(
@@ -1861,19 +1902,21 @@ async function processNode(
           // node would block live creates of the same value.
           return { status: "skipped", liveTarget: false };
         }
-        const updateWindowError = validateUpdateValidityWindow(
+        const updateWindow = validateUpdateValidityWindow(
           node,
           existing.valid_from,
         );
-        if (updateWindowError !== undefined) {
-          return { status: "error", error: updateWindowError };
+        if (!updateWindow.ok) {
+          return { status: "error", error: updateWindow.error };
         }
         // Route through the shared write step so the update maintains
         // uniqueness entries, embeddings, and fulltext — the collection API's
-        // integrity, which a raw backend.updateNode would skip. A uniqueness
-        // conflict is reported per-row (the plan phase throws before the row is
-        // written, so no partial write escapes), and so is a write that landed
-        // on nothing because the target changed under us.
+        // integrity, which a raw backend.updateNode would skip. Both per-row
+        // recoveries below are safe to catch and commit past because every
+        // `UniquenessError` `applyNodeUpdate` can raise comes from its plan or
+        // its claim, both of which precede the row write (and the claim
+        // compensates itself), and a write that landed on nothing wrote nothing
+        // by definition.
         const updateError = await updateImportedNode(
           writeContext,
           backend,
@@ -1883,6 +1926,7 @@ async function processNode(
             schema: registration.type.schema,
             validatedProps: propsResult.data,
             uniqueConstraints,
+            windowFence: updateWindow.value,
           },
         );
         if (updateError !== undefined) {
@@ -2199,12 +2243,12 @@ async function processEdgeSlice(
             record(edge, { status: "skipped", liveTarget: false });
             break;
           }
-          const updateWindowError = validateUpdateValidityWindow(
+          const updateWindow = validateUpdateValidityWindow(
             edge,
             existing.valid_from,
           );
-          if (updateWindowError !== undefined) {
-            record(edge, { status: "error", error: updateWindowError });
+          if (!updateWindow.ok) {
+            record(edge, { status: "error", error: updateWindow.error });
             break;
           }
           const updateError = await updateImportedEdge(
@@ -2212,7 +2256,7 @@ async function processEdgeSlice(
             graphId,
             edge,
             props,
-            existing.valid_from,
+            updateWindow.value,
           );
           if (updateError !== undefined) {
             record(edge, { status: "error", error: updateError });
@@ -2388,19 +2432,19 @@ async function processEdge(
         if (existing.deleted_at !== undefined) {
           return { status: "skipped", liveTarget: false };
         }
-        const updateWindowError = validateUpdateValidityWindow(
+        const updateWindow = validateUpdateValidityWindow(
           edge,
           existing.valid_from,
         );
-        if (updateWindowError !== undefined) {
-          return { status: "error", error: updateWindowError };
+        if (!updateWindow.ok) {
+          return { status: "error", error: updateWindow.error };
         }
         const updateError = await updateImportedEdge(
           backend,
           graphId,
           edge,
           propsResult.data,
-          existing.valid_from,
+          updateWindow.value,
         );
         if (updateError !== undefined) {
           return { status: "error", error: updateError };

@@ -947,8 +947,14 @@ async function performNodeUpdate<G extends GraphDef>(
       {
         effectiveValidFrom: existing.valid_from,
         appliesStatedValidFrom: false,
+        effectiveBoundIsStored: true,
       }
-    : { effectiveValidFrom: resurrectionInstant, appliesStatedValidFrom: true },
+    : {
+        effectiveValidFrom: resurrectionInstant,
+        appliesStatedValidFrom: true,
+        // The instant this write is about to stamp, not a bound the row holds.
+        effectiveBoundIsStored: false,
+      },
     validTo,
   );
 
@@ -963,25 +969,16 @@ async function performNodeUpdate<G extends GraphDef>(
     ...(effectiveValidFrom !== undefined && { validFrom: effectiveValidFrom }),
     ...(validTo !== undefined && { validTo }),
     // The bound the verdict above READ, carried into the UPDATE's own `WHERE`
-    // so the row this writes is the row that was judged. Two conditions, and
-    // both matter:
-    //
-    //  - the verdict consulted the effective bound at all. A plain
-    //    `update({ props })` states no window, reads no bound, and stays
-    //    unfenced by this — the same rule `UpdateEdgeParams`'s identity
-    //    components follow, for the same reason: a component the caller made no
-    //    claim about must not become a predicate that refuses legitimate
-    //    writes.
-    //  - the effective bound WAS the row's stored one. On a resurrection the
-    //    guard is handed `resurrectionInstant` instead, so the verdict never
-    //    looked at `existing.valid_from` and asserting it would fence on a
-    //    value nothing read. That leg carries `deleted_at IS NOT NULL` as its
-    //    own fence and converges through the recovery below.
-    ...(resurrectionInstant === undefined &&
-      windowVerdict.readEffectiveLowerBound && {
-        // eslint-disable-next-line unicorn/no-null -- `expectedValidFrom` distinguishes "assert IS NULL" (null) from "assert nothing" (undefined); see UpdateNodeParams.
-        expectedValidFrom: existing.valid_from ?? null,
-      }),
+    // so the row this writes is the row that was judged. The verdict hands over
+    // the predicate rather than a flag, so both conditions that decide it — did
+    // the verdict consult the effective bound, and WAS that bound the row's
+    // stored one — are answered where they are known. A plain
+    // `update({ props })` states no window, reads no bound, and stays unfenced:
+    // the same rule `UpdateEdgeParams`'s identity components follow, for the
+    // same reason. The resurrecting leg is judged against `resurrectionInstant`
+    // and so fences on `deleted_at IS NOT NULL` alone, converging through the
+    // recovery below.
+    ...windowVerdict.storedLowerBoundFence,
   };
 
   // A resurrecting upsert (clearDeleted) may target a tombstoned row; a plain

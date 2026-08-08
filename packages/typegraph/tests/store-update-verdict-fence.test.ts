@@ -21,6 +21,12 @@
  *    claimed would refuse writes that are legitimate, which is the same mistake
  *    in the opposite direction.
  *
+ * Both halves are one decision, made once: `assertWritableValidityWindow`
+ * returns the `expectedValidFrom` predicate itself
+ * (`ValidityWindowVerdict.storedLowerBoundFence`), and the store and import
+ * legs spread what it hands them. Import previously spelled its own — always
+ * asserting — and got the second half wrong for props-only documents.
+ *
  * The race is reproduced deterministically with the round-8 lying-probe idiom:
  * the probe reports a `valid_from` the database does not hold, so the caller's
  * window passes a verdict computed against a bound that is not there.

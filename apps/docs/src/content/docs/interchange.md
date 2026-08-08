@@ -471,11 +471,18 @@ kind-scoped, so a cross-kind id collision simply reads as absent.
 row, validates the document's validity window against that row's `valid_from`,
 and then writes. Every part of that verdict is restated in the UPDATE's own
 `WHERE` — for edges the five identity components above, and for **both** nodes
-and edges the effective validity lower bound the window check was computed
-from. A concurrent hard-delete-and-recreate between the probe and the write
+and edges the effective validity lower bound, whenever the window check actually
+read it. A concurrent hard-delete-and-recreate between the probe and the write
 therefore matches no row instead of landing a decision computed for a row that
 is gone (which would have ignored a `validFrom` the document stated, or
 persisted a `validTo` below the new row's `validFrom`).
+
+The bound is read — and so restated — when the document states a `validFrom` to
+compare against it, or a lone `validTo` to check for an inverted window. A
+document that states **neither** makes no claim about the row's window, so its
+properties update is not fenced on the bound and a concurrent recreate that only
+moved the bound does not refuse it. This matches `store.nodes.*.update` exactly:
+a write asserts what its decision read, and nothing more.
 
 A write that matches no row is reported per row, so an import whose earlier
 rows are already written is not aborted for it:
@@ -491,9 +498,16 @@ const raced = result.errors.filter(
 
 `INTERCHANGE_NODE_UPDATE_TARGET_CHANGED` is the node-side prefix;
 edges reuse `INTERCHANGE_EDGE_KIND_CONFLICT`, whose message now also names the
-validity lower bound. Re-export the source and retry. A node update refused this
-way leaves no partial trace: its uniqueness, fulltext, and embedding sidecars
-are written only after the primary row update reports a match.
+validity lower bound. Re-export the source and retry.
+
+A node update refused this way leaves no partial trace, and neither does one
+refused for a uniqueness conflict. The row write and the uniqueness transition
+are one unit: the new keys are claimed first (the claim is what decides the
+conflict), the row write follows, and the old keys are released only once it
+lands — with the claims given back if it does not. Fulltext and embedding
+sidecars are written only after the row update reports a match. So a row that
+`result.errors` reports is a row the import did not change, even though the
+transaction around it commits.
 
 ### Unknown Property Handling
 

@@ -998,6 +998,10 @@ async function performEdgeUpdate<G extends GraphDef>(
     {
       effectiveValidFrom: existing.valid_from,
       appliesStatedValidFrom: options?.clearDeleted === true,
+      // Unlike the node side, an edge RETAINS `valid_from` through a
+      // resurrection that does not name a new one, so the effective bound is the
+      // row's stored one on BOTH legs and there is no carve-out to make.
+      effectiveBoundIsStored: true,
     },
     validTo,
   );
@@ -1034,18 +1038,12 @@ async function performEdgeUpdate<G extends GraphDef>(
     id,
     kind: input.identity.kind,
     props: validatedProps,
+    // The bound the window verdict above READ, carried into the same `WHERE` as
+    // the identity components and on exactly the same terms: present only when
+    // the verdict consulted it, because a component the caller made no claim
+    // about must not become a predicate that refuses legitimate writes.
+    ...windowVerdict.storedLowerBoundFence,
   };
-  // The bound the window verdict above READ, carried into the same `WHERE` as
-  // the identity components and on exactly the same terms: emitted only when
-  // the verdict consulted it, because a component the caller made no claim
-  // about must not become a predicate that refuses legitimate writes. Unlike
-  // the node side, `effectiveValidFrom` here is the row's stored bound on BOTH
-  // legs — an edge retains `valid_from` through a resurrection that does not
-  // name a new one — so there is no resurrection carve-out to make.
-  if (windowVerdict.readEffectiveLowerBound) {
-    // eslint-disable-next-line unicorn/no-null -- `expectedValidFrom` distinguishes "assert IS NULL" (null) from "assert nothing" (undefined); see UpdateEdgeParams.
-    updateParams.expectedValidFrom = existing.valid_from ?? null;
-  }
   if (input.identity.fromKind !== undefined) {
     updateParams.fromKind = input.identity.fromKind;
   }

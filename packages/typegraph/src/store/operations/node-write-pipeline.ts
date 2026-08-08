@@ -40,14 +40,14 @@ import {
 } from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
-  applyUniquenessUpdate,
-  checkUniquenessConstraints,
   createUniquenessContext,
   deleteUniquenessEntries,
   insertUniquenessEntries,
   insertUniquenessEntriesBatch,
+  planUniquenessReinsert,
   planUniquenessUpdate,
   type UniquenessUpdatePlan,
+  withUniquenessTransition,
 } from "../uniqueness";
 
 type Backend = GraphBackend | TransactionBackend;
@@ -280,16 +280,15 @@ export type NodeUpdateTarget =
   | Readonly<{ existing: NodeRow; clearDeleted: true }>;
 
 /**
- * Runs the READ half of a node update's uniqueness maintenance and returns the
- * WRITE half as a thunk the caller runs after the primary row update.
+ * Decides a node update's uniqueness transition, writing nothing.
  *
  * Two shapes behind one seam. A live row diffs its old and new keys; a
  * resurrecting update (`clearDeleted` on a tombstoned row) cannot, because the
  * soft delete already removed its entries — the diff would skip an unchanged
  * key and leave the resurrected node holding NO reservation, so a later create
- * could silently duplicate the value. It re-checks and re-inserts instead,
- * exactly as `applyNodeResurrect` does. Both refuse a conflict before returning
- * and both write only when the thunk is called.
+ * could silently duplicate the value. It re-reserves every applying key
+ * instead. Both refuse a conflict before returning, and both hand the caller a
+ * plan that only {@link withUniquenessTransition} may carry out.
  */
 async function planNodeUpdateUniqueness(
   ctx: NodeWriteContext,
@@ -299,29 +298,20 @@ async function planNodeUpdateUniqueness(
     uniqueConstraints: readonly UniqueConstraint[];
   }>,
   backend: Backend,
-): Promise<() => Promise<void>> {
+): Promise<UniquenessUpdatePlan> {
   const { kind, id } = args.existing;
 
   if (args.existing.deleted_at !== undefined) {
-    await checkUniquenessConstraints(
+    return planUniquenessReinsert(
       uniquenessContext(ctx, backend),
       kind,
       id,
       args.validatedProps,
       args.uniqueConstraints,
     );
-    return async () => {
-      await insertUniquenessEntries(
-        uniquenessContext(ctx, backend),
-        kind,
-        id,
-        args.validatedProps,
-        args.uniqueConstraints,
-      );
-    };
   }
 
-  const plan: UniquenessUpdatePlan = await planUniquenessUpdate(
+  return planUniquenessUpdate(
     uniquenessContext(ctx, backend),
     kind,
     id,
@@ -329,14 +319,6 @@ async function planNodeUpdateUniqueness(
     args.validatedProps,
     args.uniqueConstraints,
   );
-  return async () => {
-    await applyUniquenessUpdate(
-      uniquenessContext(ctx, backend),
-      kind,
-      id,
-      plan,
-    );
-  };
 }
 
 /**
@@ -345,20 +327,19 @@ async function planNodeUpdateUniqueness(
  * removed), the core row update, then embedding and fulltext sync. Returns
  * the updated row.
  *
- * ## The primary write GATES the sidecars
+ * ## The row write and its uniqueness transition are ONE unit
  *
- * The uniqueness verdict is computed first — a value another node already holds
- * must be refused before this node's row changes — but every sidecar WRITE runs
- * after `backend.updateNode` returns a row. The row update can legitimately
- * match nothing: `expectedValidFrom` (and, for a live-row update, the
- * `deleted_at IS NULL` fence) turn a target that changed under us into a
- * `no_row_returned` refusal, and the callers that state those predicates —
- * interchange import — report that PER ROW and commit the rest of the
- * transaction. With the old ordering that left the node's uniqueness
- * reservations moved, its fulltext row rewritten, and its embeddings re-synced
- * for props no row ever received. Nothing here is savepoint-protected (see
- * `write-transaction.ts`), so ordering is the only atomicity available, and it
- * is sufficient: read, gate, write.
+ * Both can fail — the row write matches nothing when `expectedValidFrom` or the
+ * `deleted_at` fence stopped holding, the uniqueness claim loses a race for a
+ * key — and a caller that catches either PER ROW and commits the rest of the
+ * transaction (interchange import) must never be left with half of the pair
+ * applied. {@link withUniquenessTransition} owns that sequencing and documents
+ * why claim/gate/release is the only order that works; this function just hands
+ * it the plan and the write.
+ *
+ * The embedding and fulltext syncs stay AFTER the gate: they are derived data
+ * with no claim to make, so a row write that lands on nothing must not rewrite
+ * a fulltext row or re-embed props no row ever received.
  */
 export async function applyNodeUpdate(
   ctx: NodeWriteContext,
@@ -377,8 +358,8 @@ export async function applyNodeUpdate(
   const { kind, id } = args.existing;
 
   // Read-only phase: decide the sidecar changes, refuse a conflict, write
-  // nothing. What comes back is the deferred WRITE half.
-  const applyUniqueness = await planNodeUpdateUniqueness(
+  // nothing.
+  const plan = await planNodeUpdateUniqueness(
     ctx,
     {
       existing: args.existing,
@@ -412,10 +393,13 @@ export async function applyNodeUpdate(
   }
   if (args.clearDeleted) updateParams.clearDeleted = true;
 
-  // The gate. A zero-row match throws here, before any sidecar was touched.
-  const row = await backend.updateNode(updateParams);
-
-  await applyUniqueness();
+  const row = await withUniquenessTransition(
+    uniquenessContext(ctx, backend),
+    kind,
+    id,
+    plan,
+    () => backend.updateNode(updateParams),
+  );
 
   await Promise.all([
     syncEmbeddings(
@@ -532,34 +516,32 @@ export async function applyNodeResurrect(
 ): Promise<NodeRow> {
   const { kind, id } = args.existing;
   const props = parseRowProps(args.existing);
-  // Read, gate, write — the ordering `applyNodeUpdate` documents, for the same
-  // reason. The resurrecting UPDATE carries `deleted_at IS NOT NULL`, so a peer
-  // that revived this tombstone first makes it match zero rows; reserving the
-  // uniqueness keys BEFORE that gate left this caller holding reservations for
-  // a revival it did not perform, and the peer's own reservations are the ones
-  // the live row is entitled to. The conflict CHECK still runs first, so a key
-  // another node holds is refused before anything is written.
-  await checkUniquenessConstraints(
+  // One unit, exactly as `applyNodeUpdate`, and for the same reason: the
+  // resurrecting UPDATE carries `deleted_at IS NOT NULL`, so a peer that revived
+  // this tombstone first makes it match zero rows — and the reservations that
+  // revival is entitled to are the peer's, not this caller's.
+  // `withUniquenessTransition` gives them back when the gate refuses.
+  const plan = await planUniquenessReinsert(
     uniquenessContext(ctx, backend),
     kind,
     id,
     props,
     args.uniqueConstraints,
   );
-  const row = await backend.updateNode({
-    graphId: ctx.graphId,
-    kind,
-    id,
-    props,
-    incrementVersion: true,
-    clearDeleted: true,
-  });
-  await insertUniquenessEntries(
+  const row = await withUniquenessTransition(
     uniquenessContext(ctx, backend),
     kind,
     id,
-    props,
-    args.uniqueConstraints,
+    plan,
+    () =>
+      backend.updateNode({
+        graphId: ctx.graphId,
+        kind,
+        id,
+        props,
+        incrementVersion: true,
+        clearDeleted: true,
+      }),
   );
   await Promise.all([
     syncEmbeddings(nodeSyncContext(ctx, kind, id, backend), args.schema, props),

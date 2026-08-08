@@ -1,6 +1,6 @@
 /**
  * An import UPDATE asserts EVERY component its verdict read — including the
- * effective validity lower bound.
+ * effective validity lower bound — and NOTHING it did not.
  *
  * `onConflict: "update"` probes the stored row, validates the document's
  * validity window against that row's `valid_from`
@@ -22,9 +22,19 @@
  * the database does not hold, and only the predicate in the statement can catch
  * it.
  *
+ * The converse half is just as load-bearing, and this suite used to certify the
+ * opposite of it: a document naming NEITHER `validFrom` nor `validTo` makes the
+ * verdict read no bound at all, so fencing on the bound would refuse a props
+ * update over a component the document never spoke about — a write the
+ * equivalent `store.nodes.*.update` performs. The fence comes from the verdict
+ * (`ValidityWindowVerdict.storedLowerBoundFence`), so "assert what you read"
+ * and "assert only what you read" are the same rule, decided once.
+ *
  * NULL-safety is a first-class case, not an edge case: `valid_from` is nullable,
  * `col = NULL` is UNKNOWN in SQL, and an assertion that can never match is as
- * broken as one that never runs. An open-left row asserts `IS NULL`.
+ * broken as one that never runs. An open-left row asserts `IS NULL` — which is
+ * why the open-left cases below state a `validTo`: without one there is no fence
+ * to be NULL-safe about.
  */
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -370,6 +380,78 @@ describe("import update verdict fence", () => {
       });
       expect(created.email).toBe("moved@example.com");
     });
+
+    it(`refuses an update whose STATED lower bound stopped matching the row (${leg})`, async () => {
+      // The document states the bound it was exported with, and the probe
+      // agrees — so the window guard passes and the verdict READ that bound.
+      // The database holds a different one. Only the predicate in the statement
+      // can see that, and it must, or the document's `validFrom` is applied to a
+      // row it was never checked against.
+      const { backend, store } = await seedLateBound();
+      spoofProbedValidFrom(backend, EARLY_BOUND);
+
+      const result = await importGraph(
+        store,
+        {
+          ...emptyDocument(),
+          nodes: nodeDocument(repeat, { validFrom: EARLY_BOUND }).nodes,
+          edges: edgeDocument(repeat, { validFrom: EARLY_BOUND }).edges,
+        },
+        importOptions({ onConflict: "update" }),
+      );
+
+      expect(result.nodes.updated).toBe(0);
+      expect(result.edges.updated).toBe(0);
+      expect(result.success).toBe(false);
+      expect(
+        result.errors.find((entry) => entry.id === NODE_ID)?.error,
+      ).toContain("INTERCHANGE_NODE_UPDATE_TARGET_CHANGED");
+      expect(
+        result.errors.find((entry) => entry.id === EDGE_ID)?.error,
+      ).toContain("INTERCHANGE_EDGE_KIND_CONFLICT");
+      const storedNode = await storedNodeWindow(backend);
+      const storedEdge = await storedEdgeWindow(backend);
+      expect(storedNode.props).toEqual({
+        name: "Alice",
+        email: "original@example.com",
+      });
+      expect(storedEdge.props).toEqual({ note: "original" });
+    });
+
+    it(`updates a props-only document whose bound moved under it (${leg})`, async () => {
+      // The document names neither bound, so the verdict read none and there is
+      // nothing for a recreate to have invalidated: the properties update is
+      // legitimate and must land. Import used to assert the probed `valid_from`
+      // regardless and refuse this — over-fencing a decision it never made.
+      const { backend, store } = await seedLateBound();
+      spoofProbedValidFrom(backend, EARLY_BOUND);
+
+      const result = await importGraph(
+        store,
+        {
+          ...emptyDocument(),
+          nodes: nodeDocument(repeat).nodes,
+          edges: edgeDocument(repeat).edges,
+        },
+        importOptions({ onConflict: "update" }),
+      );
+
+      const expectedUpdates = repeat ? 2 : 1;
+      expect(result.errors).toEqual([]);
+      expect(result.nodes.updated).toBe(expectedUpdates);
+      expect(result.edges.updated).toBe(expectedUpdates);
+      // The props moved; the bound the document said nothing about did not.
+      expect(await storedNodeWindow(backend)).toEqual({
+        validFrom: LATE_BOUND,
+        validTo: undefined,
+        props: { name: "Alice", email: "moved@example.com" },
+      });
+      expect(await storedEdgeWindow(backend)).toEqual({
+        validFrom: LATE_BOUND,
+        validTo: undefined,
+        props: { note: "written by the import" },
+      });
+    });
   }
 
   it("asserts an OPEN-LEFT bound as IS NULL, not as `= NULL`", async () => {
@@ -377,6 +459,10 @@ describe("import update verdict fence", () => {
     // predicate silently breaks: SQL compares NULL to UNKNOWN, so the update
     // matches nothing and an ordinary re-import of an open-left row starts
     // reporting a conflict that is not there. The fence has to say IS NULL.
+    //
+    // The documents state a `validTo`, which is what makes the verdict read the
+    // row's (absent) bound and therefore emit the fence at all. A props-only
+    // document would prove nothing here: it is fenced on nothing by design.
     const { backend, store } = seed();
     const seeded = await importGraph(
       store,
@@ -420,8 +506,8 @@ describe("import update verdict fence", () => {
       store,
       {
         ...emptyDocument(),
-        nodes: nodeDocument(false).nodes,
-        edges: edgeDocument(false).edges,
+        nodes: nodeDocument(false, { validTo: MIDDLE_BOUND }).nodes,
+        edges: edgeDocument(false, { validTo: MIDDLE_BOUND }).edges,
       },
       importOptions({ onConflict: "update" }),
     );
@@ -431,19 +517,21 @@ describe("import update verdict fence", () => {
     expect(result.edges.updated).toBe(1);
     expect(await storedNodeWindow(backend)).toEqual({
       validFrom: undefined,
-      validTo: undefined,
+      validTo: MIDDLE_BOUND,
       props: { name: "Alice", email: "moved@example.com" },
     });
     expect(await storedEdgeWindow(backend)).toEqual({
       validFrom: undefined,
-      validTo: undefined,
+      validTo: MIDDLE_BOUND,
       props: { note: "written by the import" },
     });
   });
 
   it("refuses an update against an open-left row whose bound appeared under it", async () => {
     // The other half of NULL-safety: the probe says open-left, the database
-    // holds a bound. `IS NULL` must not match that row.
+    // holds a bound. `IS NULL` must not match that row. The documents state a
+    // `validTo` so the verdict reads the (probed) absence of a bound and the
+    // fence is emitted.
     const { backend, store } = await seedLateBound();
     spoofProbedValidFrom(backend, undefined);
 
@@ -451,8 +539,8 @@ describe("import update verdict fence", () => {
       store,
       {
         ...emptyDocument(),
-        nodes: nodeDocument(false).nodes,
-        edges: edgeDocument(false).edges,
+        nodes: nodeDocument(false, { validTo: LATE_BOUND }).nodes,
+        edges: edgeDocument(false, { validTo: LATE_BOUND }).edges,
       },
       importOptions({ onConflict: "update" }),
     );

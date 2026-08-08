@@ -357,6 +357,31 @@ export type UpdateValidityLowerBound = Readonly<{
    * refusal rather than a silent drop.
    */
   appliesStatedValidFrom: boolean;
+  /**
+   * Whether `effectiveValidFrom` IS the row's stored `valid_from` — the value an
+   * `expectedValidFrom` predicate would name — rather than a bound this write is
+   * about to stamp itself.
+   *
+   * A node resurrection resets `valid_from` to the write instant and passes THAT
+   * as the effective bound, so its verdict never looked at what the row holds and
+   * a fence on the stored value would predicate the write on something nothing
+   * read. An edge retains its bound through a resurrection, so its effective
+   * bound is the stored one on both legs.
+   */
+  effectiveBoundIsStored: boolean;
+}>;
+
+/**
+ * The `expectedValidFrom` predicate a write owes its verdict, shaped for
+ * spreading straight into the backend's update params.
+ *
+ * `{}` means "assert nothing"; `{ expectedValidFrom: null }` means "assert the
+ * row still has NO lower bound". The two are different claims and the object
+ * form keeps them distinguishable at every call site — see
+ * `UpdateNodeParams.expectedValidFrom`.
+ */
+export type ValidityLowerBoundFence = Readonly<{
+  expectedValidFrom?: string | null;
 }>;
 
 /**
@@ -364,24 +389,30 @@ export type UpdateValidityLowerBound = Readonly<{
  * just reached — not about the window, but about what the verdict DEPENDED ON.
  *
  * THE SINGLE OWNER of the question "must this write assert the row's stored
- * lower bound?". A write asserts every component its verdict read (see
- * `UpdateNodeParams.expectedValidFrom`), and whether the row's bound is such a
- * component is decided by which branches the guard actually took — so the
- * answer is returned by the guard itself rather than re-derived beside it. A
- * second spelling of these conditions would drift from the guard the first time
- * one of them moved, and the drift would be invisible: too FEW assertions is a
- * silent race, too many is a refusal of writes that are legitimate.
+ * lower bound?", and it answers by handing over the predicate ITSELF rather than
+ * a flag a caller then turns into one. A write asserts every component its
+ * verdict read (see `UpdateNodeParams.expectedValidFrom`), and which components
+ * those are is decided by which branches the guard actually took — so a caller
+ * that could still spell the fence on its own would eventually spell a different
+ * one. Interchange import did exactly that: it asserted the probed
+ * `valid_from` unconditionally, over-fencing props-only updates the store paths
+ * (correctly) left unfenced. There is now nothing to re-derive.
+ *
+ * Too FEW assertions is a silent race; too many is a refusal of writes that are
+ * legitimate. Both failures come from a second spelling.
  */
 export type ValidityWindowVerdict = Readonly<{
   /**
-   * True when the verdict consulted the row's stored `valid_from` — either by
-   * comparing a stated bound against it, or by inverting a lone `validTo`
-   * against it. False when the caller named no window at all, or when the write
-   * applies the bound it stated: in those cases the verdict is independent of
-   * what the row holds, and predicating the write on it would refuse a
+   * The fence this verdict obliges the write to carry. Non-empty when the
+   * verdict consulted the row's STORED `valid_from` — either by comparing a
+   * stated bound against it, or by inverting a lone `validTo` against it — and
+   * empty when the caller named no window at all, when the write applies the
+   * bound it stated, or when the effective bound was one this write will stamp
+   * rather than one the row holds. In those cases the verdict is independent of
+   * what the row carries, and predicating the write on it would refuse a
    * concurrent recreate that changed nothing this decision looked at.
    */
-  readEffectiveLowerBound: boolean;
+  storedLowerBoundFence: ValidityLowerBoundFence;
 }>;
 
 /**
@@ -459,8 +490,8 @@ function assertStatedLowerBoundIsApplicable(
  * @param validFrom - The caller's explicit lower bound, if any.
  * @param lowerBound - What the write will do with the row's lower bound; see
  *   {@link UpdateValidityLowerBound}.
- * @returns {@link ValidityWindowVerdict} — whether this verdict READ the row's
- *   stored bound, which the write must then assert.
+ * @returns {@link ValidityWindowVerdict} — the `expectedValidFrom` fence this
+ *   verdict obliges the write to carry, empty when it read no stored bound.
  * @throws ValidationError with issue code {@link INVERTED_VALIDITY_WINDOW_CODE}
  *   or {@link IMMUTABLE_VALIDITY_LOWER_BOUND_CODE}
  */
@@ -496,9 +527,14 @@ export function assertWritableValidityWindow(
   const comparedStoredBoundAgainstEnd =
     validFrom === undefined && validTo !== undefined;
 
+  const readEffectiveLowerBound =
+    comparedStatedBound || comparedStoredBoundAgainstEnd;
   return {
-    readEffectiveLowerBound:
-      comparedStatedBound || comparedStoredBoundAgainstEnd,
+    storedLowerBoundFence:
+      readEffectiveLowerBound && lowerBound.effectiveBoundIsStored ?
+        // eslint-disable-next-line unicorn/no-null -- `expectedValidFrom` distinguishes "assert IS NULL" (null) from "assert nothing" (an absent key); see UpdateNodeParams.
+        { expectedValidFrom: lowerBound.effectiveValidFrom ?? null }
+      : {},
   };
 }
 
