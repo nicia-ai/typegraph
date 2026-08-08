@@ -1,5 +1,1314 @@
 # @nicia-ai/typegraph
 
+## 0.46.0
+
+### Minor Changes
+
+- [#427](https://github.com/nicia-ai/typegraph/pull/427) [`facef56`](https://github.com/nicia-ai/typegraph/commit/facef560d14c38607d6414818c65e43dc65a88d2) Thanks [@pdlug](https://github.com/pdlug)! - Add `signal` to `exportGraphStream`, and keep a streaming import's statistics refresh inside its connection lease.
+
+  An export stream holds one `repeatable_read` / `read_only` transaction for its whole life, and on a single-connection backend it holds that connection's exclusive interchange-stream lease with it. Every cooperative exit already settled both, because each runs the generator's `finally`: `break` or `throw` out of a `for await`, and an explicit `iterator.return()`. A consumer that pulls `next()` and then simply DROPS the iterator — the `Promise.race([iterator.next(), timeout])` pattern — has no cooperative exit, because async-generator `finally` blocks do not run on garbage collection. That leaked the snapshot transaction for the life of the process, and with it the lease, so every later export and every later import on that connection was refused for a stream nobody was reading.
+
+  `ExportOptionsSchema` now accepts `signal?: AbortSignal`, so both `exportGraph` and `exportGraphStream` take it, on both capability arms — a non-transactional export holds no snapshot and no lease, but it still owes its consumer an answer rather than a silent stall, and the same cancellation path gives it one. On a transactional backend, aborting rolls the snapshot transaction back and releases the lease whether or not anyone is waiting on `next()`; the pull that is in flight when the abort lands — and a pull from a consumer that walked away and came back — rejects with the new `ExportStreamCancelledError` (`code: "INTERCHANGE_EXPORT_STREAM_ABORTED"`), carrying the signal's own `reason` as `cause`. A signal that is already aborted refuses the export before any transaction is opened or any lease claimed. The listener is subscribed before anything is claimed or opened and `signal.aborted` is re-checked immediately after subscribing, so an abort at any instant is either seen by that re-check or delivered to the listener — including one raised synchronously by a driver inside `backend.transaction(...)`, which an `AbortSignal` never replays to a listener that arrives later. Everything else is unchanged: an export without a signal behaves exactly as before, and a cooperative exit still reports a clean end rather than a cancellation.
+
+  There is deliberately no garbage-collection fallback. A `FinalizationRegistry` on the iterable cannot work here — not merely unreliably, but never: the producer is interruptible only where it is parked waiting for the consumer, so any cleanup state able to settle an abandoned stream must reach the stream's internal channel, and a registry holds its held value strongly, so holding anything that reaches that channel keeps the abandoned stream permanently reachable and the entry can never fire. The signal is the mechanism, and it is a contract rather than a hint.
+
+  Separately, `importGraphStream` now holds its target connection's stream lease across the trailing planner-statistics refresh instead of releasing it when the chunk loop ends. That `ANALYZE` is a write like the chunks were, and running it outside the lease left it to be stranded by an export snapshot opening in that window — swallowed as a warning, because the refresh is best-effort. `importGraph` never had the hole (`withImportStreamLease` spans its whole call), so this also removes a divergence between the two import surfaces. The lease is still released on every exit, including the error paths.
+
+  Also fixes a silent cross-kind edge overwrite in import. Edge ids are unique per graph but the import's existence probe (`getEdge` / `getEdges`) is keyed on `(graph_id, id)` with no kind comparison, so a document edge of kind A whose id was already held by a kind-B row matched that row: `onConflict: "update"` wrote A's properties onto the kind-B row with nothing in `result.errors`, and `onConflict: "skip"` counted the document's edge as already present when no edge of its kind existed. Both are now reported as a per-row `ImportError` prefixed `INTERCHANGE_EDGE_KIND_CONFLICT`, naming the stored kind and the stated one, with the stored row left untouched — the check runs before the conflict strategy, so all three strategies answer alike. `backend.updateEdge` is additionally called with `kind`, which `UpdateEdgeParams` documents as MUST-apply, so the predicate lives in the UPDATE's own `WHERE` and the check cannot be raced by a concurrent hard-delete-and-recreate; a write that consequently matches no row is reported as the same per-row error rather than aborting the import. Nodes were never affected — their probe is kind-scoped.
+
+  The export's snapshot guarantee is now stated as the capability-scoped fact it is, in the API docs, the option docs, the error class, and the abort message: a backend reporting `capabilities.transactions` reads the whole export inside one repeatable-read transaction, while one without (SQLite `transactionMode: "none"`, session-less HTTP Postgres drivers) paginates statement by statement and can show a mid-stream write in later pages. `ExportStreamCancelledError`'s message now says which of the two it is describing, so a cancelled non-transactional export no longer claims to have rolled back a snapshot it never opened.
+
+- [#417](https://github.com/nicia-ai/typegraph/pull/417) [`9d3014c`](https://github.com/nicia-ai/typegraph/commit/9d3014c05f2936fcdadb3fa50950445a0d8e2652) Thanks [@pdlug](https://github.com/pdlug)! - graph-merge: judge the edge fold's property union against base, and report a
+  target-precedence window discard
+
+  Two adjacent gaps in the edge repoint/window path. One is a bug fix, the other
+  adds an optional field to a report type, so this ships at the higher `minor`
+  bump and covers both.
+
+  The repoint fold's property union had no base to compare against, unlike the
+  node path's three-way merge, so a staged copy of an INHERITED edge contributed
+  its whole fork property bag as first-class `(branch, value)` claims — including
+  the values it never touched. Under any rank-based `onPropertyConflict` an
+  untouched base value could therefore outvote a value a branch actually authored,
+  decided by whichever branch label happened to ride on the untouched copy. The
+  window-only carrier made it observable: an inherited row whose only change is
+  its end-of-validity is staged solely to give that ending somewhere to ride, its
+  properties ARE the base's, and its branch is merely whichever sorted first in
+  staging. The union now filters every contributor to the properties it CHANGED
+  from its own base — a branch-created edge has no base, so everything it carries
+  stays a full claim — which means a carrier contributes no claim and raises no
+  conflict at any rank. Genuine disagreements are unaffected: two members that
+  changed one property differently still conflict, over their real values alone.
+
+  Filtering claims does not erase content: the folded row commits the same property
+  set as before, and a key only a non-survivor carries keeps the value held by the
+  member with the minimum edge ID — the row, never the branch label riding on it,
+  since for these keys no branch claimed anything and an arbitrary label deciding
+  the committed value is the very thing being fixed.
+
+  `MergeReport.validityEnds` now also reports the window claims that target
+  precedence discards. When the incremental target had already moved an inherited
+  row's end, the reconciler took the row out of the resolution and the branch
+  claims vanished from the report entirely — less visible than a claim that merely
+  lost the least-claim rule, which stays named in `claimedBy`. Such a row now gets
+  a resolution naming the target's own committed instant, its discarded claimants,
+  and the new optional `ValidityEndResolution.precedence` field set to the
+  exported `VALIDITY_END_TARGET_PRECEDENCE`. The field is absent on every entry
+  the merge itself decided, so existing consumers read what they always read; no
+  write is staged and no provenance credit is minted for such a row, and a row no
+  branch claimed still produces no entry at all.
+
+- [#364](https://github.com/nicia-ai/typegraph/pull/364) [`fb29816`](https://github.com/nicia-ai/typegraph/commit/fb2981664c77d704b7f78933b8f887222c796091) Thanks [@pdlug](https://github.com/pdlug)! - Add optional `topK` to `pageRank()` and `personalizedPageRank()`, and optional
+  `minComponentSize` to `weaklyConnectedComponents()`. Both bound only result
+  extraction: the limit and the inclusive component-size filter are applied in
+  extraction SQL after the existing deterministic ordering, so bounded rows never
+  reach the driver. Default results and ordering are unchanged, and the graph
+  computation itself still runs over the whole visible induced subgraph.
+
+- [#415](https://github.com/nicia-ai/typegraph/pull/415) [`b68e643`](https://github.com/nicia-ai/typegraph/commit/b68e6437a337cdcd2e3c166754deb87008e25152) Thanks [@pdlug](https://github.com/pdlug)! - Refuse non-canonical validity-window timestamps in trusted import.
+
+  `trustedImportGraph` / `trustedImportGraphStream` accept a pre-typed stream and
+  never re-parse it, so a `validFrom` / `validTo` that TypeScript types as `string`
+  but is not canonical fixed-width UTC ISO 8601 used to flow straight to SQL. Every
+  temporal filter compares those values AS TEXT against an `asOf` coordinate, so a
+  stored `"2021-01-01"`, `"...T00:00:00Z"`, `"...:00.1Z"` or `"...+01:00"` mis-sorts
+  and silently includes or excludes the wrong rows — and it mis-decided the
+  negative-width window check that the same path performs on the way in.
+
+  Both window fields of every streamed node and edge are now format-checked with
+  the same `isCanonicalIsoDate` decision the untrusted import schema and the store's
+  own writes make. A violation refuses the WHOLE stream with a `TrustedImportError`
+  carrying the existing reason `invalid_stream`, naming the offending field, row and
+  value; the session's transaction rolls back, so chunks already streamed are not
+  left behind. This is a behavior change: a stream that previously imported and
+  stored an unsortable timestamp now fails loudly. Convert such values with
+  `new Date(value).toISOString()`. The check is format-only — trusted import still
+  skips property, reference and conflict validation — and it leaves an absent field
+  and an explicitly `null` (confirmed open-left) `validFrom` untouched.
+
+  Also documents a pre-existing bulk-API limitation, with no behavior change:
+  `bulkUpsertById` groups every create ahead of every update, so one batch cannot
+  hand a constrained value from one row to another (releasing a `unique` value or a
+  `oneActive` edge slot and claiming it in the same batch throws `UniquenessError` /
+  `CardinalityError`, where the equivalent sequential upserts succeed). The
+  workaround is two batches, or sequential upserts.
+
+- [#374](https://github.com/nicia-ai/typegraph/pull/374) [`fadf932`](https://github.com/nicia-ai/typegraph/commit/fadf93297df40bd619a1ca45b165edc04ef6ebfe) Thanks [@pdlug](https://github.com/pdlug)! - graph-merge: stage cascade retractions with their cause instead of inferring intent
+
+  A node soft-delete ends every open identity assertion touching the node, so a
+  branch that deletes a node stages retractions it never asked for. The merge
+  previously separated those cascade endings from a branch's own retraction with
+  a conservative branch-level heuristic, which deliberately over-dropped the
+  same-branch case: a branch that retracted an assertion and LATER deleted one of
+  its endpoints looked exactly like a pure cascade, so its retraction was dropped
+  whenever the deletion was overruled — silently keeping truth the branch had
+  explicitly ended.
+
+  The soft-delete cascade now ends assertions at the deleted node's own
+  `deleted_at`, which makes the cause derivable: the state-diff compares each
+  retracted assertion's end instant to the deletion instants of its endpoints and
+  stages the retraction as either a cascade naming the deleted node or the
+  branch's own act. The merge planner drops a retraction only when EVERY branch
+  staged it as the cascade of a deletion that delete/modify resolution then
+  overruled, so an explicit retraction survives even when it comes from the
+  deleting branch. Two cases stay conservative because nothing distinguishes them
+  at the stored resolution — a hard delete (which removes the assertion rows) and
+  a retraction issued in the same millisecond as the delete that followed it.
+
+- [#387](https://github.com/nicia-ai/typegraph/pull/387) [`71361d7`](https://github.com/nicia-ai/typegraph/commit/71361d70b1fda83ad8539228c8e133abd0ce57f9) Thanks [@pdlug](https://github.com/pdlug)! - Complete the contribution health lifecycle with a read-only readiness probe and
+  an explicit destructive rebuild, so the three maintenance operations form one
+  escalation ladder: `probeContributions()` (writes nothing) →
+  `repairContributions()` (non-destructive, already shipped) →
+  `rebuildContribution()` (drops and recreates storage).
+
+  `store.probeContributions()` answers "is search coherent with the graph right
+  now" without mutating anything — safe on a read path, on a replica, and under a
+  least-privilege role. It returns one `ready` / `degraded` entry per search
+  projection plus the durable `graphRevision` the assessment was taken at on a
+  revision-tracked Store. It shares the detection logic of
+  `verifyContributions()` rather than reimplementing it, so a health check can
+  never disagree with the gate the hot path actually consults. A projection with
+  no declared contributions is omitted rather than reported `ready`, and a backend
+  that provisions contributions but cannot probe its catalog refuses instead of
+  answering — "assessed and healthy" and "never looked" never share a return
+  value.
+
+  `store.rebuildContribution("fulltext")` is the repair that was missing for a
+  `stale` contribution, whose table exists at a shape the current `createDdl` no
+  longer produces: the ensure path's `CREATE ... IF NOT EXISTS` no-ops against it,
+  so re-stamping the marker would leave it blessing storage of the wrong shape.
+  The rebuild drops the storage, recreates it, reconstructs the content from the
+  node rows, and stamps the marker inside one transaction under the schema-write
+  fence, so an interrupted rebuild rolls back rather than leaving storage attested
+  but empty. It is reachable only by name — never from `repairContributions()`,
+  which continues to report these findings as `requires-rebuild`.
+
+  Vector contributions are not rebuildable, and the call refuses with
+  `ContributionRebuildUnsupportedError` rather than dropping them: TypeGraph
+  stores the vectors callers supply and never the inputs that produced them, so
+  the embeddings exist only in the storage a rebuild would destroy.
+  `reembedVectorField(kind, fieldPath, { embed })` remains the sanctioned
+  destructive path, because it takes the callback that can regenerate them. The
+  same typed error covers a fulltext strategy that declares no `dropDdl` and a
+  backend with no transactional schema fence; all three refuse before anything is
+  dropped, and all three are declared ahead of time on the new
+  `backend.capabilities.contributions` capability.
+
+  Fixes the drift guard so the ladder can actually be climbed: when the guard
+  refused a shape change it recorded the failed attempt at the _new_ signature,
+  overwriting the only evidence of the shape the table really had. The verdict
+  then read as `missing-marker` rather than `stale`, so `repairContributions()`
+  reported it repaired — re-stamping the marker over the unchanged old-shape table
+  — and the next boot skipped the guard entirely. The guard now preserves the
+  recorded signature, so a `stale` contribution stays `stale` across restarts,
+  `repairContributions()` keeps reporting `requires-rebuild`, and the refusal
+  persists until `rebuildContribution("fulltext")` fixes the shape. Reach that
+  call from a `createStore()` / `createVerifiedStore()` Store: the managed
+  factory's boot step is what the guard refuses.
+
+  Also adds optional `dropDdl` to `TableContribution` — declared by both bundled
+  fulltext strategies — which is what opts a strategy into the rebuild.
+
+- [#376](https://github.com/nicia-ai/typegraph/pull/376) [`8c3a8e6`](https://github.com/nicia-ai/typegraph/commit/8c3a8e6af5ec2813a26d0aa13bf58da2c50fbaa3) Thanks [@pdlug](https://github.com/pdlug)! - Add a database-level contradiction backstop for Operational Identity.
+
+  A `different` assertion and a `same` assertion that would place both of its
+  endpoints in one identity class are a contradiction, and until now only
+  application code stood between such a write and a committed graph: the
+  plan-time simulation and the identity applier's validation both decide by
+  reading state and comparing, so a bug in either commits the contradiction
+  silently.
+
+  Identity now also maintains a derived **separation relation** — one row per
+  pair of identity classes a current `different` assertion holds apart, keyed by
+  the two class keys under a `CHECK (class_key_low < class_key_high)`
+  constraint. Every transaction that fuses two classes relabels the affected
+  separation rows in the same statement batch, so fusing two separated classes
+  relabels both sides of their shared row to one key and the database aborts the
+  transaction. A write that reached the ledger through a path that skipped
+  identity validation can no longer commit a contradictory graph; it fails with
+  the new typed `IdentitySeparationViolationError`.
+
+  The relation is derived and requires no application changes: it is maintained
+  wherever the identity closure is (assert, retract, fold, delete, merge,
+  import, rebuild), `rebuildIdentityClosure(store)` recomputes it from the
+  assertion ledger, and store-open identity validation checks it against that
+  recomputation.
+
+  Upgrading an existing identity-enabled database needs no manual step. A store
+  opened with `createStoreWithSchema` / `createAdapterStoreWithSchema` creates
+  the new `typegraph_identity_separation` relation through the same idempotent
+  identity DDL path as the other identity relations and recomputes it from the
+  ledger once, before anything reads it. A missing assertion ledger or closure
+  relation is still refused as data loss.
+
+  Custom backend authors: the resolved table-name types (`ResolvedSqlTableNames`,
+  `SqliteTableNames`, `PostgresTableNames`) and the `ensureIdentityTables`
+  parameter each gained a required `identitySeparation` entry, so an
+  implementation that builds one of those objects needs the new name added. Code
+  that only reads `backend.tableNames`, or that passes a partial name override to
+  `createSqliteTables` / `createPostgresTables` / `createSqlSchema`, is
+  unaffected — an omitted name still resolves to the default
+  `typegraph_identity_separation`.
+
+- [#397](https://github.com/nicia-ai/typegraph/pull/397) [`d2b935e`](https://github.com/nicia-ai/typegraph/commit/d2b935ed071fc2eb8e4310cfb1bdeecca64072b0) Thanks [@pdlug](https://github.com/pdlug)! - Graph Merge now keeps the **inherited** edge when a repoint-induced collapse folds a
+  committed row together with a branch-created one, instead of keeping the
+  lexicographically-minimal edge id.
+
+  Previously the survivor of such a collapse was whichever edge id sorted lowest. A
+  collapse rewrites the row it keeps and ends none of the rows folded into it, so when a
+  branch-created id sorted below the committed one, the merge wrote the branch's row as a
+  new edge and left the committed edge live beside it at its pre-merge properties — two
+  live rows for one folded relationship, the edit staged for the committed row never
+  written, and `merged.edges` counting one of them. Which of the two you got depended on
+  an id sort, so it was not behavior a caller could depend on.
+
+  The surviving edge id reported in `PropertyConflict.entityId`, window resolutions and
+  provenance is consequently the inherited row's id whenever the collapse involved one.
+  That is the id of the row that actually persists, and it no longer moves with
+  branch-created id lexicographics. Collapses among branch-created edges alone are
+  unchanged, as is the property/window reconciliation applied to the survivor.
+
+- [#427](https://github.com/nicia-ai/typegraph/pull/427) [`facef56`](https://github.com/nicia-ai/typegraph/commit/facef560d14c38607d6414818c65e43dc65a88d2) Thanks [@pdlug](https://github.com/pdlug)! - `store.rebuildContribution("fulltext")` is now scoped to the graph it is called on. The fulltext projection is one physical table holding every graph's rows keyed by `graph_id`, while the rebuild runs under the per-graph schema fence — so the old unconditional `DROP TABLE` destroyed every other graph's search index on the same database, with no concurrency required: a neighbouring graph's `fulltext` marker survived the drop (markers are keyed by `graph_id`), so `probeContributions()` and `verifyContributions()` went on reporting it `ready` while every search it served returned nothing. The rebuild now removes only the calling graph's rows, through the same `DELETE ... WHERE graph_id` statement `clear()` uses — one exported builder both call — and escalates to dropping and recreating the shared table only when that table holds no other graph's rows. That drop remains the one repair for storage provisioned at a shape the current DDL no longer produces, and the lock scope now matches the decision it authorizes. Two locks, protecting different resources: a constant-keyed advisory lock (`typegraph:contribution-ddl`) serializes the contribution's DDL across graphs — it survives the drop and exists even when the table does not, which is what a relation lock cannot do — and, on the path that may drop, `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE` excludes ordinary writers, which take no advisory lock at all and could otherwise commit a row between the probe and the `DROP TABLE` that the probe had already decided was safe. The verdict is re-established under that lock before any drop; the cheap unlocked probe ahead of it exists only to keep the graph-scoped path off the relation lock, and can only err toward keeping the table. Both are no-ops on SQLite, whose `BEGIN IMMEDIATE` fence already holds the database's single writer slot from probe through commit.
+
+  When the recorded shape is `stale` — the state only a recreate repairs — and the storage that would have to be recreated holds another graph's rows, the rebuild refuses with `ContributionRebuildUnsupportedError` and the new reason `shared-storage-in-use` instead of either destroying content it cannot reconstruct or re-stamping this graph's marker over a physical shape nothing verified. The refusal names the other graph ids and the sanctioned maintenance-window sequence. Vector contributions are unaffected: their storage is per-`(graph, kind, field)`, so no other graph's data is ever in reach.
+
+- [#427](https://github.com/nicia-ai/typegraph/pull/427) [`facef56`](https://github.com/nicia-ai/typegraph/commit/facef560d14c38607d6414818c65e43dc65a88d2) Thanks [@pdlug](https://github.com/pdlug)! - Harden the Operational Identity release and adjacent write paths found during its adversarial review. Identity interchange now exports one repeatable-read snapshot, uses target-bound keyset pagination pinned to code-point order via the dialect adapter's `binaryText` seam so a `base@V` content token minted on 0.45 still matches its recomputation on PostgreSQL, cancels cleanly, and refuses streams that would deadlock a serialized connection — a PGlite connection, a bare `pg`/neon `Client` (including a checked-out `PoolClient`), a `Pool` explicitly configured with `max: 1`, a postgres-js client built with `{ max: 1 }`, a better-sqlite3 handle, a `bun:sqlite` database, a sql.js database, a local (`file:`/`:memory:`) libSQL client, or Cloudflare Durable Object storage, whose transaction frame is ambient on the storage object. The refusal is one EXCLUSIVE long-lived-stream lease per serialized resource, not a one-time observation and not a cross-kind-only exclusion: at most one interchange stream of any kind holds a given connection, so all four pairings are refused rather than only the two that mix kinds — an import behind an export snapshot (including through a user-wrapped stream that no longer identifies its source backend), an export snapshot behind a streaming import, and now export-behind-export and import-behind-import too, which previously reached the driver as a nested `BEGIN` after chunks had already committed. Whichever long-lived stream starts second gets a typed `ConfigurationError` instead of both hanging: `details.code` names the condition that holds the connection (`INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` behind an export snapshot, `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT` when the object-identity detector is what answered, or the new `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS` behind another import), while the new `details.requested` and `details.heldBy` name which pairing was actually refused, so a same-kind refusal is never reported as something it is not. `"import-stream"` is the kind of EVERY long-lived import, not only the chunk-streaming one: `importGraph` takes the lease for the whole call and `trustedImportGraphStream` / `trustedImportGraph` hold it for the whole trusted session, so both APIs can now throw these serialized-connection `ConfigurationError` codes — a new error TYPE on a trusted-import surface that previously threw only `TrustedImportError`. Every exit releases the lease, including a mid-stream producer failure and a synchronous throw out of `backend.transaction(...)` (a closed handle, a refused pool checkout), which would otherwise strand the connection for the life of the process. Relatedly, SQLite's manually framed transactions no longer let a failing `ROLLBACK` mask the failure that caused it: SQLite auto-rolls-back on `SQLITE_FULL` / `SQLITE_IOERR` / `SQLITE_NOMEM`, so the unwinding `ROLLBACK` can itself fail with "cannot rollback - no transaction is active" — the caller now receives the ORIGINAL error and the rollback failure is warned instead of thrown. Graph merge uses injective composite keys, preflights provenance sidecar collisions, and refuses merge options it cannot honor instead of ignoring them.
+
+  Edge identity checks now include kind and endpoint kind on every create, delete, and get-or-create path, including tombstoned rows, and that check is carried by the write statement itself rather than re-derived beside it: `UpdateEdgeParams`, `DeleteEdgeParams`, and `HardDeleteEdgeParams` each gain an optional `kind`, and a backend that receives it MUST scope the statement to that kind. Both bundled Drizzle backends satisfy that contract through one shared predicate, but a hand-written `GraphBackend` has to honor it or it will silently widen a write it was told to narrow. Because a kind-scoped statement that also requires `deleted_at IS NULL` is its own recheck, the redundant in-transaction re-read that used to precede each edge delete and hard delete is gone — the statement either matches the edge the caller named or affects nothing. Node `bulkDelete` remains one atomic, hookless bulk operation exactly as in 0.45. Edge `bulkDelete` changes behavior in 0.46: 0.45.x looped single deletes and fired per-item `onOperationStart`/`onOperationEnd` hooks for each one, and 0.46 makes it one atomic single-transaction batch that emits NO hook events at all — neither per-item nor bulk, since `onBulkOperationStart`/`onBulkOperationEnd` fire only for node `updateWhere` and no bulk-hook coverage for deletes exists yet — so a consumer that relied on those per-item events for audit or metrics must either keep deleting individually (single `delete` still fires per-item hooks) or capture the deletions another way, such as from the ids it passes in and the rows it reads back; an id in the batch that belongs to another edge kind is refused with `ValidationError` carrying `EDGE_IDENTITY_MISMATCH_CODE`, rolling back every delete already applied earlier in the same batch.
+
+  Constrained writes no longer take their decision from a read the write cannot vouch for. Every write whose correctness rests on a check-then-write — edge cardinality `one`, `unique`, and `oneActive` (including the create and resurrect legs of `getOrCreateByEndpoints`, single and bulk), node-kind disjointness on create, and a `kindWithSubClasses` uniqueness constraint that actually expands to more than one kind (a scope covering a single kind probes exactly the row the uniques table's own primary key then reserves, so that key IS its fence) — now runs its probe and its write under the same per-graph mutual exclusion, whether or not the store enables `history` or `revisionTracking`. That exclusion previously arrived only as a SIDE EFFECT of recorded capture's advisory lock, so the DEFAULT PostgreSQL store — no history, no revision tracking — raced: two writers each probed a graph that satisfied the constraint and each committed, producing exactly the duplicate the constraint exists to prevent, with no error on either side. On PostgreSQL the fence is that same transaction-scoped advisory lock, now taken for the constraint's sake rather than the clock's; on SQLite it is the `BEGIN IMMEDIATE` writer slot the backend already holds. Writes with nothing to check — an unconstrained create, any delete, a cardinality-`many` edge — take no lock at all, so the cost tracks the constraints a graph actually declares rather than becoming a blanket serialization.
+
+  A backend running WITHOUT transactions has no fence to take, and a constrained write there is now REFUSED rather than run unfenced. Both halves of the fence are transaction-scoped constructs — SQLite's `BEGIN IMMEDIATE`, PostgreSQL's `pg_advisory_xact_lock`, which outside a transaction is acquired and dropped inside its own implicit single-statement one and excludes nothing — so "can this backend fence" and "does this write run inside a transaction" are the same question, and the refusal is keyed on exactly that. It is a `ConfigurationError` with `details.code` `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` and `details.constraint` naming WHICH declared constraint needed the fence — `edgeCardinality`, `edgeMatchKeyConvergence`, `nodeDisjointness`, or `nodeUniquenessScope` — because "this backend cannot fence constrained writes" is unusable advice while "your `cardinality: 'one'` edge cannot be enforced here" is actionable; the `suggestion` carries the per-class way forward. The blast radius is Cloudflare D1 (auto-detected as `transactionMode: "none"`), `drizzle-orm/neon-http`, and any SQLite backend explicitly built with `transactionMode: "none"` — Durable Objects are NOT affected, since `do-sqlite` reports `capabilities.transactions: true` and fences normally. On those three, a declared-constraint write that previously raced silently now throws: a `cardinality` other than `many` cannot be created or resurrected, a `disjointWith` kind cannot be created, a `kindWithSubClasses` unique that actually expands past one kind refuses on create AND update, and `getOrCreateByEndpoints` can no longer take its CREATE leg (a call that FINDS an existing edge still returns it, and a `many` resurrection is an id-keyed UPDATE re-deriving no verdict, so both keep working; the BULK form fences its whole batch and therefore refuses whatever the outcome would have been). Everything unconstrained is untouched — a `many` edge created, updated and deleted, any node delete including one whose kind participates in a disjointness axiom, and a `scope: "kind"` unique whose uniques primary key IS its fence — so this is not a blanket loss of write access on those engines. Refused rather than degraded, per the accepted-or-refused rule: a constraint enforced only when nothing races is the exact defect the fence exists to close, and reporting it as enforced would make the invariant above false precisely where it matters.
+
+  A store created with `coalesceUnchangedUpserts` likewise stopped letting an optimization change an answer. A single-node `upsertById` decided to skip its write from an autocommit read, so a writer committing between that read and the skip left the caller told its props were stored while the store in fact held the other writer's — a DIFFERENT outcome from the same call with the flag off, where the update's own in-transaction re-read merges the caller's props over whatever it finds. The skip is now taken only on evidence re-read inside a transaction after that first observation, and a losing verdict falls through to the ordinary write path; only an upsert that is about to coalesce pays the second read, so a store without the flag, or one whose props differ, keeps the single read and single write it always had.
+
+  `getOrCreateByEndpoints` now converges rather than retrying once and hoping. Its single-shot retry became a bounded loop of three attempts whose ordinary case is cheaper than before — under the fence a losing writer learns of the winner from its own in-transaction lookup instead of from a `CardinalityError` — and whose exhaustion is a typed refusal rather than a livelock or a stray constraint error leaking out of a lost race: a competitor that repeatedly creates and removes the same match key ends in a `DatabaseOperationError` naming that pattern and telling the caller to serialize or retry. The bulk edge `getOrCreateByEndpoints` and bulk node `getOrCreate` paths, which had no retry at all and surfaced a concurrent winner as a raw constraint violation, gained one.
+
+  `efSearch` is now refused everywhere it cannot be applied, not only on PostgreSQL. The guarantee that vector search never silently drops an accepted option held only for the PostgreSQL path: every SQLite backend accepted `efSearch` and ignored it, on the vector path and the hybrid path alike (the hybrid path dropped it in a second place, while rebuilding the vector parameters), so a caller tuning recall got the default frontier and no indication. All of them now ask one owner, and an engine with no per-search ANN frontier refuses with `UnsupportedBackendCapabilityError` — `details.capability` `vector.searchFrontierTuning`, `details.reason` naming the limitation (`sqlite-vec`'s `vec0` KNN takes only `k`, the page size; libSQL's DiskANN `vector_top_k` fixes `search_l` at index-creation time). PostgreSQL is unchanged, including its existing refusals for a non-HNSW slot and a driver that cannot scope `SET LOCAL`, which now come from that same owner instead of from a second spelling of the same decision.
+
+  Separately, sql.js backends could not execute a compiled query at all. The compiled-execution adapter recognized any client exposing `prepare()` and then called `all()` on the resulting statement, but sql.js's `Statement` has no `all()` — it is a `bind`/`step`/`getAsObject`/`free` cursor — so the first prepared statement threw. Client detection is now shape-specific, sql.js is excluded from the compiled path, and it runs through Drizzle's own session, which drives that cursor correctly; `bun:sqlite`, whose statement DOES expose `all()`, keeps the compiled path.
+
+  The merge-provenance sidecar now claims its graph id MARKER-FIRST instead of inferring ownership from circumstantial evidence: the durable `ProvenanceOwner` marker is the sidecar's FIRST write of any kind, committed inside the schema fence (`schemaWriteTransaction` — the same per-graph fence every schema commit and schema-managed write already respects) and BEFORE the sidecar schema is registered, which is possible because the marker is a plain node row needing no per-graph DDL. A competing writer therefore either commits first and is seen, or waits until the claim has committed; a refused open leaves the occupant byte-identical, writing no schema row, no marker, and no provenance row. Because the marker precedes the schema, the resumable interrupted state is marker-WITHOUT-schema (or marker beside a pre-marker legacy schema), which resumes by registering or migrating the schema — while a graph carrying the exact current sidecar schema with NO marker is a state this module cannot produce and is refused UNCONDITIONALLY as `unowned-exact-schema-graph`, contents never consulted: empty and provenance-shaped occupants are refused exactly like any other, since contents an application could have written are not evidence of authorship. Freedom is judged by occupancy across EVERY per-graph row table the backend names through its `tableNames` port — nodes and edges, but equally recorded-time history, the revision clock and origins, identity assertions with their recorded ledger, closure and separation, fulltext, and unique keys — so a graph id holding only, say, identity or fulltext rows is occupied and refused, and an unregistered schema is never taken as evidence of a free namespace. Only the exact validated live marker counts as ownership: a tombstoned, malformed, wrong-target, or non-canonical `ProvenanceOwner` row refuses with the reason `corrupt-ownership-marker` and is never overwritten or resurrected. Refusals report one of five typed reasons under `GRAPH_MERGE_PROVENANCE_ID_COLLISION` — `application-graph`, `empty-legacy-sidecar`, `unupgradeable-legacy-sidecar`, `unowned-exact-schema-graph`, or `corrupt-ownership-marker` — each carrying remediation specific to the state actually found, and a backend that exposes no schema fence refuses an unclaimed sidecar with `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED` rather than claiming without atomicity (an already-owned sidecar needs no claim and still opens there). One writer class takes neither the per-graph advisory lock nor the active schema row — a schema-LESS raw `createStore` writer, or a direct `backend.insertNode` / `insertEdge` — and at PostgreSQL's READ COMMITTED its insert could commit between the claim's fenced re-inspection and the claim's commit, leaving the marker on a graph id an application had just made its own. That window is closed rather than accepted: on PostgreSQL the claim issues `LOCK TABLE <nodes>, <edges> IN SHARE ROW EXCLUSIVE MODE` inside the fence and before the re-inspection, draining in-flight row writers and holding new ones off until the marker commits. `SHARE ROW EXCLUSIVE` and not `SHARE` because the mode must be SELF-exclusive: two concurrent claims on different sidecar ids hold different advisory locks, so under `SHARE` both would acquire it and then both request `ROW EXCLUSIVE` for their own marker INSERT — a lock-upgrade deadlock PostgreSQL resolves by aborting one. The cost is real and bounded: while a claim runs, every node and edge write on the whole DATABASE waits, for the duration of a few probes and one INSERT with no caller code inside — and the lock is taken only when a sidecar is created, upgraded from the pre-marker schema, or resumed after a crash, never on the common path where an already-owned sidecar opens with no fence at all. SQLite takes no such lock; `BEGIN IMMEDIATE` already owns the single writer slot.
+
+  `persistProvenance: true` is now honored or refused, never dropped: the sidecar is opened and claimed PRE-COMMIT, so an occupied sidecar graph id or a backend that cannot fence the claim refuses the whole merge as `InvalidMergeOptionsError` (`details.option` `"persistProvenance"`, with the originating `ConfigurationError` as `cause` and its code echoed as `details.provenanceErrorCode`) and leaves the target unmodified — where 0.45 would have committed the merge and reported the same configuration verdict as a `warnings` entry. Those verdicts are as true before the merge as after it, so reporting them post-commit left the caller with a committed graph and a stated option TypeGraph had silently ignored. The post-commit best-effort warning path survives only for what is genuinely transient — a row write failing against a sidecar this library already owns. One visible consequence of claiming early: after a `persistProvenance` merge the sidecar (marker and schema) exists even if the merge itself later fails, holding an owned, empty sidecar and no target change. `mergeIncremental`'s refusal of a non-`"flag"` `onBasePropertyConflict` is now a typed `InvalidMergeOptionsError` (`MERGE_ERROR_CODES.invalidOptions`, category `user`) instead of a plain `MergeError`, so it is catchable the same way every other refused merge option is. `mergeIncremental` additionally refuses a fork point that moved under it. Its plan is a set of diffs against one `base@V`, and only the TARGET was ever allowed to advance while the merge ran — but nothing checked, so a write landing on the fork-point store mid-call left the commit applying diffs against an ancestor that no longer existed. The fork point is now frozen for the duration of the call: the version read before planning is carried into the commit and re-compared as the first act of the commit transaction, and a mismatch raises `BaseVersionMismatchError` (`GRAPH_MERGE_BASE_VERSION_MISMATCH`) naming the expected and live fork-point bases rather than committing. And `branch()` no longer leaks the working copy's backend when the post-transfer schema-anchor read fails — ownership of that engine transfers to `branch()` on the strategy's success path, and a `branch()` that reports failure as `err(...)` hands the caller no handle to close.
+
+  Operational Identity's derived separation relation is never published in a state that under-reports separations. The relation is created INSIDE the transaction that fills it — the fenced path issues its DDL under `schemaWriteTransaction`, the schema-commit path returns the DDL as data for the commit transaction to issue — so a commit refused by the `IDENTITY_PROFILE_MIGRATION_PENDING` gate, a stale CAS, or a contradiction now creates nothing at all, where previously it stranded a readable, empty relation that the next open skipped because "present" was what suppressed the rebuild. What that cannot undo, a per-graph predicate heals: the fill decision is "does THIS graph hold live `different` assertions and no separation rows", not "does the table exist", so a relation left empty by an older version or by another graph's provisioning is rebuilt at the next open of the graph that owns the assertions. The predicate is exact in both directions — it shares the fill's registry kind filter and additionally requires the assertion's two endpoints to resolve to DIFFERENT identity classes, since a contradicted ledger projects to a degenerate pair the relation's CHECK refuses, which is its own fault with its own error rather than an unfilled relation. Identity DDL is serialized database-wide by a constant-keyed advisory lock (`typegraph:identity-ddl`; a no-op on SQLite, whose writer slot already serializes the database), taken inside the per-graph schema fence and outside the per-graph identity locks, because the identity relations are shared by every graph while the fence is not. A backend that cannot publish that upgrade atomically — missing `schemaWriteTransaction` or `identityTableDdl` on the fenced path, or `executeSchemaDdl` on the commit path — is refused with the new `ConfigurationError` code `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL` naming the missing ports, but only when a fill is actually owed; both bundled Drizzle backends implement all three when transactions are enabled. Finally, `isSeparated` no longer trusts an empty read: a graph with zero separation rows whose ledger holds a live, kind-filtered `different` assertion across two distinct classes raises `IDENTITY_STORAGE_MISSING` with the new `details.reason` `"unfilled"` rather than answering "not separated". That is the state a Store handle opened while the relation did not exist would otherwise slide into the moment another graph's upgrade created the shared relation mid-session; the remedy is to reopen the Store, which runs the fill, and the error says so. That proof is taken once per Store handle rather than once per read: it settles a property of the graph, not of the pair, and the assertion ledger has no index that answers it cheaply — proving it per read cost a 200-assertion same-only import 32% and eight concurrent `assertSame` 56% on SQLite, on the workload class whose separation relation is legitimately empty forever. A handle opened while the relation was absent still refuses, because a handle that cannot read the relation never records a proof; what a kept proof no longer re-detects is a relation truncated out of band midway through one handle's life, which `validateIdentity()` reports and the CHECK constraint still refuses at the next fusing write.
+
+  Three smaller guards join that one. The recorded revision clock can no longer move backward: its upsert advances the stored row only WHERE the stored revision is strictly less than the one being written, so a late allocation cannot rewind a clock other readers have already passed, and a caller that supplies an explicit stale `previousRevision` now gets a `ConfigurationError` stating that the write would have moved the graph's revision clock backward — carrying the graph id and both revisions — instead of quietly winning. Operational Identity's SQLite writes now name the one state they cannot recover from: an identity mutation inside a transaction the CALLER began and TypeGraph adopted (`store.withTransaction(externalTx)` / `store.withRecordedTransaction(externalTx)`) can find its read snapshot invalidated before it ever takes the writer slot if that transaction was opened `BEGIN DEFERRED` and another connection committed first, and SQLite cannot upgrade a stale snapshot in place. That surfaces as a `ConfigurationError` with `details.code` `IDENTITY_TRANSACTION_NOT_WRITE_FENCED` and `details.sqliteCode` `SQLITE_BUSY_SNAPSHOT`, telling the caller to roll back and reopen with `BEGIN IMMEDIATE`; TypeGraph's own transactions already open that way, so the state is unreachable without an adopted frame. And the three PostgreSQL error shapes a concurrent `CREATE ... IF NOT EXISTS` race can take — SQLSTATE `23505`, `42701`, and `XX000` carrying "tuple concurrently updated" — are now classified by one shared predicate rather than by each call site's own partial spelling of the set, so a race one site tolerated is no longer a hard failure at the next.
+
+  Edge `matchOn` composite-key construction and its per-field match comparison, embedding/fulltext field extraction, and the uniqueness path — both the unique-key computation and the `where` predicate's evaluation — now read a props bag by declared own key rather than plain property access, so a field named after an `Object.prototype` member (`toString`, `constructor`, `valueOf`) can no longer resolve to the inherited prototype member instead of the field's actual (absent) value: a unique constraint over an absent field named `toString` keyed on the inherited function, producing the empty key under `binary` collation and throwing `TypeError` under `caseInsensitive`, where it must key as absent like every other missing value. The remaining NUL-joined cache and bucket keys in edge and node operations, and legacy provenance record ids, are now built with the same injective tuple encoding already used elsewhere, closing the last collision-prone key constructions.
+
+  That own-key discipline now extends past reads of a props bag. A prototype-named field the schema DECLARES is projected and returned as its stored value instead of being short-circuited as prototype noise, so selecting a field called `toString` or `valueOf` answers with what was written rather than with the inherited function; the field tracker asks the schema introspector whether the name is declared before deciding, and an UNDECLARED prototype name still resolves exactly as it always did. Schema canonicalization builds its sorted form on a null-prototype bag, so a schema carrying a `__proto__` property is no longer canonicalized — and therefore hashed and diffed — identically to one where the property is absent; the output is byte-identical for every schema without such a key, so no existing schema's hash moves. Graph merge's property bags got the same treatment, which is what lets a fork-side DELETION of a `__proto__` property record as a deletion: the deletion marker is an assignment, and on an ordinary object literal `Object.prototype`'s setter swallowed it, silently reverting the delete to the base value. A graph-extension document that declares a PROPERTY named `__proto__` is refused outright with `RESERVED_PROPERTY_NAME`, because schema validation cannot carry it — at any depth, so a NESTED object field named `__proto__` is refused on the same grounds rather than only a top-level one. `defineNode` / `defineEdge` refuse the identical declaration at definition time (`ConfigurationError`, `details.conflicts`) — at ANY nesting depth, walking nested object schemas and every wrapper (optional, nullable, default, arrays, records, unions, lazy) structurally through Zod's public `def`, with a dotted path in the error — so the two authoring paths no longer disagree about the same unstorable field: it was a typed refusal on the document path and silent data loss on the typed one. It is reachable only through a computed key — `z.object({ __proto__: … })` written literally sets the shape object's prototype instead of creating an entry, while `z.object({ ["__proto__"]: z.string() })` yields a shape whose `Object.keys` really does contain it — and it is UNSTORABLE rather than merely reserved, because Zod drops the key from every parse result and reports success even when the field is required.
+
+  The same misreading has a WRITE side, and it is now closed as a class rather than case by case. `bag[key] = value` on a `{}` literal does not create an entry when `key` is `__proto__`: it invokes `Object.prototype`'s `__proto__` setter, which reparents the bag for an object value and does nothing at all for a primitive, so the value is dropped and every later own-key read agrees the writer never wrote it. Kind names (`isValidKindName` admits `__proto__` exactly as it admits `toString`), schema property names, JSON-Schema keywords, query aliases and `JSON.parse`d document keys are all data, and all of them admit it. `normalizeEdges` in `defineGraph` and every other data-keyed accumulator in the tree now build through one owner, `createDataKeyedBag`, so an EDGE kind named `__proto__` survives `defineGraph`, schema serialization, and a live store round trip instead of vanishing between the config and the registration. Because the class had already recurred twice from an incomplete enumeration, it is made self-enforcing: a ratchet test scans `src/**` for statement-position `{}` initializations and fails on any that is not allowlisted with a stated reason. Behavior note for callers: none of this is observable on returned values — every record TypeGraph hands back (serialized schema maps, aggregate rows, select contexts, migration counters, extension documents) accumulates on a null-prototype bag internally and is spread into an ordinary object at the public boundary, which preserves an own `__proto__` alias as data while restoring `Object.prototype`, so `row.toString()` and `record instanceof Object` behave exactly as before. Relatedly, the field tracker and the selective projection now track a DECLARED field named `toJSON` as the stored data it is, instead of exempting the name unconditionally; the exemption survives, unchanged, for kinds that do NOT declare it, where it exists only to keep an incidental `JSON.stringify` of the tracking context from being recorded as a field access.
+
+  Two remaining leaks of that internal null prototype are closed, and one of them was a behavior that depended on which query plan ran. A smart-selected alias object and its `meta` are guarded PROXIES, and a proxy's target is caller-observable — `instanceof`, `Object.getPrototypeOf` and every other internal method resolve against it, and no `get` trap can disguise it — so `ctx.p instanceof Object` answered `false` under a selective projection and `true` under the full mapper, for the same query. The boundary spread now happens inside the guard, so both mappers hand back objects rooted at `Object.prototype` while a projected field named `__proto__` survives as an own key; the tracking context handed to the `select` callback on the field-tracking pass got the same treatment, so the probe and the engine agree. `TransactionReceipt`'s `writes.nodes` and `writes.edges` are likewise ordinary objects now, matching `writes.identity`, which always was — a `__proto__` kind still reads back as an own key with its count. And the builder handed to an index `where:` callback is no longer built on a null prototype either.
+
+  `defineNode` / `defineEdge` now REFUSE a schema containing a `z.lazy()` whose getter cannot run yet, with a `ConfigurationError` naming the kind and the dotted path. This is reachable from one shape: a mutually recursive pair declared AROUND the definition call, so the second `z.object()` const is still in its temporal dead zone when the first one's getter fires. Previously that branch was skipped, and skipping it was a fail-open — a definition is validated exactly once, so a `__proto__` nested under the unreadable subtree was accepted at definition time and then silently dropped by every parse, which is the precise outcome the unstorable-name refusal exists to prevent. Recursion itself is not refused: declaring both consts before the definition — which the error message asks for — resolves every getter, and the walk then reports the real conflict at its full nested path. Note that a `z.lazy` property field is typed `unknown` by the query introspector regardless, so predicates over it degrade; recursive property schemas are not a supported shape, and this makes the one silently-wrong case loud.
+
+  An import UPDATE now asserts every component its verdict read, closing the temporal half of the class rounds 6 and 7 closed for edge kind and endpoints. `UpdateNodeParams` and `UpdateEdgeParams` each gain an optional `expectedValidFrom`, with the same MUST-apply contract as `UpdateEdgeParams.kind` — a backend that receives it has to put it in the statement's own `WHERE`, and the three states are distinct: omitted asserts nothing, `null` asserts `IS NULL` (an open-left window), a string asserts equality. Both bundled Drizzle backends satisfy it through one shared NULL-safe predicate builder; a hand-written `GraphBackend` must honor it or it will silently widen a write it was told to narrow. All four import update legs — node and edge, batched and per-row — now state the bound they validated the document's window against, so a concurrent hard-delete-and-recreate between the probe and the write matches no row instead of ignoring a `validFrom` the document stated or persisting a `validTo` below the new row's `validFrom`. They state it on exactly the terms the store paths do, because it is the same verdict object: a document naming neither `validFrom` nor `validTo` made the verdict read no bound, so its properties update is fenced on identity and liveness alone and a concurrent recreate that only moved the bound no longer refuses it. A node write that consequently matches nothing is reported per row with the new message prefix `INTERCHANGE_NODE_UPDATE_TARGET_CHANGED`; the edge equivalent keeps the published `INTERCHANGE_EDGE_KIND_CONFLICT` prefix, with the validity bound added to its message text. `ImportError` still carries no `code` field, so the prefix is the branchable token. Relatedly, a node update's row write and its uniqueness transition now commit or fail as ONE unit: the new keys are claimed before the row write (the claim upsert reports the key's final owner, so it IS the conflict gate, and a transaction holding the key cannot lose it to a peer), the row write follows, and the old keys are released only once it lands — with the claims compensated away if it does not. Import is the reason this has to hold on its own terms rather than on the transaction's: `onConflict: "update"` catches a per-row `UniquenessError`, records it, and commits everything else, so an ordering where the claim can fail AFTER the row changed reported `updated: 0` for a row whose props HAD changed, whose old reservation was released, and whose new reservation belonged to another node. The fulltext and embedding syncs still run after the row write, since a write that lands on nothing must not re-derive them.
+
+  The same fence now covers the STORE update paths, which read the probed row's `valid_from` for exactly the same verdict. `store.nodes.*.update` / `upsertById` and `store.edges.*.update` / `upsertById` carry `expectedValidFrom` into the statement's own `WHERE` — but only when the window verdict actually consulted the row's bound, which is when the caller stated a `validFrom` to compare against it or a lone `validTo` to invert against it. A plain `update({ props })` names no window, reads no bound, and is fenced by nothing extra; that conditionality is not an optimization but the same "only what it asserted" rule the edge identity components already followed, since predicating a write on a component the caller never claimed refuses writes that are legitimate. The decision has one owner, and it hands over the predicate rather than a flag: `assertWritableValidityWindow` now RETURNS the `expectedValidFrom` fence its verdict obliges the write to carry — empty when the verdict read no stored bound — so the answer comes from the branches the guard actually took and there is nothing left for a caller to re-derive. Interchange import had re-derived it, asserting the probed `valid_from` unconditionally and over-fencing exactly the props-only updates the store paths left alone; that second spelling is gone rather than corrected. When the assertion does catch a replaced row the update CONVERGES rather than failing: it re-reads, re-merges the caller's partial props over the current props, and re-judges the window against the current bound, so a stated window that no longer fits is refused with the same typed `ValidationError` it would have raised on the first attempt, and one that still fits is applied to the row that really exists. Convergence is bounded at one retry; a peer that keeps replacing the row ends in a `DatabaseOperationError` naming the contention instead of a livelock or a false "not found". Two adjacent defects in the same paragraph of code are fixed with it: `applyNodeResurrect` reserved its uniqueness keys before the gating `deleted_at IS NOT NULL` update and kept them when the gate refused, so a resurrection that lost its race left reservations behind for a revival it never performed (it now runs through the same claim/gate/release transition as `applyNodeUpdate`, which gives the reservations back when the gate matches nothing); and the bulk `getOrCreateByConstraint` decided whether to resurrect from the uniques row its batch probe captured, while the single-item path decided from the node row it was about to write — one decision with two owners, now read from the node row on both.
+
+  Relatedly, the builder a uniqueness `where` clause names fields on now answers for every declared field rather than only the fields the props bag happens to carry — which is what its type has always promised (`-?` makes every schema field required on the builder, precisely so a partial constraint can ask whether an OPTIONAL field is present). Naming an absent field previously hit the builder object's prototype instead: an everyday partial constraint over an absent optional field threw `TypeError: Expected a defined value` for every node written without it, and a field named `toString` found `Object.prototype.toString` and threw `isNull is not a function`. Such a field now evaluates as null, which is what a partial constraint means by absent — the same builder shape schema serialization has always captured a `where` clause with. `defineGraph` also refuses a `where` clause it can already see is broken, at definition time rather than on the first write it distorts: a callback that returns something other than a predicate, or a predicate naming a field the kind's schema does not declare, throws a `ConfigurationError` naming the kind, the constraint, and — for the undeclared field — the fields the kind actually declares. A statically typed caller could express neither mistake, so this bites generated or untyped definitions, where the old behavior was a constraint that quietly matched every row or partitioned on a field that was absent forever. A third state joins those two: a constraint carrying a `where` on a kind whose schema exposes no `.shape` — not an object schema, so there is no declared-field set to check the clause against — is REFUSED rather than left unvalidated, because skipping the check silently would disable the guard for exactly the untyped callers it was written for, who are also the only callers able to put a non-`ZodObject` there. Narrowly so: a plain `unique: [{ fields }]` on such a schema needs no shape to be meaningful and still works. And the same malformed clause is refused at EVALUATION too, not only at definition — `checkWherePredicate` throws the equivalent `ConfigurationError` for a callback that returns a non-predicate, so the third reader of a `where` clause now agrees with the other two (definition-time validation and persistence-time capture, all three reading the clause through one owner) instead of quietly treating a broken constraint as one that applies to every row. That matters for constraints built outside `defineGraph`, which never passed the definition-time gate. Because the check evaluates the clause, a `where` callback now runs one extra time when the graph is defined, so it must be pure — which it already had to be, since the uniqueness path evaluates it per write. This validates node kinds whose schema exposes an object shape; edge `unique` constraints are not covered.
+
+  This adds public API surface — `InvalidMergeOptionsError`, `ExportStreamCancelledError`, `EDGE_IDENTITY_MISMATCH_CODE`, `MERGE_ERROR_CODES.invalidOptions`, the `GraphBackend.identityTableDdl` port with its `IdentityTableNames` type, the `VectorSearchFrontierTuning` type, `ExportOptionsSchema`'s `signal?: AbortSignal` (accepted by both `exportGraph` and `exportGraphStream`), the optional `kind` on `UpdateEdgeParams` / `DeleteEdgeParams` / `HardDeleteEdgeParams` from the `@nicia-ai/typegraph/backend` entry point plus the four optional endpoint assertions `fromKind` / `fromId` / `toKind` / `toId` on `UpdateEdgeParams` alone (one assertion that moves together or not at all, under the same MUST-apply contract as `kind`), the `"shared-storage-in-use"` member of `ContributionRebuildRefusal`, `ValidationErrorDetails.operation` widened with `"delete"` and `"hardDelete"`, the `details.requested` / `details.heldBy` pairing on every serialized-connection interchange refusal, and the new error codes: `INTERCHANGE_EXPORT_STREAM_ABORTED` on `ExportStreamCancelledError`, the `vector.searchFrontierTuning` value of `UnsupportedBackendCapabilityError`'s `details.capability`, and the interchange, identity, and provenance `ConfigurationError` codes (`INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`, `INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT`, `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`, `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL`, `IDENTITY_TRANSACTION_NOT_WRITE_FENCED`, `IDENTITY_STORAGE_MISSING`'s new `details.reason` `"unfilled"`, `GRAPH_MERGE_PROVENANCE_ID_COLLISION` with its five refusal reasons, `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED`, and `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, whose `details.constraint` carries one of `edgeCardinality` / `edgeMatchKeyConvergence` / `nodeDisjointness` / `nodeUniquenessScope` — the four members of the internal `ConstraintFenceReason` union, which is not itself exported; branch on the string values).
+
+  Three refusals join the surface without a stable `details.code`, so match them by class plus `details` rather than by code. `assertApproximateMetricSupported` throws a `ConfigurationError` when `similarTo(..., { approximate: true })` is combined with a `metric` override that differs from the slot's declared metric, carrying `details` `{ nodeKind, fieldPath, requestedMetric, declaredMetric, indexType }`. `defineNode` / `defineEdge` throw a `ConfigurationError` for a schema property named `__proto__`, carrying `details.conflicts` and a `nodeType` / `edgeType` key. And a per-row import failure whose message is prefixed `INTERCHANGE_EDGE_KIND_CONFLICT` appears in `result.errors` when an interchange edge's id belongs to another kind — `ImportError` has no `code` field, so the message prefix is the branchable token, following the existing `windowErrorOf` idiom used by the validity-window import errors.
+
+  Two of those are BREAKING for callers who reach past the bundled implementations. `VectorCapabilities.searchFrontierTuning` is REQUIRED, not optional: a hand-written vector strategy must now state whether its engine has a per-search ANN frontier knob — `{ tunable: true, parameter, indexType, requiresTransactionScope }` or `{ tunable: false, reason }` — rather than inheriting silence, which is the exact defect the field closes, and a strategy that omits it no longer compiles. And a hand-written `GraphBackend` must apply the new `kind` on the three edge params when it is present, and the four endpoint assertions on `UpdateEdgeParams` alongside it; a backend that accepts and ignores either turns a write the caller narrowed into an unscoped one, and nothing above it re-reads to catch that any more. Kind alone is not enough for the update: an edge's endpoints are immutable for a given row but its id is not, so a concurrent hard-delete-and-recreate under the SAME kind with DIFFERENT endpoints satisfies a kind-only predicate, and an upsert that resolved the id BY endpoints would write to an edge pointing somewhere it never looked. The endpoint fields are stated only by a write that actually checked them — a plain `update` on a kind-scoped collection resolved the edge by id and kind and states none of them, because predicating on endpoints it never checked would refuse legitimate writes. `tests/edge-write-self-verification.test.ts` asserts the contract against the bundled backends.
+
+  It also changes behavior callers can observe: edge `bulkDelete`'s hooks; `importGraph` / `trustedImportGraph` / `trustedImportGraphStream` newly throwing the serialized-connection `ConfigurationError` codes (a new error type on the trusted-import surface); `persistProvenance`'s new pre-commit refusal turning a merge that previously committed-and-warned into one that refuses without touching the target; `mergeIncremental` refusing a commit whose fork point moved mid-call, where it previously committed diffs against a vanished ancestor; a stale explicit `previousRevision` now refused instead of rewinding the recorded clock; a SQLite vector or hybrid search that supplies `efSearch` now throwing `UnsupportedBackendCapabilityError` where it previously searched at the default frontier and said nothing; `defineGraph` throwing on a unique `where` clause that names an undeclared field, returns a non-predicate, or sits on a kind whose schema is not an object schema, and evaluating every such callback once at definition time; a graph-extension property named `__proto__` refused with `RESERVED_PROPERTY_NAME` at any nesting depth, and the same name in a `defineNode` / `defineEdge` schema refused with a `ConfigurationError`; a constrained write on D1, `neon-http`, or a `transactionMode: "none"` SQLite backend now refused with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` where it previously committed unfenced; `similarTo` with `approximate: true` and a mismatched `metric` override now refused where it previously served the exact scan and dropped one of the two options silently (`store.search.vector` / `hybrid` already refused every mismatched override on their own broader rule, and the builder's EXACT path stays deliberately wider — only the silent half is closed); an interchange edge whose id belongs to a row with a different kind OR different endpoints now reported as a per-row `INTERCHANGE_EDGE_KIND_CONFLICT` error naming the mismatched components, under `onConflict: "update"` (which previously overwrote the other row's properties while silently keeping its endpoints) and `"skip"` (which previously counted it present and silently lost it) — and the import's `updateEdge` statements carry the full identity assertion in their own `WHERE`, closing the concurrent-recreate window for endpoints exactly as it was closed for kind; and `MergeIncrementalArgs.options` narrowed to `Omit<MergeOptions, "target">` — a compile error for code that passed `options.target` to `mergeIncremental`, and a runtime `InvalidMergeOptionsError` for untyped callers that still do, where the named `target` argument previously won and `options.target` was silently ignored. So this release ships as a `minor`, not a `patch`.
+
+- [#426](https://github.com/nicia-ai/typegraph/pull/426) [`eb4b9c1`](https://github.com/nicia-ai/typegraph/commit/eb4b9c1076eb67d54cf3a7692ebe8f9a3b203453) Thanks [@pdlug](https://github.com/pdlug)! - Refuse a `validFrom` that a live row's update cannot store, instead of accepting
+  it and writing without it.
+
+  An in-place update never rewrites `valid_from`; only a resurrection does. Stating
+  a bound that named a different instant used to block coalescing, so the upsert
+  wrote — bumping the version and capturing a history row — while the bound itself
+  was dropped at the SQL builder and the row's window never moved. It now raises a
+  `ValidationError` whose issue carries the new exported code
+  `IMMUTABLE_VALIDITY_LOWER_BOUND`, naming both the stated instant and the one the
+  row holds so the caller can restate it without a second read.
+
+  This reaches every path that accepts `validFrom` against a live row: `upsertById`
+  and `bulkUpsertById` (nodes and edges, including a repeated id in one batch, which
+  is judged against the row the batch just queued), `getOrCreateByEndpoints` and
+  `bulkGetOrCreateByEndpoints` with `ifExists: "update"` — which previously dropped
+  the option before it reached any guard — and interchange import's
+  `onConflict: "update"` legs, where it is recorded as a per-row error prefixed with
+  the code rather than aborting the import.
+
+  What stays legal: restating the bound a row already holds (nothing to apply, so
+  nothing is ignored); a create or a resurrection, both of which store a stated
+  bound and are the way to give a row a different one; zero-width windows; and
+  `getOrCreateByEndpoints` returning an existing edge, which performs no write at
+  all.
+
+  Previously-accepted writes now refuse, so this is a MINOR bump — the same
+  precedent as the window refusals in the two releases before it.
+
+  Note for temporal imports: replaying an `includeTemporal: true` export over rows
+  that were created separately now reports those rows instead of updating their
+  props under a lower bound it ignored. Omit `validFrom` from the update document,
+  export with `includeTemporal: false`, or import into a fresh graph.
+
+- [#383](https://github.com/nicia-ai/typegraph/pull/383) [`bab0752`](https://github.com/nicia-ai/typegraph/commit/bab075213b480d61c91be06a2c833e510ab61a18) Thanks [@pdlug](https://github.com/pdlug)! - Merge an inherited row's end-of-validity instead of discarding it
+
+  `update(id, {}, { validTo })` on a branch is an ordinary write, but the merge
+  silently dropped it: modification detection compared properties only, so a
+  branch that ended an inherited node's or edge's validity merged as a no-op.
+  There was no workaround preserving row identity and history — deleting the row
+  was the only statement the merge honored, and it is a strictly stronger one.
+
+  An end-of-validity is now treated as a **sibling of deletion**:
+
+  - one branch ends a row → that end is committed, including a _later_ end that
+    extends the window;
+  - several branches end it differently → no conflict; the **earliest** end wins
+    (a fixed, commutative rule, so the merge stays order-independent);
+  - `mergeIncremental()`'s target already ended it → the target's end stands, the
+    same committed-target precedence identity survivors already get;
+  - one branch ends it and another deletes it → deleted, with **no**
+    `DeleteModifyConflict` — the stronger statement absorbs the weaker one;
+  - a branch re-states the end the target holds → nothing is staged at all: no
+    write, no version bump, no history row.
+
+  `MergeReport` gains `validityEnds`, listing every row whose end the merge
+  changed and the branches that claimed it — the arbitration is silent by design,
+  so this is how a caller sees it happened. Window deltas the commit cannot apply
+  to a live row (a fork `validFrom` divergence, or a `validTo` cleared back to
+  open — both reachable only by soft-delete + resurrect inside a fork) are now
+  reported in `dropped` with reason `"window-not-applicable"` instead of being
+  ignored.
+
+  **Behavior change.** Merges where a branch ended an inherited row now write that
+  end, so new version bumps, history rows, and recorded-time entries appear where
+  a no-op used to be. There is no opt-out flag: a permanent knob for "does the
+  merge lose data" is worse than this note. Nothing that previously succeeded now
+  fails.
+
+  Also hardens `coalesceUnchangedUpserts`: the requested and stored valid-time
+  bounds are compared as instants rather than as raw text, so the decision cannot
+  come to depend on a dialect's timestamp rendering. A bound that is not a
+  representable instant still counts as a change, so it reaches the write path
+  that rejects it rather than being coalesced away.
+
+- [#426](https://github.com/nicia-ai/typegraph/pull/426) [`eb4b9c1`](https://github.com/nicia-ai/typegraph/commit/eb4b9c1076eb67d54cf3a7692ebe8f9a3b203453) Thanks [@pdlug](https://github.com/pdlug)! - Report a non-canonical validity bound whether or not `coalesceUnchangedUpserts`
+  is on.
+
+  A parseable-but-non-canonical bound equal to the stored instant —
+  `"2100-06-01T00:00:00Z"` against a stored `"2100-06-01T00:00:00.000Z"` — compared
+  as "unchanged" with coalescing on, so the write was skipped and the
+  `ValidationError` the same call raises with coalescing off was swallowed. An
+  unrelated performance flag decided whether malformed input was reported.
+
+  A non-canonical REQUESTED bound now counts as a window change, so it reaches the
+  write path and raises identically either way. Re-stating a window in canonical
+  form still coalesces, including against a driver that renders the stored value as
+  an equivalent zoned string: only the stored side needs canonicalizing, because
+  the requested side is held to canonical form by the write validation this no
+  longer hides.
+
+- [#394](https://github.com/nicia-ai/typegraph/pull/394) [`6dd43c4`](https://github.com/nicia-ai/typegraph/commit/6dd43c40bbb988fc8d112f177f03caab86c18359) Thanks [@pdlug](https://github.com/pdlug)! - graph-merge: scope the edge repoint/dedupe fold to collisions repointing caused
+
+  A TypeGraph store is a multigraph: nothing enforces uniqueness on
+  `(from, kind, to)`, `create()` makes a parallel edge, and
+  `getOrCreateByEndpoints()` is the opt-in set-semantics accessor. The merge's edge
+  fold nevertheless grouped **every** staged edge by `(from, kind, to)` and collapsed
+  each group onto its lowest-sorting edge id, so a branch that created a parallel
+  edge lost one of the two rows — and _which_ one it lost depended on how the
+  branch-created id happened to sort against the existing one.
+
+  The fold is now restricted to what it was designed for. It groups staged edges by
+  the endpoint pair they named **before** repointing, and collapses one row per pair —
+  so a collision the canonicalization itself induced (`x → a` and `x → b` both becoming
+  `x → c*`) still folds to a single edge, keeping the existing min-id-survivor,
+  property-reconciliation, and end-of-validity behavior. Edges that already shared
+  their endpoints are no longer folded together: each distinct edge id commits as its
+  own parallel row, and a valid-time end lands on the row whose author claimed it
+  rather than migrating to an unrelated survivor.
+
+  A group that mixes the two folds only **across** the pairs. A repointed `x → b`
+  joining two parallel `x → a` rows merges into one of them, and the other row still
+  commits with the edit its author made — repointing said nothing about the rows that
+  were already there. Previously the whole group collapsed, which dropped that edit
+  silently: a folded-away row is never rewritten.
+
+  What makes two staged edges "the same row" is their **edge id**, not equal
+  properties. One inherited edge staged by several branches still folds into a single
+  write with its property disagreements reconciled; a branch-created edge is a new
+  parallel row even when its properties coincide with an existing one's.
+
+  Merges that previously collapsed parallel edges will now commit both, and the
+  spurious `PropertyConflict` those collapses reported between two rows that were
+  never the same row is gone.
+
+- [#406](https://github.com/nicia-ai/typegraph/pull/406) [`248f56a`](https://github.com/nicia-ai/typegraph/commit/248f56ab2c8bc849fe9385157f02344c7ceb612d) Thanks [@pdlug](https://github.com/pdlug)! - Refuse valid-time windows of negative width. A write whose `validTo` precedes
+  the row's effective `validFrom` describes a row that stopped being true before
+  it started — observable at no `asOf` coordinate, and unrepairable by any later
+  write — and it used to be accepted silently on every path except a node update.
+  It now raises a `ValidationError` whose issue carries the new exported code
+  `INVERTED_VALIDITY_WINDOW`.
+
+  This is a behavior change: writes that previously succeeded now fail. Two shapes
+  refuse where they did not before.
+
+  - A stated `validFrom` / `validTo` PAIR must be ordered, on node and edge
+    `create`, `upsertById`, `bulkUpsertById`, `getOrCreateByEndpoints` and its bulk
+    form, and on an imported document. `getOrCreateByEndpoints` judges the pair
+    before its existence probe, so whether a call is valid no longer depends on
+    whether the edge happens to exist yet.
+  - An UPDATE's lone `validTo` must not precede the lower bound the row carries.
+    Nodes already enforced this; edges did not, which is how a graph merge could
+    hand a committed edge an end predating its start and still report success. This
+    covers a resurrecting write too: an edge RETAINS its `valid_from` across
+    resurrection, so reviving one into a window that closed before it began now
+    means restating the start — pass `validFrom` alongside `validTo`. Landing a
+    revived edge in the ENDED state is otherwise unchanged.
+
+  `getOrCreateByEndpoints` and its bulk form now honor `validFrom` on the
+  `"resurrected"` branch, where they previously accepted it and silently dropped
+  it — which is what left the refusal above with no way to satisfy it. As the
+  backend has always documented for a resurrecting write, naming `validFrom`
+  asserts the COMPLETE window, so an accompanying `validTo` is applied and an
+  omitted one REOPENS the revived row rather than leaving the tombstoned
+  incarnation's end in place. A `"found"` or `"updated"` live edge is unaffected:
+  its stored lower bound is history and still stays put.
+
+  Interchange import records the refusal as a per-row error prefixed with
+  `INVERTED_VALIDITY_WINDOW`, so one bad row does not abort the import; its
+  `onConflict: "update"` legs are held to the existing row's `valid_from` exactly
+  as a direct `update` is. Trusted import refuses the whole stream with reason
+  `invalid_stream`.
+
+  Two shapes stay legal, deliberately. A ZERO-width window
+  (`validTo === validFrom`) is what a same-instant retraction produces at
+  millisecond precision, so the store's own output still round-trips. An INSERT
+  carrying a lone historical `validTo` still means "born already ended": the write
+  instant stamped as `valid_from` is a storage convention rather than a caller
+  assertion, and such a row is read back through `includeEnded`.
+
+- [#380](https://github.com/nicia-ai/typegraph/pull/380) [`2c5dd29`](https://github.com/nicia-ai/typegraph/commit/2c5dd29d9c23024119589d5360b265a0c3ab49da) Thanks [@pdlug](https://github.com/pdlug)! - Store the cause of an identity assertion's ending instead of deriving it.
+
+  The identity assertion relation and its recorded mirror gain nullable
+  `ended_by_kind` / `ended_by_id` columns. A node soft-delete cascade stamps the
+  deleted node's `(kind, id)` onto every assertion it ends, in the same statement
+  that closes the row; `NULL` means the row was retracted explicitly. Graph
+  merge's `RetractionCause` now reads that column instead of comparing an
+  assertion's `valid_to` against a deleted endpoint's `deleted_at`.
+
+  This removes the derivation's same-millisecond residue: a retraction issued in
+  the same millisecond as the delete that followed it is now classified as
+  `explicit` and survives a merge whose deletion is overruled, where the
+  timestamp comparison could only read the tie as a cascade and drop the
+  branch's intent. The hard-delete residue remains by design — a hard delete
+  removes the assertion rows outright, so no evidence survives to read.
+
+  Archival interchange carries the cause as an optional `endedBy` on each
+  assertion, so an export/import round-trip preserves why an assertion ended.
+  Import rejects an `endedBy` on an open assertion
+  (`IDENTITY_IMPORT_ENDED_BY_WITHOUT_END`) or one naming a node that is not an
+  endpoint of the assertion (`IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT`); a CHECK
+  constraint on the relation backs both rules at the database.
+
+  Operational Identity has not shipped in a release, so the relation changes
+  shape with no migration path.
+
+- [#268](https://github.com/nicia-ai/typegraph/pull/268) [`9721ba2`](https://github.com/nicia-ai/typegraph/commit/9721ba2854f6e5504018ee8c3b7a0eaaf87314bb) Thanks [@pdlug](https://github.com/pdlug)! - Add the opt-in TypeGraph Identity Profile with typed store, transaction, and
+  temporal-view APIs; configurable same-ID folding or assertion-only identity;
+  kind-branded and hydrated member reads; idempotent assertion receipts; ended
+  assertion retraction results; assertion history; interchange and graph
+  merge propagation; identity-expanded traversal; cross-backend closure storage;
+  and fail-fast capability errors for non-transactional D1 and neon-http drivers.
+
+  Harden ontology construction and reload validation: propagate disjointness
+  through interleaved subclass and equivalence closure, validate inverse endpoint
+  compatibility and partner uniqueness, reject unresolved extension edge names in
+  `inverseOf` and `implies` while retaining absolute external IRIs, recompute
+  serialized closures, and deprecate the type-level `sameAs` and `differentFrom`
+  factories in favor of Operational Identity.
+
+  **Behavior changes.** Ontology and registry validation is now stricter and runs
+  both at graph construction and when a persisted schema is loaded, so a few
+  patterns earlier versions silently accepted now throw a `ConfigurationError`:
+  duplicate ontology relations, hierarchical self-loops, disjointness
+  contradictions (a kind disjoint with itself, with a subclass ancestor, a common
+  subclass of two disjoint parents, or a kind declared both `equivalentTo` and
+  `disjointWith`), multiple distinct `inverseOf` partners for one edge, inverse
+  endpoint incompatibility, and unresolved extension edge names in `inverseOf`
+  or `implies`. To
+  recover, fix the graph definition; for a persisted extension document, correct
+  the stored document before upgrading (or rewrite it through the previous minor,
+  which still accepts it). Interchange documents remain readable across versions —
+  `1.0` documents are still accepted on import, and exports write `2.0`.
+  Trusted import rejects identity-enabled target stores (`identity_unsupported`)
+  and identity-bearing input (`invalid_stream`) rather than silently dropping
+  assertions or leaving the derived closure empty; use `importGraphStream` for an
+  export that carries identity truth.
+  Bundled SQLite and PostgreSQL backends provision the three identity relations,
+  including effective custom `SqlSchema` names, before first-enable preflight. An
+  already-enabled graph with missing identity storage instead fails with
+  `IDENTITY_STORAGE_MISSING`; restore missing ledgers from backup, or recreate a
+  missing derived closure and rebuild it before serving traffic.
+  `create()`/`upsertById()` of a soft-deleted same-`(kind, id)` row now resurrects that
+  row on every graph (properties replaced, validity window reset so `validFrom`
+  becomes the resurrection instant) rather than leaking a storage constraint
+  error. These are additive-strictness and semantics-pinning changes on top of
+  the new opt-in profile, hence the minor bump.
+
+  **Type-level breaking notes for backend and tooling authors.**
+
+  1. `ResolvedSqlTableNames` gained three required fields
+     (`identityAssertions`, `recordedIdentityAssertions`, `identityClosure`).
+     Out-of-tree `GraphBackend` implementations must supply them; the
+     `SqlTableNames` input type keeps these optional, so only the resolved
+     type is total.
+  2. `SqlSchema` (the abstract class) gained three abstract members
+     (`identityAssertionsTable`, `identityClosureTable`,
+     `recordedIdentityAssertionsTable`). External subclasses must add them;
+     the `createSqlSchema` factory path is unaffected.
+  3. `FORMAT_VERSION`'s literal type changed from `"1.0"` to `"2.0"`.
+     Comparisons like `FORMAT_VERSION === "1.0"` are now type errors; both
+     versions remain accepted on import.
+
+  **Behavioral note.** `revisionNow()` now returns
+  `Promise<RecordedInstant | undefined>` (a branded string, assignable to
+  `string`; use `asRecordedInstant` to round-trip).
+
+  **Review-hardening pass (same release).**
+
+  - `store.identity` and the read-only view `identity` surfaces now use the same
+    conditional presence as `tx.identity`: the property does not exist on
+    identity-disabled graph types, so misuse is a compile error. The
+    `IdentityFacadeFor` / `IdentityReadFacadeFor` helper aliases and the
+    duplicate `IdentityNodeRef` type are gone (use `IdentityFacade`,
+    `IdentityReadFacade`, and `GraphNodeReference`); the loose input type
+    formerly named `GraphNodeRef` is now `IdentityNodeRefInput`.
+  - `StoreView` and `RecordedStoreView` are now type aliases over an
+    implementation class plus `ViewIdentityAccess`, exported alongside a
+    construction-compatible `const`. `new StoreView(...)` and
+    `instanceof StoreView` keep working; subclassing them does not.
+  - `MergeReport.merged` gained an `identity: { asserted, retracted }` section
+    (`MergedCounts`), and `DroppedItem` is now a discriminated union
+    (`kind: "node" | "edge" | "identity"`) so dropped identity assertions are
+    enumerable in the report.
+  - Identity merge conflicts — including transitive `same`/`different`
+    contradictions, retract/reassert races, and assertions over merge-deleted
+    nodes — are detected at plan time and surface as `IdentityMergeConflictError`
+    (`GRAPH_MERGE_IDENTITY_CONFLICT`) through `merge()`'s returned `Result`.
+    Convergent edits (the re-asserting branch itself also retracted the pair)
+    merge cleanly.
+  - `ImportError.entityType` widened to `"node" | "edge" | "identity"`; identity
+    import failures are recorded in `result.errors` instead of throwing.
+    Archival identity imports now bound validity windows (`validTo` must not be
+    in the future for ended rows, `validFrom` must not be for open rows) with
+    `IDENTITY_IMPORT_FUTURE_VALID_TO` / `IDENTITY_IMPORT_FUTURE_VALID_FROM`.
+  - Changing `identity.sameIdAcrossKinds` is now classified a breaking schema
+    change requiring explicit migration; explicit `migrateSchema()` rebuilds the
+    identity closure atomically with the schema commit, and an unapplied
+    identity-only breaking change surfaces `IDENTITY_PROFILE_MIGRATION_PENDING`
+    rather than a generic `MigrationError`.
+
+  **Performance.** Current-coordinate identity reads (`membersOf`, `areSame`,
+  `areDifferent`, `representativeOf`, `nodesOf`) were O(total graph size) on
+  SQLite — the class-members lookup defeated the closure's class index and the
+  planner scanned every live node per read. The rewritten statement is
+  O(class size): ~40x faster on a populated graph (0.013 ms vs 0.56 ms per
+  read at ~6,000 nodes), with a smaller improvement on PostgreSQL.
+
+  **Follow-up hardening (same release).** `ValidationIssue` gained an optional
+  `assertionId` field carrying the offending identity assertion structurally;
+  identity import failures (self-assertions included) attribute their
+  `result.errors` entries by that id, never by message parsing. The identity
+  enablement preflight is derived inside `initializeSchema()` itself, so every
+  public first-commit path — bare `ensureSchema`/`initializeSchema` included —
+  builds and validates the closure atomically with version 1. Identity reads on
+  `includeTombstones` views hydrate soft-deleted rows the coordinate makes
+  visible instead of silently dropping them.
+
+  **Import error attribution.** The import coordinator tags rethrown errors
+  with the id of the assertion it was applying, so `ImportResult.errors`
+  attribution for contradictions and missing endpoints identifies the failing
+  assertion rather than the first assertion sharing its endpoints.
+
+  **The identity preflight is not substitutable.** `initializeSchema()` and
+  `SchemaManagerOptions` no longer accept a schema-commit preflight callback —
+  a no-op callback could suppress the mandatory closure build at version 1.
+  Both (and `MigrateSchemaOptions`) instead accept the effective `SqlSchema`
+  (`schema`), and every identity-enabled schema commit derives the closure
+  preflight internally from it.
+
+  **One schema source in the batteries-included constructors.** The nested
+  `schemaManagement` option no longer accepts `schema` (typed out and stripped
+  at runtime): the effective `SqlSchema` has exactly one source, `store.schema`,
+  which also drives physical table provisioning — a second schema could name
+  tables that were never created. The manager brand-validates the `schema`
+  option with `requireSqlSchema()` before any DDL or version commit, so a
+  schema-shaped plain object is rejected (`INVALID_SQL_SCHEMA`) instead of
+  committing a closure into tables the Store never reads.
+
+  **Historical bridges must exist; plan-time simulation knows the profile.**
+  Archival identity imports now require every ended assertion's endpoints to
+  exist structurally (soft-deleted rows qualify; the store's own exports
+  already satisfy this), so a hand-built document can no longer conduct
+  historical identity through a node that never existed. The graph-merge
+  plan-time contradiction check now simulates the target's identity semantics
+  — implicit same-id folds under `sameIdAcrossKinds: "fold"` and ontology
+  `disjointWith` between class member kinds — so those contradictions surface
+  as `GRAPH_MERGE_IDENTITY_CONFLICT` at plan time instead of a generic commit
+  failure. Counterfeit schema objects are rejected before any identity DDL
+  runs, on fresh and already-enabled graphs alike.
+
+  **Assertion-free nodes join the plan-time simulation.** The merge planner's
+  contradiction check now seeds its universe with every post-merge canonical
+  node and the live target peers sharing their ids (one kind-free indexed
+  probe, only under `sameIdAcrossKinds: "fold"`), so a node no assertion
+  names — newly created, retyped, or an existing same-id peer — can no longer
+  fold into a disjoint-kind class undetected and fail at commit as a generic
+  merge error.
+
+  **Universe seeding, precisely.** The plan-time simulation seeds retyped
+  canonical nodes under the kind the commit writes (not their pre-retype
+  kind), the live same-id peer probe reads the merge TARGET when it differs
+  from the diff source (`mergeAgainstBase`, `mergeIncremental`), and the
+  incremental commit revalidates the probed peer set inside its transaction —
+  a same-id peer landing in the plan→commit window is refused as the same
+  typed replan error the other window guards raise.
+
+  **The window guard ranges over the committed plan.** The incremental
+  fold-peer revalidation compares only ids the final plan folds on —
+  commit-ready canonical nodes and remapped assertion endpoints — so a window
+  row at an id canonicalization dropped is tolerated as an ordinary target
+  advance instead of raising a spurious replan error.
+
+  **The window guard is class-transitive.** The incremental fold-peer guard
+  also snapshots each final seed's structural identity class at plan time and
+  revalidates the fingerprints inside the commit transaction — a window row
+  or assertion that joins a seed's class through another member (leaving the
+  seed's direct same-id peers untouched) is refused as the typed replan
+  error, and a rerun surfaces the contradiction as a plan-time
+  `GRAPH_MERGE_IDENTITY_CONFLICT`.
+
+  **A validated baseline, exactly.** The incremental identity guard now
+  re-probes and snapshots the final seeds' classes AFTER planning and re-runs
+  the identity simulation against that exact snapshot — its members join the
+  simulation universe unlinked, with connectivity rebuilt from the
+  deletion-filtered fresh ledger and fold unions — so drift landing between
+  planning and the snapshot fails as a typed plan-time conflict instead of
+  becoming the guard's baseline. Fingerprints are structurally encoded (injective for ids
+  containing any character) and carry a liveness bit, so a planned assertion
+  endpoint deleted in the commit window is refused as the typed replan error
+  rather than failing generically.
+
+  **Negative truth in the baseline.** The post-plan identity recheck consumes
+  the target's FRESH assertion ledger (not the pre-planning staging capture),
+  and the transaction guard carries a deterministic fingerprint of the
+  `different` assertions touching the guarded universe — a `different`
+  committed in either window is refused typed instead of surfacing as a
+  generic commit failure.
+
+  **The identity guard covers both profiles.** The incremental identity
+  baseline, class/liveness fingerprints, and negative-ledger guard run for
+  every identity-enabled merge — under `sameIdAcrossKinds: "ignore"` too,
+  where explicit assertions still change plan legality. Only the same-id
+  fold expansion stays profile-gated; the plan-time simulation additionally
+  models the profile-independent create-time constraint that one id cannot
+  be shared by ontology-disjoint kinds, and the direct-peer window check
+  refuses a disjoint same-id arrival under `"ignore"` while tolerating a
+  benign one.
+
+  **Replacement is legal.** Planned node deletions are excluded from both
+  sides of the incremental identity guard (peers, liveness, class members,
+  and the ledger slice), and `applyMergePlan` soft-deletes nodes BEFORE the
+  node writes — so a plan replacing a node with a disjoint same-id one (the
+  order the create-time constraint permits, and the order the same
+  operations run directly on a store) commits instead of being falsely
+  rejected or failing at apply.
+
+  **Deleting a bridge splits the class.** The incremental recheck derives
+  connectivity from the deletion-filtered fresh ledger and the checker's
+  fold unions — never by pre-linking the old closure's filtered member
+  lists — so a plan that deletes an identity bridge and asserts its former
+  ends `different` commits instead of being falsely rejected. Snapshot class
+  members still join the simulation universe (unlinked) so fold links at
+  unprobed ids keep participating.
+
+  **The transaction re-derives legality.** The incremental commit guard's
+  final step re-runs the full identity simulation on transaction reads —
+  fresh deletion-filtered ledger, snapshot members, fold unions — so drift
+  that leaves every fingerprint unchanged (a redundant `same(a, b)` that
+  becomes the surviving link once the plan removes the pair's bridge) is
+  refused as the typed replan error instead of failing generically at apply.
+
+  **One assertion id, one truth — validated where it can be typed.** The
+  planner refuses one id staged for two different complete truths and any
+  staged id already identifying different truth among the target's stored
+  rows (ended included, exactly the set the import coordinator compares);
+  the commit transaction revalidates every planned id against transaction
+  reads (both commit modes), so a window row reusing a planned id — even with
+  endpoints entirely outside the guarded universe — refuses as the typed
+  replan error instead of a generic id-conflict at apply.
+
+  **Retractions carry their complete truth.** A merge plan's identity
+  retractions are full expected rows, never bare ids: the planner validates
+  each one against the row its id identifies on the target and SKIPS —
+  reported as `identity:retraction-target-mismatch` in `dropped` — a
+  retraction whose id the target reuses for different truth, instead of
+  ending a row the branch never saw. The commit transaction revalidates the
+  surviving retractions (and every planned assertion id) by id in BOTH
+  commit modes; snapshot commits need this explicitly because the legacy
+  base@V token fingerprints only CURRENT assertions, so an ended window row
+  claiming a planned id would otherwise slip through to a generic apply
+  failure. The raw staged assertions are also checked one-id-one-truth
+  BEFORE the semantic survivor dedupe, closing the validity-only collision
+  (same id, same pair, different `validFrom`) that dedupe used to collapse
+  silently while the report listed the id as both applied and dropped.
+
+  **The applier is the completeness backstop, typed.** Any identity refusal
+  that still escapes the commit — an invariant the plan-time simulation
+  does not (yet) mirror — is translated into the typed
+  `IdentityMergeConflictError` with the applier's error as its cause,
+  instead of surfacing as the generic merge wrapper. Identity-typed
+  environment errors (missing profile, non-atomic backend) pass through
+  unchanged. A property-based law suite additionally quantifies the merge
+  contract over randomized identity histories on both backends: refusals
+  are always typed, a committed ledger is internally consistent, pre-merge
+  truth survives unless a branch retracted it or deleted an endpoint, and
+  the report never lists an id as both dropped-as-duplicate and newly
+  current.
+
+  **Truth replacement is visible to the diff.** The identity diff compares
+  ids present on both sides by COMPLETE truth, not presence: a branch that
+  hard-deletes an assertion's endpoint (physically removing the row),
+  recreates it, and imports the same id for different truth used to diff as
+  empty — the merge silently kept the base truth the branch had replaced.
+  The replacement now stages as a retraction plus a new assertion, and
+  because the applier never reuses an ended row's id, the merge refuses
+  typed instead of silently preserving either side.
+
+  **Identity semantics extracted; translation at the applier boundary.**
+  The plan-time identity derivation, contradiction simulation, and commit
+  guards now live in `graph-merge/merge-identity.ts` with a one-directional
+  dependency from the merge orchestrator (functions take a structural
+  `IdentityPlanSlice`, never the full plan type). The typed-conflict
+  translation wraps exactly the identity-apply call inside the commit, so
+  it also classifies refusals whose identity code lives in nested
+  validation issues (`details.issues[].code`) and — because only identity
+  rows are applied at that boundary — a missing-node error there can only
+  mean a vanished assertion endpoint, which now translates too instead of
+  surfacing as the generic wrapper. Exact-duplicate staging (two branches
+  importing one identical row) no longer reports the id as dropped while
+  applying it.
+
+  **Five laws, three lanes.** The property suite now also holds every
+  successful merge to BRANCH-EFFECT accounting — every truth a branch holds
+  is applied with equal complete truth, enumerated as dropped, retracted,
+  or invalidated by an endpoint deletion; silent loss is a law violation —
+  and runs the whole law set in three lanes: snapshot `merge()` under both
+  identity profiles (with hard-delete/recreate and same-id fold peers in
+  the operation alphabet) and `mergeIncremental()` against a target that
+  ADVANCED after the fork, where branch truth meets independently-moved
+  target truth. Truth-preservation and branch-effect exclusions are
+  truth-aware: a retraction excuses a row's death only when the retracted
+  COMPLETE truth matches, and a hard-delete/recreate excuses exactly the
+  rows it physically killed, not everything ever touching the node. A
+  dropped-as-duplicate id must never be current post-merge. The generator
+  skips only expected semantic refusals (contradiction, missing node); any
+  other error fails the run rather than silently emptying the histories.
+  Independent-target merge semantics are now documented in the identity
+  guide.
+
+  **The survivor pick respects committed truth.** The law suite caught its
+  first live defect within a day: a branch-minted assertion id could win
+  the semantic-pair dedupe against the target's own committed row — the
+  applier (idempotent per pair) then skipped the write, so the report
+  claimed an id as applied that never landed while listing the target's
+  committed row as dropped. Ids already committed on the target with the
+  exact staged truth now always win the survivor pick, pinned by a
+  deterministic incremental test alongside the law.
+
+  **The simulation uses the plan's REAL canonical map.** Both closure
+  re-runs (post-plan and in-transaction) previously reconstructed the
+  member→survivor map from the report-shaped resolutions, which drops pure
+  ontology-retype clusters and mis-keys mixed-kind members — degrading the
+  decisive in-transaction backstop into judging endpoints at pre-merge
+  identities (a false negative) and enabling an unresolvable replan loop (a
+  false refusal). The plan now carries the exact `canonicalOf` map the
+  commit repoints edges with, and the reconstruction is deleted. The
+  simulated base ledger is also deletion-filtered inside the checker
+  itself, so all three call sites share one post-deletion rule.
+
+  **An overruled deletion no longer ends identity truth.** A node
+  soft-delete cascades — it ends every open assertion touching the node —
+  so the deleting branch's diff stages those endings as retractions
+  indistinguishable from intent. When the delete/modify resolution keeps
+  the modification (the default `"flag"` and `"modifyWins"` policies), the
+  node survives, and the cascaded retraction is now dropped with it —
+  reported as `identity:deletion-overruled` — instead of ending the
+  resurrected node's assertions anyway.
+
+  **Identity-only merges advance the revision clock.** The interchange
+  import records capture touches through its own recorded binding, so a
+  merge whose only effect was creating assertions never marked the mutation
+  as written: the durable revision clock stayed unmoved and every base@V
+  token went stale, letting a later commit's target-unchanged guard pass
+  against a target that DID move. The apply now marks the write from the
+  import summary, with a regression test on a revision-tracking store.
+
+  **Guard structure hardened.** The by-id freshness check is invoked
+  directly by BOTH commit paths (never through the peer-probe guard's early
+  return), the environment-code passthrough covers the identity
+  environment/corruption codes that must never be translated into replan
+  advice, and one id staged as both a new assertion and a retraction — an
+  applier-refusing shape currently unreachable through any supported
+  staging path — refuses typed defensively at plan time.
+
+  **External-review hardening (cross-model pass).** An independent review
+  with a different model produced six verified fixes: (1) the
+  deletion-overruled retraction filter is provenance-aware — a retraction
+  is dropped only when EVERY contributing branch is explained by an
+  overruled endpoint deletion, so a branch that retracted independently
+  keeps its effect (the earlier filter silently suppressed it); (2)
+  committed-row precedence in the survivor dedupe is RE-DERIVED after
+  endpoint canonicalization, closing the collision the first fix missed
+  when reconciliation collapses a branch pair onto a committed target
+  pair; (3) merges refuse, typed, any branch whose store ran a schema
+  operation after forking (its committed schema hash no longer matches the
+  fork source's) — schema side effects can no longer be smuggled into a
+  data merge as bare identity changes; (4) a kind-dropping
+  `migrateSchema()` now cascades the assertion ledger exactly as
+  `Store.removeKinds()` does, instead of stranding current assertions on
+  unregistered kinds where a later "no-op" merge would end them; (5) a
+  staged survivor's valid-time window travels with the commit write, so a
+  branch-authored — possibly already ended — window survives resurrection
+  instead of being reset to merge time and silently joining a live fold
+  class; (6) `merged.identity` reports rows the applier actually created
+  and ended (idempotent skips excluded) instead of planned intents, and
+  the replan-vs-conflict error suggestions are path-specific. Temporal
+  windows on MODIFIED inherited nodes remain outside merge state — a
+  documented boundary.
+
+  **Second cross-model pass: the fixes' own compositions.** A follow-up
+  external review of the previous round's fixes produced seven more
+  verified corrections. The schema-drift guard now anchors on the branch's
+  AT-FORK `(version, hash)` row — a round-trip migration that restores the
+  document hash still advances the monotonic version and is refused, and
+  unmanaged fork sources are no longer falsely rejected; revision-anchored
+  `base@V` tokens bake in the active schema version, fencing the same
+  round-trip on the target side (the legacy content fingerprint already
+  covered it). Kind-dropping schema operations cascade the assertion
+  ledger even when identity is DISABLED at drop time (the ledger, not the
+  schema profile, is the signal), and first enablement purges assertions
+  naming unregistered kinds, so historical orphans cannot be adopted into
+  a fresh closure. Node resurrection carries `validFrom` through the
+  internal update path (a branch-authored ended window no longer inverts
+  into merge-time-start), merged edges carry their staged windows exactly
+  as nodes do, and when the live incremental target itself contributed the
+  surviving member, the TARGET's committed window wins over a branch
+  re-window. Canonicalization that would move a COMMITTED assertion's own
+  endpoints refuses with a specific typed conflict (committed rows cannot
+  be rewritten), and window-identical upserts coalesce again instead of
+  rewriting version and history state.
+
+  **Final pre-merge pass.** A last scoped external review of the previous
+  hardening commit returned three refinements, all applied: the
+  disabled-identity cascade's outside-transaction emptiness probe is
+  skipped when THIS commit is the one disabling identity (writers on the
+  still-enabled prior schema could otherwise slip an assertion in between
+  probe and lock — the locked cascade always runs for that shape); node
+  writes validate the EFFECTIVE validity lower bound, so a lone historical
+  `validTo` on a resurrecting upsert refuses typed instead of persisting a
+  born-inverted, permanently invisible window (edge resurrection keeps its
+  sanctioned resurrect-as-ended contract — edges retain their stored lower
+  bound, so the node-side corruption cannot arise there); and bulk edge
+  coalescing compares explicit windows against the stored window, so
+  no-op incremental merges stop rewriting byte-identical target edges.
+  The property law lanes carry explicit five-minute test budgets sized
+  for coverage-instrumented CI shards.
+
+- [#375](https://github.com/nicia-ai/typegraph/pull/375) [`fc6075d`](https://github.com/nicia-ai/typegraph/commit/fc6075ddca02de4c0fa9d15167c124868ab947b5) Thanks [@pdlug](https://github.com/pdlug)! - **The merge commit proves its own identity result.** After a merge commit's
+  identity DML, and inside the same transaction, the applier now re-derives the
+  identity classes the merge TOUCHED and refuses a contradiction there — a class
+  whose member kinds the ontology declares disjoint, or a current `different`
+  assertion whose endpoints share a class. Both commit modes run it, seeded from
+  the planned assertion and retraction endpoints plus (under
+  `sameIdAcrossKinds: "fold"`) the node identities the commit writes, so the cost
+  is proportional to the affected classes rather than the graph.
+
+  This makes a committed identity ledger correct independently of the plan-time
+  simulation, which reasons about state read before any write. The simulation and
+  the commit-window fingerprints remain as the diagnosability layer: they refuse
+  early, before anything is written, naming exactly what drifted.
+
+  Because the scans resolve classes through the materialized closure — the same
+  authority every current identity read uses — a closure that lags its ledger can
+  hide a contradiction as easily as invent one. On any inconsistency the closure
+  is rebuilt from the base relations inside the commit transaction and the scans
+  re-run against it: a clean second pass means the closure was stale and is now
+  repaired atomically with the merge, while a repeated contradiction aborts the
+  whole merge. There is no partial commit either way.
+
+  `IdentityContradictionErrorDetails.operation` gained a `"merge"` member for
+  this refusal, which reaches callers as the existing
+  `IdentityMergeConflictError` (`GRAPH_MERGE_IDENTITY_CONFLICT`) with the
+  contradiction as its cause.
+
+### Patch Changes
+
+- [#418](https://github.com/nicia-ai/typegraph/pull/418) [`5795127`](https://github.com/nicia-ai/typegraph/commit/57951275ee6310bcbfebadb1e3bdc46204769052) Thanks [@pdlug](https://github.com/pdlug)! - store: coalesce a bulk upsert that re-states a row's own validity window
+
+  `bulkUpsertById` now decides whether a requested `validFrom` / `validTo` is a
+  change the same way `upsertById` does, through one shared comparison, so a batch
+  and the same items applied one at a time write the same rows.
+
+  Two defects met in that comparison. The node bulk path refused to coalesce
+  whenever an item named a bound AT ALL, so any caller that re-stated a row
+  together with the window it already holds — a merge commit, or any
+  read-modify-write loop that round-trips `meta.validFrom` — bumped the row's
+  version and wrote a history and revision entry for a row that did not change.
+  The edge bulk path did compare, but compared the bounds as DRIVER TEXT: a
+  Postgres driver that renders `timestamptz` as a zoned string rather than a
+  `Date` yields text that is equivalent to the caller's canonical ISO bound
+  without being identical to it, so the same batch could coalesce on one backend
+  and write on another. Both paths now compare INSTANTS, and an unrepresentable
+  bound still counts as a change so the write path raises the `ValidationError`
+  the caller is owed rather than coalescing it away.
+
+  The bulk paths also track the window each queued write leaves behind, so a
+  repeated id in one batch is compared against the batch's own pending state
+  rather than the once-prefetched row. Previously an edge item that re-stated the
+  window the row held BEFORE the batch was read as unchanged and skipped, dropping
+  a write the sequential path performs. A later copy that re-states the window a
+  queued write established coalesces; one that names a bound the backend was left
+  to stamp (an omitted `validFrom` on a create) writes, since that instant is not
+  knowable batch-locally.
+
+- [#363](https://github.com/nicia-ai/typegraph/pull/363) [`cdc904b`](https://github.com/nicia-ai/typegraph/commit/cdc904b574d4aa5a4ef10f3378b1ca4079373209) Thanks [@pdlug](https://github.com/pdlug)! - Chunk iterative graph-algorithm node-kind initialization within each backend's bind-parameter budget.
+
+- [#396](https://github.com/nicia-ai/typegraph/pull/396) [`994c7da`](https://github.com/nicia-ai/typegraph/commit/994c7da9aff06d995680381e3b43c4a05bece5a3) Thanks [@pdlug](https://github.com/pdlug)! - Reach the candidate edge of a current-coordinate identity-expanded traversal by
+  an equi-join instead of a correlated membership scan
+
+  An identity-expanded hop at the current coordinate read the materialized closure
+  from inside a correlated `EXISTS`, so nothing in the join condition linked the
+  frontier row to the edge row. Both engines were free to enumerate
+  _frontier rows × edges of the matching kind_ and probe the closure per pair, which
+  cost quadratically in graph size.
+
+  Each traversal step now widens its frontier onto the closure's class members with
+  an outer join, so the candidate edge is reached by the same ordinary indexed
+  equality a traversal without identity expansion uses. One compiler path serves
+  both coordinates and both emitters. On SQLite a hop over 100,000 matching edges
+  from a 500-row frontier drops from 51.6 s to 77 ms, and `EXPLAIN QUERY PLAN`
+  seeks `typegraph_edges_from_idx` where it used to scan every matching edge per
+  source row; PostgreSQL drops from 9.2 s to 61 ms.
+
+  A traversal at a **historical** coordinate reaches its candidate edge through the
+  same step, so it gains the same join order: on SQLite an `asOf` hop over 100,000
+  matching edges drops from 31.3 s to 241 ms. That coordinate's own remaining cost
+  is the ledger reconstruction, still tracked in typegraph#310.
+
+  Results are unchanged at every coordinate: physical edges stay deduplicated, and
+  member visibility, the `sameIdAcrossKinds` profile and the read instant are all
+  resolved exactly where they were. The class members a current-coordinate step
+  joins are reached by seeking the closure from the frontier row, so the cost of
+  the widening tracks the frontier and its classes rather than the identity
+  population — see the follow-up changeset, which replaced the graph-wide relation
+  this change first shipped with that seek.
+
+- [#400](https://github.com/nicia-ai/typegraph/pull/400) [`05af68d`](https://github.com/nicia-ai/typegraph/commit/05af68d122371ddeab03269536f2c7484ccf1a74) Thanks [@pdlug](https://github.com/pdlug)! - graph-merge: record each provenance contribution once, so the persisted count is
+  the rows actually written
+
+  Several planning phases legitimately observe the same
+  `(role, canonical, branch, source)` contribution. An inherited edge is credited
+  once when its modification survives delete/modify and again when the repoint
+  fold reads it as a source, and a fold set's `mergedIds` carries one entry per
+  staged copy — so a row staged by several branches re-offered each of its
+  branches once per copy. The tuple is exactly the sidecar row's identity, so
+  those re-observations were never new information: they inflated
+  `provenancePersisted.count`, and because a single `bulkUpsertById` batch cannot
+  create the same id twice, the over-count was the milder half: with
+  `persistProvenance: true`, a merge in which a single branch modified one
+  inherited edge failed the whole best-effort persist, so `provenancePersisted`
+  came back absent, a `provenance persistence failed …` warning was reported, and
+  NO provenance rows were written at all.
+
+  Contributions are now collapsed at the single recording funnel, so the record
+  list, the in-memory `provenance.byBranch` index and the reported count all
+  speak about distinct contributions. `persistProvenanceRecords` additionally
+  collapses records that hash to one id before the batch, which makes its
+  documented "row count written" true for any caller's record list. Every
+  genuinely distinct contributing branch is still credited.
+
+- [#384](https://github.com/nicia-ai/typegraph/pull/384) [`cc7af7b`](https://github.com/nicia-ai/typegraph/commit/cc7af7b1ef53458296f27b73484cd799667df13c) Thanks [@pdlug](https://github.com/pdlug)! - Report the real active schema version in `StaleVersionError.details.actual` when
+  a PostgreSQL schema-managed write loses to a concurrent schema commit.
+
+  The write fence takes a `FOR SHARE` lock on the active schema row. At `read
+committed`, a locking read that blocks behind an in-flight schema commit
+  rechecks only the row versions its own statement snapshot saw — so once the
+  winner marked the old row inactive, the fence saw no active row at all and
+  reported `actual: 0`, misrepresenting the database as having no active schema.
+  The fence now settles an empty locked read with a non-locking read, which
+  observes the committed winner, and reports `0` only when a graph genuinely has
+  no active version. The write itself was always correctly rejected; only the
+  error metadata was wrong.
+
+- [#427](https://github.com/nicia-ai/typegraph/pull/427) [`facef56`](https://github.com/nicia-ai/typegraph/commit/facef560d14c38607d6414818c65e43dc65a88d2) Thanks [@pdlug](https://github.com/pdlug)! - Bound current-coordinate identity expansion by the frontier instead of the
+  identity population
+
+  An identity-expanded traversal at the current coordinate built its class relation
+  by self-joining the whole identity closure into a materialized CTE, before any
+  frontier predicate applied. The relation's size is the sum of the squares of
+  every class in the graph, so a hop from a single start row paid for identity
+  classes it never touched: nine unrelated classes of 501 members materialize
+  2,259,009 seed/member pairs, and the hop measured 564 ms on SQLite and 568 ms on
+  PostgreSQL where the equivalent traversal without expansion costs microseconds.
+  Doubling an unrelated class quadrupled the cost.
+
+  Each step now seeks the closure from its own frontier rows — the frontier row's
+  class through the closure primary key, that class's members through the class
+  index, each member's node for its visibility — so the peer relation is never
+  built for classes the query does not touch. The same hop measures 0.5 ms on
+  SQLite and 2.4 ms on PostgreSQL, and PostgreSQL's `EXPLAIN (ANALYZE)` reports 18
+  rows visited against 4,522,557. A single-start-row hop over 50,000 folded triples
+  drops from 387 ms to 1 ms on SQLite. Wide-frontier hops are unchanged: 500 source
+  rows over 100,000 matching edges measures 325 ms against 331 ms, because that
+  shape was already paying for a population it used.
+
+  The **historical** coordinate keeps its hoisted, materialized relation. Its rows
+  come from a recursive fixed point over the assertion ledger that no frontier row
+  narrows, so evaluating it once per statement is still the win, and the two
+  coordinates are now deliberately different strategies behind one interface rather
+  than one relation with two sources. Both remain a single compilation path across
+  dialects.
+
+  Results are unchanged at both coordinates: physical edges stay deduplicated,
+  member visibility is still resolved against the read instant, and a frontier row
+  in no class still expands to itself.
+
+- [#391](https://github.com/nicia-ai/typegraph/pull/391) [`8eafebd`](https://github.com/nicia-ai/typegraph/commit/8eafebdae8d28fc48343fcd5d498f47b1684311f) Thanks [@pdlug](https://github.com/pdlug)! - Evaluate the historical identity-class reconstruction once per query instead of
+  once per candidate edge
+
+  An identity-expanded traversal hop under a historical coordinate (`asOf`,
+  `asOfRecorded`, or a non-current `view()`) has no materialized closure to read,
+  so it rebuilds classes from the assertion ledger. That rebuild used to sit inside
+  the correlated edge predicate, where SQLite re-materialized it for every
+  candidate _(source row, edge)_ pair, and under `sameIdAcrossKinds: "fold"` each
+  rebuild also scanned the structural same-id relation across the graph — a
+  quadratic term that quadrupled per doubling of graph size.
+
+  The reconstruction is now a single materialized query-level relation of
+  `(seed_kind, seed_id, kind, id)` rows, seeded by the nodes that have identity
+  peers rather than by the frontier, so it depends on nothing a traversal step
+  carries and is built once for the whole statement. Each step widens its frontier
+  onto that relation with an outer join, which turns the candidate-edge lookup into
+  the same ordinary indexed equality a traversal without identity expansion uses.
+  On the narrow-edge fixture (SQLite, all _n_ nodes acting as source rows) the hop
+  drops from 122/486/1984/8261 ms at _n_ = 250/500/1000/2000 to 7/7/14/28 ms, and
+  grows linearly rather than quadratically.
+
+  Results are unchanged at every coordinate. Current-coordinate traversal still
+  reads the materialized closure through its existing correlated predicate.
+
+- [#425](https://github.com/nicia-ai/typegraph/pull/425) [`92354bf`](https://github.com/nicia-ai/typegraph/commit/92354bfb559c255a03b4b5e91741b87b98de5777) Thanks [@pdlug](https://github.com/pdlug)! - Ask props bags whether they carry a key with `Object.hasOwn` rather than `in`.
+
+  A props bag is data: its keys come from a JSON column, so a schema may declare a
+  field named after an `Object.prototype` member — `toString`, `constructor`,
+  `valueOf` — and such a field is ordinary data that survives Zod validation and
+  the JSON round-trip untouched. `in` cannot answer "does this row carry this
+  property" for such a bag, because `"toString" in {}` is `true`: a row that does
+  not carry the key reads as though it does, and the read that follows yields the
+  inherited prototype member instead of stored data.
+
+  This is a lost-write fix, not only hardening. In a graph merge, a fork's bag is
+  its full intended state, so a base property absent from it was deleted by that
+  fork. Under `in` that deletion was never detected for a prototype-named field:
+  no deletion tombstone was written and the base value survived the merge, silently
+  discarding the fork's write. The same misclassification credited a branch that
+  does not carry such a property with the inherited prototype member as if it were
+  a stored value, letting an invented claim compete in conflict resolution and be
+  reported to the caller as that branch's value. A schema diff also reported a
+  removed prototype-named property as an incompatible schema change rather than a
+  removal, because the absent field resolved to a function that was then compared
+  as though it were the field's new schema.
+
+  The edge fold and the node cluster union were affected in the same way, and their
+  worst outcome was a committed function. For a property the SURVIVING row does not
+  carry, both ask that row's bag for the value to keep, so under `in` they took the
+  inherited `Object.prototype` member and wrote that function into the merged row
+  instead of the value a member actually carried. The cluster union additionally
+  routed such a property through the separate base-property-conflict policy on the
+  strength of a base member that does not carry it, so the wrong policy decided the
+  committed value. The edge fold's claim filter separately counted a member that says
+  NOTHING about such a field as having AUTHORED it; the shared value collector
+  discarded that phantom claim, so the two agreed only by one absorbing the other's
+  mistake.
+
+  Two guards were quietly weakened rather than corrupted. Graph-extension validation
+  accepted a unique constraint on an undeclared field named after a prototype
+  member — it answered "declared" against the prototype — and went on to index a
+  field that does not exist. The evolve guard that refuses re-adding a kind whose
+  data cleanup is still pending never counted such a kind as added, so it skipped
+  the refusal.
+
+  The convention now has one owner, `hasOwnKey`, applied across graph-merge node and
+  edge property resolution, schema-diff property classification, schema-removal
+  reconciliation, interchange unknown-property stripping, graph-extension document
+  validation, query and index schema-field validation, the evolve pending-removal
+  guard, edge `matchOn` composite-key and match-comparison reads, and
+  embedding/fulltext field extraction. `in` remains correct, and still in use,
+  when both the key and membership question are internal: a discriminated union's
+  tag, a capability probe, a brand check, and the deliberate `Object.prototype`
+  lookup in selective projection. A user-supplied field name is always checked as
+  an own key, even when the schema shape itself is statically known, so names such
+  as `__proto__` and `constructor` cannot masquerade as declared fields through
+  `Object.prototype`.
+
+  A plain `bag[field]` walks the prototype chain exactly as `field in bag` does, so
+  the same misreading reached two more read paths that never used `in` at all. An
+  edge's `matchOn` composite key and its per-field match comparison
+  (`getOrCreateByEndpoints`, edge upsert dedup) read a caller's stored and input
+  props by a schema-declared field name; a field named after a prototype member
+  that neither bag carries as an own key now reads as `undefined` on both sides
+  instead of the same inherited function, so a match or non-match decision is never
+  made on a phantom shared value. `syncEmbeddings` and `computeFulltextContent`
+  read a declared embedding or searchable field the same way, so an undeclared
+  row no longer surfaces a prototype function as if it were the field's stored
+  value there either.
+
+  `then` and `toJSON` complete the same class from the other end. They are the two
+  names JavaScript itself probes — the thenable check and the `JSON.stringify` hook
+  — so every proxy standing in for a row resolved them to `undefined` up front to
+  stay safe to await and to serialize. They are also legal schema field names, and
+  answering them by NAME before consulting the data made the read side lie: a
+  declared field called `toJSON` came back `undefined` through smart selection while
+  the full mapper returned the stored string, so the same query answered differently
+  depending on whether the optimizer engaged — exactly the equivalence selective
+  projection exists to preserve. The predicate builders (query, traversal,
+  collection, and index WHERE) made such a field unaddressable outright, and field
+  tracking dropped a declared `then`, so the projection could not have carried it.
+
+  **A declared `then` or `toJSON` field is now tracked, projected, readable through
+  smart selection, and usable in a predicate.** The rule is the one the surrounding
+  fixes already follow: ask the data question first — `hasOwnKey` for a
+  materialized row, `hasDeclaredField` for a proxy whose key set is the schema —
+  and fall back to the probe exemption only once the answer is "not data", which is
+  what keeps `await` and `JSON.stringify` working on a partially projected row.
+  Returning an own `then` is safe as well as correct: props decode from a JSON
+  column, so the value can never be callable, and the thenable check ignores a
+  non-callable `then` exactly as it does on the plain objects the full path returns.
+  `isInteropProbeKey` owns which names those are, and an ESLint rule bans the bare
+  name comparison that used to stand in for the decision.
+
+  `__proto__`, the case originally reported, is the NARROW variant. Every VALIDATED
+  write path blocks it: Zod drops an own `__proto__` key, and `bag["__proto__"] = value`
+  assigns a prototype rather than creating a key, so an assignment-built bag cannot
+  carry one either. It is still reachable through `trustedImportGraph`, which by
+  contract does not validate properties and writes a caller's bag verbatim — the
+  stored JSON parses back with `__proto__` as an own key on both dialects. Recorded
+  here so the two are not confused: a prototype-named field needs nothing unusual at
+  all, while `__proto__` needs the trusted path.
+
+- [#381](https://github.com/nicia-ai/typegraph/pull/381) [`e6fb356`](https://github.com/nicia-ai/typegraph/commit/e6fb35669ed0bfeab1cfce64aafc72afaf5698a2) Thanks [@pdlug](https://github.com/pdlug)! - identity: answer current different-ness with one probe on the separation relation
+
+  `identity.areDifferent()` and the `assertSame` contradiction precheck resolved
+  both identity classes and then loaded every current `different` assertion
+  touching one of them, scanning in JS for one that spanned the pair. That scan
+  grew with class size and, past the backend's bind budget, took more than one
+  statement. Both now probe the derived separation relation on its primary key
+  `(graph_id, class_key_low, class_key_high)` instead: `areDifferent` reads the
+  assertion ledger not at all, and the precheck reads it only to name the
+  conflicting assertion in the typed error it is already about to throw.
+
+  Results and typed errors are unchanged. Reads at a valid-time `asOf` or a
+  recorded coordinate still reconstruct from the ledger, since the separation
+  relation projects current assertions onto current classes. A probe never
+  answers "not separated" when it could not read: a missing relation refuses with
+  `IDENTITY_STORAGE_MISSING`, and any other driver failure propagates unchanged so
+  transient conflicts stay classifiable.
+
+- [#404](https://github.com/nicia-ai/typegraph/pull/404) [`479ca78`](https://github.com/nicia-ai/typegraph/commit/479ca783781d9449a7b20422446c68fd702f516b) Thanks [@pdlug](https://github.com/pdlug)! - Fix `bulkUpsertById` throwing on a repeated id whose row does not exist yet.
+
+  `bulkUpsertById` applies items in order, so a repeated id in one batch is
+  last-write-wins — but that only held for an id that already existed. The create
+  branch queued its create without registering the id in the batch-local pending
+  map, so a second copy of a **new** id queued a second create and the batch failed
+  with `Node already exists` / `Edge already exists` (a unique-constraint violation
+  on some paths). Callers feeding a batch straight from a stream or a changeset,
+  where a key can legitimately appear twice, hit this on first delivery of a key.
+
+  A queued create is now registered like a queued update: a later copy of the id
+  takes the update path over the queued create, which runs after the batch's
+  creates, so the final row is exactly what the equivalent sequence of `upsertById`
+  calls produces — the later copy's props merged over the created row, one version
+  bump per real write, and the created row's validity lower bound. With
+  `coalesceUnchangedUpserts` enabled, a value-identical second copy of a new id now
+  coalesces against the queued create instead of writing a second time. Nodes and
+  edges are both fixed; for edges, as for an id that already existed, a later
+  copy's `from` / `to` are ignored because an update never repoints an edge.
+
+  Two smaller consequences of routing every queued write through the same state: a
+  repeated id whose dirty check rejected an earlier item's props no longer reports
+  the wrong error, and no later copy can coalesce against a stale prefetched row
+  after an earlier item queued a write.
+
+- [#362](https://github.com/nicia-ai/typegraph/pull/362) [`9982960`](https://github.com/nicia-ai/typegraph/commit/9982960e66343c6980b8d6e87e0cb159a981e72a) Thanks [@pdlug](https://github.com/pdlug)! - Translate PostgreSQL read-only and missing-`TEMP` failures during graph
+  analytics into `UnsupportedBackendCapabilityError`, preserving the driver error
+  as the cause. Both refusal points are covered: a standby that rejects the
+  read-write working-table transaction, and a role that cannot create the
+  temporary table inside it.
+
+- [#420](https://github.com/nicia-ai/typegraph/pull/420) [`d82fdaf`](https://github.com/nicia-ai/typegraph/commit/d82fdaf369109fe791be00ffe330351fb8aa4d00) Thanks [@pdlug](https://github.com/pdlug)! - Harden two failures at the operations/backend boundary: a create the engine
+  refuses now reports the condition it actually hit, and the last UPDATE path that
+  could store an inverted valid-time window no longer can.
+
+  **A create refused by the engine reports "already exists", not a raw driver
+  error.** A create learns an id is taken either from its own existence probe or
+  from the engine refusing the INSERT, and the second used to escape as a
+  `DrizzleQueryError` whose `.message` is the raw INSERT text. One condition
+  therefore surfaced as a typed user error down one path and an opaque system error
+  down the other, and callers could not branch on it at all. The engine's report is
+  now classified structurally and both routes raise the same `ValidationError`, on
+  the single and batch create paths for nodes and edges alike.
+
+  Two things reach the engine's path. A NODE create probes first, but the probe and
+  the INSERT are two statements and PostgreSQL's default READ COMMITTED does not
+  serialize the two write transactions, so a concurrent create of the same new id
+  can commit in between — the issue's reproduction. An EDGE create has no existence
+  probe at all, so the engine's refusal is its only report of a taken id, on every
+  backend and with no race involved.
+
+  Classification is structural, never message text: SQLSTATE 23505 plus the
+  PostgreSQL protocol's own constraint and relation fields, and SQLite's extended
+  result code, which distinguishes a primary-key duplicate (1555) from any other
+  unique-index duplicate (2067) in the code itself.
+
+  Every such refusal, from either route, now carries the new exported issue code
+  `ENTITY_ALREADY_EXISTS`, so a caller can recognize it without matching on the
+  message. `details.entityType` and `details.kind` say what was refused;
+  `details.id` names the taken id, and is absent only when the refused statement
+  inserted more than one row, because the engine reports that the statement
+  collided without saying which row did. No race is needed to reach that: a bulk
+  create of edges, whose ids the caller supplied and which nothing probes, is
+  refused this way on every backend.
+
+  The classification is scoped to the primary key on purpose. A `unique: true`
+  index declaration materializes a UNIQUE INDEX on the same relation, and violating
+  that is a declared-uniqueness failure about the row's VALUES rather than a
+  duplicate identity — PostgreSQL reports it under the index's own name and SQLite
+  under a different extended code, so it never matches and is unaffected. Neither is
+  a declared `unique` constraint conflict, which still raises `UniquenessError`.
+
+  SQLite never reached the node race: `BEGIN IMMEDIATE` gives the writer slot to
+  one transaction at a time, so a second create cannot sit between its probe and its
+  INSERT while the first commits. Its probe is authoritative there, and the refusal
+  was already the typed error — it now carries the code too. A duplicate EDGE id on
+  SQLite did surface as a raw `SqliteError`, and now raises the same error as it
+  does on PostgreSQL.
+
+  **A node resurrection stores the bound its window guard measured against.** A
+  resurrection rewrites `valid_from` rather than retaining it, so the guard that
+  refuses inverted windows has no stored bound to check and used the write instant
+  instead — sampled in the operations layer, while the backend went on to stamp its
+  own, strictly later, sample. A `validTo` at the guard's instant passed as
+  zero-width and committed as NEGATIVE width a millisecond later, the exact shape
+  the previous release exists to refuse. The operations layer now passes the
+  instant it validated against explicitly, so the bound that is checked is the
+  bound that is stored. Stating both endpoints is unaffected; the only change to a
+  successful write is that a resurrection's `valid_from` is the operations layer's
+  instant rather than the backend's — sampled a moment earlier inside the same
+  locked write, before the uniqueness entries it re-checks and re-inserts.
+
+  Edge resurrection was never exposed: an edge RETAINS its stored `valid_from`
+  unless the write names a new one, so its guard measures against a value already
+  on disk and predicts nothing.
+
+- [#403](https://github.com/nicia-ai/typegraph/pull/403) [`c0279fc`](https://github.com/nicia-ai/typegraph/commit/c0279fc9cafac91b7a6ec31c343bd8fbdd12d743) Thanks [@pdlug](https://github.com/pdlug)! - graph-merge: credit the branch that authored a merged row's end-of-validity
+
+  Ending a row's validity is authored state, but a branch whose only change to a
+  row was its window could contribute the instant the merge committed and still be
+  absent from the merge's provenance. An identity is staged once, so a branch that
+  merely moved an inherited edge's window had its staged copy skipped whenever
+  another branch's property edit already staged that edge — and the provenance for
+  edges is derived from the staged copies. Nodes were worse: a window change had no
+  provenance path at all, so a window-only node ending was credited to nobody even
+  when no other branch touched the row.
+
+  The credit now comes from the window resolution itself, which is the only phase
+  that knows whose claim was committed. It credits exactly the branches whose claim
+  IS the resolved end — a claim that lost the least-claim rule contributed nothing
+  to the committed row, and remains visible in `MergeReport.validityEnds` under
+  `claimedBy`. A branch that both edited a row's properties and moved its window
+  stays one contribution.
+
+  The staged copy that carries a window-only ending is no longer credited for
+  carrying it: that copy exists only to give the ending a row to write, its
+  properties are the base's, and the branch holding it is whichever sorted first —
+  possibly one whose claim the merge discarded. Which branch carries the row is
+  left exactly as it was, because that branch also labels the base's properties in
+  the repoint fold's property union, where a relabelled contribution can change
+  which value a fold commits. Merge outcomes are unchanged; only the provenance is.
+
 ## 0.45.0
 
 ### Minor Changes
