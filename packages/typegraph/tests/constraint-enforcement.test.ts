@@ -10,7 +10,12 @@ import { z } from "zod";
 import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import { checkWherePredicate, computeUniqueKey } from "../src/constraints";
-import { CardinalityError, UniquenessError } from "../src/errors";
+import { type UniqueConstraint } from "../src/core/types";
+import {
+  CardinalityError,
+  ConfigurationError,
+  UniquenessError,
+} from "../src/errors";
 import { buildKindRegistry } from "../src/registry";
 import { createStore } from "../src/store";
 import {
@@ -1088,11 +1093,15 @@ describe("Partial uniqueness over an absent optional field", () => {
     // spread throws a TypeError from inside user code. And a predicate built
     // from such a read would carry a symbol as its `field`, which reads as
     // absent for every node: a partial constraint silently applying to nothing.
-    expect(symbolProbes).toHaveLength(1);
-    const probed = requireDefined(symbolProbes.at(-1));
-    expect(probed).toHaveLength(PROBED_SYMBOLS.length);
-    for (const value of probed) {
-      expect(value).toBeUndefined();
+    // The callback runs once per evaluation AND once at definition time, where
+    // `defineGraph` captures the clause to check its field is declared. Every
+    // recorded probe — from either caller — must answer the same way.
+    expect(symbolProbes.length).toBeGreaterThanOrEqual(1);
+    for (const probed of symbolProbes) {
+      expect(probed).toHaveLength(PROBED_SYMBOLS.length);
+      for (const value of probed) {
+        expect(value).toBeUndefined();
+      }
     }
   });
 
@@ -1108,5 +1117,104 @@ describe("Partial uniqueness over an absent optional field", () => {
     const carried = { label: "first", toString: "alpha" };
     expect(checkWherePredicate(whenNull, carried)).toBe(false);
     expect(checkWherePredicate(whenPresent, carried)).toBe(true);
+  });
+});
+
+// ============================================================
+// Undeclared `where` Fields Are Refused at Definition Time
+// ============================================================
+
+/**
+ * The uniqueness predicate builder is a TOTAL Proxy: it answers for every
+ * name, because the builder type declares every schema field as required so a
+ * partial constraint can ask whether an OPTIONAL one is present. That totality
+ * is correct and must stay — but it means a TYPO'D field name cannot be caught
+ * at the builder. For a typed caller the type system catches it
+ * (`UniqueConstraintPredicateBuilder` declares exactly the schema's fields and
+ * has no index signature); an untyped JavaScript caller had no guard at all and
+ * got a predicate that quietly never applied — a partial constraint enforcing
+ * nothing, reported as success.
+ *
+ * `defineGraph` is where that is refused: the one gate every constraint passes
+ * before a write can evaluate it, so the refusal covers every write path rather
+ * than the subset of `checkWherePredicate` call sites that happen to hold a
+ * schema. It mirrors `validateGraphExtension`'s `UNKNOWN_UNIQUE_WHERE_FIELD`,
+ * which already holds this invariant for kinds declared as JSON documents.
+ */
+
+type UntypedFieldBuilder = Readonly<{
+  isNull: () => unknown;
+  isNotNull: () => unknown;
+}>;
+
+/**
+ * Builds the graph the way an untyped caller would: the constraint is cast to
+ * the declared type, which is exactly what an untyped call site does implicitly.
+ */
+function defineAccountGraph(
+  id: string,
+  where: (fields: Record<string, UntypedFieldBuilder>) => unknown,
+): unknown {
+  const constraint: UniqueConstraint = {
+    name: "unique_external_id",
+    fields: ["externalId"],
+    scope: "kind",
+    collation: "binary",
+    where: where as NonNullable<UniqueConstraint["where"]>,
+  };
+
+  // The registration is cast to its constraint-free shape: that is precisely
+  // what an untyped call site has — a `unique` array TypeScript never checked.
+  const registration = { type: Account, unique: [constraint] } as unknown as {
+    type: typeof Account;
+  };
+
+  return defineGraph({
+    id,
+    nodes: { Account: registration },
+    edges: {},
+    ontology: [],
+  });
+}
+
+describe("uniqueness `where` clauses naming an undeclared field", () => {
+  it("refuses the graph definition, naming the field and the declared set", () => {
+    expect(() =>
+      defineAccountGraph("undeclared_where_field", (fields) =>
+        requireDefined(fields["externaId"]).isNotNull(),
+      ),
+    ).toThrow(/externaId/);
+
+    expect(() =>
+      defineAccountGraph("undeclared_where_field_2", (fields) =>
+        requireDefined(fields["externaId"]).isNotNull(),
+      ),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("refuses a `where` callback that returns something other than a predicate", () => {
+    expect(() =>
+      defineAccountGraph("non_predicate_where", () => ({ nope: true })),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("accepts a clause naming a DECLARED optional field, which still evaluates as absent", () => {
+    const graph = defineAccountGraph("declared_optional_where", (fields) =>
+      requireDefined(fields["externalId"]).isNotNull(),
+    ) as typeof partialUniqueGraph;
+
+    const [constraint] = graph.nodes.Account.unique;
+
+    // The 0.46 behavior this refusal must not disturb: a DECLARED but absent
+    // optional field evaluates as absent rather than throwing or being refused.
+    expect(checkWherePredicate(requireDefined(constraint), { name: "a" })).toBe(
+      false,
+    );
+    expect(
+      checkWherePredicate(requireDefined(constraint), {
+        name: "a",
+        externalId: "ext-1",
+      }),
+    ).toBe(true);
   });
 });

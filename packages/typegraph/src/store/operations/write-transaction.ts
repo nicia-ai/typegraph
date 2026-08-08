@@ -15,6 +15,33 @@
  * Both {@link NodeOperationContext} and {@link EdgeOperationContext} route their
  * mutations through this one helper, replacing the byte-identical per-file
  * copies that previously drifted independently.
+ *
+ * ## Lock order
+ *
+ * Every managed Store write acquires, in this order and no other:
+ *
+ * 1. the schema-version fence ({@link lockSchemaVersionForStoreWrite}), which
+ *    pins the schema the write compiles against;
+ * 2. the per-graph write lock — `typegraph:recorded-graph-write`, taken here
+ *    BEFORE any row read or write, so nothing a later step decides can be
+ *    invalidated by a concurrent graph write;
+ * 3. the per-graph identity lock (`typegraph:identity`), taken by the identity
+ *    service inside `fn`;
+ * 4. row work;
+ * 5. `typegraph:recorded-clock`, taken LAST, at capture flush.
+ *
+ * The comment on `graphAdvisoryLockSql` in
+ * {@link file://../recorded-capture/clock.ts} states the rule this order
+ * exists to satisfy: a lock namespace belongs to ONE acquire-order position,
+ * and sharing a key across two positions creates a circular wait.
+ *
+ * Constrained writes (see `fencesConstraintProbe` below) therefore reuse the
+ * EXISTING `typegraph:recorded-graph-write` key rather than introducing a
+ * sibling namespace. A sibling would be strictly wrong here: it would sit at
+ * the same acquire-order position but form a disjoint exclusion set, so a
+ * capture-enabled writer holding the recorded key and a constrained writer
+ * holding the sibling would not exclude each other — which is precisely the
+ * mutual exclusion the constrained write needs.
  */
 import {
   type GraphBackend,
@@ -52,6 +79,29 @@ interface WriteTransactionSession {
 }
 
 const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
+
+/**
+ * Graphs whose per-graph write lock a still-running {@link runInWriteTransaction}
+ * frame already holds on a given target.
+ *
+ * `pg_advisory_xact_lock` is reentrant and held to the end of the top-level
+ * transaction, so re-acquiring it is pure round-trip churn. Operations compose
+ * — a bulk `getOrCreateByEndpoints` calls the create batch and the upsert
+ * update against ITS transaction target — and each nested call would otherwise
+ * pay a lock round trip the enclosing frame already paid.
+ *
+ * `store.transaction(...)` is covered by {@link WriteTransactionSession}
+ * instead; this covers the operation-calls-operation nesting inside a single
+ * managed write. Same caveat as the capture layer's memo in
+ * `recorded-capture/clock.ts`: NOT savepoint-aware. A manual `SAVEPOINT` rolled
+ * back across the outer acquisition releases the lock but not this entry;
+ * manual savepoints inside a managed write are outside the contract.
+ */
+const heldGraphWriteLocks = new WeakMap<object, Set<string>>();
+
+function holdsGraphWriteLock(target: object, graphId: string): boolean {
+  return heldGraphWriteLocks.get(target)?.has(graphId) === true;
+}
 
 /**
  * Binds nested typed mutations to one caller-owned transaction commit so a
@@ -122,6 +172,25 @@ export async function lockSchemaVersionForStoreWrite(
 }
 
 /**
+ * How a write states whether it needs the per-graph write fence.
+ *
+ * `fencesConstraintProbe` is an assertion about THIS write's body: "it runs a
+ * check-then-act whose verdict no database key repeats at write time". The
+ * classification lives with the constraints
+ * ({@link file://../constraints.ts edgeWriteNeedsConstraintFence} /
+ * `nodeWriteNeedsConstraintFence`), never inline at a call site, so a new
+ * constraint kind cannot teach half the write paths about itself.
+ *
+ * Default `false`: an unconstrained write — a plain create of a `many`-edge, a
+ * node whose uniques are all backed by the uniques primary key, a delete —
+ * takes no lock and pays no round trip for one.
+ */
+type WriteTransactionOptions<T> = Readonly<{
+  didWrite?: (result: T) => boolean;
+  fencesConstraintProbe?: boolean;
+}>;
+
+/**
  * Runs a graph-entity mutation cascade inside a single top-level transaction.
  *
  * On a transactional backend the cascade shares one transaction so it commits
@@ -133,9 +202,18 @@ export async function lockSchemaVersionForStoreWrite(
  * offer atomicity. A schema-managed Store fails closed before `fn` because the
  * backend cannot hold the schema-version fence.
  *
- * Under history capture the per-graph write lock is taken inside the
- * transaction before any row work, matching the acquire order the recorded
- * clock lock depends on to avoid a circular wait.
+ * The per-graph write lock is taken inside the transaction before any row work
+ * (see the module's lock order) when EITHER the store captures — history or
+ * revision tracking, whose clocks must serialize — OR the caller declared the
+ * body a constrained write via `fencesConstraintProbe`. The two reasons share
+ * one lock because they need the same exclusion: on a capture-enabled store a
+ * constrained write and a captured write must exclude each other, which two
+ * keys could not arrange.
+ *
+ * On a non-transactional backend this takes no lock at all, exactly as it takes
+ * no transaction: such a backend cannot hold either, and the write proceeds
+ * unfenced rather than failing — matching the atomicity the same backend
+ * already cannot offer.
  */
 export function runInWriteTransaction<T>(
   ctx: WriteTransactionContext,
@@ -144,23 +222,40 @@ export function runInWriteTransaction<T>(
     target: GraphBackend | TransactionBackend,
     lock: GraphWriteLock,
   ) => Promise<T>,
-  options?: Readonly<{ didWrite?: (result: T) => boolean }>,
+  options?: WriteTransactionOptions<T>,
 ): Promise<T> {
   const ownsWriteLock =
     "transaction" in backend && backend.capabilities.transactions;
+  const needsGraphWriteLock =
+    ctx.historyEnabled ||
+    ctx.revisionTrackingEnabled ||
+    options?.fencesConstraintProbe === true;
   return runOptionallyInTransaction(backend, async (target) => {
     await lockSchemaVersionForStoreWrite(ctx, target);
     const session =
-      ctx.historyEnabled || ctx.revisionTrackingEnabled ?
-        writeTransactionSessions.get(target)
-      : undefined;
+      needsGraphWriteLock ? writeTransactionSessions.get(target) : undefined;
+    // Either constructor yields the same compile-time evidence token; which one
+    // ran says why no acquisition was needed. `uncapturedGraphWriteLock` covers
+    // both "this store needs no lock" and "an enclosing frame on this target
+    // already holds it" — in the second case the lock is genuinely held, which
+    // is a stronger claim than the constructor makes, not a weaker one.
+    const acquiresLock =
+      needsGraphWriteLock &&
+      session?.lock === undefined &&
+      !holdsGraphWriteLock(target, ctx.graphId);
     const lock =
-      session?.lock ??
-      (ctx.historyEnabled || ctx.revisionTrackingEnabled ?
+      acquiresLock ?
         await lockRecordedGraphWrite(target, ctx.graphId)
-      : uncapturedGraphWriteLock());
+      : (session?.lock ?? uncapturedGraphWriteLock());
     if (session !== undefined) session.lock = lock;
-    const result = await fn(target, lock);
+    const held = heldGraphWriteLocks.get(target) ?? new Set<string>();
+    if (acquiresLock) {
+      held.add(ctx.graphId);
+      heldGraphWriteLocks.set(target, held);
+    }
+    const result = await (acquiresLock ?
+      fn(target, lock).finally(() => held.delete(ctx.graphId))
+    : fn(target, lock));
     if (session !== undefined) {
       session.wrote ||= options?.didWrite?.(result) ?? true;
       return result;
@@ -216,8 +311,9 @@ export function runHookedWriteOperation<T>(
     target: GraphBackend | TransactionBackend,
     lock: GraphWriteLock,
   ) => Promise<T>,
+  options?: WriteTransactionOptions<T>,
 ): Promise<T> {
   return ctx.withOperationHooks(opContext, () =>
-    runInWriteTransaction(ctx, backend, body),
+    runInWriteTransaction(ctx, backend, body, options),
   );
 }

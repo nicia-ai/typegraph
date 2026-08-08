@@ -34,12 +34,20 @@ import {
   type QueryHookContext,
   searchable,
 } from "../src";
-import { type AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
+import {
+  type AnySqliteDatabase,
+  isBetterSqlite3Client,
+  isBunSqliteClient,
+  isSqlJsClient,
+} from "../src/backend/drizzle/execution/sqlite-execution";
 import {
   createPostgresBackend,
   isSerializedPostgresClient,
 } from "../src/backend/drizzle/postgres";
-import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
+import {
+  createSqliteBackend,
+  isSerializedSqliteClient,
+} from "../src/backend/drizzle/sqlite";
 import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
 import {
   acquireSerializedStreamLease,
@@ -49,7 +57,12 @@ import {
   sharesSerializedTransactionResource,
   snapshotExportContention,
 } from "../src/backend/transaction-resource";
-import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
+import {
+  createBackendOverlay,
+  type GraphBackend,
+  type TransactionBackend,
+  type TransactionOptions,
+} from "../src/backend/types";
 import { requireDefined } from "../src/utils/presence";
 import { dumpObservableState } from "./state-snapshot";
 import { createTestBackend } from "./test-utils";
@@ -573,6 +586,229 @@ describe("serialized SQLite connection detection", () => {
   });
 });
 
+/** A prepared statement of the better-sqlite3 / bun:sqlite shape. */
+function createAllBearingStatement(): object {
+  return {
+    all: (): readonly unknown[] => [],
+    run: (): object => ({ changes: 0 }),
+  };
+}
+
+/**
+ * A `bun:sqlite` `Database`, duck-typed to the members `isBunSqliteClient`
+ * reads — `query` (bun's cached-statement factory), the `run`/`exec` pair,
+ * `serialize`, and the `filename` string — verified against `bun-types` 1.3.x.
+ * Hand-built because bun:sqlite exists only inside the Bun runtime, so the
+ * shape under test is the shape the predicate reads.
+ */
+function createBunSqliteClient(
+  overrides: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    prepare: (): object => createAllBearingStatement(),
+    query: (): object => createAllBearingStatement(),
+    run: (): object => ({ changes: 0 }),
+    exec: (): object => ({ changes: 0 }),
+    serialize: (): Uint8Array => new Uint8Array(),
+    close: (): void => {
+      // A stand-in never opens anything to close.
+    },
+    filename: ":memory:",
+    ...overrides,
+  };
+}
+
+/**
+ * A `sql.js` `Database`, duck-typed to the members `isSqlJsClient` reads —
+ * `export` (dump to bytes) and `getRowsModified`, sql.js's own API, plus the
+ * `prepare`/`exec`/`run` trio. Its `prepare` returns a sql.js `Statement`
+ * (`bind`/`step`/`getAsObject`/`free`, NO `all`), which is why the compiled
+ * execution path must abstain on this client.
+ */
+function createSqlJsClient(
+  overrides: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    prepare: (): object => ({
+      bind: (): boolean => true,
+      step: (): boolean => false,
+      getAsObject: (): object => ({}),
+      free: (): boolean => true,
+    }),
+    exec: (): readonly unknown[] => [],
+    run: (): object => ({}),
+    each: (): object => ({}),
+    export: (): Uint8Array => new Uint8Array(),
+    getRowsModified: (): number => 0,
+    close: (): void => {
+      // A stand-in never opens anything to close.
+    },
+    ...overrides,
+  };
+}
+
+/** The same client shape minus one member — a near miss of a driver's shape. */
+function withoutMember(
+  client: Readonly<Record<string, unknown>>,
+  member: string,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(client).filter(([name]) => name !== member),
+  );
+}
+
+/** What `drizzle(client)` exposes to the backend factory, for any client. */
+function createClientDatabase(client: unknown): AnySqliteDatabase {
+  return {
+    $client: client,
+    get: (): unknown => ({}),
+    all: (): readonly unknown[] => [],
+    run: (): unknown => ({}),
+  } as unknown as AnySqliteDatabase;
+}
+
+/**
+ * bun:sqlite and sql.js are each ONE connection every wrapper's statements run
+ * on, exactly like better-sqlite3 — and until #434 neither was marked, because
+ * the only SQLite duck-type was better-sqlite3's `pragma`. An unmarked
+ * serialized driver keeps only the identity pre-flight in `importGraphStream`,
+ * which a `history: true` store's overlay defeats, so a streaming export/import
+ * pair on one bun:sqlite or sql.js connection reached `BEGIN IMMEDIATE`
+ * instead of the typed refusal.
+ *
+ * Each mark rests on POSITIVE structural evidence taken from the driver's own
+ * typings; a client carrying only part of a shape must abstain rather than
+ * guess, because marking a genuinely concurrent driver refuses work that
+ * succeeds.
+ */
+describe("serialized SQLite client detection", () => {
+  const openDatabases: Database.Database[] = [];
+
+  afterEach(() => {
+    for (const database of openDatabases.splice(0)) database.close();
+  });
+
+  /** A REAL better-sqlite3 handle, to check the shapes against each other. */
+  function openBetterSqlite3Client(): Database.Database {
+    const database = new Database(":memory:");
+    openDatabases.push(database);
+    return database;
+  }
+
+  it("marks a bun:sqlite Database", () => {
+    expect(isSerializedSqliteClient(createBunSqliteClient())).toBe(true);
+  });
+
+  it("marks a sql.js Database", () => {
+    expect(isSerializedSqliteClient(createSqlJsClient())).toBe(true);
+  });
+
+  it("recognizes two backends over one bun:sqlite Database", () => {
+    const client = createBunSqliteClient();
+
+    const first = createSqliteBackend(createClientDatabase(client));
+    const second = createSqliteBackend(createClientDatabase(client));
+
+    expect(first).not.toBe(second);
+    // Preconditions for the gap: transactions are on, so the interchange guard
+    // does not short-circuit, and the two wrappers are distinct objects, so the
+    // identity pre-flight cannot answer either.
+    expect(first.capabilities.transactions).toBe(true);
+    expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+    expect(snapshotExportContention(first, second)).toBe("shared-resource");
+  });
+
+  it("recognizes two backends over one sql.js Database", () => {
+    const client = createSqlJsClient();
+
+    const first = createSqliteBackend(createClientDatabase(client));
+    const second = createSqliteBackend(createClientDatabase(client));
+
+    expect(first.capabilities.transactions).toBe(true);
+    expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+    expect(snapshotExportContention(first, second)).toBe("shared-resource");
+  });
+
+  it("carries the bun:sqlite mark through the wrappers a history store adds", () => {
+    const client = createBunSqliteClient();
+    const source = createSqliteBackend(createClientDatabase(client));
+    const target = createBackendOverlay(
+      createGraphBackendProjection(
+        createSqliteBackend(createClientDatabase(client)),
+      ),
+      {},
+    );
+
+    expect(snapshotExportContention(source, target)).toBe("shared-resource");
+  });
+
+  it("treats separate bun:sqlite and sql.js handles as independent", () => {
+    // Two handles are two connections, whatever they point at — marking them
+    // as one resource would refuse an export/import pair that works.
+    expect(
+      sharesSerializedTransactionResource(
+        createSqliteBackend(createClientDatabase(createBunSqliteClient())),
+        createSqliteBackend(createClientDatabase(createBunSqliteClient())),
+      ),
+    ).toBe(false);
+    expect(
+      sharesSerializedTransactionResource(
+        createSqliteBackend(createClientDatabase(createSqlJsClient())),
+        createSqliteBackend(createClientDatabase(createSqlJsClient())),
+      ),
+    ).toBe(false);
+  });
+
+  it("abstains on prepare-capable clients it cannot attribute to a driver", () => {
+    // A client that merely prepares statements says nothing about whether its
+    // driver serializes: `sqlite-proxy`, a bespoke adapter, or a pooling
+    // wrapper all prepare. Only the named driver shapes are evidence.
+    expect(isSerializedSqliteClient({ prepare: (): object => ({}) })).toBe(
+      false,
+    );
+    expect(isSerializedSqliteClient({})).toBe(false);
+    expect(isSerializedSqliteClient(undefined)).toBe(false);
+  });
+
+  it("abstains on near-miss driver shapes", () => {
+    // bun:sqlite without its `query` factory, or without the `filename` string
+    // (better-sqlite3 names that property `name`), is not identified as
+    // bun:sqlite; sql.js without `export` or without `getRowsModified` is not
+    // identified as sql.js. Each removed member is the one that carries the
+    // attribution, so dropping it must drop the mark.
+    expect(
+      isSerializedSqliteClient(withoutMember(createBunSqliteClient(), "query")),
+    ).toBe(false);
+    expect(
+      isSerializedSqliteClient(
+        withoutMember(createBunSqliteClient(), "filename"),
+      ),
+    ).toBe(false);
+    expect(
+      isSerializedSqliteClient(withoutMember(createSqlJsClient(), "export")),
+    ).toBe(false);
+    expect(
+      isSerializedSqliteClient(
+        withoutMember(createSqlJsClient(), "getRowsModified"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not mistake one identified driver for another", () => {
+    // The three prepare-capable shapes are mutually exclusive on the members
+    // that identify them, so no client is marked by an arm meant for a
+    // different driver.
+    const betterSqlite3 = openBetterSqlite3Client();
+
+    expect(isBunSqliteClient(betterSqlite3)).toBe(false);
+    expect(isSqlJsClient(betterSqlite3)).toBe(false);
+    expect(isBetterSqlite3Client(createBunSqliteClient())).toBe(false);
+    expect(isSqlJsClient(createBunSqliteClient())).toBe(false);
+    expect(isBetterSqlite3Client(createSqlJsClient())).toBe(false);
+    expect(isBunSqliteClient(createSqlJsClient())).toBe(false);
+  });
+});
+
 /**
  * The `ctx.storage` object a Durable Object hands to `drizzle()`: the async and
  * sync transaction runners plus the SQL API, which together are the evidence
@@ -1033,6 +1269,167 @@ describe("hook contract: success is reported only after COMMIT", () => {
       expect(after).toEqual(before);
     });
   }
+});
+
+// ============================================================
+// Edge-identity contract
+// ============================================================
+
+type EdgeWriteCall = Readonly<{
+  method: string;
+  params: Readonly<Record<string, unknown>>;
+}>;
+
+/** Edge write members whose params carry an optional expected `kind`. */
+const KIND_PREDICATED_EDGE_WRITES = new Set([
+  "updateEdge",
+  "deleteEdge",
+  "hardDeleteEdge",
+]);
+
+/** Edge write members that are deliberately kind-blind. */
+const KIND_BLIND_EDGE_WRITES = new Set([
+  "deleteEdgesBatch",
+  "hardDeleteEdgesBatch",
+]);
+
+/**
+ * Records the params the store hands each edge write, on the TRANSACTION
+ * target — which is where a managed write actually runs.
+ *
+ * This is a duck-typed stand-in for a CUSTOM backend: a third-party
+ * implementation only ever sees these params objects, so what the store puts
+ * in them is the whole of the contract it can honor.
+ */
+function isRecordedEdgeWrite(property: string | symbol): property is string {
+  return (
+    typeof property === "string" &&
+    (KIND_PREDICATED_EDGE_WRITES.has(property) ||
+      KIND_BLIND_EDGE_WRITES.has(property))
+  );
+}
+
+function recordEdgeWriteParams(target: GraphBackend): Readonly<{
+  backend: GraphBackend;
+  calls: EdgeWriteCall[];
+}> {
+  const calls: EdgeWriteCall[] = [];
+
+  function record<T extends object>(inner: T, wrapTransaction: boolean): T {
+    return new Proxy(inner, {
+      get(source, property, receiver): unknown {
+        const value: unknown = Reflect.get(source, property, receiver);
+        if (typeof value !== "function") return value;
+
+        if (wrapTransaction && property === "transaction") {
+          const transaction = value as GraphBackend["transaction"];
+          const recording: GraphBackend["transaction"] = <R>(
+            fn: (tx: TransactionBackend) => Promise<R>,
+            options: TransactionOptions | undefined,
+          ): Promise<R> => transaction((tx) => fn(record(tx, false)), options);
+          return recording;
+        }
+
+        if (!isRecordedEdgeWrite(property)) return value;
+        const method = value as (...args: unknown[]) => unknown;
+        return (...args: unknown[]): unknown => {
+          calls.push({
+            method: property,
+            params: (args[0] ?? {}) as Readonly<Record<string, unknown>>,
+          });
+          return Reflect.apply(method, source, args);
+        };
+      },
+    });
+  }
+
+  return { backend: record(target, true), calls };
+}
+
+function paramsFor(
+  calls: readonly EdgeWriteCall[],
+  method: string,
+): Readonly<Record<string, unknown>> {
+  const call = calls.find((entry) => entry.method === method);
+  return requireDefined(call, `no ${method} call recorded`).params;
+}
+
+/**
+ * The contract a CUSTOM backend has to honor, asserted from the store side.
+ *
+ * `UpdateEdgeParams` / `DeleteEdgeParams` / `HardDeleteEdgeParams` carry an
+ * optional `kind`, and a backend that receives it MUST put it in the write
+ * statement's own `WHERE` — `... AND kind = ?`. Edge ids are graph-global while
+ * collections are kind-scoped, so a write keyed on `(graph_id, id)` alone can
+ * land on a row a concurrent `hardDelete` + recreate re-pointed the id at, and
+ * a backend that silently drops the predicate re-opens exactly the window the
+ * store stated it to close. A backend that ignores it looks correct until it is
+ * raced, which is why the built-in backends' behavior is pinned separately in
+ * `tests/edge-write-self-verification.test.ts` — what THIS file pins is the
+ * other half: that the store actually supplies the kind, so a custom backend
+ * has something to honor.
+ *
+ * The cascade is the deliberate exception and is asserted alongside: it removes
+ * every connected edge whatever its kind, so it must state none.
+ */
+async function seedRecordedEdge() {
+  const recorder = recordEdgeWriteParams(createTestBackend());
+  const [store] = await createStoreWithSchema(graph, recorder.backend);
+  await seedPair(store);
+  const edge = await store.edges.knows.create(
+    { kind: "Person", id: "person-a" } as never,
+    { kind: "Person", id: "person-b" } as never,
+    { weight: 1 },
+    { id: "knows-1" },
+  );
+  recorder.calls.length = 0;
+  return { calls: recorder.calls, store, edgeId: edge.id };
+}
+
+describe("edge-identity contract: kind-scoped writes state their expected kind", () => {
+  const seedEdge = seedRecordedEdge;
+
+  it("passes the collection's kind to updateEdge", async () => {
+    const { calls, store, edgeId } = await seedEdge();
+    await store.edges.knows.update(edgeId, { weight: 2 });
+    expect(paramsFor(calls, "updateEdge")["kind"]).toBe("knows");
+  });
+
+  it("passes the collection's kind to deleteEdge", async () => {
+    const { calls, store, edgeId } = await seedEdge();
+    await store.edges.knows.delete(edgeId);
+    expect(paramsFor(calls, "deleteEdge")["kind"]).toBe("knows");
+  });
+
+  it("passes the collection's kind to hardDeleteEdge", async () => {
+    const { calls, store, edgeId } = await seedEdge();
+    await store.edges.knows.hardDelete(edgeId);
+    expect(paramsFor(calls, "hardDeleteEdge")["kind"]).toBe("knows");
+  });
+
+  it("passes the collection's kind on the batch delete path", async () => {
+    const { calls, store, edgeId } = await seedEdge();
+    await store.edges.knows.bulkDelete([edgeId]);
+    expect(paramsFor(calls, "deleteEdge")["kind"]).toBe("knows");
+  });
+
+  it("states NO kind on the node delete cascade", async () => {
+    const { calls, store } = await seedEdge();
+    // `Person` is `onDelete: "cascade"`, so this removes the connected edge by
+    // ENDPOINT across every edge kind. A kind predicate leaking in here would
+    // strand edges of the kinds the cascade did not name.
+    await store.nodes.Person.delete("person-a" as never);
+
+    const cascadeCalls = calls.filter(
+      (call) =>
+        KIND_BLIND_EDGE_WRITES.has(call.method) ||
+        KIND_PREDICATED_EDGE_WRITES.has(call.method),
+    );
+    expect(cascadeCalls.length).toBeGreaterThan(0);
+    for (const call of cascadeCalls) {
+      expect(call.params["kind"]).toBeUndefined();
+    }
+  });
 });
 
 describe("query hook contract: each submitted statement is observable", () => {

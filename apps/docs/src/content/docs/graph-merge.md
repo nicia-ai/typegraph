@@ -149,6 +149,22 @@ write latency for a high-concurrency, single-graph workload. Partition that
 workload across graphs or leave revision tracking off when the content-fingerprint
 fallback is acceptable.
 
+Turning revision tracking off does **not** turn off all serialization.
+*Constrained* writes now take the same per-graph mutual exclusion regardless of
+`revisionTracking` or `history`, because their check-then-write is only sound if
+nothing else writes the graph in between: edge cardinality (`one`, `unique`,
+`oneActive`, and the `getOrCreateByEndpoints` create and resurrect legs),
+node-kind disjointness on create, and a `kindWithSubClasses` uniqueness
+constraint that actually expands to more than one kind — a scope covering a
+single kind probes exactly the row the uniques table's primary key then
+reserves, so that key is already its fence. Everything else — an unconstrained
+create, a delete, a cardinality-`many` edge — pays nothing, so the cost is
+proportional to the constraints you actually declared. On PostgreSQL that
+exclusion is the same transaction-scoped advisory lock; on SQLite it is the
+`BEGIN IMMEDIATE` writer slot the backend already takes. A backend running
+without transactions (D1, `neon-http`, or `transactionMode: "none"`) has neither
+and cannot be fenced.
+
 This unlocks:
 
 - Many concurrent agent, importer, or review branches without base-version
@@ -586,6 +602,12 @@ const result = await mergeIncremental({
 `mergeIncremental()` requires `onBasePropertyConflict: "flag"` — any other value
 is refused with `InvalidMergeOptionsError` — so a stale branch value can never
 overwrite a newer committed value during new-vs-base recall.
+The `forkPoint` must stay **frozen for the duration of the call**: every branch
+diff is computed against it, and the commit transaction re-reads its `base@V`
+before applying anything, so a write landing on the fork point mid-merge is
+refused with `BaseVersionMismatchError` instead of committing diffs against an
+ancestor that no longer exists. Only the `target` may advance while the merge
+runs.
 If both the branch and the live target changed the same inherited row, the target
 value/deletion wins and the conflict is reported. Both `merge()` and
 `mergeIncremental()` commit **transactionally** and require a

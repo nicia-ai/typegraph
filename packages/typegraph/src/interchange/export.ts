@@ -14,6 +14,7 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
+import { ExportStreamCancelledError } from "../errors";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { nowIso } from "../utils/date";
@@ -104,6 +105,36 @@ export async function exportGraph<G extends GraphDef>(
  * header, then every node chunk, then every edge chunk. Consumers that write to
  * a network, file, or fresh working copy can process one chunk at a time rather
  * than materializing a graph-sized {@link GraphData} value.
+ *
+ * ## Stopping a stream you will not finish
+ *
+ * While the stream is open it holds a repeatable-read snapshot transaction, and
+ * on a serialized connection it holds that connection's one EXCLUSIVE stream
+ * lease with it. Every cooperative exit settles both, because each runs the
+ * generator's `finally`: `break` or `throw` out of a `for await`, and an
+ * explicit `iterator.return()`.
+ *
+ * A consumer that pulls `next()` and then simply DROPS the iterator has no
+ * cooperative exit — async-generator `finally` blocks do not run on garbage
+ * collection — so it must pass {@link ExportOptions.signal} and abort it.
+ * Without that, the snapshot transaction stays open for the life of the
+ * process and every later interchange stream on that connection is refused on
+ * behalf of a stream nobody is reading.
+ *
+ * ### Why there is no garbage-collection safety net (#429)
+ *
+ * A `FinalizationRegistry` on the iterable cannot close this: it is not merely
+ * unreliable here, it can never fire. The producer is interruptible in exactly
+ * one place — it is parked in {@link RendezvousChannel.push} waiting for the
+ * consumer, not in the database — so any cleanup state capable of settling an
+ * abandoned stream has to reach that channel. A registry holds its held value
+ * STRONGLY, and holding anything that reaches the channel's scope keeps the
+ * abandoned generator permanently reachable: measured on Node 24, publishing
+ * just `channel.abort` is enough to stop the stream being collected, while
+ * publishing an unrelated object is not. The net's own bookkeeping would
+ * therefore be what kept the entry from ever firing — a safety promise that
+ * reads as protection and is not there. The signal is the mechanism, and it is
+ * a contract rather than a hint.
  */
 export function exportGraphStream<G extends GraphDef>(
   store: Store<G>,
@@ -122,6 +153,13 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
   options?: ExportStreamOptionsInput,
 ): AsyncIterable<GraphInterchangeChunk> {
   const resolved = ExportStreamOptionsSchema.parse(options ?? {});
+  const signal = resolved.signal;
+  // Refused BEFORE anything is claimed or opened: an already-aborted signal
+  // must not open a snapshot transaction and take a connection's lease only to
+  // give both back on the next tick.
+  if (signal?.aborted === true) {
+    throw exportStreamCancelled(store.graphId, signal.reason);
+  }
   const channel = createRendezvousChannel<GraphInterchangeChunk>();
   const produce = async (
     target: GraphBackend | TransactionBackend,
@@ -179,6 +217,16 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       channel.fail(error);
     },
   );
+  // The signal is subscribed only once the snapshot is actually open, and in
+  // the SAME synchronous turn that opened it — nothing above yields, so no
+  // abort can be observed in between, and the two paths that throw before this
+  // point (the lease refusal, and a driver that rejects `transaction()`
+  // synchronously) have already given back everything they took. Subscribing
+  // earlier would attach a stream that never started to the caller's signal.
+  const abortStream = (): void => {
+    channel.abort(exportStreamCancelled(store.graphId, signal?.reason));
+  };
+  signal?.addEventListener("abort", abortStream, { once: true });
 
   try {
     for (;;) {
@@ -188,9 +236,30 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       delivery.acknowledge();
     }
   } finally {
+    // Unsubscribe before unwinding: this stream is settling through a
+    // cooperative path, and a signal the caller reuses for its next export must
+    // not still reach this one — nor keep this generator's scope alive for as
+    // long as the caller holds the signal.
+    signal?.removeEventListener("abort", abortStream);
     channel.cancel();
     await producer;
   }
+}
+
+/**
+ * The single owner of the error an aborted export stream reports, so the
+ * pre-flight refusal and the mid-stream abort state the same condition in the
+ * same vocabulary — one code, one message, the signal's own reason as `cause`.
+ */
+function exportStreamCancelled(
+  graphId: string,
+  cause?: unknown,
+): ExportStreamCancelledError {
+  return new ExportStreamCancelledError(
+    "The graph export stream was aborted through its AbortSignal: its repeatable-read snapshot has been rolled back and the connection it held released.",
+    { graphId },
+    cause === undefined ? {} : { cause },
+  );
 }
 
 /**
@@ -317,7 +386,16 @@ type RendezvousChannel<T> = Readonly<{
   take: () => Promise<RendezvousDelivery<T> | undefined>;
   finish: () => void;
   fail: (error: unknown) => void;
+  /** The consumer left through a cooperative path; the stream simply ends. */
   cancel: () => void;
+  /**
+   * Nobody is coming back for this stream. Unwinds the producer — which rolls
+   * the snapshot transaction back and releases the connection's lease on its
+   * way out — AND makes `error` the channel's terminal state, so a consumer
+   * that is waiting on `next()`, or that asks again later, is told why rather
+   * than handed a silent end of stream it would read as a complete export.
+   */
+  abort: (error: Error) => void;
 }>;
 
 function createRendezvousChannel<T>(): RendezvousChannel<T> {
@@ -330,15 +408,27 @@ function createRendezvousChannel<T>(): RendezvousChannel<T> {
     reject: (error: unknown) => void;
   }>;
 
-  const cancelledError = new Error("Export stream consumer cancelled.");
+  const consumerCancelledError = new Error("Export stream consumer cancelled.");
   let pendingPush: PendingPush | undefined;
   let pendingTake: PendingTake | undefined;
   let inFlightReject: ((error: unknown) => void) | undefined;
   let terminal: Readonly<{ error?: Error }> | undefined;
-  let cancelled = false;
+  /**
+   * Why the producer is being torn down, once something decided to tear it
+   * down — a cooperative consumer exit ({@link cancel}) or a cancellation
+   * ({@link abort}).
+   *
+   * The single owner of "this stream is unwinding": it is what every pending
+   * and future push rejects with, so the producer always unwinds through one
+   * rejection whichever side started it, and it is how {@link fail} recognizes
+   * the failure this channel caused itself.
+   */
+  let producerUnwindError: Error | undefined;
 
   function push(value: T): Promise<void> {
-    if (cancelled) return Promise.reject(cancelledError);
+    if (producerUnwindError !== undefined) {
+      return Promise.reject(producerUnwindError);
+    }
     if (terminal !== undefined || pendingPush !== undefined) {
       return Promise.reject(
         new Error("Cannot push to a completed or occupied export channel."),
@@ -386,7 +476,7 @@ function createRendezvousChannel<T>(): RendezvousChannel<T> {
   }
 
   function finish(): void {
-    if (cancelled) return;
+    if (producerUnwindError !== undefined) return;
     terminal = {};
     if (pendingTake !== undefined) {
       const take = pendingTake;
@@ -396,7 +486,17 @@ function createRendezvousChannel<T>(): RendezvousChannel<T> {
   }
 
   function fail(error: unknown): void {
-    if (cancelled && error === cancelledError) return;
+    // The producer failed with the very rejection this channel handed it in
+    // order to unwind: that is this channel's own doing, not a new outcome to
+    // report. Compared against a DEFINED unwind error only — a producer that
+    // rejects with `undefined` is a real failure and must still reach the
+    // consumer.
+    if (producerUnwindError !== undefined && error === producerUnwindError) {
+      return;
+    }
+    // An abort already published the terminal state the consumer must see; the
+    // producer's own unwinding failure must not overwrite it.
+    if (terminal !== undefined) return;
     const exportError =
       error instanceof Error ? error : (
         new Error("Graph export failed.", { cause: error })
@@ -410,17 +510,17 @@ function createRendezvousChannel<T>(): RendezvousChannel<T> {
   }
 
   function cancel(): void {
-    if (cancelled) return;
-    cancelled = true;
+    if (producerUnwindError !== undefined) return;
+    producerUnwindError = consumerCancelledError;
     if (pendingPush !== undefined) {
       const push = pendingPush;
       pendingPush = undefined;
-      push.reject(cancelledError);
+      push.reject(consumerCancelledError);
     }
     if (inFlightReject !== undefined) {
       const reject = inFlightReject;
       inFlightReject = undefined;
-      reject(cancelledError);
+      reject(consumerCancelledError);
     }
     if (pendingTake !== undefined) {
       const take = pendingTake;
@@ -429,7 +529,36 @@ function createRendezvousChannel<T>(): RendezvousChannel<T> {
     }
   }
 
-  return { push, take, finish, fail, cancel };
+  function abort(error: Error): void {
+    // Nothing is held any more: the producer already settled (so the
+    // transaction is committed or rolled back and the lease given back), or it
+    // is already unwinding for someone else. Either way this abort has nothing
+    // to take back and must not restate the outcome. Both arms are defensive
+    // rather than reachable today — the rendezvous parks the producer in `push`
+    // for exactly as long as the consumer is parked at a `yield`, so a settled
+    // producer always means the consumer's pull already resolved and the
+    // generator's `finally` already unsubscribed this stream from its signal.
+    if (terminal !== undefined || producerUnwindError !== undefined) return;
+    producerUnwindError = error;
+    terminal = { error };
+    if (pendingPush !== undefined) {
+      const push = pendingPush;
+      pendingPush = undefined;
+      push.reject(error);
+    }
+    if (inFlightReject !== undefined) {
+      const reject = inFlightReject;
+      inFlightReject = undefined;
+      reject(error);
+    }
+    if (pendingTake !== undefined) {
+      const take = pendingTake;
+      pendingTake = undefined;
+      take.reject(error);
+    }
+  }
+
+  return { push, take, finish, fail, cancel, abort };
 }
 
 // ============================================================

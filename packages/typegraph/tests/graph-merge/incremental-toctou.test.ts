@@ -102,6 +102,21 @@ function injectWindowWrite(
     props: { name: string; cohort: string; mrn: string };
   }>[],
 ): () => void {
+  return injectWindowWork(target, async () => {
+    await target.nodes.Patient.bulkCreate(rows);
+  });
+}
+
+/**
+ * The general form of {@link injectWindowWrite}: runs `work` once, on the first
+ * `target.transaction` call, before delegating. The write it performs need not
+ * land on `target` — a fork-point write in the same window is the other side of
+ * the incremental contract (#439).
+ */
+function injectWindowWork(
+  target: CareStore,
+  work: () => Promise<void>,
+): () => void {
   const original = target.transaction.bind(target);
   let injected = false;
   (target as { transaction: unknown }).transaction = async (
@@ -110,7 +125,7 @@ function injectWindowWrite(
   ) => {
     if (!injected) {
       injected = true;
-      await target.nodes.Patient.bulkCreate(rows);
+      await work();
     }
     return (original as (f: unknown, o: unknown) => unknown)(fn, options);
   };
@@ -205,6 +220,64 @@ describe.each(backendMatrix())(
       });
       expect(isOk(rerun)).toBe(true);
       expect(await patientIds(target)).toEqual(["drift-1"]);
+    });
+
+    it("REFUSES the commit when the FORK POINT itself is written in the window", async () => {
+      // #439: the fork point is the ancestor every branch diff was computed
+      // against. The precondition reads its base@V before planning; a write
+      // landing between that read and the commit leaves the plan describing an
+      // ancestor that no longer exists — and the incremental commit cannot
+      // notice via the target, which is ALLOWED to advance. Only re-reading the
+      // fork point inside the commit catches it.
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const provider = await forkWithAddition(forkPoint, {
+        name: "Anna Rivera",
+        cohort: "C1",
+        mrn: "MRN-1",
+      });
+      const target = await emptyStore();
+
+      const restore = injectWindowWork(target, async () => {
+        await forkPoint.nodes.Patient.bulkCreate([
+          {
+            id: "fork-drift",
+            props: { name: "Fork Drift", cohort: "C7", mrn: "MRN-7" },
+          },
+        ]);
+      });
+
+      const result = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: mergeOptions(),
+      });
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+        expect(result.error.code).toBe("GRAPH_MERGE_BASE_VERSION_MISMATCH");
+        expect(result.error.message).toContain("fork point was modified");
+      }
+      // Nothing was applied: the plan derived from the old fork point never ran.
+      expect(await patientIds(target)).toEqual([]);
+
+      // And the drift is not merely a timing artifact — with the fork point
+      // moved for good, the up-front precondition now refuses the same merge,
+      // which is exactly the check the commit window had escaped.
+      restore();
+      const rerun = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: mergeOptions(),
+      });
+      expect(isErr(rerun)).toBe(true);
+      if (isErr(rerun)) {
+        expect(rerun.error).toBeInstanceOf(BaseVersionMismatchError);
+      }
+      expect(await patientIds(target)).toEqual([]);
     });
 
     // The uniques side-table PK would itself reject this duplicate at write

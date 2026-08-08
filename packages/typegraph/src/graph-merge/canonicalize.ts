@@ -1,4 +1,4 @@
-import { hasOwnKey } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Canonical survivor selection + commutative property union (design §6.4 rule 3
@@ -301,7 +301,7 @@ function unionProperties(
     }
   }
 
-  const props: Record<string, JsonValue> = {};
+  const props = createDataKeyedBag<JsonValue>();
   const conflicts: PropertyConflict[] = [];
 
   for (const property of [...propertyNames].sort((left, right) =>

@@ -22,7 +22,7 @@ import { requireDefined } from "../src/utils/presence";
 
 /**
  * The shape node-postgres reports for a duplicate-key failure, carrying the
- * `code` field `isPostgresUniqueViolationError` classifies on. A looser stub
+ * `code` field `isPostgresConcurrentDdlRaceError` classifies on. A looser stub
  * would leave the real detector untested.
  */
 function duplicateKeyError(): Error {
@@ -51,12 +51,42 @@ function statementText(statement: unknown): string {
 }
 
 /**
+ * The shape node-postgres reports when an `ALTER TABLE ... ADD COLUMN IF NOT
+ * EXISTS` loses the catalog race: `duplicate_column`, not `unique_violation`.
+ * The additive columns on the index-materialization table are issued by exactly
+ * this statement at every boot (#445).
+ */
+function duplicateColumnError(): Error {
+  return Object.assign(
+    new Error(
+      'column "claim_token" of relation "typegraph_index_materializations" already exists',
+    ),
+    { code: "42701", severity: "ERROR" },
+  );
+}
+
+/**
+ * The other shape the same race takes: `heap_update` losing a catalog row
+ * raises `elog(ERROR, "tuple concurrently updated")`, which carries only the
+ * catch-all internal SQLSTATE.
+ */
+function concurrentTupleUpdateError(): Error {
+  return Object.assign(new Error("tuple concurrently updated"), {
+    code: "XX000",
+    severity: "ERROR",
+  });
+}
+
+/**
  * A Drizzle-shaped Postgres handle whose `execute` fails the FIRST attempt at
- * each distinct statement with 23505 and succeeds on the retry — exactly what
- * the loser of a concurrent CREATE observes.
+ * each distinct statement with `error()` (23505 by default) and succeeds on the
+ * retry — exactly what the loser of a concurrent CREATE observes.
  */
 function stubPostgresDatabase(
-  options: Readonly<{ failFirstAttempt: boolean }>,
+  options: Readonly<{
+    failFirstAttempt: boolean;
+    error?: () => Error;
+  }>,
 ): Readonly<{ db: AnyPgDatabase; attempts: readonly string[] }> {
   const attempts: string[] = [];
   const failed = new Set<string>();
@@ -80,7 +110,7 @@ function stubPostgresDatabase(
         return Promise.resolve({ rows: [] as readonly unknown[] });
       }
       failed.add(text);
-      return Promise.reject(duplicateKeyError());
+      return Promise.reject((options.error ?? duplicateKeyError)());
     },
   } as unknown as AnyPgDatabase;
   return { db, attempts };
@@ -136,6 +166,42 @@ describe("Postgres concurrent CREATE DDL", () => {
       requireDefined(backend.ensureRuntimeContributions)("graph"),
     ).resolves.toBeUndefined();
   });
+
+  it.each([
+    { name: "a duplicate key (23505)", error: duplicateKeyError },
+    { name: "a duplicate column (42701)", error: duplicateColumnError },
+    {
+      name: "a concurrently updated catalog tuple (XX000)",
+      error: concurrentTupleUpdateError,
+    },
+  ])(
+    "completes ensureIndexMaterializationsTable when a concurrent booter wins with $name",
+    async ({ error }) => {
+      // #445: the CREATE was retried but the two additive ALTERs were bare, so
+      // a second replica booting at the same moment failed the boot on a
+      // statement that is a no-op by construction.
+      const { db, attempts } = stubPostgresDatabase({
+        failFirstAttempt: true,
+        error,
+      });
+      const backend = createPostgresBackend(db, { vector: false });
+
+      await expect(
+        requireDefined(backend.ensureIndexMaterializationsTable)(),
+      ).resolves.toBeUndefined();
+
+      // Both ALTERs were issued, and each statement twice: the loss and the
+      // retry that observes the winner's committed column.
+      const counts = attemptCounts(attempts);
+      const alters = [...counts.keys()].filter((statement) =>
+        statement.includes("ADD COLUMN IF NOT EXISTS"),
+      );
+      expect(alters).toHaveLength(2);
+      expect([...counts.values()]).toEqual(
+        Array.from({ length: counts.size }, () => 2),
+      );
+    },
+  );
 
   it("still surfaces a uniqueness failure the retry cannot clear", async () => {
     const db = {

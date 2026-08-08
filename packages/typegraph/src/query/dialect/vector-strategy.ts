@@ -37,8 +37,13 @@ import {
   type VectorCapabilities,
   type VectorIndexType,
   type VectorMetric,
+  type VectorSearchFrontierTuning,
   type VectorSearchParams,
 } from "../../backend/types";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+} from "../../errors";
 import { requireDefined } from "../../utils/presence";
 import { sql, type SqlFragment } from "../sql-fragment";
 
@@ -361,6 +366,107 @@ export function assertVectorSearchLimit(limit: number): void {
       `vectorSearch limit must be a positive integer, got: ${limit}`,
     );
   }
+}
+
+/**
+ * The frontier declaration of a backend's active vector strategy, or the
+ * "there is no vector engine here" declaration when vector support is
+ * disabled. Total, so a call site never has to invent a default: a backend
+ * with no strategy has nothing to apply an override to and refuses on the
+ * same arm as an engine that lacks the knob.
+ */
+export function vectorSearchFrontierTuning(
+  strategy: VectorStrategy | undefined,
+): VectorSearchFrontierTuning {
+  return (
+    strategy?.capabilities.searchFrontierTuning ?? {
+      tunable: false,
+      reason: "vector support is disabled on this backend",
+    }
+  );
+}
+
+/** What one backend needs to decide whether it can apply an `efSearch`. */
+export type EfSearchApplicability = Readonly<{
+  /** The caller's override; `undefined` (no override) is always accepted. */
+  efSearch: number | undefined;
+  /** Index type of the slot being searched. */
+  indexType: VectorIndexType;
+  /** The active strategy's declaration. See {@link VectorSearchFrontierTuning}. */
+  tuning: VectorSearchFrontierTuning;
+  /** Whether the backend can open the frame a scoped override needs. */
+  transactions: boolean;
+  /**
+   * Dialect name used in the refusal message (`"PostgreSQL"` / `"SQLite"`) —
+   * the only dialect-specific token in the decision, so both backends read
+   * the same predicate rather than re-spelling the arms.
+   */
+  dialect: string;
+  /** Engine identity recorded in the refusal details (`strategy.name`). */
+  engine: string;
+}>;
+
+/**
+ * The single owner of "may this backend apply a per-search `efSearch`?" —
+ * returning the engine parameter to set with it, or `undefined` when no
+ * override was requested.
+ *
+ * An accepted option is applied or refused, never ignored: every arm below is
+ * a state in which the option cannot reach the engine, and each throws naming
+ * that state instead of dropping the value. Both backends call this before
+ * building the search, so the SQLite and PostgreSQL behaviors are two readings
+ * of one predicate — the sqlite-vec silent no-op existed precisely because the
+ * decision lived only on the PostgreSQL side. Returning the parameter (rather
+ * than only asserting) is what keeps it one owner: the caller that applies the
+ * override never re-derives whether it may.
+ *
+ * Refusals:
+ *
+ * - engine has no per-search frontier knob at all (`tunable: false`) —
+ *   `UnsupportedBackendCapabilityError` on `vector.searchFrontierTuning`,
+ *   carrying the strategy's own `reason`.
+ * - slot is not the tunable index type — `ConfigurationError` (the caller can
+ *   fix this by declaring the index, so it is configuration, not capability).
+ * - the override needs a transaction to be scoped to and the backend has none
+ *   — `UnsupportedBackendCapabilityError` on `transactions`.
+ *
+ * Range validation (pgvector's 1..1000) stays with the engine that has the
+ * range; this predicate answers only whether the knob exists here at all.
+ */
+export function resolveEfSearchOverride(
+  applicability: EfSearchApplicability,
+): string | undefined {
+  const { efSearch, indexType, tuning, transactions, dialect, engine } =
+    applicability;
+  if (efSearch === undefined) return undefined;
+  if (!tuning.tunable) {
+    throw new UnsupportedBackendCapabilityError(
+      `${dialect} efSearch override`,
+      "vector.searchFrontierTuning",
+      { efSearch, engine, reason: tuning.reason },
+      `Omit efSearch: ${engine} has no per-search ANN frontier parameter (${tuning.reason}). Tune recall with the search limit, or use an exact search.`,
+    );
+  }
+  if (indexType !== tuning.indexType) {
+    // "an HNSW vector index" — the article suits the one tunable index type
+    // any bundled engine declares.
+    throw new ConfigurationError(
+      `${dialect} efSearch requires an ${tuning.indexType.toUpperCase()} vector index.`,
+      { efSearch, indexType },
+      {
+        suggestion: `Configure the embedding with index: { type: "${tuning.indexType}" }, or omit efSearch.`,
+      },
+    );
+  }
+  if (tuning.requiresTransactionScope && !transactions) {
+    throw new UnsupportedBackendCapabilityError(
+      `${dialect} efSearch override`,
+      "transactions",
+      { efSearch, engine, parameter: tuning.parameter },
+      `Use a transactional ${dialect} driver: ${tuning.parameter} is scoped to the search's own transaction, and a session-wide setting would leak into concurrent searches.`,
+    );
+  }
+  return tuning.parameter;
 }
 
 /**

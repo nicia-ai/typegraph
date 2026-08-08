@@ -489,6 +489,7 @@ type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 type DeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -1002,6 +1003,7 @@ export const ExportOptionsSchema: z.ZodObject<{
         state: "state";
         archival: "archival";
     }>>;
+    signal: z.ZodOptional<z.ZodCustom<AbortSignal, AbortSignal>>;
 }, z.core.$strip>;
 
 // @public (undocumented)
@@ -1021,6 +1023,7 @@ export const ExportStreamOptionsSchema: z.ZodObject<{
         state: "state";
         archival: "archival";
     }>>;
+    signal: z.ZodOptional<z.ZodCustom<AbortSignal, AbortSignal>>;
     batchSize: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 
@@ -1839,6 +1842,7 @@ type GroupBySpec = Readonly<{
 type HardDeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -3615,6 +3619,8 @@ type SchemaIntrospector = Readonly<{
     getSharedFieldTypeInfo: (kindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
     getEdgeFieldTypeInfo: (edgeKindName: string, fieldName: string) => FieldTypeInfo | undefined;
     getSharedEdgeFieldTypeInfo: (edgeKindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
+    hasDeclaredField: (kindNames: readonly string[], fieldName: string) => boolean;
+    hasDeclaredEdgeField: (edgeKindNames: readonly string[], fieldName: string) => boolean;
     hasSearchableField: (kindNames: readonly string[]) => boolean;
 }>;
 
@@ -4715,6 +4721,7 @@ export const UnknownPropertyStrategySchema: z.ZodEnum<{
 type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;
@@ -4836,6 +4843,7 @@ type VectorCapabilities = Readonly<{
     indexTypes: readonly VectorIndexType[];
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
+    searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // @public
@@ -4875,6 +4883,17 @@ type VectorMetricType = "cosine" | "l2" | "inner_product";
 
 // @public (undocumented)
 type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "deleteEmbeddingBatch" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
+
+// @public
+type VectorSearchFrontierTuning = Readonly<{
+    tunable: true;
+    parameter: string;
+    indexType: VectorIndexType;
+    requiresTransactionScope: boolean;
+}> | Readonly<{
+    tunable: false;
+    reason: string;
+}>;
 
 // @public (undocumented)
 type VectorSearchHit<N = Node> = Readonly<{

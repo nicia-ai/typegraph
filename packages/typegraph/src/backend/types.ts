@@ -101,6 +101,51 @@ export type FilteredApproximateSearch = Readonly<{
 }>;
 
 /**
+ * Whether an engine exposes a PER-SEARCH knob for the ANN candidate frontier —
+ * the parameter {@link VectorSearchParams.efSearch} maps onto.
+ *
+ * Declared, never inferred: `efSearch` is an accepted option, so a backend that
+ * cannot apply it must refuse it rather than ignore it (AGENTS.md contract
+ * discipline). This capability is what the shared refusal predicate reads, and
+ * what a caller reads to know whether passing `efSearch` will be honored.
+ *
+ * - **pgvector**: `hnsw.ef_search`, applied per search with `SET LOCAL` inside
+ *   the search's own transaction — hence `requiresTransactionScope`, since a
+ *   session-wide `SET` would leak the override into concurrent searches.
+ * - **sqlite-vec**: `tunable: false`. A vec0 KNN takes `k` and nothing else;
+ *   there is no frontier to widen.
+ * - **libSQL DiskANN**: `tunable: false`. `vector_top_k(idx, q, k)` is a table
+ *   function with no per-query parameters; DiskANN's `search_l` is fixed at
+ *   index-creation time.
+ */
+export type VectorSearchFrontierTuning =
+  | Readonly<{
+      tunable: true;
+      /** Engine-native parameter `efSearch` maps to (`"hnsw.ef_search"`). */
+      parameter: string;
+      /**
+       * The one index type whose search honors the parameter. `efSearch` on a
+       * slot of any other index type is refused, not ignored: an IVFFlat or
+       * brute-force slot would silently discard it.
+       */
+      indexType: VectorIndexType;
+      /**
+       * `true` when applying the parameter needs a transaction to scope it to
+       * the one search. A backend that reports `transactions: false` refuses
+       * `efSearch` rather than leaking a session-wide setting.
+       */
+      requiresTransactionScope: boolean;
+    }>
+  | Readonly<{
+      tunable: false;
+      /**
+       * Why this engine has no per-search frontier knob — surfaced in the
+       * refusal's details so the state is named rather than implied.
+       */
+      reason: string;
+    }>;
+
+/**
  * Vector search capabilities.
  */
 export type VectorCapabilities = Readonly<{
@@ -120,6 +165,14 @@ export type VectorCapabilities = Readonly<{
    * an engine promise it does not keep.
    */
   filteredApproximateSearch: FilteredApproximateSearch;
+  /**
+   * Whether a per-search ANN frontier override (`efSearch`) can be applied.
+   * See {@link VectorSearchFrontierTuning}.
+   *
+   * Required, so a new vector strategy must state whether it honors the
+   * option instead of inheriting silence — the exact defect this closes.
+   */
+  searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // ============================================================
@@ -535,6 +588,30 @@ export type TrustedImportSession = Readonly<{
 export type UpdateEdgeParams = Readonly<{
   graphId: string;
   id: string;
+  /**
+   * The kind this write ASSERTS the target row already carries.
+   *
+   * Edge ids are graph-global while public collections are kind-scoped, so a
+   * kind-scoped write has an expected kind and must not land on a row carrying
+   * a different one. Stating it here puts the predicate in the write
+   * statement's own `WHERE`, which is the only placement a concurrent
+   * `hardDelete` + recreate cannot slip past: a read-then-write pair keyed on
+   * `(graph_id, id)` alone re-resolves that id between the read and the write
+   * under PostgreSQL READ COMMITTED. A write whose stated kind does not match
+   * affects zero rows.
+   *
+   * A backend MUST apply the predicate when it is present — silently ignoring
+   * it re-opens the window the caller stated it to close, and the ignoring
+   * backend looks correct until it is raced.
+   * `tests/edge-write-self-verification.test.ts` asserts the behavior against
+   * the built-in backends.
+   *
+   * Omitted where the operation legitimately spans kinds: the node delete
+   * cascade removes every connected edge whatever its kind, so it states none.
+   * {@link DeleteEdgeParams} and {@link HardDeleteEdgeParams} carry the same
+   * field with the same contract.
+   */
+  kind?: string;
   props: Readonly<Record<string, unknown>>;
   /**
    * Applied when resurrecting a tombstone, where it asserts a COMPLETE window:
@@ -552,6 +629,8 @@ export type UpdateEdgeParams = Readonly<{
 export type DeleteEdgeParams = Readonly<{
   graphId: string;
   id: string;
+  /** See {@link UpdateEdgeParams.kind}. */
+  kind?: string;
 }>;
 
 /**
@@ -569,6 +648,8 @@ export type HardDeleteNodeParams = Readonly<{
 export type HardDeleteEdgeParams = Readonly<{
   graphId: string;
   id: string;
+  /** See {@link UpdateEdgeParams.kind}. */
+  kind?: string;
 }>;
 
 /** Parameters for a batched edge delete (soft or hard). */
@@ -697,10 +778,19 @@ export type VectorSearchParams = Readonly<{
    * trades latency for recall. The floor for the over-fetch to fill its
    * candidate set is `efSearch >= limit`; ~2–4× is the high-recall
    * target. Applied transaction-locally (`SET LOCAL`) on the Postgres
-   * HNSW path only. No-op on backends without an HNSW frontier knob
-   * (sqlite-vec). PostgreSQL backends without transactions (for example,
-   * `drizzle-orm/neon-http`) refuse the option because they cannot safely scope
-   * the override.
+   * HNSW path only.
+   *
+   * APPLIED OR REFUSED, never ignored. Read
+   * `capabilities.vector.searchFrontierTuning` to know which you get:
+   *
+   * - `tunable: false` (sqlite-vec, libSQL DiskANN — no per-search frontier
+   *   knob exists): `UnsupportedBackendCapabilityError`.
+   * - a slot whose index type is not the tunable one (pgvector IVFFlat or
+   *   brute-force): `ConfigurationError`.
+   * - `requiresTransactionScope` on a backend reporting
+   *   `transactions: false` (for example `drizzle-orm/neon-http`):
+   *   `UnsupportedBackendCapabilityError`, because `SET LOCAL` has no frame
+   *   to be local to.
    */
   efSearch?: number;
 }>;

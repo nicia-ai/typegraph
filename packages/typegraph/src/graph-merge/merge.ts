@@ -1,4 +1,4 @@
-import { hasOwnKey } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * `merge()` orchestrator (design §7.2, T11).
@@ -1463,12 +1463,35 @@ function pickClusterCanonical(
  * survive; writing it as `undefined` makes the row write drop it (the props column
  * is JSON-serialized, which omits `undefined`), so the fork's deletion is applied
  * instead of being silently reverted to the base value.
+ *
+ * The bag is null-prototype ({@link createDataKeyedBag}) because its keys are
+ * DATA — property names read off committed rows, and `trustedImportGraph`
+ * writes a caller's bag verbatim, so a stored bag CAN carry an own `__proto__`
+ * (`JSON.parse` mints it as ordinary own data). Writing the deletion marker for
+ * that key into a `{}` literal does not create an entry: it invokes
+ * `Object.prototype`'s `__proto__` setter, which with `undefined` as the value
+ * is a silent no-op. The tombstone this function exists to write would simply
+ * not be written.
+ *
+ * SCOPE OF THE CLAIM, measured rather than assumed: no reachable write carries
+ * an own `__proto__` back into a committed row anyway — Zod drops the key in
+ * strip AND loose mode, so the base value does not survive a merge commit with
+ * or without the tombstone, and `branch()`'s validating clone refuses such a
+ * base outright. So this is the function honoring its own contract
+ * independently of what a distant layer happens to strip, NOT a user-visible
+ * defect being fixed: the end state is currently identical either way, which is
+ * why no end-to-end test guards it (one would pass under the mutation). The
+ * live-ammunition key for the deletion contract is a DECLARED prototype-named
+ * field such as `toString`, which this file's tests cover.
  */
 function commitModificationProps(
   baseProps: Readonly<Record<string, unknown>>,
   forkProps: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
-  const props: Record<string, unknown> = { ...forkProps };
+  const props = createDataKeyedBag<unknown>();
+  for (const key of Object.keys(forkProps)) {
+    props[key] = forkProps[key];
+  }
   for (const key of Object.keys(baseProps)) {
     if (!hasOwnKey(forkProps, key)) {
       props[key] = undefined;
@@ -2128,7 +2151,7 @@ async function resolveMerge<G extends GraphDef>(
   branches: readonly GraphBranch<G>[],
   options: NormalizedMergeOptions<G>,
   useBaseSources: boolean,
-  incremental?: IncrementalConfig,
+  incremental?: IncrementalConfig<G>,
   expectedBaseVersion?: BaseVersion,
 ): Promise<Result<MergeReport<G>, MergeError>> {
   // Reserved BranchIds are used for non-user contributions. Reject real branches
@@ -2445,6 +2468,7 @@ async function resolveMerge<G extends GraphDef>(
           stagedNewByKind,
           options,
           introspectionKinds,
+          forkPoint: incremental.forkPoint,
           ...(identityGuard === undefined ?
             {}
           : { identityPeerProbe: identityGuard }),
@@ -2625,9 +2649,21 @@ export async function mergeAgainstBase<G extends GraphDef>(
 
 // --- mergeIncremental: full fork-point-vs-live-target entry point (§6.6) -------
 
+/**
+ * The fork-point premise {@link mergeIncremental} established BEFORE planning:
+ * this store, at this `base@V`, is the immutable ancestor every branch diff was
+ * computed against. Carried into the commit so it can be re-established at the
+ * point of no return (see {@link assertForkPointUnchanged}).
+ */
+type ForkPointPrecondition<G extends GraphDef> = Readonly<{
+  store: Store<G>;
+  version: BaseVersion;
+}>;
+
 /** Internal config carried into {@link resolveMerge} for incremental mode. */
-type IncrementalConfig = Readonly<{
+type IncrementalConfig<G extends GraphDef> = Readonly<{
   targetBranchId: BranchId;
+  forkPoint: ForkPointPrecondition<G>;
 }>;
 
 /**
@@ -3033,6 +3069,12 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
   introspectionKinds: ReadonlyMap<string, readonly UniqueIntrospection[]>;
   plannedBaseMatchKeys: ReadonlySet<MergeKey>;
   /**
+   * The fork point and the `base@V` every branch declared against it, checked
+   * before planning and re-checked at the commit (see
+   * {@link assertForkPointUnchanged}).
+   */
+  forkPoint: ForkPointPrecondition<G>;
+  /**
    * `(kind, id) -> version` for every committed target node observed while
    * planning (the target-branch diff enumeration). The commit-time guard
    * re-reads the rows the plan writes OR deletes and refuses if any inherited
@@ -3349,6 +3391,55 @@ async function assertInheritedEdgesUnchanged<G extends GraphDef>(
 }
 
 /**
+ * Re-establishes `mergeIncremental()`'s fork-point premise at the point of no
+ * return — the incremental analogue of the snapshot path's
+ * {@link assertTargetUnchanged}.
+ *
+ * `mergeIncremental()` reads the fork point's `base@V` BEFORE planning, refuses
+ * any branch that declares a different one, and then derives the whole plan
+ * from fork-point→branch diffs. A write landing on the fork point in that
+ * window makes every one of those diffs describe an ancestor that no longer
+ * exists — and nothing downstream notices, because the incremental commit
+ * deliberately does NOT re-check the TARGET's `base@V` (an advancing target is
+ * the feature). Re-reading the fork point here turns that into a typed refusal
+ * instead of a committed plan derived from state that is gone.
+ *
+ * The token is recomputed by {@link computeBaseVersion} — the same and only
+ * definition of a store's `base@V` that produced the value being compared, so
+ * there is no second spelling of the comparison to drift. The SCHEMA half needs
+ * no separate re-check: `computeSchemaComponent` hashes the serialized graph
+ * with the version excluded, making it a pure function of the in-memory graph
+ * definition, which is exactly why `assertTargetUnchanged` re-checks only the
+ * content half too. The fork point's active schema VERSION is covered anyway —
+ * it is part of the revision-anchored token.
+ *
+ * The re-read goes through the fork point's OWN backend rather than this
+ * transaction: the fork point is a different store, and what must hold is its
+ * COMMITTED state. Deliberately no advisory lock either — the fork point is
+ * immutable by contract, so this detects a violated contract rather than
+ * excluding a legal writer, and taking the graph write lock on a second
+ * connection would deadlock against this very transaction whenever the fork
+ * point and the target share one database.
+ */
+async function assertForkPointUnchanged<G extends GraphDef>(
+  precondition: ForkPointPrecondition<G>,
+): Promise<void> {
+  const liveVersion = await computeBaseVersion(precondition.store);
+  if (liveVersion === precondition.version) return;
+  throw new BaseVersionMismatchError(
+    "The mergeIncremental() fork point was modified between the fork-point precondition and the commit transaction; every branch diff was computed against the previous fork-point state, so the resolved plan was not applied.",
+    {
+      details: {
+        expectedForkPointBase: precondition.version,
+        liveForkPointBase: liveVersion,
+      },
+      suggestion:
+        "Keep the fork-point store immutable for the duration of the merge (it is the diff reference, not a merge target), then re-run mergeIncremental().",
+    },
+  );
+}
+
+/**
  * The full incremental commit path (§6.6). The planner has already folded the live
  * target in as a preferred synthetic branch, so this path preflights destructive
  * row hazards inside the target transaction and then applies the normal merge plan.
@@ -3378,6 +3469,13 @@ async function commitIncrementalPlan<G extends GraphDef>(
       if (target.revisionTrackingEnabled) {
         await lockRecordedGraphWrite(transactionBackend(tx), target.graphId);
       }
+      // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
+      // against is re-read here, so a write to it in the plan→commit window
+      // refuses the merge instead of committing diffs against a fork point
+      // that has moved. Runs first: it is the premise every later guard's
+      // baseline was derived under, and on a revision-anchored fork point it
+      // is an O(1) read.
+      await assertForkPointUnchanged(guard.forkPoint);
       const nodesApi = tx.nodes as unknown as TxNodes;
       const edgesApi = tx.edges as unknown as TxEdges;
       // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
@@ -3428,6 +3526,14 @@ async function commitIncrementalPlan<G extends GraphDef>(
  * (`branch.base === computeBaseVersion(forkPoint)`); `forkPoint` and `target` share a
  * schema hash (schema drift is fatal; target CONTENT may have advanced); and
  * `onBasePropertyConflict` is `"flag"` (keep-base for committed-row conflicts).
+ *
+ * The fork-point precondition is not merely an entry check: it is re-verified
+ * inside the commit transaction, so `forkPoint` must stay immutable for the
+ * duration of the call. A write to it while the merge is in flight makes every
+ * branch diff describe an ancestor that no longer exists, and is refused with
+ * `BaseVersionMismatchError` rather than committed (see
+ * {@link assertForkPointUnchanged}). The TARGET, by contrast, may advance
+ * throughout — that is what "incremental" means.
  */
 export async function mergeIncremental<G extends GraphDef>(
   args: MergeIncrementalArguments<G>,
@@ -3490,6 +3596,12 @@ export async function mergeIncremental<G extends GraphDef>(
     [targetBranch, ...branches],
     options,
     true,
-    { targetBranchId: COMMITTED_TARGET_BRANCH },
+    {
+      targetBranchId: COMMITTED_TARGET_BRANCH,
+      // The fork-point precondition just validated, carried to the commit so
+      // it is re-established there rather than assumed to have held for the
+      // whole of planning (see `assertForkPointUnchanged`).
+      forkPoint: { store: forkPoint, version: forkVersion },
+    },
   );
 }

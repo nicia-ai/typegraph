@@ -1,3 +1,4 @@
+import { assertWhereFieldDeclared } from "../constraints";
 import { ConfigurationError } from "../errors/index";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import {
@@ -371,6 +372,7 @@ function defineGraphUnchecked<
 
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
+  assertUniqueConstraintsAreDeclared(config.nodes);
   // Vector indexes are auto-derived from `embedding()` brands on node
   // schemas (see `autoDeriveVectorIndexes`). Explicit declarations
   // passed via `defineGraph({ indexes })` win on (kind, fieldPath)
@@ -439,6 +441,48 @@ export function defineInternalGraph<
 const EMPTY_DEPRECATED_KINDS: ReadonlySet<string> = Object.freeze(
   new Set<string>(),
 );
+
+// ============================================================
+// Unique Constraint Validation
+// ============================================================
+
+/**
+ * Refuses any uniqueness constraint whose `where` clause names a field its kind
+ * does not declare.
+ *
+ * `defineGraph` is the one gate every constraint passes before a write can
+ * evaluate it — the store reads constraints off `registration.unique`, and the
+ * only other way a registration is built is `mergeGraphExtension`, whose
+ * documents `validateGraphExtension` already refuses on the same grounds
+ * (`UNKNOWN_UNIQUE_WHERE_FIELD`). Validating here therefore covers every write
+ * path at once, instead of at each `checkWherePredicate` call site.
+ *
+ * Typed callers are already guarded by `UniqueConstraintPredicateBuilder`,
+ * which declares exactly the schema's fields; this is the runtime half, for
+ * untyped callers whose typo would otherwise produce a constraint that quietly
+ * never applies.
+ */
+function assertUniqueConstraintsAreDeclared(
+  nodes: Record<string, NodeRegistration>,
+): void {
+  for (const registration of Object.values(nodes)) {
+    const constraints = registration.unique;
+    if (constraints === undefined || constraints.length === 0) continue;
+
+    const shape = (registration.type.schema as { shape?: unknown }).shape;
+    if (shape === undefined || typeof shape !== "object" || shape === null) {
+      continue;
+    }
+
+    for (const constraint of constraints) {
+      assertWhereFieldDeclared(
+        registration.type.kind,
+        constraint,
+        shape as Readonly<Record<string, unknown>>,
+      );
+    }
+  }
+}
 
 // ============================================================
 // Index Normalization

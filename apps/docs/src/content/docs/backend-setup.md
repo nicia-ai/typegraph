@@ -913,7 +913,7 @@ TypeGraph choosing separate query semantics per backend:
 | Vector index type `ivfflat`                            | ✗                                                 | ✓                                          | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`)                       |
 | Filtered approximate search **guarantees** a full page | ✓ `sqlite-vec` / ✗ `libsql-native`                | ✗ (`pgvector` recovers, but is bounded)    | Only `sqlite-vec` guarantees it; the others can return **fewer than `limit`** rows under heavy filtering — see below      |
 | Per-query fulltext `language` override                 | ✗                                                 | ✓                                          | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query               |
-| HNSW `efSearch` query tuning                           | ✗                                                 | ✓ transactional HNSW drivers               | Silent no-op on SQLite; transaction-less Postgres and IVFFlat refuse the option rather than ignore it                     |
+| HNSW `efSearch` query tuning                           | ✗                                                 | ✓ transactional HNSW drivers               | Refused, never ignored: `UnsupportedBackendCapabilityError` with `details.capability` `vector.searchFrontierTuning` on **any** SQLite backend (vector and hybrid alike — neither `sqlite-vec`'s `vec0` KNN nor `libsql-native`'s DiskANN has a per-search frontier), and on transaction-less Postgres or a non-HNSW slot |
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
 | TypeGraph Identity Profile                             | ✓ transactional drivers                           | ✓ transactional drivers                    | Enabled graphs fail fast on non-atomic drivers; identity-disabled graphs retain their ordinary path                      |
 
@@ -955,8 +955,15 @@ filter to every row; or declare the field's index as `"none"` so it is always br
 
 Vector and fulltext capabilities are populated from the configured strategy, so the matrix above reflects the
 bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`). A custom strategy advertising
-different `metrics`/`indexTypes`/`filteredApproximateSearch` shifts these rows accordingly — always check
-`backend.capabilities` at runtime rather than hard-coding the dialect.
+different `metrics`/`indexTypes`/`filteredApproximateSearch`/`searchFrontierTuning` shifts these rows accordingly —
+always check `backend.capabilities` at runtime rather than hard-coding the dialect.
+
+`searchFrontierTuning` is **required** on a vector strategy's capabilities, so a strategy must state whether it has a
+per-search ANN frontier knob rather than inheriting silence. It is a discriminated union: `{ tunable: true, parameter,
+indexType, requiresTransactionScope }` names the engine parameter `efSearch` maps to (`pgvector`: `hnsw.ef_search`, on
+an `hnsw` slot, needing a transaction to scope it), while `{ tunable: false, reason }` names why the engine has no such
+knob and is what makes `efSearch` a typed refusal there. A hand-written strategy that omits the field no longer
+compiles.
 
 Both bundled backends advertise `windowFunctions: true`. Vector, fulltext, and hybrid relevance-ranking
 queries use `ROW_NUMBER()` internally and throw `ConfigurationError` before SQL generation if a custom backend profile

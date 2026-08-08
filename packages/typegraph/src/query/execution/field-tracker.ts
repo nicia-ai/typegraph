@@ -42,6 +42,20 @@ export type TrackingContextOptions = Readonly<{
 // Constants
 // ============================================================
 
+/**
+ * Names the tracking proxies answer with the inherited `Object.prototype`
+ * member, so a select callback that stringifies or type-tests an alias object
+ * during tracking behaves like it would against a real result object.
+ *
+ * A name on this list is a prototype member only while the schema does NOT
+ * declare a field by that name — `z.object({ toString: z.string() })` is an
+ * ordinary schema, and its field is ordinary data. Membership is therefore
+ * decided by {@link SchemaIntrospector.hasDeclaredField}, the same own-key
+ * question `hasOwnKey` answers everywhere else; a declared name never reaches
+ * this list. Classifying it here instead left the field untracked, so the
+ * selective projection never selected it and the guarded result proxy served
+ * the inherited member in place of the stored value.
+ */
 const OBJECT_PROTOTYPE_PROPERTIES = new Set<string>([
   "__proto__",
   "constructor",
@@ -151,7 +165,10 @@ function createNodeTrackingProxy(
         if (property === "then") return;
         if (property === "toJSON") return;
 
-        if (OBJECT_PROTOTYPE_PROPERTIES.has(property)) {
+        if (
+          OBJECT_PROTOTYPE_PROPERTIES.has(property) &&
+          !options.schemaIntrospector.hasDeclaredField(kindNames, property)
+        ) {
           if (property === "constructor") return Object;
           if (property === "__proto__") return Object.prototype;
           return Reflect.get(Object.prototype, property) as unknown;
@@ -194,7 +211,13 @@ function createEdgeTrackingProxy(
         if (property === "then") return;
         if (property === "toJSON") return;
 
-        if (OBJECT_PROTOTYPE_PROPERTIES.has(property)) {
+        if (
+          OBJECT_PROTOTYPE_PROPERTIES.has(property) &&
+          !options.schemaIntrospector.hasDeclaredEdgeField(
+            edgeKindNames,
+            property,
+          )
+        ) {
           if (property === "constructor") return Object;
           if (property === "__proto__") return Object.prototype;
           return Reflect.get(Object.prototype, property) as unknown;

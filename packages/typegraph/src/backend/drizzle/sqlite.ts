@@ -40,6 +40,8 @@ import {
 import {
   assertVectorSearchLimit,
   buildVectorCapabilities,
+  resolveEfSearchOverride,
+  vectorSearchFrontierTuning,
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
@@ -111,7 +113,9 @@ import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
   getDurableObjectStorageClient,
-  resolveSqliteClient,
+  isBetterSqlite3Client,
+  isBunSqliteClient,
+  isSqlJsClient,
   type SqliteExecutionAdapter,
   type SqliteExecutionProfile,
   type SqliteExecutionProfileHints,
@@ -821,6 +825,21 @@ function createSqliteOperationBackend(
           params: VectorSearchParams,
         ): Promise<readonly VectorSearchResult[]> {
           assertVectorSearchLimit(params.limit);
+          // Apply-or-refuse for the per-search ANN frontier. No SQLite engine
+          // TypeGraph bundles has one (sqlite-vec's vec0 takes only `k`;
+          // libSQL's `vector_top_k` takes only (index, query, k)), so the
+          // shared predicate refuses `efSearch` here with the engine's own
+          // reason instead of accepting it and searching as if it were never
+          // passed. `undefined` — the overwhelmingly common case — returns
+          // without touching anything.
+          resolveEfSearchOverride({
+            efSearch: params.efSearch,
+            indexType: params.indexType,
+            tuning: vectorSearchFrontierTuning(vectorStrategy),
+            transactions: capabilities.transactions,
+            dialect: "SQLite",
+            engine: vectorStrategy.name,
+          });
           // Deliberately NOT marker-gated: search is read-only (no DDL
           // hazard to gate), and its params carry the caller's runtime
           // metric override, which legitimately diverges from the
@@ -870,6 +889,19 @@ function createSqliteOperationBackend(
               // the fulltext depth is validated inside
               // buildFulltextSearch).
               assertVectorSearchLimit(params.vector.k);
+              // The hybrid statement's vector leg carries the same option on
+              // the same engine, so it takes the same refusal. This path built
+              // its own `VectorSearchParams` and dropped
+              // `params.vector.efSearch` while doing so — the silent ignore in
+              // its second location.
+              resolveEfSearchOverride({
+                efSearch: params.vector.efSearch,
+                indexType: params.vector.indexType,
+                tuning: vectorSearchFrontierTuning(vectorStrategy),
+                transactions: capabilities.transactions,
+                dialect: "SQLite",
+                engine: vectorStrategy.name,
+              });
               const slot = vectorSlotFromParams({
                 graphId: params.graphId,
                 nodeKind: params.nodeKind,
@@ -1152,13 +1184,16 @@ export function isLocalLibsqlClient(client: unknown): boolean {
  * Returns the single connection a Drizzle database serializes every statement
  * onto, if its driver is one we can positively identify as such.
  *
- * Three drivers qualify:
+ * Five drivers qualify, each by its own named predicate — a driver is marked on
+ * evidence of WHAT IT IS, never on the absence of a disqualifier:
  *
- * - **better-sqlite3**: a single, synchronous connection, so an open transaction
- *   on one wrapper is an open transaction for all of them. Duck-typed on
- *   `prepare` + `pragma` (both better-sqlite3 `Database` methods; neither
- *   bun:sqlite nor node:sqlite expose `pragma`) rather than importing the native
- *   addon.
+ * - **better-sqlite3** ({@link isBetterSqlite3Client}): a single, synchronous
+ *   connection, so an open transaction on one wrapper is an open transaction
+ *   for all of them.
+ * - **bun:sqlite** ({@link isBunSqliteClient}): the same one synchronous
+ *   connection, reached through `drizzle-orm/bun-sqlite`.
+ * - **sql.js** ({@link isSqlJsClient}): one in-WASM database handle; every
+ *   wrapper's statements run on it in order.
  * - **Cloudflare Durable Object storage** (`drizzle(ctx.storage)`): one storage
  *   connection whose transaction frame is AMBIENT on the storage object rather
  *   than a handle passed to the callback (see `runDoSqliteStorageTransaction`:
@@ -1170,33 +1205,46 @@ export function isLocalLibsqlClient(client: unknown): boolean {
  *   transaction runner requires, so the framing and the mark cannot drift apart.
  * - **a local `@libsql/client`**: also one stable connection — which is exactly
  *   why local clients frame transactions as raw BEGIN/COMMIT on it (see
- *   {@link isLocalLibsqlClient}). libsql clients expose no `prepare`, so the
- *   shared prepare-capable resolver cannot see them and the driver client is
- *   read directly here.
+ *   {@link isLocalLibsqlClient}). libsql clients expose no `prepare`, so no
+ *   prepare-capable predicate can see them and the driver client is read
+ *   directly here.
  *
  * Unrecognized clients stay unmarked: SEPARATE connections to the same file are
  * genuinely concurrent under WAL and must not be treated as one serialized
- * resource.
+ * resource, and a driver whose dispatch we cannot attribute proves nothing.
+ * The full classification — marked, deliberately unmarked, and the remaining
+ * gaps — is the inventory in `../transaction-resource.ts`.
  */
 function getSerializedSqliteConnection(
   db: AnySqliteDatabase,
 ): object | undefined {
-  const preparingClient = resolveSqliteClient(db);
-  if (preparingClient !== undefined) {
-    // `prepare` is answered by resolveSqliteClient; `pragma` is the
-    // better-sqlite3 discriminator on top of it. A prepare-capable client is
-    // never a libsql or Durable Object storage client, so this arm is terminal.
-    const candidate = preparingClient as Readonly<Record<string, unknown>>;
-    return typeof candidate["pragma"] === "function" ?
-        preparingClient
-      : undefined;
+  const client = (db as Readonly<{ $client?: unknown }>).$client;
+  if (
+    isBetterSqlite3Client(client) ||
+    isBunSqliteClient(client) ||
+    isSqlJsClient(client)
+  ) {
+    return client as object;
   }
   // The storage object IS the serialized resource: every wrapper built over the
   // same `ctx.storage` shares its one connection and its ambient transaction.
   const storageClient = getDurableObjectStorageClient(db);
   if (storageClient !== undefined) return storageClient;
-  const client = (db as Readonly<{ $client?: unknown }>).$client;
   return isLocalLibsqlClient(client) ? (client as object) : undefined;
+}
+
+/**
+ * Whether two backends built over `client` would be treated as one serialized
+ * connection. The marking predicate itself, exposed for the driver-shape unit
+ * tests (mirrors `isSerializedPostgresClient`); production code reaches it only
+ * through {@link createSqliteBackend}.
+ */
+export function isSerializedSqliteClient(client: unknown): boolean {
+  return (
+    getSerializedSqliteConnection({
+      $client: client,
+    } as unknown as AnySqliteDatabase) !== undefined
+  );
 }
 
 export function createSqliteBackend(

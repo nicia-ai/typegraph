@@ -24,7 +24,11 @@ import { META_EDGE_IMPLIES, META_EDGE_INVERSE_OF } from "../ontology/constants";
 import { isExternalIri } from "../ontology/external-iri";
 import { type OntologyRelation } from "../ontology/types";
 import { canonicalEqual } from "../schema/canonical";
-import { compactUndefined, hasOwnKey } from "../utils/object";
+import {
+  compactUndefined,
+  createDataKeyedBag,
+  hasOwnKey,
+} from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { unwrap } from "../utils/result";
 import { compileGraphExtension } from "./compiler";
@@ -139,7 +143,10 @@ export function mergeGraphExtension<G extends GraphDef>(
     nodeKinds.set(node.type.kind, node.type);
   }
 
-  const mergedNodes: Record<string, NodeRegistration> = {};
+  // Kind-keyed, and `isValidKindName` admits `__proto__`: a `{}` accumulator
+  // would answer `mergedNodes["__proto__"] = registration` with the prototype
+  // setter, dropping a kind the document legally declared.
+  const mergedNodes = createDataKeyedBag<NodeRegistration>();
   for (const [name, registration] of Object.entries(graph.nodes)) {
     if (runtimeNodeNames.has(name)) continue;
     mergedNodes[name] = registration;
@@ -151,7 +158,7 @@ export function mergeGraphExtension<G extends GraphDef>(
     };
   }
 
-  const mergedEdges: Record<string, EdgeRegistration> = {};
+  const mergedEdges = createDataKeyedBag<EdgeRegistration>();
   for (const [name, registration] of Object.entries(graph.edges)) {
     if (runtimeEdgeNames.has(name)) continue;
     mergedEdges[name] = registration;
@@ -255,7 +262,7 @@ function deriveGraphExtensionVectorIndexes(
   compiledNodes: ReturnType<typeof compileGraphExtension>["nodes"],
 ): readonly VectorIndexDeclaration[] {
   if (compiledNodes.length === 0) return [];
-  const registrations: Record<string, NodeRegistration> = {};
+  const registrations = createDataKeyedBag<NodeRegistration>();
   for (const compiled of compiledNodes) {
     registrations[compiled.type.kind] = {
       type: compiled.type,

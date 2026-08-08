@@ -292,6 +292,7 @@ export type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 export type DeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -941,6 +942,7 @@ export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getEd
 export type HardDeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -1734,6 +1736,7 @@ export type UniqueRow = Readonly<{
 export type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     validTo?: string;
@@ -1826,6 +1829,7 @@ export type VectorCapabilities = Readonly<{
     indexTypes: readonly VectorIndexType[];
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
+    searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // @public
@@ -1871,6 +1875,17 @@ export function vectorPhysicalName(prefix: string, graphId: string, nodeKind: st
 
 // @public
 export function vectorScoreExpression(distanceExpression: SqlFragment, metric: VectorMetric): SqlFragment;
+
+// @public
+export type VectorSearchFrontierTuning = Readonly<{
+    tunable: true;
+    parameter: string;
+    indexType: VectorIndexType;
+    requiresTransactionScope: boolean;
+}> | Readonly<{
+    tunable: false;
+    reason: string;
+}>;
 
 // @public
 export type VectorSearchParams = Readonly<{

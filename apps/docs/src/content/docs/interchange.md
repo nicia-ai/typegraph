@@ -192,6 +192,7 @@ recorded as an `entityType: "identity"` entry in `result.errors`.
 | `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields |
 | `includeDeleted` | `boolean` | `false` | Include soft-deleted records |
 | `identityMode` | `"state" \| "archival"` | `"state"` | Export current identity assertions, or current plus ended assertions |
+| `signal` | `AbortSignal` | none | Cancel the export: roll its snapshot transaction back and release the connection. See [Cancelling an export](#cancelling-an-export) |
 
 **Round-trip caveat:** with the default `includeTemporal: false`, exported
 records carry no `validFrom`/`validTo`. On import, an omitted `validFrom`
@@ -214,6 +215,64 @@ document imported into a fresh graph creates those rows with their stated bounds
 and is unaffected. To update props over existing rows from a temporal export,
 either omit `validFrom` from the update document, export with
 `includeTemporal: false`, or import into a fresh graph and swap it in.
+
+### Cancelling an export
+
+An export holds one repeatable-read snapshot transaction for its whole life, and
+on a single-connection backend it holds that connection's exclusive
+interchange-stream lease with it. Every *cooperative* exit gives both back,
+because each one runs the stream's `finally`: `break` or `throw` out of a `for
+await`, and an explicit `iterator.return()`.
+
+A consumer that pulls `next()` and then simply **drops the iterator** has no
+cooperative exit. Async-generator `finally` blocks do not run on garbage
+collection, so that snapshot transaction stays open for the life of the process
+— and on a serialized connection every later export and every later import is
+then refused for a stream nobody is reading. If you might abandon an iterator,
+pass a `signal`:
+
+```typescript
+const controller = new AbortController();
+const iterator = exportGraphStream(store, {
+  batchSize: 1000,
+  signal: controller.signal,
+})[Symbol.asyncIterator]();
+
+try {
+  for (;;) {
+    const next = await Promise.race([
+      iterator.next(),
+      deadline(30_000), // resolves to a sentinel, leaving the pull in flight
+    ]);
+    if (next === TIMED_OUT) {
+      // Do NOT just walk away: this is the leak. Aborting rolls the snapshot
+      // back and frees the connection.
+      controller.abort(new Error("export deadline exceeded"));
+      break;
+    }
+    if (next.done === true) break;
+    await write(next.value);
+  }
+} finally {
+  controller.abort();
+}
+```
+
+Aborting rejects the pull that is in flight — and any later pull from a consumer
+that walked away and came back — with
+[`ExportStreamCancelledError`](/errors#exportstreamcancellederror), carrying the
+signal's own reason as `cause`, so a cancelled export is never mistaken for a
+complete one. Aborting a signal *before* the first pull refuses the export
+outright: no transaction is opened and no lease claimed. Aborting one that has
+already finished does nothing, so a single controller can safely span a whole
+job. `exportGraph` accepts `signal` too — there it simply makes the call reject
+instead of running to completion.
+
+There is deliberately no garbage-collection fallback. A `FinalizationRegistry`
+cannot close this gap: any cleanup state able to settle an abandoned stream has
+to reach the stream's internals, and a registry holds its state strongly, so
+doing so would keep the abandoned stream reachable and the finalizer would never
+run. The signal is the mechanism.
 
 ## Importing Data
 

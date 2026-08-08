@@ -210,8 +210,7 @@ export function publicNodeRef<G extends GraphDef>(
 }
 
 /**
- * Serializes identity-affecting writers on one graph (Postgres only; SQLite
- * writers are already serialized by its single-writer lock).
+ * Serializes identity-affecting writers on one graph (Postgres only).
  *
  * The lock is deliberately whole-graph rather than scoped to the kinds a write
  * touches. Identity closures are transitive: an assertion between two kinds
@@ -223,6 +222,17 @@ export function publicNodeRef<G extends GraphDef>(
  * identity-enabled graph serialize even when their kinds share no relation.
  * Scoping the lock to connected components of the assertion graph is the
  * refinement if that ceiling ever binds.
+ *
+ * SQLITE: no lock is taken because the engine's single writer slot already
+ * serializes writers — a premise that holds for every transaction TypeGraph
+ * opens itself (`BEGIN IMMEDIATE` takes the slot before the first read) but NOT
+ * for one adopted through `store.withTransaction()`, which may have been begun
+ * DEFERRED by the caller. There the fold's read→write can lose the upgrade and
+ * SQLite refuses the write with a stale snapshot. That case is neither
+ * serializable from here (the frame is already open, and its kind is not
+ * observable) nor retryable in place (SQLite requires a rollback), so it is
+ * refused with a typed error naming the cause and the remedy — see
+ * `executeIdentityStatement` (#447).
  */
 export async function lockIdentityGraph(
   target: Backend,

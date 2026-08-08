@@ -91,7 +91,16 @@
  * so no wrapper can observe it unmarked:
  *
  * - better-sqlite3 `Database` (`prepare` + `pragma`) — `createSqliteBackend` via
- *   `getSerializedSqliteConnection`.
+ *   `getSerializedSqliteConnection`, which asks one named predicate per driver.
+ * - bun:sqlite `Database` (`prepare` + `query` + `run`/`exec` + `serialize` +
+ *   a `filename` string) — same site, via `isBunSqliteClient`. One synchronous
+ *   connection, like better-sqlite3; `query` and `filename` are what separate
+ *   it structurally from better-sqlite3 (`pragma`, `name`), so the mark never
+ *   rests on a session's constructor name, which bundlers rename.
+ * - sql.js `Database` (`prepare` + `exec` + `run` + `export` +
+ *   `getRowsModified`) — same site, via `isSqlJsClient`. One in-WASM handle
+ *   executed in-process; `export` and `getRowsModified` are sql.js's own API
+ *   and exist on no other SQLite client.
  * - Local `@libsql/client` (`protocol === "file"`: `file:` paths, `:memory:`,
  *   an embedded replica's local file) — same site, via `isLocalLibsqlClient`.
  * - PGlite — `createPostgresBackend` via `getPgliteClient` (`query` +
@@ -141,16 +150,22 @@
  * store's overlay already defeats). Each is a coverage extension needing
  * positive evidence of the client shape, never a silent no-op:
  *
- * - Single-connection SQLite drivers other than better-sqlite3 and local libSQL
- *   — bun:sqlite, sql.js, expo-sqlite, op-sqlite, node:sqlite. One synchronous
- *   connection each, but none exposes better-sqlite3's `pragma`, so the
- *   duck-type cannot see them. #434 names bun:sqlite and node:sqlite; the rest
- *   are the same class.
+ * - React Native / Expo SQLite drivers — `expo-sqlite` and `op-sqlite`. One
+ *   connection each, and both are genuinely serialized, but neither exposes a
+ *   plain `prepare` (`prepareAsync` / `prepareSync`, `prepareStatement`), so
+ *   none of the predicates above can see them and neither driver is installable
+ *   here to derive the shape from rather than guess it. Remaining #434 scope:
+ *   each needs its own positive shape, taken from the driver's own typings.
+ * - `node:sqlite` `DatabaseSync`: UNREACHABLE through Drizzle today —
+ *   drizzle-orm 0.45.2 ships `bun-sqlite`, `sql-js`, `durable-sqlite`,
+ *   `expo-sqlite`, `op-sqlite`, `sqlite-proxy` and `better-sqlite3`, and no
+ *   `node-sqlite` entrypoint, so no `createSqliteBackend` call can be handed
+ *   one. Re-check when the Drizzle floor moves; nothing to mark until then.
  * - Bun `SQL` (Postgres) built with `{ max: 1 }`: genuinely serialized, but
- *   nothing in this package positively identifies that driver — the SQLite side
- *   recognizes `BunSQLiteSession`, and there is no Postgres equivalent — so
- *   `options.max` there cannot be attributed to a driver whose dispatch we know.
- *   Marking it needs a Bun-`SQL` discriminator first. Remaining #434 scope.
+ *   nothing in this package positively identifies that driver — there is no
+ *   Postgres equivalent of the SQLite driver shapes above — so `options.max`
+ *   there cannot be attributed to a driver whose dispatch we know. Marking it
+ *   needs a Bun-`SQL` discriminator first. Remaining #434 scope.
  * - Drivers we cannot identify at all (`sqlite-proxy`, `pg-proxy`, a bespoke
  *   adapter): whether the far side serializes is unknowable from here, so they
  *   fall under the residual gap above.

@@ -27,12 +27,13 @@ import {
 } from "../core/types";
 import {
   CardinalityError,
+  ConfigurationError,
   DisjointError,
   EndpointError,
   UniquenessError,
 } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
-import { readOwnProperty } from "../utils/object";
+import { hasOwnKey, readOwnProperty } from "../utils/object";
 import { isPresent } from "../utils/presence";
 
 // ============================================================
@@ -88,12 +89,7 @@ export function checkWherePredicate(
     return true; // No where clause, always applies
   }
 
-  // Build predicate context
-  const predicateBuilder = buildPredicateContext();
-  const predicate = constraint.where(predicateBuilder);
-
-  // Evaluate predicate
-  return evaluatePredicate(predicate, props);
+  return evaluatePredicate(captureWherePredicate(constraint.where), props);
 }
 
 type UniquePredicate = Readonly<{
@@ -101,6 +97,124 @@ type UniquePredicate = Readonly<{
   field: string;
   op: NullCheckOp;
 }>;
+
+/**
+ * The `where` callback as every caller of {@link captureWherePredicate} sees it:
+ * a per-field builder in, whatever the author returned out.
+ *
+ * Deliberately looser than `UniqueConstraint["where"]`, whose builder type is
+ * generic in the kind's schema — the capture is the same operation whether the
+ * callback came from a typed `defineGraph` registration, a compiled
+ * graph-extension document, or an untyped JavaScript caller.
+ */
+type UniqueWhereCallback = (
+  builder: Readonly<
+    Record<
+      string,
+      Readonly<{
+        isNull: () => UniquePredicate;
+        isNotNull: () => UniquePredicate;
+      }>
+    >
+  >,
+) => unknown;
+
+/**
+ * Runs a `where` callback against the shared builder and returns the predicate
+ * it named, or `undefined` when the callback returned something that is not a
+ * predicate.
+ *
+ * The single owner of "what does this `where` clause say": constraint
+ * EVALUATION ({@link checkWherePredicate}), definition-time VALIDATION
+ * ({@link assertWhereFieldDeclared}), and persistence-time CAPTURE
+ * (`serializeWherePredicate` in src/schema/serializer.ts) all read the clause
+ * through this one function, so a persisted `where`, a validated `where`, and
+ * an evaluated `where` cannot disagree about which field the author named.
+ */
+export function captureWherePredicate(
+  where: UniqueWhereCallback,
+): UniquePredicate | undefined {
+  const predicate = where(buildPredicateContext());
+  if (
+    typeof predicate !== "object" ||
+    predicate === null ||
+    !("__type" in predicate)
+  ) {
+    return undefined;
+  }
+
+  const candidate = predicate as {
+    __type: unknown;
+    field: unknown;
+    op: unknown;
+  };
+  if (
+    candidate.__type !== "unique_predicate" ||
+    typeof candidate.field !== "string" ||
+    (candidate.op !== "isNull" && candidate.op !== "isNotNull")
+  ) {
+    return undefined;
+  }
+
+  return {
+    __type: "unique_predicate",
+    field: candidate.field,
+    op: candidate.op,
+  };
+}
+
+/**
+ * Refuses a uniqueness constraint whose `where` clause names a field the kind
+ * does not declare.
+ *
+ * The runtime half of the builder's guard. {@link buildPredicateContext} is
+ * total by design — it must answer for a DECLARED-but-absent field, which is
+ * the whole point of a partial constraint — so a typo'd name cannot be caught
+ * there, and the type system catches it only for typed callers
+ * (`UniqueConstraintPredicateBuilder` declares exactly the schema's fields and
+ * has no index signature). An untyped caller naming an undeclared field
+ * otherwise gets a predicate that quietly never applies.
+ *
+ * Called once per constraint at graph-definition time — the single point every
+ * constraint passes through before any write can evaluate it — rather than at
+ * each of the write paths' `checkWherePredicate` call sites, so the refusal
+ * covers every path uniformly and costs nothing per write. Mirrors
+ * `validateGraphExtension`'s `UNKNOWN_UNIQUE_WHERE_FIELD` refusal, which
+ * already holds the same invariant for kinds declared as JSON documents.
+ */
+export function assertWhereFieldDeclared(
+  kind: string,
+  constraint: UniqueConstraint,
+  shape: Readonly<Record<string, unknown>>,
+): void {
+  if (!constraint.where) return;
+
+  const predicate = captureWherePredicate(constraint.where);
+  if (predicate === undefined) {
+    throw new ConfigurationError(
+      `Unique constraint "${constraint.name}" on node kind "${kind}" has a \`where\` callback that does not return a predicate.`,
+      { kind, constraintName: constraint.name },
+      {
+        suggestion: `Return a field predicate, e.g. \`where: (fields) => fields.${Object.keys(shape)[0] ?? "someField"}.isNotNull()\`.`,
+      },
+    );
+  }
+
+  if (!hasOwnKey(shape, predicate.field)) {
+    throw new ConfigurationError(
+      `Unique constraint "${constraint.name}" on node kind "${kind}" has a \`where\` clause on field "${predicate.field}", which is not declared in the kind's schema.`,
+      {
+        kind,
+        constraintName: constraint.name,
+        field: predicate.field,
+        declaredFields: Object.keys(shape),
+      },
+      {
+        suggestion: `Name a declared field (${Object.keys(shape).join(", ")}) or add "${predicate.field}" to the schema.`,
+      },
+    );
+  }
+}
 
 type PredicateContext = Readonly<
   Record<
@@ -129,18 +243,17 @@ type PredicateContext = Readonly<
  * Answering every name is safe because a name comes from the predicate author
  * (the code), never from data, and the field's VALUE is still read from the
  * props bag by own key when the predicate is evaluated — so an absent field
- * evaluates as null, which is what a partial constraint means by absent. This
- * is also the shape `serializeWherePredicate` (src/schema/serializer.ts) has
- * always captured constraints with, so a persisted `where` and an evaluated
- * `where` now see the same builder.
+ * evaluates as null, which is what a partial constraint means by absent. Every
+ * reader of a `where` clause goes through {@link captureWherePredicate}, which
+ * builds this one context, so a persisted `where`, a validated `where`, and an
+ * evaluated `where` cannot see different builders.
  *
- * The guard against a TYPO'D field name is the type system, not this Proxy:
- * `UniqueConstraintPredicateBuilder` declares exactly the schema's fields, so a
- * typed caller cannot name an undeclared one. An UNTYPED caller naming an
- * undeclared field gets absent-⇒-null semantics (the predicate quietly never
- * applies) rather than a runtime refusal — this function has no schema shape
- * to validate against. Runtime refusal parity with `validateMatchOnFields`
- * would need the shape threaded to every checkWherePredicate call site.
+ * The guard against a TYPO'D field name is NOT this Proxy — it must stay total
+ * or a declared-but-absent field loses its member. It is
+ * {@link assertWhereFieldDeclared}, which every constraint passes at
+ * graph-definition time: an undeclared name is refused there with a typed
+ * `ConfigurationError`, so no `where` clause naming one ever reaches
+ * evaluation, from a typed or an untyped caller.
  */
 function buildPredicateContext(): PredicateContext {
   return new Proxy<PredicateContext>(

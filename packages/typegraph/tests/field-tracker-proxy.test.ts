@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineNode } from "../src";
+import { defineEdge, defineNode } from "../src";
 import { type QueryBuilderState } from "../src/query/builder/types";
 import {
   createTrackingContext,
@@ -427,5 +427,106 @@ describe("field access deduplication", () => {
     const fields = tracker.getAccessedFields();
     const nameFields = fields.filter((f) => f.field === "name");
     expect(nameFields).toHaveLength(1);
+  });
+});
+
+// ============================================================
+// Declared Fields Named After Prototype Members
+// ============================================================
+
+/**
+ * A schema may DECLARE a field named after an `Object.prototype` member.
+ * `Object.prototype` membership is only the right answer for a name the schema
+ * does NOT declare; for a declared one it hides real data, because an untracked
+ * field is never projected and the result proxy then serves the inherited
+ * member in its place.
+ */
+const Shadowed = defineNode("Shadowed", {
+  schema: z.object({
+    name: z.string(),
+    toString: z.string().optional(),
+  }),
+});
+
+const shadowedEdge = defineEdge("shadowedEdge", {
+  schema: z.object({ valueOf: z.string().optional() }),
+});
+
+const shadowedIntrospector = createSchemaIntrospector(
+  new Map([["Shadowed", { schema: Shadowed.schema }]]),
+  new Map([["shadowedEdge", { schema: shadowedEdge.schema }]]),
+);
+
+function createShadowedContext(tracker: FieldAccessTracker): {
+  s: TestProxy;
+  e: TestProxy;
+} {
+  const state: QueryBuilderState = {
+    ...createTestState(),
+    startKinds: ["Shadowed"],
+    startAlias: "s",
+    currentAlias: "t",
+    traversals: [
+      {
+        edgeKinds: ["shadowedEdge"],
+        edgeAlias: "e",
+        nodeKinds: ["Shadowed"],
+        nodeAlias: "t",
+        direction: "out",
+        joinFromAlias: "s",
+        joinEdgeField: "from_id",
+        optional: false,
+      },
+    ],
+  };
+
+  return createTrackingContext(state, tracker, {
+    schemaIntrospector: shadowedIntrospector,
+    mode: "truthy",
+    optionalTraversalAliases: "present",
+  }) as { s: TestProxy; e: TestProxy };
+}
+
+describe("declared fields named after Object.prototype members", () => {
+  it("tracks a declared node field named toString as a field, not a prototype member", () => {
+    const tracker = new FieldAccessTracker();
+    const context = createShadowedContext(tracker);
+
+    // A string placeholder, not `Object.prototype.toString`. Bracket notation
+    // throughout: dot notation on these names reads the inherited member the
+    // proxy is being asked NOT to serve.
+    // eslint-disable-next-line @typescript-eslint/dot-notation
+    expect(typeof context.s["toString"]).toBe("string");
+    expect(tracker.getAccessedFields()).toContainEqual({
+      alias: "s",
+      field: "toString",
+      isSystemField: false,
+    });
+  });
+
+  it("tracks a declared edge field named valueOf as a field", () => {
+    const tracker = new FieldAccessTracker();
+    const context = createShadowedContext(tracker);
+
+    // eslint-disable-next-line @typescript-eslint/dot-notation
+    expect(typeof context.e["valueOf"]).toBe("string");
+    expect(tracker.getAccessedFields()).toContainEqual({
+      alias: "e",
+      field: "valueOf",
+      isSystemField: false,
+    });
+  });
+
+  it("still answers an UNDECLARED prototype name with the inherited member", () => {
+    const tracker = new FieldAccessTracker();
+    const context = createShadowedContext(tracker);
+
+    // `valueOf` is not declared on Shadowed, and `toString` is not declared on
+    // the edge — each stays a prototype member for the kind that lacks it.
+    // eslint-disable-next-line @typescript-eslint/dot-notation
+    expect(typeof context.s["valueOf"]).toBe("function");
+    // eslint-disable-next-line @typescript-eslint/dot-notation
+    expect(typeof context.e["toString"]).toBe("function");
+    expect(tracker.getAccessedFields()).toHaveLength(0);
   });
 });

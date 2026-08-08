@@ -57,6 +57,33 @@ export function readOwnProperty(
 }
 
 /**
+ * Creates an accumulator whose KEYS ARE DATA — a kind name, a property name, a
+ * JSON-Schema keyword, an entity's property bag. The write-side companion to
+ * {@link hasOwnKey} / {@link readOwnProperty}, and like them the single owner
+ * of the question: every accumulator keyed by data is built here.
+ *
+ * Null-prototype, because `bag[key] = value` on a `{}` literal does NOT create
+ * an entry when `key` is `__proto__`: it invokes `Object.prototype`'s
+ * `__proto__` SETTER, which either reparents the bag (object value) or does
+ * nothing at all (primitive value). Either way the value is silently dropped,
+ * and every later own-key read answers as if the writer never wrote it — the
+ * write-side mirror of the inherited-member read `hasOwnKey` exists to prevent.
+ *
+ * Reachable, and not through anything exotic: kind names are validated against
+ * `/^[A-Za-z_][A-Za-z0-9_]*$/`, which admits `__proto__` (as it does
+ * `toString` and `constructor`); extension property names are unrestricted
+ * apart from a reserved list; and `JSON.parse` yields `__proto__` as an
+ * ordinary own key, so any document read off disk or the wire can carry one.
+ *
+ * A plain `{}` remains correct — and stays in use — for records whose keys are
+ * statically known: an options object, a discriminated-union member, a fixed
+ * lookup table.
+ */
+export function createDataKeyedBag<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+/**
  * Builds an object dropping any keys whose value is `undefined`.
  *
  * Lets callers construct discriminated-union members and `defineNode` /

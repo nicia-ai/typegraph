@@ -14,7 +14,7 @@ import {
   lockRecordedGraphWrite,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
-import { isPostgresUniqueViolationError } from "../utils/sql-errors";
+import { isPostgresConcurrentDdlRaceError } from "../utils/sql-errors";
 import { separationRebuildRequired } from "./separation";
 import {
   deleteAssertionsTouchingKinds,
@@ -285,11 +285,14 @@ async function provisionDerivedRelations(
  * PostgreSQL's `IF NOT EXISTS` cannot see another session's uncommitted
  * pg_class row, so a CREATE issued while an unfenced creator
  * (`bootstrapTables`, first-enablement `ensureIdentityTables`) is mid-flight
- * can come back 23505 — and inside a transaction that aborts everything, so
- * the in-place retry `executeConcurrentCreateDdl` uses is not available. The
- * whole attempt is therefore re-run once, against a database where the winner's
- * table is now committed and the CREATE is a no-op. Bounded at one: a second
- * 23505 is no longer a race, and staying loud is the point.
+ * can come back 23505 (or 42701 for an additive column) — and inside a
+ * transaction that aborts everything, so the in-place retry
+ * `executeConcurrentCreateDdl` uses is not available. The whole attempt is
+ * therefore re-run once, against a database where the winner's table is now
+ * committed and the CREATE is a no-op. Which failures mean "lost the race" is
+ * {@link isPostgresConcurrentDdlRaceError} — the same single owner the backend
+ * helper classifies through. Bounded at one: a second such failure is no longer
+ * a race, and staying loud is the point.
  *
  * The DDL advisory lock below is what makes this rare rather than routine — it
  * serializes fenced identity DDL across graphs, which is the collision two
@@ -301,7 +304,7 @@ async function withConcurrentCreateRetry(
   try {
     await attempt();
   } catch (error) {
-    if (!isPostgresUniqueViolationError(error)) throw error;
+    if (!isPostgresConcurrentDdlRaceError(error)) throw error;
     await attempt();
   }
 }
@@ -333,7 +336,11 @@ async function withConcurrentCreateRetry(
  * (`CREATE TABLE IF NOT EXISTS` on shared relations), so there is nothing here
  * that would want a second graph's fence.
  *
- * SQLite needs nothing: its writer slot already serializes the whole database.
+ * SQLite needs nothing: its writer slot already serializes the whole database —
+ * with the adopted-DEFERRED-frame caveat `lockIdentityGraph` documents, which
+ * `executeIdentityStatement` turns into a typed refusal (#447). Schema
+ * transitions run inside the backend's own schema-write transaction, so this
+ * path is not reachable from an adopted frame today.
  */
 async function lockIdentityDdl(target: IdentityTarget): Promise<void> {
   if (target.dialect !== "postgres") return;

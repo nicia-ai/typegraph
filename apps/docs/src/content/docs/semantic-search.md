@@ -823,8 +823,14 @@ leaks to the next query on a pooled connection. Omitting it preserves
 today's behavior exactly — no transaction is opened. It applies to the
 **Postgres HNSW** path only:
 
-- **sqlite-vec** has no equivalent frontier knob and ignores `efSearch`
-  (no-op).
+- **SQLite backends refuse it.** Neither `sqlite-vec` — whose `vec0` KNN
+  takes only `k`, the page size — nor `libsql-native`, whose DiskANN
+  `vector_top_k` fixes `search_l` at index-creation time, has a per-search
+  frontier to set. Supplying `efSearch` to either, on the vector path or
+  the hybrid path, is refused with `UnsupportedBackendCapabilityError`
+  (`details.capability` `vector.searchFrontierTuning`, `details.reason`
+  naming the engine's limitation) rather than searching as if the option
+  had not been passed.
 - **Transaction-less Postgres drivers** (`drizzle-orm/neon-http`) can't
   scope `SET LOCAL`, so a search that supplies `efSearch` is refused with
   `UnsupportedBackendCapabilityError`. Use a transactional driver

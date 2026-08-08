@@ -21,13 +21,18 @@ import {
   sql,
 } from "../src";
 import { type GraphBackend } from "../src/backend/types";
-import { parseRecordedInstant } from "../src/core/temporal";
+import {
+  createRecordedInstant,
+  parseRecordedInstant,
+} from "../src/core/temporal";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
 } from "../src/query/sql-intent";
 import {
+  advanceRevisionClock,
+  readRecordedClock,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
 } from "../src/store/recorded-capture";
@@ -263,5 +268,70 @@ describe("recorded commit clock", () => {
     );
     expect(await readOpenFrom(backend, "x")).toBe(sharedRevision);
     expect(await readOpenFrom(backend, "y")).toBe(sharedRevision);
+  });
+
+  it("refuses a stale caller-supplied revision instead of moving the clock backward", async () => {
+    // #440: `previousRevision` lets a caller state the clock's previous value
+    // instead of reading it here. The ROW is the fence — only a strictly
+    // advancing revision is taken — and an allocation the row declined is
+    // refused rather than returned as if it had committed. Nothing today can
+    // supply a stale value (the sole caller holds the graph write lock and
+    // deletes the row first), so the guard is asserted at the seam that would
+    // let a future one.
+    const backend = createTestBackend();
+    await createStoreWithSchema(clockGraph, backend, {
+      revisionTracking: true,
+    });
+    const schema = createSqlSchema(backend.tableNames);
+    const wallTime = "2026-06-03T00:00:00.000Z";
+
+    // Seed the clock at revision 5 by allocating the successor of revision 4.
+    const seeded = await advanceRevisionClock(
+      backend,
+      schema,
+      clockGraph.id,
+      false,
+      createRecordedInstant(4, wallTime),
+    );
+    expect(parseRecordedInstant(seeded).revision).toBe(5);
+
+    // A caller whose value predates the live clock allocates revision 3. The
+    // UPSERT declines it, so the clock still reads 5 — and the caller is told
+    // rather than handed an instant the clock never reached.
+    await expect(
+      advanceRevisionClock(
+        backend,
+        schema,
+        clockGraph.id,
+        false,
+        createRecordedInstant(2, wallTime),
+      ),
+    ).rejects.toThrow(/moved the graph's revision clock backward/u);
+    expect(
+      recordedInstantRevision(
+        requireRecordedInstant(
+          await readRecordedClock(backend, schema, clockGraph.id),
+          "expected the fenced clock to survive the stale write",
+        ),
+      ),
+    ).toBe(5);
+
+    // A forward value still advances: the fence blocks regression, not motion.
+    const advanced = await advanceRevisionClock(
+      backend,
+      schema,
+      clockGraph.id,
+      false,
+      createRecordedInstant(6, wallTime),
+    );
+    expect(parseRecordedInstant(advanced).revision).toBe(7);
+    expect(
+      recordedInstantRevision(
+        requireRecordedInstant(
+          await readRecordedClock(backend, schema, clockGraph.id),
+          "expected the forward write to land",
+        ),
+      ),
+    ).toBe(7);
   });
 });

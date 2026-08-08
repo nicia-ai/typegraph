@@ -296,9 +296,11 @@ async function importGraphData<G extends GraphDef>(
  * `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS` behind another import.
  *
  * Once accepted, the import holds that connection's one stream lease for the
- * whole chunk loop, so any export snapshot or second import that tries to start
- * BETWEEN chunks is the side refused — this import keeps running instead of
- * stalling against a transaction its next chunk can never write past.
+ * whole call — every chunk AND the trailing statistics refresh, which is a
+ * write like any other — so any export snapshot or second import that tries to
+ * start while a write of this import is still to come is the side refused, and
+ * this import keeps running instead of stalling against a transaction it can
+ * never write past.
  *
  * Connections we cannot observe are not detected: two clients dialed at one
  * server, or two SQLite handles on one file, are independent and are not
@@ -471,22 +473,32 @@ export async function importGraphStream<G extends GraphDef>(
         }
       }
     }
+    if (header === undefined) {
+      throw new Error(
+        "Graph interchange stream ended before emitting a header.",
+      );
+    }
+    // The trailing ANALYZE is a WRITE on the target connection, exactly like
+    // the chunks were, so it belongs inside the lease rather than after it.
+    // Releasing at the end of the chunk loop instead left this write outside
+    // every guard: on a serialized connection an export snapshot opening in
+    // that window takes the one connection ANALYZE has to run on and does not
+    // give it back until the export ends, and the refresh's best-effort
+    // handling swallowed the result as a warning. The lease now spans every
+    // write this call makes — the same span `withImportStreamLease` gives
+    // `importGraph`, whose refresh has always been inside it.
+    await refreshStatisticsAfterImport(
+      store,
+      options,
+      result,
+      "importGraphStream",
+    );
   } finally {
-    // Released as soon as the last chunk is processed (or the loop throws): the
-    // lease exists to keep an export snapshot from opening while a chunk write
-    // is still to come, and the post-loop statistics refresh is not one.
+    // One release for every exit — the loop's, the missing-header throw, and
+    // the refresh's — so "the lease lives exactly as long as the writes" holds
+    // on the error paths too.
     releaseImportLease?.();
   }
-
-  if (header === undefined) {
-    throw new Error("Graph interchange stream ended before emitting a header.");
-  }
-  await refreshStatisticsAfterImport(
-    store,
-    options,
-    result,
-    "importGraphStream",
-  );
   return { ...result, success: result.errors.length === 0 };
 }
 
@@ -912,6 +924,20 @@ function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.errors.push(...source.errors);
 }
 
+/**
+ * Refreshes planner statistics after a mutating import.
+ *
+ * CALLED UNDER THE TARGET CONNECTION'S STREAM LEASE by every surface: ANALYZE
+ * is a write, and a write that runs outside the lease can be stranded by an
+ * export snapshot that takes the one connection it needs. `importGraph` holds
+ * the lease through {@link withImportStreamLease} for its whole call;
+ * `importGraphStream` holds its chunk-loop lease across this call too.
+ *
+ * Best-effort: by this point the import is committed, so a failed statistics
+ * refresh must not convert the completed (non-atomic on some backends,
+ * non-retryable) import into a thrown failure — it degrades to a warning, and
+ * the caller can run `store.refreshStatistics()`.
+ */
 async function refreshStatisticsAfterImport<G extends GraphDef>(
   store: Store<G>,
   options: ResolvedImportOptions,

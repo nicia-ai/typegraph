@@ -100,6 +100,17 @@ const SQLITE_VEC_CAPABILITIES: VectorCapabilities = {
     mode: "filter-pushdown",
     guaranteesFullPage: true,
   },
+  // A vec0 KNN query is `WHERE embedding MATCH ? AND k = ?` — `k` is the only
+  // knob, and it IS the page size, not a frontier around it. sqlite-vec
+  // exposes no session setting, no query parameter, and no index option that
+  // widens the candidate list (verified against v0.1.9's vec0 query surface),
+  // so a per-search `efSearch` has nothing to bind to and is refused rather
+  // than accepted and dropped.
+  searchFrontierTuning: {
+    tunable: false,
+    reason:
+      "a vec0 KNN takes only `k` (the page size); sqlite-vec exposes no ANN frontier parameter",
+  },
 };
 
 /** Whether a slot's declared index type maps to vec0's `MATCH … k =` KNN. */

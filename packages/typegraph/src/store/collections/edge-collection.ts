@@ -10,6 +10,7 @@ import {
   type FindEdgesByKindParams,
   type GraphBackend,
   rowPropsToObject,
+  runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
@@ -1007,10 +1008,22 @@ export function createEdgeCollection<
         return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const { results, mutations } =
-        backend.capabilities.transactions && "transaction" in backend ?
-          await backend.transaction(async (txBackend) => upsertAll(txBackend))
-        : await upsertAll(backend);
+      // INVARIANT: the prefetch that feeds every coalesce decision and the
+      // writes those decisions elect run against ONE target — so an item is
+      // skipped only on evidence taken inside the transaction that would have
+      // written it, never on an autocommit read taken before it (the defect
+      // `upsertById` had on the node side).
+      //
+      // `runOptionallyInTransaction` is the one owner of "open a transaction if
+      // this backend has one": already inside `store.transaction(...)` the
+      // target IS the caller's transaction and no nested one opens, and on a
+      // backend that reports `transactions: false` there is nothing to open, so
+      // the decision is exactly as fenced as that backend's writes are — which
+      // is to say not at all, matching the atomicity it already cannot offer.
+      const { results, mutations } = await runOptionallyInTransaction(
+        backend,
+        (target) => upsertAll(target),
+      );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real
       // mutations count toward the threshold. A no-op inside a caller

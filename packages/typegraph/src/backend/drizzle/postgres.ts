@@ -44,7 +44,6 @@ import {
   CompilerInvariantError,
   ConfigurationError,
   StaleVersionError,
-  UnsupportedBackendCapabilityError,
 } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -59,6 +58,8 @@ import {
 import {
   assertVectorSearchLimit,
   buildVectorCapabilities,
+  resolveEfSearchOverride,
+  vectorSearchFrontierTuning,
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
@@ -76,7 +77,7 @@ import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
   isMissingTableError,
-  isPostgresUniqueViolationError,
+  isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -590,17 +591,24 @@ export function createPostgresBackend(
   // ensure through it instead of issuing DDL on the hot path.
   const matTable = tables.contributionMaterializations;
 
+  /**
+   * Runs one IDEMPOTENT DDL statement — `CREATE ... IF NOT EXISTS` or
+   * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` — with the one-shot retry a
+   * concurrent boot needs.
+   *
+   * PostgreSQL's IF NOT EXISTS check cannot see another session's uncommitted
+   * catalog row. The loser waits for the winner and is then handed the
+   * winner's conflict instead of a harmless notice; retrying after that wait
+   * observes the committed object. Which failures mean that is
+   * {@link isPostgresConcurrentDdlRaceError}'s single decision — anything else
+   * (and anything the retry cannot clear) stays loud.
+   */
   async function executeConcurrentCreateDdl(ddl: string): Promise<void> {
     const statement = sql.raw(ddl);
     try {
       await db.execute(statement);
     } catch (error) {
-      // PostgreSQL's IF NOT EXISTS check cannot see another session's
-      // uncommitted catalog row. The loser waits for the winner and may then
-      // receive 23505 from pg_type/pg_class instead of a harmless notice.
-      // Retrying after that wait observes the committed table. Any unrelated
-      // uniqueness failure remains loud if the retry cannot confirm it.
-      if (!isPostgresUniqueViolationError(error)) throw error;
+      if (!isPostgresConcurrentDdlRaceError(error)) throw error;
       await db.execute(statement);
     }
   }
@@ -1010,16 +1018,18 @@ export function createPostgresBackend(
       // Deployments created before the build-claim columns existed get
       // them additively; fresh installs already have them from the
       // CREATE TABLE above.
+      //
+      // These take the concurrent-DDL retry for the same reason the CREATE
+      // does, and it is the same loop two replicas run at boot: ADD COLUMN IF
+      // NOT EXISTS cannot see another session's uncommitted pg_attribute row,
+      // so the loser waits and is then handed 42701 (or `tuple concurrently
+      // updated`) instead of the notice — a spuriously failed boot (#445).
       const tableName = getTableName(tables.indexMaterializations);
-      await db.execute(
-        sql.raw(
-          `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;`,
-        ),
+      await executeConcurrentCreateDdl(
+        `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;`,
       );
-      await db.execute(
-        sql.raw(
-          `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
-        ),
+      await executeConcurrentCreateDdl(
+        `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
       );
     },
 
@@ -1789,8 +1799,10 @@ function createPostgresOperationBackend(
    * The transaction-local GUC overrides for one vector search:
    *
    * - `hnsw.ef_search` when the caller supplied `efSearch` (validated
-   *   upstream; refused on transactionless drivers, where `SET LOCAL` cannot
-   *   be scoped).
+   *   upstream; whether it may be applied at all — and under which parameter
+   *   name — is {@link resolveEfSearchOverride}, the predicate the SQLite
+   *   backend reads too, which refuses a non-HNSW slot and a transactionless
+   *   driver where `SET LOCAL` cannot be scoped).
    * - `hnsw.iterative_scan = strict_order` on HNSW slots (pgvector >= 0.8):
    *   the search SQL constrains results to live candidate nodes (and
    *   optionally `minScore`), and a plain HNSW scan yields only `ef_search`
@@ -1810,30 +1822,19 @@ function createPostgresOperationBackend(
     params: Pick<VectorSearchParams, "efSearch" | "indexType">,
   ): Promise<readonly SearchGucOverride[]> {
     const overrides: SearchGucOverride[] = [];
-    if (params.efSearch !== undefined) {
-      if (params.indexType !== "hnsw") {
-        throw new ConfigurationError(
-          "PostgreSQL efSearch requires an HNSW vector index.",
-          { efSearch: params.efSearch, indexType: params.indexType },
-          {
-            suggestion:
-              'Configure the embedding with index: { type: "hnsw" }, or omit efSearch.',
-          },
-        );
-      }
-      if (capabilities.transactions) {
-        overrides.push({
-          name: "hnsw.ef_search",
-          value: String(params.efSearch),
-        });
-      } else {
-        throw new UnsupportedBackendCapabilityError(
-          "PostgreSQL efSearch override",
-          "transactions",
-          { efSearch: params.efSearch },
-          "Use a transactional PostgreSQL driver such as node-postgres, neon-serverless, or postgres-js.",
-        );
-      }
+    const efSearchParameter = resolveEfSearchOverride({
+      efSearch: params.efSearch,
+      indexType: params.indexType,
+      tuning: vectorSearchFrontierTuning(vectorStrategy),
+      transactions: capabilities.transactions,
+      dialect: "PostgreSQL",
+      engine: vectorStrategy?.name ?? "this backend",
+    });
+    if (efSearchParameter !== undefined) {
+      overrides.push({
+        name: efSearchParameter,
+        value: String(params.efSearch),
+      });
     }
     if (
       params.indexType === "hnsw" &&

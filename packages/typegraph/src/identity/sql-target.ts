@@ -11,6 +11,7 @@ import { ConfigurationError } from "../errors";
 import { type SqlFragment } from "../query/sql-fragment";
 import { asCompiledStatementSql } from "../query/sql-intent";
 import { recordedBindParamBudget } from "../store/recorded-capture/relations";
+import { isSqliteStaleSnapshotError } from "../utils/sql-errors";
 
 /** A top-level backend or a transaction-scoped one; identity writes accept both. */
 export type IdentityTarget = GraphBackend | TransactionBackend;
@@ -74,11 +75,54 @@ function requireStatementTarget(
   }
 }
 
+/**
+ * The refusal an identity write raises when SQLite would not let the enclosing
+ * transaction become a writer (#447).
+ *
+ * The per-graph identity locks (`lockIdentityGraph`, `lockIdentityDdl`) are
+ * no-ops on SQLite, on the premise that TypeGraph's own transactions open
+ * `BEGIN IMMEDIATE` and therefore hold the database's single writer slot for
+ * the whole read→write identity fold. `adoptTransaction` breaks exactly that
+ * premise: it adopts a transaction the CALLER began, which may be DEFERRED, and
+ * the adoption seam cannot observe how — SQLite exposes no frame-kind query
+ * through any bundled driver. A deferred frame is a reader until its first
+ * write, so the fold's write can find the snapshot stale and lose the upgrade.
+ *
+ * SQLite renders that as `SQLITE_BUSY_SNAPSHOT` / "database is locked", which
+ * says nothing about the cause and names no remedy. It is not retryable in
+ * place either — SQLite's own contract is that the transaction must be rolled
+ * back — and the transaction boundary belongs to the caller, so identity cannot
+ * restart it. What identity CAN guarantee is that the failure never surfaces as
+ * a raw driver error: it names the adopted deferred frame and the fix.
+ */
+function identityWriterSlotError(cause: unknown): ConfigurationError {
+  return new ConfigurationError(
+    "Operational Identity could not take the SQLite writer slot: this transaction was begun DEFERRED and another connection committed before the identity write, so its read snapshot is stale.",
+    {
+      code: "IDENTITY_TRANSACTION_NOT_WRITE_FENCED",
+      sqliteCode: "SQLITE_BUSY_SNAPSHOT",
+    },
+    {
+      cause,
+      suggestion:
+        "Roll back and re-run the transaction (SQLite cannot upgrade a stale snapshot in place). Identity mutations serialize on the writer slot, so an adopted transaction must be opened with BEGIN IMMEDIATE — or run the writes through store.transaction(), which already does.",
+    },
+  );
+}
+
 /** Runs one write statement against an identity target. */
 export async function executeIdentityStatement(
   target: IdentityTarget,
   statement: SqlFragment,
 ): Promise<void> {
   requireStatementTarget(target);
-  await target.executeStatement(asCompiledStatementSql(statement));
+  try {
+    await target.executeStatement(asCompiledStatementSql(statement));
+  } catch (error) {
+    // Every identity relation writer runs through here, so translating at this
+    // one seam covers the whole surface — the fold, the derived-relation
+    // writers, maintenance and the schema transition alike.
+    if (!isSqliteStaleSnapshotError(error)) throw error;
+    throw identityWriterSlotError(error);
+  }
 }

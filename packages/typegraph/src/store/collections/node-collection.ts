@@ -8,6 +8,7 @@ import { type z } from "zod";
 import {
   type GraphBackend,
   rowPropsToObject,
+  runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
@@ -568,27 +569,59 @@ export function createNodeCollection<
     ): Promise<Node<N>> {
       const existing = await backend.getNode(graphId, kind, id);
 
-      if (existing) {
-        // Coalesce a value-identical replay: skip the write entirely (no
-        // updateNode, no recorded capture, no revision advance, no hooks) and
-        // resolve with the existing node. See
-        // BaseStoreOptions.coalesceUnchangedUpserts.
+      // Coalesce a value-identical replay: skip the write entirely (no
+      // updateNode, no recorded capture, no revision advance, no hooks) and
+      // resolve with the existing node. See
+      // BaseStoreOptions.coalesceUnchangedUpserts.
+      const coalesces = (row: NonNullable<typeof existing>): boolean => {
         const runDirtyCheck =
           config.upsertDirtyCheck &&
           (() =>
             requireDefined(config.upsertDirtyCheck)(
               kind,
               id,
-              rowPropsToObject(existing.props),
+              rowPropsToObject(row.props),
               data,
             ));
-        if (shouldCoalesceUpsert(existing, options, runDirtyCheck)) {
-          return narrowNode<N>(rowToNode(existing));
+        return shouldCoalesceUpsert(row, options, runDirtyCheck);
+      };
+
+      // INVARIANT: a coalescing upsert elides its write only on evidence it
+      // re-read inside a transaction, after this autocommit observation.
+      //
+      // Coalescing must be an optimization, never a semantic: with the flag
+      // off, `executeNodeUpdate` opens a transaction, re-reads, and merges the
+      // caller's props over whatever it finds, so a writer that commits between
+      // the read above and the write still has the caller's props applied on
+      // top. Deciding "skip" from that same earlier read gave a DIFFERENT
+      // answer — the caller was told its props were stored while the store held
+      // the other writer's — so the flag changed the outcome instead of the
+      // cost. Re-reading here restores the equivalence: the losing verdict
+      // falls through to the ordinary write path, whose own in-transaction
+      // re-read merges over the current row.
+      //
+      // Only a coalescing store that is ABOUT to skip pays the second read; a
+      // store without the flag, or one whose props differ, keeps the single
+      // read and the single write it always had. On SQLite the re-read runs
+      // under `BEGIN IMMEDIATE`, which excludes every other writer for its
+      // duration; on a backend without transactions there is nothing to open
+      // and the decision is as fenced as that backend's writes are — which is
+      // to say not at all, matching the atomicity it already cannot offer.
+      const decisive =
+        existing !== undefined && coalesces(existing) ?
+          await runOptionallyInTransaction(backend, (target) =>
+            target.getNode(graphId, kind, id),
+          )
+        : existing;
+
+      if (decisive !== undefined) {
+        if (coalesces(decisive)) {
+          return narrowNode<N>(rowToNode(decisive));
         }
         const result = await executeNodeUpdate(
           buildUpsertUpdateInput(kind, id, data, options),
           backend,
-          { clearDeleted: existing.deleted_at !== undefined },
+          { clearDeleted: decisive.deleted_at !== undefined },
         );
         return narrowNode<N>(result);
       }
@@ -851,10 +884,10 @@ export function createNodeCollection<
         return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const { results, mutations } =
-        backend.capabilities.transactions && "transaction" in backend ?
-          await backend.transaction(async (txBackend) => upsertAll(txBackend))
-        : await upsertAll(backend);
+      const { results, mutations } = await runOptionallyInTransaction(
+        backend,
+        (target) => upsertAll(target),
+      );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real
       // mutations count toward the threshold. A no-op inside a caller

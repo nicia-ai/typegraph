@@ -38,8 +38,19 @@ export function edgeIdentityFromRow(row: {
  *
  * Edge ids are graph-global, while public collections are kind-scoped and an
  * edge's endpoints are immutable. Every collection write calls this predicate
- * before it consumes a row, and write operations repeat it against their
- * transactional re-read so a concurrent change cannot bypass the contract.
+ * before it consumes a row.
+ *
+ * This check alone does NOT close the window between reading a row and writing
+ * it: a re-read is a separate statement, and until the write commits, another
+ * session's `hardDelete(id)` + recreate can re-point that id (PostgreSQL READ
+ * COMMITTED re-resolves it; SQLite's `BEGIN IMMEDIATE` does not). What closes
+ * the window is that the write statement carries the same expected kind in its
+ * own `WHERE` (see {@link UpdateEdgeParams}'s `kind`), so this predicate and
+ * the write agree on which row they mean by construction rather than by
+ * repetition. A row that fails the predicate here is refused before any write;
+ * a row that changes afterwards makes the write match nothing, and the caller
+ * hears the same refusal from
+ * {@link file://./edge-operations.ts withUnmatchedEdgeUpdateRefusal}.
  */
 export function assertEdgeIdentityMatches(
   id: string,

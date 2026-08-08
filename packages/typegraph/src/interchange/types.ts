@@ -376,6 +376,26 @@ export const ExportOptionsSchema = z.object({
   includeDeleted: z.boolean().default(false),
   /** Operational Identity export mode. Defaults to current state only. */
   identityMode: IdentityInterchangeModeSchema.default("state"),
+  /**
+   * Cancels the export: its repeatable-read snapshot transaction is rolled
+   * back, the serialized connection's stream lease is released, and the
+   * consumer is rejected with an `ExportStreamCancelledError`
+   * (`code: "INTERCHANGE_EXPORT_STREAM_ABORTED"`) carrying the signal's own
+   * `reason` as `cause`. Aborting before the first read refuses the export
+   * outright: no transaction is opened and no lease claimed.
+   *
+   * On `exportGraph` this is a convenience — the call rejects instead of
+   * running to completion. On {@link exportGraphStream} it is the ONLY
+   * contract-grade way to stop a stream a consumer will not finish pulling:
+   * an async generator's `finally` does not run on garbage collection, so a
+   * consumer that pulls `next()` and then drops the iterator — the
+   * `Promise.race([iterator.next(), timeout])` pattern — otherwise holds the
+   * snapshot transaction, and with it the connection's exclusive stream lease,
+   * until the process exits. `break` / `throw` out of a `for await` and an
+   * explicit `iterator.return()` settle the stream cooperatively and need no
+   * signal; a race that abandons the iterator needs one.
+   */
+  signal: z.instanceof(AbortSignal).optional(),
 });
 
 /** Export options with defaults applied (output type) */

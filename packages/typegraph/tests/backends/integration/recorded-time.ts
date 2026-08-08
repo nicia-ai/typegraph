@@ -29,6 +29,8 @@ import {
   type TransactionBackend,
 } from "../../../src/backend/types";
 import {
+  createRecordedInstant,
+  parseRecordedInstant,
   type ReadCoordinate,
   RECORDED_MAX_REVISION,
   recordedInstantWallTime,
@@ -49,6 +51,10 @@ import {
   CURRENT_ONLY_READ_NAMES,
   EDGE_BATCH_READ_NAMES,
 } from "../../../src/store/collection-surface";
+import {
+  advanceRevisionClock,
+  readRecordedClock as readGraphRecordedClock,
+} from "../../../src/store/recorded-capture";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { TRANSACTION_RUNTIME } from "../../../src/store/types";
 import { requireDefined } from "../../../src/utils/presence";
@@ -767,6 +773,53 @@ export function registerRecordedTimeIntegrationTests(
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("fences a stale caller-supplied revision inside the clock UPSERT", async () => {
+      // #440: the clock row refuses a backward move itself. The fence is one
+      // `ON CONFLICT ... DO UPDATE ... WHERE` predicate written once for both
+      // dialects, so it belongs in the shared suite — a SQLite-only assertion
+      // would happily certify a predicate PostgreSQL rejects (AGENTS.md parity
+      // rule #2). Driven at the allocator seam against a graph id of its own,
+      // which is all the clock row is keyed by.
+      const backend = context.getStore().backend;
+      const schema = createSqlSchema(backend.tableNames);
+      const graphId = "recorded_clock_fence";
+      const wallTime = "2026-06-03T00:00:00.000Z";
+
+      const seeded = await advanceRevisionClock(
+        backend,
+        schema,
+        graphId,
+        false,
+        createRecordedInstant(4, wallTime),
+      );
+      expect(parseRecordedInstant(seeded).revision).toBe(5);
+
+      await expect(
+        advanceRevisionClock(
+          backend,
+          schema,
+          graphId,
+          false,
+          createRecordedInstant(2, wallTime),
+        ),
+      ).rejects.toThrow(/moved the graph's revision clock backward/u);
+
+      const survived = requireRecordedInstant(
+        await readGraphRecordedClock(backend, schema, graphId),
+        "expected the fenced clock to survive the stale write",
+      );
+      expect(recordedInstantRevision(survived)).toBe(5);
+
+      const advanced = await advanceRevisionClock(
+        backend,
+        schema,
+        graphId,
+        false,
+        createRecordedInstant(6, wallTime),
+      );
+      expect(parseRecordedInstant(advanced).revision).toBe(7);
     });
 
     it("rolls back live and recorded rows when create finalization fails", async () => {

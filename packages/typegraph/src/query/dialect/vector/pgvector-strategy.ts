@@ -106,6 +106,17 @@ const PGVECTOR_CAPABILITIES: VectorCapabilities = {
     mode: "iterative-scan",
     guaranteesFullPage: false,
   },
+  // The one bundled engine with a real per-search frontier: `hnsw.ef_search`
+  // sizes the HNSW candidate list. IVFFlat has no equivalent (`ivfflat.probes`
+  // is a different structure's knob and is not what `efSearch` means), and the
+  // GUC is applied with `SET LOCAL` inside the search's own transaction so
+  // concurrent searches cannot inherit each other's override.
+  searchFrontierTuning: {
+    tunable: true,
+    parameter: "hnsw.ef_search",
+    indexType: "hnsw",
+    requiresTransactionScope: true,
+  },
 };
 
 /** Whether a slot's declared index type materializes a real pgvector ANN index. */

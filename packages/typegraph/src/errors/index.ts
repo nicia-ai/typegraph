@@ -1416,6 +1416,33 @@ export class TrustedImportError extends TypeGraphError {
 }
 
 /**
+ * Thrown to a graph export stream's consumer when the caller's `AbortSignal`
+ * settled the stream instead of it reaching its end.
+ *
+ * Raised only after the export's repeatable-read snapshot has been rolled back
+ * and the serialized connection's stream lease released, so receiving it means
+ * the connection is already usable again. `cause` carries the signal's own
+ * `reason` when the caller supplied one.
+ */
+export class ExportStreamCancelledError extends TypeGraphError {
+  constructor(
+    message: string,
+    details: Readonly<Record<string, unknown>> = {},
+    options?: Readonly<{ cause?: unknown; suggestion?: string }>,
+  ) {
+    super(message, "INTERCHANGE_EXPORT_STREAM_ABORTED", {
+      details,
+      category: "user",
+      suggestion:
+        options?.suggestion ??
+        "Start a new export; the aborted one released its snapshot transaction and the connection it held.",
+      cause: options?.cause,
+    });
+    this.name = "ExportStreamCancelledError";
+  }
+}
+
+/**
  * The stable `details.code` values raised by the recorded-capture guards on a
  * history- or revision-tracked store. These are the sanctioned branch points
  * for a portable caller that must pick a transaction strategy without

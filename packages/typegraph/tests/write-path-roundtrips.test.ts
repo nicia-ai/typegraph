@@ -201,7 +201,14 @@ describe("cascade edge deletion batches", () => {
 // ============================================================
 
 describe("delete round trips", () => {
-  it("edge delete and hard delete gate, then recheck inside the transaction", async () => {
+  // The in-transaction recheck read these paths used to make is GONE: the
+  // DELETE / UPDATE statements now carry the expected kind in their own WHERE
+  // (see UpdateEdgeParams.kind), so the write is its own recheck and a second
+  // `getEdge` would re-derive a verdict the statement already enforces. The
+  // gate outside the transaction stays — it is what keeps an absent or
+  // wrong-kind edge from opening an empty transaction and from firing hooks —
+  // so each path is one read plus one write instead of two reads plus one.
+  it("edge delete and hard delete gate once; the write carries its own kind predicate", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
       const { backend, counts } = withCallCounts(rawBackend);
@@ -219,12 +226,12 @@ describe("delete round trips", () => {
 
       counts["getEdge"] = 0;
       await store.edges.links.delete(soft.id);
-      expect(counts["getEdge"]).toBe(2);
+      expect(counts["getEdge"]).toBe(1);
       expect(counts["deleteEdge"]).toBe(1);
 
       counts["getEdge"] = 0;
       await store.edges.links.hardDelete(hard.id);
-      expect(counts["getEdge"]).toBe(2);
+      expect(counts["getEdge"]).toBe(1);
       expect(counts["hardDeleteEdge"]).toBe(1);
 
       expect(await store.edges.links.findFrom(hub)).toHaveLength(0);

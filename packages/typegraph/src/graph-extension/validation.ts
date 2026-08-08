@@ -21,6 +21,7 @@ import { encodeJsonPointerSegment } from "../query/json-pointer";
 import { RESERVED_EDGE_KEYS, RESERVED_NODE_KEYS } from "../store/reserved-keys";
 import {
   compactUndefined,
+  createDataKeyedBag,
   freezeDeep,
   hasOwnKey,
   isPlainObject,
@@ -374,7 +375,10 @@ function validateNodesSection(
     return undefined;
   }
 
-  const result: Record<string, ExtensionNodeDef> = {};
+  // Kind names are DATA: `isValidKindName` admits `__proto__`, so a `{}`
+  // accumulator would answer that write with the prototype setter and drop the
+  // kind — silently, since the document is otherwise valid.
+  const result = createDataKeyedBag<ExtensionNodeDef>();
   const recorded = new Set<string>();
 
   for (const [kindName, rawNode] of Object.entries(rawNodes)) {
@@ -497,7 +501,8 @@ function validateEdgesSection(
     return undefined;
   }
 
-  const result: Record<string, ExtensionEdgeDef> = {};
+  // Kind names are DATA — see the node section for why `{}` loses `__proto__`.
+  const result = createDataKeyedBag<ExtensionEdgeDef>();
   const recorded = new Set<string>();
 
   for (const [kindName, rawEdge] of Object.entries(rawEdges)) {
@@ -1052,9 +1057,24 @@ function validatePropertiesMap(
 
   const reserved =
     ownerType === "node" ? RESERVED_NODE_KEYS : RESERVED_EDGE_KEYS;
-  const result: Record<string, ExtensionPropertyType> = {};
+  // Property names are DATA, and unrestricted apart from the reserved list and
+  // the `$` prefix — `__proto__` reaches here from any JSON document.
+  const result = createDataKeyedBag<ExtensionPropertyType>();
   for (const [propertyName, propertyValue] of Object.entries(raw)) {
     const propertyPath = `${path}/${encodeJsonPointerSegment(propertyName)}`;
+    // A property named `__proto__` is not storable: Zod accepts it in a shape
+    // but drops it from every parse result (and reports success even when the
+    // field is required), so a node written with it would silently lose the
+    // value. Refuse the declaration rather than accept a field the schema
+    // layer cannot honor.
+    if (propertyName === "__proto__") {
+      issues.push({
+        path: propertyPath,
+        message: `Property name "__proto__" is not allowed for ${ownerType} "${ownerName}": schema validation cannot carry it.`,
+        code: "RESERVED_PROPERTY_NAME",
+      });
+      continue;
+    }
     if (reserved.has(propertyName)) {
       issues.push({
         path: propertyPath,

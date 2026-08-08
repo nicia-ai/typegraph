@@ -355,6 +355,23 @@ export async function ensureRevisionOrigin(
   );
 }
 
+/**
+ * Persists a graph's clock row, SELF-FENCED against a backward move.
+ *
+ * The per-graph revision is the total order every recorded instant is read
+ * back in, so lowering it re-issues instants that were already handed out —
+ * silent corruption of recorded-time ordering, not a loud failure. The row
+ * therefore refuses the write itself instead of trusting whoever computed the
+ * value: the conflict update applies only when the proposed revision strictly
+ * advances the stored one. A caller that read the clock outside the lock and
+ * lost the race becomes a no-op here (and is refused by
+ * {@link assertRecordedClockAdvanced}) rather than a rollback of the clock.
+ *
+ * One predicate for both dialects: SQLite and PostgreSQL share the
+ * `ON CONFLICT ... DO UPDATE ... WHERE` form and the `excluded.` alias for the
+ * proposed row. The stored row is qualified by table name so neither engine has
+ * to resolve a bare `revision` against two candidate rows.
+ */
 async function writeRecordedClock(
   target: RecordedClockBackend,
   schema: SqlSchema,
@@ -367,8 +384,39 @@ async function writeRecordedClock(
       INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
       VALUES (${graphId}, ${parts.revision}, ${parts.recordedAt})
       ON CONFLICT (graph_id) DO UPDATE
-      SET revision = ${parts.revision}, recorded_at = ${parts.recordedAt}
+      SET revision = excluded.revision, recorded_at = excluded.recorded_at
+      WHERE ${schema.recordedClockTable}.revision < excluded.revision
     `,
+  );
+}
+
+/**
+ * Confirms the fenced UPSERT actually took the allocated revision.
+ *
+ * Runs only on the `previousRevision` path — the one where the caller, not this
+ * module, supplied the clock's previous value. There the fence alone is not
+ * enough: it protects the ROW, but the allocated instant has already been
+ * computed from the caller's claim and would be returned as if committed,
+ * stamping rows with an instant the clock never reached. An allocation that the
+ * row declined is refused here instead of reported. On the read-under-lock path
+ * the previous value came from this same transaction, so no re-read is needed
+ * (and none is paid for by the capture flush).
+ */
+async function assertRecordedClockAdvanced(
+  target: RecordedClockBackend,
+  schema: SqlSchema,
+  graphId: string,
+  revision: number,
+): Promise<void> {
+  const stored = await readRecordedClockParts(target, schema, graphId);
+  if (stored?.revision === revision) return;
+  throw new ConfigurationError(
+    "Recorded commit allocation was refused: the supplied previous revision was stale, so the write would have moved the graph's revision clock backward.",
+    { graphId, allocatedRevision: revision, storedRevision: stored?.revision },
+    {
+      suggestion:
+        "Read the previous revision inside the same transaction that allocates the commit (omit previousRevision), or hold the per-graph write lock across the read and the allocation.",
+    },
   );
 }
 
@@ -434,6 +482,9 @@ export async function allocateRecordedCommit(
   }
   const instant = createRecordedInstant(revision, recordedAt);
   await writeRecordedClock(target, schema, graphId, { revision, recordedAt });
+  if (previousRevision !== undefined) {
+    await assertRecordedClockAdvanced(target, schema, graphId, revision);
+  }
   return { instant, revision, recordedAt };
 }
 

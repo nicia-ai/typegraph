@@ -6,6 +6,7 @@
  */
 import { z } from "zod";
 
+import { captureWherePredicate } from "../constraints";
 import {
   getEdgeKinds,
   getNodeKinds,
@@ -18,6 +19,7 @@ import {
   type NullCheckOp,
   type UniqueConstraint,
 } from "../core/types";
+import { ConfigurationError } from "../errors";
 import {
   type GraphExtension,
   LEGACY_GRAPH_EXTENSION_VERSION,
@@ -36,6 +38,7 @@ import {
 import { computeClosuresFromOntology } from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
+import { createDataKeyedBag } from "../utils/object";
 import { sortedReplacer } from "./canonical";
 import {
   type JsonSchema,
@@ -287,7 +290,7 @@ function serializeEdgeIndexDeclaration(
 function serializeNodes<G extends GraphDef>(
   graph: G,
 ): Record<string, SerializedNodeDef> {
-  const result: Record<string, SerializedNodeDef> = {};
+  const result = createDataKeyedBag<SerializedNodeDef>();
 
   for (const kindName of getNodeKinds(graph)) {
     const registration = graph.nodes[kindName];
@@ -356,35 +359,31 @@ type PredicateBuilder = Readonly<Record<string, FieldPredicateBuilder>>;
 /**
  * Serializes a where predicate function to a JSON-serializable structure.
  *
- * The where function is called with a proxy builder that captures the
- * field and operation, which can then be serialized and later deserialized.
+ * Capture runs through `captureWherePredicate` — the same builder constraint
+ * EVALUATION and definition-time VALIDATION use — rather than a second proxy
+ * spelled here. Two builders answering the same question is how a persisted
+ * `where` drifts from the one the store enforces.
+ *
+ * No field validation happens here: `defineGraph` refuses an undeclared `where`
+ * field before a constraint can be registered (`assertWhereFieldDeclared`), and
+ * `validateGraphExtension` refuses the same thing for document-declared kinds,
+ * so by the time a graph is serialized its clauses are already declared-field
+ * clauses. Re-checking would make persistence a second owner of a decision that
+ * has one.
  */
 function serializeWherePredicate(
   whereFunction: (builder: PredicateBuilder) => SerializedPredicate,
 ): string {
-  // Create a proxy builder that captures the predicate structure
-  const builder = new Proxy(
-    {},
-    {
-      get(_target, field: string): FieldPredicateBuilder {
-        return {
-          isNull: (): SerializedPredicate => ({
-            __type: "unique_predicate",
-            field,
-            op: "isNull" as const,
-          }),
-          isNotNull: (): SerializedPredicate => ({
-            __type: "unique_predicate",
-            field,
-            op: "isNotNull" as const,
-          }),
-        };
+  const predicate = captureWherePredicate(whereFunction);
+  if (predicate === undefined) {
+    throw new ConfigurationError(
+      `A unique constraint's \`where\` callback did not return a predicate, so it cannot be persisted.`,
+      {},
+      {
+        suggestion: `Return a field predicate, e.g. \`where: (fields) => fields.someField.isNotNull()\`.`,
       },
-    },
-  );
-
-  // Call the where function to get the predicate
-  const predicate = whereFunction(builder);
+    );
+  }
 
   // Serialize the predicate structure as JSON
   return JSON.stringify({ field: predicate.field, op: predicate.op });
@@ -442,7 +441,7 @@ export function deserializeWherePredicate(
 function serializeEdges<G extends GraphDef>(
   graph: G,
 ): Record<string, SerializedEdgeDef> {
-  const result: Record<string, SerializedEdgeDef> = {};
+  const result = createDataKeyedBag<SerializedEdgeDef>();
 
   for (const kindName of getEdgeKinds(graph)) {
     const registration = graph.edges[kindName];

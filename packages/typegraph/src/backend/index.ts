@@ -208,6 +208,7 @@ export type {
   VectorIndexType,
   VectorMetric,
   VectorOperationBackend,
+  VectorSearchFrontierTuning,
   VectorSearchParams,
   VectorSearchResult,
 } from "./types";

@@ -145,6 +145,25 @@ export function buildGetEdges(
 }
 
 /**
+ * The `AND kind = ?` an edge write carries when its caller stated the kind it
+ * expects the row to already have (see {@link UpdateEdgeParams}'s `kind`).
+ *
+ * This is what makes a kind-scoped edge write SELF-VERIFYING: the identity the
+ * caller checked and the row the statement mutates are resolved by one
+ * `WHERE`, in one statement, so no concurrent `hardDelete` + recreate can
+ * re-point the id between the check and the write. An absent kind emits no
+ * predicate — the node delete cascade legitimately spans kinds.
+ *
+ * One owner: every edge write statement that accepts an expected kind builds
+ * its predicate here, so `UPDATE`, soft `DELETE`, and hard `DELETE` cannot
+ * drift into disagreeing about what "the same edge" means.
+ */
+function expectedKindPredicate(tables: Tables, kind: string | undefined): SQL {
+  if (kind === undefined) return sql.empty();
+  return sql` AND ${tables.edges.kind} = ${kind}`;
+}
+
+/**
  * Builds an UPDATE query for an edge.
  * Uses raw column names in SET clause.
  */
@@ -182,13 +201,14 @@ export function buildUpdateEdge(
   }
 
   const setClause = sql.join(setParts, sql`, `);
+  const expectedKind = expectedKindPredicate(tables, params.kind);
 
   if (params.clearDeleted) {
     return sql`
       UPDATE ${edges}
       SET ${setClause}
       WHERE ${edges.graphId} = ${params.graphId}
-        AND ${edges.id} = ${params.id}
+        AND ${edges.id} = ${params.id}${expectedKind}
       RETURNING *
     `;
   }
@@ -197,7 +217,7 @@ export function buildUpdateEdge(
     UPDATE ${edges}
     SET ${setClause}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} = ${params.id}
+      AND ${edges.id} = ${params.id}${expectedKind}
       AND ${edges.deletedAt} IS NULL
     RETURNING *
   `;
@@ -218,7 +238,7 @@ export function buildDeleteEdge(
     UPDATE ${edges}
     SET ${quotedColumn(edges.deletedAt)} = ${timestamp}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} = ${params.id}
+      AND ${edges.id} = ${params.id}${expectedKindPredicate(tables, params.kind)}
       AND ${edges.deletedAt} IS NULL
   `;
 }
@@ -280,7 +300,7 @@ export function buildHardDeleteEdge(
   return sql`
     DELETE FROM ${edges}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} = ${params.id}
+      AND ${edges.id} = ${params.id}${expectedKindPredicate(tables, params.kind)}
   `;
 }
 

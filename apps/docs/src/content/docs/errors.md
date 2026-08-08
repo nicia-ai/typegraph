@@ -496,6 +496,27 @@ try {
 }
 ```
 
+#### Definition-time unique-constraint refusals
+
+`defineGraph()` validates every node kind's `unique` constraints when the graph
+is defined, rather than leaving a broken `where` clause to surface as odd
+behavior on the first write. Two states are refused with `ConfigurationError`:
+
+- A `where` callback that **does not return a predicate** — `details` carries
+  `kind` and `constraintName`.
+- A predicate naming a **field the kind's schema does not declare** — `details`
+  adds `field` and `declaredFields`.
+
+Both carry only the class-level code `CONFIGURATION_ERROR`; match them by class,
+not by a `details.code`. The equivalent invariant on the graph-extension
+document path does have a stable code, `UNKNOWN_UNIQUE_WHERE_FIELD`.
+
+Because the check evaluates the clause, a `where` callback now runs once at
+definition time in addition to its per-write evaluations — keep it pure. The
+check applies to node kinds whose schema exposes an object shape; edge `unique`
+constraints are not validated here. Statically typed callers were already unable
+to name an undeclared field, so this bites untyped or generated definitions.
+
 #### Operational Identity guard codes
 
 Operational Identity lifecycle failures use stable `details.code` values on
@@ -512,6 +533,7 @@ Operational Identity lifecycle failures use stable `details.code` values on
 | `IDENTITY_PROFILE_MIGRATION_PENDING` | A `sameIdAcrossKinds` change (a breaking `fold`↔`ignore` flip, or disabling identity) has not been applied — either it is breaking, or `autoMigrate` is disabled. |
 | `IDENTITY_SCHEMA_MIGRATION_PENDING` | An identity-relevant ontology change is pending because `autoMigrate` is disabled. |
 | `IDENTITY_SEPARATION_VIOLATION` | The derived separation relation refused a write that would place both endpoints of a current `different` assertion in one identity class. The database-level backstop beneath identity validation; reaching it means an earlier guard let a contradiction through. |
+| `IDENTITY_TRANSACTION_NOT_WRITE_FENCED` | SQLite refused an identity write because the enclosing transaction was begun `DEFERRED` and another connection committed before it could take the writer slot. Only reachable through `store.withTransaction(externalTx)` / `store.withRecordedTransaction(externalTx)`, where the caller owns the `BEGIN` — TypeGraph's own transactions open `BEGIN IMMEDIATE` and hold the slot from the start. SQLite cannot upgrade a stale snapshot in place, so roll back and re-run the transaction, opening it with `BEGIN IMMEDIATE`. |
 | `IDENTITY_SCHEMA_CONTRADICTION` | Existing nodes or assertions contradict the proposed identity profile or ontology, or the materialized closure disagrees with the assertions it was derived from. Run `rebuildIdentityClosure(store)` to recover from a closure mismatch. |
 | `IDENTITY_IMPORT_REQUIRES_PROFILE` | An interchange document carries an `identity` section but the target graph does not have the profile enabled. |
 | `IDENTITY_MERGE_REQUIRES_PROFILE` | A branch carries identity changes but the merge target graph does not have the profile enabled. |
@@ -602,6 +624,18 @@ clients dialed at one server, or two SQLite handles on one file, are genuinely
 independent. See
 [Scaling branches and interchange](/graph-merge#scaling-branches-and-interchange)
 for which drivers are recognized as serialized.
+
+#### `ExportStreamCancelledError`
+
+An export stream whose `signal` fires settles with `ExportStreamCancelledError`
+(`code: "INTERCHANGE_EXPORT_STREAM_ABORTED"`) rather than a silent end of stream,
+so a consumer never mistakes a cancelled export for a complete one. It is thrown
+only *after* the snapshot transaction has been rolled back and the connection's
+stream lease released, so receiving it means the connection is already free.
+`details.graphId` names the exported graph and `cause` carries the signal's own
+`reason` when the caller supplied one. A signal that is already aborted refuses
+the export before any transaction is opened. See
+[Cancelling an export](/interchange#cancelling-an-export).
 
 #### Recorded-capture guard codes
 
@@ -905,3 +939,5 @@ try {
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported |
+| `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation |
+| `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired; its snapshot transaction was rolled back and the connection's stream lease released before the error was raised |

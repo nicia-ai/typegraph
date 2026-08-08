@@ -6,6 +6,7 @@
  */
 import type { KindEntity } from "../core/types";
 import { ConfigurationError } from "../errors";
+import { createDataKeyedBag } from "../utils/object";
 
 export const RESERVED_NODE_KEYS: ReadonlySet<string> = new Set([
   "id",
@@ -136,7 +137,11 @@ export function filterReservedKeys(
   props: Record<string, unknown>,
   reservedKeys: ReadonlySet<string>,
 ): Record<string, unknown> {
-  const filtered: Record<string, unknown> = {};
+  // Props keys are DATA (a trusted import writes a caller's bag verbatim, and
+  // `JSON.parse` yields `__proto__` as an own key), so the accumulator must be
+  // null-prototype — a `{}` literal would answer `filtered["__proto__"] = v`
+  // with the prototype setter and silently drop the value.
+  const filtered = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(props)) {
     if (!reservedKeys.has(key)) {
       filtered[key] = value;
