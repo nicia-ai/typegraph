@@ -9,19 +9,30 @@ PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
 DEFAULT_POSTGRES_URL="postgresql://typegraph:typegraph@localhost:5432/typegraph_test"
 
 # If POSTGRES_URL is already set (e.g., in CI), use the existing database
+EXTERNAL_POSTGRES=0
 if [[ -n "$POSTGRES_URL" ]]; then
   echo "Using existing PostgreSQL at $POSTGRES_URL"
+  EXTERNAL_POSTGRES=1
 else
-  # Start PostgreSQL locally
-  echo "Starting PostgreSQL..."
+  # Start PostgreSQL locally. `up -d --wait` is idempotent, so a container
+  # left warm by a previous run is reused as-is, and the container is left
+  # running afterwards: repeat runs skip the start/stop cycle, and one
+  # invocation's exit can no longer tear the server out from under a
+  # concurrent invocation (which shows up as a wall of ECONNREFUSED
+  # failures that reads as a code regression). Per-suite databases are
+  # dropped and recreated by each run, so a warm server carries no state
+  # between runs. Set TYPEGRAPH_POSTGRES_DOWN=1 to restore teardown, or
+  # stop it manually: docker compose -f packages/typegraph/docker-compose.yml down
+  echo "Starting PostgreSQL (reused if already running)..."
   docker compose -f "$PACKAGE_DIR/docker-compose.yml" up -d --wait
 
-  # Ensure cleanup on exit (success or failure)
-  cleanup() {
-    echo "Stopping PostgreSQL..."
-    docker compose -f "$PACKAGE_DIR/docker-compose.yml" down
-  }
-  trap cleanup EXIT
+  if [[ "${TYPEGRAPH_POSTGRES_DOWN:-}" == "1" ]]; then
+    cleanup() {
+      echo "Stopping PostgreSQL..."
+      docker compose -f "$PACKAGE_DIR/docker-compose.yml" down
+    }
+    trap cleanup EXIT
+  fi
 
   POSTGRES_URL="$DEFAULT_POSTGRES_URL"
 fi
@@ -31,22 +42,51 @@ fi
 # Each suite provisions its own database off this URL (see
 # `tests/postgres-test-database.ts`), so the schema-destructive DDL in their
 # `beforeAll`/`beforeEach` hooks can no longer reach another suite's tables.
-# Isolation therefore holds by construction, and running any subset of these
-# files in parallel — the usual way to reproduce one failure — is safe.
+# Isolation therefore holds by construction, and the suites run file-parallel.
 #
-# `--no-file-parallelism` stays for the CONNECTION BUDGET, not for isolation:
-# every worker holds at least one pool against the same server, the
-# graph-merge property fixtures keep several backends alive at once, and
-# `max_connections` is 100 ("sorry, too many clients already"). Graph-merge
-# fixtures additionally isolate per-fixture schemas.
+# The worker cap exists for the CONNECTION BUDGET, not for isolation: every
+# worker holds at least one pool against the same server, and the graph-merge
+# property fixtures keep several backends alive at once. Parallelism is
+# therefore tied to WHO provisioned the server:
+#
+# - The bundled docker-compose.yml raises max_connections to 400, which gives
+#   6 workers comfortable headroom, so the compose path defaults to
+#   min(6, cores).
+# - An externally supplied POSTGRES_URL has an UNKNOWN budget — a stock
+#   server's max_connections=100 cannot absorb six workers' pools, and "sorry,
+#   too many clients already" mid-suite is the failure mode — so it defaults
+#   to the pre-parallel behaviour of ONE worker. An owner who has budgeted
+#   their server states the cap explicitly via TYPEGRAPH_PG_MAX_WORKERS
+#   (CI does: it raises max_connections on its service container first, and
+#   the workflow sets the cap beside that step).
+#
+# Graph-merge fixtures additionally isolate per-fixture schemas.
 #
 # With POSTGRES_URL set, the graph-merge backendMatrix() gains its
 # server-Postgres entry, so those suites run on SQLite, PGlite, AND the
 # production pg driver in this lane.
-echo "Running PostgreSQL tests..."
+CORES="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+if [[ -n "${TYPEGRAPH_PG_MAX_WORKERS:-}" ]]; then
+  MAX_WORKERS="$TYPEGRAPH_PG_MAX_WORKERS"
+elif [[ "$EXTERNAL_POSTGRES" == "1" ]]; then
+  MAX_WORKERS=1
+else
+  MAX_WORKERS=$(( CORES < 6 ? CORES : 6 ))
+fi
+
+# The graph-merge and pglite vitest projects serialize their files by
+# default to keep PGlite startup latency out of the default lane; this
+# lane opts them back in only when it actually runs multi-worker (see
+# vitest.config.ts) — with one worker the opt-in would change nothing but
+# still advertise a parallelism the connection budget never approved.
+if [[ "$MAX_WORKERS" -gt 1 ]]; then
+  export TYPEGRAPH_HEAVY_FILE_PARALLELISM=1
+fi
+
+echo "Running PostgreSQL tests ($MAX_WORKERS workers)..."
 vitest_args=(
   run
-  --no-file-parallelism
+  --maxWorkers="$MAX_WORKERS"
 )
 
 if [[ -n "${VITEST_SHARD:-}" ]]; then

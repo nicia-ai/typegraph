@@ -353,12 +353,41 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The lane runs its suites file-parallel and budgets connections for
+      # it (see scripts/test-postgres.sh). The bundled docker-compose.yml
+      # raises max_connections at container start, but GitHub service
+      # containers accept no command override, so this step raises it the
+      # only way available: ALTER SYSTEM, restart, and prove the setting
+      # took before any test connects.
+      - name: Raise PostgreSQL connection budget for parallel suites
+        run: |
+          set -euo pipefail
+          container='${{ job.services.postgres.id }}'
+          docker exec "$container" psql -U typegraph -d typegraph_test -c "ALTER SYSTEM SET max_connections = 400"
+          docker restart "$container"
+          for _ in {1..30}; do
+            if docker exec "$container" pg_isready -U typegraph -d typegraph_test >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          applied="$(docker exec "$container" psql -U typegraph -d typegraph_test -tAc 'SHOW max_connections')"
+          if [[ "$applied" != "400" ]]; then
+            echo "max_connections is $applied, expected 400" >&2
+            exit 1
+          fi
+
       - name: Run PostgreSQL integration tests
         run: pnpm --filter @nicia-ai/typegraph test:postgres
         env:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
           VITEST_SHARD: ${{ matrix.shard }}
+          # An externally supplied POSTGRES_URL defaults to ONE worker because
+          # the script cannot know the server's connection budget. This job
+          # raised max_connections to 400 in the step above, so it states the
+          # cap that budget affords (the runners have 4 cores).
+          TYPEGRAPH_PG_MAX_WORKERS: 4
 
       - name: Run PostgreSQL perf sanity
         if: ${{ matrix.shard == '1/2' }}

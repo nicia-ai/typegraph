@@ -114,8 +114,11 @@ export default defineConfig({
           // These suites provision in-process Postgres instances and exercise
           // persistence plus bulk-write paths. Keep their normal startup and
           // teardown latency from competing with file-parallel unit tests or
-          // the default five-second budget.
-          fileParallelism: false,
+          // the default five-second budget. The PostgreSQL lane opts back in:
+          // it provisions an explicit server connection budget for parallel
+          // files (scripts/test-postgres.sh), and the 60s budgets below
+          // already absorb concurrent PGlite startup latency.
+          fileParallelism: process.env.TYPEGRAPH_HEAVY_FILE_PARALLELISM === "1",
           testTimeout: 60_000,
           hookTimeout: 60_000,
         },
@@ -130,7 +133,8 @@ export default defineConfig({
           // use generous budgets so normal PGlite startup/cleanup latency does
           // not masquerade as a correctness failure. Scoped to this project so
           // the rest of the package keeps default parallelism + fast timeouts.
-          fileParallelism: false,
+          // The PostgreSQL lane opts back in (see the pglite project note).
+          fileParallelism: process.env.TYPEGRAPH_HEAVY_FILE_PARALLELISM === "1",
           testTimeout: 60_000,
           hookTimeout: 60_000,
         },
