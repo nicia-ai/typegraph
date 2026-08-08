@@ -579,24 +579,26 @@ describe("a live different-assertion inside one class", () => {
       injectContradictedDifferent(result, first, second);
       expect(separationRowCount(result)).toBe(0);
 
+      // A FRESH handle, deliberately: the readiness proof is remembered per
+      // handle, and the handle above proved this relation readable BEFORE the
+      // injection, so reading through it would short-circuit the decision under
+      // test. That the database still OPENS is half the claim — a predicate
+      // counting the injected row would demand a rebuild at every open, and
+      // that rebuild aborts on the degenerate pair, turning a ledger fault into
+      // a store that cannot be constructed at all.
+      const [reopened] = await createStoreWithSchema(foldGraph, result.backend);
+      expect(await reopened.identity.areSame(first, second)).toBe(true);
+
       // Zero rows is the ONLY content this relation can hold for that
       // assertion, so it is not an unfilled relation and must not be reported
       // as one: the fault is a self-contradictory ledger, whose typed error
       // comes from the writer and the CHECK, and whose remedy is not a rebuild.
-      expect(await store.identity.areDifferent(first, third)).toBe(false);
+      expect(await reopened.identity.areDifferent(first, third)).toBe(false);
 
       // The contradiction is still caught where it is actually enforced.
       await expect(
-        store.identity.assertDifferent(first, third),
+        reopened.identity.assertDifferent(first, third),
       ).rejects.toBeInstanceOf(IdentitySeparationViolationError);
-
-      // And the database still OPENS. A predicate that counted the injected row
-      // would demand a rebuild at every open, and that rebuild aborts on the
-      // degenerate pair — turning a ledger fault into a store that cannot be
-      // constructed at all, with an error naming storage rather than the
-      // contradiction.
-      const [reopened] = await createStoreWithSchema(foldGraph, result.backend);
-      expect(await reopened.identity.areSame(first, second)).toBe(true);
     } finally {
       await result.backend.close();
     }

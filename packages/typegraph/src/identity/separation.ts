@@ -253,11 +253,80 @@ export async function isSeparated(
     orderedPair(firstClassKey, secondClassKey),
   );
   if (probe.pairSeparated) return true;
+  // The fast path, unchanged: rows exist for this graph, so the relation is not
+  // in the unfilled state and the ledger is not read at all. This statement is
+  // exactly the one the guard inherited — no proof rides along, no kind binds.
   if (probe.graphHasRows) return false;
+  // Zero rows is not an exceptional state: it is the STEADY state of every
+  // graph that holds only `same` assertions, so this is the path whose cost
+  // decides whether the guard is affordable. The proof runs at most once per
+  // Store handle.
+  if (separationReadinessProven(registry, graphId)) return false;
   if (await hasLiveDifferentAssertions(target, schema, graphId, registry)) {
     throw separationUnfilledError(graphId, schema);
   }
+  proveSeparationReadiness(registry, graphId);
   return false;
+}
+
+/**
+ * Graphs whose separation relation has already been proven readable and
+ * complete for a given registry: "the relation holds rows for this graph, or
+ * the ledger owes it none".
+ *
+ * WHY THE PROOF IS WORTH KEEPING. The state it settles is not a corner case: a
+ * graph holding only `same` assertions has zero separation rows FOREVER, so
+ * without a memo every validated pair re-asks the ledger — and that question
+ * has no index to answer it from (the ledger's partial unique index covers
+ * `valid_to IS NULL`, which the live-window predicate does not imply), so it
+ * scans. Measured on SQLite: +23% on a 50-assertion import, +32% at 200, +56%
+ * on eight concurrent `assertSame`. The memo makes the proof O(1) per handle
+ * instead of O(pairs).
+ *
+ * WHY THE REGISTRY IS THE KEY. It is the graph's kind registry — one per Store
+ * handle, and the very filter the proof was taken under. A proof is therefore
+ * reused only where the filter that produced it still applies, and two handles
+ * over the same graph hold separate registries and prove independently.
+ * A transaction target cannot be the key: every write opens its own, so a
+ * per-target memo would never be reused by the single-assertion path at all.
+ *
+ * WHY IT IS SOUND. Nothing a validated write does turns a proven relation back
+ * into an unfilled one: the writes that follow ADD separation rows (an accepted
+ * `different`), or relabel rows that already exist (an accepted `same`), and a
+ * retraction removes an assertion together with the row it produced. Across
+ * processes the ledger and the relation move together too — every sanctioned
+ * path writes both in one transaction.
+ *
+ * WHAT IT GIVES UP, stated plainly. The window this guard exists for is
+ * UNAFFECTED: a handle opened while the relation was ABSENT fails loudly on
+ * every read (it cannot read the relation at all), so it never records a proof,
+ * and its FIRST successful read — the one right after another graph's upgrade
+ * publishes the shared relation — still runs the proof and still refuses. What
+ * a kept proof no longer re-detects is a relation dropped or truncated OUT OF
+ * BAND midway through a handle's life, after that handle had already read it
+ * successfully. That is the corruption class `validateIdentity()` reports and
+ * the CHECK constraint still refuses at the next fusing write — not the
+ * storage-provisioning gap this guard was added for.
+ *
+ * Keyed weakly, exactly as the recorded-write lock memo is, so a memo entry
+ * cannot outlive the handle that earned it.
+ */
+const provenSeparationReadiness = new WeakMap<KindRegistry, Set<string>>();
+
+function separationReadinessProven(
+  registry: KindRegistry,
+  graphId: string,
+): boolean {
+  return provenSeparationReadiness.get(registry)?.has(graphId) === true;
+}
+
+function proveSeparationReadiness(
+  registry: KindRegistry,
+  graphId: string,
+): void {
+  const proven = provenSeparationReadiness.get(registry) ?? new Set<string>();
+  proven.add(graphId);
+  provenSeparationReadiness.set(registry, proven);
 }
 
 /** What one probe of the relation establishes about a pair AND its graph. */
@@ -266,6 +335,18 @@ type SeparationProbe = Readonly<{
   graphHasRows: boolean;
 }>;
 
+/**
+ * The pair lookup and "does this graph hold ANY row", in one statement.
+ *
+ * The readiness proof deliberately does NOT ride along here. Folding it in as a
+ * `CASE`-guarded scalar subquery was measured and rejected: it made the
+ * eight-concurrent-`assertSame` workload SLOWER than leaving it as a second
+ * statement (0.873 vs 0.793 ms/op), because a fresh transaction cannot reuse a
+ * memo and every statement then carries the join, the kind binds, and a bigger
+ * plan to prepare — while the graphs that DO hold rows would have paid the same
+ * binds for a subquery whose arm is never taken. Cheap on paper, not on the
+ * engine.
+ */
 async function probeSeparationPair(
   target: IdentityTarget,
   schema: SqlSchema,
@@ -508,12 +589,7 @@ async function hasLiveDifferentAssertions(
   // cartesian product keeps the statement inside the backend's bind budget for
   // a registry too large to name in one; a single chunk is the normal case and
   // the loop then runs exactly one probe.
-  const chunkSize = identityChunkSize(target, {
-    fixedParameters: OWED_SEPARATION_PROBE_PARAMETERS,
-    maxItems: MAX_REFERENCE_CHUNK_SIZE,
-    parametersPerItem: 2,
-  });
-  const kindChunks = chunk(activeKinds, chunkSize);
+  const kindChunks = chunk(activeKinds, owedProbeChunkSize(target));
   for (const first of kindChunks) {
     for (const second of kindChunks) {
       if (await probeOwedSeparation(target, schema, graphId, [first, second])) {
@@ -596,10 +672,22 @@ async function probeOwedSeparation(
           OR COALESCE(class_a.class_id, live_different.a_id)
             <> COALESCE(class_b.class_id, live_different.b_id)
         )
-      LIMIT 1
+        LIMIT 1
     `),
   );
   return rows.length > 0;
+}
+
+/**
+ * How wide the kind lists may be in ONE owed-separation statement: a registry
+ * that does not fit is asked about in chunks rather than silently truncated.
+ */
+function owedProbeChunkSize(target: IdentityTarget): number {
+  return identityChunkSize(target, {
+    fixedParameters: OWED_SEPARATION_PROBE_PARAMETERS,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
 }
 
 function liveDifferentSource(schema: SqlSchema, graphId: string): SqlFragment {
