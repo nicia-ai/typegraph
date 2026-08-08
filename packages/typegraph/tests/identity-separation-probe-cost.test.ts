@@ -20,6 +20,7 @@ import {
 } from "../src";
 import { separationRebuildRequired } from "../src/identity/separation";
 import { MAX_REFERENCE_CHUNK_SIZE } from "../src/identity/sql-target";
+import { type GraphData, importGraph } from "../src/interchange";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { type SqlFragment } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry";
@@ -40,6 +41,13 @@ const graph = defineGraph({
 interface RelationCounts {
   assertionStatements: number;
   separationStatements: number;
+  /**
+   * Statements issued by the unfilled-storage guard specifically — the ledger
+   * probes it runs when the relation holds no row for the graph. Identified by
+   * the alias the guard wraps its snapshot source in, which no other identity
+   * statement uses.
+   */
+  readinessProofStatements: number;
 }
 
 // Table names arrive as identifier chunks, not literal SQL text.
@@ -58,7 +66,11 @@ function relationCountingBackend(): Readonly<{
 }> {
   const base = createTestBackend();
   const tables = createSqlSchema(base.tableNames).tables;
-  const counts = { assertionStatements: 0, separationStatements: 0 };
+  const counts = {
+    assertionStatements: 0,
+    separationStatements: 0,
+    readinessProofStatements: 0,
+  };
 
   function count(compiled: SqlFragment): void {
     const text = fragmentText(compiled);
@@ -69,6 +81,9 @@ function relationCountingBackend(): Readonly<{
     }
     if (text.includes(tables.identitySeparation)) {
       counts.separationStatements += 1;
+    }
+    if (text.includes("live_different")) {
+      counts.readinessProofStatements += 1;
     }
   }
 
@@ -105,6 +120,7 @@ function relationCountingBackend(): Readonly<{
     reset: () => {
       counts.assertionStatements = 0;
       counts.separationStatements = 0;
+      counts.readinessProofStatements = 0;
     },
   };
 }
@@ -139,6 +155,7 @@ describe("cost of a current different-ness read", () => {
     expect(counts).toEqual({
       assertionStatements: 0,
       separationStatements: 1,
+      readinessProofStatements: 0,
     });
 
     // The negative answer costs the same probe, and so does the answer for a
@@ -150,6 +167,7 @@ describe("cost of a current different-ness read", () => {
     expect(counts).toEqual({
       assertionStatements: 0,
       separationStatements: 1,
+      readinessProofStatements: 0,
     });
   });
 
@@ -169,7 +187,89 @@ describe("cost of a current different-ness read", () => {
     expect(counts).toEqual({
       assertionStatements: 1,
       separationStatements: 1,
+      readinessProofStatements: 1,
     });
+
+    // ONCE, not once per read. The proof settles a property of the graph, not
+    // of the pair, and the ledger has no index that could answer it cheaply —
+    // so a per-read proof is what made a `same`-only workload pay for a guard
+    // whose answer never changes. The pair probe itself still runs every time.
+    reset();
+    expect(await store.identity.areDifferent(first, second)).toBe(false);
+    expect(counts).toEqual({
+      assertionStatements: 0,
+      separationStatements: 1,
+      readinessProofStatements: 0,
+    });
+  });
+});
+
+/**
+ * The workload class the guard's first shape mispriced: a graph holding ONLY
+ * `same` assertions never has a separation row, so "zero rows" is not a corner
+ * case there — it is the steady state, and every validated pair landed on the
+ * guard's ledger probe. Counted rather than timed, so the claim is structural:
+ * the proof is per HANDLE, and the count must not move when the batch does.
+ *
+ * The review's workload: an interchange import whose identity section is all
+ * `same`. Every assertion in it runs the same per-pair validation a single
+ * `assertSame` does, so the import is where a per-pair proof multiplies.
+ */
+function sameOnlyImport(run: string, count: number): GraphData {
+  const now = new Date().toISOString();
+  const ids = Array.from({ length: count }, (_, index) => `${run}-${index}`);
+  return {
+    formatVersion: "2.0",
+    exportedAt: now,
+    source: { type: "external", description: "guard cost" },
+    nodes: ids.flatMap((id) => [
+      { kind: "Person", id: `a-${id}`, properties: { name: id } },
+      { kind: "Person", id: `b-${id}`, properties: { name: id } },
+    ]),
+    edges: [],
+    identity: {
+      profile: "typegraph-identity-v1",
+      mode: "state",
+      assertions: ids.map((id) => ({
+        id: `assertion-${id}`,
+        relation: "same" as const,
+        a: { kind: "Person", id: `a-${id}` },
+        b: { kind: "Person", id: `b-${id}` },
+        validFrom: now,
+      })),
+    },
+  };
+}
+
+describe("cost of the unfilled-storage guard under same-only batches", () => {
+  it("proves readiness once per import, not once per assertion", async () => {
+    const { backend, counts, reset } = relationCountingBackend();
+    const store = await createInitializedStore(graph, backend);
+
+    reset();
+    const fiftyResult = await importGraph(store, sameOnlyImport("fifty", 50), {
+      onConflict: "error",
+      refreshStatistics: false,
+    });
+    expect(fiftyResult.success).toBe(true);
+    const fifty = counts.readinessProofStatements;
+
+    reset();
+    const twoHundredResult = await importGraph(
+      store,
+      sameOnlyImport("twoHundred", 200),
+      { onConflict: "error", refreshStatistics: false },
+    );
+    expect(twoHundredResult.success).toBe(true);
+    const twoHundred = counts.readinessProofStatements;
+
+    // ONE proof for the first import — no live `different` exists, so the cheap
+    // half of the probe settles it in a single statement — and NONE for the
+    // second, which reuses the first's proof because the same handle asked.
+    // Proving per pair reads 50 and 200 instead, which is what the review
+    // measured as +23% and +32% on these two imports.
+    expect(fifty).toBe(1);
+    expect(twoHundred).toBe(0);
   });
 });
 
