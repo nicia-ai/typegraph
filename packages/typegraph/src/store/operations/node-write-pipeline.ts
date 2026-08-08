@@ -532,14 +532,14 @@ export async function applyNodeResurrect(
 ): Promise<NodeRow> {
   const { kind, id } = args.existing;
   const props = parseRowProps(args.existing);
+  // Read, gate, write — the ordering `applyNodeUpdate` documents, for the same
+  // reason. The resurrecting UPDATE carries `deleted_at IS NOT NULL`, so a peer
+  // that revived this tombstone first makes it match zero rows; reserving the
+  // uniqueness keys BEFORE that gate left this caller holding reservations for
+  // a revival it did not perform, and the peer's own reservations are the ones
+  // the live row is entitled to. The conflict CHECK still runs first, so a key
+  // another node holds is refused before anything is written.
   await checkUniquenessConstraints(
-    uniquenessContext(ctx, backend),
-    kind,
-    id,
-    props,
-    args.uniqueConstraints,
-  );
-  await insertUniquenessEntries(
     uniquenessContext(ctx, backend),
     kind,
     id,
@@ -554,6 +554,13 @@ export async function applyNodeResurrect(
     incrementVersion: true,
     clearDeleted: true,
   });
+  await insertUniquenessEntries(
+    uniquenessContext(ctx, backend),
+    kind,
+    id,
+    props,
+    args.uniqueConstraints,
+  );
   await Promise.all([
     syncEmbeddings(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
     syncFulltext(nodeSyncContext(ctx, kind, id, backend), args.schema, props),

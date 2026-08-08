@@ -42,6 +42,37 @@
  * absent from a default PostgreSQL store. An UNCONSTRAINED edge write
  * (cardinality `many`, no convergence probe) states that it needs no fence and
  * pays for none.
+ *
+ * **A write asserts every component its verdict READ.** The identity claim
+ * above is one instance of a wider rule, and the rule is what keeps this module
+ * honest: `performEdgeUpdate` probes the row, decides from what it finds, and
+ * then writes, so anything the decision consumed and the statement does not
+ * restate is a decision that can land on a row it was never computed for.
+ * Enumerated, with where each is asserted:
+ *
+ *  - `kind` and the four endpoint components — asserted, per the paragraph
+ *    above, exactly to the extent the caller claimed them.
+ *  - `deleted_at` (live vs tombstoned, which selects the leg) — asserted as
+ *    `deleted_at IS NULL` on the in-place leg. Deliberately NOT asserted on the
+ *    resurrecting leg: `buildUpdateEdge`'s `clearDeleted` branch carries no
+ *    tombstone predicate, so an upsert whose peer revived the row first still
+ *    applies its window instead of failing. That is a convergence choice, not
+ *    an oversight — the losing writer owns the properties either way.
+ *  - `valid_from` — asserted via `expectedValidFrom` WHEN the window verdict
+ *    read it ({@link ValidityWindowVerdict}), which is when the caller stated a
+ *    `validFrom` to compare or a lone `validTo` to invert against the row's
+ *    bound. A caller that states no window reads no bound and is fenced by
+ *    nothing extra, on the same "only what it asserted" principle as endpoints.
+ *  - `props` — read as the merge base for the caller's partial update, and NOT
+ *    assertable: an edge props blob is TEXT on SQLite and `jsonb` on
+ *    PostgreSQL, and neither comparison is stable under key reordering. Bounded
+ *    instead by {@link performEdgeUpdateConverging}, which re-reads and
+ *    re-merges whenever the bound assertion catches a replaced row.
+ *  - `valid_to` of a tombstone, read by the resurrect cardinality check
+ *    (`EdgeResurrectCardinality.effectiveValidTo`) — NOT asserted, and bounded
+ *    by the constraint fence instead: that probe and its write commit under the
+ *    same per-graph mutual exclusion (paragraph above), so no peer can move the
+ *    bound between them.
  */
 import {
   createBackendOverlay,
@@ -961,7 +992,7 @@ async function performEdgeUpdate<G extends GraphDef>(
   // this re-read. A plain in-place update stores no lower bound at all, so one
   // that differs from the bound the row holds is refused rather than accepted
   // and dropped.
-  assertWritableValidityWindow(
+  const windowVerdict = assertWritableValidityWindow(
     `edge "${id}"`,
     validFrom,
     {
@@ -996,6 +1027,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     props: Record<string, unknown>;
     validFrom?: string;
     validTo?: string;
+    expectedValidFrom?: string | null;
     clearDeleted?: boolean;
   } = {
     graphId: ctx.graphId,
@@ -1003,6 +1035,17 @@ async function performEdgeUpdate<G extends GraphDef>(
     kind: input.identity.kind,
     props: validatedProps,
   };
+  // The bound the window verdict above READ, carried into the same `WHERE` as
+  // the identity components and on exactly the same terms: emitted only when
+  // the verdict consulted it, because a component the caller made no claim
+  // about must not become a predicate that refuses legitimate writes. Unlike
+  // the node side, `effectiveValidFrom` here is the row's stored bound on BOTH
+  // legs — an edge retains `valid_from` through a resurrection that does not
+  // name a new one — so there is no resurrection carve-out to make.
+  if (windowVerdict.readEffectiveLowerBound) {
+    // eslint-disable-next-line unicorn/no-null -- `expectedValidFrom` distinguishes "assert IS NULL" (null) from "assert nothing" (undefined); see UpdateEdgeParams.
+    updateParams.expectedValidFrom = existing.valid_from ?? null;
+  }
   if (input.identity.fromKind !== undefined) {
     updateParams.fromKind = input.identity.fromKind;
   }
@@ -1024,6 +1067,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     target,
     id,
     input.identity,
+    updateParams.expectedValidFrom !== undefined,
     () => target.updateEdge(updateParams),
   );
 
@@ -1057,6 +1101,7 @@ async function withUnmatchedEdgeUpdateRefusal<G extends GraphDef>(
   target: GraphBackend | TransactionBackend,
   id: string,
   expected: EdgeIdentityExpectation,
+  assertedValidFrom: boolean,
   write: () => Promise<BackendEdgeRow>,
 ): Promise<BackendEdgeRow> {
   try {
@@ -1071,12 +1116,89 @@ async function withUnmatchedEdgeUpdateRefusal<G extends GraphDef>(
         edgeIdentityFromRow(current),
         "update",
       );
+      // Identity still matches, so the predicate that stopped matching was the
+      // validity bound this update asserted — the row was replaced by an
+      // incarnation whose window the verdict never saw. That is not "no such
+      // edge", and reporting it as one would be a lie about a row that is
+      // sitting right there; it is a stale target, and the caller above
+      // converges on the row that is actually present.
+      if (assertedValidFrom && current.deleted_at === undefined) {
+        throw new EdgeUpdateTargetMoved(expected.kind, id);
+      }
     }
     // The row is gone, or still this edge but tombstoned by a concurrent
     // delete (a non-resurrecting UPDATE carries `deleted_at IS NULL`). Either
     // way the edge this update was for no longer exists to update.
     throw new EdgeNotFoundError(expected.kind, id);
   }
+}
+
+/**
+ * Internal signal: the edge is still there and still this edge, but the
+ * validity bound the update asserted no longer holds.
+ *
+ * Module-private and never returned to a caller, exactly like
+ * {@link EdgeConvergenceRaced}. {@link performEdgeUpdateConverging} is the only
+ * code that catches it, and it does so to re-read and re-judge rather than to
+ * report anything.
+ */
+class EdgeUpdateTargetMoved extends Error {
+  constructor(kind: string, id: string) {
+    super(
+      `The ${kind} edge "${id}" was replaced between this update's read and ` +
+        `its write; re-resolving it. This is internal and is never returned ` +
+        `to a caller.`,
+    );
+    this.name = "EdgeUpdateTargetMoved";
+  }
+}
+
+/**
+ * How many probe-and-write rounds an edge update gets before it stops trying to
+ * converge. See {@link NODE_UPDATE_ATTEMPTS}' counterpart reasoning: one retry
+ * absorbs a single concurrent recreate, and the bound stops a peer that keeps
+ * replacing the row from livelocking this writer.
+ */
+const EDGE_UPDATE_ATTEMPTS = 2;
+
+/**
+ * Runs {@link performEdgeUpdate} and CONVERGES on the row that is actually
+ * there when the asserted validity bound stopped matching.
+ *
+ * The retry re-reads, re-merges the caller's partial props over the CURRENT
+ * props, and re-judges the window against the CURRENT bound — so a stated
+ * window that no longer fits is refused with the same typed `ValidationError`
+ * the first attempt would have raised, and one that still fits is applied to
+ * the row that really exists. Refusing instead would make the fence a behavior
+ * regression for every writer that loses a benign race.
+ *
+ * Only the bound-mismatch case retries. A vanished row, a tombstoned row, and
+ * an id that now resolves to a different edge are all terminal verdicts that
+ * {@link withUnmatchedEdgeUpdateRefusal} has already turned into the typed
+ * errors this operation has always thrown.
+ */
+async function performEdgeUpdateConverging<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  input: UpsertUpdateEdgeInput,
+  target: GraphBackend | TransactionBackend,
+  options?: Readonly<{ clearDeleted?: boolean }>,
+): Promise<Edge> {
+  for (let attempt = 1; attempt <= EDGE_UPDATE_ATTEMPTS; attempt += 1) {
+    try {
+      return await performEdgeUpdate(ctx, input, target, options);
+    } catch (error) {
+      if (!(error instanceof EdgeUpdateTargetMoved)) throw error;
+      if (attempt === EDGE_UPDATE_ATTEMPTS) {
+        throw new DatabaseOperationError(
+          `Edge update for "${input.id}" could not be applied to a stable row after ${EDGE_UPDATE_ATTEMPTS} attempts: the row was replaced between each read and its write. A concurrent writer is replacing this edge faster than it can be read; serialize the writers, or retry.`,
+          { operation: "update", entity: "edge" },
+          { cause: error },
+        );
+      }
+    }
+  }
+  // Unreachable: the loop either returns or throws on its last attempt.
+  throw new EdgeNotFoundError(input.identity.kind, input.id);
 }
 
 /**
@@ -1115,7 +1237,7 @@ export async function executeEdgeUpdate<G extends GraphDef>(
   const opContext = ctx.createOperationContext("update", "edge", gate.kind, id);
 
   return runHookedWriteOperation(ctx, opContext, backend, (target) =>
-    performEdgeUpdate(ctx, input, target),
+    performEdgeUpdateConverging(ctx, input, target),
   );
 }
 
@@ -1173,7 +1295,7 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
           resurrectCardinality.effectiveValidTo,
         );
       }
-      return performEdgeUpdate(ctx, input, target, options);
+      return performEdgeUpdateConverging(ctx, input, target, options);
     },
     {
       // An in-place props update re-derives no constraint verdict: endpoints

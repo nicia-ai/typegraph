@@ -2,6 +2,47 @@
  * Node Operations for Store
  *
  * Handles node CRUD operations: create, update, delete.
+ *
+ * ## A write asserts every component its verdict READ
+ *
+ * `performNodeUpdate` is a probe-and-write pair: it reads the row, decides from
+ * what it finds, and then writes. Under PostgreSQL READ COMMITTED a concurrent
+ * `hardDelete` + recreate re-resolves `(graph_id, kind, id)` between the two,
+ * so anything the decision consumed and the statement does not restate is a
+ * decision that can land on a row it was never computed for — and the write
+ * reports success. Every value read off the probed row, and where it is
+ * asserted:
+ *
+ *  - `kind` / `id` — the write key itself, restated in every UPDATE's `WHERE`.
+ *  - `deleted_at` (which leg runs, and whether to sample a resurrection
+ *    instant) — asserted as `deleted_at IS NULL` on the in-place leg and
+ *    `IS NOT NULL` on the resurrecting one, so each leg can only hit a row in
+ *    the state it was chosen for.
+ *  - `valid_from` — asserted via `UpdateNodeParams.expectedValidFrom` WHEN the
+ *    window verdict read it ({@link ValidityWindowVerdict}): the caller stated
+ *    a `validFrom` to compare against the row's, or a lone `validTo` to invert
+ *    against it. A plain `update({ props })` states no window, so the verdict
+ *    is independent of the row's bound and the write carries no predicate for
+ *    it — the same "only what it asserted" rule the edge identity components
+ *    follow, and for the same reason: inventing a predicate for a component the
+ *    caller made no claim about refuses writes that are legitimate. A
+ *    resurrection is judged against the write instant rather than the row's
+ *    bound, so it asserts none either; its own tombstone predicate fences it.
+ *  - `props` — read twice, as the merge base for the caller's partial update
+ *    and as the `oldProps` side of the uniqueness diff — and NOT assertable: a
+ *    props blob is TEXT on SQLite and `jsonb` on PostgreSQL, and neither
+ *    comparison is stable under key reordering. Bounded instead, two ways: the
+ *    sidecar writes are gated on the primary UPDATE's rowcount (see
+ *    `applyNodeUpdate`), and
+ *    {@link performNodeUpdateWithResurrectionRecovery} re-reads and re-merges
+ *    whenever a predicate catches a replaced row.
+ *  - the uniques-table row behind `getOrCreateByConstraint` — read to resolve
+ *    WHICH node the key names. Not assertable by the node UPDATE (it is a
+ *    different table); bounded by the constraint write fence, which makes the
+ *    probe and the write it authorizes commit under one per-graph mutual
+ *    exclusion. Its `deleted_at`, however, is NOT the owner of "does this write
+ *    resurrect" — both the single and bulk paths read that from the node row
+ *    they are about to write, because one decision with two owners drifts.
  */
 import {
   createBackendOverlay,
@@ -899,7 +940,7 @@ async function performNodeUpdate<G extends GraphDef>(
   // A resurrection STORES a stated `validFrom` (it rewrites the whole window);
   // an in-place update never does, so one that differs from the row's stored
   // bound is refused rather than accepted and dropped.
-  assertWritableValidityWindow(
+  const windowVerdict = assertWritableValidityWindow(
     `${kind} "${id}"`,
     validFrom,
     resurrectionInstant === undefined ?
@@ -921,6 +962,26 @@ async function performNodeUpdate<G extends GraphDef>(
     uniqueConstraints: registration.unique ?? [],
     ...(effectiveValidFrom !== undefined && { validFrom: effectiveValidFrom }),
     ...(validTo !== undefined && { validTo }),
+    // The bound the verdict above READ, carried into the UPDATE's own `WHERE`
+    // so the row this writes is the row that was judged. Two conditions, and
+    // both matter:
+    //
+    //  - the verdict consulted the effective bound at all. A plain
+    //    `update({ props })` states no window, reads no bound, and stays
+    //    unfenced by this — the same rule `UpdateEdgeParams`'s identity
+    //    components follow, for the same reason: a component the caller made no
+    //    claim about must not become a predicate that refuses legitimate
+    //    writes.
+    //  - the effective bound WAS the row's stored one. On a resurrection the
+    //    guard is handed `resurrectionInstant` instead, so the verdict never
+    //    looked at `existing.valid_from` and asserting it would fence on a
+    //    value nothing read. That leg carries `deleted_at IS NOT NULL` as its
+    //    own fence and converges through the recovery below.
+    ...(resurrectionInstant === undefined &&
+      windowVerdict.readEffectiveLowerBound && {
+        // eslint-disable-next-line unicorn/no-null -- `expectedValidFrom` distinguishes "assert IS NULL" (null) from "assert nothing" (undefined); see UpdateNodeParams.
+        expectedValidFrom: existing.valid_from ?? null,
+      }),
   };
 
   // A resurrecting upsert (clearDeleted) may target a tombstoned row; a plain
@@ -943,6 +1004,49 @@ async function performNodeUpdate<G extends GraphDef>(
   return rowToNode(row);
 }
 
+/**
+ * How many probe-and-write rounds a node update gets before it stops trying to
+ * converge. One retry: enough to absorb a single concurrent recreate, bounded
+ * so a peer that keeps replacing the row cannot livelock this caller (the same
+ * shape, and the same reasoning, as `getOrCreateByEndpoints`'s bounded loop).
+ */
+const NODE_UPDATE_ATTEMPTS = 2;
+
+/**
+ * Runs a node update and CONVERGES on the row that is actually there when a
+ * predicated UPDATE matches nothing.
+ *
+ * `performNodeUpdate` is a probe-and-write pair, and both of the predicates its
+ * statement carries beyond `(graph_id, kind, id)` can stop matching between the
+ * two under PostgreSQL READ COMMITTED:
+ *
+ *  - `deleted_at IS NOT NULL` on the resurrecting leg — a peer resurrected the
+ *    tombstone first;
+ *  - `expectedValidFrom` on the in-place leg — a peer hard-deleted and
+ *    recreated the row, so the bound this update's window verdict was computed
+ *    against is gone.
+ *
+ * Both are the SAME event from the caller's side: the row moved under a
+ * decision already made. Neither may surface as the zero-row
+ * `DatabaseOperationError` the backend raises, which is an internal sentinel
+ * and names nothing a caller can act on. So this re-reads and re-derives:
+ *
+ *  - row gone, or tombstoned where the leg needs a live one — `NodeNotFoundError`,
+ *    exactly what the pre-write probe would have thrown;
+ *  - row live — retry the whole thing. The retry re-reads, re-merges the
+ *    caller's partial props over the CURRENT props, and re-judges the window
+ *    against the CURRENT bound, so a stated window that no longer fits is
+ *    refused with the same typed `ValidationError` the first attempt would have
+ *    raised. A resurrection that lost its race converges to an ordinary update,
+ *    which is upsert's documented semantics: the peer owns the new window, this
+ *    late writer owns the properties — and a caller that STATED a lower bound
+ *    for the resurrection it lost is therefore refused rather than silently
+ *    updated without it.
+ *
+ * Retrying rather than refusing is what keeps the fence from being a behavior
+ * regression: the losing writer still lands its properties, on the row that is
+ * really there, judged against the bounds that row really carries.
+ */
 async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
@@ -950,23 +1054,55 @@ async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
   lock: GraphWriteLock,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
-  try {
-    return await performNodeUpdate(ctx, input, target, lock, options);
-  } catch (error) {
-    if (!options?.clearDeleted || !isNodeUpdateNoRowError(error)) throw error;
-
-    // Another writer may resurrect the tombstone after this upsert's probe.
-    // Upsert still owns the requested properties, so converge by re-reading
-    // the now-live row and applying an ordinary update instead of exposing
-    // the resurrection UPDATE's internal zero-row sentinel. The peer owns the
-    // new validity window: this late writer updates its props and leaves the
-    // peer's validFrom alone, matching upsert's documented update semantics —
-    // so a caller that STATED a lower bound for the resurrection it lost is
-    // refused here rather than silently updated without it.
-    const current = await target.getNode(ctx.graphId, input.kind, input.id);
-    if (current === undefined || current.deleted_at !== undefined) throw error;
-    return performNodeUpdate(ctx, input, target, lock);
+  for (let attempt = 1; attempt <= NODE_UPDATE_ATTEMPTS; attempt += 1) {
+    try {
+      // Only the FIRST attempt may resurrect: reaching a retry means the row is
+      // live, and an ordinary update is what converges on it.
+      return await performNodeUpdate(
+        ctx,
+        input,
+        target,
+        lock,
+        attempt === 1 ? options : undefined,
+      );
+    } catch (error) {
+      if (!isNodeUpdateNoRowError(error) || attempt === NODE_UPDATE_ATTEMPTS) {
+        throw nodeUpdateRaceError(input, error);
+      }
+      const current = await target.getNode(ctx.graphId, input.kind, input.id);
+      if (current === undefined || current.deleted_at !== undefined) {
+        throw new NodeNotFoundError(input.kind, input.id);
+      }
+    }
   }
+  // Unreachable: the loop either returns or throws on its last attempt.
+  throw new NodeNotFoundError(input.kind, input.id);
+}
+
+/**
+ * The error a caller sees when a node update exhausts its attempts, or fails
+ * with something that is not the zero-row sentinel.
+ *
+ * A non-sentinel error passes through untouched. The sentinel does not: it says
+ * "the statement matched nothing", which after {@link NODE_UPDATE_ATTEMPTS}
+ * rounds means a peer is replacing this row faster than this writer can read
+ * it. That is a contention fact, and it is reported as one rather than as a
+ * missing node — the node is present, it just is not staying still.
+ */
+function nodeUpdateRaceError(
+  input: UpsertUpdateNodeInput,
+  error: unknown,
+): unknown {
+  if (!isNodeUpdateNoRowError(error)) return error;
+  return new DatabaseOperationError(
+    `Node update for ${input.kind} "${input.id}" could not be applied to a stable row after ${NODE_UPDATE_ATTEMPTS} attempts: the row was removed and recreated between each read and its write. A concurrent writer is replacing this node faster than it can be read; serialize the writers, or retry.`,
+    {
+      operation: "update",
+      entity: "node",
+      attempted: [{ kind: input.kind, id: input.id }],
+    },
+    { cause: error },
+  );
 }
 
 // ============================================================
@@ -2810,7 +2946,6 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       nodeId: string;
       concreteKind: string;
       validatedProps: Record<string, unknown>;
-      isSoftDeleted: boolean;
     }[] = [];
     const duplicateOf: { index: number; sourceIndex: number }[] = [];
     const seenKeys = new Map<string, number>();
@@ -2838,7 +2973,6 @@ export async function executeNodeBulkGetOrCreateByConstraint<
           nodeId: existing.node_id,
           concreteKind: existing.concrete_kind,
           validatedProps,
-          isSoftDeleted: existing.deleted_at !== undefined,
         });
       }
     }
@@ -2864,8 +2998,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
 
     // Step 5: Handle existing nodes (fetch/update/resurrect)
     for (const entry of toFetch) {
-      const { index, concreteKind, validatedProps, isSoftDeleted, nodeId } =
-        entry;
+      const { index, concreteKind, validatedProps, nodeId } = entry;
 
       const existingRow = await backend.getNode(
         ctx.graphId,
@@ -2883,6 +3016,15 @@ export async function executeNodeBulkGetOrCreateByConstraint<
         results[index] = { node, action: "created" };
         continue;
       }
+
+      // Read from the NODE ROW this loop just fetched, not from the uniques row
+      // the batch probe captured back in step 2 — the single-item path has
+      // always derived it here (see `executeNodeGetOrCreateByConstraint`), and
+      // one decision with two owners drifts. The uniques copy is also the
+      // staler of the two: step 4's creates run between the probe and this
+      // read, and a peer can soft-delete or resurrect the node in that window.
+      // Whether this write RESURRECTS has to come from the row it will target.
+      const isSoftDeleted = existingRow.deleted_at !== undefined;
 
       if (isSoftDeleted || ifExists === "update") {
         const node = await executeNodeUpsertUpdate(

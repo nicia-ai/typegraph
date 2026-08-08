@@ -360,6 +360,31 @@ export type UpdateValidityLowerBound = Readonly<{
 }>;
 
 /**
+ * What {@link assertWritableValidityWindow} reports back about the verdict it
+ * just reached — not about the window, but about what the verdict DEPENDED ON.
+ *
+ * THE SINGLE OWNER of the question "must this write assert the row's stored
+ * lower bound?". A write asserts every component its verdict read (see
+ * `UpdateNodeParams.expectedValidFrom`), and whether the row's bound is such a
+ * component is decided by which branches the guard actually took — so the
+ * answer is returned by the guard itself rather than re-derived beside it. A
+ * second spelling of these conditions would drift from the guard the first time
+ * one of them moved, and the drift would be invisible: too FEW assertions is a
+ * silent race, too many is a refusal of writes that are legitimate.
+ */
+export type ValidityWindowVerdict = Readonly<{
+  /**
+   * True when the verdict consulted the row's stored `valid_from` — either by
+   * comparing a stated bound against it, or by inverting a lone `validTo`
+   * against it. False when the caller named no window at all, or when the write
+   * applies the bound it stated: in those cases the verdict is independent of
+   * what the row holds, and predicating the write on it would refuse a
+   * concurrent recreate that changed nothing this decision looked at.
+   */
+  readEffectiveLowerBound: boolean;
+}>;
+
+/**
  * Refuses a stated `validFrom` the write would not apply.
  *
  * A live row's lower bound is HISTORY: it records when the row started being
@@ -434,6 +459,8 @@ function assertStatedLowerBoundIsApplicable(
  * @param validFrom - The caller's explicit lower bound, if any.
  * @param lowerBound - What the write will do with the row's lower bound; see
  *   {@link UpdateValidityLowerBound}.
+ * @returns {@link ValidityWindowVerdict} — whether this verdict READ the row's
+ *   stored bound, which the write must then assert.
  * @throws ValidationError with issue code {@link INVERTED_VALIDITY_WINDOW_CODE}
  *   or {@link IMMUTABLE_VALIDITY_LOWER_BOUND_CODE}
  */
@@ -442,20 +469,37 @@ export function assertWritableValidityWindow(
   validFrom: string | undefined,
   lowerBound: UpdateValidityLowerBound,
   validTo: string | undefined,
-): void {
+): ValidityWindowVerdict {
   assertOrderedValidityWindow(subject, validFrom, validTo);
-  if (validFrom !== undefined && !lowerBound.appliesStatedValidFrom) {
+
+  // The stated bound is COMPARED against the stored one only here — a write
+  // that applies what the caller stated has nothing to compare it to.
+  const comparedStatedBound =
+    validFrom !== undefined && !lowerBound.appliesStatedValidFrom;
+  if (comparedStatedBound) {
     assertStatedLowerBoundIsApplicable(
       subject,
       validFrom,
       lowerBound.effectiveValidFrom,
     );
   }
+
   assertEffectiveValidityLowerBound(
     subject,
     validFrom ?? lowerBound.effectiveValidFrom,
     validTo,
   );
+  // ...and the inversion check falls back to the row's bound only when the
+  // caller named an end without a start. Note this is true whether or not the
+  // row HAS a bound: "no lower bound to invert against" is itself a reading of
+  // the row, and a recreate that gives the row one changes the answer.
+  const comparedStoredBoundAgainstEnd =
+    validFrom === undefined && validTo !== undefined;
+
+  return {
+    readEffectiveLowerBound:
+      comparedStatedBound || comparedStoredBoundAgainstEnd,
+  };
 }
 
 /**
