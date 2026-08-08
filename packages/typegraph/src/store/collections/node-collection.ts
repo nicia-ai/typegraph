@@ -104,7 +104,13 @@ function evaluateNodePredicate<N extends NodeType>(
     {
       get(_target, property) {
         if (typeof property === "symbol") return;
-        if (property === "then" || property === "toJSON") return;
+        // No interop exemption for `then` / `toJSON`. This accessor's contract
+        // is that EVERY name is a field — the typed signature offers the
+        // schema's fields, including ones legally named after a protocol hook,
+        // and refusing those names made a declared field unaddressable. The
+        // exemption is also unnecessary here: a field builder is an object,
+        // never a function, so `await` sees a non-callable `then` and
+        // `JSON.stringify` a non-callable `toJSON`, and neither is invoked.
         if (
           property === "id" ||
           property === "kind" ||

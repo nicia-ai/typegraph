@@ -9,7 +9,7 @@
 import type { KindEntity } from "../../core/types";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../../system-fields";
 import { compareStrings } from "../../utils/compare";
-import { createDataKeyedBag } from "../../utils/object";
+import { createDataKeyedBag, isInteropProbeKey } from "../../utils/object";
 import { mergeEdgeKinds, type SelectiveField, type ValueType } from "../ast";
 import { type QueryBuilderState } from "../builder/types";
 import {
@@ -171,15 +171,15 @@ function createNodeTrackingProxy(
     {
       get: (_, property: string | symbol) => {
         if (typeof property === "symbol") return;
-        if (property === "then") return;
-        // `toJSON` is exempted so an incidental `JSON.stringify` of the
-        // tracking context does not record a phantom field. It is NOT on
-        // `Object.prototype`, but it earns the same rule as the members that
-        // are: a DECLARED field named `toJSON` is stored data, and exempting
-        // it would leave it untracked — the selective projection would omit
-        // the column the select callback just read.
+        // The interop probes are exempted so an incidental `await` or
+        // `JSON.stringify` of the tracking context does not record a phantom
+        // field. Neither is on `Object.prototype`, but both earn the same rule
+        // as the members that are: a DECLARED field named `then` or `toJSON` is
+        // stored data, and exempting it would leave it untracked — the
+        // selective projection would omit the column the select callback just
+        // read, and the result mapper would have no own key to hand back.
         if (
-          property === "toJSON" &&
+          isInteropProbeKey(property) &&
           !options.schemaIntrospector.hasDeclaredField(kindNames, property)
         ) {
           return;
@@ -228,11 +228,10 @@ function createEdgeTrackingProxy(
     {
       get: (_, property: string | symbol) => {
         if (typeof property === "symbol") return;
-        if (property === "then") return;
-        // See `createNodeTrackingProxy`: a DECLARED `toJSON` is stored data and
-        // must be tracked, not exempted.
+        // See `createNodeTrackingProxy`: a DECLARED `then` / `toJSON` is stored
+        // data and must be tracked, not exempted.
         if (
-          property === "toJSON" &&
+          isInteropProbeKey(property) &&
           !options.schemaIntrospector.hasDeclaredEdgeField(
             edgeKindNames,
             property,

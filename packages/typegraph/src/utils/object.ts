@@ -96,6 +96,40 @@ export function createDataKeyedBag<T>(): Record<string, T> {
 }
 
 /**
+ * The two property names JavaScript itself probes on an arbitrary object:
+ * `then` (the thenable check promise adoption performs) and `toJSON` (the hook
+ * `JSON.stringify` looks for). A proxy standing in for data resolves them to
+ * `undefined` so it is not mistaken for a promise and does not break
+ * serialization.
+ */
+const INTEROP_PROBE_KEYS: ReadonlySet<string> = new Set(["then", "toJSON"]);
+
+/**
+ * True if `key` is a name the language probes for a protocol rather than a name
+ * a caller asked for. The single owner of WHICH names those are — the companion
+ * to, not a substitute for, the question of whether the name is data
+ * (`hasOwnKey` for a materialized bag, `SchemaIntrospector.hasDeclaredField`
+ * for a proxy whose key set is the schema).
+ *
+ * **This predicate is a fallback, never a short-circuit.** `then` and `toJSON`
+ * are ordinary identifiers: `z.object({ toJSON: z.string() })` is a legal
+ * schema, and such a field is stored, validated, and round-tripped as data like
+ * any other. A trap that answers `undefined` for these names BEFORE consulting
+ * the data it fronts therefore drops a declared field — the read side of the
+ * same mistake `hasOwnKey` fixes on the write side. Ask the data question
+ * first; reach for this only once the answer is "not data", where resolving to
+ * `undefined` keeps `await` and `JSON.stringify` working on a partial object.
+ *
+ * Returning stored data for an own `then` is safe as well as correct: props
+ * come from a JSON column, so the value can never be callable, and the thenable
+ * check ignores a non-callable `then` exactly as it does on the plain objects
+ * the non-selective path returns.
+ */
+export function isInteropProbeKey(key: string): boolean {
+  return INTEROP_PROBE_KEYS.has(key);
+}
+
+/**
  * Builds an object dropping any keys whose value is `undefined`.
  *
  * Lets callers construct discriminated-union members and `defineNode` /

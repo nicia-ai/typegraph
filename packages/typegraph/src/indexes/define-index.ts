@@ -26,7 +26,7 @@ import {
 } from "../query/schema-introspector";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../system-fields";
 import { fnv1aBase36 } from "../utils/hash";
-import { hasOwnKey } from "../utils/object";
+import { hasOwnKey, isInteropProbeKey } from "../utils/object";
 import { getNodeScopeColumns } from "./compiler";
 import {
   type EdgeIndexConfig,
@@ -415,7 +415,10 @@ function createNodeWhereBuilder<N extends NodeType>(
     };
   }
 
-  return createWhereProxy<NodeIndexWhereBuilder<N>>((key) => getOperand(key));
+  return createWhereProxy<NodeIndexWhereBuilder<N>>(
+    (key) => getOperand(key),
+    (key) => system.has(key) || hasOwnKey(shape, key),
+  );
 }
 
 function createEdgeWhereBuilder<E extends AnyEdgeType>(
@@ -451,11 +454,15 @@ function createEdgeWhereBuilder<E extends AnyEdgeType>(
     };
   }
 
-  return createWhereProxy<EdgeIndexWhereBuilder<E>>((key) => getOperand(key));
+  return createWhereProxy<EdgeIndexWhereBuilder<E>>(
+    (key) => getOperand(key),
+    (key) => system.has(key) || hasOwnKey(shape, key),
+  );
 }
 
 function createWhereProxy<TBuilder extends object>(
   getOperand: (key: string) => IndexWhereOperand,
+  declaresField: (key: string) => boolean,
 ): TBuilder {
   // An ORDINARY object target, even though the target is never read: a proxy's
   // target is what `instanceof`, `Object.getPrototypeOf` and every other
@@ -466,8 +473,14 @@ function createWhereProxy<TBuilder extends object>(
   return new Proxy({} as TBuilder, {
     get: (_target, property: string | symbol) => {
       if (typeof property !== "string") return;
-      if (property === "then") return;
-      if (property === "toJSON") return;
+
+      // A DECLARED field wins over the interop exemption, for the reason
+      // `isInteropProbeKey` documents: `then` and `toJSON` are legal schema
+      // field names, and refusing them here left a partial index unable to
+      // reference a field the schema declares. Only an UNDECLARED probe
+      // resolves to `undefined`, keeping the builder safe to await or
+      // stringify.
+      if (isInteropProbeKey(property) && !declaresField(property)) return;
 
       const operand = getOperand(property);
       return createIndexWhereFieldBuilder(operand);

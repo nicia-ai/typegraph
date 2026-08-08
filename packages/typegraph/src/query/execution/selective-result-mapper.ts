@@ -8,7 +8,7 @@
 
 import type { KindEntity } from "../../core/types";
 import { compareStrings, hasOwnKey, normalizePath } from "../../utils";
-import { createDataKeyedBag } from "../../utils/object";
+import { createDataKeyedBag, isInteropProbeKey } from "../../utils/object";
 import { mergeEdgeKinds, type SelectiveField, type Traversal } from "../ast";
 import type {
   AliasMap,
@@ -399,16 +399,29 @@ function createGuardedProxy(
           return Reflect.get(object, property, receiver) as unknown;
         }
 
-        if (property === "then" || property === "toJSON") {
-          return;
-        }
-
-        // Own keys only: the projected row's keys are data, so `in` here would
-        // answer for `Object.prototype` members the row does not carry. Behavior
-        // is unchanged — such a key falls through to the prototype branch below
-        // and resolves the same way — but the two cases are now distinct.
+        // Own keys FIRST — before any protocol-name exemption. The projected
+        // row's keys are data, so `in` here would answer for `Object.prototype`
+        // members the row does not carry, and a name-identity short-circuit
+        // ahead of this branch would answer for a field the row DOES carry.
+        // Smart selection must be indistinguishable from the full mapper, whose
+        // plain objects hand back an own `then` / `toJSON` like any other
+        // property; a schema may declare either name, and such a field survives
+        // validation and the JSON round-trip as ordinary data. The boundary
+        // spread above preserves that: it copies own properties with
+        // CreateDataProperty, so every projected field — `__proto__` included —
+        // is still an own key of the target this branch reads.
         if (hasOwnKey(object, property)) {
           return Reflect.get(object, property, receiver);
+        }
+
+        // Reached only once the row is known NOT to carry the key: resolve the
+        // language's own probes to `undefined` so a partially projected row is
+        // not mistaken for a thenable by `await` and `JSON.stringify` still
+        // works on it. Returning stored data above is safe for `then` because
+        // props decode from JSON and can never be callable — the thenable check
+        // ignores a non-callable `then`, exactly as it does on the full path.
+        if (isInteropProbeKey(property)) {
+          return;
         }
 
         // Deliberately `in`, NOT hasOwnKey: this branch's whole purpose is to
