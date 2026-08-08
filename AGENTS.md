@@ -262,7 +262,7 @@ describe("Feature", () => {
 
 # Contract Discipline
 
-Two rules, each distilled from a recurring class of real defects:
+Three rules, each distilled from a recurring class of real defects:
 
 - **One predicate, one owner.** A comparison, classification, or validation
   decision consumed by more than one path must be a single exported function
@@ -277,6 +277,18 @@ Two rules, each distilled from a recurring class of real defects:
   API lying to its caller. Audit every option a change touches: each one is
   either threaded to the write that honors it or refused on the path that
   cannot.
+- **A changed contract re-audits its consumers.** When a change alters what a
+  shared function throws, returns, orders, or asserts, enumerate its callers
+  and disposition each against the new semantics before merging — verifying
+  the changed code against the one consumer you had in mind is not enough.
+  Reordering sidecar writes after their gate was correct for store callers
+  (a throw aborts the transaction) and turned import's catch-per-row into a
+  partial commit; a guard that began returning "what I read" was consumed by
+  the store paths while import kept asserting unconditionally. Both defects
+  lived in callers the fix never touched. When the contract is a decision,
+  prefer returning the decision itself (the predicate, the fence, the plan)
+  over a flag a caller re-derives it from — a consumer that cannot spell its
+  own version cannot drift.
 
 # Error Handling
 
