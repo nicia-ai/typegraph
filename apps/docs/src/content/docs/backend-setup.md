@@ -929,10 +929,14 @@ Unconstrained writes on those backends are untouched and keep working exactly as
 before: a `cardinality: "many"` edge created, updated and deleted; any node
 delete, including one whose kind participates in a disjointness axiom (a delete
 re-derives no cross-kind verdict); a node whose uniques are all `scope: "kind"`;
-and a `getOrCreateByEndpoints` that *finds* an existing edge, or resurrects a
-`many` one — that resurrection is an id-keyed `UPDATE` that re-derives nothing.
-The bulk `getOrCreateByEndpoints` form fences its whole batch, so it refuses on
-those backends whatever the outcome would have been.
+and a `getOrCreateByEndpoints` that *finds* an existing edge in the default
+`ifExists: "return"` mode, or resurrects a `many` one — that resurrection is an
+id-keyed `UPDATE` that re-derives nothing. With `coalesceUnchangedUpserts`
+enabled, confirming that a single `ifExists: "update"` endpoint replay is
+unchanged requires the endpoint match-key convergence fence and therefore
+refuses on these backends. The bulk `getOrCreateByEndpoints` form fences its
+whole batch, so it refuses on those backends whatever the outcome would have
+been.
 
 ### SQLite ↔ PostgreSQL parity
 

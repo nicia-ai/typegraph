@@ -417,6 +417,9 @@ export type BaseStoreOptions = Readonly<{
    * preserving its original `validFrom` / `updatedAt` / `version`. An endpoint
    * get-or-create reports action `"found"` when its requested update is
    * coalesced; `"updated"` always means an UPDATE actually ran.
+   * Node `getOrCreateByConstraint` updates are outside this option's scope and
+   * still write on every `ifExists: "update"` match; replay projectors that
+   * need coalescing should use `upsertById` for nodes.
    *
    * Receipt shape is unchanged and needs no new signal: a coalesced upsert
    * still counts as one write intent (`writes.total` includes it), but
