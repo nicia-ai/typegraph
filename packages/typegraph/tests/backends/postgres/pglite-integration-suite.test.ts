@@ -59,7 +59,17 @@ beforeEach(async () => {
 // backend close is a no-op) and the engine must survive for the next test.
 createIntegrationTestSuite(
   "PGlite",
-  () => ({ backend: engine.makeBackend() }),
+  () => ({
+    backend: engine.makeBackend(),
+    // PGlite is one in-process instance, so a backend over the lane's own
+    // engine is already the serialized fixture. Closing stays a no-op because
+    // the engine outlives each test.
+    createSerializedBackend: () =>
+      Promise.resolve({
+        backend: engine.makeBackend(),
+        close: () => Promise.resolve(),
+      }),
+  }),
   {
     createIsolatedBackend: async () => {
       const { backend } = await createLocalPgliteBackend();

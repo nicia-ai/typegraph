@@ -52,6 +52,7 @@ export {
 } from "../store/recorded-capture";
 export {
   storeBackend,
+  storeQueryBackend,
   storeRuntime,
   transactionBackend,
 } from "../store/runtime-port";

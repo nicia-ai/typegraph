@@ -983,6 +983,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
       backend: this.#backend,
+      // The query path's own construction, not a second spelling of it: a
+      // caller that could only rebuild this object could not observe the one
+      // the queries actually run on.
+      queryBackend: (target) =>
+        this.#createHookedQueryBackend(target ?? this[STORE_RUNTIME].backend),
       sealedQuery: (coordinate) => this.sealedQuery(coordinate),
       recordedNodeGetById: (kind, id, coordinate) =>
         this.recordedNodeGetById(kind, id, coordinate),

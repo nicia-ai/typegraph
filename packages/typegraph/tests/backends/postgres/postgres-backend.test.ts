@@ -414,6 +414,19 @@ describe("PostgreSQL Adapter", () => {
           cleanup: async () => {
             await pool.end();
           },
+          // The suite's own pool is default-sized and therefore audited
+          // `independent`. A `max: 1` pool against the same provisioned
+          // database is the serialized shape.
+          createSerializedBackend: () => {
+            const serializedPool = new Pool({
+              connectionString: TEST_DATABASE_URL,
+              max: 1,
+            });
+            return Promise.resolve({
+              backend: createPostgresBackend(drizzle(serializedPool)),
+              close: () => serializedPool.end(),
+            });
+          },
         };
       },
       {

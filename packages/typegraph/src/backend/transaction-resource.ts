@@ -312,6 +312,33 @@ export function resolveBackendAudit(
   return BACKEND_RESOURCE_AUDITS.get(backend);
 }
 
+/**
+ * How a backend's connection was classified, as a single value.
+ *
+ * `"unaudited"` is NOT a verdict about the connection: it says nobody looked.
+ * Two populations are legitimately unaudited and always will be —
+ * transaction-scoped backends (`transaction()`, `adoptTransaction`), which are
+ * built from an operations fragment rather than derived from a root backend,
+ * and `GraphBackend`s users implement themselves. So `"unaudited"` on an
+ * arbitrary object proves nothing; on a backend one of this package's factories
+ * built, or on one derived from such a backend through `derive-backend.ts`, it
+ * proves the construction bypassed the seam.
+ */
+export type BackendResourceProvenance =
+  "serialized" | "independent" | "unaudited";
+
+/**
+ * The classification of `backend`'s connection — the decision itself rather
+ * than a flag every caller re-derives from {@link resolveBackendAudit}.
+ *
+ * @internal
+ */
+export function backendResourceProvenance(
+  backend: object,
+): BackendResourceProvenance {
+  return resolveBackendAudit(backend)?.kind ?? "unaudited";
+}
+
 /** Whether two backend wrappers cannot make snapshot reads and writes concurrently. */
 export function sharesSerializedTransactionResource(
   left: GraphBackend,

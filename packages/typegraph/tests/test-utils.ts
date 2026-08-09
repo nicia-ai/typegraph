@@ -26,6 +26,10 @@ import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
 import type { SqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
+  type BackendResourceProvenance,
+  backendResourceProvenance,
+} from "../src/backend/transaction-resource";
+import {
   type AdapterBackend,
   type GraphBackend,
   SQLITE_CAPABILITIES,
@@ -121,6 +125,30 @@ export function makeUnauditedBackend(): GraphBackend {
     capabilities: SQLITE_CAPABILITIES,
     close: () => Promise.resolve(),
   } as GraphBackend;
+}
+
+/**
+ * Asserts that a backend one of this package's factories built — or one the
+ * construction seam derived from such a backend — carries a connection verdict,
+ * and returns the verdict so the caller can keep reasoning about it.
+ *
+ * SCOPE, which is the point of the name: this is a property of the FIXTURE's
+ * backend, never an invariant of the library. Two populations are legitimately
+ * `"unaudited"` forever — transaction-scoped backends, which are built from an
+ * operations fragment and have no source backend to inherit from, and
+ * `GraphBackend`s implemented outside this package. Pointing this at either one
+ * asserts something false.
+ *
+ * WHICH verdict is right is lane-dependent (a better-sqlite3 or PGlite fixture
+ * is `"serialized"`, a default-size pool is `"independent"`), so the assertion
+ * is deliberately only that a factory LOOKED.
+ */
+export function expectAuditedBackend(
+  backend: object,
+): BackendResourceProvenance {
+  const provenance = backendResourceProvenance(backend);
+  expect(provenance).not.toBe("unaudited");
+  return provenance;
 }
 
 /**

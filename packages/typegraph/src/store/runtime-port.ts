@@ -40,6 +40,22 @@ export const STORE_RUNTIME: unique symbol =
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
+  /**
+   * @internal The backend this Store's queries actually execute through for
+   * `target` — the Store's own backend when `target` is omitted.
+   *
+   * It is the SAME private construction the query path uses rather than a
+   * reconstruction of it, because the object it returns is the one a lost
+   * derivation corrupts: the hooked query backend is a transient local inside
+   * query construction that is stored nowhere, so no other handle on it exists
+   * and a regression there is invisible to every assertion about
+   * {@link StoreRuntime.backend}.
+   *
+   * NOTE for anything asserting on it: with no query hook configured this
+   * returns its argument unchanged, so a hookless Store answers with the very
+   * object it was handed and a comparison against that object is a tautology.
+   */
+  queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
   sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
   recordedNodeGetById: <N extends NodeType>(
     kind: string,
@@ -261,6 +277,17 @@ export function storeBackend<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
 ): GraphBackend {
   return storeRuntime(store).backend;
+}
+
+/**
+ * The backend a Store's queries execute through — see
+ * {@link StoreRuntime.queryBackend}, including its note about hookless Stores.
+ */
+export function storeQueryBackend<G extends GraphDef>(
+  store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
+  target?: GraphBackend | TransactionBackend,
+): GraphBackend {
+  return storeRuntime(store).queryBackend(target);
 }
 
 type TransactionRuntimePort = Readonly<{

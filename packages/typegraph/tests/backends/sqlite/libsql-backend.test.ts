@@ -93,6 +93,22 @@ createIntegrationTestSuite("libsql", async () => {
       await backend.close();
       client.close();
     },
+    // A local-FILE client is the serialized libsql shape (`protocol: "file"`),
+    // opened on its own temp file so nothing a provenance test does reaches
+    // the suite's own fixture.
+    createSerializedBackend: async () => {
+      const serializedPath = createTemporaryDbPath();
+      const serializedClient = createClient({ url: `file:${serializedPath}` });
+      const { backend: serializedBackend } =
+        await createLibsqlBackend(serializedClient);
+      return {
+        backend: serializedBackend,
+        close: async () => {
+          await serializedBackend.close();
+          serializedClient.close();
+        },
+      };
+    },
   };
 });
 

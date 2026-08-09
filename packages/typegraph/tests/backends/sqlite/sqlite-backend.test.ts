@@ -66,7 +66,16 @@ createAdapterTestSuite("SQLite", () => createTestBackend());
 createIntegrationTestSuite("SQLite", () => {
   const db = createTestDatabase();
   // SQLite uses in-memory databases, no cleanup needed
-  return { backend: createSqliteBackend(db) };
+  return {
+    backend: createSqliteBackend(db),
+    // better-sqlite3 is one synchronous handle, so the batteries-included
+    // factory already yields a serialized backend. It gets its own database so
+    // nothing a provenance test does reaches the suite's own fixture.
+    createSerializedBackend: () => {
+      const { backend } = createLocalSqliteBackend();
+      return Promise.resolve({ backend, close: () => backend.close() });
+    },
+  };
 });
 
 // ============================================================

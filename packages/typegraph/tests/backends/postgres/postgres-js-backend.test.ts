@@ -202,6 +202,15 @@ describe("PostgreSQL Adapter (postgres-js driver)", () => {
           cleanup: async () => {
             await sql.end();
           },
+          // The suite's own client runs at `max: 4` and is audited
+          // `independent`; `{ max: 1 }` is its serialized shape.
+          createSerializedBackend: () => {
+            const serializedSql = postgres(TEST_DATABASE_URL, { max: 1 });
+            return Promise.resolve({
+              backend: createPostgresBackend(drizzle(serializedSql)),
+              close: () => serializedSql.end(),
+            });
+          },
         };
       },
       {
