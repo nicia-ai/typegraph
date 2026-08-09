@@ -105,6 +105,7 @@ import { canonicalEqual } from "../../schema/canonical";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
+  preservesImmutableLowerBound,
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
@@ -967,10 +968,14 @@ async function performEdgeUpdate<G extends GraphDef>(
 
   const { validatedProps } = resolveEdgeUpdateProps(ctx, existing, input.props);
 
-  const validFrom = validateOptionalCanonicalIsoDate(
+  const statedValidFrom = validateOptionalCanonicalIsoDate(
     input.validFrom,
     "validFrom",
   );
+  const preservesLiveLowerBound =
+    options?.clearDeleted !== true &&
+    preservesImmutableLowerBound(input.onImmutableLowerBound);
+  const validFrom = preservesLiveLowerBound ? undefined : statedValidFrom;
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
   // The row's stored lower bound is the effective one on EVERY edge update,
   // in-place or resurrecting: an edge RETAINS `valid_from` unless the
@@ -1646,6 +1651,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     ifExists?: IfExistsMode;
     validFrom?: string;
     validTo?: string;
+    onImmutableLowerBound?: "preserve" | "refuse";
   }>,
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
   const ifExists = options?.ifExists ?? "return";
@@ -1663,20 +1669,26 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   // Validate matchOn fields
   validateMatchOnFields(edgeKind.schema, matchOn, kind);
 
-  // Validate temporal inputs before the read probe so validity of a call does
-  // not depend on whether its endpoint identity already exists. Only the
-  // endpoint PAIR can be judged here — the effective lower bound of a lone
-  // `validTo` belongs to the row the write leg resolves to, and is checked there.
+  // Canonical form is validated before the read probe so malformed input is
+  // always refused. Strict writes and return-mode calls also judge the stated
+  // pair here. A preserve-mode update defers ordering until its write leg has
+  // resolved whether it will create/resurrect (and apply the stated start) or
+  // update a live row (and retain the stored start).
   const validFrom = validateOptionalCanonicalIsoDate(
     options?.validFrom,
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(options?.validTo, "validTo");
-  assertOrderedValidityWindow(
-    `${kind} edge between ${fromKind} "${fromId}" and ${toKind} "${toId}"`,
-    validFrom,
-    validTo,
-  );
+  if (
+    ifExists !== "update" ||
+    !preservesImmutableLowerBound(options?.onImmutableLowerBound)
+  ) {
+    assertOrderedValidityWindow(
+      `${kind} edge between ${fromKind} "${fromId}" and ${toKind} "${toId}"`,
+      validFrom,
+      validTo,
+    );
+  }
 
   // Probe outside the transaction: with ifExists "return", the common found
   // path performs no write, so it must not pay for a write transaction
@@ -1782,6 +1794,9 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
           props: validatedProps,
           ...(validFrom !== undefined && { validFrom }),
           ...(validTo !== undefined && { validTo }),
+          ...(options?.onImmutableLowerBound !== undefined && {
+            onImmutableLowerBound: options.onImmutableLowerBound,
+          }),
         },
         backend,
       );
@@ -1812,6 +1827,9 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         props: validatedProps,
         ...(validFrom !== undefined && { validFrom }),
         ...(validTo !== undefined && { validTo }),
+        ...(options?.onImmutableLowerBound !== undefined && {
+          onImmutableLowerBound: options.onImmutableLowerBound,
+        }),
       },
       backend,
       {
@@ -1886,6 +1904,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     props: Record<string, unknown>;
     validFrom?: string;
     validTo?: string;
+    onImmutableLowerBound?: "preserve" | "refuse";
   }>[],
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{
@@ -1916,6 +1935,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     endpointKey: string;
     validFrom?: string;
     validTo?: string;
+    onImmutableLowerBound?: "preserve" | "refuse";
   }[] = [];
 
   for (const item of items) {
@@ -1928,13 +1948,18 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       "validFrom",
     );
     const validTo = validateOptionalCanonicalIsoDate(item.validTo, "validTo");
-    // As in the single-item path: the endpoint pair is judged up front so a
-    // batch's validity does not depend on which items already exist.
-    assertOrderedValidityWindow(
-      `${kind} edge between ${item.fromKind} "${item.fromId}" and ${item.toKind} "${item.toId}"`,
-      validFrom,
-      validTo,
-    );
+    // As in the single-item path, canonical form is always judged up front.
+    // Preserve-mode updates defer ordering until the target row is resolved.
+    if (
+      ifExists !== "update" ||
+      !preservesImmutableLowerBound(item.onImmutableLowerBound)
+    ) {
+      assertOrderedValidityWindow(
+        `${kind} edge between ${item.fromKind} "${item.fromId}" and ${item.toKind} "${item.toId}"`,
+        validFrom,
+        validTo,
+      );
+    }
 
     const compositeKey = buildEdgeCompositeKey(
       item.fromKind,
@@ -1961,6 +1986,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       endpointKey,
       ...(validFrom !== undefined && { validFrom }),
       ...(validTo !== undefined && { validTo }),
+      ...(item.onImmutableLowerBound !== undefined && {
+        onImmutableLowerBound: item.onImmutableLowerBound,
+      }),
     });
   }
 
@@ -2023,6 +2051,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
      */
     validFrom?: string;
     validTo?: string;
+    onImmutableLowerBound?: "preserve" | "refuse";
   }
   interface DuplicateEntry {
     index: number;
@@ -2050,6 +2079,16 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       // Check within-batch duplicate
       const previousIndex = seenKeys.get(entry.compositeKey);
       if (previousIndex !== undefined) {
+        // A duplicate is a found/no-write result, so there is no stored target
+        // window against which preserve mode can defer this decision. Keep the
+        // existing return-mode contract: its stated pair must be ordered.
+        if (preservesImmutableLowerBound(entry.onImmutableLowerBound)) {
+          assertOrderedValidityWindow(
+            `${kind} edge between ${entry.fromKind} "${entry.fromId}" and ${entry.toKind} "${entry.toId}"`,
+            entry.validFrom,
+            entry.validTo,
+          );
+        }
         duplicateOf.push({ index, sourceIndex: previousIndex });
         continue;
       }
@@ -2097,6 +2136,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             validFrom: entry.validFrom,
           }),
           ...(entry.validTo !== undefined && { validTo: entry.validTo }),
+          ...(entry.onImmutableLowerBound !== undefined && {
+            onImmutableLowerBound: entry.onImmutableLowerBound,
+          }),
         });
       }
     }
@@ -2183,6 +2225,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                   validFrom: entry.validFrom,
                 }),
                 ...(entry.validTo !== undefined && { validTo: entry.validTo }),
+                ...(entry.onImmutableLowerBound !== undefined && {
+                  onImmutableLowerBound: entry.onImmutableLowerBound,
+                }),
               },
               target,
               {
@@ -2218,6 +2263,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                   validFrom: entry.validFrom,
                 }),
                 ...(entry.validTo !== undefined && { validTo: entry.validTo }),
+                ...(entry.onImmutableLowerBound !== undefined && {
+                  onImmutableLowerBound: entry.onImmutableLowerBound,
+                }),
               },
               target,
             );

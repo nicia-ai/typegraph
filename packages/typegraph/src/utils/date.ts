@@ -416,7 +416,7 @@ export type ValidityWindowVerdict = Readonly<{
 }>;
 
 /**
- * Whether a node upsert explicitly treats its stated lower bound as
+ * Whether an upsert explicitly treats its stated lower bound as
  * create/resurrection-only input.
  *
  * This predicate owns the policy decision for both write execution and
