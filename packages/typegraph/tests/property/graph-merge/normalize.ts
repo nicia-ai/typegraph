@@ -116,7 +116,8 @@ type NormalizedValidityEnd = Readonly<{
   entity: string;
   kind: string;
   id: string;
-  validTo: string;
+  validTo: string | undefined;
+  clearValidTo: true | undefined;
   claimedBy: readonly string[];
   precedence: string | undefined;
 }>;
@@ -279,6 +280,7 @@ export function normalizeReport<G extends GraphDef>(
       kind: entry.kind,
       id: entry.id,
       validTo: entry.validTo,
+      clearValidTo: entry.clearValidTo,
       claimedBy: [...entry.claimedBy]
         .map((branchId) => branchId as string)
         .sort((left, right) => compareStrings(left, right)),

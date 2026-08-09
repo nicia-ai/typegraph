@@ -481,10 +481,10 @@ type MergeReport = {
   // Node drops (deleted endpoints, incompatible members), edge drops, identity
   // drops (identity:duplicate-assertion, identity:endpoints-collapsed,
   // identity:retraction-target-mismatch, identity:deletion-overruled), and
-  // window deltas the commit cannot apply (window-not-applicable)
+  // lower-bound deltas the commit cannot apply (window-not-applicable)
   dropped: DroppedItem[];
-  // Inherited rows whose end-of-validity the merge resolved, and who claimed each
-  // end; precedence: "target" marks a row the incremental target had already ended
+  // Inherited rows whose end-of-validity the merge resolved. Each entry carries
+  // validTo for a set/move or clearValidTo: true for a reopening.
   validityEnds: ValidityEndResolution[];
   baseAmbiguities: BaseAmbiguity[]; // new-vs-base matches that spanned >= 2 committed entities
   provenance: ProvenanceIndex; // byBranch(id) -> { nodeIds, edgeIds }
@@ -675,8 +675,9 @@ as-is by the commit rather than reset to merge time. When the incremental
 target itself also created the surviving row, the target's committed window
 wins.
 
-**An inherited row's end-of-validity is merged.** `update(id, {}, { validTo })`
-on a branch is an ordinary write, and the merge carries that ending to the
+**An inherited row's end-of-validity is merged.** Both
+`update(id, {}, { validTo })` and `update(id, {}, { clearValidTo: true })` on a
+branch are ordinary writes. The merge carries the set, move, or reopening to the
 target even when the row's properties are untouched:
 
 ```typescript
@@ -686,6 +687,11 @@ const report = unwrap(await merge(base, [fork]));
 report.validityEnds;
 // [{ entity: "node", kind: "Patient", id: "pat-1",
 //    validTo: "2030-06-01T00:00:00.000Z", claimedBy: ["worker-1"] }]
+
+await fork.store.nodes.Patient.update(asNodeId("pat-1"), {}, { clearValidTo: true });
+// A merge now reopens pat-1 and reports:
+// [{ entity: "node", kind: "Patient", id: "pat-1",
+//    clearValidTo: true, claimedBy: ["worker-1"] }]
 ```
 
 An ending is treated as a **sibling of deletion**, not as a property, because it
@@ -695,7 +701,9 @@ explains the whole contract:
 | Situation | Outcome |
 | --------- | ------- |
 | One branch ends the row | That end is written — including a *later* end, which extends the window. |
+| One branch reopens the row | The end is cleared with `clearValidTo: true`. |
 | Several branches end it differently | No conflict. The **earliest** end wins, and `report.validityEnds` names every claiming branch. |
+| Sibling branches end and reopen it | The end wins as the stronger monotone claim; every claimant remains visible in `report.validityEnds`. |
 | The incremental target already ended it | The target's end stands. A branch never re-windows a row the target itself windowed, and the row is left out of the merge's writes entirely — but the discarded claims are still reported, as an entry carrying `precedence: "target"` and the target's own instant. |
 | One branch ends it, another deletes it | Deleted, with **no** `DeleteModifyConflict` — the stronger statement absorbs the weaker one. |
 | A branch re-states the end the target holds | No write at all — nothing is staged, so there is no version bump or history row even with `coalesceUnchangedUpserts` off. |
@@ -717,11 +725,12 @@ merge committed none of that end.
 
 **Every claim the merge observed is visible in `validityEnds`, applied or not.**
 An entry with no `precedence` is one the merge *decided*: `validTo` is the
-instant it wrote. An entry with `precedence: "target"` is one it did **not** —
-the incremental target had already moved that end, so `validTo` is the instant
-the target already held, `claimedBy` names the branch claims that were thrown
-away, and nothing was written or credited for the row. A row no branch claimed
-at all produces no entry, since there was nothing to discard.
+instant it wrote, or `clearValidTo: true` says it reopened the row. An entry
+with `precedence: "target"` is one it did **not** — the incremental target had
+already changed that end, so the entry describes the target's set or clear,
+`claimedBy` names the branch claims that were thrown away, and nothing was
+written or credited for the row. A row no branch claimed at all produces no
+entry, since there was nothing to discard.
 
 `validityEnds` reports claims about rows inherited from the fork point. If the
 fork point is empty, every branch row is branch-created and the array is always
@@ -737,17 +746,16 @@ properties, and its ending rides along only if that modification survives.
 **What is still NOT merged, and why.** On a row that is live in both the base
 and the branch, `validTo` is the only window field a branch can author *and* the
 commit can apply. A row's lower bound is immutable outside resurrection —
-`validFrom` is written only when a soft-deleted row is brought back — and
-`validTo` can be set or moved but never cleared back to open. So two window
-deltas are observable in a fork yet unapplicable:
+`validFrom` is written only when a soft-deleted row is brought back — so that
+lower-bound delta remains observable in a fork but unapplicable:
 
 | Observed delta | Reachable how | Merged? |
 | -------------- | ------------- | ------- |
 | `validTo` set or moved | `update(id, {}, { validTo })` | **Yes** |
+| `validTo` cleared back to open | `update(id, {}, { clearValidTo: true })` | **Yes** |
 | `validFrom` changed | soft-delete + resurrect inside the fork | No |
-| `validTo` cleared back to open | soft-delete + resurrect inside the fork | No |
 
-Rather than silently ignore those, the merge reports each one in
+Rather than silently ignore it, the merge reports the lower-bound change in
 `report.dropped` with reason `"window-not-applicable"`. Reconciling a value the
 commit would then drop is worse than not merging it: the report would claim a
 change that never happened.

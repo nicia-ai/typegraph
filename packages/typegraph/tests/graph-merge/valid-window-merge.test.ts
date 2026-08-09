@@ -625,6 +625,80 @@ describe.each(backendMatrix())(
       expect(await nodeEnd(forkPoint, "Patient", "pat-1")).toBe(LATEST);
     });
 
+    it("reopens inherited node and edge windows from a branch", async () => {
+      const forkPoint = await seededForkPoint();
+      await forkPoint.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
+      await forkPoint.edges.hadEncounter.update(EDGE_1, {}, { validTo: LATE });
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      await branchA.store.nodes.Patient.update(
+        PATIENT,
+        {},
+        { clearValidTo: true },
+      );
+      await branchA.store.edges.hadEncounter.update(
+        EDGE_1,
+        {},
+        { clearValidTo: true },
+      );
+
+      const report = unwrap(
+        await merge(forkPoint, [branchA], { branchOrder: BRANCH_ORDER }),
+      );
+
+      expect(await nodeEnd(forkPoint, "Patient", "pat-1")).toBeUndefined();
+      expect(await edgeEnd(forkPoint, "edge-1")).toBeUndefined();
+      expect(report.validityEnds).toEqual([
+        {
+          entity: "node",
+          kind: "Patient",
+          id: "pat-1",
+          clearValidTo: true,
+          claimedBy: [BRANCH_A],
+        },
+        {
+          entity: "edge",
+          kind: "hadEncounter",
+          id: "edge-1",
+          clearValidTo: true,
+          claimedBy: [BRANCH_A],
+        },
+      ]);
+      expect(unapplicableIds(report)).not.toContain("pat-1");
+      expect(unapplicableIds(report)).not.toContain("edge-1");
+    });
+
+    it("keeps an ending over a concurrent reopening", async () => {
+      const forkPoint = await seededForkPoint();
+      await forkPoint.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      const branchB = await forkOf(forkPoint, BRANCH_B);
+      await branchA.store.nodes.Patient.update(
+        PATIENT,
+        {},
+        { clearValidTo: true },
+      );
+      await branchB.store.nodes.Patient.update(PATIENT, {}, { validTo: EARLY });
+
+      const report = unwrap(
+        await merge(forkPoint, [branchA, branchB], {
+          branchOrder: BRANCH_ORDER,
+        }),
+      );
+
+      // An ending is the stronger monotone claim when sibling branches disagree
+      // about reopening the same row.
+      expect(await nodeEnd(forkPoint, "Patient", "pat-1")).toBe(EARLY);
+      expect(report.validityEnds).toEqual([
+        {
+          entity: "node",
+          kind: "Patient",
+          id: "pat-1",
+          validTo: EARLY,
+          claimedBy: [BRANCH_A, BRANCH_B],
+        },
+      ]);
+    });
+
     it("leaves the target's window alone for a props-only modification", async () => {
       const forkPoint = await seededForkPoint({
         coalesceUnchangedUpserts: true,

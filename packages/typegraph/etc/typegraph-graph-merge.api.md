@@ -4917,10 +4917,15 @@ export type ValidityEndResolution = Readonly<{
     entity: "node" | "edge";
     kind: string;
     id: string;
-    validTo: string;
     claimedBy: readonly BranchId[];
     precedence?: typeof VALIDITY_END_TARGET_PRECEDENCE;
-}>;
+}> & (Readonly<{
+    validTo: string;
+    clearValidTo?: never;
+}> | Readonly<{
+    clearValidTo: true;
+    validTo?: never;
+}>);
 
 // @public
 type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" | "embedding" | "unknown";
