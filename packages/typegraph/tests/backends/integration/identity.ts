@@ -783,7 +783,7 @@ export function registerIdentityIntegrationTests(
       const tag = await evolved.getNodeCollectionOrThrow("Tag").create({
         label: "author",
       });
-      await evolved.identity.assertSame(person, tag as never);
+      await evolved.identity.assertSame(person, tag);
       const beforeRemoval = await evolved.recordedNow();
       expect(beforeRemoval).toBeDefined();
 

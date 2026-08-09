@@ -408,7 +408,7 @@ describe("Operational Identity", () => {
     const tag = await evolved.getNodeCollectionOrThrow("Tag").create({
       label: "author",
     });
-    await evolved.identity.assertSame(person, tag as never);
+    await evolved.identity.assertSame(person, tag);
     const beforeRemoval = requireRecordedInstant(
       await evolved.recordedNow(),
       "expected a recorded instant before kind removal",
@@ -428,9 +428,7 @@ describe("Operational Identity", () => {
     expect(await removed.identity.membersOf(person)).toEqual([
       { kind: "Person", id: person.id },
     ]);
-    await expect(
-      removed.identity.membersOf({ kind: "Tag", id: tag.id } as never),
-    ).rejects.toMatchObject({
+    await expect(removed.identity.membersOf(tag)).rejects.toMatchObject({
       code: "KIND_NOT_FOUND",
       details: matchingObject({ kindName: "Tag" }),
     });

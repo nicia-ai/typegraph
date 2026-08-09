@@ -43,7 +43,7 @@ import {
 declare const DYNAMIC_NODE_BRAND: unique symbol;
 declare const DYNAMIC_EDGE_BRAND: unique symbol;
 
-export type DynamicNodeType = NodeType &
+export type DynamicNodeType<K extends string = string> = NodeType<K> &
   Readonly<{ [DYNAMIC_NODE_BRAND]: true }>;
 
 export type DynamicEdgeType = AnyEdgeType &

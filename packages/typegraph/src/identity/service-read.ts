@@ -4,7 +4,6 @@ import { KindNotFoundError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
-import { type GraphNodeReference } from "../store/types";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
@@ -43,6 +42,7 @@ import {
   type IdentityAssertion,
   type IdentityAssertionId,
   type IdentityAssertionResult,
+  type IdentityNodeReference,
   type IdentityNodeRefInput,
   type IdentityRelation,
 } from "./types";
@@ -202,11 +202,11 @@ export function assertionResult<G extends GraphDef>(
 
 export function publicNodeRef<G extends GraphDef>(
   ref: PlainNodeRef,
-): GraphNodeReference<G> {
+): IdentityNodeReference<G> {
   // Every service entry point validates kinds against the graph registry, and
   // persisted assertion/closure rows are constrained to those same endpoints.
   // Reapply the public per-kind NodeId brand at this storage boundary.
-  return ref as GraphNodeReference<G>;
+  return ref as IdentityNodeReference<G>;
 }
 
 /**

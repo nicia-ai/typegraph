@@ -290,8 +290,27 @@ input where the brand is not available.
 ```typescript
 import type { DynamicNodeCollection } from "@nicia-ai/typegraph";
 
-// Derived from NodeCollection<NodeType, string> with branded ID parameters widened to string
+// Derived from NodeCollection<DynamicNodeType, string> with ID parameters widened to string
 ```
+
+### `DynamicNode` and `DynamicNodeReference`
+
+`DynamicNode` is the nominal node value returned by a
+`DynamicNodeCollection`. `DynamicNodeReference` is the nominal lightweight
+`{ kind, id }` form returned by runtime-aware identity reads. The marker lets
+those results flow back into identity operations without making arbitrary
+string kinds valid compile-time inputs.
+
+```typescript
+import type {
+  DynamicNode,
+  DynamicNodeReference,
+} from "@nicia-ai/typegraph";
+```
+
+Identity reads return `IdentityNodeReference<G>`, the union of the graph's
+compile-time node references and `DynamicNodeReference`, because a class can
+contain both after runtime evolution.
 
 ### `DynamicEdgeCollection`
 

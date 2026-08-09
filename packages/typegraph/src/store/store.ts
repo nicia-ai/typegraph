@@ -574,8 +574,12 @@ type StoreCore<G extends GraphDef> = Readonly<{
   edges: GraphEdgeCollections<G>;
   algorithms: GraphAlgorithms<G>;
   search: StoreSearch<G>;
-  getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
-  getNodeCollectionOrThrow: (kind: string) => DynamicNodeCollection;
+  getNodeCollection: <const K extends string>(
+    kind: K,
+  ) => DynamicNodeCollection<K> | undefined;
+  getNodeCollectionOrThrow: <const K extends string>(
+    kind: K,
+  ) => DynamicNodeCollection<K>;
   getEdgeCollection: (kind: string) => DynamicEdgeCollection | undefined;
   getEdgeCollectionOrThrow: (kind: string) => DynamicEdgeCollection;
   getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
@@ -1551,14 +1555,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * lookup exactly like `this.#graph.nodes` membership is checked everywhere
    * else.
    */
-  #resolveDynamicNodeCollection(
+  #resolveDynamicNodeCollection<const K extends string>(
     collections: GraphNodeCollections<G>,
-    kind: string,
-  ): DynamicNodeCollection | undefined {
+    kind: K,
+  ): DynamicNodeCollection<K> | undefined {
     if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
     return collections[
       kind as keyof G["nodes"] & string
-    ] as unknown as DynamicNodeCollection;
+    ] as unknown as DynamicNodeCollection<K>;
   }
 
   /**
@@ -1571,7 +1575,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * me the collection" pattern, prefer `getNodeCollectionOrThrow` — it
    * throws `KindNotFoundError` instead of forcing a null-check.
    */
-  getNodeCollection(kind: string): DynamicNodeCollection | undefined {
+  getNodeCollection<const K extends string>(
+    kind: K,
+  ): DynamicNodeCollection<K> | undefined {
     return this.#resolveDynamicNodeCollection(this.nodes, kind);
   }
 
@@ -1584,7 +1590,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * operates on the new kind, and the null-check the optional variant requires
    * is busywork.
    */
-  getNodeCollectionOrThrow(kind: string): DynamicNodeCollection {
+  getNodeCollectionOrThrow<const K extends string>(
+    kind: K,
+  ): DynamicNodeCollection<K> {
     const collection = this.getNodeCollection(kind);
     if (collection === undefined) {
       throw new KindNotFoundError(kind, "node", {
@@ -2837,7 +2845,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 hookedFunction,
               ),
           },
-          getNodeCollection: (kind: string) =>
+          getNodeCollection: <const K extends string>(kind: K) =>
             this.#resolveDynamicNodeCollection(nodes, kind),
         };
       Object.defineProperty(fallbackContext, TRANSACTION_RUNTIME, {
@@ -3235,7 +3243,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           nodes,
           edges,
           ...(identity === undefined ? {} : { identity }),
-          getNodeCollection: (kind: string) =>
+          getNodeCollection: <const K extends string>(kind: K) =>
             this.#resolveDynamicNodeCollection(nodes, kind),
         }),
       );
@@ -3319,9 +3327,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         identity
       : wrapTransactionIdentity(identity, receiptRecorder);
 
-    const getNodeCollection = (
-      kind: string,
-    ): DynamicNodeCollection | undefined =>
+    const getNodeCollection = <const K extends string>(
+      kind: K,
+    ): DynamicNodeCollection<K> | undefined =>
       this.#resolveDynamicNodeCollection(nodes, kind);
 
     // Honest capability discriminant for `tx.sql`. Capture/revision tracking

@@ -799,6 +799,9 @@ const DYNAMIC_EDGE_BRAND: unique symbol;
 const DYNAMIC_NODE_BRAND: unique symbol;
 
 // @public (undocumented)
+const DYNAMIC_NODE_REFERENCE_BRAND: unique symbol;
+
+// @public (undocumented)
 type DynamicEdgeAccessor = Readonly<{
     id: StringFieldAccessor;
     kind: StringFieldAccessor;
@@ -826,6 +829,9 @@ type DynamicFieldBuilder = BaseFieldAccessor & Readonly<{
 }>;
 
 // @public
+type DynamicNode<K extends string = string> = Node<DynamicNodeType<K>>;
+
+// @public
 type DynamicNodeAccessor = Readonly<{
     id: StringFieldAccessor;
     kind: StringFieldAccessor;
@@ -834,10 +840,17 @@ type DynamicNodeAccessor = Readonly<{
 }>;
 
 // @public
-type DynamicNodeCollection = WidenBrandedIds<NodeCollection<NodeType, string>>;
+type DynamicNodeCollection<K extends string = string> = WidenBrandedIds<NodeCollection<DynamicNodeType<K>, string>>;
+
+// @public
+type DynamicNodeReference<K extends string = string> = Readonly<{
+    kind: K;
+    id: NodeId<DynamicNodeType<K>>;
+    [DYNAMIC_NODE_REFERENCE_BRAND]: true;
+}>;
 
 // @public (undocumented)
-type DynamicNodeType = NodeType & Readonly<{
+type DynamicNodeType<K extends string = string> = NodeType<K> & Readonly<{
     [DYNAMIC_NODE_BRAND]: true;
 }>;
 
@@ -1956,8 +1969,8 @@ type HybridVectorOptions = Readonly<{
 type IdentityAssertion<G extends GraphDef> = Readonly<{
     id: IdentityAssertionId;
     relation: IdentityRelation;
-    a: GraphNodeReference<G>;
-    b: GraphNodeReference<G>;
+    a: IdentityNodeReference<G>;
+    b: IdentityNodeReference<G>;
     validFrom: string;
     validTo?: string;
 }>;
@@ -2002,10 +2015,13 @@ export class IdentityMergeConflictError extends MergeError {
 // @public
 type IdentityNode<G extends GraphDef> = {
     [K in NodeKinds<G>]: Node<G["nodes"][K]["type"]>;
-}[NodeKinds<G>];
+}[NodeKinds<G>] | DynamicNode;
 
 // @public
-type IdentityNodeRefInput<G extends GraphDef> = NodeRef<AllNodeTypes<G>>;
+type IdentityNodeReference<G extends GraphDef> = GraphNodeReference<G> | DynamicNodeReference;
+
+// @public
+type IdentityNodeRefInput<G extends GraphDef> = NodeRef<AllNodeTypes<G>> | DynamicNode | DynamicNodeReference;
 
 // @public
 type IdentityPair<G extends GraphDef> = Readonly<{
@@ -2015,8 +2031,8 @@ type IdentityPair<G extends GraphDef> = Readonly<{
 
 // @public
 type IdentityReadFacade<G extends GraphDef> = Readonly<{
-    representativeOf: (ref: IdentityNodeRefInput<G>) => Promise<GraphNodeReference<G> | undefined>;
-    membersOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly GraphNodeReference<G>[]>;
+    representativeOf: (ref: IdentityNodeRefInput<G>) => Promise<IdentityNodeReference<G> | undefined>;
+    membersOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityNodeReference<G>[]>;
     nodesOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityNode<G>[]>;
     areSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
     areDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
@@ -4555,8 +4571,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     edges: GraphEdgeCollections<G>;
     algorithms: GraphAlgorithms<G>;
     search: StoreSearch<G>;
-    getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
-    getNodeCollectionOrThrow: (kind: string) => DynamicNodeCollection;
+    getNodeCollection: <const K extends string>(kind: K) => DynamicNodeCollection<K> | undefined;
+    getNodeCollectionOrThrow: <const K extends string>(kind: K) => DynamicNodeCollection<K>;
     getEdgeCollection: (kind: string) => DynamicEdgeCollection | undefined;
     getEdgeCollectionOrThrow: (kind: string) => DynamicEdgeCollection;
     getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
@@ -5072,7 +5088,7 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
     nodes: GraphNodeCollections<G>;
     edges: GraphEdgeCollections<G>;
     backend: TransactionReadBackend;
-    getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
+    getNodeCollection: <const K extends string>(kind: K) => DynamicNodeCollection<K> | undefined;
 }> & (G["identity"] extends GraphIdentityConfig ? Readonly<{
     identity: IdentityFacade<G>;
 }> : Readonly<Record<never, never>>);

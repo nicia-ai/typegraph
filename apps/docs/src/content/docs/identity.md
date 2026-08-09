@@ -96,11 +96,33 @@ When you hold a plain assertion-ID string that came from persistence or an
 interchange document, re-enter the branded type with the `asIdentityAssertionId(value)`
 caster rather than a `as` assertion.
 
-Reference reads return graph-bounded `{ kind, id }` values whose IDs retain the
-node kind's `NodeId` brand. `nodesOf` hydrates the class into a kind-discriminated
-node union. A missing, deleted, or
-coordinate-invisible input returns `undefined`, `[]`, or `false` according to
-the method. A visible singleton returns itself from `membersOf` and
+Runtime-evolved nodes carry a nominal dynamic-node type, so they flow through
+the same identity surface without a cast:
+
+```typescript
+const evolved = await store.evolve(extension);
+const person = await evolved.nodes.Person.create({ name: "Alice" });
+const tag = await evolved
+  .getNodeCollectionOrThrow("Tag")
+  .create({ label: "author" });
+
+await evolved.identity.assertSame(person, tag);
+await evolved.identity.membersOf(tag);
+```
+
+Identity results include both compile-time graph references and dynamic node
+references. This widening is necessary even when a read starts from `person`:
+its class can contain `tag`. A plain `{ kind: string, id: string }` is not a
+proof that the kind came through the evolved Store; pass the dynamic node, or a
+nominal dynamic reference returned by an identity read. Unknown and removed
+kinds still fail at runtime with `KindNotFoundError`.
+
+Reference reads return `IdentityNodeReference<G>` values covering both
+compile-time graph kinds and registered runtime kinds. Their IDs retain the
+appropriate nominal brand. `nodesOf` hydrates the class into static
+kind-discriminated members or `DynamicNode` values for runtime members. A
+missing, deleted, or coordinate-invisible input returns `undefined`, `[]`, or
+`false` according to the method. A visible singleton returns itself from `membersOf` and
 `representativeOf`, and `areSame(ref, ref)` is true. `areDifferent` lifts an
 explicit different assertion across both identity classes and also reflects
 ontology `disjointWith` constraints. Representatives are deterministic: the
