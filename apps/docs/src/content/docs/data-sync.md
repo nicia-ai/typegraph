@@ -68,6 +68,20 @@ const doc2 = await store.nodes.Document.upsertById("doc_123", {
 // doc1.id === doc2.id - same node, updated in place
 ```
 
+To reopen a previously ended fact without changing its identity, use the
+explicit clear operation:
+
+```typescript
+await store.nodes.Document.upsertById("doc_123", currentProps, {
+  clearValidTo: true,
+});
+```
+
+Omitting both end fields preserves the current end; `validTo` sets it;
+`clearValidTo: true` removes it. With `coalesceUnchangedUpserts`, replaying a
+clear against an already-open row skips the write, but capability validation
+still runs first.
+
 ### bulkCreate
 
 Efficiently creates multiple nodes in a single operation. Uses a single
@@ -216,7 +230,9 @@ For endpoint writes, `validFrom` applies when a new edge is created and on the
 `onImmutableLowerBound: "preserve"`, an `"updated"` live edge keeps its stored
 lower bound while still applying props and `validTo`; the default `"refuse"`
 policy instead refuses a different stated start. A `"found"` result performs no
-write and preserves the existing validity window. An end that precedes the
+write and preserves the existing validity window. To reopen an ended live edge,
+pass `clearValidTo: true` together with `ifExists: "update"`; the default return
+mode refuses that combination rather than ignoring the clear. An end that precedes the
 row's effective start is refused — see
 [Inverted validity windows](/errors/#inverted_validity_window).
 

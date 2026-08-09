@@ -3,6 +3,7 @@ import {
   preservesImmutableLowerBound,
   statedBoundMatchesStored,
 } from "../../utils/date";
+import { validityEndAfterMutation } from "../validity-end";
 
 /**
  * Coalesce dirty-check shared by `upsertById` / `bulkUpsertById`.
@@ -76,6 +77,7 @@ export type UpsertWindow = Readonly<{
 type RequestedWindow = Readonly<{
   validFrom?: string;
   validTo?: string;
+  clearValidTo?: true;
   onImmutableLowerBound?: "preserve" | "refuse";
 }>;
 
@@ -148,6 +150,10 @@ export function upsertWindowChanges(
 ): boolean {
   return (
     lowerBoundRequiresWrite(requested, current.valid_from) ||
+    (requested?.clearValidTo === true &&
+      validityEndAfterMutation(requested, current.valid_to) !==
+        current.valid_to) ||
+    (requested?.clearValidTo === true && requested.validTo !== undefined) ||
     windowFieldChanges(requested?.validTo, current.valid_to)
   );
 }
@@ -166,7 +172,10 @@ export function upsertWindowChanges(
 export function windowAfterUpsertCreate(
   requested: RequestedWindow,
 ): UpsertWindow {
-  return { valid_from: requested.validFrom, valid_to: requested.validTo };
+  return {
+    valid_from: requested.validFrom,
+    valid_to: validityEndAfterMutation(requested, undefined),
+  };
 }
 
 /**
@@ -180,7 +189,7 @@ export function windowAfterUpsertUpdate(
 ): UpsertWindow {
   return {
     valid_from: current.valid_from,
-    valid_to: requested.validTo ?? current.valid_to,
+    valid_to: validityEndAfterMutation(requested, current.valid_to),
   };
 }
 
@@ -203,7 +212,13 @@ export function shouldCoalesceUpsert(
     valid_from?: string | undefined;
     valid_to?: string | undefined;
   }>,
-  options: Readonly<{ validFrom?: string; validTo?: string }> | undefined,
+  options:
+    | Readonly<{
+        validFrom?: string;
+        validTo?: string;
+        clearValidTo?: true;
+      }>
+    | undefined,
   runDirtyCheck: (() => UpsertDirtyCheck) | undefined,
 ): boolean {
   // An explicit temporal override blocks coalescing ONLY when it would

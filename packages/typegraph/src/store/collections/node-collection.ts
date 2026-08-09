@@ -40,7 +40,12 @@ import {
   type NodeGetOrCreateByConstraintResult,
   type QueryOptions,
   type UpdateNodeInput,
+  type ValidityEndMutation,
 } from "../types";
+import {
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+} from "../validity-end";
 import {
   findRepeatedUpsertIds,
   shouldCoalesceUpsert,
@@ -60,9 +65,9 @@ type OnImmutableLowerBound = "preserve" | "refuse";
 
 type NodeUpsertOptions = Readonly<{
   validFrom?: string;
-  validTo?: string;
   onImmutableLowerBound?: OnImmutableLowerBound;
-}>;
+}> &
+  ValidityEndMutation;
 
 /**
  * Narrows unparameterized Node to Node<N>.
@@ -270,15 +275,17 @@ function buildUpdateInput(
   kind: string,
   id: string,
   props: Record<string, unknown>,
-  options?: Readonly<{ validTo?: string }>,
+  options?: ValidityEndMutation,
 ): UpdateNodeInput {
   const input: {
     kind: string;
     id: string;
     props: Partial<Record<string, unknown>>;
     validTo?: string;
+    clearValidTo?: true;
   } = { kind, id, props };
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
   return input as UpdateNodeInput;
 }
 
@@ -287,7 +294,12 @@ function buildUpsertUpdateInput(
   kind: string,
   id: string,
   props: Record<string, unknown>,
-  options?: NodeUpsertOptions,
+  options?: Readonly<{
+    validFrom?: string;
+    validTo?: string;
+    clearValidTo?: true;
+    onImmutableLowerBound?: OnImmutableLowerBound;
+  }>,
 ): UpsertUpdateNodeInput {
   const input: {
     kind: string;
@@ -295,10 +307,12 @@ function buildUpsertUpdateInput(
     props: Partial<Record<string, unknown>>;
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: OnImmutableLowerBound;
   } = { kind, id, props };
   if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
   if (options?.onImmutableLowerBound !== undefined) {
     input.onImmutableLowerBound = options.onImmutableLowerBound;
   }
@@ -399,7 +413,7 @@ export function createNodeCollection<
     async update(
       id: NodeId<N>,
       props: Partial<z.input<N["schema"]>>,
-      options?: Readonly<{ validTo?: string }>,
+      options?: ValidityEndMutation,
     ): Promise<Node<N>> {
       const result = await executeNodeUpdate(
         buildUpdateInput(kind, id, props, options),
@@ -588,6 +602,14 @@ export function createNodeCollection<
       data: Record<string, unknown>,
       options?: NodeUpsertOptions,
     ): Promise<Node<N>> {
+      assertValidityEndMutation(options ?? {}, {
+        entityType: "node",
+        kind,
+        id,
+      });
+      if (options?.clearValidTo === true) {
+        assertClearValidToSupported(backend, "node");
+      }
       const existing = await backend.getNode(graphId, kind, id);
 
       // Coalesce a value-identical replay: skip the write entirely (no
@@ -702,10 +724,22 @@ export function createNodeCollection<
         props: z.input<N["schema"]>;
         validFrom?: string;
         validTo?: string;
+        clearValidTo?: true;
         onImmutableLowerBound?: OnImmutableLowerBound;
       }>[],
     ): Promise<Node<N>[]> {
       if (items.length === 0) return [];
+
+      for (const item of items) {
+        assertValidityEndMutation(item, {
+          entityType: "node",
+          kind,
+          id: item.id,
+        });
+        if (item.clearValidTo === true) {
+          assertClearValidToSupported(backend, "node");
+        }
+      }
 
       const upsertAll = async (
         target: GraphBackend | TransactionBackend,

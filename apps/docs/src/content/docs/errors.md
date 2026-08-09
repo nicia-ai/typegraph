@@ -185,7 +185,9 @@ What deliberately does not raise it:
 - **A create, or a resurrection.** Both write a fresh window, so a stated
   `validFrom` is stored — that is the way to give a row a different lower bound.
 - **`getOrCreateByEndpoints` returning an existing edge.** That branch performs
-  no write, so its window options describe the row to create if none is found.
+  no write, so `validFrom` / `validTo` describe the row to create if none is
+  found. `clearValidTo` is refused on a live return-mode match because it names
+  a mutation; use `ifExists: "update"`.
 - **A node upsert or endpoint-matched edge update with
   `onImmutableLowerBound: "preserve"`.** This explicitly treats `validFrom` as
   create/resurrection-only input. A live-row update keeps its stored lower

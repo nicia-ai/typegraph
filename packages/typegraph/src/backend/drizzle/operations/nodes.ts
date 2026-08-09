@@ -186,6 +186,8 @@ export function buildUpdateNode(
       sql`${quotedColumn(nodes.validFrom)} = ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}`,
       sql`${quotedColumn(nodes.validTo)} = ${sqlNull(params.validTo)}`,
     );
+  } else if (params.clearValidTo === true) {
+    setParts.push(sql`${quotedColumn(nodes.validTo)} = NULL`);
   } else if (params.validTo !== undefined) {
     setParts.push(sql`${quotedColumn(nodes.validTo)} = ${params.validTo}`);
   }

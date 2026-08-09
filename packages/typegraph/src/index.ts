@@ -601,6 +601,7 @@ export type {
   UnboundLiveStoreOptions,
   UpdateEdgeInput,
   UpdateNodeInput,
+  ValidityEndMutation,
 } from "./store/types";
 
 // ============================================================

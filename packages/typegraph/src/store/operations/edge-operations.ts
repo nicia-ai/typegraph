@@ -68,11 +68,9 @@
  *    PostgreSQL, and neither comparison is stable under key reordering. Bounded
  *    instead by {@link performEdgeUpdateConverging}, which re-reads and
  *    re-merges whenever the bound assertion catches a replaced row.
- *  - `valid_to` of a tombstone, read by the resurrect cardinality check
- *    (`EdgeResurrectCardinality.effectiveValidTo`) — NOT asserted, and bounded
- *    by the constraint fence instead: that probe and its write commit under the
- *    same per-graph mutual exclusion (paragraph above), so no peer can move the
- *    bound between them.
+ *  - `valid_to` when deciding whether an ended/deleted edge re-enters the active
+ *    `oneActive` population — asserted only for that decision; other
+ *    cardinalities do not turn an unconditional clear into a stale-value CAS.
  */
 import {
   createBackendOverlay,
@@ -92,6 +90,7 @@ import {
 } from "../../core/types";
 import {
   CardinalityError,
+  ConfigurationError,
   DatabaseOperationError,
   EdgeNotFoundError,
   EndpointNotFoundError,
@@ -134,6 +133,11 @@ import {
   type IfExistsMode,
   type OperationHookContext,
 } from "../types";
+import {
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+  validityEndAfterMutation,
+} from "../validity-end";
 import { withAlreadyExistsTranslation } from "./already-exists";
 import {
   assertEdgeIdentityMatches,
@@ -955,6 +959,12 @@ async function performEdgeUpdate<G extends GraphDef>(
 ): Promise<Edge> {
   const id = input.id;
 
+  assertValidityEndMutation(input, {
+    entityType: "edge",
+    kind: input.identity.kind,
+    id,
+  });
+
   const existing = await target.getEdge(ctx.graphId, id);
   if (!existing || (!options?.clearDeleted && existing.deleted_at)) {
     throw new EdgeNotFoundError(input.identity.kind, id);
@@ -978,6 +988,38 @@ async function performEdgeUpdate<G extends GraphDef>(
   const appliedValidFrom =
     preservesLiveLowerBound ? undefined : statedValidFrom;
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+  const effectiveValidTo =
+    options?.clearDeleted === true && appliedValidFrom !== undefined ?
+      validTo
+    : validityEndAfterMutation(
+        input.clearValidTo === true ? { clearValidTo: true }
+        : validTo === undefined ? {}
+        : { validTo },
+        existing.valid_to,
+      );
+  const cardinality = edgeCardinality(ctx, input.identity.kind);
+  const reentersLivePopulation =
+    options?.clearDeleted === true && existing.deleted_at !== undefined;
+  const reentersActivePopulation =
+    cardinality === "oneActive" &&
+    effectiveValidTo === undefined &&
+    (existing.deleted_at !== undefined || existing.valid_to !== undefined);
+  if (reentersLivePopulation || reentersActivePopulation) {
+    await checkCardinalityConstraint(
+      {
+        graphId: ctx.graphId,
+        registry: ctx.registry,
+        backend: target,
+      },
+      input.identity.kind,
+      cardinality,
+      existing.from_kind,
+      existing.from_id,
+      existing.to_kind,
+      existing.to_id,
+      effectiveValidTo,
+    );
+  }
   // The row's stored lower bound is the effective one on EVERY edge update,
   // in-place or resurrecting: an edge RETAINS `valid_from` unless the
   // resurrection names a new one (see UpdateEdgeParams), so a lone `validTo`
@@ -1036,8 +1078,8 @@ async function performEdgeUpdate<G extends GraphDef>(
     toId?: string;
     props: Record<string, unknown>;
     validFrom?: string;
-    validTo?: string;
     expectedValidFrom?: string | null;
+    expectedValidTo?: string | null;
     clearDeleted?: boolean;
   } = {
     graphId: ctx.graphId,
@@ -1065,7 +1107,9 @@ async function performEdgeUpdate<G extends GraphDef>(
   if (appliedValidFrom !== undefined) {
     updateParams.validFrom = appliedValidFrom;
   }
-  if (validTo !== undefined) updateParams.validTo = validTo;
+  if (reentersActivePopulation && existing.valid_to !== undefined) {
+    updateParams.expectedValidTo = existing.valid_to;
+  }
   if (options?.clearDeleted) updateParams.clearDeleted = true;
 
   const row = await withUnmatchedEdgeUpdateRefusal(
@@ -1073,8 +1117,15 @@ async function performEdgeUpdate<G extends GraphDef>(
     target,
     id,
     input.identity,
-    updateParams.expectedValidFrom !== undefined,
-    () => target.updateEdge(updateParams),
+    updateParams.expectedValidFrom !== undefined ||
+      updateParams.expectedValidTo !== undefined,
+    () =>
+      target.updateEdge({
+        ...updateParams,
+        ...(input.clearValidTo === true ? { clearValidTo: true as const }
+        : validTo === undefined ? {}
+        : { validTo }),
+      }),
   );
 
   return rowToEdge(row);
@@ -1107,7 +1158,7 @@ async function withUnmatchedEdgeUpdateRefusal<G extends GraphDef>(
   target: GraphBackend | TransactionBackend,
   id: string,
   expected: EdgeIdentityExpectation,
-  assertedValidFrom: boolean,
+  assertedWindowState: boolean,
   write: () => Promise<BackendEdgeRow>,
 ): Promise<BackendEdgeRow> {
   try {
@@ -1128,7 +1179,7 @@ async function withUnmatchedEdgeUpdateRefusal<G extends GraphDef>(
       // edge", and reporting it as one would be a lie about a row that is
       // sitting right there; it is a stale target, and the caller above
       // converges on the row that is actually present.
-      if (assertedValidFrom && current.deleted_at === undefined) {
+      if (assertedWindowState && current.deleted_at === undefined) {
         throw new EdgeUpdateTargetMoved(expected.kind, id);
       }
     }
@@ -1217,6 +1268,7 @@ export async function executeEdgeUpdate<G extends GraphDef>(
     identity: EdgeIdentityExpectation;
     props: Partial<Record<string, unknown>>;
     validTo?: string;
+    clearValidTo?: true;
   },
   backend: GraphBackend | TransactionBackend,
 ): Promise<Edge> {
@@ -1242,8 +1294,25 @@ export async function executeEdgeUpdate<G extends GraphDef>(
 
   const opContext = ctx.createOperationContext("update", "edge", gate.kind, id);
 
-  return runHookedWriteOperation(ctx, opContext, backend, (target) =>
-    performEdgeUpdateConverging(ctx, input, target),
+  return runHookedWriteOperation(
+    ctx,
+    opContext,
+    backend,
+    (target) => {
+      if (input.clearValidTo === true) {
+        assertClearValidToSupported(backend, "edge");
+      }
+      return performEdgeUpdateConverging(ctx, input, target);
+    },
+    {
+      fencesConstraintProbe:
+        (
+          input.clearValidTo === true &&
+          edgeCardinality(ctx, gate.kind) === "oneActive"
+        ) ?
+          edgeWriteNeedsConstraintFence("oneActive")
+        : undefined,
+    },
   );
 }
 
@@ -1257,16 +1326,6 @@ export async function executeEdgeUpdate<G extends GraphDef>(
  * used to run it against the root backend, outside any transaction, where a
  * concurrent create could land between the verdict and the revival.
  */
-type EdgeResurrectCardinality = Readonly<{
-  cardinality: Cardinality;
-  fromKind: string;
-  fromId: string;
-  toKind: string;
-  toId: string;
-  /** The upper bound the revived row will hold; `oneActive` ignores ended rows. */
-  effectiveValidTo: string | undefined;
-}>;
-
 /**
  * Executes an edge update for upsert — bypasses the soft-delete check
  * and optionally clears `deleted_at`.
@@ -1275,41 +1334,26 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: UpsertUpdateEdgeInput,
   backend: GraphBackend | TransactionBackend,
-  options?: Readonly<{
-    clearDeleted?: boolean;
-    resurrectCardinality?: EdgeResurrectCardinality;
-  }>,
+  options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Edge> {
-  const resurrectCardinality = options?.resurrectCardinality;
+  if (input.clearValidTo === true) {
+    assertClearValidToSupported(backend, "edge");
+  }
   return runInWriteTransaction(
     ctx,
     backend,
     async (target) => {
-      if (resurrectCardinality !== undefined) {
-        await checkCardinalityConstraint(
-          {
-            graphId: ctx.graphId,
-            registry: ctx.registry,
-            backend: target,
-          },
-          input.identity.kind,
-          resurrectCardinality.cardinality,
-          resurrectCardinality.fromKind,
-          resurrectCardinality.fromId,
-          resurrectCardinality.toKind,
-          resurrectCardinality.toId,
-          resurrectCardinality.effectiveValidTo,
-        );
-      }
       return performEdgeUpdateConverging(ctx, input, target, options);
     },
     {
       // An in-place props update re-derives no constraint verdict: endpoints
       // are immutable, so cardinality cannot change under it.
       fencesConstraintProbe:
-        resurrectCardinality === undefined ? undefined : (
-          edgeWriteNeedsConstraintFence(resurrectCardinality.cardinality)
-        ),
+        input.clearValidTo === true || options?.clearDeleted === true ?
+          edgeWriteNeedsConstraintFence(
+            edgeCardinality(ctx, input.identity.kind),
+          )
+        : undefined,
     },
   );
 }
@@ -1646,6 +1690,23 @@ function defersEndpointWindowOrdering(
   );
 }
 
+/** Refuses a clear request on the endpoint mode whose matched-row contract is read-only. */
+function assertEndpointClearCanApply(
+  ifExists: IfExistsMode,
+  clearValidTo: true | undefined,
+  kind: string,
+): void {
+  if (ifExists !== "return" || clearValidTo !== true) return;
+  throw new ConfigurationError(
+    `clearValidTo requires ifExists: "update" for getOrCreateByEndpoints on edge kind "${kind}"; ifExists: "return" never mutates a matching edge.`,
+    {
+      code: "CLEAR_VALID_TO_REQUIRES_UPDATE",
+      kind,
+      ifExists,
+    },
+  );
+}
+
 /**
  * Executes a single getOrCreateByEndpoints operation.
  */
@@ -1663,6 +1724,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     ifExists?: IfExistsMode;
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "preserve" | "refuse";
   }>,
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
@@ -1671,6 +1733,11 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
 
   const registration = getEdgeRegistration(ctx.graph, kind);
   const edgeKind = registration.type;
+
+  assertValidityEndMutation(options ?? {}, { entityType: "edge", kind });
+  if (options?.clearValidTo === true) {
+    assertClearValidToSupported(backend, "edge");
+  }
 
   // Validate props
   const validatedProps = validateEdgeProps(edgeKind.schema, props, {
@@ -1721,6 +1788,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       validatedProps,
     );
     if (probedLiveRow !== undefined) {
+      assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
       return { edge: rowToEdge(probedLiveRow), action: "found" };
     }
   }
@@ -1789,6 +1857,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     // Live match found
     if (liveRow !== undefined) {
       if (ifExists === "return") {
+        assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
         return { edge: rowToEdge(liveRow), action: "found" };
       }
       // ifExists === "update". `validFrom` is forwarded even though an in-place
@@ -1803,6 +1872,9 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
           props: validatedProps,
           ...(validFrom !== undefined && { validFrom }),
           ...(validTo !== undefined && { validTo }),
+          ...(options?.clearValidTo === true && {
+            clearValidTo: true as const,
+          }),
           ...(options?.onImmutableLowerBound !== undefined && {
             onImmutableLowerBound: options.onImmutableLowerBound,
           }),
@@ -1812,15 +1884,13 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       return { edge, action: "updated" };
     }
 
-    // Deleted match only → resurrect, re-checking cardinality INSIDE the
-    // resurrecting transaction (see EdgeResurrectCardinality): the verdict and
-    // the revival it authorizes then share the fence.
-    const cardinality = registration.cardinality ?? "many";
+    // Deleted match only → resurrect. The shared update path derives the
+    // resulting live/active state and re-checks cardinality under the same
+    // transaction fence as the revival it authorizes.
     if (deletedRow === undefined) {
       throw new Error("Expected deletedRow to be defined");
     }
     const matchedDeletedRow = deletedRow;
-    const effectiveValidTo = validTo ?? matchedDeletedRow.valid_to;
 
     // A resurrection forwards `validFrom` as the create leg does: naming it
     // restates the revived row's WHOLE window (the backend rewrites both
@@ -1836,22 +1906,15 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         props: validatedProps,
         ...(validFrom !== undefined && { validFrom }),
         ...(validTo !== undefined && { validTo }),
+        ...(options?.clearValidTo === true && {
+          clearValidTo: true as const,
+        }),
         ...(options?.onImmutableLowerBound !== undefined && {
           onImmutableLowerBound: options.onImmutableLowerBound,
         }),
       },
       backend,
-      {
-        clearDeleted: true,
-        resurrectCardinality: {
-          cardinality,
-          fromKind,
-          fromId,
-          toKind,
-          toId,
-          effectiveValidTo,
-        },
-      },
+      { clearDeleted: true },
     );
     return { edge, action: "resurrected" };
   }
@@ -1913,6 +1976,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     props: Record<string, unknown>;
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "preserve" | "refuse";
   }>[],
   backend: GraphBackend | TransactionBackend,
@@ -1928,7 +1992,6 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
 
   const registration = getEdgeRegistration(ctx.graph, kind);
   const edgeKind = registration.type;
-  const cardinality = registration.cardinality ?? "many";
 
   // Validate matchOn fields once
   validateMatchOnFields(edgeKind.schema, matchOn, kind);
@@ -1944,10 +2007,15 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     endpointKey: string;
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "preserve" | "refuse";
   }[] = [];
 
   for (const item of items) {
+    assertValidityEndMutation(item, { entityType: "edge", kind });
+    if (item.clearValidTo === true) {
+      assertClearValidToSupported(backend, "edge");
+    }
     const validatedProps = validateEdgeProps(edgeKind.schema, item.props, {
       kind,
       operation: "create",
@@ -1992,6 +2060,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       endpointKey,
       ...(validFrom !== undefined && { validFrom }),
       ...(validTo !== undefined && { validTo }),
+      ...(item.clearValidTo === true && { clearValidTo: true as const }),
       ...(item.onImmutableLowerBound !== undefined && {
         onImmutableLowerBound: item.onImmutableLowerBound,
       }),
@@ -2057,6 +2126,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
      */
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "preserve" | "refuse";
   }
   interface DuplicateEntry {
@@ -2142,6 +2212,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             validFrom: entry.validFrom,
           }),
           ...(entry.validTo !== undefined && { validTo: entry.validTo }),
+          ...(entry.clearValidTo === true && {
+            clearValidTo: true as const,
+          }),
           ...(entry.onImmutableLowerBound !== undefined && {
             onImmutableLowerBound: entry.onImmutableLowerBound,
           }),
@@ -2166,6 +2239,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     if (allFoundLive) {
       const found: Result[] = Array.from({ length: items.length });
       for (const entry of probe.toFetch) {
+        assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
         found[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
       }
       for (const { index, sourceIndex } of probe.duplicateOf) {
@@ -2231,22 +2305,15 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                   validFrom: entry.validFrom,
                 }),
                 ...(entry.validTo !== undefined && { validTo: entry.validTo }),
+                ...(entry.clearValidTo === true && {
+                  clearValidTo: true as const,
+                }),
                 ...(entry.onImmutableLowerBound !== undefined && {
                   onImmutableLowerBound: entry.onImmutableLowerBound,
                 }),
               },
               target,
-              {
-                clearDeleted: true,
-                resurrectCardinality: {
-                  cardinality,
-                  fromKind: entry.fromKind,
-                  fromId: entry.fromId,
-                  toKind: entry.toKind,
-                  toId: entry.toId,
-                  effectiveValidTo: entry.validTo ?? entry.row.valid_to,
-                },
-              },
+              { clearDeleted: true },
             );
             results[entry.index] = { edge, action: "resurrected" };
           } else if (ifExists === "update") {
@@ -2269,6 +2336,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                   validFrom: entry.validFrom,
                 }),
                 ...(entry.validTo !== undefined && { validTo: entry.validTo }),
+                ...(entry.clearValidTo === true && {
+                  clearValidTo: true as const,
+                }),
                 ...(entry.onImmutableLowerBound !== undefined && {
                   onImmutableLowerBound: entry.onImmutableLowerBound,
                 }),
@@ -2277,6 +2347,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             );
             results[entry.index] = { edge, action: "updated" };
           } else {
+            assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
             results[entry.index] = {
               edge: rowToEdge(entry.row),
               action: "found",
@@ -2287,6 +2358,13 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
         // Step 6: Resolve within-batch duplicates
         for (const { index, sourceIndex } of duplicateOf) {
           const sourceResult = requireDefined(results[sourceIndex]);
+          if (sourceResult.action === "found") {
+            assertEndpointClearCanApply(
+              ifExists,
+              items[index]?.clearValidTo,
+              kind,
+            );
+          }
           results[index] = { edge: sourceResult.edge, action: "found" };
         }
 
