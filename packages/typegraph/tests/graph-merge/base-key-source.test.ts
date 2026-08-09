@@ -136,6 +136,17 @@ describe.each(backendMatrix())("baseKey source [$name]", (entry) => {
     expect(patients.map((patient) => patient.id)).toEqual(["base-1"]);
     expect(requireDefined(patients[0]).name).toBe("Ana Rivera");
     expect(result.data.resolutions.length).toBeGreaterThanOrEqual(1);
+    expect(result.data.resolutions[0]?.decisiveEdges[0]).toMatchObject({
+      decision: "scored",
+      sources: [
+        {
+          kind: "baseIndex",
+          indexName: "patient_cohort_idx",
+        },
+      ],
+      strategy: { kind: "fulltext", fields: ["name"] },
+      threshold: 0.85,
+    });
   });
 
   it("does NOT merge a same-index-key pair below threshold (a block key is a candidate, not a forced match)", async () => {

@@ -19,6 +19,7 @@ import { z } from "zod";
 import { count, defineEdge, defineGraph, defineNode } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import {
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
@@ -192,15 +193,24 @@ describe("PostgreSQL Adapter (postgres-js driver)", () => {
       await clearTestData();
     });
 
-    createIntegrationTestSuite("PostgreSQL (postgres-js)", () => {
-      const { sql, db } = createConnection();
-      return {
-        backend: createPostgresBackend(db),
-        cleanup: async () => {
-          await sql.end();
+    createIntegrationTestSuite(
+      "PostgreSQL (postgres-js)",
+      () => {
+        const { sql, db } = createConnection();
+        return {
+          backend: createPostgresBackend(db),
+          cleanup: async () => {
+            await sql.end();
+          },
+        };
+      },
+      {
+        createIsolatedBackend: async () => {
+          const { backend } = await createLocalPgliteBackend();
+          return { backend, cleanup: () => backend.close() };
         },
-      };
-    });
+      },
+    );
   });
 });
 

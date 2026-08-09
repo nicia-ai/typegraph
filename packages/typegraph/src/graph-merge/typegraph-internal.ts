@@ -42,7 +42,10 @@ export {
   type OntologyIntrospection,
   type UniqueIntrospection,
 } from "../store/introspect";
+export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
+  advanceRevisionClock,
+  forceRecordedGraphRevision,
   lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,

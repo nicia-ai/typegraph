@@ -35,9 +35,10 @@ primitive you can build:
   patient-care graph — by exact identifier, blocking key, or fuzzy name match.
 - **Master-data / entity dedup (CRM, FHIR, catalogs).** Use declared `unique`
   constraints as definitional identity and similarity scoring for the rest.
-- **Human-in-the-loop review queues.** `merge()` returns a report, not just a
-  mutation. Auto-apply the clean parts, route the conflicts to a reviewer, and
-  keep a provenance trail of every decision.
+- **Human-in-the-loop review queues.** `planMerge()` returns the exact proposed
+  write set, conflicts, and entity-resolution evidence without changing the
+  target. Persist that JSON artifact, review it in another process, and apply
+  the reviewed bytes later with `applyMergePlan()`.
 - **Incremental ingestion against a live graph.** `mergeIncremental()` lets new
   batches land on a target that has *advanced* since the branch was taken,
   re-discovering already-committed entities instead of duplicating them.
@@ -61,8 +62,10 @@ The mental model is a three-act lifecycle:
    the normal store API; the base is never touched.
 2. Writers do whatever they want — create nodes/edges, modify inherited rows,
    delete inherited rows.
-3. **`merge()`** diffs every branch against the base, then runs a fixed
-   pipeline to fold them into the target:
+3. **Plan, then apply.** `planMerge()` diffs every branch against the base and
+   runs a fixed planning pipeline. `applyMergePlan()` validates the serialized
+   artifact and its digest, checks its revision fence inside the write
+   transaction, then mechanically applies the already-resolved writes:
 
    ```text
    stage (diff every branch)
@@ -71,10 +74,13 @@ The mental model is a three-act lifecycle:
          → canonicalize (pick a survivor, union properties, resolve conflicts)
            → repoint + dedupe edges onto survivors
              → reconcile delete/modify and types
-               → commit transactionally + build the report
+               → emit a revision-fenced JSON plan
+                 → validate + commit transactionally + build the report
    ```
 
-   If the target Store carries a reconciled schema version, its commit acquires
+   `merge()` remains the one-call convenience wrapper over this same lifecycle;
+   it plans and immediately applies. If the target Store carries a reconciled
+   schema version, its commit acquires
    and validates the normal schema-write fence before row DML. A raw target
    remains outside that guarantee. PostgreSQL serialization failures are retried
    automatically around the complete merge commit.
@@ -130,6 +136,92 @@ console.log(result.data.conflicts); // the "Anna" vs "Ana" spelling disagreement
 `isOk`). The default working-copy strategy clones the base through TypeGraph's
 streaming interchange, so each branch gets a fresh backend from your factory
 without building a graph-sized export document in memory.
+
+## Reviewable plan/apply lifecycle
+
+Use the two-step API when approval must happen before accepted graph truth
+changes. The target must have `revisionTracking: true` or `history: true` so the
+plan can carry a durable, store-specific revision fence.
+
+```typescript
+import { applyMergePlan, isOk, planMerge } from "@nicia-ai/typegraph/graph-merge";
+
+const planned = await planMerge(base, [sourceA, sourceB], {
+  resolve: {
+    Patient: {
+      block: (node) => node.mrn ?? node.birthDate,
+      similarity: { kind: "fulltext", fields: ["name"] },
+      threshold: 0.78,
+    },
+  },
+});
+if (!isOk(planned)) throw planned.error;
+
+// Safe to persist or send to a separate review process.
+const stored = JSON.stringify(planned.data);
+const reviewed = JSON.parse(stored);
+
+// Later, against the same unchanged target:
+const applied = await applyMergePlan(base, reviewed);
+if (!isOk(applied)) throw applied.error;
+console.log(applied.data.merged); // actual committed effects
+```
+
+Planning does not mutate the target. The public plan contains only JSON-safe,
+deterministically ordered data: its target/schema/revision fence, resolved write
+set, review information, match evidence, and a stable content digest. It never
+contains a Store, backend, `Map`, `Set`, callback, or embedder. Applying it does
+not re-run blocking, candidate generation, similarity scoring, embeddings,
+canonical selection, or conflict callbacks. The final report copies the
+reviewed entity-resolution evidence unchanged.
+
+The envelope is deliberately explicit: `formatVersion` selects the wire schema;
+`digest` identifies its canonical content; `mode`, `target`, and `anchors` state
+what was observed; `proposed` summarizes the review; `writes` is the complete
+mechanical write set; and `review` holds the conflicts, resolutions, evidence,
+diagnostics, warnings, and other report material known before apply.
+
+The plan's `proposed` summary describes **proposed changes**. It deliberately
+does not call them “merged”: `MergeReport.merged` is reserved for the actual
+effects returned after a successful transaction. Coalescing and idempotent
+identity operations can make actual counts differ from the proposal.
+
+For a frozen ancestor and a live destination, use the named incremental planner:
+
+```typescript
+const planned = await planMergeIncremental({
+  forkPoint,
+  target,
+  branches,
+  options,
+});
+if (!isOk(planned)) throw planned.error;
+
+const applied = await applyMergePlan(target, planned.data);
+```
+
+The same target revision must still be current when the reviewed plan is
+applied. If it moved during planning, planning returns
+`MergePlanningStaleError` and no artifact. If it moved afterwards,
+`applyMergePlan()` returns `StaleMergePlanError` before plan writes. Re-plan,
+review the new digest and proposal, then apply the new artifact; never edit an
+old plan or retry it as though it still represented the target. A successful
+plan is single-use: a second or concurrent application is stale.
+
+`merge()` and `mergeIncremental()` remain convenient compatibility wrappers.
+They invoke the same planner and applier contiguously and return the same
+`MergeReport` shape as before, now with match evidence on each resolution. Use
+the wrappers when no external approval boundary is needed.
+
+:::caution[Sensitive plans and trust]
+A plan contains the complete resolved writes and may therefore contain personal,
+regulated, or otherwise sensitive application data. Protect it like the source
+graph: encrypt it where appropriate, restrict access, and avoid logging it. The
+digest identifies the exact canonical artifact and detects accidental or
+unrecorded changes. It is **not** a signature, proof of origin, authentication,
+or authorization. Authenticate untrusted storage and authorize the caller before
+passing a plan to `applyMergePlan()`.
+:::
 
 ## Scaling branches and interchange
 
@@ -225,11 +317,11 @@ merges *by id only*: its new nodes and edges are copied through, but no fuzzy
 matching runs. Each configured kind composes up to three candidate sources, all
 feeding one shared scorer:
 
-| Source | What it matches | Configured by |
-| ------ | --------------- | ------------- |
-| Exact unique | Two staged nodes sharing all of a declared `unique` constraint's values — a *definitional* match that bypasses scoring | the graph's `unique` constraints |
-| Blocking key | Cheap pre-grouping so similarity only compares plausibly-related nodes | `block` (staged) / `blockIndex` (vs. committed base) |
-| Similarity | Fuzzy scoring of candidate pairs against a `threshold` | `similarity` + `threshold` |
+| Source       | What it matches                                                                                                        | Configured by                                        |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Exact unique | Two staged nodes sharing all of a declared `unique` constraint's values — a *definitional* match that bypasses scoring | the graph's `unique` constraints                     |
+| Blocking key | Cheap pre-grouping so similarity only compares plausibly-related nodes                                                 | `block` (staged) / `blockIndex` (vs. committed base) |
+| Similarity   | Fuzzy scoring of candidate pairs against a `threshold`                                                                 | `similarity` + `threshold`                           |
 
 ```typescript
 resolve: {
@@ -287,12 +379,12 @@ resolve: {
 
 Four strategies cover the spectrum from zero-dependency to embedding-powered:
 
-| Strategy | Needs embedder? | Use case |
-| -------- | --------------- | -------- |
-| `fulltext` | No | Portable in-memory Sørensen–Dice trigram score over one or more fields (e.g. `name`). The cross-backend default. |
-| `custom` | No | Your own deterministic `score(a, b) => number` — domain rules, weighted field blends, edit distance. |
-| `vector` | Yes | Cosine similarity over one field's embedding. Catches semantic near-duplicates. |
-| `hybrid` | Yes | Blend `vector` and `fulltext` by `weights` (default 0.5 / 0.5). |
+| Strategy   | Needs embedder? | Use case                                                                                                         |
+| ---------- | --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `fulltext` | No              | Portable in-memory Sørensen–Dice trigram score over one or more fields (e.g. `name`). The cross-backend default. |
+| `custom`   | No              | Your own deterministic `score(a, b) => number` — domain rules, weighted field blends, edit distance.             |
+| `vector`   | Yes             | Cosine similarity over one field's embedding. Catches semantic near-duplicates.                                  |
+| `hybrid`   | Yes             | Blend `vector` and `fulltext` by `weights` (default 0.5 / 0.5).                                                  |
 
 The `fulltext` scorer runs **in memory** over the staged candidate text — it
 deliberately does not consult database fulltext indexes, because branch
@@ -325,12 +417,12 @@ arrival order decide.
 
 ### Property conflicts
 
-| Policy | Behavior |
-| ------ | -------- |
-| `flag` (default) | Commit the deterministic survivor value (or the committed base value, for base-vs-branch) and record a `PropertyConflict` for review. The graph still gets a value; the disagreement is surfaced rather than resolved toward another branch. |
-| `lastWriteWins` | Pick the value from the highest-priority branch (earliest in `branchOrder`) — *logical* order, never wall-clock. |
-| `provenanceWeighted` | Pick the value from the highest-weight branch (see `provenanceWeights`). Ties fall back to branch order. |
-| function | Delegate: `(conflict) => JsonValue` lets application code decide per conflict. |
+| Policy               | Behavior                                                                                                                                                                                                                                     |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `flag` (default)     | Commit the deterministic survivor value (or the committed base value, for base-vs-branch) and record a `PropertyConflict` for review. The graph still gets a value; the disagreement is surfaced rather than resolved toward another branch. |
+| `lastWriteWins`      | Pick the value from the highest-priority branch (earliest in `branchOrder`) — *logical* order, never wall-clock.                                                                                                                             |
+| `provenanceWeighted` | Pick the value from the highest-weight branch (see `provenanceWeights`). Ties fall back to branch order.                                                                                                                                     |
+| function             | Delegate: `(conflict) => JsonValue` lets application code decide per conflict.                                                                                                                                                               |
 
 There are **two** property-conflict knobs, deliberately separate so a fuzzy
 branch match can never silently overwrite committed data:
@@ -357,11 +449,11 @@ An inherited node or edge that one branch **deletes** while another **modifies**
 is neither a pure delete nor a pure modify. `onDeleteModifyConflict` governs it
 for both nodes and edges:
 
-| Policy | Behavior |
-| ------ | -------- |
+| Policy           | Behavior                                                                                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `flag` (default) | The modification survives **and** an unresolved `DeleteModifyConflict` is recorded — a merge must never silently destroy the only branch still carrying data. |
-| `deleteWins` | Honor the delete; discard the modification; record the conflict. |
-| `modifyWins` | Resurrect the row; keep the modification; record the conflict. |
+| `deleteWins`     | Honor the delete; discard the modification; record the conflict.                                                                                              |
+| `modifyWins`     | Resurrect the row; keep the modification; record the conflict.                                                                                                |
 
 Independent edits to the *same* inherited row by different branches are
 **three-way merged against the base**: a field only one branch changed takes
@@ -474,7 +566,7 @@ type MergeReport = {
     edges: number;
     identity: { asserted: number; retracted: number }; // ledger effects
   };
-  resolutions: EntityResolution[]; // which fork ids collapsed into each canonical
+  resolutions: EntityResolution[]; // collapse membership + decisive match evidence
   conflicts: PropertyConflict[]; // per-property disagreements + how they resolved
   deleteModifyConflicts: DeleteModifyConflict[]; // node/edge delete-vs-modify cases
   typeReconciliations: TypeReconciliation[]; // ontology kind collapses
@@ -489,6 +581,7 @@ type MergeReport = {
   baseAmbiguities: BaseAmbiguity[]; // new-vs-base matches that spanned >= 2 committed entities
   provenance: ProvenanceIndex; // byBranch(id) -> { nodeIds, edgeIds }
   warnings: string[]; // non-fatal advisories (ceiling skips, provenance-persist failures)
+  candidateDiagnostics?: CandidateDiagnostics; // bounded, opt-in scored comparisons
   provenancePersisted?: { graphId: string; count: number }; // when persistProvenance ran
 };
 ```
@@ -496,6 +589,69 @@ type MergeReport = {
 A typical operator loop: auto-apply when `conflicts` and
 `deleteModifyConflicts` are empty; otherwise enqueue them for review alongside
 `resolutions` so the reviewer sees what merged and why.
+
+### Why two entities matched
+
+Every multi-member `EntityResolution` has `decisiveEdges`: a deterministic
+minimal connectivity witness. A resolution over N distinct `(kind, id)`
+identities normally has N−1 edges. Endpoints retain both kind and id, so
+same-id nodes of different kinds remain distinguishable during ontology
+reconciliation.
+
+A same-id ontology retype remains a `TypeReconciliation`, rather than creating
+an id-merge resolution. Its optional `decisiveEdges` carries the accepted retype
+witness without changing the meaning of the existing resolution collection.
+
+Each edge records every candidate source that proposed the pair in stable order.
+Definitional evidence names the trusted rule, such as a unique constraint, and
+does not pretend the internal forced match was a perfect similarity score.
+Scored evidence records the strategy descriptor, actual score, and threshold
+used by the shared scorer:
+
+```typescript
+type MatchEvidence =
+  | {
+      a: { kind: string; id: string };
+      b: { kind: string; id: string };
+      sources: MatchSource[];
+      decision: "definitional";
+    }
+  | {
+      a: { kind: string; id: string };
+      b: { kind: string; id: string };
+      sources: MatchSource[];
+      decision: "scored";
+      strategy: MatchStrategy;
+      score: number;
+      threshold: number;
+    };
+```
+
+Built-in source metadata distinguishes block, unique, base-unique, base-index,
+keyless, and ontology-retype proposals. Several sources proposing the same pair
+are all retained after deduplication. Strategy metadata describes `fulltext`,
+`vector`, `hybrid`, or `custom` configuration, never custom function source.
+Default evidence excludes the raw compared values and rejected pairs because
+those may contain PII and can make reports enormous.
+
+Candidate diagnostics are explicit and bounded:
+
+```typescript
+const planned = await planMerge(base, branches, {
+  ...options,
+  candidateDiagnostics: { limit: 1_000 },
+});
+```
+
+When enabled, the report and reviewable plan include accepted and rejected
+scored comparisons in canonical order. A definitional edge removed by the base
+ambiguity or diameter guard is also retained with its exclusion reason, so the
+final partition remains explainable. The collection also carries `total`,
+`limit`, and `truncated`.
+The limit is deterministic: the same candidate set produces the same retained
+prefix regardless of branch, source, or backend enumeration order. Diagnostics
+still omit raw compared values; join their `(kind, id)` references to application
+data only in an appropriately protected evaluation environment.
 
 ## Provenance
 
@@ -692,14 +848,14 @@ An ending is treated as a **sibling of deletion**, not as a property, because it
 makes the same kind of statement: *this stopped being true*. That single choice
 explains the whole contract:
 
-| Situation | Outcome |
-| --------- | ------- |
-| One branch ends the row | That end is written — including a *later* end, which extends the window. |
-| Several branches end it differently | No conflict. The **earliest** end wins, and `report.validityEnds` names every claiming branch. |
-| The incremental target already ended it | The target's end stands. A branch never re-windows a row the target itself windowed, and the row is left out of the merge's writes entirely — but the discarded claims are still reported, as an entry carrying `precedence: "target"` and the target's own instant. |
-| One branch ends it, another deletes it | Deleted, with **no** `DeleteModifyConflict` — the stronger statement absorbs the weaker one. |
-| A branch re-states the end the target holds | No write at all — nothing is staged, so there is no version bump or history row even with `coalesceUnchangedUpserts` off. |
-| No branch touched the window | Untouched. A properties-only edit never passes a window, so the committed one stands. |
+| Situation                                   | Outcome                                                                                                                                                                                                                                                              |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One branch ends the row                     | That end is written — including a *later* end, which extends the window.                                                                                                                                                                                             |
+| Several branches end it differently         | No conflict. The **earliest** end wins, and `report.validityEnds` names every claiming branch.                                                                                                                                                                       |
+| The incremental target already ended it     | The target's end stands. A branch never re-windows a row the target itself windowed, and the row is left out of the merge's writes entirely — but the discarded claims are still reported, as an entry carrying `precedence: "target"` and the target's own instant. |
+| One branch ends it, another deletes it      | Deleted, with **no** `DeleteModifyConflict` — the stronger statement absorbs the weaker one.                                                                                                                                                                         |
+| A branch re-states the end the target holds | No write at all — nothing is staged, so there is no version bump or history row even with `coalesceUnchangedUpserts` off.                                                                                                                                            |
+| No branch touched the window                | Untouched. A properties-only edit never passes a window, so the committed one stands.                                                                                                                                                                                |
 
 The earliest-end rule is fixed, not a policy knob: it is commutative and
 associative, so the merge stays order-independent, and `onPropertyConflict`
@@ -741,11 +897,11 @@ commit can apply. A row's lower bound is immutable outside resurrection —
 `validTo` can be set or moved but never cleared back to open. So two window
 deltas are observable in a fork yet unapplicable:
 
-| Observed delta | Reachable how | Merged? |
-| -------------- | ------------- | ------- |
-| `validTo` set or moved | `update(id, {}, { validTo })` | **Yes** |
-| `validFrom` changed | soft-delete + resurrect inside the fork | No |
-| `validTo` cleared back to open | soft-delete + resurrect inside the fork | No |
+| Observed delta                 | Reachable how                           | Merged? |
+| ------------------------------ | --------------------------------------- | ------- |
+| `validTo` set or moved         | `update(id, {}, { validTo })`           | **Yes** |
+| `validFrom` changed            | soft-delete + resurrect inside the fork | No      |
+| `validTo` cleared back to open | soft-delete + resurrect inside the fork | No      |
 
 Rather than silently ignore those, the merge reports each one in
 `report.dropped` with reason `"window-not-applicable"`. Reconciling a value the
@@ -783,15 +939,21 @@ const result = await merge(base, [agentB, systemOfRecord, agentA], {
 All entry points return a `Result`; the error arm is a typed `TypeGraphError`
 subclass you can branch on:
 
-| Error | When |
-| ----- | ---- |
-| `BranchError` | `branch()` could not materialize a working copy. |
-| `BaseVersionMismatchError` | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
-| `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge). |
-| `InvalidMergeOptionsError` | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`. |
-| `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`. |
-| `MergeConflictError` | A conflict could not be resolved under the configured policy. |
-| `MergeError` | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes. |
+| Error                        | When                                                                                                                                                                                                                                                                          |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BranchError`                | `branch()` could not materialize a working copy.                                                                                                                                                                                                                              |
+| `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
+| `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge).                                  |
+| `InvalidMergeOptionsError`   | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`.                         |
+| `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |
+| `MergeConflictError`         | A conflict could not be resolved under the configured policy.                                                                                                                                                                                                                 |
+| `MergePlanCapabilityError`   | Public planning was requested for a target without the durable revision guarantee needed across processes and time. Enable `revisionTracking` or `history`.                                                                                                                   |
+| `MergePlanningStaleError`    | The target moved while planning was reading it. No plan was returned; plan again from the new revision.                                                                                                                                                                       |
+| `StaleMergePlanError`        | The target revision changed after planning, or this plan was already applied. Review a newly-created plan.                                                                                                                                                                    |
+| `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/origin mismatches.                                                                                                                       |
+| `CandidateSourceError`       | A built-in candidate source failed; details identify its source id, entity kind, and operation.                                                                                                                                                                               |
+| `MatchEvidenceError`         | Evidence could not be constructed safely, including a custom scorer returning `NaN` or infinity.                                                                                                                                                                              |
+| `MergeError`                 | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes.                                                                                                                                            |
 
 ## Example
 

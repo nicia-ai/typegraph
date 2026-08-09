@@ -53,7 +53,12 @@ Examples: [github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples](
 TypeGraph ships semantic graph merge as a dedicated subpath:
 
 ```ts
-import { branch, merge } from "@nicia-ai/typegraph/graph-merge";
+import {
+  applyMergePlan,
+  branch,
+  merge,
+  planMerge,
+} from "@nicia-ai/typegraph/graph-merge";
 ```
 
 `branch()` creates isolated working copies over caller-provided backends, stamped
@@ -71,12 +76,26 @@ append-only pile of duplicates. The merge pipeline can:
 - preserve branch-specific context by repointing edges to canonical nodes;
 - surface property and delete/modify conflicts (for nodes and edges) in a
   `MergeReport`, three-way merged against base so disjoint edits compose;
+- explain every entity collapse with deterministic decisive edges, complete
+  candidate-source attribution, and the actual score/threshold for scored
+  matches, with bounded accepted/rejected diagnostics available on request;
 - expose report-only provenance, with optional sidecar persistence you can query.
 
 `merge()` is a snapshot merge (all branches forked from the current base);
 `mergeIncremental()` additively folds a new source into a target that has already
 advanced, re-discovering committed entities instead of duplicating them — the
 primitive for continuous ingestion.
+
+For approval workflows, `planMerge()` and `planMergeIncremental()` produce a
+deterministically ordered, JSON-serializable `MergePlanArtifact` without
+mutating the target. Store or review that artifact, then pass it to
+`applyMergePlan()`. Apply validates its digest and checks its durable revision,
+graph, schema, and origin fence inside the write transaction; it never re-runs
+candidate generation, scoring, embeddings, or policy callbacks. Plans require a
+target with `revisionTracking: true` or `history: true`. They may contain
+sensitive application data, and their digest provides integrity/identity—not a
+signature, authentication, or authorization. `merge()` and `mergeIncremental()`
+remain one-call compatibility APIs over the same resolution and write owners.
 
 It lives in the core package because the primitive is defined over TypeGraph
 stores, schemas, indexes, backends, and ontology semantics rather than as a

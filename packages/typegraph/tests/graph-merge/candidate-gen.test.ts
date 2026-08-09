@@ -115,6 +115,16 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
         `${expected[0]}|${expected[1]}`,
       ]);
       expect(result.data.warnings).toEqual([]);
+      expect(result.data.diagnostics).toHaveLength(1);
+      expect(result.data.diagnostics[0]).toMatchObject({
+        scoreDecision: "accepted",
+        evidence: {
+          decision: "scored",
+          sources: [{ kind: "block", sourceId: "exactKey" }],
+          strategy: { kind: "fulltext", fields: ["name"] },
+          threshold: DEMO_THRESHOLD,
+        },
+      });
     }
   });
 
@@ -426,6 +436,47 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     if (isOk(result)) {
       // The near-duplicate pair clears the threshold under fake-embedding cosine.
       expect(result.data.edges).toHaveLength(1);
+      expect(result.data.edges[0]?.evidence).toMatchObject({
+        decision: "scored",
+        strategy: { kind: "vector", fields: ["name"] },
+        threshold: 0.5,
+      });
     }
   });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "refuses non-finite custom score %s instead of serializing it",
+    async (nonFiniteScore) => {
+      const fixture = await entry.make();
+      cleanup = fixture.cleanup;
+      const harness = await makeHarness(fixture.backend);
+      const a = await harness.create("Anna Rivera", "1974-03-09");
+      const b = await harness.create("Ana Rivera", "1974-03-09");
+      const result = generateCandidates(
+        blockNodes([a, b], blockByBirthDate),
+        {
+          ...blockByBirthDate,
+          similarity: { kind: "custom", score: () => nonFiniteScore },
+          threshold: 0.5,
+        },
+        harness.ctx,
+        "error",
+      );
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(MergeError);
+        expect(result.error.details).toMatchObject({
+          kind: "Patient",
+          operation: "score",
+          sourceIds: ["exactKey"],
+        });
+        expect(result.error.details?.["endpoints"]).toEqual(
+          expect.arrayContaining([
+            { kind: "Patient", id: a.id },
+            { kind: "Patient", id: b.id },
+          ]),
+        );
+      }
+    },
+  );
 });

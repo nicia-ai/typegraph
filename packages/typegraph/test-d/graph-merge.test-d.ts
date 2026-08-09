@@ -9,9 +9,14 @@ import {
   type Store,
 } from "..";
 import {
+  applyMergePlan,
   BranchError,
+  type CandidateDiagnostics,
+  type EntityResolution,
   type GraphBranch,
   type MakeBackend,
+  type MatchEvidence,
+  type MergePlanArtifact,
   type MergeOptions,
   MergeError,
   type MergeReport,
@@ -25,6 +30,8 @@ import {
   merge,
   normalizeMergeOptions,
   openProvenanceStore,
+  planMerge,
+  planMergeIncremental,
   type ProvenanceGraph,
   unwrap,
 } from "../dist/graph-merge";
@@ -62,6 +69,7 @@ const options: MergeOptions<typeof graph> = {
   },
   reconcileTypes: "ontology",
   onPropertyConflict: "flag",
+  candidateDiagnostics: { limit: 100 },
 };
 
 // A resolve key that is not a node kind of `graph` is a COMPILE error, not a
@@ -74,6 +82,7 @@ expectError<MergeOptions<typeof graph>>({
     },
   },
 });
+expectError<MergeOptions<typeof graph>>({ candidateDiagnostics: {} });
 
 const normalized = normalizeMergeOptions(options);
 expectType<ReconcileTypesMode>(normalized.reconcileTypes);
@@ -84,6 +93,40 @@ expectType<Promise<Result<GraphBranch<typeof graph>, BranchError>>>(
 expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
   merge(store, branches, options),
 );
+expectType<Promise<Result<MergePlanArtifact, MergeError>>>(
+  planMerge(store, branches, options),
+);
+expectType<Promise<Result<MergePlanArtifact, MergeError>>>(
+  planMergeIncremental({
+    forkPoint: store,
+    target: store,
+    branches,
+    options,
+  }),
+);
+
+declare const mergePlan: MergePlanArtifact;
+expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+  applyMergePlan(store, mergePlan),
+);
+expectError(applyMergePlan(store, {} as unknown));
+expectError((mergePlan.digest = "tampered"));
+
+declare const resolution: EntityResolution;
+expectType<readonly MatchEvidence[]>(resolution.decisiveEdges);
+declare const evidence: MatchEvidence;
+if (evidence.decision === "scored") {
+  expectType<number>(evidence.score);
+  expectType<number>(evidence.threshold);
+} else {
+  expectError(evidence.score);
+}
+
+declare const diagnostics: CandidateDiagnostics;
+expectType<number>(diagnostics.total);
+expectType<number>(diagnostics.limit);
+expectType<boolean>(diagnostics.truncated);
+expectType<"accepted" | "rejected">(diagnostics.entries[0]!.scoreDecision);
 expectType<Promise<Store<ProvenanceGraph>>>(openProvenanceStore(store));
 expectType<Promise<Store<ProvenanceGraph>>>(
   openProvenanceStore(adapterHistoryStore),
