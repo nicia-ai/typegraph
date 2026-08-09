@@ -94,6 +94,26 @@ async function countRecordedNodeRows(
   return Number(rows[0]?.cnt ?? 0);
 }
 
+/** Recorded history rows captured for one edge id. */
+async function countRecordedEdgeRows(
+  store: HistoryIntegrationStore | IntegrationStore,
+  kind: string,
+  id: string,
+): Promise<number> {
+  const backend = store[STORE_RUNTIME].backend;
+  const table = createSqlSchema(backend.tableNames).recordedEdgesTable;
+  const rows = await backend.execute<CountRow>(
+    asCompiledRowsSql(sql`
+      SELECT COUNT(*) AS cnt
+      FROM ${table}
+      WHERE graph_id = ${store.graphId}
+        AND kind = ${kind}
+        AND id = ${id}
+    `),
+  );
+  return Number(rows[0]?.cnt ?? 0);
+}
+
 /**
  * A future instant and a later one. Every re-stated window in these cases has to
  * be a window the store would accept as a fresh write too, and a bound before the
@@ -493,6 +513,156 @@ export function registerCoalesceUpsertIntegrationTests(
       // (Edges carry no version, and updatedAt can collide within a
       // millisecond, so the value change is the reliable signal.)
       expect((after as { since?: string }).since).toBe("2099");
+    });
+
+    describe("endpoint get-or-create updates (#467)", () => {
+      it("coalesces a single identical replay without hooks, history, or receipt capture", async () => {
+        const onOperationStart = vi.fn();
+        const store = await context.createHistoryStore(integrationTestGraph, {
+          coalesceUnchangedUpserts: true,
+          hooks: { onOperationStart },
+        });
+        const [alice, bob] = await seedEndpoints(store, "endpoint-single");
+        const created = await store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { since: "2020" },
+        );
+        expect(created.action).toBe("created");
+
+        const recordedBefore = await store.recordedNow();
+        const rowsBefore = await countRecordedEdgeRows(
+          store,
+          "knows",
+          created.edge.id,
+        );
+        onOperationStart.mockClear();
+
+        const replay = await store.transactionWithReceipt(async (tx) =>
+          tx.edges.knows.getOrCreateByEndpoints(
+            alice,
+            bob,
+            { since: "2020" },
+            { ifExists: "update" },
+          ),
+        );
+
+        // `found` is the honest no-write action. `updated` means an UPDATE ran.
+        expect(replay.result.action).toBe("found");
+        expect(replay.result.edge.id).toBe(created.edge.id);
+        expect(replay.result.edge.meta.updatedAt).toBe(
+          created.edge.meta.updatedAt,
+        );
+        expect(replay.receipt.writes.total).toBe(1);
+        expect(replay.receipt.recorded).toBeUndefined();
+        expect(await store.recordedNow()).toBe(recordedBefore);
+        expect(
+          await countRecordedEdgeRows(store, "knows", created.edge.id),
+        ).toBe(rowsBefore);
+        expect(onOperationStart).not.toHaveBeenCalled();
+
+        const changed = await store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { since: "2021" },
+          { ifExists: "update" },
+        );
+        expect(changed.action).toBe("updated");
+        expect(changed.edge.since).toBe("2021");
+        expect(await store.recordedNow()).not.toBe(recordedBefore);
+      });
+
+      it("coalesces a one-item bulk replay without advancing the revision anchor", async () => {
+        const store = await createCoalesceStore(context, {
+          revisionTracking: true,
+        });
+        const [alice, bob] = await seedEndpoints(store, "endpoint-bulk");
+        const [created] = await store.edges.knows.bulkGetOrCreateByEndpoints([
+          { from: alice, to: bob, props: { since: "2020" } },
+        ]);
+        expect(created?.action).toBe("created");
+        const revisionBefore = await store.revisionNow();
+
+        const [replayed] = await store.edges.knows.bulkGetOrCreateByEndpoints(
+          [{ from: alice, to: bob, props: { since: "2020" } }],
+          { ifExists: "update" },
+        );
+
+        expect(replayed?.action).toBe("found");
+        expect(replayed?.edge.meta.updatedAt).toBe(
+          created?.edge.meta.updatedAt,
+        );
+        expect(await store.revisionNow()).toBe(revisionBefore);
+
+        const [changed] = await store.edges.knows.bulkGetOrCreateByEndpoints(
+          [{ from: alice, to: bob, props: { since: "2021" } }],
+          { ifExists: "update" },
+        );
+        expect(changed?.action).toBe("updated");
+        expect(changed?.edge.since).toBe("2021");
+        expect(await store.revisionNow()).not.toBe(revisionBefore);
+      });
+
+      it("coalesces a re-stated window but writes a changed window", async () => {
+        const store = await createCoalesceStore(context);
+        const [alice, bob] = await seedEndpoints(store, "endpoint-window");
+        const created = await store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { since: "2020" },
+          { validTo: WINDOW_END },
+        );
+        const validFrom = requireDefined(created.edge.meta.validFrom);
+
+        const replayed = await store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { since: "2020" },
+          { ifExists: "update", validFrom, validTo: WINDOW_END },
+        );
+        expect(replayed.action).toBe("found");
+        expect(replayed.edge.meta.updatedAt).toBe(created.edge.meta.updatedAt);
+
+        const changed = await store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { since: "2020" },
+          { ifExists: "update", validTo: LATER_WINDOW_END },
+        );
+        expect(changed.action).toBe("updated");
+        expect(canonicalizeDatabaseTimestamp(changed.edge.meta.validTo)).toBe(
+          LATER_WINDOW_END,
+        );
+      });
+
+      it("never coalesces resurrection and still rejects malformed windows", async () => {
+        const store = await createCoalesceStore(context);
+        const [alice, bob] = await seedEndpoints(store, "endpoint-resurrect");
+        const created = await store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { since: "2020" },
+        );
+        await store.edges.knows.delete(created.edge.id);
+
+        const resurrected = await store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { since: "2020" },
+          { ifExists: "update" },
+        );
+        expect(resurrected.action).toBe("resurrected");
+        expect(resurrected.edge.id).toBe(created.edge.id);
+
+        await expect(
+          store.edges.knows.getOrCreateByEndpoints(
+            alice,
+            bob,
+            { since: "2020" },
+            { ifExists: "update", validTo: NON_CANONICAL_WINDOW_END },
+          ),
+        ).rejects.toThrow(/validTo/u);
+      });
     });
 
     describe("with history capture", () => {

@@ -112,7 +112,10 @@ import { generateId } from "../../utils/id";
 import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
-import { type UpsertDirtyCheck } from "../collections/coalesce";
+import {
+  shouldCoalesceUpsert,
+  type UpsertDirtyCheck,
+} from "../collections/coalesce";
 import { type UpsertUpdateEdgeInput } from "../collections/edge-collection";
 import {
   checkCardinalityConstraint,
@@ -158,6 +161,7 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
+  coalesceUnchangedUpsertsEnabled: boolean;
   revisionSchema: SqlSchema;
   registry: KindRegistry;
   createOperationContext: (
@@ -1267,19 +1271,30 @@ type EdgeResurrectCardinality = Readonly<{
   effectiveValidTo: string | undefined;
 }>;
 
+type EdgeUpsertUpdateOutcome = Readonly<{
+  edge: Edge;
+  wrote: boolean;
+}>;
+
 /**
- * Executes an edge update for upsert — bypasses the soft-delete check
- * and optionally clears `deleted_at`.
+ * Executes the endpoint-aware edge upsert update and reports whether it wrote.
+ *
+ * The ordinary id-upsert callers need only the edge, while endpoint
+ * get-or-create also owes callers an honest action (`found` when an identical
+ * replay was coalesced, `updated` only when an UPDATE ran). Keeping the verdict
+ * here makes the dirty-check read and the write it may elide share the same
+ * transaction and graph-write fence.
  */
-export async function executeEdgeUpsertUpdate<G extends GraphDef>(
+async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: UpsertUpdateEdgeInput,
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{
     clearDeleted?: boolean;
     resurrectCardinality?: EdgeResurrectCardinality;
+    coalesceUnchanged?: boolean;
   }>,
-): Promise<Edge> {
+): Promise<EdgeUpsertUpdateOutcome> {
   const resurrectCardinality = options?.resurrectCardinality;
   return runInWriteTransaction(
     ctx,
@@ -1301,7 +1316,37 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
           resurrectCardinality.effectiveValidTo,
         );
       }
-      return performEdgeUpdateConverging(ctx, input, target, options);
+
+      if (options?.coalesceUnchanged === true && !options.clearDeleted) {
+        const existing = await target.getEdge(ctx.graphId, input.id);
+        if (existing !== undefined && existing.deleted_at === undefined) {
+          assertEdgeIdentityMatches(
+            input.id,
+            input.identity,
+            edgeIdentityFromRow(existing),
+            "update",
+          );
+          const runDirtyCheck = () =>
+            edgeUpsertDirtyCheck(
+              ctx,
+              existing.kind,
+              existing.id,
+              rowPropsToObject(existing.props),
+              input.props,
+            );
+          if (shouldCoalesceUpsert(existing, input, runDirtyCheck)) {
+            return { edge: rowToEdge(existing), wrote: false };
+          }
+        }
+      }
+
+      const edge = await performEdgeUpdateConverging(
+        ctx,
+        input,
+        target,
+        options,
+      );
+      return { edge, wrote: true };
     },
     {
       // An in-place props update re-derives no constraint verdict: endpoints
@@ -1310,8 +1355,31 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
         resurrectCardinality === undefined ? undefined : (
           edgeWriteNeedsConstraintFence(resurrectCardinality.cardinality)
         ),
+      didWrite: (outcome) => outcome.wrote,
     },
   );
+}
+
+/**
+ * Executes an edge update for upsert — bypasses the soft-delete check
+ * and optionally clears `deleted_at`.
+ */
+export async function executeEdgeUpsertUpdate<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  input: UpsertUpdateEdgeInput,
+  backend: GraphBackend | TransactionBackend,
+  options?: Readonly<{
+    clearDeleted?: boolean;
+    resurrectCardinality?: EdgeResurrectCardinality;
+  }>,
+): Promise<Edge> {
+  const outcome = await executeEdgeUpsertUpdateWithOutcome(
+    ctx,
+    input,
+    backend,
+    options,
+  );
+  return outcome.edge;
 }
 
 /**
@@ -1795,7 +1863,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       // update stores no lower bound: the shared write guard is what judges it,
       // refusing a bound that differs from the one the live row holds instead of
       // dropping it here where the caller would never hear about it.
-      const edge = await executeEdgeUpsertUpdate(
+      const outcome = await executeEdgeUpsertUpdateWithOutcome(
         ctx,
         {
           id: liveRow.id,
@@ -1808,8 +1876,12 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
           }),
         },
         backend,
+        { coalesceUnchanged: ctx.coalesceUnchangedUpsertsEnabled },
       );
-      return { edge, action: "updated" };
+      return {
+        edge: outcome.edge,
+        action: outcome.wrote ? "updated" : "found",
+      };
     }
 
     // Deleted match only → resurrect, re-checking cardinality INSIDE the
@@ -2183,7 +2255,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
   // under one per-graph mutual exclusion — the bulk analogue of the single-item
   // path's `convergeOn` guard, and the reason the bulk path needs no in-loop
   // race handling of its own.
-  function runBatch(): Promise<Result[]> {
+  function runBatch(): Promise<
+    Readonly<{ results: Result[]; writes: number }>
+  > {
     return runInWriteTransaction(
       ctx,
       backend,
@@ -2192,6 +2266,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           await fetchRowsByEndpoint(target),
         );
         const results: Result[] = Array.from({ length: items.length });
+        let writes = 0;
 
         // Step 4: Execute creates in batch
         if (toCreate.length > 0) {
@@ -2207,6 +2282,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
               action: "created",
             };
           }
+          writes += toCreate.length;
         }
 
         // Step 5: Handle existing edges (update/skip/resurrect)
@@ -2249,11 +2325,12 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
               },
             );
             results[entry.index] = { edge, action: "resurrected" };
+            writes += 1;
           } else if (ifExists === "update") {
             // As in the single-item path: `validFrom` is forwarded so the
             // shared write guard refuses a bound the in-place update cannot
             // store, rather than dropping it silently here.
-            const edge = await executeEdgeUpsertUpdate(
+            const outcome = await executeEdgeUpsertUpdateWithOutcome(
               ctx,
               {
                 id: entry.row.id,
@@ -2274,8 +2351,13 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                 }),
               },
               target,
+              { coalesceUnchanged: ctx.coalesceUnchangedUpsertsEnabled },
             );
-            results[entry.index] = { edge, action: "updated" };
+            results[entry.index] = {
+              edge: outcome.edge,
+              action: outcome.wrote ? "updated" : "found",
+            };
+            if (outcome.wrote) writes += 1;
           } else {
             results[entry.index] = {
               edge: rowToEdge(entry.row),
@@ -2290,13 +2372,21 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           results[index] = { edge: sourceResult.edge, action: "found" };
         }
 
-        return results;
+        return { results, writes };
       },
       // A bulk getOrCreate always converges on a match key no database key
       // backs, whatever its cardinality — the same reason the single-item path
       // fences unconditionally.
-      { fencesConstraintProbe: "edgeMatchKeyConvergence" },
+      {
+        fencesConstraintProbe: "edgeMatchKeyConvergence",
+        didWrite: (outcome) => outcome.writes > 0,
+      },
     );
+  }
+
+  async function runBatchResults(): Promise<Result[]> {
+    const outcome = await runBatch();
+    return outcome.results;
   }
 
   // The single-item path's `CardinalityError` retry, which this path lacked: a
@@ -2306,9 +2396,9 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
   // competitor that is not a `getOrCreateByEndpoints`) — one retry, matching
   // the single-item path rather than inventing a second policy.
   try {
-    return await runBatch();
+    return await runBatchResults();
   } catch (error) {
     if (!(error instanceof CardinalityError)) throw error;
-    return runBatch();
+    return runBatchResults();
   }
 }

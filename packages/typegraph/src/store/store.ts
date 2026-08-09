@@ -4924,6 +4924,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      coalesceUnchangedUpsertsEnabled:
+        this.#options?.coalesceUnchangedUpserts === true,
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
       createOperationContext: (operation, entity, kind, id) =>

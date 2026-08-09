@@ -391,9 +391,9 @@ export type BaseStoreOptions = Readonly<{
    */
   autoRefreshStatistics?: false | number;
   /**
-   * Skip the write for an `upsertById` (or `bulkUpsertById` item) whose
-   * validated props are value-identical to the existing live row. Default
-   * off.
+   * Skip the write for an `upsertById`, `bulkUpsertById` item, or endpoint
+   * get-or-create update whose validated props are value-identical to the
+   * existing live row. Default off.
    *
    * Enable this for at-least-once / replay materializers. An event log that
    * re-delivers a byte-identical change would otherwise rewrite the row anyway:
@@ -414,7 +414,9 @@ export type BaseStoreOptions = Readonly<{
    * **no write at all**: no `updateNode`, no recorded-time capture, no history
    * row, no revision-anchor advance, and no `update` operation hooks (nothing
    * happened, so nothing is reported). It resolves with the **existing** node,
-   * preserving its original `validFrom` / `updatedAt` / `version`.
+   * preserving its original `validFrom` / `updatedAt` / `version`. An endpoint
+   * get-or-create reports action `"found"` when its requested update is
+   * coalesced; `"updated"` always means an UPDATE actually ran.
    *
    * Receipt shape is unchanged and needs no new signal: a coalesced upsert
    * still counts as one write intent (`writes.total` includes it), but

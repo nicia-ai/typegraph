@@ -523,7 +523,7 @@ function createStore<G extends GraphDef>(
 | `schema` | `SqlSchema` | Custom table name configuration created with `createSqlSchema(...)` |
 | `queryDefaults.traversalExpansion` | `TraversalExpansion` | Default ontology expansion mode for traversals (default: `"inverse"`) |
 | `autoRefreshStatistics` | `false \| number` | Row threshold at which a single autocommit `bulkCreate`/`bulkInsert` triggers an automatic planner-statistics refresh (default: `1000`); `false` disables. See [Refreshing planner statistics](/backend-setup#refreshing-planner-statistics-after-bulk-loads). |
-| `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById` / `bulkUpsertById` item whose validated props already equal the existing live row (default: `false`). For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options) and [Materializing external event logs](/materializing-event-logs). |
+| `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById`, `bulkUpsertById`, or endpoint get-or-create update whose validated props and requested window already equal the existing live row (default: `false`). For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options), [`getOrCreateByEndpoints`](#getorcreatebyendpointsfrom-to-props-options), and [Materializing external event logs](/materializing-event-logs). |
 
 **Example:**
 
@@ -1566,6 +1566,12 @@ effective start — see
 [Inverted validity windows](/errors/#inverted_validity_window). When `ifExists`
 is omitted or `"return"`, a live match produces the `"found"` action and neither
 temporal option changes the edge.
+
+With `coalesceUnchangedUpserts: true`, an `ifExists: "update"` match whose
+validated props and requested validity bounds already equal the live edge is a
+no-op. It returns the existing edge with action `"found"`; action `"updated"`
+therefore always means an UPDATE ran. The same rule applies per item to
+`bulkGetOrCreateByEndpoints`.
 
 #### `bulkGetOrCreateByEndpoints(items, options?)`
 
