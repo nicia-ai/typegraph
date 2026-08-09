@@ -975,7 +975,8 @@ async function performEdgeUpdate<G extends GraphDef>(
   const preservesLiveLowerBound =
     options?.clearDeleted !== true &&
     preservesImmutableLowerBound(input.onImmutableLowerBound);
-  const validFrom = preservesLiveLowerBound ? undefined : statedValidFrom;
+  const appliedValidFrom =
+    preservesLiveLowerBound ? undefined : statedValidFrom;
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
   // The row's stored lower bound is the effective one on EVERY edge update,
   // in-place or resurrecting: an edge RETAINS `valid_from` unless the
@@ -999,7 +1000,7 @@ async function performEdgeUpdate<G extends GraphDef>(
   // and dropped.
   const windowVerdict = assertWritableValidityWindow(
     `edge "${id}"`,
-    validFrom,
+    appliedValidFrom,
     {
       effectiveValidFrom: existing.valid_from,
       appliesStatedValidFrom: options?.clearDeleted === true,
@@ -1011,8 +1012,8 @@ async function performEdgeUpdate<G extends GraphDef>(
     validTo,
   );
 
-  // `validFrom` reaches the backend only through a resurrecting write (see
-  // UpdateEdgeParams): a live edge's lower bound is history and stays put.
+  // `appliedValidFrom` reaches the backend only through a resurrecting write
+  // (see UpdateEdgeParams): a live edge's lower bound is history and stays put.
   //
   // `kind` makes the UPDATE self-verifying: the re-read above computed the
   // merged props and the effective window, and the same predicate that
@@ -1061,7 +1062,9 @@ async function performEdgeUpdate<G extends GraphDef>(
   if (input.identity.toId !== undefined) {
     updateParams.toId = input.identity.toId;
   }
-  if (validFrom !== undefined) updateParams.validFrom = validFrom;
+  if (appliedValidFrom !== undefined) {
+    updateParams.validFrom = appliedValidFrom;
+  }
   if (validTo !== undefined) updateParams.validTo = validTo;
   if (options?.clearDeleted) updateParams.clearDeleted = true;
 
@@ -1634,6 +1637,15 @@ export async function executeEdgeFindByEndpoints<G extends GraphDef>(
   return liveRow === undefined ? undefined : rowToEdge(liveRow);
 }
 
+function defersEndpointWindowOrdering(
+  ifExists: IfExistsMode,
+  onImmutableLowerBound: "preserve" | "refuse" | undefined,
+): boolean {
+  return (
+    ifExists === "update" && preservesImmutableLowerBound(onImmutableLowerBound)
+  );
+}
+
 /**
  * Executes a single getOrCreateByEndpoints operation.
  */
@@ -1679,10 +1691,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(options?.validTo, "validTo");
-  if (
-    ifExists !== "update" ||
-    !preservesImmutableLowerBound(options?.onImmutableLowerBound)
-  ) {
+  if (!defersEndpointWindowOrdering(ifExists, options?.onImmutableLowerBound)) {
     assertOrderedValidityWindow(
       `${kind} edge between ${fromKind} "${fromId}" and ${toKind} "${toId}"`,
       validFrom,
@@ -1950,10 +1959,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     const validTo = validateOptionalCanonicalIsoDate(item.validTo, "validTo");
     // As in the single-item path, canonical form is always judged up front.
     // Preserve-mode updates defer ordering until the target row is resolved.
-    if (
-      ifExists !== "update" ||
-      !preservesImmutableLowerBound(item.onImmutableLowerBound)
-    ) {
+    if (!defersEndpointWindowOrdering(ifExists, item.onImmutableLowerBound)) {
       assertOrderedValidityWindow(
         `${kind} edge between ${item.fromKind} "${item.fromId}" and ${item.toKind} "${item.toId}"`,
         validFrom,
