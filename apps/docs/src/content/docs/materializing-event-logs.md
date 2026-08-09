@@ -64,6 +64,7 @@ async function projectChange(
       ifExists: "update",
       validFrom: change.relationshipValidFrom,
       validTo: change.relationshipValidTo,
+      onImmutableLowerBound: "preserve",
     },
   );
 }
@@ -72,15 +73,13 @@ async function projectChange(
 The important rule is that the second delivery of the same change takes the same
 code path and reaches the same row identities.
 
-The node's `"preserve"` policy makes `validFrom` create/resurrection-only input:
-a later revision updates props without trying to rewrite the live row's start.
-Without it, the default `"refuse"` policy raises
-`IMMUTABLE_VALIDITY_LOWER_BOUND` when a revision states a different start. The
-edge explicitly selects `ifExists: "update"`; the default is `"return"`, which
-is right for create-once relationships but writes neither revised props nor a
-closing `validTo` when the edge already exists. The decoder supplies
-`relationshipValidFrom` only on the event that creates the relationship; later
-live-edge revisions omit it unless they restate the stored bound exactly.
+The `"preserve"` policy makes `validFrom` create/resurrection-only input for
+both node and edge writes: a later revision updates props and `validTo` without
+trying to rewrite the live row's start. Without it, the default `"refuse"`
+policy raises `IMMUTABLE_VALIDITY_LOWER_BOUND` when a revision states a
+different start. The edge also explicitly selects `ifExists: "update"`; the
+default is `"return"`, which is right for create-once relationships but writes
+neither revised props nor a closing `validTo` when the edge already exists.
 
 ### `matchOn` widens the identity key — don't reach for it by default
 
@@ -273,8 +272,9 @@ store creates a row without a stated `validFrom`, TypeGraph uses the ingest
 instant. A later replayed event whose historical `validTo` precedes that ingest
 instant is therefore an `INVERTED_VALIDITY_WINDOW`, even if the source timeline
 itself was ordered. An event-time decoder must emit `validFrom` on the event
-that first creates each row; `onImmutableLowerBound: "preserve"` then lets later
-revisions carry their source bound without trying to move the stored start.
+that first creates each node or edge; `onImmutableLowerBound: "preserve"` then
+lets later revisions carry their source bound without trying to move the stored
+start.
 
 ### In-graph cursors and the receipt
 
