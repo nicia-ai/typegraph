@@ -14,11 +14,21 @@ import {
   type TemporalAlgorithmOptions,
 } from "@nicia-ai/typegraph";
 import type {
+  CandidateDiagnostics,
+  EntityResolution,
   GraphBranch,
   MakeBackend,
+  MatchEvidence,
+  MergePlanArtifact,
   MergeOptions,
 } from "@nicia-ai/typegraph/graph-merge";
-import { branch, merge } from "@nicia-ai/typegraph/graph-merge";
+import {
+  applyMergePlan,
+  branch,
+  merge,
+  planMerge,
+  planMergeIncremental,
+} from "@nicia-ai/typegraph/graph-merge";
 import type { SqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { z } from "zod";
 
@@ -86,6 +96,9 @@ declare const worksAtId: EdgeId<typeof worksAt>;
 declare const sqliteTables: SqliteTables;
 declare const makeBackend: MakeBackend;
 declare const branches: readonly GraphBranch<typeof graph>[];
+declare const mergePlan: MergePlanArtifact;
+declare const entityResolution: EntityResolution;
+declare const candidateDiagnostics: CandidateDiagnostics;
 
 const nodeKinds = getNodeKinds(graph);
 const edgeKinds = getEdgeKinds(graph);
@@ -110,10 +123,24 @@ const mergeOptions: MergeOptions<typeof graph> = {
       threshold: 0.8,
     },
   },
+  candidateDiagnostics: { limit: 100 },
 };
 
 void branch(store, makeBackend);
 void merge(store, branches, mergeOptions);
+void planMerge(store, branches, mergeOptions);
+void planMergeIncremental({
+  forkPoint: store,
+  target: store,
+  branches,
+  options: mergeOptions,
+});
+void applyMergePlan(store, mergePlan);
+
+const decisiveEdges: readonly MatchEvidence[] = entityResolution.decisiveEdges;
+const diagnosticLimit: number = candidateDiagnostics.limit;
+void decisiveEdges;
+void diagnosticLimit;
 
 // @ts-expect-error - edge id brands cannot be mixed across edge kinds
 void store.edges.knows.getById(worksAtId);

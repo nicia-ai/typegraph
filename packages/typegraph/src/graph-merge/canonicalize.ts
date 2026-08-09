@@ -443,6 +443,9 @@ export function canonicalizeCluster(
     memberIds,
     kind,
     branchOrigins,
+    // The merge orchestrator replaces this with the witness selected from the
+    // post-guard surviving edge set. Canonicalization never re-derives evidence.
+    decisiveEdges: [],
   };
 
   // Window precedence mirrors committed-first assertion precedence: when the

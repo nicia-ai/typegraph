@@ -139,6 +139,16 @@ describe.each(backendMatrix())("baseUnique source [$name]", (entry) => {
     expect(
       produced.forcedEdges.every((e) => e.score === FORCED_MATCH_SCORE),
     ).toBe(true);
+    expect(produced.forcedEdges[0]?.evidence).toMatchObject({
+      decision: "definitional",
+      sources: [
+        {
+          kind: "baseUnique",
+          constraintName: "mrn_unique",
+        },
+      ],
+    });
+    expect(produced.forcedEdges[0]?.evidence).not.toHaveProperty("score");
     expect(produced.pairs).toEqual([]);
 
     // One base member per matched committed node, origin "base", props stripped

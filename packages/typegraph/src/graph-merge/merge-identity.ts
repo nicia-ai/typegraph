@@ -1136,7 +1136,7 @@ export function assertOneIdOneTruth(
 export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
   target: Store<G>,
   txBackend: TransactionBackend,
-  plan: IdentityPlanSlice,
+  plan: Pick<IdentityPlanSlice, "identityAssertions" | "identityRetractions">,
 ): Promise<void> {
   const plannedIds = [
     ...plan.identityAssertions.map((assertion) => assertion.id),

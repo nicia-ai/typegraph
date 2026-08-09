@@ -32,6 +32,7 @@ import {
   createPostgresBackend,
   createPostgresTables,
 } from "../../../src/backend/postgres";
+import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import type {
   GraphBackend,
   TransactionBackend,
@@ -404,16 +405,25 @@ describe("PostgreSQL Adapter", () => {
       await clearTestData();
     });
 
-    createIntegrationTestSuite("PostgreSQL", () => {
-      // Create a fresh connection for each backend instance
-      const { pool, db } = createConnection();
-      return {
-        backend: createPostgresBackend(db),
-        cleanup: async () => {
-          await pool.end();
+    createIntegrationTestSuite(
+      "PostgreSQL",
+      () => {
+        // Create a fresh connection for each backend instance
+        const { pool, db } = createConnection();
+        return {
+          backend: createPostgresBackend(db),
+          cleanup: async () => {
+            await pool.end();
+          },
+        };
+      },
+      {
+        createIsolatedBackend: async () => {
+          const { backend } = await createLocalPgliteBackend();
+          return { backend, cleanup: () => backend.close() };
         },
-      };
-    });
+      },
+    );
   });
 });
 

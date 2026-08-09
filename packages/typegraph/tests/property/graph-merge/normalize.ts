@@ -81,6 +81,7 @@ type NormalizedResolution = Readonly<{
   kind: string;
   memberIds: readonly string[];
   branchOrigins: readonly string[];
+  decisiveEdges: MergeReport["resolutions"][number]["decisiveEdges"];
 }>;
 
 /** A delete/modify conflict in canonical form. */
@@ -218,6 +219,7 @@ export function normalizeReport<G extends GraphDef>(
       branchOrigins: [...resolution.branchOrigins]
         .map((id) => id as string)
         .sort((left, right) => compareStrings(left, right)),
+      decisiveEdges: resolution.decisiveEdges,
     }))
     .sort((left, right) => compareStrings(left.canonicalId, right.canonicalId));
 

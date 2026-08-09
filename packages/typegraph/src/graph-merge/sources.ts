@@ -37,8 +37,13 @@ import { requireDefined } from "../utils/presence";
  * the scoring stage additionally dedups + sorts, so neither source's emission order
  * leaks into the merge result.
  */
-import { isUniqueBucketKey, UNBLOCKED_BUCKET_KEY } from "./blocking";
-import { MergeError } from "./errors";
+import {
+  isUniqueBucketKey,
+  UNBLOCKED_BUCKET_KEY,
+  uniqueConstraintNameForBucket,
+} from "./blocking";
+import { CandidateSourceError } from "./errors";
+import { entityRef, type MatchSource } from "./evidence";
 import {
   compareMergeKeys,
   compareStrings,
@@ -164,12 +169,13 @@ export type CandidateSource = Readonly<{
 function orderEndpoints<K extends NodeType>(
   left: Node<K>,
   right: Node<K>,
+  sources: readonly MatchSource[],
 ): CandidatePair<K> {
   const leftKey = mergeKeyOf(left);
   const rightKey = mergeKeyOf(right);
   return compareMergeKeys(leftKey, rightKey) <= 0 ?
-      { a: leftKey, b: rightKey, left, right }
-    : { a: rightKey, b: leftKey, left: right, right: left };
+      { a: leftKey, b: rightKey, left, right, sources }
+    : { a: rightKey, b: leftKey, left: right, right: left, sources };
 }
 
 /** Sorts a bucket's members by ascending node id (defensive — blocking already does). */
@@ -272,6 +278,7 @@ function windowedPairs(
         orderEndpoints(
           requireDefined(keyed[index]).node,
           requireDefined(keyed[index_]).node,
+          [{ kind: "keyless", sourceId: "keyless" }],
         ),
       );
     }
@@ -309,6 +316,7 @@ export function pairsFromBlocks(
           orderEndpoints(
             requireDefined(members[index]),
             requireDefined(members[index_]),
+            [{ kind: "block", sourceId: "exactKey" }],
           ),
         );
       }
@@ -331,13 +339,37 @@ export function forcedEdgesFromBlocks(
       continue;
     }
     const members = sortMembersById(blocks.get(bucketKey) ?? []);
+    const constraintName = uniqueConstraintNameForBucket(bucketKey);
+    if (constraintName === undefined) {
+      throw new CandidateSourceError(
+        "Unique candidate bucket has no constraint name.",
+        {
+          details: {
+            operation: "candidateEvidence",
+            sourceId: "unique",
+            kind: members[0]?.kind ?? "unknown",
+          },
+        },
+      );
+    }
     for (let index = 0; index < members.length; index += 1) {
       for (let index_ = index + 1; index_ < members.length; index_ += 1) {
         const { a, b } = orderEndpoints(
           requireDefined(members[index]),
           requireDefined(members[index_]),
+          [],
         );
-        edges.push({ a, b, score: FORCED_MATCH_SCORE });
+        edges.push({
+          a,
+          b,
+          score: FORCED_MATCH_SCORE,
+          evidence: {
+            a: entityRef(a),
+            b: entityRef(b),
+            sources: [{ kind: "unique", sourceId: "unique", constraintName }],
+            decision: "definitional",
+          },
+        });
       }
     }
   }
@@ -411,6 +443,12 @@ export function ontologyRetypeEdges(
           a: requireDefined(members[0]),
           b: requireDefined(members[index]),
           score: FORCED_MATCH_SCORE,
+          evidence: {
+            a: entityRef(requireDefined(members[0])),
+            b: entityRef(requireDefined(members[index])),
+            sources: [{ kind: "retype", sourceId: "retype" }],
+            decision: "definitional",
+          },
         });
       }
     }
@@ -544,9 +582,15 @@ export const baseUniqueSource: CandidateSource = {
       uniqueConstraints === undefined ||
       store === undefined
     ) {
-      throw new MergeError(
+      throw new CandidateSourceError(
         "baseUniqueSource requires nodes, uniqueConstraints, and store in the source scope.",
-        { details: { kind, source: "baseUnique" } },
+        {
+          details: {
+            kind,
+            sourceId: "baseUnique",
+            operation: "generate",
+          },
+        },
       );
     }
 
@@ -577,14 +621,23 @@ export const baseUniqueSource: CandidateSource = {
         try {
           return await collection.bulkFindByConstraint(constraint.name, items);
         } catch (error) {
-          throw new MergeError(
+          throw new CandidateSourceError(
             `baseUniqueSource: new-vs-base lookup for constraint "${constraint.name}" on kind "${kind}" failed — a staged node's props could not be validated against the kind's schema for constraint-key computation.`,
-            { details: { kind, constraint: constraint.name }, cause: error },
+            {
+              details: {
+                kind,
+                sourceId: "baseUnique",
+                operation: "lookupConstraint",
+                constraint: constraint.name,
+              },
+              cause: error,
+            },
           );
         }
       }),
     );
-    for (const matches of matchesByConstraint) {
+    for (const [constraintIndex, matches] of matchesByConstraint.entries()) {
+      const constraint = requireDefined(constraints[constraintIndex]);
       for (const [index, node] of nodes.entries()) {
         const base = matches[index];
         if (base === undefined) {
@@ -617,7 +670,23 @@ export const baseUniqueSource: CandidateSource = {
           compareMergeKeys(stagedKey, baseKey) <= 0 ?
             { a: stagedKey, b: baseKey }
           : { a: baseKey, b: stagedKey };
-        forcedEdges.push({ a, b, score: FORCED_MATCH_SCORE });
+        forcedEdges.push({
+          a,
+          b,
+          score: FORCED_MATCH_SCORE,
+          evidence: {
+            a: entityRef(a),
+            b: entityRef(b),
+            sources: [
+              {
+                kind: "baseUnique",
+                sourceId: "baseUnique",
+                constraintName: constraint.name,
+              },
+            ],
+            decision: "definitional",
+          },
+        });
       }
     }
 
@@ -665,9 +734,11 @@ export const baseKeySource: CandidateSource = {
       return { pairs: [], forcedEdges: [], baseMembers: [] };
     }
     if (nodes === undefined || store === undefined) {
-      throw new MergeError(
+      throw new CandidateSourceError(
         "baseKeySource requires nodes and store in the source scope.",
-        { details: { kind, source: "baseKey" } },
+        {
+          details: { kind, sourceId: "baseKey", operation: "generate" },
+        },
       );
     }
 
@@ -684,9 +755,17 @@ export const baseKeySource: CandidateSource = {
     try {
       matchesByNode = await collection.bulkFindByIndex(blockIndex, items);
     } catch (error) {
-      throw new MergeError(
+      throw new CandidateSourceError(
         `baseKeySource: new-vs-base lookup on index "${blockIndex}" for kind "${kind}" failed — the index is undeclared or a staged node's props are incompatible with its indexed fields.`,
-        { details: { kind, index: blockIndex }, cause: error },
+        {
+          details: {
+            kind,
+            sourceId: "baseKey",
+            operation: "lookupIndex",
+            index: blockIndex,
+          },
+          cause: error,
+        },
       );
     }
 
@@ -710,7 +789,11 @@ export const baseKeySource: CandidateSource = {
         if (stagedKey === baseKey) {
           continue;
         }
-        pairs.push(orderEndpoints(stagedNode, base));
+        pairs.push(
+          orderEndpoints(stagedNode, base, [
+            { kind: "baseIndex", sourceId: "baseKey", indexName: blockIndex },
+          ]),
+        );
       }
     }
 
