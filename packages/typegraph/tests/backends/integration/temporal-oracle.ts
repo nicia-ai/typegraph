@@ -1030,7 +1030,8 @@ async function assertProjectionParity(
 }
 
 // ============================================================
-// The still-reproduces tests, one per declared gap
+// The still-reproduces tests, one per declared gap, and the gap-CLOSED tests
+// that replaced the two the seam closed
 // ============================================================
 
 type GapReproduction = (context: IntegrationTestContext) => Promise<void>;
@@ -1057,45 +1058,6 @@ async function storedRow(
    compile error), and that structure is worth more than inlining the expects
    into literal `it` bodies. */
 const GAP_REPRODUCTIONS = {
-  "born-ended-insert": async (context) => {
-    const backend = context.getBackend();
-    const store = freshStore(backend, "gap_insert");
-    await store.nodes.OraclePerson.create(
-      { name: "born ended" },
-      { id: "f1", validTo: FIRST_PAST_ANCHOR },
-    );
-    const row = await storedRow(backend, store, "f1");
-    // The gap: a bound nobody stated is stamped past the stated end.
-    expect(row.validTo).toBe(FIRST_PAST_ANCHOR);
-    expect(row.validFrom).toBeDefined();
-    expect(rowSatisfiesOrderedWindow(row)).toBe(false);
-    // ...so the row is readable at no coordinate at all.
-    for (const at of [
-      "2019-01-01T00:00:00.000Z",
-      FIRST_PAST_ANCHOR,
-      LAST_FUTURE_ANCHOR,
-    ]) {
-      const seen = await store.nodes.OraclePerson.getById(
-        asNodeId<typeof OraclePerson>("f1"),
-        { temporalMode: "asOf", asOf: at },
-      );
-      expect(seen).toBeUndefined();
-    }
-  },
-  "born-ended-on-tombstone": async (context) => {
-    const backend = context.getBackend();
-    const store = freshStore(backend, "gap_tombstone");
-    await store.nodes.OraclePerson.create({ name: "first" }, { id: "t1" });
-    await store.nodes.OraclePerson.delete(asNodeId<typeof OraclePerson>("t1"));
-    await store.nodes.OraclePerson.create(
-      { name: "born ended on tombstone" },
-      { id: "t1", validTo: FIRST_PAST_ANCHOR },
-    );
-    const row = await storedRow(backend, store, "t1");
-    expect(row.validTo).toBe(FIRST_PAST_ANCHOR);
-    expect(row.validFrom).toBeDefined();
-    expect(rowSatisfiesOrderedWindow(row)).toBe(false);
-  },
   "resurrection-refusal-gap": async (context) => {
     const store = freshStore(context.getBackend(), "gap_refusal");
     for (const id of ["c1", "u1"]) {
@@ -1127,6 +1089,69 @@ const GAP_REPRODUCTIONS = {
     );
   },
 } as const satisfies Record<KnownContractGapId, GapReproduction>;
+
+/**
+ * What the two born-ended entries used to excuse, restated as what the tree now
+ * does. These are the SAME two scripts their reproductions ran — a lone past
+ * `validTo` on a fresh id and on a tombstoned id — with every assertion turned
+ * around: no lower bound instead of a stamped one, an ordered window instead of a
+ * backwards one, and a row readable before its end instead of at no coordinate at
+ * all. Keeping the scripts and inverting the expectations is what makes the pair
+ * a closure record rather than two unrelated tests that happen to be green.
+ *
+ * Both variants assert the SAME stored shape, which is the create half of I12:
+ * one stated window through two entry points reaches one outcome. The tombstoned
+ * variant is the one that fails if `buildUpdateNode`'s resurrection leg is left
+ * on the old resolver while the eight insert builders are rewired.
+ */
+async function assertBornEndedCreateStoresNoLowerBound(
+  context: IntegrationTestContext,
+  variant: Readonly<{ label: string; id: string; tombstoneFirst: boolean }>,
+): Promise<void> {
+  const backend = context.getBackend();
+  const store = freshStore(backend, variant.label);
+  const nodeId = asNodeId<typeof OraclePerson>(variant.id);
+  if (variant.tombstoneFirst) {
+    await store.nodes.OraclePerson.create(
+      { name: "first" },
+      { id: variant.id },
+    );
+    await store.nodes.OraclePerson.delete(nodeId);
+  }
+
+  const created = await store.nodes.OraclePerson.create(
+    { name: "born ended" },
+    { id: variant.id, validTo: FIRST_PAST_ANCHOR },
+  );
+  expect(created.meta.validFrom).toBeUndefined();
+  expect(created.meta.validTo).toBe(FIRST_PAST_ANCHOR);
+
+  const row = await storedRow(backend, store, variant.id);
+  expect(row.validTo).toBe(FIRST_PAST_ANCHOR);
+  expect(row.validFrom).toBeUndefined();
+  expect(rowSatisfiesOrderedWindow(row)).toBe(true);
+  expect(intervalIsEmpty(intervalOf(row))).toBe(false);
+
+  // "Ended at T, start unknown": readable at every coordinate before its end,
+  // at none from its end onward. The upper bound is half-open, so the end
+  // instant itself is already outside.
+  for (const at of ["2019-01-01T00:00:00.000Z", "2019-12-31T23:59:59.999Z"]) {
+    await expect(
+      store.nodes.OraclePerson.getById(nodeId, {
+        temporalMode: "asOf",
+        asOf: at,
+      }),
+    ).resolves.toBeDefined();
+  }
+  for (const at of [FIRST_PAST_ANCHOR, LAST_FUTURE_ANCHOR]) {
+    await expect(
+      store.nodes.OraclePerson.getById(nodeId, {
+        temporalMode: "asOf",
+        asOf: at,
+      }),
+    ).resolves.toBeUndefined();
+  }
+}
 /* eslint-enable vitest/no-standalone-expect */
 
 // ============================================================
@@ -1220,6 +1245,24 @@ export function registerTemporalOracleIntegrationTests(
           await GAP_REPRODUCTIONS[gap.id](context);
         });
       }
+    });
+
+    describe("closed contract gaps", () => {
+      it("closed: a born-ended create on a fresh id stores no lower bound and reads back before its end", async () => {
+        await assertBornEndedCreateStoresNoLowerBound(context, {
+          label: "closed_insert",
+          id: "f1",
+          tombstoneFirst: false,
+        });
+      });
+
+      it("closed: a born-ended create on a tombstoned id stores the same shape as on a fresh id", async () => {
+        await assertBornEndedCreateStoresNoLowerBound(context, {
+          label: "closed_tombstone",
+          id: "t1",
+          tombstoneFirst: true,
+        });
+      });
     });
 
     it("stores no window readable at no coordinate, and stamps no bound it did not judge (P1/P1b/P2)", async () => {

@@ -96,10 +96,12 @@ interface GraphData {
 
 `validFrom` has three states: the key **absent** means it wasn't requested
 (`includeTemporal: false`, the default) — import defaults it to the
-import's own creation timestamp. An **explicit `null`** means the source
-row is confirmed to have no lower bound (open-left validity) — import
-preserves that instead of re-stamping it. A **string** is an explicit
-value, carried through unchanged.
+import's own creation timestamp, unless the record also states a `validTo`
+at or before that instant, in which case it is imported with no lower bound
+("ended at T, start unknown") rather than one past its own end. An
+**explicit `null`** means the source row is confirmed to have no lower bound
+(open-left validity) — import preserves that instead of re-stamping it. A
+**string** is an explicit value, carried through unchanged.
 
 ### Format Version Compatibility
 
@@ -201,7 +203,8 @@ next chunk, so a slow database read does not count as consumer idleness.
 
 **Round-trip caveat:** with the default `includeTemporal: false`, exported
 records carry no `validFrom`/`validTo`. On import, an omitted `validFrom`
-defaults to the *import's own* creation timestamp — so a plain
+defaults to the *import's own* creation timestamp (a born-already-ended record
+is the exception noted above, and keeps no lower bound) — so a plain
 `exportGraph` + `importGraph` round trip does **not** reproduce the
 source's original valid-time window; every imported record becomes valid
 from import time forward. Pass `includeTemporal: true` on export when the

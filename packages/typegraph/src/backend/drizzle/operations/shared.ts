@@ -88,36 +88,6 @@ export function sqlNull(value: string | undefined): SQL | string {
 }
 
 /**
- * Resolves a `validFrom` insert value against the row's creation timestamp.
- * Three states, matching {@link InsertNodeParams.validFrom} /
- * {@link InsertEdgeParams.validFrom}:
- *  - `undefined` (omitted): defaults to `timestamp` — every insert path
- *    (single, batch, returning/non-returning) agrees that "no validFrom"
- *    means "valid from creation", not open-left NULL (see issue #240).
- *  - `null`: preserves an explicit open-left window — returned as
- *    `undefined` here so the caller's {@link sqlNull} wrap emits SQL NULL,
- *    letting interchange import round-trip a row that predates the #240
- *    fix without narrowing its validity window on re-import (e.g. via a
- *    `branch()` clone).
- *  - a string: passed through unchanged.
- *
- * The `timestamp` fallback is a storage convention, not an assertion the caller
- * can be held to, so a write whose validity window is GUARDED against the
- * resulting lower bound must supply that bound explicitly instead of relying on
- * it: this function samples nothing, but its caller's `timestamp` comes from a
- * later clock read than the guard's, and the difference is a window of negative
- * width (issue #413). The node resurrection path therefore passes the instant it
- * validated against; see `buildUpdateNode` and `performNodeUpdate`.
- */
-export function resolveValidFrom(
-  validFrom: string | null | undefined,
-  timestamp: string,
-): string | undefined {
-  if (validFrom === null) return undefined;
-  return validFrom ?? timestamp;
-}
-
-/**
  * The `AND valid_from …` conjunction a write carries when its caller ASSERTED
  * the lower bound the target row already holds (see
  * {@link UpdateNodeParams.expectedValidFrom} /

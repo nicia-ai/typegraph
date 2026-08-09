@@ -518,12 +518,33 @@ When querying with temporal context, these fields are available:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `validFrom` | `string \| undefined` | When this version became valid |
+| `validFrom` | `string \| undefined` | When this version became valid (`undefined` on an **open-left** row — see below) |
 | `validTo` | `string \| undefined` | When this version was superseded (undefined if current) |
 | `createdAt` | `string` | When the node was first created |
 | `updatedAt` | `string` | When this version was written |
 | `deletedAt` | `string \| undefined` | Soft-delete timestamp (undefined if not deleted) |
 | `version` | `number` | Optimistic concurrency version number |
+
+### Open-left rows (`validFrom` is `undefined`)
+
+A row may have **no lower bound at all**, which means "valid since forever, as
+far as this store knows". `asOf` and `current` treat such a row as valid at
+every instant at or before its `validTo`. Two writes produce one:
+
+- an interchange record stating `validFrom: null` — a source row confirmed to
+  have no lower bound, round-tripped rather than re-stamped;
+- a **born-already-ended** write: one that CREATES a row while stating a
+  `validTo` at or before its own instant and no `validFrom`. The row's start is
+  unknown rather than after its end, so no bound is stored and the row reads back
+  at every `asOf` before that end. A `validTo` in the *future* is unaffected — it
+  still stamps the creation instant, so the row stays invisible at instants
+  before it existed. A **node** create whose id names a tombstone resurrects
+  that row and still qualifies — same stored shape as a fresh id; an edge create
+  never lands on a tombstone (a taken id raises `Edge already exists`). A
+  resurrecting *upsert* does not: on a tombstoned node, `upsertById` /
+  `bulkUpsertById` judge the stated `validTo` against the resurrection instant;
+  on a tombstoned edge, `bulkUpsertById` and `getOrCreateByEndpoints` judge it
+  against the bound the row retains.
 
 ```typescript
 .select((ctx) => ({

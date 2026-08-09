@@ -68,10 +68,13 @@ export const InterchangeNodeSchema = z.object({
   properties: z.record(z.string(), z.unknown()),
   /**
    * `undefined` (key absent): not requested (`includeTemporal: false`) —
-   * import defaults it to the import's own creation timestamp. `null`:
-   * requested and confirmed the row has no lower bound (e.g. a legacy row
-   * predating the "omitted validFrom defaults to creation time" fix) —
-   * import preserves that open-left validity instead of re-stamping it.
+   * import defaults it to the import's own creation timestamp, UNLESS the
+   * record states a `validTo` at or before that instant, in which case the row
+   * is imported with no lower bound ("ended at T, start unknown") rather than
+   * one after its own end (issue #407). `null`: requested and confirmed the row
+   * has no lower bound (e.g. a legacy row predating the "omitted validFrom
+   * defaults to creation time" fix) — import preserves that open-left validity
+   * instead of re-stamping it.
    */
   validFrom: ValidityTimestampSchema.nullable().optional(),
   validTo: ValidityTimestampSchema.optional(),

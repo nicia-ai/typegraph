@@ -307,6 +307,41 @@ export function registerTemporalIntegrationTests(
       expect(pastNode).toBeUndefined();
     });
 
+    it("still stamps the create timestamp when a FUTURE validTo is stated alone", async () => {
+      // The sibling of the #240 test above, and the standing guard against the
+      // naive reading of #407. A lone `validTo` leaves the row with no lower
+      // bound only when stamping one would make the window readable at no
+      // coordinate — that is, when the end is at or before the write instant. A
+      // SCHEDULED end means "valid from now until then", so the create instant
+      // is still stamped and the row is still invisible before it existed. A
+      // rule that dropped the bound whenever a `validTo` was named would make
+      // this row visible at `asOf(2020)`, widening a window the caller narrowed.
+      const { PAST } = TEMPORAL_ANCHORS;
+      const scheduledEnd = new Date(Date.now() + 3_600_000).toISOString();
+      const store = context.getStore();
+
+      const alice = await store.nodes.Person.create(
+        { name: "Alice" },
+        { validTo: scheduledEnd },
+      );
+
+      expect(alice.meta.validFrom).toBeDefined();
+      expect(alice.meta.validTo).toBe(scheduledEnd);
+
+      const pastNode = await store.nodes.Person.getById(alice.id, {
+        temporalMode: "asOf",
+        asOf: PAST,
+      });
+      expect(pastNode).toBeUndefined();
+
+      // ...and it is current right now, so the stamped bound is a real bound
+      // rather than a value that happens to sort before every coordinate.
+      const currentNode = await store.nodes.Person.getById(alice.id, {
+        temporalMode: "current",
+      });
+      expect(currentNode?.id).toBe(alice.id);
+    });
+
     it("defaults an omitted edge validFrom to the create timestamp, even when both endpoints predate it", async () => {
       // Regression test for #240's "test gap": pair the implicit-validFrom
       // edge with endpoints that are ALREADY valid at the historical asOf,

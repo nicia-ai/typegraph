@@ -486,7 +486,12 @@ export type InsertNodeParams = Readonly<{
   id: string;
   props: Readonly<Record<string, unknown>>;
   /**
-   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * Omitted (`undefined`): the insert stamps its own creation timestamp —
+   * UNLESS a stated `validTo` at or before that instant would make the stored
+   * window readable at no coordinate, in which case the row is stored with no
+   * lower bound ("ended at T, start unknown"). See
+   * `resolveStampedValidityLowerBound`, which every insert builder decides
+   * through.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.
@@ -510,7 +515,13 @@ export type UpdateNodeParams = Readonly<{
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
-  /** Applied when resurrecting a tombstone; omitted means the resurrection instant. */
+  /**
+   * Applied when resurrecting a tombstone, which RESETS the window. Omitted
+   * means the resurrection instant — unless a stated `validTo` at or before it
+   * would leave the row readable at no coordinate, in which case the
+   * resurrection stores no lower bound. Same rule, same owner, as an insert:
+   * `resolveStampedValidityLowerBound`.
+   */
   validFrom?: string | null;
   /**
    * The effective `valid_from` this write ASSERTS the target row already
@@ -598,7 +609,12 @@ export type InsertEdgeParams = Readonly<{
   toId: string;
   props: Readonly<Record<string, unknown>>;
   /**
-   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * Omitted (`undefined`): the insert stamps its own creation timestamp —
+   * UNLESS a stated `validTo` at or before that instant would make the stored
+   * window readable at no coordinate, in which case the row is stored with no
+   * lower bound ("ended at T, start unknown"). See
+   * `resolveStampedValidityLowerBound`, which every insert builder decides
+   * through.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.

@@ -489,9 +489,11 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  // A stated pair must be ordered. A lone historical validTo is NOT an error on
-  // an insert — it means "born already ended" (see
-  // assertWritableValidityWindow). Both create paths (single and batch) prepare
+  // A stated pair must be ordered, and on an insert that is the COMPLETE rule.
+  // A lone historical validTo is NOT an error — it means "born already ended"
+  // (see assertWritableValidityWindow), and the insert stores no lower bound for
+  // it rather than one past the stated end, so there is no effective bound left
+  // for this layer to judge. Both create paths (single and batch) prepare
   // through here, so this is the only insert-side check needed.
   assertOrderedValidityWindow(`edge "${id}"`, validFrom, validTo);
 

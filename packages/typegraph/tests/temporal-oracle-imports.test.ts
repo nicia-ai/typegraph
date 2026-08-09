@@ -11,9 +11,9 @@
  * plus two clauses the set alone does not carry:
  *
  * - the `src/utils/date` import is checked at the NAMED-import level, so the
- *   window guards (`isInvertedValidityWindow`, and the `isEmptyValidityWindow` /
- *   `resolveStampedValidityLowerBound` pair that lands with the seam) stay out
- *   while the timestamp normalizer stays in;
+ *   window guards (`isInvertedValidityWindow`, `isEmptyValidityWindow` and the
+ *   stamping owner `resolveStampedValidityLowerBound`) stay out while the
+ *   timestamp normalizer stays in;
  * - the barrel import is asserted to be an `import type` declaration. Specifier
  *   equality alone leaves the barrel a live hole: it is closed today only by
  *   what `src/index.ts` happens to re-export, which is not a property anyone

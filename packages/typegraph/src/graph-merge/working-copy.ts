@@ -24,9 +24,11 @@
  * `includeTemporal: true` carries `validFrom`/`validTo` through unchanged,
  * preserving the base's exact valid-time window on the clone: create-time
  * paths default an omitted `validFrom` to the row's own creation instant
- * (see #240), and export/import round-trip a still-open-left `valid_from`
- * (e.g. a row that predates the #240 fix) as an explicit `null` rather than
- * silently dropping it — see `InterchangeNodeSchema.validFrom`'s doc.
+ * (see #240) — except for a BORN-ENDED row, whose stated `validTo` at or before
+ * the write instant leaves it with no lower bound at all (see #407) — and
+ * export/import round-trip a still-open-left `valid_from` (a born-ended row, or
+ * one that predates the #240 fix) as an explicit `null` rather than silently
+ * dropping it — see `InterchangeNodeSchema.validFrom`'s doc.
  * Without either half of this, the clone's re-import would re-stamp the
  * affected base rows to the CLONE's creation instant instead — narrowing
  * their validity window and making `asOf` reads on the fork diverge from

@@ -11,9 +11,11 @@
  *   2. an in-place UPDATE's lone `validTo` must not precede the row's stored
  *      `valid_from` — the hole the edge path used to have;
  *   3. ZERO width stays legal, on creates and on updates;
- *   4. "born already ended" — an INSERT carrying a lone historical `validTo` —
- *      stays legal: the stamped `valid_from` is a storage convention, not a
- *      caller assertion, and the row is read back through `includeEnded`;
+ *   4. "born already ended" — a create carrying a lone historical `validTo` —
+ *      stays legal, and stores NO lower bound (issue #407): the row states where
+ *      it ended, not where it began, so nothing is stamped after its own end and
+ *      it reads back at every `asOf` coordinate before that end. This holds on a
+ *      fresh id and on one naming a tombstone, which take different write paths;
  *   5. resurrecting an edge into the ended state stays legal, but the end it
  *      names is held to the bound the row RETAINS across resurrection;
  *   6. import refuses an inverted document per row, carrying the stable code;
@@ -138,6 +140,47 @@ async function expectInvertedWindowRefusal(
   expect(
     (error as ValidationError).details.issues.map((issue) => issue.code),
   ).toContain(INVERTED_VALIDITY_WINDOW_CODE);
+}
+
+/**
+ * THE canonical statement of the born-ended contract (issue #407).
+ *
+ * A create naming only a `validTo` at or before its own write instant states
+ * "this ended at T"; it does not state where it started. Stamping the write
+ * instant as `valid_from` would answer a question nobody asked, and answer it
+ * with a window no `asOf` coordinate can observe — a successful write that
+ * stores an unreadable row. So no bound is stored at all, and the row means
+ * what it says: ended at T, start unknown.
+ *
+ * The assertion is the STORED shape and the READ, not just the accepted
+ * call: `meta.validTo` alone passed before the fix and after it.
+ */
+async function assertBornEndedNodeShape(
+  backend: GraphBackend,
+  store: ReturnType<typeof createStore<typeof graph>>,
+  id: string,
+): Promise<void> {
+  const raw = requireDefined(await backend.getNode(graph.id, "Person", id));
+  expect(raw.valid_from).toBeUndefined();
+  expect(raw.valid_to).toBe(START);
+
+  // Readable at every coordinate before its end, at none from its end on —
+  // the upper bound is half-open, so the end instant itself is outside.
+  const nodeId = asNodeId<typeof Person>(id);
+  await expect(
+    store.nodes.Person.getById(nodeId, {
+      temporalMode: "asOf",
+      asOf: EARLIER,
+    }),
+  ).resolves.toBeDefined();
+  for (const at of [START, LATER]) {
+    await expect(
+      store.nodes.Person.getById(nodeId, {
+        temporalMode: "asOf",
+        asOf: at,
+      }),
+    ).resolves.toBeUndefined();
+  }
 }
 
 describe("inverted valid-time windows", () => {
@@ -359,14 +402,11 @@ describe("inverted valid-time windows", () => {
   });
 
   describe("born already ended stays legal", () => {
-    it("accepts a lone historical validTo on node and edge create", async () => {
+    it("stores no lower bound for a lone historical validTo on node and edge create", async () => {
       const store = createStore(graph, backend);
-      // No validFrom: the backend stamps the write instant. The row is
-      // deliberately not current, and `includeEnded` is how it is read back —
-      // an established idiom across the temporal, search and provenance suites.
       const person = await store.nodes.Person.create(
         { name: "Former" },
-        { validTo: START },
+        { id: "born-ended-fresh", validTo: START },
       );
       const acme = await store.nodes.Company.create({ name: "Acme" });
       const edge = await store.edges.worksAt.create(
@@ -377,7 +417,46 @@ describe("inverted valid-time windows", () => {
       );
 
       expect(person.meta.validTo).toBe(START);
+      expect(person.meta.validFrom).toBeUndefined();
       expect(edge.meta.validTo).toBe(START);
+      expect(edge.meta.validFrom).toBeUndefined();
+
+      await assertBornEndedNodeShape(backend, store, "born-ended-fresh");
+
+      // Edges take the same route through the same insert builders, so the same
+      // shape has to reach the edges relation — asserted on the row, not
+      // inferred from the node's.
+      const rawEdge = requireDefined(await backend.getEdge(graph.id, edge.id));
+      expect(rawEdge.valid_from).toBeUndefined();
+      expect(rawEdge.valid_to).toBe(START);
+      const beforeEnd = await store.edges.worksAt.getById(edge.id, {
+        temporalMode: "asOf",
+        asOf: EARLIER,
+      });
+      expect(beforeEnd?.id).toBe(edge.id);
+    });
+
+    it("stores the same shape when the create lands on a tombstoned id", async () => {
+      // A create whose id names an existing tombstone RESURRECTS it, reaching
+      // `buildUpdateNode`'s window-reset leg instead of an insert builder — a
+      // second write path for one user-visible operation. It stamps its bound
+      // through the same owner, so one stated window has one outcome whichever
+      // path it takes (invariant I12's create legs).
+      const store = createStore(graph, backend);
+      const person = await store.nodes.Person.create(
+        { name: "First" },
+        { id: "born-ended-tombstone" },
+      );
+      await store.nodes.Person.delete(person.id);
+
+      const revived = await store.nodes.Person.create(
+        { name: "Former" },
+        { id: "born-ended-tombstone", validTo: START },
+      );
+
+      expect(revived.meta.validTo).toBe(START);
+      expect(revived.meta.validFrom).toBeUndefined();
+      await assertBornEndedNodeShape(backend, store, "born-ended-tombstone");
     });
 
     it("accepts resurrecting an edge straight into the ended state", async () => {

@@ -163,11 +163,17 @@ export function upsertWindowChanges(
  * COMPLETE window — leaves the row holding, for a later item with the same id in
  * the same batch to compare against.
  *
- * An omitted `validFrom` is stamped with the write instant by the backend, a
- * value this layer cannot know, so it stays `undefined`. A later copy naming a
- * lower bound therefore counts as a change and writes, rather than coalescing
- * against a guess: the bulk path may spend a write the sequential path would
- * skip, but it never skips one the sequential path makes.
+ * An omitted `validFrom` is left `undefined`, and that prediction is now EXACT in
+ * one case and conservative in the other:
+ *
+ *  - BORN-ENDED (a stated `validTo` at or before the write instant): the backend
+ *    stamps no lower bound at all, so `undefined` is precisely what the row will
+ *    hold, and a later copy restating that shape coalesces correctly;
+ *  - every other create: the backend stamps its own write instant, a value this
+ *    layer cannot know, so `undefined` remains a deliberate under-approximation.
+ *    A later copy naming a lower bound counts as a change and writes, rather than
+ *    coalescing against a guess — the bulk path may spend a write the sequential
+ *    path would skip, but it never skips one the sequential path makes.
  */
 export function windowAfterUpsertCreate(
   requested: RequestedWindow,

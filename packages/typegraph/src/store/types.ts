@@ -799,7 +799,11 @@ export type NodeCollection<
   /**
    * Create a new node.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   create: (
     props: z.input<N["schema"]>,
@@ -892,7 +896,11 @@ export type NodeCollection<
    * the data shape is determined at runtime, not compile time.
    * The return type is fully typed — only the input gate is relaxed.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   createFromRecord: (
     data: Record<string, unknown>,
@@ -907,7 +915,14 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. An update to a LIVE row stores no lower
+   * operation's timestamp when omitted. On the CREATE branch that default is
+   * dropped when a stated `validTo` at or before the write instant would leave
+   * the row readable at no coordinate: NO lower bound is stored ("ended at T,
+   * start unknown") and `meta.validFrom` reads back as `undefined`. A
+   * RESURRECTION does not take that exception: it judges the stated `validTo`
+   * against the resurrection instant, so one strictly earlier is REFUSED and one
+   * landing exactly on it stores a zero-width window. State `validFrom`
+   * alongside a historical `validTo` when the id may name a tombstone. An update to a LIVE row stores no lower
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
@@ -935,7 +950,14 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. An update to a LIVE row stores no lower
+   * operation's timestamp when omitted. On the CREATE branch that default is
+   * dropped when a stated `validTo` at or before the write instant would leave
+   * the row readable at no coordinate: NO lower bound is stored ("ended at T,
+   * start unknown") and `meta.validFrom` reads back as `undefined`. A
+   * RESURRECTION does not take that exception: it judges the stated `validTo`
+   * against the resurrection instant, so one strictly earlier is REFUSED and one
+   * landing exactly on it stores a zero-width window. State `validFrom`
+   * alongside a historical `validTo` when the id may name a tombstone. An update to a LIVE row stores no lower
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
@@ -958,7 +980,11 @@ export type NodeCollection<
    * More efficient than calling create() multiple times.
    * Use `bulkInsert` for the dedicated fast path that skips returning results.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkCreate: (
     items: readonly Readonly<{
@@ -983,7 +1009,14 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. An update to a LIVE row stores no lower
+   * operation's timestamp when omitted. On the CREATE branch that default is
+   * dropped when a stated `validTo` at or before the write instant would leave
+   * the row readable at no coordinate: NO lower bound is stored ("ended at T,
+   * start unknown") and `meta.validFrom` reads back as `undefined`. A
+   * RESURRECTION does not take that exception: it judges the stated `validTo`
+   * against the resurrection instant, so one strictly earlier is REFUSED and one
+   * landing exactly on it stores a zero-width window. State `validFrom`
+   * alongside a historical `validTo` when the id may name a tombstone. An update to a LIVE row stores no lower
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
@@ -1021,7 +1054,11 @@ export type NodeCollection<
    * with `returnResults: false`, the intent is unambiguous: no results
    * are returned and the operation is wrapped in a transaction.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkInsert: (
     items: readonly Readonly<{
@@ -1190,7 +1227,11 @@ export type EdgeCollection<
   /**
    * Create a new edge.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    *
    * @param from - Source node (must be one of the allowed 'from' types)
    * @param to - Target node (must be one of the allowed 'to' types)
@@ -1372,7 +1413,11 @@ export type EdgeCollection<
    * More efficient than calling create() multiple times.
    * Use `bulkInsert` for the dedicated fast path that skips returning results.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkCreate: (
     items: readonly Readonly<{
@@ -1400,9 +1445,15 @@ export type EdgeCollection<
    * is refused with `ValidationError` carrying
    * `EDGE_IDENTITY_MISMATCH_CODE`; it is never silently ignored.
    *
-   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
-   * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. An update to a LIVE row stores no lower
+   * `validFrom` applies when the upsert CREATES the edge and when it RESURRECTS
+   * a tombstoned one. A create writes a fresh validity window, defaulting to the
+   * operation's timestamp when omitted — unless a stated `validTo` at or before
+   * that instant would leave the row readable at no coordinate, in which case NO
+   * lower bound is stored ("ended at T, start unknown") and `meta.validFrom`
+   * reads back as `undefined`. A resurrection stamps nothing: an edge RETAINS
+   * its stored lower bound unless the item names a new one, so a `validTo`
+   * before the retained bound is REFUSED rather than stamped over. An update to
+   * a LIVE row stores no lower
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
@@ -1438,7 +1489,11 @@ export type EdgeCollection<
    * with `returnResults: false`, the intent is unambiguous: no results
    * are returned and the operation is wrapped in a transaction.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkInsert: (
     items: readonly Readonly<{
@@ -1495,8 +1550,13 @@ export type EdgeCollection<
    * property fields, only edges whose properties match on those fields are considered.
    * Soft-deleted matches are resurrected when cardinality allows.
    *
-   * `validFrom` applies on the create and RESURRECT branches, defaulting to the
-   * operation's creation timestamp when omitted. On the `ifExists: "update"`
+   * `validFrom` applies on the create and RESURRECT branches. A create defaults
+   * it to the operation's creation timestamp when omitted — unless a stated
+   * `validTo` at or before that instant would leave the row readable at no
+   * coordinate, in which case no lower bound is stored ("ended at T, start
+   * unknown"). A resurrection stamps nothing: an edge RETAINS its stored lower
+   * bound unless the call names a new one, so a `validTo` before the retained
+   * bound is REFUSED rather than stamped over. On the `ifExists: "update"`
    * branch a live edge's lower bound is history and cannot be stored, so a
    * `validFrom` naming a different instant is REFUSED (`ValidationError`
    * carrying `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`); restating the bound the

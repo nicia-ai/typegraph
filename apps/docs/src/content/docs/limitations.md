@@ -346,7 +346,9 @@ Temporal queries (`asOf`, `includeEnded`) work correctly but have some constrain
 - Point-in-time queries cannot be combined with streaming (`.stream()`)
 - `validFrom` defaults to the record's own creation timestamp when omitted, so `asOf` queries
   work out of the box; an end boundary still requires an explicit `validTo` — an open `validTo`
-  means "still valid"
+  means "still valid". A record written with a `validTo` at or before its own creation instant
+  is "born already ended" and stores no lower bound instead, so it reads back at every `asOf`
+  before that end
 - Clock skew between application servers can affect temporal accuracy
 
 ### Recorded / system time (`history: true`)

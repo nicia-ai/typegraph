@@ -683,10 +683,12 @@ function draftNodeCreate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  // A stated pair must be ordered. A lone historical validTo is NOT an error on
-  // an insert — it means "born already ended" (see
-  // assertWritableValidityWindow). Both create paths (single and batch) draft
-  // through here, so this is the only insert-side check needed.
+  // A stated pair must be ordered, and on an insert that is the COMPLETE rule.
+  // A lone historical validTo is NOT an error — it means "born already ended"
+  // (see assertWritableValidityWindow), and the insert stores no lower bound for
+  // it rather than one past the stated end, so there is no effective bound left
+  // for this layer to judge. Both create paths (single and batch) draft through
+  // here, so this is the only insert-side check needed.
   assertOrderedValidityWindow(`${kind} "${id}"`, validFrom, validTo);
 
   return {
@@ -937,11 +939,12 @@ async function performNodeUpdate<G extends GraphDef>(
   // effective lower bound is the write instant rather than the row's stored
   // one. That instant is sampled HERE and then travels to the backend as an
   // explicit `validFrom`, because the guard has to measure the bound the write
-  // will actually store: left to default, `resolveValidFrom` would stamp the
-  // backend's own, strictly later, sample, and a `validTo` at this instant
-  // would pass the guard as zero-width and land as negative width a
-  // millisecond later (issue #413). An in-place update keeps the row's stored
-  // bound, which no write rewrites and so needs no prediction.
+  // will actually store: left to default, the builder's own
+  // `resolveStampedValidityLowerBound` call would judge the backend's strictly
+  // later sample, and a `validTo` at this instant would pass the guard as
+  // zero-width and land as a different shape a millisecond later (issue #413).
+  // An in-place update keeps the row's stored bound, which no write rewrites and
+  // so needs no prediction.
   const resurrectionInstant =
     options?.clearDeleted === true && existing.deleted_at !== undefined ?
       nowIso()

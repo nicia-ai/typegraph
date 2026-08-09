@@ -258,6 +258,97 @@ export function isInvertedValidityWindow(
 }
 
 /**
+ * Whether a validity window is readable at NO instant — inverted OR zero width.
+ * The CHOICE predicate, sibling to {@link isInvertedValidityWindow}'s REFUSAL
+ * predicate, and the two answer different questions on purpose:
+ *
+ *  - a window a caller STATED in full is refused only when it is inverted, because
+ *    zero width is what a same-instant retraction produces and the store's own
+ *    output must round-trip;
+ *  - a bound a write CHOOSES for a caller who stated none must never satisfy this
+ *    one, because a row nobody can read at any coordinate is not a window the
+ *    caller asked for.
+ *
+ * `inverted ⇒ empty`, and `empty ∧ ¬inverted ⟺ zero width`. That law is a
+ * property in `tests/property/temporal-window.test.ts`, so the pair cannot drift
+ * into disagreeing about anything but the boundary they deliberately differ on.
+ *
+ * PRECONDITION: as {@link isInvertedValidityWindow} — both endpoints canonical
+ * fixed-width UTC ISO 8601, so the lexicographic compare is a chronological one.
+ */
+export function isEmptyValidityWindow(
+  validFrom: string | undefined,
+  validTo: string | undefined,
+): boolean {
+  if (validFrom === undefined || validTo === undefined) return false;
+  return validFrom >= validTo;
+}
+
+/**
+ * THE lower bound a write that STAMPS its own start stores, decided against the
+ * instant it is about to stamp. One owner for every such write, so no two of them
+ * can spell the decision differently. Three inputs, three outcomes:
+ *
+ *  - a stated `null`   → no lower bound (a CONFIRMED open-left window, which is
+ *                        how interchange round-trips a row that has none);
+ *  - a stated string   → that bound, the caller's own assertion, verbatim;
+ *  - nothing stated    → the write instant, UNLESS stamping it would leave the
+ *                        window readable at no instant. A row carrying only a
+ *                        `validTo` at or before the write instant is "born already
+ *                        ended": its start is UNKNOWN, not at-or-after its end, so
+ *                        it stores no lower bound and reads back at every `asOf`
+ *                        before that end (issue #407).
+ *
+ * The comparison against `validTo` is NON-STRICT: `validTo === writeInstant`
+ * stores no bound too. A stamped `[T, T)` is a successful write no coordinate can
+ * observe, and the millisecond of skew between a caller's own `Date.now()` and the
+ * backend's sample is enough to land there — so the rule is total, and there is no
+ * input for which a stamped bound yields an empty window.
+ *
+ * The write instant is a PARAMETER, not a clock read: the caller passes the very
+ * value it binds into `created_at`/`updated_at` (or, for a resurrection, the
+ * instant its guard judged), so the decision and the stamp cannot come from two
+ * different samples (issue #413's failure mode). This function has no way to
+ * sample a clock, which is what makes that structural rather than tested.
+ *
+ * PRECONDITION: as {@link isEmptyValidityWindow}. This is called BELOW the
+ * validation boundary, on a public `GraphBackend` surface, so canonicality is
+ * established by whoever reached the backend: store paths through
+ * {@link validateOptionalCanonicalIsoDate}, interchange import through its own
+ * window validator, trusted import through its per-chunk format check. A direct
+ * `GraphBackend` caller establishes it itself — a pre-existing property of that
+ * surface, written down here rather than left implicit.
+ */
+export function resolveStampedValidityLowerBound(
+  statedValidFrom: string | null | undefined,
+  validTo: string | undefined,
+  writeInstant: string,
+): string | undefined {
+  if (statedValidFrom === null) return undefined;
+  if (statedValidFrom !== undefined) return statedValidFrom;
+  return isEmptyValidityWindow(writeInstant, validTo) ? undefined : (
+      writeInstant
+    );
+}
+
+/**
+ * The lower bound a write that PASSES THROUGH a stated one stores: `null` — the
+ * interchange spelling of a confirmed open-left window — becomes "no bound", and
+ * a string is stored verbatim.
+ *
+ * Separate from {@link resolveStampedValidityLowerBound} because it answers a
+ * different question. Its one caller (`buildUpdateEdge`'s resurrection leg) writes
+ * the window only when the caller NAMED a lower bound; an edge resurrection that
+ * names none RETAINS the stored window rather than choosing a new one, so there is
+ * no instant to judge and none is offered.
+ */
+export function resolveStatedValidityLowerBound(
+  validFrom: string | null,
+): string | undefined {
+  return validFrom ?? undefined;
+}
+
+/**
  * Refuses a `validTo` whose EFFECTIVE lower bound would invert the window. On an
  * in-place update the row's stored lower bound is the effective one and must stay
  * <= the new `validTo`; on a resurrection that RESETS `valid_from` it is the
@@ -492,11 +583,15 @@ function assertStatedLowerBoundIsApplicable(
  * check, so a caller is told their bound will not be stored rather than being
  * told about a bound they did not name.
  *
- * INSERTS use {@link assertOrderedValidityWindow} alone. An insert carrying a
- * lone historical `validTo` means "born already ended", and the write instant
- * the backend stamps as `valid_from` is a storage convention rather than a
- * caller assertion — the row is deliberately not current and is read back
- * through `includeEnded`. Only an UPDATE has a lower bound the caller can be
+ * INSERTS use {@link assertOrderedValidityWindow} alone, and that is now the
+ * COMPLETE stated-pair rule rather than a partial one. An insert carrying a lone
+ * historical `validTo` means "born already ended", and there is no bound to hold
+ * the caller to because the write stamps none:
+ * {@link resolveStampedValidityLowerBound} stores no lower bound whenever the
+ * instant it would stamp cannot precede the stated end (I1b). So no insert path
+ * can store a window readable at no coordinate, on any `GraphBackend` caller —
+ * the decision lives in the SQL builders, below the store, below interchange and
+ * below trusted import (I5). Only an UPDATE has a lower bound the caller can be
  * held to.
  *
  * @param subject - Human-readable identification of the row, for the message

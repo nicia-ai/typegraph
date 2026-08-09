@@ -28,8 +28,9 @@
  * - the interval a stored row is readable over, `NULL` bound = unbounded;
  * - which rows a bitemporal coordinate must return;
  * - the lower bound a write that resolves its own start is expected to store
- *   ({@link expectedStoredLowerBound} — the ONE function the #407 contract
- *   change edits);
+ *   ({@link expectedStoredLowerBound} — the only place the model encodes that
+ *   rule, and consumed by the PURE window-algebra property rather than by any
+ *   database property in this suite; see its own doc block for why);
  * - the cells where the tree is known to violate an invariant this workstream
  *   states ({@link KNOWN_CONTRACT_GAPS}).
  *
@@ -411,34 +412,49 @@ export function traversableEdgesAt(
 /**
  * The lower bound a write that STAMPS its own start is expected to store.
  *
- * TODAY'S CONTRACT, as `resolveValidFrom`
- * (`src/backend/drizzle/operations/shared.ts`) and its private twin in
- * `src/backend/drizzle/trusted-import.ts` implement it:
+ * THE CONTRACT, as the eight insert builders, the node resurrection leg and the
+ * four trusted-import legs implement it through their one owner
+ * (`resolveStampedValidityLowerBound`, `src/utils/date.ts`):
  *
  *  - a stated `null`  → no lower bound (a confirmed open-left window);
  *  - a stated string  → that bound, the caller's own assertion;
- *  - nothing stated   → the write instant, UNCONDITIONALLY.
+ *  - nothing stated   → the write instant, UNLESS stamping it would leave the
+ *                       window readable at no instant, in which case no lower
+ *                       bound at all — a row "born already ended", whose start is
+ *                       UNKNOWN rather than after its own end (issue #407).
  *
- * That last cell is issue #407: with a stated `validTo` at or before the write
- * instant it stores a window readable at no coordinate. This function is the
- * ONE place the model encodes it, so the #407 contract change is a one-function
- * edit here — and the cells it is currently wrong about are declared in
- * {@link KNOWN_CONTRACT_GAPS} rather than smoothed over.
+ * That last clause asks the model's OWN emptiness owner ({@link intervalIsEmpty})
+ * rather than re-spelling a bound comparison here, so "readable at no instant"
+ * has one answer across the property that checks stamped bounds and the property
+ * that checks visibility. The comparison is non-strict for the same reason the
+ * library's is: a `validTo` landing in the write instant's own millisecond would
+ * otherwise store `[T, T)`, a successful write no coordinate can observe.
  *
  * The write instant is a PARAMETER, never a clock read, which is what lets a
  * caller check the decision against the instant the row actually carries.
+ *
+ * WHO CONSUMES THIS, STATED. Only `tests/property/temporal-window.test.ts`,
+ * which quantifies every stamping law over BOTH encodings — this one and the
+ * library owner — so the two cannot drift. No database property predicts a
+ * stored bound with it: a DB property would have to know which instant the
+ * backend sampled, and the ledger cannot see that, so the suite's stamped-bound
+ * check (P1b) asserts the weaker, clock-free fact that no unstated bound left an
+ * EMPTY window, through {@link intervalIsEmpty} directly. This function is
+ * therefore an independent restatement bound at numRuns in a pure file, not a
+ * dependency of the oracle's database properties.
  */
 export function expectedStoredLowerBound(
   statedValidFrom: Instant | null | undefined,
-
-  // ignores the upper bound; the A2' rule this becomes consults it, and the
-  // parameter is stated now so the signature does not change with the contract.
-  _statedValidTo: Instant | undefined,
+  statedValidTo: Instant | undefined,
   writeInstant: Instant,
 ): Instant | undefined {
   if (statedValidFrom === null) return undefined;
   if (statedValidFrom !== undefined) return statedValidFrom;
-  return writeInstant;
+  const stamped = intervalOf({
+    validFrom: writeInstant,
+    validTo: statedValidTo,
+  });
+  return intervalIsEmpty(stamped) ? undefined : writeInstant;
 }
 
 // ============================================================
@@ -499,35 +515,19 @@ export type KnownContractGap = Readonly<{
 }>;
 
 /**
- * Restriction R-A removes the born-ended CREATE on a fresh id, R-B the same
- * shape on a tombstoned id, R-C the resurrecting `upsertById` that names a lone
- * non-future `validTo`. R-A and R-B are stated for NODES AND EDGES alike: the
- * same insert builders stamp both relations, so leaving the edge shape emittable
- * would make P1 red for a cell the table claims to excuse.
+ * Restriction R-C removes the resurrecting `upsertById` that names a lone
+ * non-future `validTo`. R-A and R-B — the born-ended CREATE on a fresh id and the
+ * same shape on a tombstoned id, both stated for nodes and edges alike — are
+ * GONE: the seam that routes every stamping site through
+ * `resolveStampedValidityLowerBound` closed both cells, so their op shapes are
+ * emittable again and P1/P1b quantify over them like any other write.
  *
- * Because every exclusion is over an op SHAPE, the `validTo == write instant`
- * cell (which stores a zero-width window today — satisfying I1, violating I1b)
- * cannot be emitted either: a `validTo` drawn from the run's own write instants
- * is part of the same withheld shape. That is why two entries suffice for the
- * born-ended cell and no fake-timer machinery is needed inside the property.
+ * With the born-ended shapes back, the `validTo == write instant` cell is
+ * reachable again too (a `validTo` drawn from the run's own write instants), and
+ * it is now a covered case rather than an excused one: the stamping rule's
+ * non-strict comparison stores no bound there.
  */
 export const KNOWN_CONTRACT_GAPS = [
-  {
-    id: "born-ended-insert",
-    invariants: ["I1", "I1b"],
-    closedBy: "batch-2",
-    restrictedOpShapes: ["create-born-ended", "edge-create-born-ended"],
-    reproducedBy:
-      "still reproduces: a born-ended create on a fresh id stores a window readable at no coordinate",
-  },
-  {
-    id: "born-ended-on-tombstone",
-    invariants: ["I1", "I1b"],
-    closedBy: "batch-2",
-    restrictedOpShapes: ["create-on-tombstone-born-ended"],
-    reproducedBy:
-      "still reproduces: a born-ended create on a tombstoned id stores a window readable at no coordinate",
-  },
   {
     id: "resurrection-refusal-gap",
     invariants: ["I12"],
