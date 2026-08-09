@@ -186,15 +186,18 @@ What deliberately does not raise it:
   `validFrom` is stored — that is the way to give a row a different lower bound.
 - **`getOrCreateByEndpoints` returning an existing edge.** That branch performs
   no write, so its window options describe the row to create if none is found.
-- **A node upsert with `onImmutableLowerBound: "preserve"`.** This explicitly
-  treats `validFrom` as create/resurrection-only input. A live-row update keeps
-  its stored lower bound while still applying props and `validTo`; the default
-  remains `"refuse"` so an unqualified bound is never silently dropped.
+- **A node upsert or endpoint-matched edge update with
+  `onImmutableLowerBound: "preserve"`.** This explicitly treats `validFrom` as
+  create/resurrection-only input. A live-row update keeps its stored lower
+  bound while still applying props and `validTo`; the default remains
+  `"refuse"` so an unqualified bound is never silently dropped. Edge updates
+  use the policy with `ifExists: "update"`; the bulk edge form sets it per item.
 
-It reaches every path that accepts `validFrom` against a live row: `upsertById`,
-`bulkUpsertById` (including a repeated id in one batch, judged against the row
-the batch just queued), `getOrCreateByEndpoints` / `bulkGetOrCreateByEndpoints`
-with `ifExists: "update"`, and interchange import's `onConflict: "update"` legs —
+Under the default `"refuse"` policy, it reaches every path that accepts
+`validFrom` against a live row: `upsertById`, `bulkUpsertById` (including a
+repeated id in one batch, judged against the row the batch just queued),
+`getOrCreateByEndpoints` / `bulkGetOrCreateByEndpoints` with
+`ifExists: "update"`, and interchange import's `onConflict: "update"` legs —
 where, as with the inverted-window refusal, it is recorded as a per-row error
 prefixed with the code rather than aborting the import.
 
