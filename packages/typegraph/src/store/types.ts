@@ -4,6 +4,7 @@
 import { type z } from "zod";
 
 import {
+  type BackendValidityEndMutation,
   type EdgeRow,
   type NodeRow,
   type TransactionBackend,
@@ -29,6 +30,13 @@ import {
 } from "../core/types";
 import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
+
+/**
+ * An explicit validity-end mutation. Omission preserves the stored end,
+ * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
+ * two write actions mutually exclusive without exposing public `null`.
+ */
+export type ValidityEndMutation = BackendValidityEndMutation;
 import type {
   DynamicEdgeAccessor,
   DynamicNodeAccessor,
@@ -124,15 +132,6 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
   validFrom?: string;
   validTo?: string;
 }>;
-
-/**
- * An explicit validity-end mutation. Omission preserves the stored end,
- * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
- * two write actions mutually exclusive without exposing public `null`.
- */
-export type ValidityEndMutation =
-  | Readonly<{ validTo?: string; clearValidTo?: never }>
-  | Readonly<{ validTo?: never; clearValidTo: true }>;
 
 /**
  * Input for updating a node.
@@ -768,9 +767,12 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
      */
     onImmutableLowerBound?: "preserve" | "refuse";
     /**
-     * Valid-time end for a created, updated, or resurrected edge. Ignored when
-     * the operation returns an existing edge without writing. May not precede
-     * the row's effective start; see `INVERTED_VALIDITY_WINDOW_CODE`.
+     * Valid-time end for a created, updated, or resurrected edge. `validTo` is
+     * ignored when the operation returns an existing edge without writing;
+     * `clearValidTo` instead requires `ifExists: "update"` on a live match and
+     * is refused with `CLEAR_VALID_TO_REQUIRES_UPDATE` under return mode. May
+     * not precede the row's effective start; see
+     * `INVERTED_VALIDITY_WINDOW_CODE`.
      */
   }> &
     ValidityEndMutation;
@@ -810,7 +812,10 @@ export type NodeCollection<
     options?: QueryOptions,
   ) => Promise<readonly (Node<N> | undefined)[]>;
 
-  /** Update a node */
+  /**
+   * Update a node's properties and optionally set or clear its validity end.
+   * Omitting both end options preserves the stored window.
+   */
   update: (
     id: NodeId<N>,
     props: Partial<z.input<N["schema"]>>,
@@ -1203,7 +1208,10 @@ export type EdgeCollection<
     options?: QueryOptions,
   ) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
 
-  /** Update an edge's properties */
+  /**
+   * Update an edge's properties and optionally set or clear its validity end.
+   * Reopening a `oneActive` edge rechecks cardinality before the write.
+   */
   update: (
     id: EdgeId<E>,
     props: Partial<z.input<E["schema"]>>,

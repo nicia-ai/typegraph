@@ -760,6 +760,12 @@ Rather than silently ignore it, the merge reports the lower-bound change in
 commit would then drop is worse than not merging it: the report would claim a
 change that never happened.
 
+Delete+resurrect can also make an ended base row appear open because resurrection
+creates a fresh window. When `validFrom` changed, that open end is part of the
+same non-applicable resurrection artifact; it is not treated as a branch-authored
+`clearValidTo`, and an incremental target artifact does not outrank another
+branch's explicit end claim.
+
 Full interval reconciliation (intersecting `[validFrom, validTo]` across
 branches) is deliberately out of scope — it needs a write path that moves a live
 row's lower bound, which contradicts the temporal model, and it would silently

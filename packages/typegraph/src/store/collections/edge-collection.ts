@@ -47,7 +47,10 @@ import {
   type QueryOptions,
   type ValidityEndMutation,
 } from "../types";
-import { assertValidityEndMutation } from "../validity-end";
+import {
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+} from "../validity-end";
 import {
   findRepeatedUpsertIds,
   type UpsertDirtyCheck,
@@ -617,11 +620,6 @@ export function createEdgeCollection<
       props: Partial<z.input<E["schema"]>>,
       options?: ValidityEndMutation,
     ): Promise<Edge<E>> {
-      assertValidityEndMutation(options ?? {}, {
-        entityType: "edge",
-        kind,
-        id,
-      });
       const result = await executeEdgeUpdate(
         buildUpdateEdgeInput(kind, id, props, options),
         backend,
@@ -805,6 +803,9 @@ export function createEdgeCollection<
           kind,
           id: item.id,
         });
+        if (item.clearValidTo === true) {
+          assertClearValidToSupported(backend, "edge");
+        }
       }
 
       const upsertAll = async (

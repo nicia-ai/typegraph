@@ -4377,7 +4377,7 @@ type UpdateEdgeParams = Readonly<{
     clearDeleted?: boolean;
 }> & BackendValidityEndMutation;
 
-// @public (undocumented)
+// @public
 type UpdateNodeParams = Readonly<{
     graphId: string;
     kind: string;

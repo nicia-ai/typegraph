@@ -695,6 +695,13 @@ Every write method below that accepts a `validFrom` option (`create`,
 that operation's own creation timestamp when omitted — `validFrom` is never
 left open-ended. `validTo` remains optional and open-ended until set.
 
+Writes that accept a validity-end mutation have three explicit states: omit both
+fields to preserve the stored end, pass `{ validTo }` to set or move it, or pass
+`{ clearValidTo: true }` to remove it and reopen the window. `validTo` and
+`clearValidTo` are mutually exclusive. Clearing is supported by node `update`,
+`upsertById`, `upsertByIdFromRecord`, and `bulkUpsertById`, plus edge `update`,
+`bulkUpsertById`, and both endpoint get-or-create forms.
+
 A window may not have negative width. Stating both endpoints out of order, or
 updating a row with a `validTo` that precedes its stored `validFrom`, raises a
 `ValidationError` whose issue carries the code `INVERTED_VALIDITY_WINDOW` — such
@@ -779,14 +786,15 @@ const [alice, bob, unknown] = await store.nodes.Person.getByIds([
 // unknown: undefined
 ```
 
-#### `update(id, props)`
+#### `update(id, props, options?)`
 
 Updates node properties.
 
 ```typescript
 store.nodes.Person.update(
   id: NodeId<Person>,
-  props: Partial<{ name: string; email?: string }>
+  props: Partial<{ name: string; email?: string }>,
+  options?: { validTo?: string } | { clearValidTo: true },
 ): Promise<Node<Person>>;
 ```
 
@@ -923,6 +931,7 @@ store.nodes.Person.upsertById(
   options?: {
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
   }
 ): Promise<Node<Person>>;
@@ -945,7 +954,8 @@ otherwise rewrite every row and grow recorded history by one per delivery. A
 write still happens (never coalesced) when the row is soft-deleted (an upsert
 resurrects it), when an explicit `validFrom` / `validTo` MOVES the window the row
 already holds, or when any prop differs after Zod normalization. Re-stating the
-window a row already holds coalesces like any other unchanged value, and a
+window a row already holds — including clearing an already-open end — coalesces
+like any other unchanged value after backend capability validation, and a
 `validFrom` naming a bound a live row does not hold is refused rather than
 written (see
 [Immutable validity lower bounds](/errors/#immutable_validity_lower_bound)) —
@@ -976,6 +986,7 @@ store.nodes.Person.upsertByIdFromRecord(
   options?: {
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
   }
 ): Promise<Node<Person>>;
@@ -1037,6 +1048,7 @@ store.nodes.Person.bulkUpsertById(
     props: { name: string; email?: string };
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
   }[]
 ): Promise<Node<Person>[]>;
@@ -1275,7 +1287,7 @@ Updates edge properties.
 store.edges.worksAt.update(
   id: EdgeId<worksAt>,
   props: Partial<{ role: string }>,
-  options?: { validTo?: string }
+  options?: { validTo?: string } | { clearValidTo: true }
 ): Promise<Edge<worksAt>>;
 ```
 
@@ -1524,6 +1536,7 @@ store.edges.worksAt.bulkUpsertById(
     props?: { role: string };
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
   }[]
 ): Promise<Edge<worksAt>[]>;
 ```
@@ -1543,6 +1556,7 @@ store.edges.worksAt.getOrCreateByEndpoints(
     ifExists?: "return" | "update"; // Default: "return"
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve"; // Default: "refuse"
   }
 ): Promise<{
@@ -1566,6 +1580,11 @@ effective start — see
 [Inverted validity windows](/errors/#inverted_validity_window). When `ifExists`
 is omitted or `"return"`, a live match produces the `"found"` action and neither
 temporal option changes the edge.
+`clearValidTo` is the exception: a live match can apply it only under
+`ifExists: "update"`. Supplying it with the default/`"return"` mode refuses with
+`ConfigurationError` code `CLEAR_VALID_TO_REQUIRES_UPDATE` instead of silently
+returning an ended edge. A create or tombstone resurrection can still apply the
+clear request.
 
 #### `bulkGetOrCreateByEndpoints(items, options?)`
 
@@ -1579,6 +1598,7 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
     props: { role: string };
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
   }[],
   options?: {

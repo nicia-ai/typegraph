@@ -225,9 +225,11 @@ function sameValidToChange(left: ValidToChange, right: ValidToChange): boolean {
 
 /**
  * Splits ONE branch's observed window delta into the part the commit can apply
- * (a set, move, or clear of `validTo`) and the part it cannot. A single delta can be
- * both: a fork that soft-deleted and resurrected a row moved `validFrom`
- * (unapplicable) and may have set a new end (applicable) in the same act.
+ * (a set, move, or authored clear of `validTo`) and the part it cannot. A moved
+ * lower bound proves delete+resurrect occurred. Its implicit ended-to-open
+ * transition is part of that indivisible resurrection artifact, not an authored
+ * clear, so it stays entirely in `window-not-applicable`; an explicit new end
+ * remains independently applicable.
  */
 function classifyDelta(
   base: ValidWindow,
@@ -236,14 +238,15 @@ function classifyDelta(
   applicableEnd: ValidToChange | undefined;
   unapplicable: boolean;
 }> {
+  const lowerBoundMoved = fork.validFrom !== base.validFrom;
   const endCleared = fork.validTo === undefined && base.validTo !== undefined;
   return {
     applicableEnd:
       fork.validTo !== undefined && fork.validTo !== base.validTo ?
         { kind: "set", validTo: fork.validTo }
-      : endCleared ? { kind: "clear" }
+      : endCleared && !lowerBoundMoved ? { kind: "clear" }
       : undefined,
-    unapplicable: fork.validFrom !== base.validFrom,
+    unapplicable: lowerBoundMoved,
   };
 }
 

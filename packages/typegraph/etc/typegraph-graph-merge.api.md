@@ -4832,7 +4832,7 @@ type UpdateEdgeParams = Readonly<{
     clearDeleted?: boolean;
 }> & BackendValidityEndMutation;
 
-// @public (undocumented)
+// @public
 type UpdateNodeParams = Readonly<{
     graphId: string;
     kind: string;
@@ -4912,13 +4912,7 @@ type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, 
 export const VALIDITY_END_TARGET_PRECEDENCE: "target";
 
 // @public
-type ValidityEndMutation = Readonly<{
-    validTo?: string;
-    clearValidTo?: never;
-}> | Readonly<{
-    validTo?: never;
-    clearValidTo: true;
-}>;
+type ValidityEndMutation = BackendValidityEndMutation;
 
 // @public
 export type ValidityEndResolution = Readonly<{

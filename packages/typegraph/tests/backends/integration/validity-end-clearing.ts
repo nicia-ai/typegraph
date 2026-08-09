@@ -70,6 +70,19 @@ export function registerValidityEndClearingIntegrationTests(
         },
       ]);
       expect(requireDefined(bulk).meta.validTo).toBeUndefined();
+
+      const resurrectSeed = await store.nodes.Person.create(
+        { name: "resurrect" },
+        { id: "resurrect", validTo: END },
+      );
+      await store.nodes.Person.delete(resurrectSeed.id);
+      const resurrected = await store.nodes.Person.upsertById(
+        resurrectSeed.id,
+        { name: "resurrect" },
+        { clearValidTo: true },
+      );
+      expect(resurrected.meta.deletedAt).toBeUndefined();
+      expect(resurrected.meta.validTo).toBeUndefined();
     });
 
     it("reopens edges through every update surface", async () => {
@@ -146,6 +159,67 @@ export function registerValidityEndClearingIntegrationTests(
         );
       expect(requireDefined(bulkEndpoint).edge.id).toBe(bulkEndpointSeed.id);
       expect(requireDefined(bulkEndpoint).edge.meta.validTo).toBeUndefined();
+
+      const resurrectSeed = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "resurrect" },
+        { validTo: END },
+      );
+      await store.edges.worksAt.delete(resurrectSeed.id);
+      const resurrected = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "resurrect" },
+        {
+          matchOn: ["role"],
+          ifExists: "update",
+          clearValidTo: true,
+        },
+      );
+      expect(resurrected.action).toBe("resurrected");
+      expect(resurrected.edge.meta.deletedAt).toBeUndefined();
+      expect(resurrected.edge.meta.validTo).toBeUndefined();
+    });
+
+    it("refuses clearValidTo when endpoint return mode finds a live edge", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Return Alice" });
+      const acme = await store.nodes.Company.create({ name: "Return Acme" });
+      await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "ended" },
+        { validTo: END },
+      );
+
+      await expect(
+        store.edges.worksAt.getOrCreateByEndpoints(
+          alice,
+          acme,
+          { role: "ended" },
+          { matchOn: ["role"], clearValidTo: true },
+        ),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: { code: "CLEAR_VALID_TO_REQUIRES_UPDATE" },
+      });
+      await expect(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints(
+          [
+            {
+              from: alice,
+              to: acme,
+              props: { role: "ended" },
+              clearValidTo: true,
+            },
+          ],
+          { matchOn: ["role"] },
+        ),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: { code: "CLEAR_VALID_TO_REQUIRES_UPDATE" },
+      });
     });
 
     it("re-checks oneActive when an ended edge becomes open", async () => {
@@ -181,6 +255,10 @@ export function registerValidityEndClearingIntegrationTests(
         { role: "old" },
         { validTo: END },
       );
+      const deletedOpen = await store.edges.worksAt.create(alice, first, {
+        role: "deleted-open",
+      });
+      await store.edges.worksAt.delete(deletedOpen.id);
       await store.edges.worksAt.create(alice, second, { role: "current" });
 
       await expect(
@@ -190,6 +268,22 @@ export function registerValidityEndClearingIntegrationTests(
         temporalMode: "includeEnded",
       });
       expect(unchanged?.meta.validTo).toBe(END);
+
+      await expect(
+        store.edges.worksAt.bulkUpsertById([
+          {
+            id: deletedOpen.id,
+            from: alice,
+            to: first,
+            props: { role: "deleted-open" },
+            clearValidTo: true,
+          },
+        ]),
+      ).rejects.toMatchObject({ name: "CardinalityError" });
+      const stillDeleted = await store.edges.worksAt.getById(deletedOpen.id, {
+        temporalMode: "includeTombstones",
+      });
+      expect(stillDeleted?.meta.deletedAt).toBeDefined();
     });
 
     it("refuses a custom backend that does not promise to apply clearing", async () => {
@@ -197,7 +291,9 @@ export function registerValidityEndClearingIntegrationTests(
       const backend = createBackendOverlay(base, {
         capabilities: { ...base.capabilities, clearValidTo: false },
       });
-      const store = createStore(integrationTestGraph, backend);
+      const store = createStore(integrationTestGraph, backend, {
+        coalesceUnchangedUpserts: true,
+      });
       const person = await store.nodes.Person.create(
         { name: "Custom" },
         { validTo: END },
@@ -213,6 +309,46 @@ export function registerValidityEndClearingIntegrationTests(
         temporalMode: "includeEnded",
       });
       expect(unchanged?.meta.validTo).toBe(END);
+
+      const open = await store.nodes.Person.create({ name: "Open" });
+      await expect(
+        store.nodes.Person.upsertById(
+          open.id,
+          { name: "Open" },
+          { clearValidTo: true },
+        ),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: { code: "CLEAR_VALID_TO_UNSUPPORTED" },
+      });
+    });
+
+    it("reports invalid direct clears through operation hooks", async () => {
+      const events: string[] = [];
+      const store = await context.createStore(integrationTestGraph, {
+        hooks: {
+          onOperationStart: (ctx) => {
+            events.push(`start:${ctx.operationId}`);
+          },
+          onError: (ctx, error) => {
+            events.push(`error:${ctx.operationId}:${error.name}`);
+          },
+        },
+      });
+      const person = await store.nodes.Person.create({ name: "Hooked" });
+      events.length = 0;
+
+      await expect(
+        store.nodes.Person.update(person.id, {}, {
+          validTo: END,
+          clearValidTo: true,
+        } as never),
+      ).rejects.toMatchObject({ name: "ValidationError" });
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatch(/^start:/);
+      expect(events[1]).toBe(
+        `error:${events[0]?.slice("start:".length)}:ValidationError`,
+      );
     });
 
     it("records reopen writes in transaction receipts", async () => {

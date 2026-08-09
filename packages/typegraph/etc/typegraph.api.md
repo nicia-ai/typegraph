@@ -6412,7 +6412,7 @@ export type UpdateNodeInput<N extends NodeType = NodeType> = Readonly<{
     props: Partial<z.infer<N["schema"]>>;
 }> & ValidityEndMutation;
 
-// @public (undocumented)
+// @public
 type UpdateNodeParams = Readonly<{
     graphId: string;
     kind: string;
@@ -6524,13 +6524,7 @@ export type ValidationIssue = Readonly<{
 type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, Dir extends TraversalDirection_2> = G["edges"][EK] extends EdgeRegistration ? Dir extends "out" ? G["edges"][EK]["to"][number]["kind"] : G["edges"][EK]["from"][number]["kind"] : never;
 
 // @public
-export type ValidityEndMutation = Readonly<{
-    validTo?: string;
-    clearValidTo?: never;
-}> | Readonly<{
-    validTo?: never;
-    clearValidTo: true;
-}>;
+export type ValidityEndMutation = BackendValidityEndMutation;
 
 // @public
 type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" | "embedding" | "unknown";

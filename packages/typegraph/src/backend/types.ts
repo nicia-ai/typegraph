@@ -286,7 +286,8 @@ export type BackendCapabilities = Readonly<{
   /**
    * Whether `updateNode` / `updateEdge` honor `clearValidTo: true` by storing
    * SQL NULL in `valid_to`. Absent is `false`: custom backends must opt in so
-   * the store refuses this operation instead of silently preserving the end.
+   * the store refuses every explicit clear-bearing call before lookup,
+   * coalescing, or write instead of making support depend on row state.
    */
   clearValidTo?: boolean;
   /**
@@ -495,12 +496,15 @@ export type InsertNodeParams = Readonly<{
 }>;
 
 /**
- * Parameters for updating a node.
+ * A backend validity-end mutation. Omission preserves the stored end,
+ * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
+ * two write actions mutually exclusive without exposing SQL `NULL`.
  */
-type BackendValidityEndMutation =
+export type BackendValidityEndMutation =
   | Readonly<{ validTo?: string; clearValidTo?: never }>
   | Readonly<{ validTo?: never; clearValidTo: true }>;
 
+/** Parameters for updating a node. */
 export type UpdateNodeParams = Readonly<{
   graphId: string;
   kind: string;

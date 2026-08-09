@@ -915,9 +915,6 @@ async function performNodeUpdate<G extends GraphDef>(
   const { kind, id } = input;
 
   assertValidityEndMutation(input, { entityType: "node", kind, id });
-  if (input.clearValidTo === true) {
-    assertClearValidToSupported(backend, "node");
-  }
 
   const existing = await backend.getNode(ctx.graphId, kind, id);
   if (!existing) throw new NodeNotFoundError(kind, id);
@@ -1668,9 +1665,6 @@ export async function executeNodeUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
-  if (input.clearValidTo === true) {
-    assertClearValidToSupported(backend, "node");
-  }
   const opContext = ctx.createOperationContext(
     "update",
     "node",
@@ -1682,6 +1676,9 @@ export async function executeNodeUpdate<G extends GraphDef>(
     opContext,
     backend,
     async (target, lock) => {
+      if (input.clearValidTo === true) {
+        assertClearValidToSupported(backend, "node");
+      }
       const identity = ctx.identity;
       if (options?.clearDeleted && identity !== undefined) {
         await identity.lock(target);

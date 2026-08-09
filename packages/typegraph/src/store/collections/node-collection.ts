@@ -42,7 +42,10 @@ import {
   type UpdateNodeInput,
   type ValidityEndMutation,
 } from "../types";
-import { assertValidityEndMutation } from "../validity-end";
+import {
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+} from "../validity-end";
 import {
   findRepeatedUpsertIds,
   shouldCoalesceUpsert,
@@ -412,11 +415,6 @@ export function createNodeCollection<
       props: Partial<z.input<N["schema"]>>,
       options?: ValidityEndMutation,
     ): Promise<Node<N>> {
-      assertValidityEndMutation(options ?? {}, {
-        entityType: "node",
-        kind,
-        id,
-      });
       const result = await executeNodeUpdate(
         buildUpdateInput(kind, id, props, options),
         backend,
@@ -609,6 +607,9 @@ export function createNodeCollection<
         kind,
         id,
       });
+      if (options?.clearValidTo === true) {
+        assertClearValidToSupported(backend, "node");
+      }
       const existing = await backend.getNode(graphId, kind, id);
 
       // Coalesce a value-identical replay: skip the write entirely (no
@@ -735,6 +736,9 @@ export function createNodeCollection<
           kind,
           id: item.id,
         });
+        if (item.clearValidTo === true) {
+          assertClearValidToSupported(backend, "node");
+        }
       }
 
       const upsertAll = async (
