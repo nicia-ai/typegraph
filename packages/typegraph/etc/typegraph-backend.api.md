@@ -32,6 +32,7 @@ export function assertVectorSearchLimit(limit: number): void;
 export type BackendCapabilities = Readonly<{
     transactions: boolean;
     windowFunctions: boolean;
+    clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
     vector?: VectorCapabilities | undefined;
@@ -51,6 +52,15 @@ export type BackendMaintenance = Pick<GraphBackend, "refreshStatistics">;
 
 // @public (undocumented)
 export type BackendTransactions = Pick<GraphBackend, "transaction">;
+
+// @public
+type BackendValidityEndMutation = Readonly<{
+    validTo?: string;
+    clearValidTo?: never;
+}> | Readonly<{
+    validTo?: never;
+    clearValidTo: true;
+}>;
 
 // @public
 export const BASE_CONTRIBUTION_OWNER = "base";
@@ -1743,23 +1753,22 @@ export type UpdateEdgeParams = Readonly<{
     toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
+    expectedValidTo?: string | null;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
-// @public
+// @public (undocumented)
 export type UpdateNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 export type UpdateNodeSetParams = Readonly<{

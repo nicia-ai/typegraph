@@ -89,6 +89,7 @@ import type {
   JsonValue,
   NodeId,
   NodeType,
+  ValidityEndMutation,
 } from "./typegraph-internal";
 import type {
   BranchId,
@@ -184,9 +185,8 @@ export type StagedEdge = Readonly<{
    * a monotone claim that must not be lost to the survivor pick.
    */
   validFrom?: string;
-  validTo?: string;
-  clearValidTo?: true;
-}>;
+}> &
+  ValidityEndMutation;
 
 /**
  * A surviving merged edge after repoint + dedupe. `id` is the canonical survivor
@@ -208,9 +208,8 @@ export type MergedEdge = Readonly<{
   mergedIds: readonly EdgeId[];
   /** The survivor's {@link StagedEdge} window, if it carried one. */
   validFrom?: string;
-  validTo?: string;
-  clearValidTo?: true;
-}>;
+}> &
+  ValidityEndMutation;
 
 /**
  * The outcome of the repoint + dedupe cascade: the surviving merged edges, every

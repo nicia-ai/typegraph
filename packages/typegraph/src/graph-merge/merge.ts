@@ -161,6 +161,7 @@ import type {
   TransactionBackend,
   TransactionOptions,
   UniqueIntrospection,
+  ValidityEndMutation,
 } from "./typegraph-internal";
 import {
   lockRecordedGraphWrite,
@@ -1544,9 +1545,8 @@ type PlannedNodeWrite = Readonly<{
    * coalesce.
    */
   validFrom?: string;
-  validTo?: string;
-  clearValidTo?: true;
-}>;
+}> &
+  ValidityEndMutation;
 
 /**
  * THE node-write enumeration: every node row a resolved plan writes, in commit
@@ -1676,17 +1676,8 @@ function nodeWriteProps(
   };
 }
 
-type NodeWriteWindowOptions =
-  | Readonly<{
-      validFrom?: string;
-      validTo?: string;
-      clearValidTo?: never;
-    }>
-  | Readonly<{
-      validFrom?: string;
-      validTo?: never;
-      clearValidTo: true;
-    }>;
+type NodeWriteWindowOptions = Readonly<{ validFrom?: string }> &
+  ValidityEndMutation;
 
 /** Converts the plan's explicit set/clear state into the collection option union. */
 function nodeWriteWindowOptions(
@@ -1787,10 +1778,9 @@ async function applyMergePlan<G extends GraphDef>(
       to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
       props,
       ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
-      ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
-      ...(edge.clearValidTo === undefined ?
-        {}
-      : { clearValidTo: edge.clearValidTo }),
+      ...(edge.clearValidTo === true ? { clearValidTo: true as const }
+      : edge.validTo === undefined ? {}
+      : { validTo: edge.validTo }),
     };
     const existing = edgesByKind.get(edge.kind);
     if (existing === undefined) {
@@ -2025,17 +2015,7 @@ type NodeCollectionLike = Readonly<{
   upsertByIdFromRecord: (
     id: string,
     data: Record<string, unknown>,
-    options?:
-      | Readonly<{
-          validFrom?: string;
-          validTo?: string;
-          clearValidTo?: never;
-        }>
-      | Readonly<{
-          validFrom?: string;
-          validTo?: never;
-          clearValidTo: true;
-        }>,
+    options?: Readonly<{ validFrom?: string }> & ValidityEndMutation,
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
 }>;
@@ -2047,15 +2027,14 @@ type EdgeCollectionLike = Readonly<{
     options?: Readonly<{ temporalMode?: "includeTombstones" }>,
   ) => Promise<readonly (Edge | undefined)[]>;
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: string;
       from: Readonly<{ kind: string; id: string }>;
       to: Readonly<{ kind: string; id: string }>;
       props?: Record<string, unknown>;
       validFrom?: string;
-      validTo?: string;
-      clearValidTo?: true;
-    }>[],
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
 }>;
