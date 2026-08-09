@@ -2,6 +2,11 @@
 
 import { createLibraryConfig } from "@typegraph/eslint-config/library";
 
+import {
+  WRITE_PIPELINE_EXEMPTIONS,
+  writePipelineBlocks,
+} from "./eslint/write-pipeline-inventory.mjs";
+
 const DIALECT_SEAM_MESSAGE =
   "Do not branch on dialect identity in the query compiler. Express the " +
   "difference as a method/capability on DialectAdapter (a token-level seam) so " +
@@ -104,6 +109,88 @@ const SOURCE_WIDE_RESTRICTIONS = [
   ...INTEROP_PROBE_RESTRICTIONS,
 ];
 
+// The query compiler's dialect ban, named once so the write-pipeline block
+// that also covers `src/identity/historical-sql.ts` can respell its profile
+// without dropping it. Flat-config rule entries REPLACE, so a later block that
+// forgot this list would silently switch the parity guardrail off for that
+// file.
+const DIALECT_SEAM_RESTRICTIONS = [
+  {
+    selector:
+      "BinaryExpression[operator=/^(===|!==|==|!=)$/] > Literal[value=/^(sqlite|postgres)$/]",
+    message: DIALECT_SEAM_MESSAGE,
+  },
+  {
+    selector: "SwitchCase > Literal[value=/^(sqlite|postgres)$/]",
+    message: DIALECT_SEAM_MESSAGE,
+  },
+];
+
+/**
+ * The five audited overlay files: they legitimately drop the backend-overlay
+ * ban (they ARE the audited decorators), so they are their own restriction
+ * profile rather than an `ignores` hole in the store profile.
+ */
+const AUDITED_OVERLAY_FILES = [
+  "src/store/operations/edge-operations.ts",
+  "src/store/operations/node-operations.ts",
+  "src/store/recorded-capture.ts",
+  "src/store/recorded-read-service.ts",
+  "src/store/store.ts",
+];
+
+/**
+ * The write-pipeline ban's restriction PROFILES: every file in scope belongs
+ * to exactly one, and each states the whole `no-restricted-syntax` list that
+ * applies to it (flat config replaces rather than merges). The generator emits
+ * two blocks per profile — the in-scheme half adds the write-pipeline
+ * selectors, the exempt half is the identical list without them, which is the
+ * only difference an exemption is allowed to make.
+ */
+const WRITE_PIPELINE_PROFILES = [
+  {
+    name: "store",
+    files: ["src/store/**/*.ts"],
+    ignores: AUDITED_OVERLAY_FILES,
+    restrictions: [
+      ...SOURCE_WIDE_RESTRICTIONS,
+      GLOBAL_SYMBOL_RESTRICTION,
+      ...BACKEND_OVERLAY_RESTRICTIONS,
+    ],
+  },
+  {
+    name: "subsystems",
+    files: [
+      "src/interchange/**/*.ts",
+      "src/identity/**/*.ts",
+      "src/graph-merge/**/*.ts",
+    ],
+    ignores: ["src/identity/historical-sql.ts"],
+    restrictions: [
+      ...SOURCE_WIDE_RESTRICTIONS,
+      GLOBAL_SYMBOL_RESTRICTION,
+      ...RUNTIME_PORT_RESTRICTIONS,
+      ...BACKEND_OVERLAY_RESTRICTIONS,
+    ],
+  },
+  {
+    name: "audited-overlay",
+    files: AUDITED_OVERLAY_FILES,
+    restrictions: [...SOURCE_WIDE_RESTRICTIONS, GLOBAL_SYMBOL_RESTRICTION],
+  },
+  {
+    name: "dialect-seam",
+    files: ["src/identity/historical-sql.ts"],
+    restrictions: [
+      ...SOURCE_WIDE_RESTRICTIONS,
+      GLOBAL_SYMBOL_RESTRICTION,
+      ...RUNTIME_PORT_RESTRICTIONS,
+      ...BACKEND_OVERLAY_RESTRICTIONS,
+      ...DIALECT_SEAM_RESTRICTIONS,
+    ],
+  },
+];
+
 export default [
   ...createLibraryConfig(import.meta.dirname, {
     ignores: [
@@ -113,6 +200,10 @@ export default [
       // Plain-node CI tooling (runs under `node`, not part of the typed
       // library program); still formatted by prettier.
       "scripts/**/*.mjs",
+      // Flat-config data imported by eslint.config.mjs itself — plain ESM
+      // plus its hand-written declaration, outside the typed library program
+      // for the same reason.
+      "eslint/**",
       // #140: workerd-only do-sqlite suite (cloudflare:test). Runs via
       // its own `test:do` lane, not the Node lanes which cannot resolve
       // the `cloudflare:test` / worker ambient types.
@@ -246,15 +337,7 @@ export default [
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_OVERLAY_RESTRICTIONS,
-        {
-          selector:
-            "BinaryExpression[operator=/^(===|!==|==|!=)$/] > Literal[value=/^(sqlite|postgres)$/]",
-          message: DIALECT_SEAM_MESSAGE,
-        },
-        {
-          selector: "SwitchCase > Literal[value=/^(sqlite|postgres)$/]",
-          message: DIALECT_SEAM_MESSAGE,
-        },
+        ...DIALECT_SEAM_RESTRICTIONS,
       ],
     },
   },
@@ -289,20 +372,13 @@ export default [
       ],
     },
   },
-  {
-    files: [
-      "src/store/operations/edge-operations.ts",
-      "src/store/operations/node-operations.ts",
-      "src/store/recorded-capture.ts",
-      "src/store/recorded-read-service.ts",
-      "src/store/store.ts",
-    ],
-    rules: {
-      "no-restricted-syntax": [
-        "error",
-        ...SOURCE_WIDE_RESTRICTIONS,
-        GLOBAL_SYMBOL_RESTRICTION,
-      ],
-    },
-  },
+  // The write-pipeline ban, and — because flat config applies the LAST
+  // matching block — every restriction those files already carried,
+  // regenerated from one data source. This replaces the hand-written per-file
+  // block for the audited overlay files: it is now the `audited-overlay`
+  // profile below, so its coverage cannot drift from the ban's scopes.
+  ...writePipelineBlocks({
+    profiles: WRITE_PIPELINE_PROFILES,
+    exemptions: WRITE_PIPELINE_EXEMPTIONS,
+  }),
 ];

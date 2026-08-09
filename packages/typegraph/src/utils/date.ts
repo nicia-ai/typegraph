@@ -385,6 +385,40 @@ export type ValidityLowerBoundFence = Readonly<{
 }>;
 
 /**
+ * Whether a {@link ValidityLowerBoundFence} STATES anything. Returns a
+ * boolean, despite the `asserts` in its name reading like a TypeScript
+ * assertion function: it answers "does this fence assert the row's stored
+ * lower bound?".
+ *
+ * THE SINGLE OWNER of that question, placed beside the type it decides about.
+ * Two spellings of it existed — `args.expectedValidFrom !== undefined` at the
+ * write step that carries the fence into the UPDATE, and a key-membership test
+ * wherever a fence had to be recognised as empty. They agree today under
+ * `exactOptionalPropertyTypes`, which is exactly the state in which a second
+ * implementation of an existing decision is still a defect: the copies WILL
+ * drift, and this one decides whether a write is fenced at all.
+ *
+ * `{ expectedValidFrom: null }` is a STATED fence — "assert the row still has
+ * NO lower bound" — not an empty one, which is why the test is against
+ * `undefined` and not against nullishness.
+ */
+export function assertsStoredLowerBound<T extends ValidityLowerBoundFence>(
+  fence: T,
+): fence is T & StatedValidityLowerBoundFence {
+  return fence.expectedValidFrom !== undefined;
+}
+
+/**
+ * A {@link ValidityLowerBoundFence} that states a bound — what
+ * {@link assertsStoredLowerBound} narrows to, so a caller that has asked the
+ * question does not have to re-ask it to satisfy `exactOptionalPropertyTypes`.
+ * Re-asking is how the second spelling gets reintroduced.
+ */
+export type StatedValidityLowerBoundFence = Readonly<{
+  expectedValidFrom: string | null;
+}>;
+
+/**
  * What {@link assertWritableValidityWindow} reports back about the verdict it
  * just reached — not about the window, but about what the verdict DEPENDED ON.
  *

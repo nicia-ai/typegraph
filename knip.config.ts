@@ -29,6 +29,14 @@ const config: KnipConfig = {
         "src/core/embedding.ts",
         "src/core/external-ref.ts",
         "src/core/searchable.ts",
+        // The write-pipeline seam. It lands ahead of its consumers: the write
+        // paths move onto it one module per batch, so until the last batch
+        // some of its surface is reachable only from the suites that pin the
+        // seam. Each entry is deleted by the batch that consumes the module.
+        "src/store/operations/write-plan.ts",
+        "src/store/operations/write-fences.ts",
+        "src/store/operations/write-session.ts",
+        "src/store/operations/write-executor.ts",
       ],
     },
     "apps/docs": {

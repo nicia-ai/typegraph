@@ -28,6 +28,7 @@ import {
 import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
 import { RestrictedDeleteError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { assertsStoredLowerBound } from "../../utils/date";
 import {
   deleteNodeEmbeddings,
   syncEmbeddings,
@@ -388,7 +389,10 @@ export async function applyNodeUpdate(
   };
   if (args.validFrom !== undefined) updateParams.validFrom = args.validFrom;
   if (args.validTo !== undefined) updateParams.validTo = args.validTo;
-  if (args.expectedValidFrom !== undefined) {
+  // `assertsStoredLowerBound` owns "does this fence state anything?" — the same
+  // predicate the fence appliers consult, so the step that CARRIES the fence
+  // and the seam that VALIDATES it cannot disagree about what an empty fence is.
+  if (assertsStoredLowerBound(args)) {
     updateParams.expectedValidFrom = args.expectedValidFrom;
   }
   if (args.clearDeleted) updateParams.clearDeleted = true;
