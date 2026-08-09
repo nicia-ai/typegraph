@@ -3037,6 +3037,12 @@ type CreateVectorIndexParams = Readonly<{
 }>;
 
 // @public
+const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
+
+// @public
+type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
+// @public
 type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 
 // @public
@@ -3944,6 +3950,7 @@ type GraphBackend = Readonly<{
         params: readonly unknown[];
     }>;
     executeDdl?: (this: void, ddl: string) => Promise<void>;
+    ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
     transaction: <T>(this: void, fn: (tx: TransactionBackend) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     close: (this: void) => Promise<void>;
 }>;

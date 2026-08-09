@@ -401,6 +401,26 @@ function parallelBucketKey(declaration: IndexDeclaration): IndexEntity {
   return declaration.entity;
 }
 
+/**
+ * Installs `pg_trgm`, preferring the backend's race-tolerant seam.
+ *
+ * The two branches are the SAME request, differing only in what happens to
+ * the loser of a concurrent install: `ensureExtension` recognizes the 23505
+ * and retries through `IF NOT EXISTS`, while a bare `executeDdl` surfaces it
+ * as this index's `failed` entry (today's behavior, kept for backends that
+ * predate the seam). A backend with neither member keeps failing loudly on
+ * `requireDefined`.
+ */
+async function ensureTrigramExtension(backend: GraphBackend): Promise<void> {
+  if (backend.ensureExtension !== undefined) {
+    await backend.ensureExtension("pg_trgm");
+    return;
+  }
+  await requireDefined(backend.executeDdl)(
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
+  );
+}
+
 async function materializeRelationalIndex(
   declaration: RelationalIndexDeclaration,
   backend: GraphBackend,
@@ -455,9 +475,15 @@ async function materializeRelationalIndex(
         // gin_trgm_ops lives in the pg_trgm extension (contrib — present
         // on stock Postgres and the hosted variants). Idempotent, and a
         // permission failure surfaces as this index's `failed` entry.
-        await requireDefined(backend.executeDdl)(
-          "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
-        );
+        //
+        // `ensureExtension` adds what a bare statement cannot have: the
+        // extension is database-global while this claim is per-index, so two
+        // materializers building DIFFERENT trigram indexes race on the
+        // catalog row, and the loser's 23505 is a spurious `failed` entry
+        // (#446). A backend without the member keeps issuing it bare — the
+        // index is still materialized, just without race tolerance, which is
+        // strictly what the caller asked for and not a new refusal.
+        await ensureTrigramExtension(backend);
       }
       await requireDefined(backend.executeDdl)(ddl);
     },

@@ -107,6 +107,8 @@ import {
   type ContributionRepopulationStats,
   createBackendOverlay,
   type CreateVectorIndexParams,
+  DATABASE_EXTENSION_NAMES,
+  type DatabaseExtensionName,
   type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
   type DeleteFulltextParams,
@@ -1011,6 +1013,30 @@ export function createPostgresBackend(
 
     async executeDdl(ddl: string): Promise<void> {
       await db.execute(sql.raw(ddl));
+    },
+
+    async ensureExtension(name: DatabaseExtensionName): Promise<void> {
+      // The name reaches DDL by interpolation, so the allowlist — not the
+      // caller's type — is what makes the identifier trustworthy at runtime.
+      const validated = DATABASE_EXTENSION_NAMES.find(
+        (candidate) => candidate === name,
+      );
+      if (validated === undefined) {
+        throw new ConfigurationError(
+          `Unsupported database extension "${name}".`,
+          { extension: name, supported: DATABASE_EXTENSION_NAMES },
+          {
+            suggestion: `Request one of: ${DATABASE_EXTENSION_NAMES.join(", ")}.`,
+          },
+        );
+      }
+      // `IF NOT EXISTS` is not a concurrency primitive here: the loser of a
+      // concurrent install waits for the winner and is handed 23505 rather
+      // than a notice (#446, and the same catalog race
+      // `executeConcurrentCreateDdl` already owns for tables and columns).
+      await executeConcurrentCreateDdl(
+        `CREATE EXTENSION IF NOT EXISTS "${validated}";`,
+      );
     },
 
     async ensureIndexMaterializationsTable(): Promise<void> {

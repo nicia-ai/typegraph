@@ -120,6 +120,7 @@ export type {
   CountEdgesFromParams,
   CountNodesByKindParams,
   CreateVectorIndexParams,
+  DatabaseExtensionName,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
   DeleteEmbeddingParams,
@@ -214,6 +215,7 @@ export type {
 } from "./types";
 export {
   D1_MAX_BIND_PARAMETERS,
+  DATABASE_EXTENSION_NAMES,
   DURABLE_OBJECT_MAX_BIND_PARAMETERS,
   isLiveNodeRow,
   isTombstonedNodeRow,

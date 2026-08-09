@@ -214,4 +214,71 @@ describe("Postgres concurrent CREATE DDL", () => {
       /duplicate key value/,
     );
   });
+
+  // #446: `CREATE EXTENSION IF NOT EXISTS` loses the same catalog race the
+  // CREATEs above do — the loser waits for the winner and is handed 23505 on
+  // `pg_extension_name_index` — but the resource is database-global while the
+  // index-materialization claim protecting it is per-index, so two
+  // materializers building DIFFERENT trigram indexes both reach it.
+  it("installs an extension when a concurrent installer wins the catalog race", async () => {
+    const { db, attempts } = stubPostgresDatabase({ failFirstAttempt: true });
+    const backend = createPostgresBackend(db, { vector: false });
+
+    await expect(
+      requireDefined(backend.ensureExtension)("pg_trgm"),
+    ).resolves.toBeUndefined();
+
+    expect(attempts).toEqual([
+      'CREATE EXTENSION IF NOT EXISTS "pg_trgm";',
+      'CREATE EXTENSION IF NOT EXISTS "pg_trgm";',
+    ]);
+  });
+
+  it("issues the extension statement once when nothing is racing it", async () => {
+    const { db, attempts } = stubPostgresDatabase({ failFirstAttempt: false });
+    const backend = createPostgresBackend(db, { vector: false });
+
+    await requireDefined(backend.ensureExtension)("vector");
+
+    expect(attempts).toEqual(['CREATE EXTENSION IF NOT EXISTS "vector";']);
+  });
+
+  it("refuses an extension outside the allowlist without issuing DDL", async () => {
+    const { db, attempts } = stubPostgresDatabase({ failFirstAttempt: false });
+    const backend = createPostgresBackend(db, { vector: false });
+
+    // The name reaches DDL by interpolation, so an unvalidated caller — a
+    // JavaScript consumer the union type cannot reach — must be refused
+    // before the statement is built, not quoted into it.
+    await expect(
+      requireDefined(backend.ensureExtension)(
+        'pg_trgm"; DROP TABLE typegraph_nodes; --' as never,
+      ),
+    ).rejects.toThrow(/Unsupported database extension/);
+    expect(attempts).toEqual([]);
+  });
+
+  it("still surfaces an extension failure the retry cannot clear", async () => {
+    const attempts: string[] = [];
+    const db = {
+      $client: { query: () => Promise.resolve({ rows: [] }) },
+      execute: (statement: unknown) => {
+        attempts.push(statementText(statement));
+        return Promise.reject(
+          Object.assign(new Error("permission denied to create extension"), {
+            code: "42501",
+            severity: "ERROR",
+          }),
+        );
+      },
+    } as unknown as AnyPgDatabase;
+    const backend = createPostgresBackend(db, { vector: false });
+
+    await expect(
+      requireDefined(backend.ensureExtension)("pg_trgm"),
+    ).rejects.toThrow(/permission denied/);
+    // A permission failure is not a race, so it is not retried — it keeps
+    // surfacing as the requesting index's `failed` entry.
+    expect(attempts).toHaveLength(1);
+  });
 });

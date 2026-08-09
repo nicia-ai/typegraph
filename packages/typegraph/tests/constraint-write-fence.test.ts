@@ -18,13 +18,12 @@
  * and — just as load-bearing — its ABSENCE on writes that declare no constraint,
  * so the fix cannot be "lock everything".
  *
- * Statements are captured with drizzle's `logger`, matching
- * `backends/postgres/recorded-lock-churn.test.ts`: it sees every statement,
+ * Statements are captured through the shared `tests/statement-recorder.ts`
+ * harness (drizzle's `logger`, matching
+ * `backends/postgres/recorded-lock-churn.test.ts`): it sees every statement,
  * including ones a backend-method Proxy would miss.
  */
-import { PGlite } from "@electric-sql/pglite";
-import { drizzle } from "drizzle-orm/pglite";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -34,14 +33,12 @@ import {
   disjointWith,
   subClassOf,
 } from "../src";
-import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
-import { createPostgresBackend } from "../src/backend/postgres";
-import { type GraphBackend } from "../src/backend/types";
-import { createStore, type Store } from "../src/store";
+import {
+  createRecordedPostgresStore,
+  type LoggedStatement,
+} from "./statement-recorder";
 
 const GRAPH_WRITE_NAMESPACE = "typegraph:recorded-graph-write";
-
-type LoggedStatement = Readonly<{ query: string; params: readonly unknown[] }>;
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -119,45 +116,10 @@ const graph = defineGraph({
   ],
 });
 
-type FenceStore = Store<typeof graph>;
-
-const cleanups: (() => Promise<void>)[] = [];
-
-afterEach(async () => {
-  const pending = cleanups.splice(0);
-  for (const cleanup of pending.toReversed()) await cleanup();
-});
-
-async function createLoggedStore(): Promise<
-  Readonly<{
-    store: FenceStore;
-    backend: GraphBackend;
-    statements: LoggedStatement[];
-    reset: () => void;
-  }>
+function createLoggedStore(): ReturnType<
+  typeof createRecordedPostgresStore<typeof graph>
 > {
-  const client = await PGlite.create();
-  cleanups.push(() => client.close());
-  await client.exec(generatePostgresDDL().join("\n\n"));
-
-  const statements: LoggedStatement[] = [];
-  const backend = createPostgresBackend(
-    drizzle(client, {
-      logger: {
-        logQuery(query: string, params: unknown[]): void {
-          statements.push({ query, params });
-        },
-      },
-    }),
-    { vector: false },
-  );
-
-  return {
-    store: createStore(graph, backend),
-    backend,
-    statements,
-    reset: () => statements.splice(0),
-  };
+  return createRecordedPostgresStore(graph);
 }
 
 function graphWriteLockIndex(statements: readonly LoggedStatement[]): number {

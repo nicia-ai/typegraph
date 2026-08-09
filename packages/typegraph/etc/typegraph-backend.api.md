@@ -286,6 +286,12 @@ export type CreateVectorIndexParams = Readonly<{
 export const D1_MAX_BIND_PARAMETERS = 100;
 
 // @public
+export const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
+
+// @public
+export type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
+// @public
 export type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 
 // @public
@@ -905,6 +911,7 @@ export type GraphBackend = Readonly<{
         params: readonly unknown[];
     }>;
     executeDdl?: (this: void, ddl: string) => Promise<void>;
+    ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
     transaction: <T>(this: void, fn: (tx: TransactionBackend) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     close: (this: void) => Promise<void>;
 }>;

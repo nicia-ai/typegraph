@@ -1588,6 +1588,19 @@ export type IdentityTableNames = Readonly<{
 }>;
 
 /**
+ * The database-global extensions TypeGraph installs on a caller's behalf.
+ *
+ * The extent is closed on purpose: {@link GraphBackend.ensureExtension}
+ * interpolates the name into DDL, so the allowlist — not the caller — is what
+ * decides the identifier can be trusted. `pg_trgm` backs `method: "trigram"`
+ * index materialization; `vector` backs pgvector storage.
+ */
+export const DATABASE_EXTENSION_NAMES = ["pg_trgm", "vector"] as const;
+
+/** A name {@link GraphBackend.ensureExtension} accepts. */
+export type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
+/**
  * The GraphBackend interface abstracts database operations.
  *
  * Implementations should provide:
@@ -2602,6 +2615,26 @@ export type GraphBackend = Readonly<{
    * statement outside `transaction(...)`.
    */
   executeDdl?: (this: void, ddl: string) => Promise<void>;
+
+  /**
+   * Installs a database-global extension idempotently, tolerating the
+   * concurrent-install race.
+   *
+   * `CREATE EXTENSION IF NOT EXISTS` is not a concurrency primitive on
+   * PostgreSQL: the existence check cannot see another session's uncommitted
+   * `pg_extension` row, so the loser of a race waits for the winner and is
+   * then handed SQLSTATE 23505 instead of the harmless "already exists"
+   * notice (#446). A backend implementing this member owns that retry; a
+   * caller that only has {@link GraphBackend.executeDdl} keeps issuing the
+   * statement bare and keeps surfacing the loser's failure.
+   *
+   * Like `executeDdl`, implementations MUST run the statement at the
+   * top-level backend, never inside `transaction(...)`: the 23505 aborts the
+   * enclosing transaction, so a retry issued inside one would only collect
+   * `25P02` on the way out. That is why this member is absent from
+   * {@link TransactionBackend}.
+   */
+  ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
 
   // === Transaction ===
   /** Runs TypeGraph operations inside a backend-owned transaction. */

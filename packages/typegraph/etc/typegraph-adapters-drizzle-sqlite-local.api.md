@@ -3126,6 +3126,12 @@ type CreateVectorIndexParams = Readonly<{
 }>;
 
 // @public
+const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
+
+// @public
+type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
+// @public
 export const DEFAULT_LOCAL_SQLITE_PRAGMAS: Required<LocalSqlitePragmaOptions>;
 
 // @public
@@ -3666,6 +3672,7 @@ type GraphBackend = Readonly<{
         params: readonly unknown[];
     }>;
     executeDdl?: (this: void, ddl: string) => Promise<void>;
+    ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
     transaction: <T>(this: void, fn: (tx: TransactionBackend) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     close: (this: void) => Promise<void>;
 }>;

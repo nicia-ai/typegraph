@@ -457,6 +457,12 @@ type CreateVectorIndexParams = Readonly<{
 // @public
 const CURRENT_ONLY_READ_NAMES: readonly ["findByConstraint", "bulkFindByConstraint", "bulkFindByIndex"];
 
+// @public
+const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
+
+// @public
+type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
 // @public (undocumented)
 type DateFieldAccessor = BaseFieldAccessor & Readonly<{
     gt: (value: Date | string | ParameterRef) => Predicate;
@@ -1507,6 +1513,7 @@ type GraphBackend = Readonly<{
         params: readonly unknown[];
     }>;
     executeDdl?: (this: void, ddl: string) => Promise<void>;
+    ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
     transaction: <T>(this: void, fn: (tx: TransactionBackend) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     close: (this: void) => Promise<void>;
 }>;

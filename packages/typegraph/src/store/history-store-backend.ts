@@ -41,6 +41,10 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "dropVectorIndex",
   "edgeExistsBetween",
   "ensureContributionMaterializationsTable",
+  // Installs a database-global extension. Like the `ensure*Table` members it
+  // sits beside, it creates storage-level scaffolding and writes no graph row,
+  // so it cannot bypass a capture flush.
+  "ensureExtension",
   "ensureFulltextTable",
   "ensureIndexMaterializationsTable",
   "ensureKindRemovalsTable",
