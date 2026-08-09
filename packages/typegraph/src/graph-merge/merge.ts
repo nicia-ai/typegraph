@@ -1,3 +1,4 @@
+import { validateEdgeEndpoints } from "../constraints";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
@@ -62,8 +63,9 @@ import { buildSubClassClosure } from "./closures";
 import type { ClusterResult } from "./clustering";
 import {
   connectedComponents,
+  decisiveEdgesForCluster,
   enforceBaseGuard,
-  enforceDiameter,
+  enforceDiameterWithEdges,
 } from "./clustering";
 import type { ProvenanceWeights } from "./conflict-policy";
 import { buildBranchRank } from "./conflict-policy";
@@ -84,8 +86,19 @@ import {
   BaseVersionMismatchError,
   describeCause,
   InvalidMergeOptionsError,
+  InvalidMergePlanError,
   MergeError,
+  MergePlanCapabilityError,
+  MergePlanDigestMismatchError,
+  MergePlanningStaleError,
+  MergePlanOriginMismatchError,
+  MergePlanSchemaMismatchError,
+  MergePlanTargetMismatchError,
+  StaleMergePlanError,
+  UnsupportedMergePlanVersionError,
 } from "./errors";
+import type { CandidateDiagnostic, CandidateDiagnostics } from "./evidence";
+import { compareMatchEvidence } from "./evidence";
 import {
   assertIdentityEndpointsNotDeleted,
   assertIdentityPeersStable,
@@ -114,6 +127,20 @@ import {
 } from "./node-key";
 import type { NormalizedMergeOptions } from "./options";
 import { normalizeMergeOptions } from "./options";
+import type {
+  MergePlanAnchors,
+  MergePlanArtifact,
+  MergePlanArtifactV1,
+  MergePlanArtifactV1Input,
+  MergePlanEdgeUpsert,
+  MergePlanEntityRef,
+  MergePlanNodeUpsert,
+  MergePlanTargetFence,
+} from "./plan-schema";
+import {
+  constructMergePlanArtifact,
+  validateMergePlanArtifact,
+} from "./plan-wire";
 import type { ProvenanceGraph } from "./provenance-store";
 import {
   contributionKey,
@@ -161,8 +188,12 @@ import type {
   TransactionBackend,
   TransactionOptions,
   UniqueIntrospection,
+  ValidityEndMutation,
 } from "./typegraph-internal";
 import {
+  advanceRevisionClock,
+  forceRecordedGraphRevision,
+  forceWriteTransactionRevision,
   lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
@@ -193,6 +224,7 @@ import type {
   TypeReconciliation,
   ValidityEndResolution,
 } from "./types";
+import type { ValidToChange } from "./valid-window";
 import { resolveValidWindows } from "./valid-window";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
@@ -402,6 +434,8 @@ async function generateAllCandidates<G extends GraphDef>(
       edges: readonly CandidateEdge[];
       warnings: readonly string[];
       baseMembers: readonly BaseMember[];
+      diagnostics: readonly CandidateDiagnostic[];
+      diagnosticsTotal: number;
     }>,
     MergeError
   >
@@ -409,6 +443,8 @@ async function generateAllCandidates<G extends GraphDef>(
   const allEdges: CandidateEdge[] = [];
   const warnings: string[] = [];
   const baseMembers: BaseMember[] = [];
+  const diagnostics: CandidateDiagnostic[] = [];
+  let diagnosticsTotal = 0;
   const byKind = newNodesByKind(staging);
   const sources =
     useBaseSources ?
@@ -431,6 +467,8 @@ async function generateAllCandidates<G extends GraphDef>(
             edges: readonly CandidateEdge[];
             warnings: readonly string[];
             baseMembers: readonly BaseMember[];
+            diagnostics: readonly CandidateDiagnostic[];
+            diagnosticsTotal: number;
           }>,
           MergeError
         >
@@ -439,7 +477,13 @@ async function generateAllCandidates<G extends GraphDef>(
         if (resolveConfig === undefined) {
           // No resolution config for this kind: merge by id only (no candidate
           // edges, so every new node stays a singleton cluster).
-          return ok({ edges: [], warnings: [], baseMembers: [] });
+          return ok({
+            edges: [],
+            warnings: [],
+            baseMembers: [],
+            diagnostics: [],
+            diagnosticsTotal: 0,
+          });
         }
 
         const nodes = items.map((staged) => asNode(staged));
@@ -494,6 +538,7 @@ async function generateAllCandidates<G extends GraphDef>(
           kindCtx,
           options.onComparisonCeiling,
           options.maxComparisonsPerKind,
+          options.candidateDiagnostics?.limit ?? 0,
         );
         if (isErr(scored)) {
           return err(scored.error);
@@ -504,6 +549,8 @@ async function generateAllCandidates<G extends GraphDef>(
             (warning) => `[${kind}] ${warning.message}`,
           ),
           baseMembers: kindBaseMembers,
+          diagnostics: scored.data.diagnostics,
+          diagnosticsTotal: scored.data.diagnosticsTotal,
         });
       },
     ),
@@ -516,6 +563,14 @@ async function generateAllCandidates<G extends GraphDef>(
     allEdges.push(...result.data.edges);
     warnings.push(...result.data.warnings);
     baseMembers.push(...result.data.baseMembers);
+    if (options.candidateDiagnostics !== undefined) {
+      diagnostics.push(...result.data.diagnostics);
+      diagnostics.sort((left, right) =>
+        compareMatchEvidence(left.evidence, right.evidence),
+      );
+      diagnostics.splice(options.candidateDiagnostics.limit);
+    }
+    diagnosticsTotal += result.data.diagnosticsTotal;
   }
 
   return ok({
@@ -528,6 +583,8 @@ async function generateAllCandidates<G extends GraphDef>(
     baseMembers: baseMembers.sort((left, right) =>
       compareMergeKeys(mergeKeyOf(left), mergeKeyOf(right)),
     ),
+    diagnostics,
+    diagnosticsTotal,
   });
 }
 
@@ -630,7 +687,7 @@ function indexNewNodesById(
 function buildStagedEdges(
   staging: StagingSet,
   modifiedEdges: readonly StagedModifiedEdge[],
-  edgeValidityEnds: ReadonlyMap<MergeKey, string>,
+  edgeValidityEnds: ReadonlyMap<MergeKey, ValidToChange>,
   edgeDeletions: ReadonlyMap<MergeKey, string>,
 ): Readonly<{
   edges: readonly StagedEdge[];
@@ -647,7 +704,7 @@ function buildStagedEdges(
   for (const item of modifiedEdges) {
     const identity = mergeKeyOf(item.edge);
     stagedIdentities.add(identity);
-    const validTo = edgeValidityEnds.get(identity);
+    const validToChange = edgeValidityEnds.get(identity);
     staged.push({
       id: item.edge.id,
       kind: item.edge.kind,
@@ -659,7 +716,9 @@ function buildStagedEdges(
       props: item.edge.forkProps as Readonly<Record<string, JsonValue>>,
       baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
       branchId: item.branchId,
-      ...(validTo === undefined ? {} : { validTo }),
+      ...(validToChange?.kind === "set" ? { validTo: validToChange.validTo }
+      : validToChange?.kind === "clear" ? { clearValidTo: true as const }
+      : {}),
     });
   }
   // An inherited edge whose ONLY change is its end-of-validity is in neither the
@@ -677,9 +736,9 @@ function buildStagedEdges(
   // is credited from the resolution rather than from whoever carried the row.
   for (const item of staging.windowedEdges) {
     const identity = mergeKeyOf(item.edge);
-    const validTo = edgeValidityEnds.get(identity);
+    const validToChange = edgeValidityEnds.get(identity);
     if (
-      validTo === undefined ||
+      validToChange === undefined ||
       stagedIdentities.has(identity) ||
       edgeDeletions.has(identity)
     ) {
@@ -698,7 +757,9 @@ function buildStagedEdges(
       props: item.edge.props as Readonly<Record<string, JsonValue>>,
       baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
       branchId: item.branchId,
-      validTo,
+      ...(validToChange.kind === "set" ?
+        { validTo: validToChange.validTo }
+      : { clearValidTo: true as const }),
     });
   }
   return { edges: staged, windowOnlyCarried };
@@ -826,9 +887,9 @@ export type MergePlan<G extends GraphDef> = Readonly<{
    * the base value re-asserted, and never the target's own value written back at
    * itself, which is what lets an unchanged window coalesce.
    */
-  nodeValidityEnds: ReadonlyMap<MergeKey, string>;
+  nodeValidityEnds: ReadonlyMap<MergeKey, ValidToChange>;
   /** The edge half of {@link nodeValidityEnds}, consumed by the repoint phase. */
-  edgeValidityEnds: ReadonlyMap<MergeKey, string>;
+  edgeValidityEnds: ReadonlyMap<MergeKey, ValidToChange>;
   validityEnds: readonly ValidityEndResolution[];
   resolutions: readonly EntityResolution[];
   propertyConflicts: readonly PropertyConflict<G>[];
@@ -838,6 +899,7 @@ export type MergePlan<G extends GraphDef> = Readonly<{
   baseAmbiguities: readonly BaseAmbiguity[];
   provenanceRecords: readonly ProvenanceRecord[];
   warnings: readonly string[];
+  candidateDiagnostics?: CandidateDiagnostics;
   identityAssertions: readonly IdentityTransferAssertion[];
   // Complete expected rows, never bare ids: a retraction ends whatever CURRENT
   // row carries its id, so it is only legal against the exact truth the branch
@@ -852,10 +914,12 @@ export type MergePlan<G extends GraphDef> = Readonly<{
  * Pure composition of the T3–T10 phases over the staged union; every step is
  * order-independent given the captured `branchRank`.
  */
-function planMerge<G extends GraphDef>(
+function buildInternalMergePlan<G extends GraphDef>(
   staging: StagingSet,
   candidateEdges: readonly CandidateEdge[],
   candidateWarnings: readonly string[],
+  candidateDiagnostics: readonly CandidateDiagnostic[],
+  candidateDiagnosticsTotal: number,
   baseMembers: readonly BaseMember[],
   options: NormalizedMergeOptions<G>,
   branchRank: ReadonlyMap<BranchId, number>,
@@ -972,10 +1036,68 @@ function planMerge<G extends GraphDef>(
     clusterEdges,
     baseIds,
   );
-  const clusters =
+  const diameterGuard =
     options.clusterMaxDiameter === undefined ?
-      guard.clusters
-    : enforceDiameter(guard.clusters, clusterEdges, options.clusterMaxDiameter);
+      {
+        clusters: guard.clusters,
+        survivingEdges: guard.survivingEdges,
+        excludedEdges: [],
+      }
+    : enforceDiameterWithEdges(
+        guard.clusters,
+        clusterEdges,
+        options.clusterMaxDiameter,
+      );
+  const clusters = diameterGuard.clusters;
+  const baseSurvivingEdges = new Set(guard.survivingEdges);
+  const survivingEdges = diameterGuard.survivingEdges.filter((edge) =>
+    baseSurvivingEdges.has(edge),
+  );
+  const excludedByEndpoints = new Map<string, "diameter" | "baseAmbiguity">();
+  for (const excluded of [
+    ...guard.excludedEdges,
+    ...diameterGuard.excludedEdges,
+  ]) {
+    excludedByEndpoints.set(
+      JSON.stringify([excluded.edge.a, excluded.edge.b]),
+      excluded.reason,
+    );
+  }
+  const diagnosticsWithDisposition: CandidateDiagnostic[] =
+    candidateDiagnostics.map((diagnostic): CandidateDiagnostic => {
+      if (diagnostic.evidence.decision === "definitional") return diagnostic;
+      if (diagnostic.scoreDecision === "rejected") return diagnostic;
+      const a = mergeKey(diagnostic.evidence.a.kind, diagnostic.evidence.a.id);
+      const b = mergeKey(diagnostic.evidence.b.kind, diagnostic.evidence.b.id);
+      const reason = excludedByEndpoints.get(JSON.stringify([a, b]));
+      return {
+        ...diagnostic,
+        clusterDisposition:
+          reason === undefined ?
+            ("retained" as const)
+          : ({ kind: "excluded" as const, reason } as const),
+      } as CandidateDiagnostic;
+    });
+  const definitionalExclusions: CandidateDiagnostic[] = [
+    ...guard.excludedEdges,
+    ...diameterGuard.excludedEdges,
+  ]
+    .filter((excluded) => excluded.edge.evidence.decision === "definitional")
+    .map((excluded) => ({
+      evidence: excluded.edge.evidence as Extract<
+        CandidateEdge["evidence"],
+        Readonly<{ decision: "definitional" }>
+      >,
+      scoreDecision: "accepted" as const,
+      clusterDisposition: {
+        kind: "excluded" as const,
+        reason: excluded.reason,
+      },
+    }));
+  const retainedDiagnostics = [
+    ...diagnosticsWithDisposition,
+    ...definitionalExclusions,
+  ].sort((left, right) => compareMatchEvidence(left.evidence, right.evidence));
   // The guard keys on composite `(kind, id)` identities; the public BaseAmbiguity
   // carries them in full, so a component spanning two same-id/different-kind committed
   // entities stays distinguishable in the report.
@@ -990,6 +1112,7 @@ function planMerge<G extends GraphDef>(
   // (5) canonicalize each cluster: min-id survivor + commutative prop union.
   const canonicalEntities: CanonicalEntity[] = [];
   const resolutions: EntityResolution[] = [];
+  const clusterByCanonicalIdentity = new Map<MergeKey, ClusterResult>();
   const propertyConflicts: PropertyConflict<G>[] = [];
   // (7-input) the distinct member kinds per cluster, collected here so a committed
   // BASE member's kind is part of type reconciliation — a base↔staged kind divergence
@@ -1013,6 +1136,10 @@ function planMerge<G extends GraphDef>(
       preferredBranchId,
     );
     canonicalEntities.push(entity);
+    clusterByCanonicalIdentity.set(
+      mergeKey(entity.kind, entity.canonicalId),
+      cluster,
+    );
     reconcileInputs.push({
       canonicalId: mergeKey(entity.kind, entity.canonicalId),
       memberKinds: members.map((member) => member.kind),
@@ -1026,7 +1153,10 @@ function planMerge<G extends GraphDef>(
       cluster.members.map((member) => idOf(member)),
     );
     if (distinctMergedIds.size > 1) {
-      resolutions.push(entity.resolution);
+      resolutions.push({
+        ...entity.resolution,
+        decisiveEdges: decisiveEdgesForCluster(cluster, survivingEdges),
+      });
     }
     // Conflicts are recorded REGARDLESS of distinct-id count: two branches can
     // stage a new node under the SAME id with differing props, producing a genuine
@@ -1228,6 +1358,24 @@ function planMerge<G extends GraphDef>(
     subClassClosure,
     options.reconcileTypes,
   );
+  const reconciledClusterByEntityId = new Map<string, ClusterResult>();
+  for (const identity of reconciliation.retypeMap.keys()) {
+    const entityId = idOf(identity);
+    const cluster = clusterByCanonicalIdentity.get(identity);
+    if (cluster !== undefined && !reconciledClusterByEntityId.has(entityId)) {
+      reconciledClusterByEntityId.set(entityId, cluster);
+    }
+  }
+  const typeReconciliations: readonly TypeReconciliation[] =
+    reconciliation.reconciliations.map((item) => {
+      const cluster = reconciledClusterByEntityId.get(item.entityId);
+      return cluster === undefined ? item : (
+          {
+            ...item,
+            decisiveEdges: decisiveEdgesForCluster(cluster, survivingEdges),
+          }
+        );
+    });
 
   // (8) repoint every staged edge onto its cluster canonical + dedupe. Index the
   // canonical entities by their `(kind, id)` ONCE so the per-cluster survivor
@@ -1403,7 +1551,7 @@ function planMerge<G extends GraphDef>(
         mergeKey(right.kind, right.entityId),
       ),
     ),
-    typeReconciliations: reconciliation.reconciliations,
+    typeReconciliations,
     dropped,
     baseAmbiguities: baseAmbiguities.sort((left, right) =>
       compareMergeKeys(
@@ -1419,6 +1567,21 @@ function planMerge<G extends GraphDef>(
     ),
     provenanceRecords,
     warnings: candidateWarnings,
+    ...(options.candidateDiagnostics === undefined ?
+      {}
+    : {
+        candidateDiagnostics: {
+          entries: retainedDiagnostics.slice(
+            0,
+            options.candidateDiagnostics.limit,
+          ),
+          total: candidateDiagnosticsTotal + definitionalExclusions.length,
+          limit: options.candidateDiagnostics.limit,
+          truncated:
+            candidateDiagnosticsTotal + definitionalExclusions.length >
+            options.candidateDiagnostics.limit,
+        },
+      }),
     identityAssertions: identityRemap.assertions,
     identityRetractions: survivingRetractions,
   };
@@ -1539,8 +1702,8 @@ type PlannedNodeWrite = Readonly<{
    * coalesce.
    */
   validFrom?: string;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 /**
  * THE node-write enumeration: every node row a resolved plan writes, in commit
@@ -1581,13 +1744,15 @@ function plannedNodeWrites<G extends GraphDef>(
       continue;
     }
     written.add(identity);
-    const validTo = plan.nodeValidityEnds.get(identity);
+    const validToChange = plan.nodeValidityEnds.get(identity);
     writes.push({
       identity,
       kind: modification.node.kind,
       id: modification.node.id,
       modification: modification.node,
-      ...(validTo === undefined ? {} : { validTo }),
+      ...(validToChange?.kind === "set" ? { validTo: validToChange.validTo }
+      : validToChange?.kind === "clear" ? { clearValidTo: true as const }
+      : {}),
     });
   }
   for (const entity of plan.canonicalEntities) {
@@ -1604,7 +1769,7 @@ function plannedNodeWrites<G extends GraphDef>(
     // including the committed-target precedence that module applies — so it
     // takes priority. The reconciled inherited end fills in only where the
     // survivor claims no end of its own.
-    const validTo = entity.validTo ?? plan.nodeValidityEnds.get(sourceIdentity);
+    const validToChange = plan.nodeValidityEnds.get(sourceIdentity);
     writes.push({
       identity: mergeKey(kind, entity.canonicalId),
       kind,
@@ -1614,7 +1779,10 @@ function plannedNodeWrites<G extends GraphDef>(
       ...(entity.validFrom === undefined ?
         {}
       : { validFrom: entity.validFrom }),
-      ...(validTo === undefined ? {} : { validTo }),
+      ...(typeof entity.validTo === "string" ? { validTo: entity.validTo }
+      : validToChange?.kind === "set" ? { validTo: validToChange.validTo }
+      : validToChange?.kind === "clear" ? { clearValidTo: true as const }
+      : {}),
     });
   }
   // An inherited row whose ONLY change is its end-of-validity has neither a
@@ -1629,11 +1797,14 @@ function plannedNodeWrites<G extends GraphDef>(
       continue;
     }
     const kind = plan.retypeMap.get(identity) ?? kindOf(identity);
+    const validToChange = requireDefined(plan.nodeValidityEnds.get(identity));
     writes.push({
       identity: mergeKey(kind, idOf(identity)),
       kind,
       id: idOf(identity),
-      validTo: requireDefined(plan.nodeValidityEnds.get(identity)),
+      ...(validToChange.kind === "set" ?
+        { validTo: validToChange.validTo }
+      : { clearValidTo: true as const }),
     });
   }
   return writes;
@@ -1662,74 +1833,137 @@ function nodeWriteProps(
   };
 }
 
+type NodeWriteWindowOptions = Readonly<{ validFrom?: string }> &
+  ValidityEndMutation;
+
+/** Converts the plan's explicit set/clear state into the collection option union. */
+function nodeWriteWindowOptions(
+  write: NodeWriteWindowOptions,
+): NodeWriteWindowOptions {
+  const validFrom =
+    write.validFrom === undefined ? {} : { validFrom: write.validFrom };
+  if (write.clearValidTo === true) {
+    return { ...validFrom, clearValidTo: true };
+  }
+  return {
+    ...validFrom,
+    ...(write.validTo === undefined ? {} : { validTo: write.validTo }),
+  };
+}
+
+type MechanicalNodeWrite = Readonly<{
+  kind: string;
+  id: string;
+  props: Readonly<Record<string, unknown>>;
+  validFrom?: string;
+}> &
+  ValidityEndMutation;
+
+type MechanicalEdgeWrite = Readonly<{
+  kind: string;
+  item: EdgeUpsert;
+}>;
+
+async function applyNodeRows(
+  nodesApi: TxNodes,
+  deletions: readonly MergePlanEntityRef[],
+  upserts: readonly MechanicalNodeWrite[],
+): Promise<number> {
+  for (const deletion of deletions) {
+    await nodeCollection(nodesApi, deletion.kind).delete(deletion.id);
+  }
+  const committed = new Set<MergeKey>();
+  for (const upsert of upserts) {
+    await nodeCollection(nodesApi, upsert.kind).upsertByIdFromRecord(
+      upsert.id,
+      upsert.props,
+      nodeWriteWindowOptions(upsert),
+    );
+    committed.add(mergeKey(upsert.kind, upsert.id));
+  }
+  return committed.size;
+}
+
+async function applyEdgeRows(
+  edgesApi: TxEdges,
+  deletions: readonly MergePlanEntityRef[],
+  upserts: readonly MechanicalEdgeWrite[],
+): Promise<number> {
+  for (const deletion of deletions) {
+    await edgeCollection(edgesApi, deletion.kind).delete(deletion.id);
+  }
+  const byKind = new Map<string, EdgeUpsert[]>();
+  for (const upsert of upserts) {
+    const items = byKind.get(upsert.kind);
+    if (items === undefined) byKind.set(upsert.kind, [upsert.item]);
+    else items.push(upsert.item);
+  }
+  let committed = 0;
+  for (const [kind, items] of byKind) {
+    await edgeCollection(edgesApi, kind).bulkUpsertById(items);
+    committed += items.length;
+  }
+  return committed;
+}
+
+async function applyIdentityRows<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  assertions: readonly IdentityTransferAssertion[],
+  retractions: readonly IdentityTransferAssertion[],
+  assertConsistent: () => Promise<void>,
+): Promise<Readonly<{ asserted: number; retracted: number }>> {
+  try {
+    const applied = await storeRuntime(target).applyIdentityMergeAtTarget(
+      txBackend,
+      retractions.map((retraction) => retraction.id),
+      assertions,
+    );
+    await assertConsistent();
+    return { asserted: applied.created, retracted: applied.retracted };
+  } catch (error) {
+    throw translateIdentityCommitError(error);
+  }
+}
+
 /**
  * Applies a resolved {@link MergePlan} through a transaction's collection API.
  * Shared by `commitPlan()` and the guarded `mergeIncremental()` commit path so
  * both modes execute the same resolved semantics.
  */
-async function applyMergePlan<G extends GraphDef>(
+async function applyInternalMergePlan<G extends GraphDef>(
   plan: MergePlan<G>,
   nodesApi: TxNodes,
   edgesApi: TxEdges,
   target: Store<G>,
   txBackend: TransactionBackend,
 ): Promise<MergedCounts> {
-  // Counted by composite `(kind, id)` identity, so two different-kind nodes that
-  // share an id string each count once (and never collide in the dedupe set).
-  const committedNodeIds = new Set<MergeKey>();
+  const nodeDeletions = [...plan.nodeDeletions].map(([identity, kind]) => ({
+    kind,
+    id: idOf(identity),
+  }));
+  const nodeUpserts = plannedNodeWrites(plan).map((write) => ({
+    kind: write.kind,
+    id: write.id,
+    props: nodeWriteProps(write, (modification) =>
+      commitModificationProps(modification.baseProps, modification.forkProps),
+    ),
+    ...(write.validFrom === undefined ? {} : { validFrom: write.validFrom }),
+    ...(write.clearValidTo === true ? { clearValidTo: true as const }
+    : write.validTo === undefined ? {}
+    : { validTo: write.validTo }),
+  }));
+  const committedNodes = await applyNodeRows(
+    nodesApi,
+    nodeDeletions,
+    nodeUpserts,
+  );
 
-  // Soft-delete every finally-deleted node FIRST (key encodes the kind; the
-  // value repeats it for the collection lookup). Deletions precede the node
-  // writes so a plan replacing a node — e.g. deleting Robot:x and creating a
-  // disjoint Person:x — applies in the only order the create-time
-  // disjoint-id constraint permits, matching how the same operations run
-  // directly on a store. Deleted identities are never also written (the
-  // write loops filter on `plan.nodeDeletions`), and edge upserts still run
-  // after these cascades.
-  for (const [identity, kind] of plan.nodeDeletions) {
-    const collection = nodeCollection(nodesApi, kind);
-    await collection.delete(idOf(identity));
-  }
-
-  // Surviving inherited modifications, then canonical cluster survivors (with
-  // retype cascade), as enumerated by {@link plannedNodeWrites} — the same
-  // enumeration the incremental write guards check. Property deletions the fork
-  // made are honored via {@link commitModificationProps}.
-  for (const write of plannedNodeWrites(plan)) {
-    const collection = nodeCollection(nodesApi, write.kind);
-    // The write's valid-time window travels with it: for a fresh insert it IS
-    // the branch's window, for a resurrection it stops the upsert from resetting
-    // a branch-authored (possibly already ENDED) window to merge time — an ended
-    // member must not come back current and, under `"fold"`, silently join a
-    // live fold class — and for an inherited row it is the reconciled
-    // end-of-validity a branch authored with `update(id, {}, { validTo })`. A
-    // write with no window leaves the committed row's window untouched.
-    await collection.upsertByIdFromRecord(
-      write.id,
-      nodeWriteProps(write, (modification) =>
-        commitModificationProps(modification.baseProps, modification.forkProps),
-      ),
-      {
-        ...(write.validFrom === undefined ?
-          {}
-        : { validFrom: write.validFrom }),
-        ...(write.validTo === undefined ? {} : { validTo: write.validTo }),
-      },
-    );
-    committedNodeIds.add(write.identity);
-  }
-
-  // Soft-delete every finally-deleted inherited edge. These ids are disjoint from
-  // the merged-edge upserts below (deleted edges are not staged), so order is
-  // immaterial. Without this an inherited edge deleted in a branch stayed live.
-  for (const [identity, kind] of plan.edgeDeletions) {
-    await edgeCollection(edgesApi, kind).delete(idOf(identity));
-  }
-
-  // Repointed + deduped edges, grouped by kind so each kind is one batched
-  // round-trip (upsert-by-id is order-independent). The retype cascade keys on
-  // each endpoint's full `(kind, id)` identity.
-  const edgesByKind = new Map<string, EdgeUpsert[]>();
+  const edgeDeletions = [...plan.edgeDeletions].map(([identity, kind]) => ({
+    kind,
+    id: idOf(identity),
+  }));
+  const edgeUpserts: MechanicalEdgeWrite[] = [];
   for (const edge of plan.mergedEdges) {
     // Honor a fork's property deletion on an inherited edge: drop base keys absent
     // from the merged props (the edge upsert PATCH-merges, so a removed key would
@@ -1745,26 +1979,25 @@ async function applyMergePlan<G extends GraphDef>(
     // branch-authored (possibly already ENDED) window to merge time, and on an
     // inherited edge it is the reconciled end-of-validity. An edge with no
     // window leaves its committed one untouched.
-    const item: EdgeUpsert = {
-      id: edge.id,
-      from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
-      to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
-      props,
-      ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
-      ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
-    };
-    const existing = edgesByKind.get(edge.kind);
-    if (existing === undefined) {
-      edgesByKind.set(edge.kind, [item]);
-    } else {
-      existing.push(item);
-    }
+    edgeUpserts.push({
+      kind: edge.kind,
+      item: {
+        id: edge.id,
+        from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
+        to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
+        props,
+        ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
+        ...(edge.clearValidTo === true ? { clearValidTo: true as const }
+        : edge.validTo === undefined ? {}
+        : { validTo: edge.validTo }),
+      },
+    });
   }
-  let committedEdges = 0;
-  for (const [kind, items] of edgesByKind) {
-    await edgeCollection(edgesApi, kind).bulkUpsertById(items);
-    committedEdges += items.length;
-  }
+  const committedEdges = await applyEdgeRows(
+    edgesApi,
+    edgeDeletions,
+    edgeUpserts,
+  );
 
   // The IDENTITY-APPLIER boundary: any refusal from the apply below is an
   // identity statement by construction, so it is translated into the typed
@@ -1777,20 +2010,16 @@ async function applyMergePlan<G extends GraphDef>(
   // contradiction. It is what makes the committed ledger correct independently
   // of the plan-time simulation, and it runs for BOTH commit modes because
   // both commit through here.
-  let appliedIdentity: Readonly<{ created: number; retracted: number }>;
-  try {
-    appliedIdentity = await storeRuntime(target).applyIdentityMergeAtTarget(
-      txBackend,
-      plan.identityRetractions.map((retraction) => retraction.id),
-      plan.identityAssertions,
-    );
-    await assertMergedIdentityClassesConsistent(target, txBackend, plan);
-  } catch (error) {
-    throw translateIdentityCommitError(error);
-  }
+  const appliedIdentity = await applyIdentityRows(
+    target,
+    txBackend,
+    plan.identityAssertions,
+    plan.identityRetractions,
+    () => assertMergedIdentityClassesConsistent(target, txBackend, plan),
+  );
 
   return {
-    nodes: committedNodeIds.size,
+    nodes: committedNodes,
     edges: committedEdges,
     // ACTUAL ledger effects from the applier: rows created (idempotent
     // exact/pair matches the target already held are excluded — the normal
@@ -1799,7 +2028,7 @@ async function applyMergePlan<G extends GraphDef>(
     // failure aborts the whole merge, so the counts never describe a
     // partial commit.
     identity: {
-      asserted: appliedIdentity.created,
+      asserted: appliedIdentity.asserted,
       retracted: appliedIdentity.retracted,
     },
   };
@@ -1860,7 +2089,7 @@ export async function commitPlan<G extends GraphDef>(
       // that claimed a planned id in the window and was then ended would pass
       // the token check and fail generically inside the applier.
       await assertPlannedIdentityIdsFresh(target, transactionBackend(tx), plan);
-      return applyMergePlan(
+      return applyInternalMergePlan(
         plan,
         tx.nodes as unknown as TxNodes,
         tx.edges as unknown as TxEdges,
@@ -1986,7 +2215,7 @@ type NodeCollectionLike = Readonly<{
   upsertByIdFromRecord: (
     id: string,
     data: Record<string, unknown>,
-    options?: Readonly<{ validFrom?: string; validTo?: string }>,
+    options?: Readonly<{ validFrom?: string }> & ValidityEndMutation,
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
 }>;
@@ -1998,14 +2227,14 @@ type EdgeCollectionLike = Readonly<{
     options?: Readonly<{ temporalMode?: "includeTombstones" }>,
   ) => Promise<readonly (Edge | undefined)[]>;
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: string;
       from: Readonly<{ kind: string; id: string }>;
       to: Readonly<{ kind: string; id: string }>;
       props?: Record<string, unknown>;
       validFrom?: string;
-      validTo?: string;
-    }>[],
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
 }>;
@@ -2145,15 +2374,232 @@ async function tryOpenProvenanceStore<G extends GraphDef>(
  * `base@V` precondition is the CALLER's responsibility — `merge()` enforces it,
  * the synthetic scope deliberately bypasses it (§6.4-B).
  */
-async function resolveMerge<G extends GraphDef>(
+type ResolvedMerge<G extends GraphDef> = Readonly<{
+  target: Store<G>;
+  plan: MergePlan<G>;
+  options: NormalizedMergeOptions<G>;
+  expectedBaseVersion?: BaseVersion;
+  incrementalGuard?: IncrementalCommitGuard<G>;
+}>;
+
+function assertPublicPlanCapability<G extends GraphDef>(
+  target: Store<G>,
+): void {
+  if (!storeBackend(target).capabilities.transactions) {
+    throw new MergePlanCapabilityError(
+      "Public merge plans require a transaction-capable target backend.",
+      { details: { capability: "transactions" } },
+    );
+  }
+  if (!target.revisionTrackingEnabled) {
+    throw new MergePlanCapabilityError(
+      "Public merge plans require durable target revision tracking.",
+      {
+        details: { capability: "revisionTracking" },
+        suggestion:
+          "Create the target Store with { revisionTracking: true } (or history enabled), then create a new plan.",
+      },
+    );
+  }
+}
+
+async function captureMergePlanTargetFence<G extends GraphDef>(
+  target: Store<G>,
+): Promise<MergePlanTargetFence> {
+  assertPublicPlanCapability(target);
+  const [activeSchema, schemaHash, origin, revision] = await Promise.all([
+    storeBackend(target).getActiveSchema(target.graphId),
+    computeSchemaComponent(target),
+    target.revisionOriginNow(),
+    target.revisionNow(),
+  ]);
+  return {
+    graphId: target.graphId,
+    schema: {
+      managed: activeSchema !== undefined,
+      version: activeSchema?.version ?? 1,
+      hash: activeSchema?.schema_hash ?? schemaHash,
+    },
+    revision: { origin, revision: revision ?? null },
+  };
+}
+
+function sameMergePlanTargetFence(
+  left: MergePlanTargetFence,
+  right: MergePlanTargetFence,
+): boolean {
+  return (
+    left.graphId === right.graphId &&
+    left.schema.managed === right.schema.managed &&
+    left.schema.version === right.schema.version &&
+    left.schema.hash === right.schema.hash &&
+    left.revision.origin === right.revision.origin &&
+    left.revision.revision === right.revision.revision
+  );
+}
+
+async function assertPlanningFenceUnchanged<G extends GraphDef>(
+  target: Store<G>,
+  startingFence: MergePlanTargetFence,
+): Promise<void> {
+  const endingFence = await captureMergePlanTargetFence(target);
+  if (sameMergePlanTargetFence(startingFence, endingFence)) return;
+  throw new MergePlanningStaleError(
+    "The merge target changed while the plan was being computed; no reviewable plan was produced.",
+    { details: { startingFence, endingFence } },
+  );
+}
+
+function splitWireProps(props: Readonly<Record<string, unknown>>): Readonly<{
+  setProps: Readonly<Record<string, JsonValue>>;
+  unsetProps: readonly string[];
+}> {
+  const setProps = createDataKeyedBag<JsonValue>();
+  const unsetProps: string[] = [];
+  for (const key of Object.keys(props).sort(compareStrings)) {
+    const value = props[key];
+    if (value === undefined) {
+      unsetProps.push(key);
+    } else {
+      setProps[key] = value as JsonValue;
+    }
+  }
+  return { setProps, unsetProps };
+}
+
+function wireEntityRef(kind: string, id: string): MergePlanEntityRef {
+  return { kind, id };
+}
+
+function resolvedNodeUpserts<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly MergePlanNodeUpsert[] {
+  return plannedNodeWrites(plan).map((write) => ({
+    kind: write.kind,
+    id: write.id,
+    ...splitWireProps(
+      nodeWriteProps(write, (modification) =>
+        commitModificationProps(modification.baseProps, modification.forkProps),
+      ),
+    ),
+    ...(write.validFrom === undefined ? {} : { validFrom: write.validFrom }),
+    ...(write.validTo === undefined ? {} : { validTo: write.validTo }),
+  }));
+}
+
+async function resolvedMergeArtifact<G extends GraphDef>(
+  resolved: ResolvedMerge<G>,
+  mode: "snapshot" | "incremental",
+  targetFence: MergePlanTargetFence,
+  anchors: MergePlanAnchors,
+): Promise<MergePlanArtifactV1> {
+  const { plan, options } = resolved;
+  const nodeUpserts = resolvedNodeUpserts(plan);
+  const edgeUpserts = plan.mergedEdges.map((edge) => {
+    const baseProps = plan.inheritedEdgeBaseProps.get(edge.id);
+    const props =
+      baseProps === undefined ?
+        edge.props
+      : commitModificationProps(baseProps, edge.props);
+    return {
+      kind: edge.kind,
+      id: edge.id,
+      from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
+      to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
+      ...splitWireProps(props),
+      ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
+      ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
+    };
+  });
+  const input: MergePlanArtifactV1Input = {
+    formatVersion: 1,
+    mode,
+    target: targetFence,
+    anchors,
+    proposed: {
+      nodes: {
+        upserts: nodeUpserts.length,
+        deletions: plan.nodeDeletions.size,
+      },
+      edges: {
+        upserts: edgeUpserts.length,
+        deletions: plan.edgeDeletions.size,
+      },
+      identity: {
+        assertions: plan.identityAssertions.length,
+        retractions: plan.identityRetractions.length,
+      },
+    },
+    writes: {
+      nodeDeletes: [...plan.nodeDeletions].map(([identity, kind]) =>
+        wireEntityRef(kind, idOf(identity)),
+      ),
+      nodeUpserts,
+      edgeDeletes: [...plan.edgeDeletions].map(([identity, kind]) =>
+        wireEntityRef(kind, idOf(identity)),
+      ),
+      edgeUpserts,
+      identityAssertions: plan.identityAssertions,
+      identityRetractions: plan.identityRetractions,
+    },
+    guards: {
+      canonicalMappings: [...plan.canonicalOf]
+        .sort(([left], [right]) => compareMergeKeys(left, right))
+        .map(([member, canonical]) => ({
+          member: wireEntityRef(kindOf(member), idOf(member)),
+          canonical: wireEntityRef(kindOf(canonical), idOf(canonical)),
+        })),
+      retypes: [...plan.retypeMap]
+        .sort(([left], [right]) => compareMergeKeys(left, right))
+        .map(([entity, toKind]) => ({
+          entity: wireEntityRef(kindOf(entity), idOf(entity)),
+          toKind,
+        })),
+      deletedNodes: [...plan.nodeDeletions].map(([identity, kind]) =>
+        wireEntityRef(kind, idOf(identity)),
+      ),
+      ...(resolved.incrementalGuard === undefined ?
+        {}
+      : {
+          incremental: {
+            tombstoneResurrection: "refuse" as const,
+            lossyUpdates: "refuse" as const,
+            edgeIdentity: "preserve" as const,
+          },
+        }),
+    },
+    review: {
+      resolutions: plan.resolutions,
+      conflicts: plan.propertyConflicts as unknown as readonly JsonValue[],
+      deleteModifyConflicts: plan.deleteModifyConflicts,
+      typeReconciliations: plan.typeReconciliations,
+      dropped: plan.dropped,
+      validityEnds: plan.validityEnds,
+      baseAmbiguities: plan.baseAmbiguities,
+      provenanceRecords: plan.provenanceRecords,
+      warnings: plan.warnings,
+      ...(plan.candidateDiagnostics === undefined ?
+        {}
+      : { diagnostics: plan.candidateDiagnostics }),
+    },
+    provenance: {
+      includeInReport: options.provenance,
+      persist: options.persistProvenance,
+    },
+  };
+  return constructMergePlanArtifact(input);
+}
+
+async function resolveMerge<G extends GraphDef, Output>(
   store: Store<G>,
   target: Store<G>,
   branches: readonly GraphBranch<G>[],
   options: NormalizedMergeOptions<G>,
   useBaseSources: boolean,
-  incremental?: IncrementalConfig<G>,
-  expectedBaseVersion?: BaseVersion,
-): Promise<Result<MergeReport<G>, MergeError>> {
+  incremental: IncrementalConfig<G> | undefined,
+  expectedBaseVersion: BaseVersion | undefined,
+  complete: (resolved: ResolvedMerge<G>) => Promise<Output>,
+): Promise<Result<Output, MergeError>> {
   // Reserved BranchIds are used for non-user contributions. Reject real branches
   // that try to mint them rather than silently corrupting conflict/provenance state.
   let targetBranchSeen = false;
@@ -2227,25 +2673,6 @@ async function resolveMerge<G extends GraphDef>(
         ),
       );
     }
-  }
-
-  // (1c) provenance sidecar precondition. `persistProvenance` is an ACCEPTED
-  // option, so whether it can be honored must be settled before the merge
-  // mutates anything: which occupant holds the sidecar graph id, and whether the
-  // backend can fence the ownership claim, are configuration facts that are true
-  // now and unchanged by the merge. Opening the sidecar here refuses those states
-  // with their typed error — a merge that cannot persist provenance never commits
-  // — and leaves the post-commit write with only the failure modes that are
-  // genuinely transient. The handle is REUSED below rather than re-opened, so the
-  // write cannot re-litigate ownership and reach a configuration verdict there.
-  // The open is idempotent and claims only this module's own sidecar graph, so a
-  // merge that later fails leaves an owned, empty sidecar and no target change.
-  const provenanceStore =
-    options.persistProvenance ?
-      await tryOpenProvenanceStore(target)
-    : undefined;
-  if (provenanceStore !== undefined && isErr(provenanceStore)) {
-    return provenanceStore;
   }
 
   try {
@@ -2374,10 +2801,12 @@ async function resolveMerge<G extends GraphDef>(
     };
 
     // (4–8) resolve the whole merge into a commit-ready plan.
-    const plan = planMerge(
+    const plan = buildInternalMergePlan(
       staging,
       candidates.data.edges,
       candidates.data.warnings,
+      candidates.data.diagnostics,
+      candidates.data.diagnosticsTotal,
       candidates.data.baseMembers,
       options,
       branchRank,
@@ -2454,17 +2883,9 @@ async function resolveMerge<G extends GraphDef>(
       identityGuard = built.probe;
     }
 
-    // (9) commit to the target. Incremental mode commits through the guarded path
-    // (the existing-target-id write guard, §6.6); snapshot mode commits directly,
-    // re-validating the captured base@V inside the transaction (TOCTOU guard).
-    // Identity refusals escaping the commit are translated to the typed
-    // conflict error at the identity-applier boundary inside applyMergePlan
-    // (see translateIdentityCommitError) — the plan-time simulation is the
-    // EARLY surface for those refusals, not the only one.
-    const merged =
-      incremental === undefined ?
-        await commitPlan(target, plan, expectedBaseVersion)
-      : await commitIncrementalPlan(target, plan, {
+    const incrementalGuard =
+      incremental === undefined ? undefined : (
+        ({
           stagedNewByKind,
           options,
           introspectionKinds,
@@ -2472,66 +2893,23 @@ async function resolveMerge<G extends GraphDef>(
           ...(identityGuard === undefined ?
             {}
           : { identityPeerProbe: identityGuard }),
-          // The committed (kind, id) keys the base sources matched at PLAN time;
-          // anything NEW the in-tx re-probe surfaces is a window write.
           plannedBaseMatchKeys: new Set(
             candidates.data.baseMembers.map((member) => mergeKeyOf(member)),
           ),
           targetNodeVersions: staging.targetNodeVersions,
           targetEdgeSignatures: staging.targetEdgeSignatures,
-        });
+        } satisfies IncrementalCommitGuard<G>)
+      );
 
-    // (10) assemble the report. The full provenance records are always built in the
-    // plan; the in-memory index is gated by `provenance`, and on-graph persistence
-    // by `persistProvenance`.
-    const provenance: ProvenanceIndex =
-      options.provenance ?
-        buildProvenanceIndex(plan.provenanceRecords)
-      : { byBranch: () => ({ nodeIds: [], edgeIds: [] }) };
-
-    const warnings = [...plan.warnings];
-    let provenancePersisted: MergeReport<G>["provenancePersisted"];
-    if (provenanceStore !== undefined && !isErr(provenanceStore)) {
-      // POST-COMMIT, best-effort — and now ONLY for transient failures: the
-      // sidecar was opened and claimed before the merge committed, so every
-      // configuration verdict has already been taken. What is left here is a row
-      // write against a graph this module owns, whose failures are backend
-      // failures (a dropped connection, a lock timeout, a full disk). The graph
-      // is already committed, so those must NOT fail the merge — they surface as
-      // a warning. The sidecar node ids are deterministic, so this UPSERTS
-      // (idempotent re-runs).
-      try {
-        const count = await persistProvenanceRecords(
-          provenanceStore.data,
-          target.graphId,
-          plan.provenanceRecords,
-        );
-        provenancePersisted = {
-          graphId: provenanceGraphId(target.graphId),
-          count,
-        };
-      } catch (error) {
-        warnings.push(
-          "provenance persistence failed (graph committed; provenance not persisted): " +
-            (error instanceof Error ? error.message : String(error)),
-        );
-      }
-    }
-
-    const report: MergeReport<G> = {
-      merged,
-      resolutions: plan.resolutions,
-      conflicts: plan.propertyConflicts,
-      deleteModifyConflicts: plan.deleteModifyConflicts,
-      typeReconciliations: plan.typeReconciliations,
-      dropped: plan.dropped,
-      validityEnds: plan.validityEnds,
-      baseAmbiguities: plan.baseAmbiguities,
-      provenance,
-      warnings,
-      ...(provenancePersisted === undefined ? {} : { provenancePersisted }),
-    };
-    return ok(report);
+    return ok(
+      await complete({
+        target,
+        plan,
+        options,
+        ...(expectedBaseVersion === undefined ? {} : { expectedBaseVersion }),
+        ...(incrementalGuard === undefined ? {} : { incrementalGuard }),
+      }),
+    );
   } catch (error) {
     // A typed MergeError thrown deeper (e.g. the incremental guard's stale-overwrite
     // refusal) carries its own precise message — surface it directly rather than
@@ -2544,6 +2922,870 @@ async function resolveMerge<G extends GraphDef>(
       new MergeError(
         `Merge failed while staging or committing: ${describeCause(error)}`,
         { cause: error },
+      ),
+    );
+  }
+}
+
+/** Commits one already-resolved merge and constructs its compatibility report. */
+async function commitResolvedMerge<G extends GraphDef>(
+  resolved: ResolvedMerge<G>,
+): Promise<MergeReport<G>> {
+  const { target, plan, options } = resolved;
+  const provenanceStore =
+    options.persistProvenance ?
+      await tryOpenProvenanceStore(target)
+    : undefined;
+  if (provenanceStore !== undefined && isErr(provenanceStore)) {
+    throw provenanceStore.error;
+  }
+  const merged =
+    resolved.incrementalGuard === undefined ?
+      await commitPlan(target, plan, resolved.expectedBaseVersion)
+    : await commitIncrementalPlan(target, plan, resolved.incrementalGuard);
+
+  const provenance: ProvenanceIndex =
+    options.provenance ?
+      buildProvenanceIndex(plan.provenanceRecords)
+    : { byBranch: () => ({ nodeIds: [], edgeIds: [] }) };
+  const warnings = [...plan.warnings];
+  let provenancePersisted: MergeReport<G>["provenancePersisted"];
+  if (provenanceStore !== undefined && !isErr(provenanceStore)) {
+    try {
+      const count = await persistProvenanceRecords(
+        provenanceStore.data,
+        target.graphId,
+        plan.provenanceRecords,
+      );
+      provenancePersisted = {
+        graphId: provenanceGraphId(target.graphId),
+        count,
+      };
+    } catch (error) {
+      warnings.push(
+        "provenance persistence failed (graph committed; provenance not persisted): " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }
+
+  return {
+    merged,
+    resolutions: plan.resolutions,
+    conflicts: plan.propertyConflicts,
+    deleteModifyConflicts: plan.deleteModifyConflicts,
+    typeReconciliations: plan.typeReconciliations,
+    dropped: plan.dropped,
+    validityEnds: plan.validityEnds,
+    baseAmbiguities: plan.baseAmbiguities,
+    provenance,
+    warnings,
+    ...(plan.candidateDiagnostics === undefined ?
+      {}
+    : { candidateDiagnostics: plan.candidateDiagnostics }),
+    ...(provenancePersisted === undefined ? {} : { provenancePersisted }),
+  };
+}
+
+function incrementalBaseConflictPolicyError<G extends GraphDef>(
+  options: NormalizedMergeOptions<G>,
+): InvalidMergeOptionsError {
+  return new InvalidMergeOptionsError(
+    'mergeIncremental() requires onBasePropertyConflict: "flag" (keep-base); a non-keep-base policy could overwrite a newer committed base value with a stale branch value.',
+    {
+      details: {
+        option: "onBasePropertyConflict",
+        accepted: "flag",
+        received: options.onBasePropertyConflict,
+      },
+    },
+  );
+}
+
+function incrementalSchemaError(): MergeError {
+  return new MergeError(
+    "mergeIncremental() requires target and forkPoint to share a schema; schema drift is not supported (the target content may differ — only the schema must match).",
+    { details: {} },
+  );
+}
+
+/** Builds a durable, reviewable snapshot merge plan without mutating the target. */
+export async function planMerge<G extends GraphDef>(
+  store: Store<G>,
+  branches: readonly GraphBranch<G>[],
+  optionsInput: MergeOptions<G> = {},
+): Promise<Result<MergePlanArtifact, MergeError>> {
+  const normalized = tryNormalize(optionsInput);
+  if (isErr(normalized)) return err(normalized.error);
+  const options = normalized.data;
+  const target = options.target ?? store;
+  let targetFence: MergePlanTargetFence;
+  try {
+    targetFence = await captureMergePlanTargetFence(target);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to capture the target's durable plan fence: ${describeCause(error)}`,
+          { cause: error },
+        )
+      ),
+    );
+  }
+  const precondition = await validateBaseVersions(target, branches);
+  if (isErr(precondition)) return err(precondition.error);
+  const anchors: MergePlanAnchors = {
+    kind: "snapshot",
+    base: { graphId: store.graphId, baseVersion: precondition.data },
+    branches: [...branches]
+      .sort((left, right) => compareStrings(left.id, right.id))
+      .map((branch) => ({
+        branchId: branch.id,
+        baseVersion: branch.base,
+      })),
+  };
+  return resolveMerge(
+    store,
+    target,
+    branches,
+    options,
+    false,
+    undefined,
+    precondition.data,
+    async (resolved) => {
+      await assertPlanningFenceUnchanged(target, targetFence);
+      return resolvedMergeArtifact(resolved, "snapshot", targetFence, anchors);
+    },
+  );
+}
+
+/** Builds a durable, reviewable incremental merge plan without mutating the target. */
+export async function planMergeIncremental<G extends GraphDef>(
+  args: MergeIncrementalArguments<G>,
+): Promise<Result<MergePlanArtifact, MergeError>> {
+  const { forkPoint, target, branches } = args;
+  const normalized = tryNormalize(args.options ?? {}, ["target"]);
+  if (isErr(normalized)) return err(normalized.error);
+  const options = normalized.data;
+  if (options.onBasePropertyConflict !== "flag") {
+    return err(incrementalBaseConflictPolicyError(options));
+  }
+  let targetFence: MergePlanTargetFence;
+  try {
+    targetFence = await captureMergePlanTargetFence(target);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to capture the target's durable plan fence: ${describeCause(error)}`,
+          { cause: error },
+        )
+      ),
+    );
+  }
+  const forkPrecondition = await validateForkPointVersions(forkPoint, branches);
+  if (isErr(forkPrecondition)) return err(forkPrecondition.error);
+  const forkVersion = forkPrecondition.data;
+  const [forkSchema, targetSchema] = await Promise.all([
+    computeSchemaComponent(forkPoint),
+    computeSchemaComponent(target),
+  ]);
+  if (forkSchema !== targetSchema) return err(incrementalSchemaError());
+  const forkActiveSchema = await storeBackend(forkPoint).getActiveSchema(
+    forkPoint.graphId,
+  );
+  const targetBranch: GraphBranch<G> = {
+    id: COMMITTED_TARGET_BRANCH,
+    base: forkVersion,
+    store: target,
+  };
+  const anchors: MergePlanAnchors = {
+    kind: "incremental",
+    forkPoint: {
+      graphId: forkPoint.graphId,
+      baseVersion: forkVersion,
+      schema: {
+        managed: forkActiveSchema !== undefined,
+        version: forkActiveSchema?.version ?? 1,
+        hash: forkActiveSchema?.schema_hash ?? forkSchema,
+      },
+    },
+    branches: [...branches]
+      .sort((left, right) => compareStrings(left.id, right.id))
+      .map((branch) => ({
+        branchId: branch.id,
+        baseVersion: branch.base,
+      })),
+  };
+  return resolveMerge(
+    forkPoint,
+    target,
+    [targetBranch, ...branches],
+    options,
+    true,
+    {
+      targetBranchId: COMMITTED_TARGET_BRANCH,
+      forkPoint: { store: forkPoint, version: forkVersion },
+    },
+    undefined,
+    async (resolved) => {
+      await assertPlanningFenceUnchanged(target, targetFence);
+      await assertForkPointUnchanged({
+        store: forkPoint,
+        version: forkVersion,
+      });
+      return resolvedMergeArtifact(
+        resolved,
+        "incremental",
+        targetFence,
+        anchors,
+      );
+    },
+  );
+}
+
+function mergePlanValidationError(
+  failure: Exclude<
+    Awaited<ReturnType<typeof validateMergePlanArtifact>>,
+    Readonly<{ success: true }>
+  >["error"],
+): MergeError {
+  switch (failure.kind) {
+    case "unsupported-version": {
+      return new UnsupportedMergePlanVersionError(
+        `Unsupported merge plan format version ${String(failure.received)}.`,
+        { details: { received: failure.received } },
+      );
+    }
+    case "digest-mismatch": {
+      return new MergePlanDigestMismatchError(
+        "The merge plan digest does not match its canonical content.",
+        { details: { expected: failure.expected, received: failure.received } },
+      );
+    }
+    case "malformed": {
+      return new InvalidMergePlanError("The merge plan is malformed.", {
+        details: { issues: failure.issues },
+      });
+    }
+    default: {
+      const exhaustive: never = failure;
+      return exhaustive;
+    }
+  }
+}
+
+function wireWriteProps(
+  setProps: Readonly<Record<string, JsonValue>>,
+  unsetProps: readonly string[],
+): Record<string, unknown> {
+  const props = createDataKeyedBag<unknown>();
+  for (const [key, value] of Object.entries(setProps)) props[key] = value;
+  for (const key of unsetProps) props[key] = undefined;
+  return props;
+}
+
+function resolvedWireProps(
+  current: Readonly<Record<string, unknown>>,
+  setProps: Readonly<Record<string, JsonValue>>,
+  unsetProps: readonly string[],
+): Record<string, unknown> {
+  const props = createDataKeyedBag<unknown>();
+  const unset = new Set(unsetProps);
+  for (const [key, value] of Object.entries(current)) {
+    if (!unset.has(key)) props[key] = value;
+  }
+  for (const [key, value] of Object.entries(setProps)) props[key] = value;
+  return props;
+}
+
+function invalidPlanForTarget(
+  message: string,
+  details: Readonly<Record<string, unknown>>,
+): InvalidMergePlanError {
+  return new InvalidMergePlanError(message, { details });
+}
+
+async function preflightWireMergeWrites<G extends GraphDef>(
+  target: Store<G>,
+  nodesApi: TxNodes,
+  edgesApi: TxEdges,
+  artifact: MergePlanArtifactV1,
+): Promise<void> {
+  const graphNodes = target.graph.nodes as Record<string, unknown>;
+  const graphEdges = target.graph.edges as Record<
+    string,
+    (typeof target.graph.edges)[keyof typeof target.graph.edges] | undefined
+  >;
+  const assertNodeKind = (kind: string): void => {
+    if (!hasOwnKey(graphNodes, kind)) {
+      throw invalidPlanForTarget(
+        `The merge plan references unknown node kind "${kind}".`,
+        { kind, role: "node" },
+      );
+    }
+  };
+  const assertEdgeKind = (kind: string): void => {
+    if (!hasOwnKey(graphEdges, kind) || graphEdges[kind] === undefined) {
+      throw invalidPlanForTarget(
+        `The merge plan references unknown edge kind "${kind}".`,
+        { kind, role: "edge" },
+      );
+    }
+  };
+
+  for (const item of [
+    ...artifact.writes.nodeDeletes,
+    ...artifact.writes.nodeUpserts,
+    ...artifact.guards.deletedNodes,
+    ...artifact.guards.canonicalMappings.flatMap((mapping) => [
+      mapping.member,
+      mapping.canonical,
+    ]),
+    ...artifact.guards.retypes.map((retype) => retype.entity),
+    ...artifact.writes.identityAssertions.flatMap((assertion) => [
+      assertion.a,
+      assertion.b,
+    ]),
+    ...artifact.writes.identityRetractions.flatMap((assertion) => [
+      assertion.a,
+      assertion.b,
+    ]),
+  ]) {
+    assertNodeKind(item.kind);
+  }
+  for (const retype of artifact.guards.retypes) assertNodeKind(retype.toKind);
+  for (const item of [
+    ...artifact.writes.edgeDeletes,
+    ...artifact.writes.edgeUpserts,
+  ]) {
+    assertEdgeKind(item.kind);
+  }
+
+  const plannedNodes = new Set(
+    artifact.writes.nodeUpserts.map((upsert) =>
+      mergeKey(upsert.kind, upsert.id),
+    ),
+  );
+  const deletedNodes = new Set(
+    artifact.writes.nodeDeletes.map((deletion) =>
+      mergeKey(deletion.kind, deletion.id),
+    ),
+  );
+  const endpointRows = new Map<MergeKey, Node | undefined>();
+  const readEndpoint = async (
+    endpoint: MergePlanEntityRef,
+  ): Promise<Node | undefined> => {
+    const key = mergeKey(endpoint.kind, endpoint.id);
+    if (endpointRows.has(key)) return endpointRows.get(key);
+    const row = (
+      await nodeCollection(nodesApi, endpoint.kind).getByIds(
+        [endpoint.id],
+        INCLUDE_TOMBSTONES,
+      )
+    )[0];
+    endpointRows.set(key, row);
+    return row;
+  };
+  const nodeUpsertsByKind = new Map<string, MergePlanNodeUpsert[]>();
+  for (const upsert of artifact.writes.nodeUpserts) {
+    const upserts = nodeUpsertsByKind.get(upsert.kind) ?? [];
+    upserts.push(upsert);
+    nodeUpsertsByKind.set(upsert.kind, upserts);
+  }
+  const currentNodesByIdentity = new Map<MergeKey, Node | undefined>();
+  for (const [kind, upserts] of nodeUpsertsByKind) {
+    const rows = await nodeCollection(nodesApi, kind).getByIds(
+      upserts.map((upsert) => upsert.id),
+      INCLUDE_TOMBSTONES,
+    );
+    for (const [index, upsert] of upserts.entries()) {
+      const row = rows[index];
+      const identity = mergeKey(kind, upsert.id);
+      currentNodesByIdentity.set(identity, row);
+      endpointRows.set(identity, row);
+    }
+  }
+  for (const upsert of artifact.writes.nodeUpserts) {
+    const current = currentNodesByIdentity.get(
+      mergeKey(upsert.kind, upsert.id),
+    );
+    if (
+      artifact.guards.incremental !== undefined &&
+      current?.meta.deletedAt !== undefined
+    ) {
+      throw invalidPlanForTarget(
+        `The incremental merge plan would resurrect soft-deleted committed node "${upsert.id}".`,
+        { kind: upsert.kind, id: upsert.id, role: "node" },
+      );
+    }
+    const props = resolvedWireProps(
+      current === undefined ? {} : nodeProps(current),
+      upsert.setProps,
+      upsert.unsetProps,
+    );
+    const schema = nodeSchemaFor(target, upsert.kind);
+    if (schema !== undefined && !schema.safeParse(props).success) {
+      throw invalidPlanForTarget(
+        `The merge plan's node write for "${upsert.id}" does not validate against the active schema.`,
+        { kind: upsert.kind, id: upsert.id, role: "node" },
+      );
+    }
+    if (artifact.guards.incremental !== undefined && current !== undefined) {
+      const analysis = analyzeRevalidatingWrite(
+        schema,
+        nodeProps(current),
+        wireWriteProps(upsert.setProps, upsert.unsetProps),
+      );
+      assertValidRevalidatingWrite(
+        analysis,
+        `The incremental merge plan found committed node "${upsert.id}" with props that do not validate against the active schema.`,
+        { kind: upsert.kind, id: upsert.id, role: "node" },
+      );
+      if (analysis.stripsCurrentProps && analysis.schemaWouldChange) {
+        throw invalidPlanForTarget(
+          `The incremental merge plan would strip existing props while updating committed node "${upsert.id}".`,
+          { kind: upsert.kind, id: upsert.id, role: "node" },
+        );
+      }
+    }
+  }
+
+  const currentEdgeIds = new Set<string>();
+  const edgeUpsertsByKind = new Map<string, MergePlanEdgeUpsert[]>();
+  for (const upsert of artifact.writes.edgeUpserts) {
+    const upserts = edgeUpsertsByKind.get(upsert.kind) ?? [];
+    upserts.push(upsert);
+    edgeUpsertsByKind.set(upsert.kind, upserts);
+  }
+  const currentEdgesByIdentity = new Map<MergeKey, Edge | undefined>();
+  for (const [kind, upserts] of edgeUpsertsByKind) {
+    const rows = await edgeCollection(edgesApi, kind).getByIds(
+      upserts.map((upsert) => upsert.id),
+      INCLUDE_TOMBSTONES,
+    );
+    for (const [index, upsert] of upserts.entries()) {
+      const row = rows[index];
+      currentEdgesByIdentity.set(mergeKey(kind, upsert.id), row);
+      if (row !== undefined) currentEdgeIds.add(upsert.id);
+    }
+  }
+  for (const upsert of artifact.writes.edgeUpserts) {
+    const registration = requireDefined(graphEdges[upsert.kind]);
+    const endpointError = validateEdgeEndpoints(
+      upsert.kind,
+      upsert.from.kind,
+      upsert.to.kind,
+      registration,
+      target.registry,
+    );
+    if (endpointError !== undefined) {
+      throw invalidPlanForTarget(endpointError.message, {
+        kind: upsert.kind,
+        id: upsert.id,
+        role: "edge",
+      });
+    }
+    for (const endpoint of [upsert.from, upsert.to]) {
+      assertNodeKind(endpoint.kind);
+      const key = mergeKey(endpoint.kind, endpoint.id);
+      if (deletedNodes.has(key)) {
+        throw invalidPlanForTarget(
+          `The merge plan deletes an endpoint required by edge "${upsert.id}".`,
+          { edgeKind: upsert.kind, edgeId: upsert.id, endpoint },
+        );
+      }
+      if (plannedNodes.has(key)) continue;
+      const row = await readEndpoint(endpoint);
+      if (row === undefined || row.meta.deletedAt !== undefined) {
+        throw invalidPlanForTarget(
+          `The merge plan references a missing edge endpoint "${endpoint.id}".`,
+          { edgeKind: upsert.kind, edgeId: upsert.id, endpoint },
+        );
+      }
+    }
+    const current = currentEdgesByIdentity.get(
+      mergeKey(upsert.kind, upsert.id),
+    );
+    if (
+      artifact.guards.incremental !== undefined &&
+      current?.meta.deletedAt !== undefined
+    ) {
+      throw invalidPlanForTarget(
+        `The incremental merge plan would resurrect soft-deleted committed edge "${upsert.id}".`,
+        { kind: upsert.kind, id: upsert.id, role: "edge" },
+      );
+    }
+    const props = resolvedWireProps(
+      current === undefined ? {} : edgeProps(current),
+      upsert.setProps,
+      upsert.unsetProps,
+    );
+    const schema = edgeSchemaFor(target, upsert.kind);
+    if (schema !== undefined && !schema.safeParse(props).success) {
+      throw invalidPlanForTarget(
+        `The merge plan's edge write for "${upsert.id}" does not validate against the active schema.`,
+        { kind: upsert.kind, id: upsert.id, role: "edge" },
+      );
+    }
+    if (artifact.guards.incremental !== undefined && current !== undefined) {
+      const analysis = analyzeRevalidatingWrite(
+        schema,
+        edgeProps(current),
+        wireWriteProps(upsert.setProps, upsert.unsetProps),
+      );
+      assertValidRevalidatingWrite(
+        analysis,
+        `The incremental merge plan found committed edge "${upsert.id}" with props that do not validate against the active schema.`,
+        { kind: upsert.kind, id: upsert.id, role: "edge" },
+      );
+      if (analysis.stripsCurrentProps && analysis.schemaWouldChange) {
+        throw invalidPlanForTarget(
+          `The incremental merge plan would strip existing props while updating committed edge "${upsert.id}".`,
+          { kind: upsert.kind, id: upsert.id, role: "edge" },
+        );
+      }
+    }
+    if (
+      current !== undefined &&
+      (current.fromKind !== upsert.from.kind ||
+        current.fromId !== upsert.from.id ||
+        current.toKind !== upsert.to.kind ||
+        current.toId !== upsert.to.id)
+    ) {
+      throw invalidPlanForTarget(
+        `The merge plan would change the immutable endpoints of edge "${upsert.id}".`,
+        { kind: upsert.kind, id: upsert.id, role: "edge" },
+      );
+    }
+  }
+
+  const missingEdgeIds = artifact.writes.edgeUpserts
+    .map((upsert) => upsert.id)
+    .filter((id) => !currentEdgeIds.has(id));
+  if (missingEdgeIds.length > 0) {
+    const plannedEdgeById = new Map(
+      artifact.writes.edgeUpserts.map((upsert) => [upsert.id, upsert]),
+    );
+    for (const kind of Object.keys(target.graph.edges)) {
+      const rows = await edgeCollection(edgesApi, kind).getByIds(
+        missingEdgeIds,
+        INCLUDE_TOMBSTONES,
+      );
+      for (const [index, row] of rows.entries()) {
+        if (row === undefined) continue;
+        const id = requireDefined(missingEdgeIds[index]);
+        const planned = plannedEdgeById.get(id);
+        if (planned !== undefined && planned.kind !== row.kind) {
+          throw invalidPlanForTarget(
+            `The merge plan reuses edge id "${id}" across kinds.`,
+            { id, committedKind: row.kind, plannedKind: planned.kind },
+          );
+        }
+      }
+    }
+  }
+}
+
+async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  artifact: MergePlanArtifactV1,
+): Promise<void> {
+  await lockRecordedGraphWrite(txBackend, target.graphId);
+  const activeSchema = await txBackend.getActiveSchema(target.graphId);
+  const liveSchema = {
+    managed: activeSchema !== undefined,
+    version: activeSchema?.version ?? 1,
+    hash: activeSchema?.schema_hash ?? (await computeSchemaComponent(target)),
+  };
+  if (
+    liveSchema.managed !== artifact.target.schema.managed ||
+    liveSchema.version !== artifact.target.schema.version ||
+    liveSchema.hash !== artifact.target.schema.hash
+  ) {
+    throw new MergePlanSchemaMismatchError(
+      "The target's active schema no longer matches the merge plan.",
+      { details: { expected: artifact.target.schema, live: liveSchema } },
+    );
+  }
+  const liveOrigin = await readRevisionOrigin(
+    txBackend,
+    target.revisionSchema,
+    target.graphId,
+  );
+  if (liveOrigin !== artifact.target.revision.origin) {
+    throw new MergePlanOriginMismatchError(
+      "The merge plan belongs to a different target revision origin.",
+      {
+        details: {
+          expectedOrigin: artifact.target.revision.origin,
+          liveOrigin,
+        },
+      },
+    );
+  }
+  const liveRevision =
+    (await readRecordedClock(
+      txBackend,
+      target.revisionSchema,
+      target.graphId,
+    )) ?? null;
+  if (liveRevision !== artifact.target.revision.revision) {
+    throw new StaleMergePlanError(
+      "The target revision changed after this merge plan was created; the plan was not applied.",
+      {
+        details: {
+          expectedRevision: artifact.target.revision.revision,
+          liveRevision,
+        },
+      },
+    );
+  }
+}
+
+function identityConsistencySeeds(
+  artifact: MergePlanArtifactV1,
+  profile: "fold" | "ignore" | undefined,
+): readonly MergePlanEntityRef[] {
+  const deleted = new Set(
+    artifact.writes.nodeDeletes.map((entity) =>
+      mergeKey(entity.kind, entity.id),
+    ),
+  );
+  const byIdentity = new Map<MergeKey, MergePlanEntityRef>();
+  const add = (entity: MergePlanEntityRef): void => {
+    const identity = mergeKey(entity.kind, entity.id);
+    if (!deleted.has(identity)) byIdentity.set(identity, entity);
+  };
+  for (const assertion of [
+    ...artifact.writes.identityAssertions,
+    ...artifact.writes.identityRetractions,
+  ]) {
+    add(assertion.a);
+    add(assertion.b);
+  }
+  if (profile === "fold") {
+    for (const upsert of artifact.writes.nodeUpserts) add(upsert);
+  }
+  return [...byIdentity]
+    .sort(([left], [right]) => compareMergeKeys(left, right))
+    .map(([, entity]) => entity);
+}
+
+async function applyWireMergeWrites<G extends GraphDef>(
+  target: Store<G>,
+  nodesApi: TxNodes,
+  edgesApi: TxEdges,
+  txBackend: TransactionBackend,
+  artifact: MergePlanArtifactV1,
+): Promise<MergedCounts> {
+  const committedNodes = await applyNodeRows(
+    nodesApi,
+    artifact.writes.nodeDeletes,
+    artifact.writes.nodeUpserts.map((upsert) => ({
+      kind: upsert.kind,
+      id: upsert.id,
+      props: wireWriteProps(upsert.setProps, upsert.unsetProps),
+      ...(upsert.validFrom === undefined ?
+        {}
+      : { validFrom: upsert.validFrom }),
+      ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
+    })),
+  );
+  const committedEdges = await applyEdgeRows(
+    edgesApi,
+    artifact.writes.edgeDeletes,
+    artifact.writes.edgeUpserts.map((upsert) => ({
+      kind: upsert.kind,
+      item: {
+        id: upsert.id,
+        from: upsert.from,
+        to: upsert.to,
+        props: wireWriteProps(upsert.setProps, upsert.unsetProps),
+        ...(upsert.validFrom === undefined ?
+          {}
+        : { validFrom: upsert.validFrom }),
+        ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
+      },
+    })),
+  );
+  const identityAssertions = artifact.writes
+    .identityAssertions as readonly IdentityTransferAssertion[];
+  const identityRetractions = artifact.writes
+    .identityRetractions as readonly IdentityTransferAssertion[];
+  const appliedIdentity = await applyIdentityRows(
+    target,
+    txBackend,
+    identityAssertions,
+    identityRetractions,
+    () =>
+      storeRuntime(target).assertIdentityClassesConsistentAtTarget(
+        txBackend,
+        identityConsistencySeeds(
+          artifact,
+          target.graph.identity?.sameIdAcrossKinds,
+        ),
+      ),
+  );
+  if (
+    !forceRecordedGraphRevision(txBackend, target.graphId) &&
+    !forceWriteTransactionRevision(txBackend)
+  ) {
+    await advanceRevisionClock(
+      txBackend,
+      target.revisionSchema,
+      target.graphId,
+      true,
+    );
+  }
+  return {
+    nodes: committedNodes,
+    edges: committedEdges,
+    identity: {
+      asserted: appliedIdentity.asserted,
+      retracted: appliedIdentity.retracted,
+    },
+  };
+}
+
+function reportFromArtifact<G extends GraphDef>(
+  artifact: MergePlanArtifactV1,
+  merged: MergedCounts,
+  warnings: readonly string[],
+  provenancePersisted?: MergeReport<G>["provenancePersisted"],
+): MergeReport<G> {
+  const provenanceRecords = artifact.review
+    .provenanceRecords as unknown as readonly ProvenanceRecord[];
+  return {
+    merged,
+    resolutions: artifact.review
+      .resolutions as unknown as readonly EntityResolution[],
+    conflicts: artifact.review
+      .conflicts as unknown as readonly PropertyConflict<G>[],
+    deleteModifyConflicts: artifact.review
+      .deleteModifyConflicts as unknown as readonly DeleteModifyConflict[],
+    typeReconciliations: artifact.review
+      .typeReconciliations as unknown as readonly TypeReconciliation[],
+    dropped: artifact.review.dropped as unknown as readonly DroppedItem[],
+    validityEnds: artifact.review
+      .validityEnds as unknown as readonly ValidityEndResolution[],
+    baseAmbiguities: artifact.review
+      .baseAmbiguities as unknown as readonly BaseAmbiguity[],
+    provenance:
+      artifact.provenance.includeInReport ?
+        buildProvenanceIndex(provenanceRecords)
+      : { byBranch: () => ({ nodeIds: [], edgeIds: [] }) },
+    warnings,
+    ...(artifact.review.diagnostics === undefined ?
+      {}
+    : {
+        candidateDiagnostics: artifact.review
+          .diagnostics as unknown as CandidateDiagnostics,
+      }),
+    ...(provenancePersisted === undefined ? {} : { provenancePersisted }),
+  };
+}
+
+/** Validates and atomically applies an approved serialized merge plan. */
+export async function applyMergePlan<G extends GraphDef>(
+  target: Store<G>,
+  input: MergePlanArtifact,
+): Promise<Result<MergeReport<G>, MergeError>> {
+  let validation: Awaited<ReturnType<typeof validateMergePlanArtifact>>;
+  try {
+    validation = await validateMergePlanArtifact(input);
+  } catch (error) {
+    return err(
+      new InvalidMergePlanError(
+        `Merge plan validation failed: ${describeCause(error)}`,
+        { cause: error },
+      ),
+    );
+  }
+  if (!validation.success)
+    return err(mergePlanValidationError(validation.error));
+  const artifact = validation.artifact;
+  if (artifact.target.graphId !== target.graphId) {
+    return err(
+      new MergePlanTargetMismatchError(
+        "The merge plan names a different target graph.",
+        {
+          details: {
+            expectedGraphId: artifact.target.graphId,
+            receivedGraphId: target.graphId,
+          },
+        },
+      ),
+    );
+  }
+  try {
+    assertPublicPlanCapability(target);
+    const provenanceStore =
+      artifact.provenance.persist ?
+        await tryOpenProvenanceStore(target)
+      : undefined;
+    if (provenanceStore !== undefined && isErr(provenanceStore)) {
+      return err(provenanceStore.error);
+    }
+    const merged = await withTxConflictRetry(() =>
+      target.transaction(async (tx) => {
+        const txBackend = transactionBackend(tx);
+        await assertMergePlanFenceInsideTransaction(
+          target,
+          txBackend,
+          artifact,
+        );
+        await preflightWireMergeWrites(
+          target,
+          tx.nodes as unknown as TxNodes,
+          tx.edges as unknown as TxEdges,
+          artifact,
+        );
+        await assertPlannedIdentityIdsFresh(target, txBackend, {
+          identityAssertions: artifact.writes.identityAssertions,
+          identityRetractions: artifact.writes.identityRetractions,
+        });
+        return applyWireMergeWrites(
+          target,
+          tx.nodes as unknown as TxNodes,
+          tx.edges as unknown as TxEdges,
+          txBackend,
+          artifact,
+        );
+      }, mergeCommitTransactionOptions(target)),
+    );
+    const warnings = [...artifact.review.warnings];
+    let provenancePersisted: MergeReport<G>["provenancePersisted"];
+    if (provenanceStore !== undefined && !isErr(provenanceStore)) {
+      try {
+        const records = artifact.review
+          .provenanceRecords as unknown as readonly ProvenanceRecord[];
+        const count = await persistProvenanceRecords(
+          provenanceStore.data,
+          target.graphId,
+          records,
+        );
+        provenancePersisted = {
+          graphId: provenanceGraphId(target.graphId),
+          count,
+        };
+      } catch (error) {
+        warnings.push(
+          "provenance persistence failed (graph committed; provenance not persisted): " +
+            describeCause(error),
+        );
+      }
+    }
+    return ok(
+      reportFromArtifact(artifact, merged, warnings, provenancePersisted),
+    );
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergeError(`Merge plan apply failed: ${describeCause(error)}`, {
+          cause: error,
+        })
       ),
     );
   }
@@ -2602,6 +3844,7 @@ export async function merge<G extends GraphDef>(
     false,
     undefined,
     precondition.data,
+    commitResolvedMerge,
   );
 }
 
@@ -2644,6 +3887,7 @@ export async function mergeAgainstBase<G extends GraphDef>(
     true,
     undefined,
     expectedBaseVersion,
+    commitResolvedMerge,
   );
 }
 
@@ -3502,7 +4746,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
       await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);
       await validateIncrementalNodeWrites(target, nodesApi, plan);
       await validateIncrementalEdgeWrites(target, edgesApi, plan);
-      return applyMergePlan(
+      return applyInternalMergePlan(
         plan,
         nodesApi,
         edgesApi,
@@ -3552,18 +4796,7 @@ export async function mergeIncremental<G extends GraphDef>(
   // conflicts. A non-keep-base policy would let a stale branch value overwrite a
   // newer committed value.
   if (options.onBasePropertyConflict !== "flag") {
-    return err(
-      new InvalidMergeOptionsError(
-        'mergeIncremental() requires onBasePropertyConflict: "flag" (keep-base); a non-keep-base policy could overwrite a newer committed base value with a stale branch value.',
-        {
-          details: {
-            option: "onBasePropertyConflict",
-            accepted: "flag",
-            received: options.onBasePropertyConflict,
-          },
-        },
-      ),
-    );
+    return err(incrementalBaseConflictPolicyError(options));
   }
 
   // Every branch must have forked from THIS fork-point (honest diff).
@@ -3579,12 +4812,7 @@ export async function mergeIncremental<G extends GraphDef>(
     computeSchemaComponent(target),
   ]);
   if (forkSchema !== targetSchema) {
-    return err(
-      new MergeError(
-        "mergeIncremental() requires target and forkPoint to share a schema; schema drift is not supported (the target content may differ — only the schema must match).",
-        { details: {} },
-      ),
-    );
+    return err(incrementalSchemaError());
   }
 
   const targetBranch: GraphBranch<G> = {
@@ -3605,5 +4833,7 @@ export async function mergeIncremental<G extends GraphDef>(
       // whole of planning (see `assertForkPointUnchanged`).
       forkPoint: { store: forkPoint, version: forkVersion },
     },
+    undefined,
+    commitResolvedMerge,
   );
 }

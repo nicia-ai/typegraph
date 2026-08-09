@@ -61,5 +61,6 @@ export function generateCandidates<K extends NodeType>(
     ctx,
     ceilingPolicy,
     maxComparisonsPerKind,
+    Number.MAX_SAFE_INTEGER,
   );
 }

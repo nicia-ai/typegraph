@@ -898,6 +898,17 @@ open: a standby refuses the read-write transaction itself, and a role without
 as `UnsupportedBackendCapabilityError`, with the PostgreSQL error retained as
 its `cause`.
 
+### Validity-end clearing capability
+
+Custom backends must advertise `capabilities.clearValidTo: true` only when both
+`updateNode` and `updateEdge` apply `clearValidTo: true` by storing SQL `NULL` in
+`valid_to`. The built-in SQLite and PostgreSQL adapters do. An explicit clear on
+a backend without that promise is refused with `ConfigurationError` code
+`CLEAR_VALID_TO_UNSUPPORTED` before coalescing or writes, so the result
+does not depend on whether the target row is already open. Omission still means
+preserve; custom backends that do not support clearing remain compatible with
+all writes that omit the option.
+
 ### Declared constraints require `transactions`
 
 A **constrained write** — one whose correctness rests on a check-then-write that

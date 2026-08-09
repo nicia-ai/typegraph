@@ -37,7 +37,17 @@
  *                         and a {@link CandidateWarning} is recorded.
  */
 
-import { MergeError } from "./errors";
+import { MatchEvidenceError, MergeError } from "./errors";
+import type {
+  CandidateDiagnostic,
+  MatchEvidence,
+  MatchSource,
+} from "./evidence";
+import {
+  describeMatchStrategy,
+  entityRef,
+  normalizeMatchSources,
+} from "./evidence";
 import { compareMergeKeys, type MergeKey } from "./node-key";
 import type { Result } from "./result";
 import { err, isErr, ok } from "./result";
@@ -55,7 +65,9 @@ import type { ComparisonCeilingPolicy, ResolveConfig } from "./types";
 export type CandidateEdge = Readonly<{
   a: MergeKey;
   b: MergeKey;
+  /** Internal drop-weakest rank. Definitional 1 is never copied to evidence. */
   score: number;
+  evidence: MatchEvidence;
 }>;
 
 /**
@@ -77,6 +89,8 @@ type CandidateWarning = Readonly<{
 export type CandidateGenResult = Readonly<{
   edges: readonly CandidateEdge[];
   warnings: readonly CandidateWarning[];
+  diagnostics: readonly CandidateDiagnostic[];
+  diagnosticsTotal: number;
 }>;
 
 /**
@@ -91,6 +105,7 @@ export type CandidatePair<K extends NodeType = NodeType> = Readonly<{
   b: MergeKey;
   left: Node<K>;
   right: Node<K>;
+  sources: readonly MatchSource[];
 }>;
 
 /**
@@ -129,6 +144,19 @@ function endpointKey(a: MergeKey, b: MergeKey): string {
   return JSON.stringify([a, b]);
 }
 
+function withSources(
+  edge: CandidateEdge,
+  sources: readonly MatchSource[],
+): CandidateEdge {
+  return {
+    ...edge,
+    evidence: {
+      ...edge.evidence,
+      sources: normalizeMatchSources([...edge.evidence.sources, ...sources]),
+    },
+  };
+}
+
 /**
  * Scores the proposed candidates for a single kind into a {@link CandidateEdge}
  * set, applying the kind's threshold and the comparison-ceiling policy.
@@ -154,30 +182,52 @@ export function scoreCandidates<K extends NodeType>(
   ctx: SimilarityContext,
   ceilingPolicy: ComparisonCeilingPolicy,
   maxComparisonsPerKind?: number,
+  diagnosticLimit = 0,
 ): Result<CandidateGenResult, MergeError> {
   const { similarity, threshold } = resolveConfig;
 
   // Reserve forced endpoint keys FIRST so a fuzzy pair proposing the same pair is
   // dropped — a definitional match is never also fuzzy-scored (the old Phase-1
   // before Phase-2 dedup, now source-agnostic).
-  const seen = new Set<string>();
-  const forced: CandidateEdge[] = [];
+  const forcedByKey = new Map<string, CandidateEdge>();
   for (const edge of input.forcedEdges) {
     const key = endpointKey(edge.a, edge.b);
-    if (!seen.has(key)) {
-      seen.add(key);
-      forced.push(edge);
-    }
+    const previous = forcedByKey.get(key);
+    forcedByKey.set(
+      key,
+      previous === undefined ? edge : (
+        withSources(previous, edge.evidence.sources)
+      ),
+    );
   }
 
-  const fuzzy: CandidatePair<K>[] = [];
+  const fuzzyByKey = new Map<string, CandidatePair<K>>();
   for (const pair of input.pairs) {
     const key = endpointKey(pair.a, pair.b);
-    if (!seen.has(key)) {
-      seen.add(key);
-      fuzzy.push(pair);
+    const forced = forcedByKey.get(key);
+    if (forced !== undefined) {
+      forcedByKey.set(key, withSources(forced, pair.sources));
+      continue;
     }
+    const previous = fuzzyByKey.get(key);
+    fuzzyByKey.set(
+      key,
+      previous === undefined ? pair : (
+        {
+          ...previous,
+          sources: normalizeMatchSources([
+            ...previous.sources,
+            ...pair.sources,
+          ]),
+        }
+      ),
+    );
   }
+  const forced = [...forcedByKey.values()];
+  const fuzzy = [...fuzzyByKey.values()].sort((left, right) => {
+    const byA = compareMergeKeys(left.a, right.a);
+    return byA === 0 ? compareMergeKeys(left.b, right.b) : byA;
+  });
 
   if (
     maxComparisonsPerKind !== undefined &&
@@ -212,6 +262,8 @@ export function scoreCandidates<K extends NodeType>(
           message: `Skipped similarity for this kind: ${fuzzy.length} candidate pairs exceeded maxComparisonsPerKind ${maxComparisonsPerKind}; nodes will merge by id and exact unique match only.`,
         },
       ],
+      diagnostics: [],
+      diagnosticsTotal: 0,
     });
   }
 
@@ -219,18 +271,82 @@ export function scoreCandidates<K extends NodeType>(
   // once, not once per pair it joins (the within-bucket pair count is ~O(n²)).
   const scorer = createPairScorer<K>(similarity, ctx);
   const edges: CandidateEdge[] = [...forced];
-  for (const { left, right, a, b } of fuzzy) {
+  const diagnostics: CandidateDiagnostic[] = [];
+  let diagnosticsTotal = 0;
+  for (const { left, right, a, b, sources } of fuzzy) {
     const scored = scorer(a, left, b, right);
     if (isErr(scored)) {
+      if (
+        similarity.kind === "custom" &&
+        scored.error instanceof MatchEvidenceError
+      ) {
+        return err(
+          new MatchEvidenceError(scored.error.message, {
+            cause: scored.error,
+            details: {
+              kind: left.kind,
+              operation: "score",
+              sourceIds: normalizeMatchSources(sources).map(
+                (source) => source.sourceId,
+              ),
+              endpoints: [entityRef(a), entityRef(b)],
+            },
+          }),
+        );
+      }
       return err(scored.error);
     }
-    if (scored.data >= threshold) {
-      edges.push({ a, b, score: scored.data });
+    if (!Number.isFinite(scored.data)) {
+      return err(
+        new MatchEvidenceError(
+          "Similarity scorer returned a non-finite score.",
+          {
+            details: {
+              kind: left.kind,
+              operation: "score",
+              sourceIds: normalizeMatchSources(sources).map(
+                (source) => source.sourceId,
+              ),
+              score: String(scored.data),
+            },
+          },
+        ),
+      );
+    }
+    const noComparableValues = scored.data < 0;
+    const publicScore = noComparableValues ? 0 : scored.data;
+    const accepted = !noComparableValues && scored.data >= threshold;
+    diagnosticsTotal += 1;
+    const retainsDiagnostic = diagnostics.length < diagnosticLimit;
+    if (accepted || retainsDiagnostic) {
+      const evidence: Extract<
+        MatchEvidence,
+        Readonly<{ decision: "scored" }>
+      > = {
+        a: entityRef(a),
+        b: entityRef(b),
+        sources: normalizeMatchSources(sources),
+        decision: "scored",
+        strategy: describeMatchStrategy(similarity),
+        score: publicScore,
+        threshold,
+      };
+      if (accepted) edges.push({ a, b, score: scored.data, evidence });
+      if (!retainsDiagnostic) continue;
+      diagnostics.push({
+        evidence,
+        scoreDecision: accepted ? "accepted" : "rejected",
+        ...(noComparableValues ?
+          { reason: "noComparableValues" as const }
+        : {}),
+      });
     }
   }
 
   return ok({
     edges: edges.sort((left, right) => compareCandidateEdges(left, right)),
     warnings: [],
+    diagnostics,
+    diagnosticsTotal,
   });
 }

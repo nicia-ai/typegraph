@@ -44,36 +44,36 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 319,
-    sha256: "1cac8627b07d6a5488dc1982cc4a79f758bdb78cdf6a3f86f6003e92e4a548cd",
+    count: 320,
+    sha256: "693df898f3cf091b8d418bdaec57eaeeb1615769672f7aad34a25d96ab7abb81",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 188,
-    sha256: "36f871a8001c4eef6b14c2ce5e6ee1611666631a6cb15edfcb844a9a9ea5ccf1",
+    count: 189,
+    sha256: "3b48341f77b9566d50c0aadafe4fd4b6c897f8bda93ac54218053ed761b8a272",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 192,
-    sha256: "425847642d8595422eba308bd82adbd816390c0ff8b03252f17c38987deaebdf",
+    count: 193,
+    sha256: "ef3d0c15ed2d572bf781da92eca0d75c05f42c417a221885fe3d6fc393c55707",
   },
   "./adapters/drizzle/sqlite": {
-    count: 189,
-    sha256: "4416003df0897fb927bbec1fdb83d2bd5c961ca8f2861c9455c9962388acaa6e",
+    count: 190,
+    sha256: "38d9f6f8541144ea2eafd0515ae39eb96ca73c678f27c74c1bd5217d63c07096",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 192,
-    sha256: "9689a7a3211bc66f7db94b89ba1be19b0387fee12ef45f12b646f3a678d6df8c",
+    count: 193,
+    sha256: "cfcdcc6f496e34f305491c48116afd854dfec5115fc9d516945c0000455ba951",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 192,
-    sha256: "9689a7a3211bc66f7db94b89ba1be19b0387fee12ef45f12b646f3a678d6df8c",
+    count: 193,
+    sha256: "cfcdcc6f496e34f305491c48116afd854dfec5115fc9d516945c0000455ba951",
   },
   "./backend": {
-    count: 1,
-    sha256: "711e337fd05fa134a31d7d29661a8a2cb1fdd078d56cc1b869251934c0b5416e",
+    count: 2,
+    sha256: "89302cd60cfda6fcf575acc1d1f273e3a9624d760dcc8afa1e763ff8bc9a3795",
   },
   "./core": {
     count: 72,
@@ -84,36 +84,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "0f36d8f84e9a9d75255b39940c5308ae4df2c3dbe1e0cb2683b00ee8cb974f73",
   },
   "./graph-merge": {
-    count: 573,
-    sha256: "2d7014a692655335e91ebbc993546f2a5e3d98189af33740ef3b98260e1feed7",
+    count: 575,
+    sha256: "1c4ece64d469588b12847b9173ad142788f7452fc6aefbe3847323c3e6668c7b",
   },
   "./indexes": {
     count: 43,
     sha256: "49144a0eeda76d83d8ebe63f533e25796e1b7d46fe521a4adc997fb58cb876bb",
   },
   "./interchange": {
-    count: 559,
-    sha256: "232f184ff2ba2469d900060588cd91cb9bf1560331923aa4ee02a57e3660fd5f",
+    count: 561,
+    sha256: "d82a3aaf758ba6c6d5384017dd97e1e8fdb3f5af5689e4187d740f670eb5d801",
   },
   "./postgres/pglite": {
-    count: 563,
-    sha256: "d0b2e1b07c66897fce0c4991577634581407bae0fb2a33a85dac8c88586cda1e",
+    count: 565,
+    sha256: "906ebc49cfb215796da5f2a01d48c61e1724706270448d4f5903c42cd9c75466",
   },
   "./profiler": {
-    count: 561,
-    sha256: "f6fff0334b7382c40fe168eea072aaaa0d37173807c37a14eb7ab427c2b99356",
+    count: 563,
+    sha256: "15b077205c11039bdcd1fbbaedf1990808848efd4fd057df1a4ae9f9e0761485",
   },
   "./provenance": {
-    count: 567,
-    sha256: "72aa460c20d18fd5d6c2e0a271ba325abffdb44bcf12c596b226c31186f28750",
+    count: 569,
+    sha256: "9eb74bf608caec29dcdf1ec0200d45dc2b3d2ae609ac3345022d04148be199d6",
   },
   "./schema": {
-    count: 209,
-    sha256: "806c2c9dfd03fd890b2e075bb9c8865bb2d89cd56317601f907767a17baf08c8",
+    count: 210,
+    sha256: "e9fbc8a155b0261a2dc45f1f246732679f7fc0c5c3b070f20a63178818404a79",
   },
   "./sqlite/local": {
-    count: 563,
-    sha256: "d0b2e1b07c66897fce0c4991577634581407bae0fb2a33a85dac8c88586cda1e",
+    count: 565,
+    sha256: "906ebc49cfb215796da5f2a01d48c61e1724706270448d4f5903c42cd9c75466",
   },
 };
 
