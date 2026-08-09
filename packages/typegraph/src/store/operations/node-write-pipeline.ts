@@ -29,6 +29,16 @@ import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
 import { RestrictedDeleteError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
+  createUniquenessContext,
+  deleteUniquenessEntries,
+  insertUniquenessEntries,
+  insertUniquenessEntriesBatch,
+  planNodeClaimReinsert,
+  planNodeClaimUpdate,
+  type UniquenessUpdatePlan,
+  withNodeClaimTransition,
+} from "../claims/node-claims";
+import {
   deleteNodeEmbeddings,
   syncEmbeddings,
   syncEmbeddingsBatchForKind,
@@ -39,16 +49,6 @@ import {
   syncFulltextBatchForKind,
 } from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import {
-  createUniquenessContext,
-  deleteUniquenessEntries,
-  insertUniquenessEntries,
-  insertUniquenessEntriesBatch,
-  planUniquenessReinsert,
-  planUniquenessUpdate,
-  type UniquenessUpdatePlan,
-  withUniquenessTransition,
-} from "../uniqueness";
 
 type Backend = GraphBackend | TransactionBackend;
 
@@ -288,7 +288,7 @@ export type NodeUpdateTarget =
  * key and leave the resurrected node holding NO reservation, so a later create
  * could silently duplicate the value. It re-reserves every applying key
  * instead. Both refuse a conflict before returning, and both hand the caller a
- * plan that only {@link withUniquenessTransition} may carry out.
+ * plan that only {@link withNodeClaimTransition} may carry out.
  */
 async function planNodeUpdateUniqueness(
   ctx: NodeWriteContext,
@@ -302,7 +302,7 @@ async function planNodeUpdateUniqueness(
   const { kind, id } = args.existing;
 
   if (args.existing.deleted_at !== undefined) {
-    return planUniquenessReinsert(
+    return planNodeClaimReinsert(
       uniquenessContext(ctx, backend),
       kind,
       id,
@@ -311,7 +311,7 @@ async function planNodeUpdateUniqueness(
     );
   }
 
-  return planUniquenessUpdate(
+  return planNodeClaimUpdate(
     uniquenessContext(ctx, backend),
     kind,
     id,
@@ -333,7 +333,7 @@ async function planNodeUpdateUniqueness(
  * `deleted_at` fence stopped holding, the uniqueness claim loses a race for a
  * key — and a caller that catches either PER ROW and commits the rest of the
  * transaction (interchange import) must never be left with half of the pair
- * applied. {@link withUniquenessTransition} owns that sequencing and documents
+ * applied. {@link withNodeClaimTransition} owns that sequencing and documents
  * why claim/gate/release is the only order that works; this function just hands
  * it the plan and the write.
  *
@@ -393,7 +393,7 @@ export async function applyNodeUpdate(
   }
   if (args.clearDeleted) updateParams.clearDeleted = true;
 
-  const row = await withUniquenessTransition(
+  const row = await withNodeClaimTransition(
     uniquenessContext(ctx, backend),
     kind,
     id,
@@ -521,15 +521,15 @@ export async function applyNodeResurrect(
   // resurrecting UPDATE carries `deleted_at IS NOT NULL`, so a peer that revived
   // this tombstone first makes it match zero rows — and the reservations that
   // revival is entitled to are the peer's, not this caller's.
-  // `withUniquenessTransition` gives them back when the gate refuses.
-  const plan = await planUniquenessReinsert(
+  // `withNodeClaimTransition` gives them back when the gate refuses.
+  const plan = await planNodeClaimReinsert(
     uniquenessContext(ctx, backend),
     kind,
     id,
     props,
     args.uniqueConstraints,
   );
-  const row = await withUniquenessTransition(
+  const row = await withNodeClaimTransition(
     uniquenessContext(ctx, backend),
     kind,
     id,

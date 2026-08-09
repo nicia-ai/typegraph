@@ -16,6 +16,7 @@ import type {
   CompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
 import { asCompiledStatementSql } from "../../query/sql-intent";
+import { type ClaimOwner, isSameClaimOwner } from "../../store/claims/axis";
 import { chunk as chunkArray } from "../../utils/array";
 import {
   isDuplicatePrimaryKeyError,
@@ -70,6 +71,14 @@ import {
   createCachedTableExistence,
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
+
+/**
+ * The owner a claim write proposes. Reading it off the params in one place is
+ * what keeps the accept/refuse test comparing the same pair the SQL arms do.
+ */
+function claimOwnerOf(params: InsertUniqueParams): ClaimOwner {
+  return { concreteKind: params.concreteKind, nodeId: params.nodeId };
+}
 
 /**
  * The internal operation backend — what `createCommonOperationBackend`
@@ -859,12 +868,24 @@ export function createCommonOperationBackend(
 
     async insertUnique(params: InsertUniqueParams): Promise<void> {
       const query = operationStrategy.buildInsertUnique(params);
-      const result = await execution.execGet<{ node_id: string }>(query);
+      const result = await execution.execGet<{
+        node_id: string;
+        concrete_kind: string;
+      }>(query);
 
-      if (result && result.node_id !== params.nodeId) {
+      if (
+        result &&
+        !isSameClaimOwner(
+          { concreteKind: result.concrete_kind, nodeId: result.node_id },
+          claimOwnerOf(params),
+        )
+      ) {
         throw new UniquenessError({
           constraintName: params.constraintName,
-          kind: params.nodeKind,
+          // The holder's own kind, never `nodeKind`: that column carries the
+          // claim AXIS, which a shared scope folds across kinds, so it need not
+          // be the holder's kind and usually is not.
+          kind: result.concrete_kind,
           existingId: result.node_id,
           newId: params.nodeId,
           fields: [],
@@ -879,8 +900,11 @@ export function createCommonOperationBackend(
 
       // A multi-row upsert cannot affect one row twice, so collapse exact
       // duplicates and reject two entries claiming the same conflict target
-      // for different nodes up front. Batch validation pre-rejects real
-      // conflicts, so this is a defensive invariant, not a semantic path.
+      // for different OWNERS up front. Comparing ids alone would dedupe a
+      // namesake under another kind into the first entry's claim and accept
+      // both — the in-statement twin of the conflict the row-level arms refuse.
+      // Batch validation pre-rejects real conflicts, so this is a defensive
+      // invariant, not a semantic path.
       const targetKey = (entry: InsertUniqueParams): string =>
         `${entry.nodeKind}\u0000${entry.constraintName}\u0000${entry.key}`;
       const byTarget = new Map<string, InsertUniqueParams>();
@@ -890,10 +914,10 @@ export function createCommonOperationBackend(
           byTarget.set(targetKey(entry), entry);
           continue;
         }
-        if (existing.nodeId !== entry.nodeId) {
+        if (!isSameClaimOwner(claimOwnerOf(existing), claimOwnerOf(entry))) {
           throw new UniquenessError({
             constraintName: entry.constraintName,
-            kind: entry.nodeKind,
+            kind: existing.concreteKind,
             existingId: existing.nodeId,
             newId: entry.nodeId,
             fields: [],
@@ -912,20 +936,24 @@ export function createCommonOperationBackend(
           constraint_name: string;
           key: string;
           node_id: string;
+          concrete_kind: string;
         }>(query);
-        const ownerByTarget = new Map(
+        const ownerByTarget = new Map<string, ClaimOwner>(
           rows.map((row) => [
             `${row.node_kind}\u0000${row.constraint_name}\u0000${row.key}`,
-            row.node_id,
+            { concreteKind: row.concrete_kind, nodeId: row.node_id },
           ]),
         );
         for (const entry of chunk) {
           const owner = ownerByTarget.get(targetKey(entry));
-          if (owner !== undefined && owner !== entry.nodeId) {
+          if (
+            owner !== undefined &&
+            !isSameClaimOwner(owner, claimOwnerOf(entry))
+          ) {
             throw new UniquenessError({
               constraintName: entry.constraintName,
-              kind: entry.nodeKind,
-              existingId: owner,
+              kind: owner.concreteKind,
+              existingId: owner.nodeId,
               newId: entry.nodeId,
               fields: [],
             });

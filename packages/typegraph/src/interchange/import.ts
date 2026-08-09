@@ -85,6 +85,7 @@ import {
   IDENTITY_IMPORT_PROGRESS,
 } from "../identity/service";
 import { type KindRegistry } from "../registry/kind-registry";
+import { checkUniquenessConstraints } from "../store/claims/node-claims";
 import {
   createNodeBatchValidationBackend,
   type NodeCreateDraft,
@@ -100,7 +101,6 @@ import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
-import { checkUniquenessConstraints } from "../store/uniqueness";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,

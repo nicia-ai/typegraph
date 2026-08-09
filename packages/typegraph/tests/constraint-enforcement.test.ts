@@ -22,7 +22,7 @@ import {
   checkUniquenessConstraints,
   createUniquenessContext,
   insertUniquenessEntries,
-} from "../src/store/uniqueness";
+} from "../src/store/claims/node-claims";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -745,6 +745,47 @@ describe("Uniqueness Scope: kindWithSubClasses", () => {
 
     expect(product.code).toBe("PROD-A");
     expect(service.code).toBe("SERV-B");
+  });
+
+  it("reserves one row at the scope's axis and names the holder's own kind", async () => {
+    const store = createStore(scopeGraph, backend);
+    const key = computeUniqueKey({ code: "AXIS-1" }, ["code"], "binary");
+
+    const product = await store.nodes.Product.create({
+      code: "AXIS-1",
+      name: "Product",
+      price: 10,
+    });
+
+    // The claim is written at the scope's AXIS — the code-point minimum of the
+    // subclass component — not under the writer's own kind. That is what makes
+    // a sibling's claim collide on the uniques primary key instead of landing
+    // in a row that can never conflict.
+    const axisRow = await backend.checkUnique({
+      graphId: scopeGraph.id,
+      nodeKind: "BaseEntity",
+      constraintName: "unique_code_across_subclasses",
+      key,
+    });
+    expect(axisRow?.node_id).toBe(product.id);
+    expect(axisRow?.concrete_kind).toBe("Product");
+    expect(
+      await backend.checkUnique({
+        graphId: scopeGraph.id,
+        nodeKind: "Product",
+        constraintName: "unique_code_across_subclasses",
+        key,
+      }),
+    ).toBeUndefined();
+
+    // The refusal names the HOLDER's kind, not the axis the row sits at.
+    await expect(
+      store.nodes.Service.create({
+        code: "AXIS-1",
+        name: "Service",
+        duration: 30,
+      }),
+    ).rejects.toMatchObject({ details: { kind: "Product" } });
   });
 
   it("allows reuse of code after delete", async () => {

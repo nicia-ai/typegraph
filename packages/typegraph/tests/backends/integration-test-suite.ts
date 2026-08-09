@@ -29,7 +29,10 @@ import {
   registerBulkFindEndpointIntegrationTests,
   registerBulkFindHeterogeneousIntegrationTests,
   registerBulkUpsertRepeatedIdIntegrationTests,
+  registerClaimLookupPreferenceIntegrationTests,
+  registerClaimOwnerIdentityIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
+  registerConstraintFenceErrorIntegrationTests,
   registerContributionDiagnosticIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerCurrentIdentityTraversalTests,
@@ -190,6 +193,9 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerRecordedTimeIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
     registerLegacyClaimAxisIntegrationTests(context);
+    registerClaimOwnerIdentityIntegrationTests(context);
+    registerClaimLookupPreferenceIntegrationTests(context);
+    registerConstraintFenceErrorIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
     registerSetNodeMutationIntegrationTests(context);

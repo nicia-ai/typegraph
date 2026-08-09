@@ -1,9 +1,10 @@
-import { getTableName, type SQL, sql } from "drizzle-orm";
+import { type Column, getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
   sql as fragmentSql,
   type SqlFragment,
 } from "../../../query/sql-fragment";
+import { claimOwnerMatchesSql } from "../../../store/claims/axis";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
@@ -21,14 +22,29 @@ type InsertUniqueDialectBuilder = (
 ) => SQL;
 
 /**
- * Builds an INSERT query for a uniqueness entry (SQLite).
+ * The proposed row's owner columns, as bound values — the single-row builders'
+ * rendering of the `proposed` side of {@link claimOwnerMatchesSql}.
+ */
+function boundOwnerColumn(
+  uniques: Tables["uniques"],
+  params: InsertUniqueParams,
+): (column: Column) => SQL {
+  return (column) =>
+    column.name === uniques.nodeId.name ?
+      sql`${params.nodeId}`
+    : sql`${params.concreteKind}`;
+}
+
+/**
+ * Builds an INSERT query for a uniqueness claim (SQLite).
  *
  * Uses ON CONFLICT with a conditional update that only succeeds if:
- * 1. The existing entry belongs to the same node (safe update), OR
- * 2. The existing entry is soft-deleted (can be reused)
+ * 1. The existing claim belongs to the same node — the OWNER PAIR
+ *    `(concrete_kind, node_id)`, because ids are unique only per kind — OR
+ * 2. The existing claim is soft-deleted (can be reused)
  *
  * If a different live node holds this key, the conflict handler leaves the
- * row unchanged, and RETURNING will show the conflicting node_id.
+ * row unchanged, and RETURNING shows the conflicting owner.
  */
 function buildInsertUniqueSqlite(
   tables: Tables,
@@ -43,6 +59,12 @@ function buildInsertUniqueSqlite(
     `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
   );
 
+  const ownerMatches = claimOwnerMatchesSql(
+    (column) => quotedColumn(column),
+    boundOwnerColumn(uniques, params),
+    uniques,
+  );
+
   return sql`
     INSERT INTO ${uniques} (${columns})
     VALUES (
@@ -52,33 +74,36 @@ function buildInsertUniqueSqlite(
     ON CONFLICT (${conflictColumns})
     DO UPDATE SET
       ${quotedColumn(uniques.nodeId)} = CASE
-        WHEN ${quotedColumn(uniques.nodeId)} = ${params.nodeId} THEN ${params.nodeId}
+        WHEN ${ownerMatches} THEN ${params.nodeId}
         WHEN ${quotedColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.nodeId}
         ELSE ${quotedColumn(uniques.nodeId)}
       END,
       ${quotedColumn(uniques.concreteKind)} = CASE
-        WHEN ${quotedColumn(uniques.nodeId)} = ${params.nodeId} THEN ${params.concreteKind}
+        WHEN ${ownerMatches} THEN ${params.concreteKind}
         WHEN ${quotedColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.concreteKind}
         ELSE ${quotedColumn(uniques.concreteKind)}
       END,
       ${quotedColumn(uniques.deletedAt)} = CASE
-        WHEN ${quotedColumn(uniques.nodeId)} = ${params.nodeId} THEN NULL
+        WHEN ${ownerMatches} THEN NULL
         WHEN ${quotedColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
         ELSE ${quotedColumn(uniques.deletedAt)}
       END
-    RETURNING ${quotedColumn(uniques.nodeId)} as node_id
+    RETURNING
+      ${quotedColumn(uniques.nodeId)} as node_id,
+      ${quotedColumn(uniques.concreteKind)} as concrete_kind
   `;
 }
 
 /**
- * Builds an INSERT query for a uniqueness entry (PostgreSQL).
+ * Builds an INSERT query for a uniqueness claim (PostgreSQL).
  *
  * Uses ON CONFLICT with a conditional update that only succeeds if:
- * 1. The existing entry belongs to the same node (safe update), OR
- * 2. The existing entry is soft-deleted (can be reused)
+ * 1. The existing claim belongs to the same node — the OWNER PAIR
+ *    `(concrete_kind, node_id)`, because ids are unique only per kind — OR
+ * 2. The existing claim is soft-deleted (can be reused)
  *
  * If a different live node holds this key, the conflict handler leaves the
- * row unchanged, and RETURNING will show the conflicting node_id.
+ * row unchanged, and RETURNING shows the conflicting owner.
  */
 function buildInsertUniquePostgres(
   tables: Tables,
@@ -94,8 +119,14 @@ function buildInsertUniquePostgres(
   );
 
   const tableName = getTableName(uniques);
-  const existingColumn = (column: { name: string }) =>
+  const existingColumn = (column: Readonly<{ name: string }>) =>
     sql.raw(`"${tableName}"."${column.name}"`);
+
+  const ownerMatches = claimOwnerMatchesSql(
+    (column) => existingColumn(column),
+    boundOwnerColumn(uniques, params),
+    uniques,
+  );
 
   return sql`
     INSERT INTO ${uniques} (${columns})
@@ -106,21 +137,23 @@ function buildInsertUniquePostgres(
     ON CONFLICT (${conflictColumns})
     DO UPDATE SET
       ${quotedColumn(uniques.nodeId)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${params.nodeId} THEN ${params.nodeId}
+        WHEN ${ownerMatches} THEN ${params.nodeId}
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.nodeId}
         ELSE ${existingColumn(uniques.nodeId)}
       END,
       ${quotedColumn(uniques.concreteKind)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${params.nodeId} THEN ${params.concreteKind}
+        WHEN ${ownerMatches} THEN ${params.concreteKind}
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.concreteKind}
         ELSE ${existingColumn(uniques.concreteKind)}
       END,
       ${quotedColumn(uniques.deletedAt)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${params.nodeId} THEN NULL
+        WHEN ${ownerMatches} THEN NULL
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
         ELSE ${existingColumn(uniques.deletedAt)}
       END
-    RETURNING ${quotedColumn(uniques.nodeId)} as node_id
+    RETURNING
+      ${quotedColumn(uniques.nodeId)} as node_id,
+      ${quotedColumn(uniques.concreteKind)} as concrete_kind
   `;
 }
 
@@ -143,13 +176,15 @@ export function buildInsertUnique(
 }
 
 /**
- * Builds a multi-row INSERT for uniqueness entries with the same conflict
+ * Builds a multi-row INSERT for uniqueness claims with the same conflict
  * semantics as {@link buildInsertUnique}, expressed against `excluded`
  * (the proposed row) instead of per-statement bound values. RETURNING
- * exposes `(node_kind, constraint_name, key, node_id)` for every row —
- * ON CONFLICT DO UPDATE returns updated rows too — so the caller can
- * attribute each entry's final owner and raise a uniqueness error for the
- * ones a different live node holds.
+ * exposes `(node_kind, constraint_name, key, node_id, concrete_kind)` for
+ * every row — ON CONFLICT DO UPDATE returns updated rows too — so the caller
+ * can attribute each entry's final OWNER PAIR and raise a uniqueness error for
+ * the ones a different live node holds. `concrete_kind` is load-bearing in that
+ * list: without it two batch rows sharing an id under different kinds would
+ * both read their own `node_id` back and both be accepted.
  *
  * Callers must not pass two entries with the same conflict target
  * (`node_kind`, `constraint_name`, `key`): a multi-row upsert cannot
@@ -189,6 +224,12 @@ export function buildInsertUniqueBatch(
   const excludedColumn = (column: Readonly<{ name: string }>) =>
     sql.raw(`excluded."${column.name}"`);
 
+  const ownerMatches = claimOwnerMatchesSql(
+    (column) => existingColumn(column),
+    (column) => excludedColumn(column),
+    uniques,
+  );
+
   const valueRows = sql.join(
     entries.map(
       (params) =>
@@ -203,17 +244,17 @@ export function buildInsertUniqueBatch(
     ON CONFLICT (${conflictColumns})
     DO UPDATE SET
       ${quotedColumn(uniques.nodeId)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${excludedColumn(uniques.nodeId)} THEN ${excludedColumn(uniques.nodeId)}
+        WHEN ${ownerMatches} THEN ${excludedColumn(uniques.nodeId)}
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${excludedColumn(uniques.nodeId)}
         ELSE ${existingColumn(uniques.nodeId)}
       END,
       ${quotedColumn(uniques.concreteKind)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${excludedColumn(uniques.nodeId)} THEN ${excludedColumn(uniques.concreteKind)}
+        WHEN ${ownerMatches} THEN ${excludedColumn(uniques.concreteKind)}
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${excludedColumn(uniques.concreteKind)}
         ELSE ${existingColumn(uniques.concreteKind)}
       END,
       ${quotedColumn(uniques.deletedAt)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${excludedColumn(uniques.nodeId)} THEN NULL
+        WHEN ${ownerMatches} THEN NULL
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
         ELSE ${existingColumn(uniques.deletedAt)}
       END
@@ -221,7 +262,8 @@ export function buildInsertUniqueBatch(
       ${quotedColumn(uniques.nodeKind)} as node_kind,
       ${quotedColumn(uniques.constraintName)} as constraint_name,
       ${quotedColumn(uniques.key)} as key,
-      ${quotedColumn(uniques.nodeId)} as node_id
+      ${quotedColumn(uniques.nodeId)} as node_id,
+      ${quotedColumn(uniques.concreteKind)} as concrete_kind
   `;
 }
 

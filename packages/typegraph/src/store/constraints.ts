@@ -19,10 +19,11 @@
  *   nodes primary key is `(graph_id, kind, id)` — the same id under a disjoint
  *   kind is a different row by construction;
  * - `scope: "kindWithSubClasses"` uniqueness probes the root kind and every
- *   descendant, while `insertUniquenessEntries` reserves one row under the
- *   node's OWN kind and the uniques primary key is
- *   `(graph_id, node_kind, constraint_name, key)` — sibling kinds are distinct
- *   rows that can never collide (see {@link file://./uniqueness.ts}).
+ *   descendant. Its claim is now reserved at the scope's AXIS — the subclass
+ *   component's minimum — so sibling kinds contend for one row and the uniques
+ *   primary key does fence them (see {@link file://./claims/node-claims.ts});
+ *   the lock is kept because the probe still reads kinds the key does not
+ *   cover, including rows written before the axis existed.
  *
  * So the probe is only as good as the serialization around it. SQLite supplies
  * that for free (`BEGIN IMMEDIATE` admits one writer per database). PostgreSQL
@@ -38,10 +39,13 @@ import {
   checkCardinality,
   checkDisjointness,
   checkUniqueEdge,
-  getKindsForUniquenessCheck,
 } from "../constraints";
 import { type Cardinality, type UniqueConstraint } from "../core/types";
 import { type KindRegistry } from "../registry/kind-registry";
+import { type ConstraintFenceReason } from "./claims/backing";
+import { nodeClaimSites } from "./claims/sites";
+
+export { type ConstraintFenceReason } from "./claims/backing";
 
 /**
  * Context for constraint operations.
@@ -51,26 +55,6 @@ export type ConstraintContext = Readonly<{
   registry: KindRegistry;
   backend: GraphBackend | TransactionBackend;
 }>;
-
-/**
- * WHICH declared constraint makes a write constrained.
- *
- * The classification names the reason rather than answering yes/no, because
- * the reason is load-bearing twice over: it is what the fence is taken FOR, and
- * — on a backend that cannot hold the fence — it is what the refusal has to
- * tell the caller. "This backend cannot fence constrained writes" is unusable
- * advice; "your `cardinality: 'one'` edge cannot be enforced here" is
- * actionable, and only the classifier knows which it was.
- */
-export type ConstraintFenceReason =
-  /** Edge cardinality `one` / `unique` / `oneActive`. */
-  | "edgeCardinality"
-  /** `getOrCreateByEndpoints` converging on a match key no key backs. */
-  | "edgeMatchKeyConvergence"
-  /** A `disjointWith` axiom, probed across kinds the node PK cannot span. */
-  | "nodeDisjointness"
-  /** A unique constraint whose scope spans more than the node's own kind. */
-  | "nodeUniquenessScope";
 
 /**
  * The constraint that makes an edge write of this cardinality constrained, or
@@ -106,12 +90,15 @@ export function edgeWriteNeedsConstraintFence(
  * - **Shared-scope uniqueness** is probed by create AND update. It qualifies
  *   only when the constraint's scope actually spans more than the node's own
  *   kind: a single-kind scope probes exactly the `(graph_id, node_kind,
- *   constraint_name, key)` row that `insertUnique` then reserves, so the
- *   uniques primary key IS the fence and the write needs no other. Deciding
- *   this by expanding the scope — rather than by testing `scope !== "kind"` —
- *   keeps the answer true for a `kindWithSubClasses` constraint on a kind that
- *   has no hierarchy, which is backed by its own key exactly like a `kind`
- *   scope.
+ *   constraint_name, key)` row that the claim then reserves, so the uniques
+ *   primary key IS the fence and the write needs no other.
+ *
+ * The uniqueness arm is a PROJECTION of {@link nodeClaimSites}, not a second
+ * spelling of it: the site already decided whether its axis spans kinds beyond
+ * the writer's own in order to decide where to write, and this reads that same
+ * decision. Disjointness is scanned first so a kind qualifying on both counts
+ * keeps reporting the class it reports today — which is what the refusal
+ * payload names.
  */
 export function nodeWriteNeedsConstraintFence(
   registry: KindRegistry,
@@ -122,9 +109,8 @@ export function nodeWriteNeedsConstraintFence(
   if (operation === "create" && registry.getDisjointKinds(kind).length > 0) {
     return "nodeDisjointness";
   }
-  const sharedScope = uniqueConstraints.some(
-    (constraint) =>
-      getKindsForUniquenessCheck(kind, constraint.scope, registry).length > 1,
+  const sharedScope = nodeClaimSites(registry, kind, uniqueConstraints).some(
+    (site) => site.needsLockFence,
   );
   return sharedScope ? "nodeUniquenessScope" : undefined;
 }

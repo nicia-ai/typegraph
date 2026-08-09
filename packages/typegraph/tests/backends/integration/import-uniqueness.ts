@@ -23,6 +23,7 @@ import {
   defineGraph,
   defineNode,
   type NodeId,
+  subClassOf,
 } from "../../../src";
 import {
   FORMAT_VERSION,
@@ -56,6 +57,46 @@ function buildImportUniquenessGraph(graphId: string) {
       },
     },
     edges: {},
+  });
+}
+
+const ImportEmployee = defineNode("ImportEmployee", {
+  schema: z.object({ email: z.string() }),
+});
+const ImportContractor = defineNode("ImportContractor", {
+  schema: z.object({ email: z.string() }),
+});
+const ImportWorker = defineNode("ImportWorker", {
+  schema: z.object({ email: z.string() }),
+});
+
+const SHARED_EMAIL_UNIQUE = {
+  name: "import_staff_email",
+  fields: ["email"],
+  scope: "kindWithSubClasses",
+  collation: "binary",
+} as const;
+
+/**
+ * A hierarchy, so one claim axis covers all three kinds — which is what makes
+ * two rows sharing an id under DIFFERENT kinds contend for one claim row.
+ */
+function buildImportHierarchyGraph(graphId: string) {
+  return defineGraph({
+    id: graphId,
+    nodes: {
+      ImportWorker: { type: ImportWorker, unique: [SHARED_EMAIL_UNIQUE] },
+      ImportEmployee: { type: ImportEmployee, unique: [SHARED_EMAIL_UNIQUE] },
+      ImportContractor: {
+        type: ImportContractor,
+        unique: [SHARED_EMAIL_UNIQUE],
+      },
+    },
+    edges: {},
+    ontology: [
+      subClassOf(ImportEmployee, ImportWorker),
+      subClassOf(ImportContractor, ImportWorker),
+    ],
   });
 }
 
@@ -252,6 +293,47 @@ export function registerImportUniquenessIntegrationTests(
         emailB: "target@example.com",
       });
       expect(batched).toEqual(sequential);
+    });
+    it("refuses only the second of two same-id rows under different kinds in one slice", async () => {
+      // Both rows carry the id "shared-x" and one shared-scope key. They are
+      // two DIFFERENT nodes — the nodes primary key is (graph, kind, id) — so
+      // the second must be a per-row refusal with the first committed, which is
+      // only decidable if the in-batch owner is the PAIR and not the id.
+      graphIdCounter += 1;
+      const [store] = await createStoreWithSchema(
+        buildImportHierarchyGraph(`import_same_id_kinds_${graphIdCounter}`),
+        context.getStore().backend,
+      );
+
+      const result = await importGraph(
+        store,
+        payload([
+          {
+            kind: "ImportEmployee",
+            id: "shared-x",
+            properties: { email: "shared@example.com" },
+          },
+          {
+            kind: "ImportContractor",
+            id: "shared-x",
+            properties: { email: "shared@example.com" },
+          },
+        ]),
+        options(100),
+      );
+
+      expect(result.nodes.created).toBe(1);
+      expect(
+        result.errors.map((entry) => ({
+          id: entry.id,
+          matchesConstraint: entry.error.includes("import_staff_email"),
+        })),
+      ).toEqual([{ id: "shared-x", matchesConstraint: true }]);
+
+      const employees = await store.nodes.ImportEmployee.find();
+      const contractors = await store.nodes.ImportContractor.find();
+      expect(employees).toHaveLength(1);
+      expect(contractors).toHaveLength(0);
     });
   });
 }

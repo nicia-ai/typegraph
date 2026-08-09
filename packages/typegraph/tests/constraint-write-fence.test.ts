@@ -33,6 +33,12 @@ import {
   disjointWith,
   subClassOf,
 } from "../src";
+import { buildKindRegistry } from "../src/registry";
+import {
+  CONSTRAINT_FENCE_BACKING,
+  CONSTRAINT_FENCE_REASONS,
+} from "../src/store/claims/backing";
+import { nodeWriteNeedsConstraintFence } from "../src/store/constraints";
 import {
   createRecordedPostgresStore,
   type LoggedStatement,
@@ -315,5 +321,150 @@ describe("constrained writes take the per-graph write fence", () => {
     await expect(
       store.edges.reportsTo.create(alice, carol, {}),
     ).rejects.toThrow(/[Cc]ardinality/u);
+  });
+});
+
+/**
+ * The lock's trigger set is a PROJECTION of the claim sites now, so the
+ * classification it reads is the same one the claim seam writes from. That
+ * makes a table over the kind shapes the ratchet: if the projection ever
+ * reports a different class — or reports one for a shape that took no lock —
+ * the change is visible here rather than in whichever write path noticed first.
+ */
+describe("the lock reason survives its re-derivation from the claim sites", () => {
+  const OWN_EMAIL_UNIQUE = {
+    name: "own_email",
+    fields: ["email"],
+    scope: "kind",
+    collation: "binary",
+  } as const;
+
+  const Plain = defineNode("Plain", { schema: z.object({ name: z.string() }) });
+  const Solo = defineNode("Solo", { schema: z.object({ email: z.string() }) });
+  const Partner = defineNode("Partner", {
+    schema: z.object({ name: z.string() }),
+  });
+  const Rival = defineNode("Rival", { schema: z.object({ name: z.string() }) });
+  const Staff = defineNode("Staff", {
+    schema: z.object({ email: z.string() }),
+  });
+  const Crew = defineNode("Crew", { schema: z.object({ email: z.string() }) });
+  const Guild = defineNode("Guild", {
+    schema: z.object({ email: z.string() }),
+  });
+  const Rider = defineNode("Rider", {
+    schema: z.object({ email: z.string() }),
+  });
+  const Nomad = defineNode("Nomad", { schema: z.object({ name: z.string() }) });
+
+  const shapeGraph = defineGraph({
+    id: "constraint_fence_reason_shapes",
+    nodes: {
+      // No constraints at all.
+      Plain: { type: Plain },
+      // Only a `scope: "kind"` unique — its own key is the fence.
+      Solo: { type: Solo, unique: [OWN_EMAIL_UNIQUE] },
+      // A disjoint partner and nothing else.
+      Partner: { type: Partner },
+      Rival: { type: Rival },
+      // A scope spanning sibling kinds.
+      Staff: { type: Staff, unique: [SHARED_SCOPE_UNIQUE] },
+      Crew: { type: Crew, unique: [SHARED_SCOPE_UNIQUE] },
+      Guild: { type: Guild, unique: [SHARED_SCOPE_UNIQUE] },
+      // Both at once: the shape that decides which class is reported.
+      Rider: { type: Rider, unique: [SHARED_SCOPE_UNIQUE] },
+      Nomad: { type: Nomad },
+    },
+    edges: {},
+    ontology: [
+      subClassOf(Crew, Staff),
+      subClassOf(Guild, Staff),
+      subClassOf(Rider, Staff),
+      disjointWith(Partner, Rival),
+      disjointWith(Rider, Nomad),
+    ],
+  });
+
+  const shapeRegistry = buildKindRegistry(shapeGraph);
+
+  const SHAPES = [
+    { kind: "Plain", unique: [], create: undefined, update: undefined },
+    {
+      kind: "Solo",
+      unique: [OWN_EMAIL_UNIQUE],
+      create: undefined,
+      update: undefined,
+    },
+    {
+      kind: "Partner",
+      unique: [],
+      create: "nodeDisjointness",
+      update: undefined,
+    },
+    {
+      kind: "Crew",
+      unique: [SHARED_SCOPE_UNIQUE],
+      create: "nodeUniquenessScope",
+      update: "nodeUniquenessScope",
+    },
+    // Disjointness is scanned FIRST, so a kind qualifying on both counts keeps
+    // naming the class the refusal payload names today.
+    {
+      kind: "Rider",
+      unique: [SHARED_SCOPE_UNIQUE],
+      create: "nodeDisjointness",
+      update: "nodeUniquenessScope",
+    },
+  ] as const;
+
+  function reasonFor(
+    shape: (typeof SHAPES)[number],
+    operation: "create" | "update",
+  ) {
+    return nodeWriteNeedsConstraintFence(
+      shapeRegistry,
+      shape.kind,
+      shape.unique,
+      operation,
+    );
+  }
+
+  for (const shape of SHAPES) {
+    it(`reports ${shape.create ?? "no"} fence for a ${shape.kind} create and ${shape.update ?? "no"} fence for its update`, () => {
+      expect(reasonFor(shape, "create")).toBe(shape.create);
+      expect(reasonFor(shape, "update")).toBe(shape.update);
+    });
+  }
+
+  it("only ever names a fence class the backing table knows", () => {
+    for (const shape of SHAPES) {
+      for (const operation of ["create", "update"] as const) {
+        const reason = reasonFor(shape, operation);
+        if (reason === undefined) continue;
+        expect(CONSTRAINT_FENCE_REASONS).toContain(reason);
+        expect(CONSTRAINT_FENCE_BACKING[reason]).toBeDefined();
+      }
+    }
+  });
+
+  it("declares a backing for every fence class, with the shared-scope claim backed by the uniques key", () => {
+    for (const reason of CONSTRAINT_FENCE_REASONS) {
+      expect(CONSTRAINT_FENCE_BACKING[reason]).toBeDefined();
+    }
+    expect(CONSTRAINT_FENCE_BACKING.nodeUniquenessScope).toBe("uniques");
+  });
+
+  it("takes no lock for a kind-scoped node UPDATE either, not just its create", async () => {
+    const { store, statements, reset } = await createLoggedStore();
+    const account = await store.nodes.Account.create({
+      email: "solo@example.com",
+    });
+
+    reset();
+    await store.nodes.Account.update(account.id, {
+      email: "solo2@example.com",
+    });
+
+    expect(graphWriteLockCount(statements)).toBe(0);
   });
 });

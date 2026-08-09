@@ -63,6 +63,31 @@ const employeeGraph = defineGraph({
   edges: {},
 });
 
+/**
+ * A second kind that can hold the SAME id as an Employee: the nodes primary key
+ * is (graph, kind, id), so `Employee "X"` and `Contractor "X"` are two nodes,
+ * and their claims are two rows one release must tell apart.
+ */
+const Contractor = defineNode("Contractor", {
+  schema: z.object({ email: z.string() }),
+});
+
+const NAMESAKE_EMAIL_UNIQUE = {
+  name: EMPLOYEE_EMAIL_CONSTRAINT,
+  fields: ["email"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+
+const namesakeGraph = defineGraph({
+  id: "legacy_claim_axis_namesake",
+  nodes: {
+    Employee: { type: Employee, unique: [NAMESAKE_EMAIL_UNIQUE] },
+    Contractor: { type: Contractor, unique: [NAMESAKE_EMAIL_UNIQUE] },
+  },
+  edges: {},
+});
+
 function emailKey(email: string): string {
   return computeUniqueKey({ email }, ["email"], "binary");
 }
@@ -244,6 +269,53 @@ export function registerLegacyClaimAxisIntegrationTests(
       );
       expect(releasedClaim.nodeId).toBe(other.id);
       expect(releasedClaim.released).toBe(true);
+    });
+
+    it("leaves a namesake's claim under another kind alone", async () => {
+      const store = await context.createStore(namesakeGraph);
+      const backend = store.backend;
+      const key = emailKey("namesake@example.com");
+
+      // Same id, different kind: an owner-blind release matches this row on
+      // (constraint, key) alone, and an id-keyed one matches it too. Only the
+      // owner PAIR tells the two claims apart.
+      const employee = await store.nodes.Employee.create(
+        { email: "namesake@example.com" },
+        { id: "namesake-x" },
+      );
+      await backend.insertUnique({
+        graphId: namesakeGraph.id,
+        nodeKind: "Root",
+        constraintName: EMPLOYEE_EMAIL_CONSTRAINT,
+        key,
+        nodeId: employee.id,
+        concreteKind: "Contractor",
+      });
+
+      await store.nodes.Employee.delete(employee.id);
+
+      const namesakeClaim = requireDefined(
+        await readClaim(
+          backend,
+          namesakeGraph.id,
+          "Root",
+          EMPLOYEE_EMAIL_CONSTRAINT,
+          key,
+        ),
+        "namesake claim row",
+      );
+      expect(namesakeClaim.released).toBe(false);
+      const ownClaim = requireDefined(
+        await readClaim(
+          backend,
+          namesakeGraph.id,
+          "Employee",
+          EMPLOYEE_EMAIL_CONSTRAINT,
+          key,
+        ),
+        "releasing node claim row",
+      );
+      expect(ownClaim.released).toBe(true);
     });
 
     it("gives back only the claim a refused write took, not this node's claim at another axis", async () => {

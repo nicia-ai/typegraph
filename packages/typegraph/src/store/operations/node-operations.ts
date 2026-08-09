@@ -54,11 +54,7 @@ import {
   type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
-import {
-  checkWherePredicate,
-  computeUniqueKey,
-  getKindsForUniquenessCheck,
-} from "../../constraints";
+import { checkWherePredicate, computeUniqueKey } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
 import { assertJsonValue } from "../../core/json-value";
 import {
@@ -110,6 +106,12 @@ import { generateId } from "../../utils/id";
 import { createDataKeyedBag, hasOwnKey } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
+import {
+  checkUniquenessConstraints,
+  createUniquenessContext,
+  nodeClaimEntries,
+} from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateNodeInput } from "../collections/node-collection";
 import {
@@ -139,10 +141,6 @@ import {
   type OperationHookContext,
   type UpdateNodeInput,
 } from "../types";
-import {
-  checkUniquenessConstraints,
-  createUniquenessContext,
-} from "../uniqueness";
 import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
@@ -328,20 +326,32 @@ function buildInsertNodeParams(
   return insertParams;
 }
 
+/**
+ * Materializes the claim row a not-yet-flushed batch member holds, so a later
+ * member's probe reads the same shape it would read from the database.
+ *
+ * It invents no kind: the owner pair comes from the pending registration. The
+ * predecessor wrote `concrete_kind: nodeKind` — the axis the probe QUERIED,
+ * which the pending writer never supplied — so `Employee "X"` followed by
+ * `Contractor "X"` on one shared-scope key read back as the same owner, the
+ * in-batch refusal was suppressed, and the real one arrived at the flush as a
+ * whole-batch abort. This is the third renderer of claim ownership; it must
+ * agree with the TypeScript predicate and the SQL arms.
+ */
 function createPendingUniqueRow(
   graphId: string,
   nodeKind: string,
   constraintName: string,
   key: string,
-  nodeId: string,
+  owner: ClaimOwner,
 ): UniqueRow {
   return {
     graph_id: graphId,
     node_kind: nodeKind,
     constraint_name: constraintName,
     key,
-    node_id: nodeId,
-    concrete_kind: nodeKind,
+    node_id: owner.nodeId,
+    concrete_kind: owner.concreteKind,
     deleted_at: undefined,
   };
 }
@@ -402,7 +412,10 @@ export function createNodeBatchValidationBackend(
   const nodeCache = new Map<string, CachedNodeRow>();
   const pendingNodes = new Map<string, NonNullable<CachedNodeRow>>();
   const uniqueCache = new Map<string, CachedUniqueRow>();
-  const pendingUniqueOwners = new Map<string, string>();
+  // The pending OWNER PAIR, never the bare id: two batch members sharing an id
+  // under different kinds are two claimants, and an id-keyed cache reads them
+  // as one.
+  const pendingUniqueOwners = new Map<string, ClaimOwner>();
 
   async function getNodeCached(
     lookupGraphId: string,
@@ -463,44 +476,28 @@ export function createNodeBatchValidationBackend(
     });
   }
 
+  // Records the claims a not-yet-flushed create will write, at the AXIS it will
+  // write them: one entry per claim, not one per kind in scope. The fan-out
+  // this replaces existed because the claim used to be written under the
+  // node's own kind while the probe read every kind in scope; now both sides
+  // name the axis, so a second entry would be a second spelling of the same
+  // reservation.
   function registerPendingUniqueEntries(
     kind: string,
     id: string,
     props: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ): void {
-    for (const constraint of constraints) {
-      if (!checkWherePredicate(constraint, props)) continue;
-
-      const key = computeUniqueKey(
-        props,
-        constraint.fields,
-        constraint.collation,
+    for (const entry of nodeClaimEntries(registry, kind, props, constraints)) {
+      pendingUniqueOwners.set(
+        buildUniqueCacheKey(
+          graphId,
+          entry.axis,
+          entry.constraintName,
+          entry.key,
+        ),
+        { concreteKind: kind, nodeId: id },
       );
-      const concreteEntryKey = buildUniqueCacheKey(
-        graphId,
-        kind,
-        constraint.name,
-        key,
-      );
-      pendingUniqueOwners.set(concreteEntryKey, id);
-
-      if (constraint.scope !== "kind") {
-        const kindsToCheck = getKindsForUniquenessCheck(
-          kind,
-          constraint.scope,
-          registry,
-        );
-        for (const kindToCheck of kindsToCheck) {
-          const inheritedEntryKey = buildUniqueCacheKey(
-            graphId,
-            kindToCheck,
-            constraint.name,
-            key,
-          );
-          pendingUniqueOwners.set(inheritedEntryKey, id);
-        }
-      }
     }
   }
 
@@ -512,10 +509,12 @@ export function createNodeBatchValidationBackend(
   // create either (a) claims a value this update just freed yet gets rejected
   // against the stale reservation, or (b) passes the stale "free" cache for a
   // value this update just took and then violates the real constraint at
-  // flush, aborting the whole import. Mirrors updateUniquenessEntries' key
-  // diff: for each constraint whose key changed, the released old key becomes
-  // free and the reserved new key becomes owned by this node, across every
-  // kind the constraint's scope checks.
+  // flush, aborting the whole import. Mirrors the claim transition's key diff:
+  // for each constraint whose key changed, the released old key becomes free
+  // and the reserved new key becomes owned by this node AT ITS AXIS — the one
+  // row the transition actually wrote — while the remaining kinds the probe
+  // reads are recorded as vacant, which they are: the probe that let this
+  // update through visited every one of them.
   function registerAppliedNodeUpdate(
     kind: string,
     id: string,
@@ -523,32 +522,38 @@ export function createNodeBatchValidationBackend(
     newProps: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ): void {
-    for (const constraint of constraints) {
-      const oldApplies = checkWherePredicate(constraint, oldProps);
-      const newApplies = checkWherePredicate(constraint, newProps);
-      const oldKey =
-        oldApplies ?
-          computeUniqueKey(oldProps, constraint.fields, constraint.collation)
-        : undefined;
-      const newKey =
-        newApplies ?
-          computeUniqueKey(newProps, constraint.fields, constraint.collation)
-        : undefined;
-      if (oldKey === newKey) continue;
+    const owner: ClaimOwner = { concreteKind: kind, nodeId: id };
+    const oldEntries = new Map(
+      nodeClaimEntries(registry, kind, oldProps, constraints).map((entry) => [
+        entry.constraintName,
+        entry,
+      ]),
+    );
+    const newEntries = new Map(
+      nodeClaimEntries(registry, kind, newProps, constraints).map((entry) => [
+        entry.constraintName,
+        entry,
+      ]),
+    );
 
-      const kindsToCheck = getKindsForUniquenessCheck(
+    for (const constraint of constraints) {
+      const oldEntry = oldEntries.get(constraint.name);
+      const newEntry = newEntries.get(constraint.name);
+      if (oldEntry?.key === newEntry?.key) continue;
+
+      const kindsToCheck = uniquenessProbeKinds(
         kind,
         constraint.scope,
         registry,
       );
 
-      if (oldKey !== undefined) {
+      if (oldEntry !== undefined) {
         for (const kindToCheck of kindsToCheck) {
           const cacheKey = buildUniqueCacheKey(
             graphId,
             kindToCheck,
             constraint.name,
-            oldKey,
+            oldEntry.key,
           );
           // This node released the key on the real backend, so it is now
           // free. Clear any pending reservation and record the known-free
@@ -558,18 +563,23 @@ export function createNodeBatchValidationBackend(
           uniqueCache.set(cacheKey, undefined);
         }
       }
-      if (newKey !== undefined) {
+      if (newEntry !== undefined) {
         for (const kindToCheck of kindsToCheck) {
           const cacheKey = buildUniqueCacheKey(
             graphId,
             kindToCheck,
             constraint.name,
-            newKey,
+            newEntry.key,
           );
-          // This node now holds the key on the real backend. A pending owner
-          // shadows the seeded uniqueCache entry (checkUniqueCached consults
-          // it first), matching registerPendingUniqueEntries' reservation.
-          pendingUniqueOwners.set(cacheKey, id);
+          if (kindToCheck === newEntry.axis) {
+            // This node now holds the key on the real backend. A pending owner
+            // shadows the seeded uniqueCache entry (checkUniqueCached consults
+            // it first), matching registerPendingUniqueEntries' reservation.
+            pendingUniqueOwners.set(cacheKey, owner);
+            continue;
+          }
+          pendingUniqueOwners.delete(cacheKey);
+          uniqueCache.set(cacheKey, undefined);
         }
       }
     }
@@ -1166,14 +1176,19 @@ export async function primeBatchValidationCaches(
     }
     const groups = new Map<string, ProbeGroup>();
     for (const draft of drafts) {
-      for (const constraint of draft.uniqueConstraints) {
-        if (!checkWherePredicate(constraint, draft.validatedProps)) continue;
-        const key = computeUniqueKey(
-          draft.validatedProps,
-          constraint.fields,
-          constraint.collation,
-        );
-        const kindsToCheck = getKindsForUniquenessCheck(
+      for (const entry of nodeClaimEntries(
+        ctx.registry,
+        draft.kind,
+        draft.validatedProps,
+        draft.uniqueConstraints,
+      )) {
+        const constraint = entry.constraint;
+        const key = entry.key;
+        // Seeded over exactly the kinds the per-row probe reads — the axis and
+        // the legacy kinds — so priming stays a batched substitute for those
+        // reads rather than a narrower set that sends them back to the
+        // database one row at a time.
+        const kindsToCheck = uniquenessProbeKinds(
           draft.kind,
           constraint.scope,
           ctx.registry,
@@ -1358,6 +1373,33 @@ async function resurrectPreparedNode<G extends GraphDef>(
 // unique constraint entries across all applicable kinds.
 // ============================================================
 
+/**
+ * THE preference rule when a key has claim rows at more than one kind — which a
+ * database carrying pre-axis rows legitimately can, at the axis AND at a
+ * concrete kind, with different owners:
+ *
+ * 1. Visit the AXIS first, then the remaining kinds in scope in code-point
+ *    order — the order {@link uniquenessProbeKinds} defines, so this reads what
+ *    the write path claims before it reads what an older version claimed.
+ * 2. Prefer a LIVE row over a tombstoned one, wherever each was found: a
+ *    tombstone is a released reservation, and reviving it while a live holder
+ *    exists would hand the caller the wrong node.
+ * 3. Among rows of the same liveness prefer the axis row, which rule 1 already
+ *    delivers.
+ *
+ * Stated rather than left to iteration order because `getOrCreateByConstraint`
+ * decides which node to revive from it.
+ */
+function prefersClaimRow(
+  incumbent: UniqueMatchRow | undefined,
+  candidate: UniqueMatchRow,
+): boolean {
+  if (incumbent === undefined) return true;
+  return (
+    incumbent.deleted_at !== undefined && candidate.deleted_at === undefined
+  );
+}
+
 async function findUniqueRowAcrossKinds(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
@@ -1365,10 +1407,10 @@ async function findUniqueRowAcrossKinds(
   key: string,
   kindsToCheck: readonly string[],
   includeDeleted: boolean,
-): Promise<
-  | { node_id: string; concrete_kind: string; deleted_at: string | undefined }
-  | undefined
-> {
+): Promise<UniqueMatchRow | undefined> {
+  // `let` earns its place: a tombstoned hit does not end the search, because a
+  // live row later in the order outranks it (rule 2).
+  let preferred: UniqueMatchRow | undefined;
   for (const kindToCheck of kindsToCheck) {
     const row = await backend.checkUnique({
       graphId,
@@ -1377,9 +1419,12 @@ async function findUniqueRowAcrossKinds(
       key,
       includeDeleted,
     });
-    if (row !== undefined) return row;
+    if (row === undefined) continue;
+    if (!prefersClaimRow(preferred, row)) continue;
+    preferred = row;
+    if (row.deleted_at === undefined) return row;
   }
-  return undefined;
+  return preferred;
 }
 
 interface UniqueMatchRow {
@@ -1401,7 +1446,10 @@ async function batchCheckUniqueAcrossKinds(
   for (const kindToCheck of kindsToCheck) {
     if (backend.checkUniqueBatch === undefined) {
       for (const key of uniqueKeys) {
-        if (existingByKey.has(key)) continue;
+        const incumbent = existingByKey.get(key);
+        if (incumbent !== undefined && incumbent.deleted_at === undefined) {
+          continue;
+        }
         const row = await backend.checkUnique({
           graphId,
           nodeKind: kindToCheck,
@@ -1409,7 +1457,7 @@ async function batchCheckUniqueAcrossKinds(
           key,
           includeDeleted,
         });
-        if (row !== undefined) {
+        if (row !== undefined && prefersClaimRow(incumbent, row)) {
           existingByKey.set(row.key, row);
         }
       }
@@ -1422,7 +1470,7 @@ async function batchCheckUniqueAcrossKinds(
         includeDeleted,
       });
       for (const row of rows) {
-        if (!existingByKey.has(row.key)) {
+        if (prefersClaimRow(existingByKey.get(row.key), row)) {
           existingByKey.set(row.key, row);
         }
       }
@@ -1936,7 +1984,7 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
             }
             const keys = [...keyToId.keys()];
             if (keys.length === 0) continue;
-            for (const kindToCheck of getKindsForUniquenessCheck(
+            for (const kindToCheck of uniquenessProbeKinds(
               kind,
               constraint.scope,
               ctx.registry,
@@ -1958,7 +2006,11 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
                 }
                 throw new UniquenessError({
                   constraintName: constraint.name,
-                  kind: kindToCheck,
+                  // The holder's own kind, never `kindToCheck`: that is the
+                  // claim AXIS after the scope move, which a shared scope
+                  // folds across kinds and which the caller never wrote. The
+                  // probe and the fence report the same value.
+                  kind: existing.concrete_kind,
                   existingId: existing.node_id,
                   newId: requireDefined(keyToId.get(existing.key)),
                   fields: constraint.fields,
@@ -2240,7 +2292,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     constraint.collation,
   );
 
-  const kindsToCheck = getKindsForUniquenessCheck(
+  const kindsToCheck = uniquenessProbeKinds(
     kind,
     constraint.scope,
     ctx.registry,
@@ -2346,7 +2398,7 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
     constraint.collation,
   );
 
-  const kindsToCheck = getKindsForUniquenessCheck(
+  const kindsToCheck = uniquenessProbeKinds(
     kind,
     constraint.scope,
     ctx.registry,
@@ -2442,7 +2494,7 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
   const validated = validateAndComputeKeys(nodeKind, kind, constraint, items);
   const uniqueKeys = collectUniqueKeys(validated);
 
-  const kindsToCheck = getKindsForUniquenessCheck(
+  const kindsToCheck = uniquenessProbeKinds(
     kind,
     constraint.scope,
     ctx.registry,
@@ -2911,7 +2963,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
   const validated = validateAndComputeKeys(nodeKind, kind, constraint, items);
   const uniqueKeys = collectUniqueKeys(validated);
 
-  const kindsToCheck = getKindsForUniquenessCheck(
+  const kindsToCheck = uniquenessProbeKinds(
     kind,
     constraint.scope,
     ctx.registry,
