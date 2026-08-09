@@ -195,32 +195,36 @@ export async function insertUniquenessEntriesBatch(
 }
 
 /**
- * Deletes uniqueness entries for a node being deleted.
+ * Releases the uniqueness entries a node being deleted holds — the LIFECYCLE
+ * shape: every claim this node owns for each applying constraint's key, at
+ * whatever axis the claim sits on.
  */
 export async function deleteUniquenessEntries(
   ctx: UniquenessContext,
   kind: string,
+  id: string,
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
 ): Promise<void> {
-  for (const constraint of constraints) {
-    if (!checkWherePredicate(constraint, props)) {
-      continue;
-    }
-
-    const key = computeUniqueKey(
-      props,
-      constraint.fields,
-      constraint.collation,
-    );
-
-    await ctx.backend.deleteUnique({
-      graphId: ctx.graphId,
-      nodeKind: kind,
-      constraintName: constraint.name,
-      key,
-    });
-  }
+  await releaseOwnedUniqueKeys(
+    ctx,
+    kind,
+    id,
+    constraints.flatMap((constraint) =>
+      checkWherePredicate(constraint, props) ?
+        [
+          {
+            constraintName: constraint.name,
+            key: computeUniqueKey(
+              props,
+              constraint.fields,
+              constraint.collation,
+            ),
+          },
+        ]
+      : [],
+    ),
+  );
 }
 
 /**
@@ -359,18 +363,65 @@ export async function planUniquenessReinsert(
   return pending;
 }
 
-/** Gives up the reservations named by `keys`, in plan order. */
-async function releaseUniqueKeys(
+/** One reservation a release names. */
+type ReleasableKey = Readonly<{ constraintName: string; key: string }>;
+
+/**
+ * A reservation a write actually took, remembered together with the claim axis
+ * it was written at so the compensation can name the same row rather than
+ * re-deriving it.
+ */
+type ClaimedKey = ReleasableKey & Readonly<{ axis: string }>;
+
+/**
+ * LIFECYCLE release: gives up every reservation THIS node holds for each
+ * `(constraintName, key)`, in plan order, whatever axis the reservation sits
+ * on.
+ *
+ * Scoping to the owner pair `(concreteKind, id)` rather than to the axis is
+ * what lets a claim written under an older axis be released by newer code, and
+ * what keeps a namesake — same id, different kind — holding its own.
+ */
+async function releaseOwnedUniqueKeys(
   ctx: UniquenessContext,
   kind: string,
-  keys: readonly Readonly<{ constraintName: string; key: string }>[],
+  id: string,
+  keys: readonly ReleasableKey[],
 ): Promise<void> {
   for (const entry of keys) {
     await ctx.backend.deleteUnique({
       graphId: ctx.graphId,
-      nodeKind: kind,
       constraintName: entry.constraintName,
       key: entry.key,
+      concreteKind: kind,
+      nodeId: id,
+    });
+  }
+}
+
+/**
+ * COMPENSATING release: undoes exactly the rows a failed write just claimed —
+ * the owner's reservation AT the axis it claimed on, and nothing else.
+ *
+ * Deliberately narrower than {@link releaseOwnedUniqueKeys}: a rollback must
+ * touch neither a reservation at another axis that predates this write nor one
+ * another node holds. Conflating the two would make a refused write strip
+ * claims it never took.
+ */
+async function releaseClaimedUniqueKeys(
+  ctx: UniquenessContext,
+  kind: string,
+  id: string,
+  keys: readonly ClaimedKey[],
+): Promise<void> {
+  for (const entry of keys) {
+    await ctx.backend.deleteUnique({
+      graphId: ctx.graphId,
+      nodeKind: entry.axis,
+      constraintName: entry.constraintName,
+      key: entry.key,
+      concreteKind: kind,
+      nodeId: id,
     });
   }
 }
@@ -386,19 +437,24 @@ async function claimUniqueKeysThen<T>(
   plan: UniquenessUpdatePlan,
   gatedWrite: () => Promise<T>,
 ): Promise<T> {
-  const claimed: Readonly<{ constraintName: string; key: string }>[] = [];
+  // The claim axis every reservation below is written at. Bound once and
+  // remembered on each claimed entry, so the compensation names the row this
+  // loop wrote instead of re-deriving which axis that was.
+  const axis = kind;
+  const claimed: ClaimedKey[] = [];
   try {
     for (const mutation of plan) {
       if (mutation.claim === undefined) continue;
       await ctx.backend.insertUnique({
         graphId: ctx.graphId,
-        nodeKind: kind,
+        nodeKind: axis,
         constraintName: mutation.constraintName,
         key: mutation.claim,
         nodeId: id,
         concreteKind: kind,
       });
       claimed.push({
+        axis,
         constraintName: mutation.constraintName,
         key: mutation.claim,
       });
@@ -408,6 +464,10 @@ async function claimUniqueKeysThen<T>(
     // Compensate, not swallow: the reservations this transition took are given
     // back and the original failure is rethrown, so the caller sees the SAME
     // error it would have seen with no reservation attempted at all.
+    //
+    // The give-back names the exact rows this transition wrote — owner pair and
+    // claim axis both — so it can strip neither a reservation at another axis
+    // that predates this write nor one a namesake under a different kind holds.
     //
     // The give-back is exact because of what a claim can be. `probeUniqueKey`
     // refuses a key another node holds and reports one THIS node already holds
@@ -427,7 +487,7 @@ async function claimUniqueKeysThen<T>(
     // error that then surfaces is a raw backend failure no per-row consumer
     // catches — the enclosing transaction aborts, which is the only honest
     // outcome left.
-    await releaseUniqueKeys(ctx, kind, claimed);
+    await releaseClaimedUniqueKeys(ctx, kind, id, claimed);
     throw error;
   }
 }
@@ -473,9 +533,10 @@ export async function withUniquenessTransition<T>(
   gatedWrite: () => Promise<T>,
 ): Promise<T> {
   const result = await claimUniqueKeysThen(ctx, kind, id, plan, gatedWrite);
-  await releaseUniqueKeys(
+  await releaseOwnedUniqueKeys(
     ctx,
     kind,
+    id,
     plan.flatMap((mutation) =>
       mutation.release === undefined ?
         []

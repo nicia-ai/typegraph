@@ -1,7 +1,7 @@
-import { type SQL, sql } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
-import { isSqlFragment } from "../../../query/sql-fragment";
+import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
 import { isPresent } from "../../../utils/presence";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import { nowIso } from "../../row-mappers";
@@ -27,6 +27,7 @@ import type {
   FulltextSearchParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   HybridSearchParams,
   InsertEdgeParams,
@@ -100,6 +101,7 @@ import {
   buildCheckUnique,
   buildCheckUniqueBatch,
   buildDeleteUnique,
+  buildHardDeleteUniquesByConcreteKind,
   buildHardDeleteUniquesByNode,
   buildHardDeleteUniquesByNodeIds,
   buildInsertUnique,
@@ -233,6 +235,14 @@ export type CommonOperationStrategy = Readonly<{
   buildHardDeleteUniquesByNodeIds: (
     params: HardDeleteUniquesByNodeIdsParams,
   ) => SQL;
+  /**
+   * Dialect-independent by construction — the fragment names only the
+   * relation and two columns, so the store-side kind-removal cleanup compiles
+   * the identical predicate through its own execution path.
+   */
+  buildHardDeleteUniquesByConcreteKind: (
+    params: HardDeleteUniquesByConcreteKindParams,
+  ) => SqlFragment;
   buildCheckUnique: (params: CheckUniqueParams) => SQL;
   buildCheckUniqueBatch: (params: CheckUniqueBatchParams) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
@@ -536,6 +546,14 @@ function createCommonOperationStrategy(
     },
     buildInsertUniqueBatch(entries: readonly InsertUniqueParams[]): SQL {
       return buildInsertUniqueBatch(tables, dialect, entries);
+    },
+    buildHardDeleteUniquesByConcreteKind(
+      params: HardDeleteUniquesByConcreteKindParams,
+    ): SqlFragment {
+      return buildHardDeleteUniquesByConcreteKind(
+        getTableName(tables.uniques),
+        params,
+      );
     },
     buildGetActiveSchema(graphId: string): SQL {
       return buildGetActiveSchema(tables, graphId, dialect);

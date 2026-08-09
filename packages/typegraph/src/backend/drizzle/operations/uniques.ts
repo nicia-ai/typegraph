@@ -1,9 +1,14 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
+import {
+  sql as fragmentSql,
+  type SqlFragment,
+} from "../../../query/sql-fragment";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
   DeleteUniqueParams,
+  HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   InsertUniqueParams,
   SqlDialect,
@@ -221,8 +226,14 @@ export function buildInsertUniqueBatch(
 }
 
 /**
- * Builds a soft DELETE query for a uniqueness entry.
+ * Builds the owner-scoped soft DELETE that releases a uniqueness claim.
  * Uses raw column name in SET clause.
+ *
+ * The owner pair `(concrete_kind, node_id)` is always part of the predicate:
+ * a release gives up the claims THIS node holds, never a namesake's under
+ * another kind and never one that predates this node's write. `nodeKind`
+ * additionally restricts the release to one claim axis — see
+ * {@link DeleteUniqueParams} for the two shapes and who issues each.
  */
 export function buildDeleteUnique(
   tables: Tables,
@@ -231,13 +242,19 @@ export function buildDeleteUnique(
 ): SQL {
   const { uniques } = tables;
 
+  const axisTerm =
+    params.nodeKind === undefined ?
+      sql``
+    : sql` AND ${uniques.nodeKind} = ${params.nodeKind}`;
+
   return sql`
     UPDATE ${uniques}
     SET ${quotedColumn(uniques.deletedAt)} = ${timestamp}
     WHERE ${uniques.graphId} = ${params.graphId}
-      AND ${uniques.nodeKind} = ${params.nodeKind}
+      AND ${uniques.concreteKind} = ${params.concreteKind}
+      AND ${uniques.nodeId} = ${params.nodeId}
       AND ${uniques.constraintName} = ${params.constraintName}
-      AND ${uniques.key} = ${params.key}
+      AND ${uniques.key} = ${params.key}${axisTerm}
       AND ${uniques.deletedAt} IS NULL
   `;
 }
@@ -276,6 +293,31 @@ export function buildHardDeleteUniquesByNodeIds(
         sql`, `,
       )})
   `;
+}
+
+/**
+ * THE definition of "the uniqueness claims nodes of this kind own": every row
+ * whose `concrete_kind` is the kind, at whatever axis the row sits on.
+ *
+ * Kind reaping is a different predicate from a lifecycle release — "every claim
+ * this kind's nodes own" rather than "this node's claim for one constraint and
+ * key" — and it is a hard delete rather than a tombstone, so it is its own
+ * builder. It is nonetheless the ONLY spelling of that predicate: both the
+ * `hardDeleteUniquesByConcreteKind` backend member and `materializeRemovals`'
+ * removed-kind cleanup compile this fragment. Keying on `node_kind` instead
+ * would leak a claim whose axis is a sibling kind, delete a surviving sibling's
+ * claim when the removed kind IS the axis, and never match a claim whose axis
+ * is not a kind at all.
+ *
+ * Takes the relation NAME rather than the Drizzle table so the store-side
+ * caller, which knows only its configured table names, can build the same
+ * statement; the fragment renders on either dialect.
+ */
+export function buildHardDeleteUniquesByConcreteKind(
+  uniquesTableName: string,
+  params: HardDeleteUniquesByConcreteKindParams,
+): SqlFragment {
+  return fragmentSql`DELETE FROM ${fragmentSql.identifier(uniquesTableName)} WHERE ${fragmentSql.identifier("graph_id")} = ${params.graphId} AND ${fragmentSql.identifier("concrete_kind")} = ${params.concreteKind}`;
 }
 
 /**

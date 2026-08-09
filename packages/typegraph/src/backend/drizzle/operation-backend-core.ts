@@ -47,6 +47,7 @@ import type {
   FindNodesByKindParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   InsertEdgeParams,
   InsertNodeParams,
@@ -106,6 +107,7 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteEdge"
   | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
+  | "hardDeleteUniquesByConcreteKind"
   | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
   | "insertEdgeNoReturn"
@@ -952,6 +954,14 @@ export function createCommonOperationBackend(
         });
         await execution.execRun(query);
       }
+    },
+
+    async hardDeleteUniquesByConcreteKind(
+      params: HardDeleteUniquesByConcreteKindParams,
+    ): Promise<void> {
+      const query =
+        operationStrategy.buildHardDeleteUniquesByConcreteKind(params);
+      await execution.execRun(query);
     },
 
     async checkUnique(

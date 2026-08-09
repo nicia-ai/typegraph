@@ -154,6 +154,7 @@ export type {
   GraphReadBackend,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   HybridSearchParams,
   HybridSearchRow,

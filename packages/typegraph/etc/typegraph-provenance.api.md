@@ -532,9 +532,11 @@ type DeleteNodeParams = Readonly<{
 // @public
 type DeleteUniqueParams = Readonly<{
     graphId: string;
-    nodeKind: string;
+    nodeKind?: string;
     constraintName: string;
     key: string;
+    concreteKind: string;
+    nodeId: string;
 }>;
 
 // @public
@@ -1410,6 +1412,7 @@ type GraphBackend = Readonly<{
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
     deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
     hardDeleteUniquesByNodeIds?: (this: void, params: HardDeleteUniquesByNodeIdsParams) => Promise<void>;
+    hardDeleteUniquesByConcreteKind?: (this: void, params: HardDeleteUniquesByConcreteKindParams) => Promise<void>;
     checkUnique: (this: void, params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
     checkUniqueBatch?: (this: void, params: CheckUniqueBatchParams) => Promise<readonly UniqueRow[]>;
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
@@ -1601,6 +1604,12 @@ type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+}>;
+
+// @public
+type HardDeleteUniquesByConcreteKindParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
 }>;
 
 // @public
@@ -4303,7 +4312,7 @@ type UniqueConstraint<S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRa
 }>;
 
 // @public (undocumented)
-type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "checkUnique" | "checkUniqueBatch">;
+type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
 
 // @public
 type UniqueConstraintField = Readonly<{

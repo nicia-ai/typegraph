@@ -77,6 +77,10 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "hardDeleteEdge",
   "hardDeleteEdgesBatch",
   "hardDeleteNode",
+  // Reaps the claims a removed kind's nodes own. Like the sibling
+  // `hardDeleteUniquesByNodeIds` beside it, it clears sidecar rows whose
+  // entity rows are already gone, so it cannot bypass a capture flush.
+  "hardDeleteUniquesByConcreteKind",
   "hardDeleteUniquesByNodeIds",
   "hybridSearch",
   "insertEdge",

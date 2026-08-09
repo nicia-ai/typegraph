@@ -449,6 +449,7 @@ export async function applyNodeSoftDelete(
   await deleteUniquenessEntries(
     uniquenessContext(ctx, backend),
     kind,
+    id,
     parseRowProps(args.existing),
     args.uniqueConstraints,
   );

@@ -1791,6 +1791,17 @@ export type GraphBackend = Readonly<{
     this: void,
     params: HardDeleteUniquesByNodeIdsParams,
   ) => Promise<void>;
+  /**
+   * Permanently removes every uniqueness claim owned by nodes of one concrete
+   * kind, at whatever axis each claim sits on. THE definition of "the claims
+   * this kind owns" — kind removal reaps through it so it can neither leak a
+   * claim whose axis is a sibling kind nor delete a surviving sibling's claim.
+   * Optional capability.
+   */
+  hardDeleteUniquesByConcreteKind?: (
+    this: void,
+    params: HardDeleteUniquesByConcreteKindParams,
+  ) => Promise<void>;
   checkUnique: (
     this: void,
     params: CheckUniqueParams,
@@ -2737,6 +2748,7 @@ export type UniqueConstraintBackend = Pick<
   | "insertUniqueBatch"
   | "deleteUnique"
   | "hardDeleteUniquesByNodeIds"
+  | "hardDeleteUniquesByConcreteKind"
   | "checkUnique"
   | "checkUniqueBatch"
 >;
@@ -3175,13 +3187,34 @@ export type InsertUniqueParams = Readonly<{
 }>;
 
 /**
- * Parameters for deleting a unique constraint entry.
+ * Parameters for releasing a unique constraint entry.
+ *
+ * Every release is scoped to the claim's OWNER — the pair
+ * `(concreteKind, nodeId)`, because a node id is unique only within its kind.
+ * The two shapes differ only in whether the claim AXIS participates:
+ *
+ *  - **Lifecycle release** (`nodeKind` absent) — "give up every claim this node
+ *    holds for this constraint and key, whatever axis it sits on". Soft delete,
+ *    an update's key-change release and the resurrect diff use it, so a claim
+ *    written under an older axis is still released by newer code.
+ *  - **Compensating release** (`nodeKind` present) — "undo exactly the row I
+ *    just claimed, at the axis I claimed it on". A failed write's rollback uses
+ *    it, so it touches neither a row that predates the write nor one another
+ *    node holds.
  */
 export type DeleteUniqueParams = Readonly<{
   graphId: string;
-  nodeKind: string;
+  /**
+   * The claim axis (`uniques.node_kind`) the release is restricted to. Absent
+   * releases the owner's claims at every axis — see the two shapes above.
+   */
+  nodeKind?: string;
   constraintName: string;
   key: string;
+  /** The claim owner's concrete kind (`uniques.concrete_kind`). */
+  concreteKind: string;
+  /** The claim owner's node id (`uniques.node_id`). */
+  nodeId: string;
 }>;
 
 /** Parameters for permanently clearing uniqueness sidecars by node identity. */
@@ -3189,6 +3222,12 @@ export type HardDeleteUniquesByNodeIdsParams = Readonly<{
   graphId: string;
   concreteKind: string;
   nodeIds: readonly string[];
+}>;
+
+/** Parameters for permanently clearing every uniqueness claim a kind owns. */
+export type HardDeleteUniquesByConcreteKindParams = Readonly<{
+  graphId: string;
+  concreteKind: string;
 }>;
 
 /**

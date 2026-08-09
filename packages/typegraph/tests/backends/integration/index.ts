@@ -21,6 +21,7 @@ export { registerIdentityImportIntegrationTests } from "./identity-import";
 export { registerIdentitySeparationIntegrationTests } from "./identity-separation";
 export { registerImportUniquenessIntegrationTests } from "./import-uniqueness";
 export { registerLateMaterializationIntegrationTests } from "./late-materialization";
+export { registerLegacyClaimAxisIntegrationTests } from "./legacy-claim-axis";
 export { registerMigrateSchemaKindIntegrationTests } from "./migrate-schema-kinds";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";

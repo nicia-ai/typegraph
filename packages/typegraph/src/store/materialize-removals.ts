@@ -9,6 +9,7 @@
  * deferrable. Candidates run sequentially because they share one graph lock.
  */
 import { type RawBackend } from "../backend/branded";
+import { buildHardDeleteUniquesByConcreteKind } from "../backend/drizzle/operations/uniques";
 import {
   type GraphBackend,
   type KindRemovalRow,
@@ -24,7 +25,7 @@ import type {
   VectorSlot,
   VectorStrategy,
 } from "../query/dialect/vector-strategy";
-import { sql } from "../query/sql-fragment";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledStatementSql } from "../query/sql-intent";
 import { parseSerializedSchema } from "../schema/manager";
 import type { SerializedSchema } from "../schema/types";
@@ -579,31 +580,52 @@ async function closeRecordedAndDeleteLiveRows(
   await executeDeleteStatements(target, deleteStatements);
 }
 
+/**
+ * The live rows a removed kind leaves behind, as statements.
+ *
+ * The uniqueness claims are NOT spelled here: which claims a kind owns is one
+ * predicate with one owner, `buildHardDeleteUniquesByConcreteKind`, and this is
+ * its second consumer. Filtering on `node_kind` — the claim AXIS — instead would
+ * leak a claim whose axis is a sibling kind, delete a surviving sibling's claim
+ * when the removed kind IS the axis, and never match a claim whose axis is not a
+ * kind at all.
+ */
 function buildRemovedKindLiveDeleteStatements(
   ctx: MaterializeOneContext,
   row: KindRemovalRow,
-): readonly string[] {
+): readonly SqlFragment[] {
   const graphLit = literal(ctx.graphId);
   const kindLit = literal(row.kindName);
   if (row.entity === "node") {
     return [
-      `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
-      `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
-      `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
-      `DELETE FROM ${quote(ctx.uniquesTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+      sql.raw(
+        `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+      ),
+      sql.raw(
+        `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
+      ),
+      sql.raw(
+        `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+      ),
+      buildHardDeleteUniquesByConcreteKind(ctx.uniquesTable, {
+        graphId: ctx.graphId,
+        concreteKind: row.kindName,
+      }),
     ];
   }
   return [
-    `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+    sql.raw(
+      `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+    ),
   ];
 }
 
 async function executeDeleteStatements(
   target: SchemaWriteTransactionBackend,
-  statements: readonly string[],
+  statements: readonly SqlFragment[],
 ): Promise<void> {
   for (const statement of statements) {
-    await target.executeStatement(asCompiledStatementSql(sql.raw(statement)));
+    await target.executeStatement(asCompiledStatementSql(statement));
   }
 }
 

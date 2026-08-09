@@ -173,6 +173,7 @@ export type {
   GraphEntityReadBackend,
   GraphEntityWriteBackend,
   GraphLifecycleBackend,
+  HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   IndexMaterializationBackend,
   LockSchemaVersionForWriteParams,

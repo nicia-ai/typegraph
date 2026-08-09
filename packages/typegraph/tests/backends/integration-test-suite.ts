@@ -43,6 +43,7 @@ import {
   registerIdentitySeparationIntegrationTests,
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
+  registerLegacyClaimAxisIntegrationTests,
   registerMigrateSchemaKindIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
@@ -188,6 +189,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerReconciledSchemaIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
+    registerLegacyClaimAxisIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
     registerSetNodeMutationIntegrationTests(context);

@@ -354,9 +354,11 @@ export type DeleteNodeParams = Readonly<{
 // @public
 export type DeleteUniqueParams = Readonly<{
     graphId: string;
-    nodeKind: string;
+    nodeKind?: string;
     constraintName: string;
     key: string;
+    concreteKind: string;
+    nodeId: string;
 }>;
 
 // @public
@@ -808,6 +810,7 @@ export type GraphBackend = Readonly<{
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
     deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
     hardDeleteUniquesByNodeIds?: (this: void, params: HardDeleteUniquesByNodeIdsParams) => Promise<void>;
+    hardDeleteUniquesByConcreteKind?: (this: void, params: HardDeleteUniquesByConcreteKindParams) => Promise<void>;
     checkUnique: (this: void, params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
     checkUniqueBatch?: (this: void, params: CheckUniqueBatchParams) => Promise<readonly UniqueRow[]>;
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
@@ -957,6 +960,12 @@ export type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+}>;
+
+// @public
+export type HardDeleteUniquesByConcreteKindParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
 }>;
 
 // @public
@@ -1723,7 +1732,7 @@ export type TrustedImportSession = Readonly<{
 export const tsvectorStrategy: FulltextStrategy;
 
 // @public (undocumented)
-export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "checkUnique" | "checkUniqueBatch">;
+export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
 
 // @public
 export type UniquenessScope = "kind" | "kindWithSubClasses";
