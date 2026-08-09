@@ -18,6 +18,7 @@ import {
   GraphAlgorithmConvergenceError,
   type Store,
 } from "../../../src";
+import { projectBackendWithout } from "../../../src/backend/derive-backend";
 import type {
   GraphBackend,
   TransactionBackend,
@@ -242,9 +243,7 @@ async function expectChunkedNodeKindInitialization(
 }
 
 function withoutTemporaryStatements(backend: GraphBackend): GraphBackend {
-  const { executeTemporaryStatement, ...inlineBackend } = backend;
-  void executeTemporaryStatement;
-  return inlineBackend;
+  return projectBackendWithout(backend, ["executeTemporaryStatement"]);
 }
 
 export function registerAlgorithmIntegrationTests(

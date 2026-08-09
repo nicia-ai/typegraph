@@ -20,6 +20,7 @@ import {
   param as parameter,
   subClassOf,
 } from "../src";
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import type { GraphBackend } from "../src/backend/types";
 import { createQueryBuilder } from "../src/query/builder";
@@ -1253,13 +1254,10 @@ describe("Query Execution (SQLite)", () => {
     });
 
     it("supports prepared fallback when executeRaw is unavailable", async () => {
-      const {
-        compileSql: ignoredCompileSql,
-        executeRaw: ignoredExecuteRaw,
-        ...restBackend
-      } = backend;
-      void ignoredCompileSql;
-      void ignoredExecuteRaw;
+      const restBackend = projectBackendWithout(backend, [
+        "compileSql",
+        "executeRaw",
+      ]);
       const backendWithoutRaw: GraphBackend = { ...restBackend };
       const storeWithoutRaw = createStore(testGraph, backendWithoutRaw);
 
@@ -1318,7 +1316,10 @@ describe("Query Execution (SQLite)", () => {
       );
 
       // Fallback path (executeRaw stripped)
-      const { compileSql: _cs, executeRaw: _er, ...restBackend } = backend;
+      const restBackend = projectBackendWithout(backend, [
+        "compileSql",
+        "executeRaw",
+      ]);
       const fallbackStore = createStore(testGraph, { ...restBackend });
       const fallbackPrepared = makePrepared(fallbackStore);
       await expect(fallbackPrepared.execute({ id: nullValue })).rejects.toThrow(
@@ -1344,7 +1345,10 @@ describe("Query Execution (SQLite)", () => {
       ).rejects.toThrow("must be a string for string operations");
 
       // Fallback path
-      const { compileSql: _cs, executeRaw: _er, ...restBackend } = backend;
+      const restBackend = projectBackendWithout(backend, [
+        "compileSql",
+        "executeRaw",
+      ]);
       const fallbackStore = createStore(testGraph, { ...restBackend });
       const fallbackPrepared = makePrepared(fallbackStore);
       await expect(
@@ -1370,7 +1374,10 @@ describe("Query Execution (SQLite)", () => {
       ).rejects.toThrow("Unsupported parameter value type");
 
       // Fallback path
-      const { compileSql: _cs, executeRaw: _er, ...restBackend } = backend;
+      const restBackend = projectBackendWithout(backend, [
+        "compileSql",
+        "executeRaw",
+      ]);
       const fallbackStore = createStore(testGraph, { ...restBackend });
       const fallbackPrepared = makePrepared(fallbackStore);
       await expect(

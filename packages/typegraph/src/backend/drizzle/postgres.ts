@@ -2137,7 +2137,7 @@ function createPostgresOperationBackend(
     capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
   );
 
-  const commonBackend = createCommonOperationBackend({
+  const commonOperationMembers = createCommonOperationBackend({
     batchConfig,
     execution: {
       execAll,
@@ -2422,7 +2422,7 @@ function createPostgresOperationBackend(
   }
 
   const operationBackend: InternalOperationBackend = {
-    ...commonBackend,
+    ...commonOperationMembers,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
     /**
@@ -2512,7 +2512,9 @@ function createPostgresOperationBackend(
       // that genuinely has no active version. A rollback landing back on
       // `expectedVersion` reports `expected === actual`; the rejection stands,
       // because nothing is holding the fence.
-      const settled = await commonBackend.getActiveSchema(params.graphId);
+      const settled = await commonOperationMembers.getActiveSchema(
+        params.graphId,
+      );
       throw new StaleVersionError({
         graphId: params.graphId,
         expected: params.expectedVersion,

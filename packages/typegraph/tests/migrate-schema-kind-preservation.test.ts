@@ -25,6 +25,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { ConfigurationError, MigrationError, StaleVersionError } from "../src";
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import { defineGraph } from "../src/core/define-graph";
 import { defineEdge } from "../src/core/edge";
 import { defineNode } from "../src/core/node";
@@ -311,11 +312,10 @@ describe("migrateSchema — populated-kind-drop refusal", () => {
   it("refuses an emptiness-guarded migration when a custom backend lacks the atomic fence", async () => {
     const backend = createTestBackend();
     await createStoreWithSchema(baseGraph, backend);
-    const {
-      commitSchemaVersionIfKindsEmpty: unsupportedCapability,
-      ...customBackend
-    } = backend;
-    void unsupportedCapability;
+    expect(backend.commitSchemaVersionIfKindsEmpty).toBeDefined();
+    const customBackend = projectBackendWithout(backend, [
+      "commitSchemaVersionIfKindsEmpty",
+    ]);
 
     const error = await migrateSchema(
       customBackend,

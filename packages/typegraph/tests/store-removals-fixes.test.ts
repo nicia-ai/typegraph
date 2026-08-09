@@ -18,6 +18,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import { createSqliteTables } from "../src/backend/sqlite";
 import { type GraphBackend } from "../src/backend/types";
 import { defineGraph, defineNode } from "../src/core";
@@ -81,11 +82,10 @@ const tagExtension = defineGraphExtension({
 describe("evolve against a DB missing typegraph_kind_removals", () => {
   it("falls back to full bootstrap for custom backends", async () => {
     const baseBackend = createTestBackend();
-    const {
-      ensureKindRemovalsTable: focusedEnsure,
-      ...backendWithoutFocusedEnsure
-    } = baseBackend;
-    expect(focusedEnsure).toBeDefined();
+    expect(baseBackend.ensureKindRemovalsTable).toBeDefined();
+    const backendWithoutFocusedEnsure = projectBackendWithout(baseBackend, [
+      "ensureKindRemovalsTable",
+    ]);
     let bootstrapCalls = 0;
     const backend: GraphBackend = {
       ...backendWithoutFocusedEnsure,

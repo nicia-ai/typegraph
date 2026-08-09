@@ -19,6 +19,7 @@ import {
   field,
   param as parameter,
 } from "../src";
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import type { GraphBackend } from "../src/backend/types";
 import { compileQuery } from "../src/query/compiler/index";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "../src/query/compiler/temporal";
@@ -61,8 +62,7 @@ function countingBackend(real: GraphBackend): {
 
 /** A backend that cannot run raw SQL text (the recompilation-fallback path). */
 function backendWithoutRawExecution(real: GraphBackend): GraphBackend {
-  const { executeRaw: _omitted, ...rest } = real;
-  return rest;
+  return projectBackendWithout(real, ["executeRaw"]);
 }
 
 async function waitForNextMillisecond(): Promise<void> {

@@ -685,7 +685,7 @@ function createSqliteOperationBackend(
   const batchConfig = computeSqliteBatchChunkSizes(
     capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
   );
-  const commonBackend = createCommonOperationBackend({
+  const commonOperationMembers = createCommonOperationBackend({
     batchConfig,
     execution: {
       execAll,
@@ -958,7 +958,7 @@ function createSqliteOperationBackend(
       };
 
   const operationBackend: InternalOperationBackend = {
-    ...commonBackend,
+    ...commonOperationMembers,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
     /**
@@ -1018,7 +1018,9 @@ function createSqliteOperationBackend(
       // read has no post-wait row recheck that could drop the active row from
       // its own snapshot. An absent row here therefore always means the graph
       // genuinely has no active schema.
-      const active = await commonBackend.getActiveSchema(params.graphId);
+      const active = await commonOperationMembers.getActiveSchema(
+        params.graphId,
+      );
       assertActiveSchemaVersion(
         params.graphId,
         params.expectedVersion,

@@ -14,6 +14,7 @@ import {
   type EdgeId,
   type NodeId,
 } from "../src";
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { ValidationError } from "../src/errors";
@@ -172,8 +173,9 @@ describe("Node Collections (SQLite)", () => {
     });
 
     it("falls back to individual getNode when backend lacks getNodes", async () => {
-      const { getNodes: _getNodes, ...rest } = backend;
-      const backendWithoutBatch = rest as GraphBackend;
+      const backendWithoutBatch: GraphBackend = projectBackendWithout(backend, [
+        "getNodes",
+      ]);
       const localStore = createStore(testGraph, backendWithoutBatch);
 
       const alice = await localStore.nodes.Person.create(
@@ -624,8 +626,9 @@ describe("Edge Collections (SQLite)", () => {
     });
 
     it("falls back to individual getEdge when backend lacks getEdges", async () => {
-      const { getEdges: _getEdges, ...rest } = backend;
-      const backendWithoutBatch = rest as GraphBackend;
+      const backendWithoutBatch: GraphBackend = projectBackendWithout(backend, [
+        "getEdges",
+      ]);
       const localStore = createStore(testGraph, backendWithoutBatch);
 
       const alice = await localStore.nodes.Person.create({ name: "Alice" });

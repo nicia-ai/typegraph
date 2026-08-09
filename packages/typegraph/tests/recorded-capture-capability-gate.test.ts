@@ -15,6 +15,7 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import type { GraphBackend } from "../src/backend/types";
 import { createTestBackend } from "./test-utils";
 
@@ -54,24 +55,17 @@ function backendWithoutTransactions(): GraphBackend {
 
 function backendWithoutExecuteStatement(): GraphBackend {
   const base = createTestBackend();
-  const { executeStatement: _executeStatement, ...withoutExecuteStatement } =
-    base;
-  return withoutExecuteStatement;
+  return projectBackendWithout(base, ["executeStatement"]);
 }
 
 function backendWithoutTableNames(): GraphBackend {
   const base = createTestBackend();
-  const { tableNames: _tableNames, ...withoutTableNames } = base;
-  return withoutTableNames;
+  return projectBackendWithout(base, ["tableNames"]);
 }
 
 function backendWithoutRevisionOriginsTableBootstrap(): GraphBackend {
   const base = createTestBackend();
-  const {
-    ensureRevisionOriginsTable: _ensureRevisionOriginsTable,
-    ...withoutRevisionOriginsTableBootstrap
-  } = base;
-  return withoutRevisionOriginsTableBootstrap;
+  return projectBackendWithout(base, ["ensureRevisionOriginsTable"]);
 }
 
 describe("recorded-time capture capability gate", () => {
