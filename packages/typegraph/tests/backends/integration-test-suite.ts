@@ -61,6 +61,7 @@ import {
   registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
   registerTemporalIntegrationTests,
+  registerTemporalOracleIntegrationTests,
   registerTransactionReceiptIntegrationTests,
   registerTraversalIntegrationTests,
   registerTrustedImportIntegrationTests,
@@ -207,6 +208,7 @@ export function createIntegrationTestSuite<
     registerOrderingIntegrationTests(context);
     registerLateMaterializationIntegrationTests(context);
     registerTemporalIntegrationTests(context);
+    registerTemporalOracleIntegrationTests(context);
     registerTransactionReceiptIntegrationTests(context);
     registerMigrateSchemaKindIntegrationTests(context);
     registerReconciledSchemaIntegrationTests(context);
