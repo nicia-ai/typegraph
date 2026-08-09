@@ -35,6 +35,10 @@ import {
   searchable,
 } from "../src";
 import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../src/backend/derive-backend";
+import {
   type AnySqliteDatabase,
   isBetterSqlite3Client,
   isBunSqliteClient,
@@ -48,24 +52,22 @@ import {
   createSqliteBackend,
   isSerializedSqliteClient,
 } from "../src/backend/drizzle/sqlite";
-import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
 import {
   acquireSerializedStreamLease,
-  markSerializedTransactionResource,
+  auditBackendResource,
   type SerializedStreamKind,
   type SerializedStreamLease,
   sharesSerializedTransactionResource,
   snapshotExportContention,
 } from "../src/backend/transaction-resource";
 import {
-  createBackendOverlay,
   type GraphBackend,
   type TransactionBackend,
   type TransactionOptions,
 } from "../src/backend/types";
 import { requireDefined } from "../src/utils/presence";
 import { dumpObservableState } from "./state-snapshot";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, makeUnauditedBackend } from "./test-utils";
 import {
   createCommitFailingBackend,
   createTracingBackend,
@@ -107,11 +109,11 @@ const graph = defineGraph({
 
 describe("serialized transaction resource ownership", () => {
   it("recognizes distinct backend wrappers sharing one serialized connection", () => {
-    const root = createTestBackend();
+    const root = makeUnauditedBackend();
     const resource = {};
-    markSerializedTransactionResource(root, resource);
-    const first = createBackendOverlay(root, {});
-    const second = createBackendOverlay(root, {});
+    auditBackendResource(root, { kind: "serialized", resource });
+    const first = deriveBackend(root, {});
+    const second = deriveBackend(root, {});
 
     expect(first).not.toBe(second);
     expect(sharesSerializedTransactionResource(first, second)).toBe(true);
@@ -123,12 +125,12 @@ describe("serialized transaction resource ownership", () => {
     // backend. A projection that dropped the mark left the import guard and
     // the branch cloner unable to see that the store still writes through the
     // source's one connection.
-    const root = createTestBackend();
+    const root = makeUnauditedBackend();
     const resource = {};
-    markSerializedTransactionResource(root, resource);
+    auditBackendResource(root, { kind: "serialized", resource });
 
-    const projected = createGraphBackendProjection(root);
-    const overlaid = createBackendOverlay(projected, {});
+    const projected = projectGraphBackend(root);
+    const overlaid = deriveBackend(projected, {});
 
     expect(projected).not.toBe(root);
     expect(sharesSerializedTransactionResource(projected, root)).toBe(true);
@@ -137,9 +139,9 @@ describe("serialized transaction resource ownership", () => {
 
   it("does not conflate projections of independent backends", () => {
     const root = createTestBackend();
-    const projectedRoot = createGraphBackendProjection(root);
+    const projectedRoot = projectGraphBackend(root);
     const other = createTestBackend();
-    const projectedOther = createGraphBackendProjection(other);
+    const projectedOther = projectGraphBackend(other);
 
     expect(sharesSerializedTransactionResource(projectedRoot, root)).toBe(true);
     expect(
@@ -168,11 +170,11 @@ describe("serialized stream lease", () => {
   // registered against the RESOURCE, so the second stream sees the first even
   // though the two hold different backend objects.
   it("publishes a stream against the resource, not the wrapper", () => {
-    const root = createTestBackend();
+    const root = makeUnauditedBackend();
     const resource = {};
-    markSerializedTransactionResource(root, resource);
-    const importing = createBackendOverlay(root, {});
-    const exporting = createBackendOverlay(root, {});
+    auditBackendResource(root, { kind: "serialized", resource });
+    const importing = deriveBackend(root, {});
+    const exporting = deriveBackend(root, {});
 
     const release = acquiredLease(
       acquireSerializedStreamLease(importing, "import-stream"),
@@ -202,10 +204,10 @@ describe("serialized stream lease", () => {
     SerializedStreamKind,
     SerializedStreamKind,
   ])[])("refuses a %s the connection a %s already holds", (second, holder) => {
-    const root = createTestBackend();
-    markSerializedTransactionResource(root, {});
-    const first = createBackendOverlay(root, {});
-    const other = createBackendOverlay(root, {});
+    const root = makeUnauditedBackend();
+    auditBackendResource(root, { kind: "serialized", resource: {} });
+    const first = deriveBackend(root, {});
+    const other = deriveBackend(root, {});
 
     const release = acquiredLease(acquireSerializedStreamLease(first, holder));
 
@@ -221,8 +223,8 @@ describe("serialized stream lease", () => {
   });
 
   it("releases only its own claim, however often it is called", () => {
-    const root = createTestBackend();
-    markSerializedTransactionResource(root, {});
+    const root = makeUnauditedBackend();
+    auditBackendResource(root, { kind: "serialized", resource: {} });
 
     const finished = acquiredLease(
       acquireSerializedStreamLease(root, "import-stream"),
@@ -244,10 +246,10 @@ describe("serialized stream lease", () => {
   });
 
   it("does not conflate independent resources", () => {
-    const first = createTestBackend();
-    const second = createTestBackend();
-    markSerializedTransactionResource(first, {});
-    markSerializedTransactionResource(second, {});
+    const first = makeUnauditedBackend();
+    const second = makeUnauditedBackend();
+    auditBackendResource(first, { kind: "serialized", resource: {} });
+    auditBackendResource(second, { kind: "serialized", resource: {} });
 
     const release = acquiredLease(
       acquireSerializedStreamLease(first, "import-stream"),
@@ -732,10 +734,8 @@ describe("serialized SQLite client detection", () => {
   it("carries the bun:sqlite mark through the wrappers a history store adds", () => {
     const client = createBunSqliteClient();
     const source = createSqliteBackend(createClientDatabase(client));
-    const target = createBackendOverlay(
-      createGraphBackendProjection(
-        createSqliteBackend(createClientDatabase(client)),
-      ),
+    const target = deriveBackend(
+      projectGraphBackend(createSqliteBackend(createClientDatabase(client))),
       {},
     );
 
@@ -860,8 +860,8 @@ describe("Durable Object storage serialized-resource detection", () => {
   it("carries the mark through the wrappers a history store adds", () => {
     const storage = createStorageClient();
     const source = createSqliteBackend(createDurableObjectDatabase(storage));
-    const target = createBackendOverlay(
-      createGraphBackendProjection(
+    const target = deriveBackend(
+      projectGraphBackend(
         createSqliteBackend(createDurableObjectDatabase(storage)),
       ),
       {},
@@ -1460,13 +1460,13 @@ describe("query hook contract: each submitted statement is observable", () => {
 
   it("reports statement failures through onError without firing onQueryEnd", async () => {
     const backend = createTestBackend();
-    const projected = createGraphBackendProjection(backend);
+    const projected = projectGraphBackend(backend);
     const executeRaw = projected.executeRaw;
     if (executeRaw === undefined)
       throw new Error("SQLite must expose executeRaw");
     const injectedFailure = new Error("injected query failure");
     let failQueries = false;
-    const failingBackend: GraphBackend = createBackendOverlay(projected, {
+    const failingBackend: GraphBackend = deriveBackend(projected, {
       executeRaw: <T>(sqlText: string, params: readonly unknown[]) =>
         failQueries ?
           Promise.reject(injectedFailure)

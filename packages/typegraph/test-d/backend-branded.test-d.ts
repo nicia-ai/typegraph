@@ -20,7 +20,8 @@ import {
   type GraphWriteBackend,
   type RawBackend,
 } from "../src/backend/branded";
-import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
+import { deriveBackend } from "../src/backend/derive-backend";
+import { type GraphBackend } from "../src/backend/types";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
 import { type DialectAdapter } from "../src/query/dialect/types";
 import { type SqlFragment } from "../src/query/sql-fragment";
@@ -128,11 +129,9 @@ expectType<never>(backendMemberWithInvalidReceiver);
 
 // Backend overlays must only replace real backend members. This catches typoed
 // wrapper keys at compile time instead of silently dropping them at runtime.
-expectAssignable<GraphBackend>(
-  createBackendOverlay(plain, { dialect: "sqlite" }),
-);
+expectAssignable<GraphBackend>(deriveBackend(plain, { dialect: "sqlite" }));
 expectError(
-  createBackendOverlay(plain, {
+  deriveBackend(plain, {
     doesNotExistOnBackend: () => undefined,
   }),
 );

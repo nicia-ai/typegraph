@@ -1,6 +1,5 @@
-import { createGraphBackendProjection } from "../backend/graph-backend-projection";
+import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
-  createBackendOverlay,
   type EdgeRow,
   type GraphBackend,
   type NodeRow,
@@ -141,8 +140,8 @@ function createRecordedReadBackend(
   // A public AdapterStore backend is frozen. Decorate a fresh allowlist
   // projection so Proxy invariants do not prevent the execute guards from
   // replacing non-configurable function properties.
-  const projectedBackend = createGraphBackendProjection(backend);
-  return createBackendOverlay(projectedBackend, {
+  const projectedBackend = projectGraphBackend(backend);
+  return deriveBackend(projectedBackend, {
     execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> =>
       withRelationsPrecondition(backend, backend.execute<T>(query), surface),
     ...(backend.executeRaw === undefined ?

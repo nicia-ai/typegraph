@@ -348,8 +348,7 @@ function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
         options?: TransactionOptions,
       ): Promise<T> {
         return backend.transaction(async (tx) => {
-          const observedTransaction: TransactionBackend = {
-            ...tx,
+          const observedTransaction = deriveBackend(tx, {
             async executeTemporaryStatement(
               query: CompiledTemporaryStatementSql,
             ): Promise<void> {
@@ -357,7 +356,7 @@ function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
               if (statement.startsWith("ANALYZE ")) statements.push(statement);
               await requireDefined(tx.executeTemporaryStatement)(query);
             },
-          };
+          });
           return fn(observedTransaction);
         }, options);
       },

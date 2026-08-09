@@ -16,7 +16,7 @@ import {
   type GraphWriteBackend,
   type RawBackend,
 } from "../backend/branded";
-import { createGraphBackendProjection } from "../backend/graph-backend-projection";
+import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
   createEdgeRowMapper,
   createNodeRowMapper,
@@ -31,7 +31,6 @@ import {
   type ContributionRebuildResult,
   type ContributionRebuildScope,
   type ContributionRepairResult,
-  createBackendOverlay,
   createTransactionReadBackend,
   type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
@@ -4969,7 +4968,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * query builder submits to the backend. A selective-projection retry
    * therefore emits two independent start/end pairs with their actual SQL.
    *
-   * Decoration goes through {@link createBackendOverlay}, which carries the
+   * Decoration goes through {@link deriveBackend}, which carries the
    * projection's serialized-resource ownership: the hooked backend still
    * executes on the source's connection, so it must answer the same "shares one
    * serialized connection" question as its source.
@@ -4989,9 +4988,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const compileSql = backend.compileSql;
     // Store backends may be frozen. Decorate an allowlist projection so
     // execute/executeRaw can be replaced without mutating the source.
-    const projected = createGraphBackendProjection(backend as GraphBackend);
+    const projected = projectGraphBackend(backend as GraphBackend);
 
-    return createBackendOverlay(projected, {
+    return deriveBackend(projected, {
       execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
         const compiled =
           compileSql === undefined ?
@@ -5244,9 +5243,7 @@ class AdapterStoreImplementation<
     this.backend =
       options?.history === true ?
         createHistoryStoreBackendProjection(this[STORE_RUNTIME].backend)
-      : Object.freeze(
-          createGraphBackendProjection(this[STORE_RUNTIME].backend),
-        );
+      : Object.freeze(projectGraphBackend(this[STORE_RUNTIME].backend));
   }
 
   /**

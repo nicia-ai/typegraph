@@ -12,9 +12,9 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { defineGraph } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
-import { createBackendOverlay } from "../../../src/backend/types";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
@@ -202,7 +202,7 @@ describe("Postgres reclaimRemovedVectorFieldTables", () => {
       baseBackend.schemaWriteTransaction,
     );
     let failAfterCleanup = true;
-    const backend = createBackendOverlay(baseBackend, {
+    const backend = deriveBackend(baseBackend, {
       async schemaWriteTransaction(graphId, fn) {
         return schemaWriteTransaction(graphId, async (target) => {
           const result = await fn(target);

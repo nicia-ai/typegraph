@@ -21,10 +21,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import {
-  type ContributionRepairResult,
-  createBackendOverlay,
-} from "../src/backend/types";
+import { deriveBackend } from "../src/backend/derive-backend";
+import { type ContributionRepairResult } from "../src/backend/types";
 import { defineGraph } from "../src/core/define-graph";
 import { embedding } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
@@ -707,7 +705,7 @@ describe("Store.evolve — runtime vector index derivation", () => {
       remaining: [],
     };
     const repairContributions = vi.fn(() => Promise.resolve(repairResult));
-    const backend = createBackendOverlay(baseBackend, {
+    const backend = deriveBackend(baseBackend, {
       capabilities: {
         ...baseBackend.capabilities,
         vector: pgvectorStrategy.capabilities,

@@ -41,6 +41,7 @@ import {
 import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
 import { errorChain, isMissingTableError } from "../../utils/sql-errors";
+import { deriveBackend } from "../derive-backend";
 import { formatPostgresTimestamp, nowIso } from "../row-mappers";
 import type { StrategyTableContribution } from "../table-contribution";
 import {
@@ -55,7 +56,6 @@ import {
   type ContributionRepairEntry,
   type ContributionRepairResult,
   type ContributionRepopulationStats,
-  createBackendOverlay,
   type RecordContributionMaterializationParams,
   type SchemaWriteTransactionBackend,
   type TransactionBackend,
@@ -540,7 +540,7 @@ export function gateFulltext(
   assert: (graphId: string) => Promise<void>,
   refuseUnavailable: RefuseUnavailableFulltext,
 ): TransactionBackend {
-  return createBackendOverlay<TransactionBackend>(
+  return deriveBackend<TransactionBackend>(
     tx,
     gateFulltextMethods(tx, assert, refuseUnavailable),
   );

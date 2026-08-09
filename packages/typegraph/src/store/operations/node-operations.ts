@@ -44,8 +44,8 @@
  *    resurrect" — both the single and bulk paths read that from the node row
  *    they are about to write, because one decision with two owners drifts.
  */
+import { deriveBackend } from "../../backend/derive-backend";
 import {
-  createBackendOverlay,
   type GraphBackend,
   type InsertNodeParams,
   isLiveNodeRow,
@@ -609,7 +609,7 @@ export function createNodeBatchValidationBackend(
     uniqueCache.set(cacheKey, row);
   }
 
-  const validationBackend = createBackendOverlay(backend, {
+  const validationBackend = deriveBackend(backend, {
     getNode: getNodeCached,
     checkUnique: checkUniqueCached,
   } satisfies Partial<GraphBackend | TransactionBackend>);

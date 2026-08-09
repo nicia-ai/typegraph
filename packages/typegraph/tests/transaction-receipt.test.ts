@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, type GraphBackend } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
-  createBackendOverlay,
   type TransactionBackend,
   type TransactionOptions,
 } from "../src/backend/types";
@@ -156,7 +156,7 @@ describe("transaction receipts", () => {
   it("passes isolationLevel through to the backend", async () => {
     const backend = createTestBackend();
     const seenOptions: (TransactionOptions | undefined)[] = [];
-    const spyingBackend = createBackendOverlay(backend, {
+    const spyingBackend = deriveBackend(backend, {
       async transactionWithNative(fn, options) {
         seenOptions.push(options);
         return backend.transactionWithNative(fn, options);

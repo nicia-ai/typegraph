@@ -138,7 +138,7 @@ import {
   nowIso,
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
-import { markSerializedTransactionResource } from "../transaction-resource";
+import { auditBackendResource } from "../transaction-resource";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -2283,11 +2283,16 @@ export function createSqliteBackend(
     },
   };
 
-  // INVARIANT: mark before any wrapper can observe this backend — see
-  // transaction-resource.ts.
-  if (serializedConnection !== undefined) {
-    markSerializedTransactionResource(backend, serializedConnection);
-  }
+  // INVARIANT: audit before any wrapper can observe this backend — see
+  // transaction-resource.ts. Unconditional: an abstention recorded as
+  // "independent" is a verdict the guards can tell apart from a backend nobody
+  // looked at.
+  auditBackendResource(
+    backend,
+    serializedConnection === undefined ?
+      { kind: "independent" }
+    : { kind: "serialized", resource: serializedConnection },
+  );
 
   return backend;
 }

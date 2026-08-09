@@ -43,16 +43,16 @@ const RUNTIME_PORT_RESTRICTIONS = [
   },
 ];
 
-const BACKEND_OVERLAY_RESTRICTIONS = [
+const BACKEND_SEAM_IMPORT_RESTRICTIONS = [
   {
-    selector: 'ImportSpecifier[imported.name="createBackendOverlay"]',
+    selector: 'ImportSpecifier[imported.name="deriveBackend"]',
     message:
-      "createBackendOverlay is decoration-only and restricted to audited modules; use an allowlist projection to narrow capabilities.",
+      "deriveBackend is decoration-only and restricted to audited modules; use an allowlist projection to narrow capabilities.",
   },
   {
-    selector: 'ExportSpecifier[local.name="createBackendOverlay"]',
+    selector: 'ExportSpecifier[local.name="deriveBackend"]',
     message:
-      "createBackendOverlay must not be re-exported from a new surface; capability narrowing uses allowlist projections.",
+      "deriveBackend must not be re-exported from a new surface; capability narrowing uses allowlist projections.",
   },
 ];
 
@@ -186,7 +186,7 @@ export default [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
-        ...BACKEND_OVERLAY_RESTRICTIONS,
+        ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
       ],
     },
   },
@@ -203,7 +203,7 @@ export default [
         ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
-        ...BACKEND_OVERLAY_RESTRICTIONS,
+        ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
       ],
     },
   },
@@ -245,7 +245,7 @@ export default [
         ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
-        ...BACKEND_OVERLAY_RESTRICTIONS,
+        ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
         {
           selector:
             "BinaryExpression[operator=/^(===|!==|==|!=)$/] > Literal[value=/^(sqlite|postgres)$/]",
@@ -268,13 +268,29 @@ export default [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
         ...RUNTIME_PORT_RESTRICTIONS,
-        ...BACKEND_OVERLAY_RESTRICTIONS,
+        ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
+      ],
+    },
+  },
+
+  // The construction seam itself: it DEFINES deriveBackend, so the import ban
+  // that keeps every other module off it cannot apply here. Every other
+  // guardrail is spread back in — a flat-config entry REPLACES, so omitting one
+  // would switch it off for the one module that owns the carry.
+  {
+    files: ["src/backend/derive-backend.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...SOURCE_WIDE_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...RUNTIME_PORT_RESTRICTIONS,
       ],
     },
   },
 
   // Audited same-surface decorators. These retain the global source and
-  // runtime-port restrictions while omitting only the overlay import ban.
+  // runtime-port restrictions while omitting only the seam import ban.
   {
     files: [
       "src/backend/drizzle/contribution-materializations.ts",

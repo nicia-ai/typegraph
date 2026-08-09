@@ -35,7 +35,7 @@ import {
   type TransactionContext,
   type TransactionReadBackend,
 } from "../src";
-import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
+import { projectGraphBackend } from "../src/backend/derive-backend";
 import {
   POSTGRES_CAPABILITIES,
   SQLITE_CAPABILITIES,
@@ -188,7 +188,7 @@ describe("portable runtime capability boundaries", () => {
       createTestBackend();
     expect(omittedExecuteRaw).toBeDefined();
 
-    const projection = createGraphBackendProjection(backendWithoutExecuteRaw);
+    const projection = projectGraphBackend(backendWithoutExecuteRaw);
 
     expect("executeRaw" in projection).toBe(false);
     expect(Object.hasOwn(projection, "executeRaw")).toBe(false);

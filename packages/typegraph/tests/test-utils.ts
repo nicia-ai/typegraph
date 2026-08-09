@@ -21,11 +21,12 @@ import {
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
 import type { SqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import type {
-  AdapterBackend,
-  GraphBackend,
-  TransactionBackend,
-  TransactionOptions,
+import {
+  type AdapterBackend,
+  type GraphBackend,
+  SQLITE_CAPABILITIES,
+  type TransactionBackend,
+  type TransactionOptions,
 } from "../src/backend/types";
 import {
   createRecordedInstant,
@@ -98,6 +99,28 @@ export function createTestBackend(
   const { backend } = createLocalSqliteBackend(options);
   backendsToClose.push(backend);
   return backend;
+}
+
+/**
+ * A GraphBackend-shaped object no factory has audited.
+ *
+ * A backend's serialized-resource verdict is written ONCE, before the object
+ * escapes its factory, and a second conflicting audit throws. A fixture built
+ * by {@link createTestBackend} therefore cannot be re-audited with a test's own
+ * sentinel resource: better-sqlite3 detection has already audited it
+ * "serialized" on its own client. Tests that need to own the verdict — the
+ * sharing and stream-lease contracts, which are about which OBJECTS share a
+ * connection, not about driver detection — start from this instead.
+ *
+ * Only the members those guards read are provided: they classify a backend by
+ * object identity and never call through it.
+ */
+export function makeUnauditedBackend(): GraphBackend {
+  return {
+    dialect: "sqlite",
+    capabilities: SQLITE_CAPABILITIES,
+    close: () => Promise.resolve(),
+  } as GraphBackend;
 }
 
 /**

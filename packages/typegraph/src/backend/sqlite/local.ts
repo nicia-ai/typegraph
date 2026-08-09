@@ -31,6 +31,7 @@ import {
 
 import { ConfigurationError } from "../../errors";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
+import { wrapWithManagedClose } from "../derive-backend";
 import { generateSqliteDDL } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
@@ -52,11 +53,7 @@ export {
   type LocalSqlitePragmaOptions,
   type LocalSqliteSynchronousMode,
 } from "./local-options";
-import {
-  type AdapterBackend,
-  type BackendCapabilities,
-  wrapWithManagedClose,
-} from "../types";
+import { type AdapterBackend, type BackendCapabilities } from "../types";
 
 export type {
   ContributionDiagnostic,

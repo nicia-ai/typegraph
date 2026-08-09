@@ -151,8 +151,8 @@
  * - Transaction-scoped backends (`transaction()`, `adoptTransaction`): the
  *   caller's transaction already owns the connection and opens no second frame,
  *   and the guards run on the root backend a Store holds. Decorators over a root
- *   backend DO carry the mark, via
- *   {@link inheritSerializedTransactionResource}.
+ *   backend DO carry the verdict, via
+ *   {@link carryBackendResourceAudit}.
  *
  * KNOWN GAPS — serialized in fact, unmarked, so they keep only the
  * identity-based pre-flight in `importGraphStream` (which a `history: true`
@@ -181,7 +181,18 @@
  */
 import { type GraphBackend } from "./types";
 
-const SERIALIZED_TRANSACTION_RESOURCES = new WeakMap<object, object>();
+/**
+ * What we know about the connection a backend's statements land on.
+ *
+ * `independent` is a POSITIVE verdict — a factory looked and found statements
+ * that can run on independent connections. It is not the same runtime state as
+ * a backend nobody audited, which carries no record at all.
+ */
+export type BackendResourceAudit =
+  | Readonly<{ kind: "serialized"; resource: object }>
+  | Readonly<{ kind: "independent" }>;
+
+const BACKEND_RESOURCE_AUDITS = new WeakMap<object, BackendResourceAudit>();
 
 /**
  * The kinds of long-lived interchange stream that hold a serialized connection
@@ -191,11 +202,19 @@ export type SerializedStreamKind = "export-snapshot" | "import-stream";
 
 /**
  * The outcome of claiming a serialized resource for a long-lived stream: the
- * (idempotent) release when the claim succeeded, or the kind of stream already
- * holding it when it did not.
+ * (idempotent) release and the resource the claim was registered under when it
+ * succeeded, or the kind of stream already holding it when it did not.
+ *
+ * `resource` is the decision itself rather than a flag a caller re-derives
+ * from the backend: `undefined` means nothing was registered, because the
+ * backend runs on no known serialized resource.
  */
 export type SerializedStreamLease =
-  | Readonly<{ acquired: true; release: () => void }>
+  | Readonly<{
+      acquired: true;
+      resource: object | undefined;
+      release: () => void;
+    }>
   | Readonly<{ acquired: false; heldBy: SerializedStreamKind }>;
 
 /**
@@ -205,30 +224,92 @@ export type SerializedStreamLease =
  */
 const ACTIVE_SERIALIZED_STREAMS = new Map<object, SerializedStreamKind>();
 
-/**
- * Marks backends whose distinct wrappers still serialize on one connection.
- *
- * INVARIANT: a backend factory must call this before anything can wrap the
- * backend it built. Decorators (createBackendOverlay, wrapWithManagedClose,
- * projections) copy the mark at construction time, so a wrapper built before
- * the mark lands is silently unowned and evades the import/clone guards.
- */
-export function markSerializedTransactionResource(
-  backend: GraphBackend,
-  resource: object,
-): void {
-  SERIALIZED_TRANSACTION_RESOURCES.set(backend, resource);
+/** Whether two audits are the same verdict about the same connection. */
+function auditsAgree(
+  left: BackendResourceAudit,
+  right: BackendResourceAudit,
+): boolean {
+  if (left.kind === "serialized") {
+    return right.kind === "serialized" && left.resource === right.resource;
+  }
+  return right.kind === "independent";
 }
 
-/** Preserves serialized-resource ownership when decorating a backend. */
-export function inheritSerializedTransactionResource(
-  target: object,
-  source: object,
+/** Names a verdict for the write-once refusal below. */
+function formatAudit(audit: BackendResourceAudit): string {
+  return audit.kind === "serialized" ? "serialized" : "independent";
+}
+
+/**
+ * Records what a backend factory found about the connection its backend runs
+ * on.
+ *
+ * INVARIANT: recorded ONCE per backend, by the factory that built it, BEFORE
+ * the backend object escapes the factory body. Derived backends (deriveBackend,
+ * projectBackend, projectBackendWithout, projectGraphBackend,
+ * wrapWithManagedClose) carry the verdict at construction time, so a wrapper
+ * built before the audit lands is silently unaudited and evades the
+ * import/clone guards.
+ *
+ * A second call with an equal verdict is a no-op. A second call with a
+ * DIFFERENT verdict throws: the stream lease reads this value and closes over
+ * the resource it claimed, so a verdict that changes under a live lease
+ * de-serializes a pair that really does share a connection.
+ *
+ * The throw is an INTERNAL invariant assertion — no library path re-audits and
+ * a user cannot reach this function — so it is a plain `TypeError` naming both
+ * verdicts, matching the repo's internal-assertion spelling (`requireDefined`,
+ * src/utils/presence.ts). Deliberately not a `ConfigurationError`: that type is
+ * user-category and would route a library bug into user-facing handling.
+ *
+ * @internal
+ */
+export function auditBackendResource(
+  backend: GraphBackend,
+  audit: BackendResourceAudit,
 ): void {
-  const resource = SERIALIZED_TRANSACTION_RESOURCES.get(source);
-  if (resource !== undefined) {
-    SERIALIZED_TRANSACTION_RESOURCES.set(target, resource);
+  const recorded = BACKEND_RESOURCE_AUDITS.get(backend);
+  if (recorded !== undefined) {
+    if (auditsAgree(recorded, audit)) return;
+    throw new TypeError(
+      `A backend's serialized-resource audit is written once: this backend ` +
+        `was audited "${formatAudit(recorded)}" and a conflicting audit ` +
+        `"${formatAudit(audit)}"${
+          recorded.kind === "serialized" && audit.kind === "serialized" ?
+            " naming a different connection"
+          : ""
+        } was attempted. The stream lease closes over the resource it claimed, ` +
+        `so a verdict that changes under a live lease de-serializes a pair ` +
+        `that really does share a connection.`,
+    );
   }
+  BACKEND_RESOURCE_AUDITS.set(backend, audit);
+}
+
+/**
+ * Copies a base backend's verdict onto a backend derived from it, or nothing
+ * when the base carries none.
+ *
+ * @internal The construction seam's carry. `src/backend/derive-backend.ts` is
+ * the only module allowed to import it.
+ */
+export function carryBackendResourceAudit(derived: object, base: object): void {
+  const audit = BACKEND_RESOURCE_AUDITS.get(base);
+  if (audit !== undefined) BACKEND_RESOURCE_AUDITS.set(derived, audit);
+}
+
+/**
+ * The verdict recorded for `backend`, or `undefined` when nobody audited it.
+ *
+ * A pure map read: the value is written once at construction, so two reads can
+ * never disagree and a lease cannot have its premise changed under it.
+ *
+ * @internal
+ */
+export function resolveBackendAudit(
+  backend: object,
+): BackendResourceAudit | undefined {
+  return BACKEND_RESOURCE_AUDITS.get(backend);
 }
 
 /** Whether two backend wrappers cannot make snapshot reads and writes concurrently. */
@@ -236,10 +317,14 @@ export function sharesSerializedTransactionResource(
   left: GraphBackend,
   right: GraphBackend,
 ): boolean {
-  const leftResource = SERIALIZED_TRANSACTION_RESOURCES.get(left);
+  const leftAudit = resolveBackendAudit(left);
+  if (leftAudit?.kind !== "serialized") return false;
+  const rightAudit = resolveBackendAudit(right);
+  // Resource identity, not audit-record identity: two audits naming the same
+  // client object are the same connection however they were recorded.
   return (
-    leftResource !== undefined &&
-    leftResource === SERIALIZED_TRANSACTION_RESOURCES.get(right)
+    rightAudit?.kind === "serialized" &&
+    leftAudit.resource === rightAudit.resource
   );
 }
 
@@ -293,33 +378,40 @@ export function snapshotExportContention(
  * when this one claimed it" true for the whole stream, in whichever order two
  * streams start — the second one always finds the first's registration.
  *
- * Marked backends only: without a known serialized resource there is no shared
- * connection for anyone to be refused against, so an unmarked backend always
- * acquires and registers nothing (see the residual gap in the module doc).
+ * Serialized backends only: without a known serialized resource there is no
+ * shared connection for anyone to be refused against, so a backend audited
+ * `independent` — and one nobody audited — always acquires and registers
+ * nothing (see the residual gap in the module doc).
  *
- * The returned release is idempotent and deletes only its own registration,
- * so an already-released stream can never evict the next stream's lease.
+ * The acquired arm reports the resource it registered under, so a caller reads
+ * the decision instead of re-deriving it from the backend; `undefined` is the
+ * no-op arm. The returned release is idempotent and deletes only its own
+ * registration, so an already-released stream can never evict the next
+ * stream's lease.
  */
 export function acquireSerializedStreamLease(
   backend: GraphBackend,
   kind: SerializedStreamKind,
 ): SerializedStreamLease {
-  const resource = SERIALIZED_TRANSACTION_RESOURCES.get(backend);
-  if (resource === undefined) {
+  const audit = resolveBackendAudit(backend);
+  if (audit?.kind !== "serialized") {
     return {
       acquired: true,
+      resource: undefined,
       release: () => {
-        // Nothing was registered: an unmarked backend has no known serialized
+        // Nothing was registered: this backend has no known serialized
         // resource, so there is nothing to give back.
       },
     };
   }
+  const resource = audit.resource;
   const holder = ACTIVE_SERIALIZED_STREAMS.get(resource);
   if (holder !== undefined) return { acquired: false, heldBy: holder };
   ACTIVE_SERIALIZED_STREAMS.set(resource, kind);
   let released = false;
   return {
     acquired: true,
+    resource,
     release: () => {
       if (released) return;
       released = true;

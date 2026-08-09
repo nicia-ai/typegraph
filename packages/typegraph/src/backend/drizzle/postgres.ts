@@ -79,6 +79,7 @@ import {
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
+import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
@@ -90,7 +91,7 @@ import {
   nowIso,
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
-import { markSerializedTransactionResource } from "../transaction-resource";
+import { auditBackendResource } from "../transaction-resource";
 import {
   type AdapterBackend,
   type BackendCapabilities,
@@ -105,7 +106,6 @@ import {
   type ContributionRebuildScope,
   type ContributionRepairResult,
   type ContributionRepopulationStats,
-  createBackendOverlay,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
@@ -1081,7 +1081,7 @@ export function createPostgresBackend(
                 { capability: "trustedImport", dialect: "postgres" },
               );
             }
-            const trustedTx = createBackendOverlay(tx, {
+            const trustedTx = deriveBackend(tx, {
               executeRaw<T>(
                 sqlText: string,
                 params: readonly unknown[],
@@ -1669,11 +1669,16 @@ export function createPostgresBackend(
     },
   };
 
-  // INVARIANT: mark before any wrapper can observe this backend — see
-  // transaction-resource.ts.
-  if (serializedClient !== undefined) {
-    markSerializedTransactionResource(backend, serializedClient);
-  }
+  // INVARIANT: audit before any wrapper can observe this backend — see
+  // transaction-resource.ts. Unconditional: an abstention recorded as
+  // "independent" is a verdict the guards can tell apart from a backend nobody
+  // looked at.
+  auditBackendResource(
+    backend,
+    serializedClient === undefined ?
+      { kind: "independent" }
+    : { kind: "serialized", resource: serializedClient },
+  );
   return backend;
 }
 

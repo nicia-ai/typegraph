@@ -72,8 +72,8 @@
  *    `oneActive` population — asserted only for that decision; other
  *    cardinalities do not turn an unconditional clear into a stale-value CAS.
  */
+import { deriveBackend } from "../../backend/derive-backend";
 import {
-  createBackendOverlay,
   type EdgeRow as BackendEdgeRow,
   type GraphBackend,
   type GraphReadBackend,
@@ -418,7 +418,7 @@ function createEdgeBatchValidationBackend(
     }
   }
 
-  const validationBackend = createBackendOverlay(backend, {
+  const validationBackend = deriveBackend(backend, {
     getNode: getNodeCached,
     countEdgesFrom: countEdgesFromCached,
     edgeExistsBetween: edgeExistsBetweenCached,

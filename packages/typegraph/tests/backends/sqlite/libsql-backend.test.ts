@@ -18,8 +18,8 @@ import {
   defineGraph,
   defineNode,
 } from "../../../src";
+import { wrapWithManagedClose } from "../../../src/backend/derive-backend";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
-import { wrapWithManagedClose } from "../../../src/backend/types";
 import { requireDefined } from "../../../src/utils/presence";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
