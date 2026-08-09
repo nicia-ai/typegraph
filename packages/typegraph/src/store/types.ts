@@ -399,9 +399,9 @@ export type BaseStoreOptions = Readonly<{
    */
   autoRefreshStatistics?: false | number;
   /**
-   * Skip the write for an `upsertById` (or `bulkUpsertById` item) whose
-   * validated props are value-identical to the existing live row. Default
-   * off.
+   * Skip the write for an `upsertById`, `bulkUpsertById` item, or endpoint
+   * get-or-create update whose validated props are value-identical to the
+   * existing live row. Default off.
    *
    * Enable this for at-least-once / replay materializers. An event log that
    * re-delivers a byte-identical change would otherwise rewrite the row anyway:
@@ -422,7 +422,12 @@ export type BaseStoreOptions = Readonly<{
    * **no write at all**: no `updateNode`, no recorded-time capture, no history
    * row, no revision-anchor advance, and no `update` operation hooks (nothing
    * happened, so nothing is reported). It resolves with the **existing** node,
-   * preserving its original `validFrom` / `updatedAt` / `version`.
+   * preserving its original `validFrom` / `updatedAt` / `version`. An endpoint
+   * get-or-create reports action `"found"` when its requested update is
+   * coalesced; `"updated"` always means an UPDATE actually ran.
+   * Node `getOrCreateByConstraint` updates are outside this option's scope and
+   * still write on every `ifExists: "update"` match; replay projectors that
+   * need coalescing should use `upsertById` for nodes.
    *
    * Receipt shape is unchanged and needs no new signal: a coalesced upsert
    * still counts as one write intent (`writes.total` includes it), but
@@ -438,9 +443,8 @@ export type BaseStoreOptions = Readonly<{
    *      batch already queued (a create or an update).
    *   2. That row is not soft-deleted (a deleted row resurrects — a real
    *      change — and is never coalesced).
-   *   3. The caller passed no explicit `validFrom` / `validTo` (an explicit
-   *      temporal override is a deliberate request and is never coalesced;
-   *      applied per item in the bulk path).
+   *   3. Any requested `validFrom` / `validTo` names the window already stored;
+   *      a changed or inapplicable temporal request reaches the write path.
    *   4. The new props, merged over the stored props and run through the
    *      kind's Zod schema (defaults applied, values normalized), are deeply
    *      value-identical to the stored props (key order aside).
