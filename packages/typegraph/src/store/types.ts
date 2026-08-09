@@ -126,14 +126,23 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
 }>;
 
 /**
+ * An explicit validity-end mutation. Omission preserves the stored end,
+ * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
+ * two write actions mutually exclusive without exposing public `null`.
+ */
+export type ValidityEndMutation =
+  | Readonly<{ validTo?: string; clearValidTo?: never }>
+  | Readonly<{ validTo?: never; clearValidTo: true }>;
+
+/**
  * Input for updating a node.
  */
 export type UpdateNodeInput<N extends NodeType = NodeType> = Readonly<{
   kind: N["kind"];
   id: NodeId<N>;
   props: Partial<z.infer<N["schema"]>>;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 // ============================================================
 // Edge Instance Types
@@ -188,8 +197,8 @@ export type CreateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
 export type UpdateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
   id: EdgeId<E>;
   props: Partial<z.infer<E["schema"]>>;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 // ============================================================
 // Query Options
@@ -763,8 +772,8 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
      * the operation returns an existing edge without writing. May not precede
      * the row's effective start; see `INVERTED_VALIDITY_WINDOW_CODE`.
      */
-    validTo?: string;
-  }>;
+  }> &
+    ValidityEndMutation;
 
 // ============================================================
 // Collection Interfaces
@@ -805,7 +814,7 @@ export type NodeCollection<
   update: (
     id: NodeId<N>,
     props: Partial<z.input<N["schema"]>>,
-    options?: Readonly<{ validTo?: string }>,
+    options?: ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -901,9 +910,9 @@ export type NodeCollection<
     props: z.input<N["schema"]>,
     options?: Readonly<{
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>,
+    }> &
+      ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -927,9 +936,9 @@ export type NodeCollection<
     data: Record<string, unknown>,
     options?: Readonly<{
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>,
+    }> &
+      ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -985,13 +994,13 @@ export type NodeCollection<
    * claim) or to apply those items as sequential `upsertById` calls.
    */
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: string;
       props: z.input<N["schema"]>;
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>[],
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<Node<N>[]>;
 
   /**
@@ -1198,7 +1207,7 @@ export type EdgeCollection<
   update: (
     id: EdgeId<E>,
     props: Partial<z.input<E["schema"]>>,
-    options?: Readonly<{ validTo?: string }>,
+    options?: ValidityEndMutation,
   ) => Promise<Edge<E, From, To>>;
 
   /**
@@ -1398,14 +1407,14 @@ export type EdgeCollection<
    * (free the slot, then claim it) or to apply those items individually.
    */
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: EdgeId<E>;
       from: NodeRef<From>;
       to: NodeRef<To>;
       props?: z.input<E["schema"]>;
       validFrom?: string;
-      validTo?: string;
-    }>[],
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<Edge<E, From, To>[]>;
 
   /**
@@ -1501,14 +1510,14 @@ export type EdgeCollection<
    * Atomic when the backend supports transactions.
    */
   bulkGetOrCreateByEndpoints: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       from: NodeRef<From>;
       to: NodeRef<To>;
       props: z.input<E["schema"]>;
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>[],
+    }> &
+      ValidityEndMutation)[],
     options?: Pick<
       EdgeGetOrCreateByEndpointsOptions<E>,
       "matchOn" | "ifExists"

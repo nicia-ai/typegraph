@@ -144,6 +144,10 @@ import {
   createUniquenessContext,
 } from "../uniqueness";
 import {
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+} from "../validity-end";
+import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
 } from "./already-exists";
@@ -910,6 +914,11 @@ async function performNodeUpdate<G extends GraphDef>(
 ): Promise<Node> {
   const { kind, id } = input;
 
+  assertValidityEndMutation(input, { entityType: "node", kind, id });
+  if (input.clearValidTo === true) {
+    assertClearValidToSupported(backend, "node");
+  }
+
   const existing = await backend.getNode(ctx.graphId, kind, id);
   if (!existing) throw new NodeNotFoundError(kind, id);
 
@@ -978,6 +987,7 @@ async function performNodeUpdate<G extends GraphDef>(
     uniqueConstraints: registration.unique ?? [],
     ...(effectiveValidFrom !== undefined && { validFrom: effectiveValidFrom }),
     ...(validTo !== undefined && { validTo }),
+    ...(input.clearValidTo === true && { clearValidTo: true as const }),
     // The bound the verdict above READ, carried into the UPDATE's own `WHERE`
     // so the row this writes is the row that was judged. The verdict hands over
     // the predicate rather than a flag, so both conditions that decide it — did
@@ -1658,6 +1668,9 @@ export async function executeNodeUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
+  if (input.clearValidTo === true) {
+    assertClearValidToSupported(backend, "node");
+  }
   const opContext = ctx.createOperationContext(
     "update",
     "node",
@@ -2000,6 +2013,9 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
+  if (input.clearValidTo === true) {
+    assertClearValidToSupported(backend, "node");
+  }
   return runInWriteTransaction(
     ctx,
     backend,

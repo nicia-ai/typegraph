@@ -284,6 +284,12 @@ export type BackendCapabilities = Readonly<{
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
   /**
+   * Whether `updateNode` / `updateEdge` honor `clearValidTo: true` by storing
+   * SQL NULL in `valid_to`. Absent is `false`: custom backends must opt in so
+   * the store refuses this operation instead of silently preserving the end.
+   */
+  clearValidTo?: boolean;
+  /**
    * Whether the backend's `execute()` supports `UPDATE … RETURNING`. Absent or
    * `true` means supported (every engine TypeGraph ships — SQLite ≥ 3.35,
    * PostgreSQL ≥ 8.2 — supports it). A custom backend whose engine cannot run
@@ -491,6 +497,10 @@ export type InsertNodeParams = Readonly<{
 /**
  * Parameters for updating a node.
  */
+type BackendValidityEndMutation =
+  | Readonly<{ validTo?: string; clearValidTo?: never }>
+  | Readonly<{ validTo?: never; clearValidTo: true }>;
+
 export type UpdateNodeParams = Readonly<{
   graphId: string;
   kind: string;
@@ -498,7 +508,6 @@ export type UpdateNodeParams = Readonly<{
   props: Readonly<Record<string, unknown>>;
   /** Applied when resurrecting a tombstone; omitted means the resurrection instant. */
   validFrom?: string | null;
-  validTo?: string;
   /**
    * The effective `valid_from` this write ASSERTS the target row already
    * carries, stated only by a caller whose decision DEPENDED on it.
@@ -526,7 +535,8 @@ export type UpdateNodeParams = Readonly<{
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
   clearDeleted?: boolean;
-}>;
+}> &
+  BackendValidityEndMutation;
 
 /**
  * Parameters for updating a set of live nodes selected by a compiled
@@ -664,7 +674,6 @@ export type UpdateEdgeParams = Readonly<{
    * Omitting `validFrom` on a resurrection leaves the stored window in place.
    */
   validFrom?: string | null;
-  validTo?: string;
   /**
    * The effective `valid_from` this write asserts the target row already
    * carries. Same three states, same NULL-safety, and the same MUST-apply
@@ -677,8 +686,14 @@ export type UpdateEdgeParams = Readonly<{
    * it must be fenced against it having changed.
    */
   expectedValidFrom?: string | null;
+  /**
+   * The `valid_to` state a constraint decision read. NULL-safe and MUST apply
+   * when present, like `expectedValidFrom`; used to fence ended-to-open edges.
+   */
+  expectedValidTo?: string | null;
   clearDeleted?: boolean;
-}>;
+}> &
+  BackendValidityEndMutation;
 
 /**
  * Parameters for deleting an edge (soft delete).
@@ -3536,6 +3551,7 @@ export const POSTGRES_MAX_BIND_PARAMETERS = 65_533;
 export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   transactions: true, // SQLite supports transactions
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
+  clearValidTo: true,
   returning: true, // SQLite has supported RETURNING since 3.35.0
   maxBindParameters: SQLITE_MAX_BIND_PARAMETERS,
   // Generic SQLite builds do not guarantee ENABLE_MATH_FUNCTIONS. The local
@@ -3549,6 +3565,7 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
 export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   transactions: true, // PostgreSQL supports transactions
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
+  clearValidTo: true,
   returning: true, // PostgreSQL has supported RETURNING since 8.2
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),
