@@ -803,6 +803,15 @@ the recorded shape no longer matches the active strategy/DDL: migrate or
 drop the fulltext table and re-run the boot, or restore the original
 strategy.
 
+`ContributionUnavailableError` with `state: "physical-storage-missing"` is
+different: the physical fulltext table disappeared after initialization. Gated
+fulltext searches and searchable node writes raise this typed error; compiled
+query-builder predicates can still surface the engine's missing-relation error.
+Run `store.rebuildContribution("fulltext")`; rerunning ordinary initialization
+cannot reconstruct the missing indexed content. Use `probeContributions()` at
+startup when an application must detect this out-of-band catalog damage before
+the first dependent read or write.
+
 ### `Cannot call .$fulltext.matches() on alias "x"`
 
 `$fulltext` is exposed on every node accessor at the type level, but

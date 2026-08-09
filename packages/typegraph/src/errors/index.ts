@@ -1666,6 +1666,49 @@ function storeNotInitializedAction(
   );
 }
 
+/** Details for a runtime contribution whose durable marker outlived storage. */
+export type ContributionUnavailableErrorDetails = Readonly<{
+  graphId: string;
+  logicalName: "fulltext";
+  physicalName: string;
+  state: "physical-storage-missing";
+}>;
+
+/**
+ * Thrown when a gated fulltext operation discovers that materialized storage
+ * disappeared after its durable marker recorded successful initialization.
+ */
+export class ContributionUnavailableError extends TypeGraphError {
+  declare readonly details: ContributionUnavailableErrorDetails;
+
+  constructor(
+    graphId: string,
+    physicalName: string,
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    const suggestion =
+      'Run store.rebuildContribution("fulltext") to recreate the lost ' +
+      "storage and repopulate it from the graph's nodes.";
+    super(
+      `Fulltext storage "${physicalName}" for graph "${graphId}" ` +
+        `disappeared after initialization. ${suggestion}`,
+      "CONTRIBUTION_UNAVAILABLE",
+      {
+        details: {
+          graphId,
+          logicalName: "fulltext",
+          physicalName,
+          state: "physical-storage-missing",
+        },
+        category: "user",
+        suggestion,
+        cause: options?.cause,
+      },
+    );
+    this.name = "ContributionUnavailableError";
+  }
+}
+
 /**
  * Human label for the un-materialized storage, derived from the
  * contribution `logicalName`: fulltext keeps "fulltext storage"; a vector

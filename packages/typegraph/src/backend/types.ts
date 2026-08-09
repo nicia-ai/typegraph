@@ -1248,7 +1248,7 @@ export type RecordContributionMaterializationParams = Readonly<{
  *   `DROP`, a schema-scoped restore that missed the contribution
  *   tables). The state {@link GraphBackend.verifyContributions} exists
  *   to surface: nothing on the open path probes the catalog, so this
- *   database opens clean and fails at the first read of the slot.
+ *   database opens clean and fails at the first dependent read or write.
  * - `missing-marker` — the physical table exists but no marker attests
  *   it as initialized (no row, no recorded success, or a recorded
  *   failure). Reads and writes are refused with
@@ -1384,9 +1384,10 @@ export type ContributionProbeContribution = "fulltext" | "vector";
  *   its durable marker and present in the catalog. Not a promise about
  *   future coherence: a write that lands after the probe returns is
  *   outside what any assessment can cover.
- * - `degraded` — at least one contribution is unusable. Queries against
- *   this projection will be refused (`StoreNotInitializedError`) or will
- *   read incomplete storage.
+ * - `degraded` — at least one contribution is unusable. Dependent operations
+ *   may be refused with a typed contribution error, fail at the engine boundary
+ *   when compiled SQL directly references missing storage, or observe
+ *   incomplete storage.
  *   {@link ContributionProbeEntry.detail} says which and why.
  * - `building` — **reserved.** No shipped path publishes it. Recording
  *   an in-flight marker would need a fifth
@@ -2360,8 +2361,8 @@ export type GraphBackend = Readonly<{
    * per-instance signature cache and then on the marker row alone, which
    * is the right default for a hot path but leaves a database whose
    * contribution tables were dropped out of band opening clean and
-   * failing at the first read. This method is the explicit, operator-
-   * invoked catalog probe that fills that gap: it issues one uncached
+   * failing at the first dependent read or write. This method is the explicit,
+   * operator-invoked catalog probe that fills that gap: it issues one uncached
    * existence query per distinct physical table and performs ZERO DDL
    * and ZERO writes, so it is safe under a least-privilege runtime role.
    *

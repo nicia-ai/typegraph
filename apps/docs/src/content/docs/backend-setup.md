@@ -1154,7 +1154,7 @@ reopen it through a managed factory before resuming version-fenced writes.
   role.**
   Every gate above trusts the marker row without probing the catalog, so
   a database whose strategy-owned tables were dropped out of band opens
-  clean and fails at the first read. This method compares each contribution
+  clean and fails at the first dependent read or write. This method compares each contribution
   currently expected by the active graph and backend strategies with its
   marker and the catalog. It does not audit retired marker rows, and a
   never-attempted contribution with neither marker nor table is omitted, so

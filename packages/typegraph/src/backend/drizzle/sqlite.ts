@@ -1717,7 +1717,11 @@ export function createSqliteBackend(
       vectorStrategy,
       contributionMaterializer,
     });
-    return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
+    return gateFulltext(
+      txBackend,
+      contributionMaterializer.assertInitialized,
+      contributionMaterializer.refuseUnavailableFulltext,
+    );
   }
 
   const backend: AdapterBackend<AnySqliteDatabase> = {
@@ -1814,6 +1818,7 @@ export function createSqliteBackend(
     ...gateFulltextMethods(
       operations,
       contributionMaterializer.assertInitialized,
+      contributionMaterializer.refuseUnavailableFulltext,
     ),
 
     async executeDdl(ddl: string): Promise<void> {
@@ -2212,6 +2217,7 @@ export function createSqliteBackend(
               gateFulltext(
                 txBackend,
                 contributionMaterializer.assertInitialized,
+                contributionMaterializer.refuseUnavailableFulltext,
               ),
               db,
             );

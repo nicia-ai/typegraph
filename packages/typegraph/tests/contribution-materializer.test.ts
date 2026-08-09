@@ -14,6 +14,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  ContributionUnavailableError,
   fts5Strategy,
   pgvectorStrategy,
   StoreNotInitializedError,
@@ -60,6 +61,15 @@ const POSTGRES_MISSING_MARKER_TABLE_ERROR = Object.assign(
     ),
   },
 );
+
+async function captureRejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
 
 function markerKey(identity: ContributionMaterializationIdentity): string {
   return [
@@ -174,6 +184,86 @@ function vectorTableOf(slot: VectorSlot): string {
     slot.fieldPath,
   );
 }
+
+describe("refuseUnavailableFulltext", () => {
+  it("translates a named missing fulltext table without a catalog query", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer, spies } = createMockMaterializer(markers);
+    await materializer.ensureRuntimeContributions(GRAPH_ID);
+    spies.tableExists.mockClear();
+    const cause = new Error(`no such table: ${FULLTEXT_TABLE}`);
+
+    const error = await captureRejection(
+      materializer.refuseUnavailableFulltext(GRAPH_ID, cause),
+    );
+
+    expect(error).toBeInstanceOf(ContributionUnavailableError);
+    expect(error).toMatchObject({
+      code: "CONTRIBUTION_UNAVAILABLE",
+      details: {
+        graphId: GRAPH_ID,
+        logicalName: "fulltext",
+        physicalName: FULLTEXT_TABLE,
+        state: "physical-storage-missing",
+      },
+      cause,
+    });
+    expect(spies.tableExists).not.toHaveBeenCalled();
+  });
+
+  it("rethrows unrelated failures without probing the catalog", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer, spies } = createMockMaterializer(markers);
+    const cause = new Error("permission denied");
+
+    await expect(
+      materializer.refuseUnavailableFulltext(GRAPH_ID, cause),
+    ).rejects.toBe(cause);
+    expect(spies.tableExists).not.toHaveBeenCalled();
+  });
+
+  it("rethrows a missing-relation failure that names another table", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer, spies } = createMockMaterializer(markers);
+    await materializer.ensureRuntimeContributions(GRAPH_ID);
+    spies.tableExists.mockClear();
+    const cause = new Error("no such table: unrelated_table");
+
+    await expect(
+      materializer.refuseUnavailableFulltext(GRAPH_ID, cause),
+    ).rejects.toBe(cause);
+    expect(spies.tableExists).not.toHaveBeenCalled();
+  });
+
+  it("does not combine an outer fulltext query with another missing relation", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer } = createMockMaterializer(markers);
+    await materializer.ensureRuntimeContributions(GRAPH_ID);
+    const cause = Object.assign(
+      new Error('relation "unrelated_table" does not exist'),
+      { code: "42P01" },
+    );
+    const wrapped = Object.assign(
+      new Error(`Failed query: DELETE FROM "${FULLTEXT_TABLE}"`),
+      { cause },
+    );
+
+    await expect(
+      materializer.refuseUnavailableFulltext(GRAPH_ID, wrapped),
+    ).rejects.toBe(wrapped);
+  });
+
+  it("does not mistake a shadow-table prefix for the declared table", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer } = createMockMaterializer(markers);
+    await materializer.ensureRuntimeContributions(GRAPH_ID);
+    const cause = new Error(`no such table: ${FULLTEXT_TABLE}_shadow`);
+
+    await expect(
+      materializer.refuseUnavailableFulltext(GRAPH_ID, cause),
+    ).rejects.toBe(cause);
+  });
+});
 
 /**
  * Provision a graph at both a fulltext and a vector contribution — the

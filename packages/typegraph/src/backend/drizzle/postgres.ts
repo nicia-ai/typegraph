@@ -883,6 +883,7 @@ export function createPostgresBackend(
       backend: gateFulltext(
         backend,
         contributionMaterializer.assertInitialized,
+        contributionMaterializer.refuseUnavailableFulltext,
       ),
       drainAndClose,
     };
@@ -1007,6 +1008,7 @@ export function createPostgresBackend(
     ...gateFulltextMethods(
       operations,
       contributionMaterializer.assertInitialized,
+      contributionMaterializer.refuseUnavailableFulltext,
     ),
 
     async executeDdl(ddl: string): Promise<void> {

@@ -388,6 +388,16 @@ created. Boot deliberately leaves such a slot untouched (with a console
 warning); run `store.reembedVectorField(kind, fieldPath)` to recreate the
 storage at the new shape and re-embed.
 
+**`ContributionUnavailableError`** with `state: "physical-storage-missing"`
+means the physical fulltext table disappeared after initialization. Gated
+fulltext operations preserve the driver error as `cause`, and transactional
+backends roll back failed searchable writes. Query-builder fulltext predicates
+compile directly to SQL and can still surface the engine's missing-relation
+error. Run `store.rebuildContribution("fulltext")` to recreate the table and
+repopulate it from the graph's nodes. A verified attach checks markers rather
+than the physical catalog; use `probeContributions()` when startup must detect
+out-of-band table loss.
+
 **Solution:** Run `createStoreWithSchema(graph, adminBackend)` once
 under the privileged role before the runtime attaches (it writes the
 contribution markers that `createStore` / `createVerifiedStore` only
@@ -419,7 +429,7 @@ strategy-owned tables. Nothing on the open path probes the catalog:
 boot and the runtime asserts short-circuit on a per-instance signature
 cache and then on the marker row alone, which keeps the hot path free
 of catalog round trips. The cost is that this database opens
-completely clean and fails at the first read of the affected slot.
+completely clean and fails at the first read or write that depends on the affected slot.
 
 **Diagnosis:** `store.verifyContributions()` reports detected drift or a
 recorded failed attempt among contributions currently expected by the active

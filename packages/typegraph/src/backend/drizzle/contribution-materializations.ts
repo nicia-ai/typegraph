@@ -19,6 +19,7 @@ import { sql } from "drizzle-orm";
 import {
   ConfigurationError,
   ContributionRebuildUnsupportedError,
+  ContributionUnavailableError,
   StoreNotInitializedError,
   type StoreNotInitializedReason,
 } from "../../errors";
@@ -39,7 +40,7 @@ import {
 } from "../../query/sql-intent";
 import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
-import { isMissingTableError } from "../../utils/sql-errors";
+import { errorChain, isMissingTableError } from "../../utils/sql-errors";
 import { formatPostgresTimestamp, nowIso } from "../row-mappers";
 import type { StrategyTableContribution } from "../table-contribution";
 import {
@@ -229,9 +230,6 @@ function contributionSignatureInput(
  * - `initialized`: signature matches, a successful `materializedAt` is
  *   recorded, and the last attempt did not error.
  */
-// The non-initialized states are exactly `StoreNotInitializedError`'s
-// reasons — derive the union so the two cannot drift apart and the
-// assert can pass the state straight through as the error reason.
 type ContributionMaterializationState =
   "initialized" | StoreNotInitializedReason;
 
@@ -394,6 +392,48 @@ export type GatableFulltextBackend = Pick<
   | "hardDeleteNode"
 >;
 
+type RefuseUnavailableFulltext = (
+  graphId: string,
+  error: unknown,
+) => Promise<never>;
+
+function missingTableErrorNames(error: unknown, tableName: string): boolean {
+  const quotedTableName = `"${tableName.replaceAll('"', '""')}"`;
+  for (const link of errorChain(error)) {
+    const message =
+      typeof link === "string" ?
+        link
+      : typeof link === "object" && link !== null ?
+        Reflect.get(link, "message")
+      : undefined;
+    if (typeof message !== "string") continue;
+
+    const sqliteMatch = /\bno such table:\s*([^\s;]+)/i.exec(message);
+    const sqliteName = sqliteMatch?.[1]?.replaceAll(/^["'`\[]|["'`\]]$/g, "");
+    if (sqliteName === tableName) return true;
+
+    const namesPostgresTable =
+      message.includes(`relation ${quotedTableName} does not exist`) ||
+      message.includes(`table ${quotedTableName} does not exist`);
+    if (namesPostgresTable) return true;
+  }
+  return false;
+}
+
+async function executeGatedFulltext<T>(
+  graphId: string,
+  assert: (graphId: string) => Promise<void>,
+  refuseUnavailable: RefuseUnavailableFulltext,
+  execute: () => Promise<T>,
+): Promise<T> {
+  await assert(graphId);
+  try {
+    return await execute();
+  } catch (error) {
+    return refuseUnavailable(graphId, error);
+  }
+}
+
 /**
  * The fulltext point-of-use gate, as the wrapped overrides only. Each
  * method asserts the durable contribution marker before delegating; an
@@ -405,6 +445,7 @@ export type GatableFulltextBackend = Pick<
 export function gateFulltextMethods(
   source: GatableFulltextBackend,
   assert: (graphId: string) => Promise<void>,
+  refuseUnavailable: RefuseUnavailableFulltext,
 ): Partial<GatableFulltextBackend> {
   // Only assign an override when the raw method exists, so the "wrap
   // only what's defined" rule stays obvious instead of hiding behind
@@ -416,15 +457,17 @@ export function gateFulltextMethods(
   if (source.upsertFulltext) {
     const raw = source.upsertFulltext;
     gated.upsertFulltext = async (params) => {
-      await assert(params.graphId);
-      await raw(params);
+      await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
+        raw(params),
+      );
     };
   }
   if (source.deleteFulltext) {
     const raw = source.deleteFulltext;
     gated.deleteFulltext = async (params) => {
-      await assert(params.graphId);
-      await raw(params);
+      await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
+        raw(params),
+      );
     };
   }
   if (source.upsertFulltextBatch) {
@@ -433,31 +476,38 @@ export function gateFulltextMethods(
       // A genuine no-op call asserts nothing — the "empty input is
       // harmless" contract.
       if (params.rows.length === 0) return;
-      await assert(params.graphId);
-      await raw(params);
+      await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
+        raw(params),
+      );
     };
   }
   if (source.deleteFulltextBatch) {
     const raw = source.deleteFulltextBatch;
     gated.deleteFulltextBatch = async (params) => {
       if (params.nodeIds.length === 0) return;
-      await assert(params.graphId);
-      await raw(params);
+      await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
+        raw(params),
+      );
     };
   }
   if (source.fulltextSearch) {
     const raw = source.fulltextSearch;
     gated.fulltextSearch = async (params) => {
-      await assert(params.graphId);
-      return raw(params);
+      return executeGatedFulltext(
+        params.graphId,
+        assert,
+        refuseUnavailable,
+        () => raw(params),
+      );
     };
   }
   // Unconditional: the hard-delete cascade deletes from the fulltext
   // table even for graphs that declare no `searchable()` fields.
   const rawHardDelete = source.hardDeleteNode;
   gated.hardDeleteNode = async (params) => {
-    await assert(params.graphId);
-    await rawHardDelete(params);
+    await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
+      rawHardDelete(params),
+    );
   };
   return gated;
 }
@@ -472,10 +522,11 @@ export function gateFulltextMethods(
 export function gateFulltext(
   tx: TransactionBackend,
   assert: (graphId: string) => Promise<void>,
+  refuseUnavailable: RefuseUnavailableFulltext,
 ): TransactionBackend {
   return createBackendOverlay<TransactionBackend>(
     tx,
-    gateFulltextMethods(tx, assert),
+    gateFulltextMethods(tx, assert, refuseUnavailable),
   );
 }
 
@@ -554,6 +605,12 @@ export type ContributionMaterializer = Readonly<{
    * the first missing/stale/failed contribution. Zero DDL, zero writes.
    */
   assertInitialized: (graphId: string) => Promise<void>;
+  /**
+   * Error-path classification for a gated fulltext operation. Translates only
+   * a missing-relation failure that names the declared fulltext table; every
+   * other failure is rethrown unchanged.
+   */
+  refuseUnavailableFulltext: RefuseUnavailableFulltext;
   /**
    * Privileged materializer for one vector slot's `ownedTables`
    * contribution(s): creates the per-`(kind, field)` table and records
@@ -1068,6 +1125,33 @@ export function createContributionMaterializer(
 
   async function assertInitialized(graphId: string): Promise<void> {
     await assertContributions(graphId, runtimeContributions());
+  }
+
+  async function refuseUnavailableFulltext(
+    graphId: string,
+    error: unknown,
+  ): Promise<never> {
+    if (!isMissingTableError(error)) throw error;
+
+    // A failed transaction cannot run the uncached catalog audit on every
+    // backend (Postgres marks it aborted; PGlite shares that one session).
+    // The failed statement still names the missing physical table. Combined
+    // That is transaction-safe proof that the declared physical storage is
+    // missing and avoids any healthy-path query. It does not prove the marker
+    // still exists because the preceding assertion may have hit its cache.
+    const missingContribution = runtimeContributions().find(
+      (contribution) =>
+        contribution.logicalName === "fulltext" &&
+        missingTableErrorNames(error, contribution.tableName),
+    );
+    if (missingContribution !== undefined) {
+      throw new ContributionUnavailableError(
+        graphId,
+        missingContribution.tableName,
+        { cause: error },
+      );
+    }
+    throw error;
   }
 
   async function ensureVectorSlot(
@@ -1653,6 +1737,7 @@ export function createContributionMaterializer(
   return {
     ensureRuntimeContributions,
     assertInitialized,
+    refuseUnavailableFulltext,
     ensureVectorSlot,
     ensureVectorSlots,
     assertVectorSlot,

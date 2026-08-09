@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { gateFulltext } from "../src/backend/drizzle/contribution-materializations";
+import {
+  type GatableFulltextBackend,
+  gateFulltext,
+  gateFulltextMethods,
+} from "../src/backend/drizzle/contribution-materializations";
 import {
   closeAfterFailure,
   createBackendOverlay,
@@ -620,6 +624,7 @@ describe("backend overlay wrappers", () => {
         assertedGraphIds.push(graphId);
         return Promise.resolve();
       },
+      (graphId, error) => Promise.reject(error),
     );
 
     await gated.execute(asCompiledRowsSql(sql`SELECT 1`));
@@ -634,6 +639,88 @@ describe("backend overlay wrappers", () => {
       "execute:prototype",
       "hardDeleteNode:prototype:person-1",
     ]);
+  });
+
+  it("routes every fulltext method failure through one refusal handler", async () => {
+    const rawError = new Error("raw fulltext failure");
+    const translatedError = new Error("typed fulltext failure");
+    const rejectRaw = vi.fn((): Promise<never> => Promise.reject(rawError));
+    const source = {
+      upsertFulltext: rejectRaw,
+      deleteFulltext: rejectRaw,
+      upsertFulltextBatch: rejectRaw,
+      deleteFulltextBatch: rejectRaw,
+      fulltextSearch: rejectRaw,
+      hardDeleteNode: rejectRaw,
+    } satisfies GatableFulltextBackend;
+    const assert = vi.fn((): Promise<void> => Promise.resolve());
+    const refuseUnavailable = vi.fn(
+      (_graphId: string, _error: unknown): Promise<never> =>
+        Promise.reject(translatedError),
+    );
+    const gated = gateFulltextMethods(source, assert, refuseUnavailable);
+
+    const calls: readonly (() => Promise<unknown>)[] = [
+      () =>
+        requireDefined(gated.upsertFulltext)({
+          graphId: "graph",
+          nodeKind: "Person",
+          nodeId: "person-1",
+          content: "Ada",
+          language: "english",
+        }),
+      () =>
+        requireDefined(gated.deleteFulltext)({
+          graphId: "graph",
+          nodeKind: "Person",
+          nodeId: "person-1",
+        }),
+      () =>
+        requireDefined(gated.upsertFulltextBatch)({
+          graphId: "graph",
+          nodeKind: "Person",
+          rows: [{ nodeId: "person-1", content: "Ada", language: "english" }],
+        }),
+      () =>
+        requireDefined(gated.deleteFulltextBatch)({
+          graphId: "graph",
+          nodeKind: "Person",
+          nodeIds: ["person-1"],
+        }),
+      () =>
+        requireDefined(gated.fulltextSearch)({
+          graphId: "graph",
+          nodeKind: "Person",
+          query: "Ada",
+          limit: 10,
+        }),
+      () =>
+        requireDefined(gated.hardDeleteNode)({
+          graphId: "graph",
+          kind: "Person",
+          id: "person-1",
+        }),
+    ];
+
+    for (const call of calls) {
+      await expect(call()).rejects.toBe(translatedError);
+    }
+    expect(assert).toHaveBeenCalledTimes(calls.length);
+    expect(refuseUnavailable).toHaveBeenCalledTimes(calls.length);
+    expect(refuseUnavailable).toHaveBeenCalledWith("graph", rawError);
+
+    await requireDefined(gated.upsertFulltextBatch)({
+      graphId: "graph",
+      nodeKind: "Person",
+      rows: [],
+    });
+    await requireDefined(gated.deleteFulltextBatch)({
+      graphId: "graph",
+      nodeKind: "Person",
+      nodeIds: [],
+    });
+    expect(assert).toHaveBeenCalledTimes(calls.length);
+    expect(refuseUnavailable).toHaveBeenCalledTimes(calls.length);
   });
 });
 
