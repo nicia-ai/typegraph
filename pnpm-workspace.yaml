@@ -4,6 +4,8 @@ packages:
 
 onlyBuiltDependencies:
   - "@ladybugdb/core"
-  - better-sqlite3
   - esbuild
   - workerd
+
+ignoredBuiltDependencies:
+  - better-sqlite3
