@@ -706,6 +706,9 @@ export function registerContributionDiagnosticIntegrationTests(
         );
 
         expect(error).toBeInstanceOf(ContributionUnavailableError);
+        if (!(error instanceof ContributionUnavailableError)) {
+          throw new Error("Expected ContributionUnavailableError");
+        }
         expect(error).toMatchObject({
           code: "CONTRIBUTION_UNAVAILABLE",
           details: {
@@ -714,8 +717,8 @@ export function registerContributionDiagnosticIntegrationTests(
             physicalName: contribution.tableName,
             state: "physical-storage-missing",
           },
-          cause: expect.anything(),
         });
+        expect(error.cause).toBeDefined();
         expect(
           await store.nodes.Article.getById(nodeId as never),
         ).toBeUndefined();
@@ -743,6 +746,9 @@ export function registerContributionDiagnosticIntegrationTests(
         );
 
         expect(error).toBeInstanceOf(ContributionUnavailableError);
+        if (!(error instanceof ContributionUnavailableError)) {
+          throw new Error("Expected ContributionUnavailableError");
+        }
         expect(error).toMatchObject({
           code: "CONTRIBUTION_UNAVAILABLE",
           details: {
@@ -751,8 +757,8 @@ export function registerContributionDiagnosticIntegrationTests(
             physicalName: contribution.tableName,
             state: "physical-storage-missing",
           },
-          cause: expect.anything(),
         });
+        expect(error.cause).toBeDefined();
       });
 
       it("escalates a dropped fulltext table through repair to rebuild", async (ctx) => {

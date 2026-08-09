@@ -400,16 +400,11 @@ type RefuseUnavailableFulltext = (
 function missingTableErrorNames(error: unknown, tableName: string): boolean {
   const quotedTableName = `"${tableName.replaceAll('"', '""')}"`;
   for (const link of errorChain(error)) {
-    const message =
-      typeof link === "string" ?
-        link
-      : typeof link === "object" && link !== null ?
-        Reflect.get(link, "message")
-      : undefined;
+    const message = errorMessage(link);
     if (typeof message !== "string") continue;
 
     const sqliteMatch = /\bno such table:\s*([^\s;]+)/i.exec(message);
-    const sqliteName = sqliteMatch?.[1]?.replaceAll(/^["'`\[]|["'`\]]$/g, "");
+    const sqliteName = unquoteSqliteIdentifier(sqliteMatch?.[1]);
     if (sqliteName === tableName) return true;
 
     const namesPostgresTable =
@@ -418,6 +413,27 @@ function missingTableErrorNames(error: unknown, tableName: string): boolean {
     if (namesPostgresTable) return true;
   }
   return false;
+}
+
+function errorMessage(error: unknown): string | undefined {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (typeof error !== "object" || error === null || !("message" in error)) {
+    return undefined;
+  }
+  return typeof error.message === "string" ? error.message : undefined;
+}
+
+function unquoteSqliteIdentifier(identifier: string | undefined): string | undefined {
+  if (identifier === undefined) return undefined;
+  const first = identifier.at(0);
+  const last = identifier.at(-1);
+  const isQuoted =
+    (first === '"' && last === '"') ||
+    (first === "'" && last === "'") ||
+    (first === "`" && last === "`") ||
+    (first === "[" && last === "]");
+  return isQuoted ? identifier.slice(1, -1) : identifier;
 }
 
 async function executeGatedFulltext<T>(
@@ -1131,12 +1147,13 @@ export function createContributionMaterializer(
     graphId: string,
     error: unknown,
   ): Promise<never> {
+    await Promise.resolve();
     if (!isMissingTableError(error)) throw error;
 
     // A failed transaction cannot run the uncached catalog audit on every
     // backend (Postgres marks it aborted; PGlite shares that one session).
-    // The failed statement still names the missing physical table. Combined
-    // That is transaction-safe proof that the declared physical storage is
+    // The failed statement still names the missing physical table. That is
+    // transaction-safe proof that the declared physical storage is
     // missing and avoids any healthy-path query. It does not prove the marker
     // still exists because the preceding assertion may have hit its cache.
     const missingContribution = runtimeContributions().find(

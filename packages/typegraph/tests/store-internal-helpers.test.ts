@@ -624,7 +624,7 @@ describe("backend overlay wrappers", () => {
         assertedGraphIds.push(graphId);
         return Promise.resolve();
       },
-      (graphId, error) => Promise.reject(error),
+      () => Promise.reject(new Error("Unexpected unavailable fulltext")),
     );
 
     await gated.execute(asCompiledRowsSql(sql`SELECT 1`));
