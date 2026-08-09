@@ -10,7 +10,10 @@
  *   1. a stated PAIR must be ordered, on every node and edge write path;
  *   2. an in-place UPDATE's lone `validTo` must not precede the row's stored
  *      `valid_from` — the hole the edge path used to have;
- *   3. ZERO width stays legal, on creates and on updates;
+ *   3. ZERO width stays legal, on creates and on updates — but only when the
+ *      caller STATES both endpoints: a write that stamps a bound the caller did
+ *      not name never chooses one that makes the window zero width, because
+ *      `[T, T)` is readable at no coordinate either (I1b);
  *   4. "born already ended" — a create carrying a lone historical `validTo` —
  *      stays legal, and stores NO lower bound (issue #407): the row states where
  *      it ended, not where it began, so nothing is stamped after its own end and
@@ -20,8 +23,11 @@
  *      names is held to the bound the row RETAINS across resurrection;
  *   6. import refuses an inverted document per row, carrying the stable code;
  *   7. a node resurrection — which RESETS `valid_from` and so has no stored
- *      bound to measure against — stores the very instant its guard measured
- *      against, instead of a later one the guard never saw.
+ *      bound to measure against — stores the very DECISION its guard reached
+ *      against the instant it sampled, instead of one re-derived from a later
+ *      sample the guard never saw. That decision is "no lower bound" whenever
+ *      the stated end is at or before that instant, so a resurrection reaches
+ *      the same stored shape a create does for the same stated window (I12).
  *
  * Trusted import carries the same refusal through its own typed stream error;
  * those cases live with the rest of its stream-shape suite in
@@ -42,7 +48,6 @@ import {
   defineGraph,
   defineNode,
   INVERTED_VALIDITY_WINDOW_CODE,
-  ValidationError,
 } from "../src";
 import type { GraphData } from "../src/interchange";
 import {
@@ -52,7 +57,7 @@ import {
   ImportOptionsSchema,
 } from "../src/interchange";
 import { requireDefined } from "../src/utils/presence";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, expectInvertedWindowRefusal } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -126,20 +131,6 @@ async function documentWithWindow(
       : { ...node, validFrom: undefined },
     ),
   };
-}
-
-/**
- * Asserts a rejection is the inverted-window refusal, identified by its stable
- * issue code rather than by message text.
- */
-async function expectInvertedWindowRefusal(
-  operation: Promise<unknown>,
-): Promise<void> {
-  await expect(operation).rejects.toThrow(ValidationError);
-  const error = await operation.catch((error_: unknown) => error_);
-  expect(
-    (error as ValidationError).details.issues.map((issue) => issue.code),
-  ).toContain(INVERTED_VALIDITY_WINDOW_CODE);
 }
 
 /**
@@ -792,19 +783,30 @@ describe("inverted valid-time windows", () => {
   describe("a node resurrection stores the bound it was measured against", () => {
     /**
      * A node resurrection REWRITES `valid_from`, so its guard has no stored bound
-     * to measure against and uses the write instant instead. The operations layer
-     * and the backend read the same clock at two different moments, so the bound
-     * the guard approved was not the bound the write stored: a `validTo` at the
-     * guard's instant passed as zero-width and landed as NEGATIVE width once the
-     * backend's later sample became `valid_from` (issue #413).
+     * to measure against and decides one against the write instant instead. The
+     * operations layer and the backend read the same clock at two different
+     * moments, so the bound the guard approved was not the bound the write
+     * stored: a `validTo` at the guard's instant passed as zero-width and landed
+     * as NEGATIVE width once the backend's later sample became `valid_from`
+     * (issue #413).
      *
-     * The fix makes the guard's instant the stored one by passing it to the
-     * backend explicitly. These cases step the clock at the operations/backend
+     * The fix makes the guard's DECISION the stored one by passing it to the
+     * backend explicitly — as a value, including the `null` that means "no lower
+     * bound", never as an omission the builder would re-derive against its own
+     * later sample. These cases step the clock at the operations/backend
      * boundary — the real ordering, made deterministic — so the gap is one
      * millisecond every run instead of whatever the machine happened to produce.
+     *
+     * `GUARD_PLUS_TWO` is where the #413 guard now bites. The stamping rule
+     * stores NO bound whenever the instant it would stamp cannot precede the
+     * stated end, so at `validTo === GUARD_INSTANT` both the guard's instant and
+     * the backend's later one resolve to "no bound" and the two clocks cannot be
+     * told apart. Two milliseconds out, they resolve to different stored values
+     * and the difference is observable again.
      */
     const GUARD_INSTANT = "2031-01-01T00:00:00.000Z";
     const BACKEND_INSTANT = "2031-01-01T00:00:00.001Z";
+    const GUARD_PLUS_TWO = "2031-01-01T00:00:00.002Z";
 
     afterEach(() => {
       vi.useRealTimers();
@@ -846,7 +848,21 @@ describe("inverted valid-time windows", () => {
       } satisfies GraphBackend;
     }
 
-    it("stores zero width when a resurrecting upsertById ends at the guard's own instant", async () => {
+    /**
+     * These two cases were `"stores zero width when a resurrecting upsertById /
+     * bulkUpsertById ends at the guard's own instant"` — the #413 record, kept
+     * here as documentation of the boundary rule they used to pin. Under the
+     * stamping rule's non-strict comparison a resurrection whose stated end
+     * lands exactly on the instant it judged stores NO lower bound instead of a
+     * zero-width window: `[T, T)` is readable at no coordinate, and a bound
+     * nobody stated must never be chosen so as to produce one.
+     *
+     * They are no longer load-bearing for #413 — the rule absorbs the one-
+     * millisecond skew at exactly this boundary, so the guard's instant and the
+     * backend's resolve alike — and the guard itself is pinned two milliseconds
+     * out, below.
+     */
+    it("stores no lower bound when a resurrecting upsertById ends at the guard's own instant", async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date(GUARD_INSTANT));
       const stepping = clockSteppingBackend();
@@ -858,30 +874,28 @@ describe("inverted valid-time windows", () => {
       );
       await store.nodes.Person.delete(person.id);
 
-      // `validTo` at the instant the guard samples: zero width, so the guard
-      // admits it. Pre-fix the backend then stamped BACKEND_INSTANT as
-      // `valid_from` and the committed row was one millisecond wide backwards.
+      // `validTo` at the instant the guard samples. Pre-#413 the backend then
+      // stamped BACKEND_INSTANT as `valid_from` and the committed row was one
+      // millisecond wide backwards; pre-#407 the guard's own instant landed and
+      // the row was zero width, readable nowhere.
       const revived = await store.nodes.Person.upsertById(
         person.id,
         { name: "Alice" },
         { validTo: GUARD_INSTANT },
       );
 
-      expect(revived.meta.validFrom).toBe(GUARD_INSTANT);
+      expect(revived.meta.validFrom).toBeUndefined();
       expect(revived.meta.validTo).toBe(GUARD_INSTANT);
 
       const raw = requireDefined(
         await stepping.getNode(graph.id, "Person", person.id),
       );
       expect(raw.deleted_at).toBeUndefined();
-      expect(
-        requireDefined(raw.valid_from) <= requireDefined(raw.valid_to),
-      ).toBe(true);
-      expect(raw.valid_from).toBe(GUARD_INSTANT);
+      expect(raw.valid_from).toBeUndefined();
       expect(raw.valid_to).toBe(GUARD_INSTANT);
     });
 
-    it("stores zero width when a resurrecting bulkUpsertById ends at the guard's own instant", async () => {
+    it("stores no lower bound when a resurrecting bulkUpsertById ends at the guard's own instant", async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date(GUARD_INSTANT));
       const stepping = clockSteppingBackend();
@@ -900,11 +914,117 @@ describe("inverted valid-time windows", () => {
       const raw = requireDefined(
         await stepping.getNode(graph.id, "Person", person.id),
       );
-      expect(
-        requireDefined(raw.valid_from) <= requireDefined(raw.valid_to),
-      ).toBe(true);
-      expect(raw.valid_from).toBe(GUARD_INSTANT);
+      expect(raw.valid_from).toBeUndefined();
       expect(raw.valid_to).toBe(GUARD_INSTANT);
+    });
+
+    it("stores the bound the guard judged, not the backend's later sample", async () => {
+      // The #413 guard, relocated off the zero-width boundary. `validTo` two
+      // milliseconds after the guard's instant leaves BOTH candidate bounds
+      // storable, so which one lands is observable: the guard's, because the
+      // store hands the backend its decision instead of letting the builder
+      // re-derive one against a clock the guard never read.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(GUARD_INSTANT));
+      const stepping = clockSteppingBackend();
+      const store = createStore(graph, stepping);
+
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "resurrect-guard-plus-two" },
+      );
+      await store.nodes.Person.delete(person.id);
+
+      const revived = await store.nodes.Person.upsertById(
+        person.id,
+        { name: "Alice" },
+        { validTo: GUARD_PLUS_TWO },
+      );
+
+      expect(revived.meta.validFrom).toBe(GUARD_INSTANT);
+      expect(revived.meta.validTo).toBe(GUARD_PLUS_TWO);
+
+      const raw = requireDefined(
+        await stepping.getNode(graph.id, "Person", person.id),
+      );
+      expect(raw.valid_from).toBe(GUARD_INSTANT);
+      expect(raw.valid_from).not.toBe(BACKEND_INSTANT);
+      expect(raw.valid_to).toBe(GUARD_PLUS_TWO);
+    });
+
+    /**
+     * I12, the half this batch closes: ONE stated window, one outcome, whichever
+     * entry point resets the tombstoned row's window. `create` on a tombstone
+     * reaches `resurrectPreparedNode`; `upsertById` reaches
+     * `performNodeUpdate`'s resurrection leg. Before this batch the first stored
+     * `(NULL, T)` while the second REFUSED the same call outright.
+     */
+    it("reaches one stored shape from both resurrection entry points", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(GUARD_INSTANT));
+      const stepping = clockSteppingBackend();
+      const store = createStore(graph, stepping);
+
+      for (const id of ["i12-create", "i12-upsert"]) {
+        await store.nodes.Person.create({ name: "Alice" }, { id });
+        await store.nodes.Person.delete(asNodeId<typeof Person>(id));
+      }
+
+      const created = await store.nodes.Person.create(
+        { name: "Revived" },
+        { id: "i12-create", validTo: START },
+      );
+      const upserted = await store.nodes.Person.upsertById(
+        "i12-upsert",
+        { name: "Revived" },
+        { validTo: START },
+      );
+
+      // A lone historical `validTo`: no lower bound, through either door.
+      expect(created.meta.validFrom).toBeUndefined();
+      expect(upserted.meta.validFrom).toBeUndefined();
+      for (const id of ["i12-create", "i12-upsert"]) {
+        const raw = requireDefined(
+          await stepping.getNode(graph.id, "Person", id),
+        );
+        expect(raw.valid_from).toBeUndefined();
+        expect(raw.valid_to).toBe(START);
+      }
+    });
+
+    it("stamps the instant the store judged when a create lands on a tombstone", async () => {
+      // The other half of the resurrection contract, and the one a lone
+      // historical `validTo` cannot see: with NO window stated there is a bound
+      // to stamp, so which clock owns it is observable. `resurrectPreparedNode`
+      // samples the instant and resolves the bound from it, and the backend's
+      // stepped sample one millisecond later never reaches the row.
+      //
+      // One resurrection per case: the harness steps the clock forward and never
+      // back, so a second one in the same test would find the two instants
+      // already collapsed onto BACKEND_INSTANT.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(GUARD_INSTANT));
+      const stepping = clockSteppingBackend();
+      const store = createStore(graph, stepping);
+
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "resurrect-open-create" },
+      );
+      await store.nodes.Person.delete(person.id);
+
+      const revived = await store.nodes.Person.create(
+        { name: "Revived" },
+        { id: "resurrect-open-create" },
+      );
+
+      expect(revived.meta.validFrom).toBe(GUARD_INSTANT);
+      const raw = requireDefined(
+        await stepping.getNode(graph.id, "Person", "resurrect-open-create"),
+      );
+      expect(raw.valid_from).toBe(GUARD_INSTANT);
+      expect(raw.valid_from).not.toBe(BACKEND_INSTANT);
+      expect(raw.valid_to).toBeUndefined();
     });
 
     it("leaves an explicitly stated resurrection window untouched", async () => {

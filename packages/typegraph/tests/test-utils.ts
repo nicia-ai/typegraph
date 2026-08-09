@@ -15,6 +15,7 @@ import {
   createStore,
   createStoreWithSchema,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
+  INVERTED_VALIDITY_WINDOW_CODE,
   ValidationError,
 } from "../src";
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
@@ -459,6 +460,24 @@ export async function expectImmutableLowerBoundRefusal(
   expect(
     (error as ValidationError).details.issues.map((issue) => issue.code),
   ).toContain(IMMUTABLE_VALIDITY_LOWER_BOUND_CODE);
+}
+
+/**
+ * Asserts an operation was refused for naming a window of negative width,
+ * identified by its stable issue code rather than by message text.
+ *
+ * Sibling of {@link expectImmutableLowerBoundRefusal}, and here for the same
+ * reason: the refusal is one refusal wherever an end lands before a start, so
+ * every path that expects it asserts it the same way.
+ */
+export async function expectInvertedWindowRefusal(
+  operation: Promise<unknown>,
+): Promise<void> {
+  await expect(operation).rejects.toThrow(ValidationError);
+  const error = await operation.catch((error_: unknown) => error_);
+  expect(
+    (error as ValidationError).details.issues.map((issue) => issue.code),
+  ).toContain(INVERTED_VALIDITY_WINDOW_CODE);
 }
 
 export { generateSqliteDDL } from "../src/backend/drizzle/ddl";

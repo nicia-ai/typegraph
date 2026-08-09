@@ -173,13 +173,17 @@ its properties are replaced and its validity window is reset, so `validFrom`
 becomes the resurrection instant — unless the write carries an explicit
 window, which is honored as given (this is how merge preserves
 branch-authored windows). A resurrecting node write that supplies only a
-historical `validTo` is refused as a `ValidationError` rather than
-persisting a window that ends before it begins; pass both bounds for a
-historical window. (Edge resurrection instead keeps its stored lower bound,
-so `getOrCreateByEndpoints` can resurrect an edge directly into the ended
-state — but the end it names is held to that retained bound, so reviving
-an edge into a window that closed before the edge began likewise means
-passing both.) This graph-wide rule does not depend on the
+historical `validTo` takes the same **born-already-ended** exception a create
+takes: no lower bound is stored ("ended at T, start unknown") rather than a
+start after its own end, so the row reads back at every `asOf` before that end
+and `meta.validFrom` is `undefined`. One stated window reaches one stored shape
+whichever node path resets it — `create()` on a fresh id, `create()` on a
+tombstone, or a resurrecting `upsertById()`. (Edge resurrection instead keeps
+its stored lower bound, so `getOrCreateByEndpoints` can resurrect an edge
+directly into the ended state — but the end it names is held to that retained
+bound, so reviving an edge into a window that closed before the edge began is
+refused as a `ValidationError`, and means passing both bounds.) This graph-wide
+rule does not depend on the
 identity profile. Resurrection does not revive ended assertions, but folding
 runs again over the resurrected node when configured. Kind removal
 cascades assertion and closure rows for the removed kinds. Tightening ontology

@@ -521,6 +521,13 @@ export type UpdateNodeParams = Readonly<{
    * would leave the row readable at no coordinate, in which case the
    * resurrection stores no lower bound. Same rule, same owner, as an insert:
    * `resolveStampedValidityLowerBound`.
+   *
+   * The store's own resurrection paths never omit it. Their window guard has to
+   * judge the bound the write will STORE, so they resolve it through that owner
+   * against the instant they sampled and pass the result — `null` included,
+   * which is how "store no lower bound" is spelled here. Omission is for callers
+   * with no such verdict to honor; it lets this builder decide against its own,
+   * strictly later sample.
    */
   validFrom?: string | null;
   /**

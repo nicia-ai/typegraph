@@ -31,8 +31,8 @@
  *   ({@link expectedStoredLowerBound} — the only place the model encodes that
  *   rule, and consumed by the PURE window-algebra property rather than by any
  *   database property in this suite; see its own doc block for why);
- * - the cells where the tree is known to violate an invariant this workstream
- *   states ({@link KNOWN_CONTRACT_GAPS}).
+ * - the vocabulary of write shapes the history generator draws from
+ *   ({@link TEMPORAL_OP_SHAPES}).
  *
  * IMPORT DISCIPLINE. The model's independence is a property of what it may
  * import, and that is ratcheted by `tests/temporal-oracle-imports.test.ts`
@@ -458,13 +458,26 @@ export function expectedStoredLowerBound(
 }
 
 // ============================================================
-// Known contract gaps
+// The op vocabulary
 // ============================================================
 
 /**
- * The op shapes the history generator can emit. A gap entry removes shapes from
- * this vocabulary; deleting the entry puts them back, in the same diff that
- * closes the cell.
+ * The op shapes the history generator can emit — ALL of them, now that no
+ * declared contract gap withholds any.
+ *
+ * A `KNOWN_CONTRACT_GAPS` table stood beside this list while the tree still
+ * violated invariants this workstream states. Each entry named the invariant it
+ * excused, withheld from this vocabulary exactly the op shapes that reached its
+ * cell, and carried a still-reproduces test; each was deleted by the diff that
+ * measurably closed it, never later. The last of them — one stated window
+ * reaching two outcomes across `create` and `upsertById` on a tombstoned id
+ * (I12) — went with the resurrection contract, so the table is empty and gone.
+ *
+ * What keeps this list honest without it is
+ * `tests/temporal-oracle-imports.test.ts`, which SAMPLES the generator's own
+ * arbitrary and asserts the shapes it can draw are exactly this list. A shape
+ * that quietly stops being emitted is a test failure rather than silent
+ * thinning of the script.
  */
 export const TEMPORAL_OP_SHAPES = [
   "create-open",
@@ -489,66 +502,3 @@ export const TEMPORAL_OP_SHAPES = [
 ] as const;
 
 export type TemporalOpShape = (typeof TEMPORAL_OP_SHAPES)[number];
-
-/**
- * One cell where the tree is known to violate an invariant this workstream
- * states. Each entry does three things: it NAMES the invariant it excuses, it
- * REMOVES the op shapes that reach the cell from the generator so the script
- * cannot hit it, and it carries a STILL-REPRODUCES test.
- *
- * Each entry is deleted by the diff that measurably closes it — never later —
- * and `closedBy` records which diff that is.
- */
-export type KnownContractGap = Readonly<{
-  id: string;
-  /** The invariants this cell violates, so the table names the whole excuse. */
-  invariants: readonly string[];
-  closedBy: "batch-2" | "batch-3";
-  /**
-   * The op shapes withheld from the generator while this gap stands. Stated
-   * over what the script SAYS, never over what it observes, so the restriction
-   * is deterministic rather than outcome-dependent.
-   */
-  restrictedOpShapes: readonly TemporalOpShape[];
-  /** The title of the deterministic example test that still reproduces it. */
-  reproducedBy: string;
-}>;
-
-/**
- * Restriction R-C removes the resurrecting `upsertById` that names a lone
- * non-future `validTo`. R-A and R-B — the born-ended CREATE on a fresh id and the
- * same shape on a tombstoned id, both stated for nodes and edges alike — are
- * GONE: the seam that routes every stamping site through
- * `resolveStampedValidityLowerBound` closed both cells, so their op shapes are
- * emittable again and P1/P1b quantify over them like any other write.
- *
- * With the born-ended shapes back, the `validTo == write instant` cell is
- * reachable again too (a `validTo` drawn from the run's own write instants), and
- * it is now a covered case rather than an excused one: the stamping rule's
- * non-strict comparison stores no bound there.
- */
-export const KNOWN_CONTRACT_GAPS = [
-  {
-    id: "resurrection-refusal-gap",
-    invariants: ["I12"],
-    closedBy: "batch-3",
-    restrictedOpShapes: ["upsert-resurrect-born-ended"],
-    reproducedBy:
-      "still reproduces: one stated window, two outcomes — create succeeds on a tombstone where upsertById refuses",
-  },
-] as const satisfies readonly KnownContractGap[];
-
-export type KnownContractGapId = (typeof KNOWN_CONTRACT_GAPS)[number]["id"];
-
-/** Every op shape some standing gap withholds from the generator. */
-export function restrictedOpShapes(): ReadonlySet<TemporalOpShape> {
-  return new Set(
-    KNOWN_CONTRACT_GAPS.flatMap((gap) => [...gap.restrictedOpShapes]),
-  );
-}
-
-/** The op shapes the generator may emit against this tree. */
-export function emittableOpShapes(): readonly TemporalOpShape[] {
-  const withheld = restrictedOpShapes();
-  return TEMPORAL_OP_SHAPES.filter((shape) => !withheld.has(shape));
-}

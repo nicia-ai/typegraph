@@ -143,9 +143,13 @@ function evaluateNodePredicate<N extends NodeType>(
  * Update input for the internal upsert path, which owns the WHOLE validity
  * window: a resurrecting upsert rewrites both endpoints, so it must be able to
  * carry `validFrom` as well as `validTo`. Dropping `validFrom` here would leave
- * the backend defaulting the lower bound to the resurrection instant while the
- * caller's (possibly already past) `validTo` stayed — an inverted window that
- * no read coordinate can observe.
+ * a stated lower bound unreachable by the only node write that stores one: a
+ * resurrection rewrites `valid_from` whether or not the caller named it, so the
+ * caller's bound would be replaced by the instant that write stamps rather than
+ * honored. It would no longer INVERT the window — a resurrection stating only a
+ * historical `validTo` stores no lower bound at all — which is why the sibling
+ * note on `UpsertUpdateEdgeInput` still reads in terms of inversion and this one
+ * does not: an edge resurrection RETAINS its stored bound.
  *
  * The public `update()` API cannot reach this member: its options type exposes
  * `validTo` only, and it builds its input through {@link buildUpdateInput}. Only

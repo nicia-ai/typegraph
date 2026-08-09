@@ -915,14 +915,12 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. On the CREATE branch that default is
-   * dropped when a stated `validTo` at or before the write instant would leave
-   * the row readable at no coordinate: NO lower bound is stored ("ended at T,
-   * start unknown") and `meta.validFrom` reads back as `undefined`. A
-   * RESURRECTION does not take that exception: it judges the stated `validTo`
-   * against the resurrection instant, so one strictly earlier is REFUSED and one
-   * landing exactly on it stores a zero-width window. State `validFrom`
-   * alongside a historical `validTo` when the id may name a tombstone. An update to a LIVE row stores no lower
+   * operation's timestamp when omitted. That default is dropped when a stated
+   * `validTo` at or before the write instant would leave the row readable at no
+   * coordinate: NO lower bound is stored ("ended at T, start unknown") and
+   * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
+   * exception, decided against the instant it samples, so one stated window
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An update to a LIVE row stores no lower
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
@@ -950,14 +948,12 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. On the CREATE branch that default is
-   * dropped when a stated `validTo` at or before the write instant would leave
-   * the row readable at no coordinate: NO lower bound is stored ("ended at T,
-   * start unknown") and `meta.validFrom` reads back as `undefined`. A
-   * RESURRECTION does not take that exception: it judges the stated `validTo`
-   * against the resurrection instant, so one strictly earlier is REFUSED and one
-   * landing exactly on it stores a zero-width window. State `validFrom`
-   * alongside a historical `validTo` when the id may name a tombstone. An update to a LIVE row stores no lower
+   * operation's timestamp when omitted. That default is dropped when a stated
+   * `validTo` at or before the write instant would leave the row readable at no
+   * coordinate: NO lower bound is stored ("ended at T, start unknown") and
+   * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
+   * exception, decided against the instant it samples, so one stated window
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An update to a LIVE row stores no lower
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
@@ -1009,14 +1005,12 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. On the CREATE branch that default is
-   * dropped when a stated `validTo` at or before the write instant would leave
-   * the row readable at no coordinate: NO lower bound is stored ("ended at T,
-   * start unknown") and `meta.validFrom` reads back as `undefined`. A
-   * RESURRECTION does not take that exception: it judges the stated `validTo`
-   * against the resurrection instant, so one strictly earlier is REFUSED and one
-   * landing exactly on it stores a zero-width window. State `validFrom`
-   * alongside a historical `validTo` when the id may name a tombstone. An update to a LIVE row stores no lower
+   * operation's timestamp when omitted. That default is dropped when a stated
+   * `validTo` at or before the write instant would leave the row readable at no
+   * coordinate: NO lower bound is stored ("ended at T, start unknown") and
+   * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
+   * exception, decided against the instant it samples, so one stated window
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An update to a LIVE row stores no lower
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the

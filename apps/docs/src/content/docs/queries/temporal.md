@@ -533,18 +533,18 @@ every instant at or before its `validTo`. Two writes produce one:
 
 - an interchange record stating `validFrom: null` — a source row confirmed to
   have no lower bound, round-tripped rather than re-stamped;
-- a **born-already-ended** write: one that CREATES a row while stating a
-  `validTo` at or before its own instant and no `validFrom`. The row's start is
-  unknown rather than after its end, so no bound is stored and the row reads back
-  at every `asOf` before that end. A `validTo` in the *future* is unaffected — it
-  still stamps the creation instant, so the row stays invisible at instants
-  before it existed. A **node** create whose id names a tombstone resurrects
-  that row and still qualifies — same stored shape as a fresh id; an edge create
-  never lands on a tombstone (a taken id raises `Edge already exists`). A
-  resurrecting *upsert* does not: on a tombstoned node, `upsertById` /
-  `bulkUpsertById` judge the stated `validTo` against the resurrection instant;
-  on a tombstoned edge, `bulkUpsertById` and `getOrCreateByEndpoints` judge it
-  against the bound the row retains.
+- a **born-already-ended** write: one that CREATES a row, or RESETS its window,
+  while stating a `validTo` at or before its own instant and no `validFrom`. The
+  row's start is unknown rather than after its end, so no bound is stored and the
+  row reads back at every `asOf` before that end. A `validTo` in the *future* is
+  unaffected — it still stamps the write instant, so the row stays invisible at
+  instants before it existed. Every **node** path that resets the window
+  qualifies, and reaches the same stored shape: a create on a fresh id, a create
+  on a tombstoned one, and a resurrecting `upsertById` / `bulkUpsertById`. An
+  **edge** never does: an edge create cannot land on a tombstone (a taken id
+  raises `Edge already exists`), and the two paths that resurrect one —
+  `bulkUpsertById` and `getOrCreateByEndpoints` — RETAIN the bound the row
+  carries and judge the stated `validTo` against it.
 
 ```typescript
 .select((ctx) => ({

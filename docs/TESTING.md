@@ -107,18 +107,21 @@ A model earns the name by three properties, and all three are load-bearing:
    requested one is checked against what it stored rather than flaking.
 3. **It passes unchanged on `main`.** A model that only passes after the fix it
    accompanies is a restatement of the fix. Where the tree is knowingly wrong,
-   the model declares the cell (`KNOWN_CONTRACT_GAPS`), withholds the op shape
-   that reaches it from the generator, and carries a still-reproduces test — and
-   each entry is deleted by the diff that measurably closes it, never later.
+   the model declares the cell in a gap table, withholds the op shape that
+   reaches it from the generator, and carries a still-reproduces test — and each
+   entry is deleted by the diff that measurably closes it, never later, with its
+   reproduction turned around into a gap-CLOSED test running the same script.
+   The temporal model carried three such entries and now carries none; its
+   `closed contract gaps` block is what that discipline leaves behind.
 
 `tests/temporal-oracle-imports.test.ts` ratchets the temporal model's
 independence: exact set equality over its import specifiers, a named-import
 check on `src/utils/date` so the window guards stay out, and an assertion that
 the barrel import is `import type`, so it cannot carry a value however the
-barrel grows. It also ratchets the gap table's plumbing by **sampling the
-history generator's own arbitrary**: a declared restriction is only real if the
-generator honors it, and comparing one spelling of the withheld set against
-another cannot show that.
+barrel grows. It also ratchets the op vocabulary by **sampling the history
+generator's own arbitrary**: a shape the script claims to cover is only covered
+if the generator can draw it, and comparing one spelling of the declared list
+against another cannot show that.
 
 The oracle properties run at a smoke-gate iteration count by default and take a
 run-count knob for deep runs:

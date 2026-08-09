@@ -695,26 +695,25 @@ Every write method below that accepts a `validFrom` option (`create`,
 that operation's own creation timestamp when omitted. `validTo` remains
 optional and open-ended until set.
 
-The one exception is a row **born already ended**: a write that CREATES a row
-while stating a `validTo` at or before its own instant and no `validFrom` stores
-**no lower bound** ("ended at T, start unknown") rather than a start after its
-own end, and `meta.validFrom` reads back as `undefined`. Such a row is visible at
-every `asOf` coordinate before its end and at none after it. A `validTo` in the
-future is unaffected — it still stamps the creation timestamp, so the row is
-invisible at instants before it existed.
+The one exception is a row **born already ended**: a write that CREATES or
+RESETS a row's window while stating a `validTo` at or before its own instant and
+no `validFrom` stores **no lower bound** ("ended at T, start unknown") rather
+than a start after its own end, and `meta.validFrom` reads back as `undefined`.
+Such a row is visible at every `asOf` coordinate before its end and at none after
+it. A `validTo` in the future is unaffected — it still stamps the creation
+timestamp, so the row is invisible at instants before it existed.
 
-The exception follows the API, not the row's prior state. Every **node** create
-path takes it, including a `create`, `bulkCreate`, or `bulkInsert` whose id names
-a tombstone: that call resurrects the row and reaches the same stored shape a
-fresh id would — no lower bound, `meta.validFrom` back as `undefined`. An edge
-create never lands on a tombstone — a taken id raises `Edge already exists`, and
-a tombstoned edge is reachable again only through `bulkUpsertById` or
-`getOrCreateByEndpoints`. A **resurrecting upsert** does not take it. `upsertById` / `bulkUpsertById` on a tombstoned node
-resets the window and judges a lone historical `validTo` against the resurrection
-instant, refusing it; `bulkUpsertById` and `getOrCreateByEndpoints` on a
-tombstoned edge retain the bound that row already carries and judge the stated
-`validTo` against that. Pass `validFrom` alongside a historical `validTo` when an
-upsert may land on a tombstone.
+One stated window reaches one stored shape. Every **node** write that resets the
+window takes the exception: `create`, `bulkCreate` and `bulkInsert` on a fresh id
+or on one naming a tombstone, and `upsertById` / `bulkUpsertById` resurrecting a
+tombstoned node — all of them store no lower bound for a lone historical
+`validTo`, and `meta.validFrom` reads back as `undefined` in every case. An
+**edge** is different, and deliberately: an edge create never lands on a
+tombstone (a taken id raises `Edge already exists`), and a tombstoned edge is
+reachable again only through `bulkUpsertById` or `getOrCreateByEndpoints`, both
+of which RETAIN the bound that row already carries and judge the stated `validTo`
+against it — so a `validTo` before that bound is refused. Pass `validFrom`
+alongside a historical `validTo` when an edge upsert may land on a tombstone.
 
 Writes that accept a validity-end mutation have three explicit states: omit both
 fields to preserve the stored end, pass `{ validTo }` to set or move it, or pass

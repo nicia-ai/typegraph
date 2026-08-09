@@ -49,13 +49,16 @@
  * already carries, so the query under test is the query users write — no
  * id-prefix predicate is bolted onto it — and shrinking stays hermetic.
  *
- * KNOWN CONTRACT GAPS. The model encodes TODAY'S contract, so this suite passes
+ * CLOSED CONTRACT GAPS. The model encodes TODAY'S contract, so this suite passed
  * unchanged on `main`; that is the evidence it is an equivalence check rather
  * than a restatement of behavior a later batch introduces. The three cells where
- * the tree violates an invariant this workstream states are declared in
- * `KNOWN_CONTRACT_GAPS`, which withholds their op shapes from the generator and
- * carries one still-reproduces test each. Each entry — and its restriction —
- * dies in the diff that measurably closes it.
+ * the tree violated an invariant this workstream states were declared in a
+ * `KNOWN_CONTRACT_GAPS` table that withheld their op shapes from the generator
+ * and carried one still-reproduces test each. All three are now closed, each in
+ * the diff that measurably closed it, and the table is gone. What replaces it is
+ * the `closed contract gaps` block below: the SAME scripts those reproductions
+ * ran, with every assertion turned around. The generator draws from the whole
+ * op vocabulary again.
  */
 import fc from "fast-check";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -68,10 +71,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  INVERTED_VALIDITY_WINDOW_CODE,
   type Node,
   type RecordedInstant,
-  ValidationError,
 } from "../../../src";
 import type { GraphBackend } from "../../../src/backend/types";
 import {
@@ -99,18 +100,16 @@ import { requireDefined } from "../../../src/utils/presence";
 import { recordedInstantFromDriver } from "../../test-utils";
 import {
   allLedgerRows,
-  emittableOpShapes,
   type Instant,
   intervalIsEmpty,
   intervalOf,
-  KNOWN_CONTRACT_GAPS,
-  type KnownContractGapId,
   type LedgerRow,
   liveLedgerRows,
   readTemporalLedger,
   type RowKey,
   rowKeyOf,
   rowSatisfiesOrderedWindow,
+  TEMPORAL_OP_SHAPES,
   type TemporalCoordinate,
   type TemporalLedger,
   type TemporalOpShape,
@@ -310,14 +309,15 @@ type GeneratedOp = Readonly<{
 
 /**
  * Exported for `tests/temporal-oracle-imports.test.ts`, which SAMPLES it to
- * assert the shapes it can draw are exactly the ones the standing gaps leave
- * emittable. Comparing `emittableOpShapes()` against a re-spelling of its own
- * body proves nothing; only the generator's own draws can show a restriction is
- * honored end-to-end.
+ * assert the shapes it can draw are exactly the declared vocabulary. Comparing
+ * one spelling of that vocabulary against another proves nothing; only the
+ * generator's own draws can show the script really covers what the list claims.
+ * This is what stood behind the gap table's restrictions while it existed, and
+ * it is what keeps the reopened shapes genuinely emitted now that it is gone.
  */
 export function generatedOpArb(): fc.Arbitrary<GeneratedOp> {
   return fc.record({
-    shape: fc.constantFrom(...emittableOpShapes()),
+    shape: fc.constantFrom(...TEMPORAL_OP_SHAPES),
     lowerPick: fc.nat({ max: 7 }),
     upperPick: fc.nat({ max: 7 }),
     targetPick: fc.nat({ max: 31 }),
@@ -1030,11 +1030,8 @@ async function assertProjectionParity(
 }
 
 // ============================================================
-// The still-reproduces tests, one per declared gap, and the gap-CLOSED tests
-// that replaced the two the seam closed
+// The gap-CLOSED tests, one per cell the gap table used to declare
 // ============================================================
-
-type GapReproduction = (context: IntegrationTestContext) => Promise<void>;
 
 async function storedRow(
   backend: GraphBackend,
@@ -1051,62 +1048,32 @@ async function storedRow(
   );
 }
 
-/* eslint-disable vitest/no-standalone-expect -- these are the bodies of the
-   still-reproduces tests, registered one per KNOWN_CONTRACT_GAPS entry below.
-   Keying them off the gap table is what makes deleting an entry delete its test
-   (the `satisfies Record<KnownContractGapId, ...>` turns a leftover into a
-   compile error), and that structure is worth more than inlining the expects
-   into literal `it` bodies. */
-const GAP_REPRODUCTIONS = {
-  "resurrection-refusal-gap": async (context) => {
-    const store = freshStore(context.getBackend(), "gap_refusal");
-    for (const id of ["c1", "u1"]) {
-      await store.nodes.OraclePerson.create({ name: "first" }, { id });
-      await store.nodes.OraclePerson.delete(asNodeId<typeof OraclePerson>(id));
-    }
-    // One stated window, two entry points, two outcomes. This assertion says
-    // nothing about the STORED shape, so it survives the batch that changes the
-    // shape and dies only with the refusal itself.
-    await expect(
-      store.nodes.OraclePerson.create(
-        { name: "revived" },
-        { id: "c1", validTo: FIRST_PAST_ANCHOR },
-      ),
-    ).resolves.toBeDefined();
-
-    const refusal: unknown = await store.nodes.OraclePerson.upsertById(
-      "u1",
-      { name: "revived" },
-      { validTo: FIRST_PAST_ANCHOR },
-    ).then(
-      (node) => node,
-      (error: unknown) => error,
-    );
-    expect(refusal).toBeInstanceOf(ValidationError);
-    const issues = (refusal as ValidationError).details.issues;
-    expect(issues.map((issue) => issue.code)).toContain(
-      INVERTED_VALIDITY_WINDOW_CODE,
-    );
-  },
-} as const satisfies Record<KnownContractGapId, GapReproduction>;
-
 /**
- * What the two born-ended entries used to excuse, restated as what the tree now
- * does. These are the SAME two scripts their reproductions ran — a lone past
- * `validTo` on a fresh id and on a tombstoned id — with every assertion turned
- * around: no lower bound instead of a stamped one, an ordered window instead of a
- * backwards one, and a row readable before its end instead of at no coordinate at
- * all. Keeping the scripts and inverting the expectations is what makes the pair
- * a closure record rather than two unrelated tests that happen to be green.
+ * What the three gap entries used to excuse, restated as what the tree now does.
+ * These are the SAME scripts their reproductions ran — a lone past `validTo` on
+ * a fresh id, on a tombstoned id, and through the resurrecting `upsertById` that
+ * used to REFUSE it — with every assertion turned around: no lower bound instead
+ * of a stamped one, an ordered window instead of a backwards one, a row readable
+ * before its end instead of at no coordinate at all, and an accepted write
+ * instead of a `ValidationError`. Keeping the scripts and inverting the
+ * expectations is what makes these a closure record rather than three unrelated
+ * tests that happen to be green.
  *
- * Both variants assert the SAME stored shape, which is the create half of I12:
- * one stated window through two entry points reaches one outcome. The tombstoned
- * variant is the one that fails if `buildUpdateNode`'s resurrection leg is left
- * on the old resolver while the eight insert builders are rewired.
+ * All three variants assert the SAME stored shape, which is I12 itself: one
+ * stated window through three entry points reaches one outcome. The tombstoned
+ * `create` is the one that fails if `buildUpdateNode`'s resurrection leg is left
+ * on the old resolver while the eight insert builders are rewired; the
+ * `upsertById` variant is the one that fails if `performNodeUpdate`'s
+ * resurrection leg judges the raw instant instead of the bound the write stores.
  */
-async function assertBornEndedCreateStoresNoLowerBound(
+async function assertBornEndedWriteStoresNoLowerBound(
   context: IntegrationTestContext,
-  variant: Readonly<{ label: string; id: string; tombstoneFirst: boolean }>,
+  variant: Readonly<{
+    label: string;
+    id: string;
+    tombstoneFirst: boolean;
+    entryPoint: "create" | "upsertById";
+  }>,
 ): Promise<void> {
   const backend = context.getBackend();
   const store = freshStore(backend, variant.label);
@@ -1119,10 +1086,17 @@ async function assertBornEndedCreateStoresNoLowerBound(
     await store.nodes.OraclePerson.delete(nodeId);
   }
 
-  const created = await store.nodes.OraclePerson.create(
-    { name: "born ended" },
-    { id: variant.id, validTo: FIRST_PAST_ANCHOR },
-  );
+  const created =
+    variant.entryPoint === "create" ?
+      await store.nodes.OraclePerson.create(
+        { name: "born ended" },
+        { id: variant.id, validTo: FIRST_PAST_ANCHOR },
+      )
+    : await store.nodes.OraclePerson.upsertById(
+        variant.id,
+        { name: "born ended" },
+        { validTo: FIRST_PAST_ANCHOR },
+      );
   expect(created.meta.validFrom).toBeUndefined();
   expect(created.meta.validTo).toBe(FIRST_PAST_ANCHOR);
 
@@ -1152,7 +1126,6 @@ async function assertBornEndedCreateStoresNoLowerBound(
     ).resolves.toBeUndefined();
   }
 }
-/* eslint-enable vitest/no-standalone-expect */
 
 // ============================================================
 // The recorded axis
@@ -1238,29 +1211,31 @@ export function registerTemporalOracleIntegrationTests(
       expect(FUTURE_ANCHORS.every((anchor) => anchor > now)).toBe(true);
     });
 
-    describe("known contract gaps", () => {
-      for (const gap of KNOWN_CONTRACT_GAPS) {
-        // eslint-disable-next-line vitest/valid-title -- the title IS the gap entry's own `reproducedBy`, so deleting the entry deletes the test
-        it(gap.reproducedBy, async () => {
-          await GAP_REPRODUCTIONS[gap.id](context);
-        });
-      }
-    });
-
     describe("closed contract gaps", () => {
       it("closed: a born-ended create on a fresh id stores no lower bound and reads back before its end", async () => {
-        await assertBornEndedCreateStoresNoLowerBound(context, {
+        await assertBornEndedWriteStoresNoLowerBound(context, {
           label: "closed_insert",
           id: "f1",
           tombstoneFirst: false,
+          entryPoint: "create",
         });
       });
 
       it("closed: a born-ended create on a tombstoned id stores the same shape as on a fresh id", async () => {
-        await assertBornEndedCreateStoresNoLowerBound(context, {
+        await assertBornEndedWriteStoresNoLowerBound(context, {
           label: "closed_tombstone",
           id: "t1",
           tombstoneFirst: true,
+          entryPoint: "create",
+        });
+      });
+
+      it("closed: a born-ended upsertById on a tombstoned id stores that shape too, instead of refusing", async () => {
+        await assertBornEndedWriteStoresNoLowerBound(context, {
+          label: "closed_resurrect",
+          id: "u1",
+          tombstoneFirst: true,
+          entryPoint: "upsertById",
         });
       });
     });

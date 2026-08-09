@@ -12,12 +12,14 @@ import { describe, expect, it } from "vitest";
 import {
   asEdgeId,
   asNodeId,
+  createStore,
   type EdgeId,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   type Node,
   type NodeId,
   type Store,
 } from "../../../src";
+import { createBackendOverlay } from "../../../src/backend/types";
 import {
   FORMAT_VERSION,
   type GraphData,
@@ -26,7 +28,10 @@ import {
 } from "../../../src/interchange";
 import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 import { requireDefined } from "../../../src/utils/presence";
-import { expectImmutableLowerBoundRefusal } from "../../test-utils";
+import {
+  expectImmutableLowerBoundRefusal,
+  expectInvertedWindowRefusal,
+} from "../../test-utils";
 import { integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -61,6 +66,24 @@ function seedPerson(
   id: string,
 ): Promise<PersonNode> {
   return store.nodes.Person.upsertById(id, { name: "Win", age: 1 });
+}
+
+/**
+ * Seeds a LIVE Person with NO lower bound: born already ended, which is the
+ * only write shape that reaches that state without interchange. The absence is
+ * asserted here rather than in each case, so a regression in the born-ended
+ * contract fails the seed instead of leaving the cases below vacuously green.
+ */
+async function seedBornEndedPerson(
+  store: LowerBoundTestStore,
+  id: string,
+): Promise<PersonNode> {
+  const created = await store.nodes.Person.create(
+    { name: "Win", age: 1 },
+    { id, validTo: REVIVED_VALID_TO },
+  );
+  expect(created.meta.validFrom).toBeUndefined();
+  return created;
 }
 
 /** An interchange document carrying exactly the rows a case is about. */
@@ -616,6 +639,143 @@ export function registerValidityLowerBoundIntegrationTests(
           expect(storedEdge?.since).toBe("first");
         }
       });
+    });
+  });
+
+  /**
+   * The ABSENT lower bound, which the born-ended contract made an ordinary shape
+   * for a live row rather than an interchange-only curiosity. "No bound" is a
+   * reading of the row like any other: a write whose verdict depends on it must
+   * assert it, and a caller who states one against it is stating one the write
+   * will not apply.
+   */
+  describe("a live row with no lower bound", () => {
+    /** Where the concurrent writer puts the bound the update never read. */
+    const RECREATED_VALID_FROM = REVIVED_VALID_FROM;
+
+    it("accepts a lone validTo against the absent bound", async () => {
+      // Nothing to invert against, so the end is free to move — including into
+      // the future, which makes the row open-left AND current.
+      const store = await context.createStore(integrationTestGraph, {});
+      const id = "vlb-born-ended-accepts";
+      await seedBornEndedPerson(store, id);
+
+      const updated = await store.nodes.Person.update(
+        personId(id),
+        {},
+        { validTo: FUTURE_VALID_TO },
+      );
+
+      expect(updated.meta.validFrom).toBeUndefined();
+      expect(canonicalizeDatabaseTimestamp(updated.meta.validTo)).toBe(
+        FUTURE_VALID_TO,
+      );
+      const current = await store.nodes.Person.getById(personId(id));
+      expect(current?.meta.validFrom).toBeUndefined();
+    });
+
+    it("refuses a stated validFrom on the live row, because no bound is there to restate", async () => {
+      // The row has nothing to match, so every stated bound differs from what it
+      // holds. Accepting one and dropping it would be the API lying about a
+      // window the caller named — the same refusal a row WITH a bound gets, on
+      // the branch where the stored value is absent.
+      const store = await context.createStore(integrationTestGraph, {});
+      const id = "vlb-born-ended-refuses";
+      await seedBornEndedPerson(store, id);
+
+      await expectImmutableLowerBoundRefusal(
+        store.nodes.Person.upsertById(
+          id,
+          { name: "Win", age: 2 },
+          { validFrom: FOREIGN_VALID_FROM },
+        ),
+      );
+
+      // `includeEnded`: the row is live but its window has closed, which is the
+      // whole shape under test.
+      const stored = await store.nodes.Person.getById(personId(id), {
+        temporalMode: "includeEnded",
+      });
+      expect(stored?.age).toBe(1);
+      expect(stored?.meta.validFrom).toBeUndefined();
+    });
+
+    it("fences the lone validTo on IS NULL, so a row that gained a bound between the probe and the write is not written over", async () => {
+      // The verdict READ "this row has no lower bound" and accepted the end on
+      // that basis, so the write must assert it. A peer that deletes and
+      // resurrects the row with a real bound between the two statements changes
+      // the answer, and the fenced UPDATE has to match nothing rather than
+      // persist an end below a start nobody judged it against.
+      //
+      // Driven deterministically at the operations/backend boundary, on the
+      // TRANSACTION target: the write runs against the backend
+      // `runInWriteTransaction` yields, not against the outer object. The peer's
+      // two statements run on that same target, so they need no second
+      // connection and cannot deadlock on any driver in the matrix — and they
+      // share this write's fate, so a refusal rolls them back too. That is why
+      // the stored-state assertion below is "the row is untouched" rather than
+      // "the peer's bound survived": what the fence has to prevent is this
+      // caller's `valid_to` landing under a `valid_from` nobody judged it
+      // against, and unfenced it commits exactly that.
+      const backend = context.getBackend();
+      const id = "vlb-born-ended-fenced";
+      let interceptions = 0;
+
+      const racingBackend = createBackendOverlay(backend, {
+        transaction: (fn, options) =>
+          backend.transaction((transactionTarget) => {
+            const racingTarget = createBackendOverlay(transactionTarget, {
+              updateNode: async (params) => {
+                if (
+                  params.id === id &&
+                  params.clearDeleted !== true &&
+                  interceptions === 0
+                ) {
+                  interceptions += 1;
+                  await transactionTarget.deleteNode({
+                    graphId: params.graphId,
+                    kind: params.kind,
+                    id: params.id,
+                  });
+                  await transactionTarget.updateNode({
+                    graphId: params.graphId,
+                    kind: params.kind,
+                    id: params.id,
+                    props: { name: "Peer", age: 9 },
+                    clearDeleted: true,
+                    validFrom: RECREATED_VALID_FROM,
+                  });
+                }
+                return transactionTarget.updateNode(params);
+              },
+            });
+            return fn(racingTarget);
+          }, options),
+      });
+
+      const store = createStore(integrationTestGraph, racingBackend);
+      await seedBornEndedPerson(store, id);
+
+      // `FOREIGN_VALID_FROM` is before the bound the peer installs, so the
+      // update the fence forces this caller to re-derive is one the row's real
+      // window refuses. Unfenced, it would have committed `valid_to` below
+      // `valid_from` — a row readable at no coordinate.
+      await expectInvertedWindowRefusal(
+        store.nodes.Person.update(
+          personId(id),
+          {},
+          { validTo: FOREIGN_VALID_FROM },
+        ),
+      );
+      expect(interceptions).toBe(1);
+
+      const stored = await store.nodes.Person.getById(personId(id), {
+        temporalMode: "includeEnded",
+      });
+      expect(stored?.meta.validFrom).toBeUndefined();
+      expect(canonicalizeDatabaseTimestamp(stored?.meta.validTo)).toBe(
+        REVIVED_VALID_TO,
+      );
     });
   });
 }

@@ -31,8 +31,6 @@ import { describe, expect, it } from "vitest";
 
 import { generatedOpArb } from "./backends/integration/temporal-oracle";
 import {
-  emittableOpShapes,
-  KNOWN_CONTRACT_GAPS,
   TEMPORAL_OP_SHAPES,
   type TemporalOpShape,
 } from "./backends/integration/temporal-oracle-model";
@@ -125,15 +123,17 @@ describe("temporal oracle model independence", () => {
   });
 });
 
-describe("temporal oracle gap plumbing", () => {
-  it("draws op shapes from exactly the vocabulary the standing gaps leave emittable", () => {
-    // The assertion that matters is over the GENERATOR, not over
-    // `emittableOpShapes()`: comparing that function against a re-spelling of
-    // its own body can only fail if someone edits that one filter, whereas
-    // swapping `fc.constantFrom(...emittableOpShapes())` for
-    // `fc.constantFrom(...TEMPORAL_OP_SHAPES)` bypasses every restriction and
-    // would leave such a comparison green while the properties go red on `main`
-    // for a cell the gap table claims to excuse.
+describe("temporal oracle op vocabulary", () => {
+  it("draws every declared op shape, so the script covers what the vocabulary claims", () => {
+    // The assertion that matters is over the GENERATOR, not over a re-spelling
+    // of the declared list: comparing one spelling against another can only
+    // fail if someone edits that one expression, whereas narrowing what
+    // `generatedOpArb` draws from — which is exactly how the deleted
+    // `KNOWN_CONTRACT_GAPS` table withheld the shapes it excused — would leave
+    // such a comparison green while the script silently stopped exercising a
+    // cell. With no gap standing, the drawn set must be the WHOLE vocabulary:
+    // this is the ratchet that keeps the reopened born-ended and resurrection
+    // shapes genuinely emitted.
     //
     // Sampled with a fixed seed, so it is deterministic; 2000 draws over a
     // vocabulary this size hits every constant of a uniform `constantFrom`.
@@ -142,23 +142,14 @@ describe("temporal oracle gap plumbing", () => {
         .sample(generatedOpArb(), { numRuns: 2000, seed: 20_260_809 })
         .map((op) => op.shape),
     );
-    expect([...drawn].toSorted()).toEqual([...emittableOpShapes()].toSorted());
-    // ...and the vocabulary it draws from is genuinely narrowed: every standing
-    // gap withholds at least one shape (an entry restricting nothing would
-    // leave its cell reachable), and every withheld shape is really withheld.
-    for (const gap of KNOWN_CONTRACT_GAPS) {
-      expect(gap.restrictedOpShapes.length).toBeGreaterThan(0);
-      for (const shape of gap.restrictedOpShapes) {
-        expect(TEMPORAL_OP_SHAPES).toContain(shape);
-        expect([...drawn]).not.toContain(shape);
-      }
-    }
+    expect([...drawn].toSorted()).toEqual([...TEMPORAL_OP_SHAPES].toSorted());
   });
 
   it("implements every declared op shape", () => {
     // A shape declared but never executed is a silent no-op in the generator:
-    // the vocabulary would claim coverage the script does not have. Lifting a
-    // restriction in a later batch must therefore find its shape already wired.
+    // the vocabulary would claim coverage the script does not have. This is what
+    // kept each restricted shape wired while its gap stood, so lifting the
+    // restriction found an implementation waiting rather than a stub.
     const oracle = readFileSync(ORACLE_PATH, "utf8");
     const unimplemented = TEMPORAL_OP_SHAPES.filter(
       (shape) => !oracle.includes(`"${shape}"`),

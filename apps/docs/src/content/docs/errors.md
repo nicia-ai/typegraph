@@ -147,8 +147,11 @@ try {
 Interchange import records the same refusal as a per-row error prefixed with the
 code, so one bad row does not abort the import; trusted import refuses the whole
 stream with `TrustedImportError` reason `invalid_stream`. A zero-width window
-(`validTo === validFrom`) is legal and never raises this, and so is a create
-carrying only a historical `validTo`.
+(`validTo === validFrom`) is legal and never raises this, and neither is a write
+that STAMPS its own start while carrying only a historical `validTo`: any create,
+and a node resurrection through `upsertById` / `bulkUpsertById`. Both store no
+lower bound instead. An edge resurrection RETAINS the bound the row already
+holds, so a `validTo` before that bound still raises this.
 
 #### `IMMUTABLE_VALIDITY_LOWER_BOUND`
 

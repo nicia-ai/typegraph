@@ -104,6 +104,7 @@ import {
   assertWritableValidityWindow,
   nowIso,
   preservesImmutableLowerBound,
+  resolveStampedValidityLowerBound,
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
@@ -935,11 +936,11 @@ async function performNodeUpdate<G extends GraphDef>(
   const nodeKind = registration.type;
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  // A node resurrection RESETS `valid_from` (see `buildUpdateNode`), so the
-  // effective lower bound is the write instant rather than the row's stored
-  // one. That instant is sampled HERE and then travels to the backend as an
-  // explicit `validFrom`, because the guard has to measure the bound the write
-  // will actually store: left to default, the builder's own
+  // A node resurrection RESETS `valid_from` (see `buildUpdateNode`), so its
+  // effective lower bound is one this write stamps rather than the row's stored
+  // one. The instant is sampled HERE and the bound resolved from it travels to
+  // the backend as an explicit `validFrom`, because the guard has to measure
+  // the bound the write will actually store: left to default, the builder's own
   // `resolveStampedValidityLowerBound` call would judge the backend's strictly
   // later sample, and a `validTo` at this instant would pass the guard as
   // zero-width and land as a different shape a millisecond later (issue #413).
@@ -962,6 +963,18 @@ async function performNodeUpdate<G extends GraphDef>(
     "validFrom",
   );
   const validFrom = preservesLiveLowerBound ? undefined : statedValidFrom;
+  // The bound this resurrection will STORE, decided by the same owner every
+  // insert builder decides through, against the instant sampled above. Asking
+  // the owner rather than assuming `resurrectionInstant` is what makes a
+  // resurrection carrying only a historical `validTo` reach the shape a create
+  // reaches — no lower bound, "ended at T, start unknown" — instead of being
+  // refused for inverting against an instant the write would never have stored
+  // (I12). `undefined` here means "no bound", which is nothing to invert
+  // against, so the verdict below judges exactly what lands.
+  const resurrectionBound =
+    resurrectionInstant === undefined ? undefined : (
+      resolveStampedValidityLowerBound(validFrom, validTo, resurrectionInstant)
+    );
   // A resurrection STORES a stated `validFrom` (it rewrites the whole window);
   // an in-place update never does, so one that differs from the row's stored
   // bound is refused rather than accepted and dropped.
@@ -975,23 +988,19 @@ async function performNodeUpdate<G extends GraphDef>(
         effectiveBoundIsStored: true,
       }
     : {
-        effectiveValidFrom: resurrectionInstant,
+        effectiveValidFrom: resurrectionBound,
         appliesStatedValidFrom: true,
-        // The instant this write is about to stamp, not a bound the row holds.
+        // The bound this write is about to stamp, not one the row holds.
         effectiveBoundIsStored: false,
       },
     validTo,
   );
 
   const writeContext = createNodeWriteContext(ctx.graphId, ctx.registry, lock);
-  // `validFrom` reaches the backend only through a resurrecting write (see
-  // UpdateNodeParams): a live row's lower bound is history and stays put.
-  const effectiveValidFrom = validFrom ?? resurrectionInstant;
   const shared = {
     schema: nodeKind.schema,
     validatedProps,
     uniqueConstraints: registration.unique ?? [],
-    ...(effectiveValidFrom !== undefined && { validFrom: effectiveValidFrom }),
     ...(validTo !== undefined && { validTo }),
     ...(input.clearValidTo === true && { clearValidTo: true as const }),
     // The bound the verdict above READ, carried into the UPDATE's own `WHERE`
@@ -1010,9 +1019,31 @@ async function performNodeUpdate<G extends GraphDef>(
   // A resurrecting upsert (clearDeleted) may target a tombstoned row; a plain
   // update must prove the row live — see NodeUpdateTarget.
   if (options?.clearDeleted) {
+    // Keyed on the SAME condition the verdict was, because only that condition
+    // produces a verdict to state. With `resurrectionInstant` defined this is
+    // the DECISION, never an absence: omitting the key would let
+    // `buildUpdateNode` re-derive the bound against the backend's own, strictly
+    // later `timestamp`, so the two layers would agree only while the two clocks
+    // do — the #413 hazard, one layer out. `null` is how `UpdateNodeParams`
+    // spells "store no lower bound", which is what this decision resolves to for
+    // a resurrection that ends at or before the instant it judged.
+    //
+    // With it UNDEFINED this read found the row live — a peer resurrected it
+    // between the collection's probe and here — so the verdict judged the row's
+    // stored bound and stamped nothing. There is no decision to state, and
+    // stating one anyway would write away a `validFrom` the guard just ACCEPTED
+    // as equal to that stored bound. The statement usually matches no row
+    // (`deleted_at IS NOT NULL`) and the recovery below re-reads, but a peer that
+    // re-tombstones before the UPDATE makes it match, so this leg carries the
+    // stated bound exactly as the in-place leg does.
+    const resurrectionLowerBound =
+      resurrectionInstant === undefined ?
+        validFrom !== undefined && { validFrom }
+        // eslint-disable-next-line unicorn/no-null -- `validFrom: null` means "store NULL"; omitting the key means "decide for me", and this path has already decided. See UpdateNodeParams.validFrom.
+      : { validFrom: resurrectionBound ?? null };
     const row = await applyNodeUpdate(
       writeContext,
-      { ...shared, existing, clearDeleted: true },
+      { ...shared, existing, clearDeleted: true, ...resurrectionLowerBound },
       backend,
     );
     return rowToNode(row);
@@ -1021,7 +1052,11 @@ async function performNodeUpdate<G extends GraphDef>(
   if (!isLiveNodeRow(existing)) throw new NodeNotFoundError(kind, id);
   const row = await applyNodeUpdate(
     writeContext,
-    { ...shared, existing },
+    // An in-place update must not rewrite the stored bound, so it keeps the
+    // conditional spread: `buildUpdateNode` ignores `validFrom` off the
+    // resurrection leg, and stating one here would claim a rewrite that no
+    // statement performs.
+    { ...shared, existing, ...(validFrom !== undefined && { validFrom }) },
     backend,
   );
   return rowToNode(row);
@@ -1332,6 +1367,20 @@ async function resurrectPreparedNode<G extends GraphDef>(
   if (current.deleted_at === undefined) {
     throw createAlreadyExistsError("node", prepared.kind, prepared.id);
   }
+  // A create landing on a tombstone RESETS the window, so this leg stamps a
+  // bound whenever the caller stated none — and it decides which one through
+  // the same owner `performNodeUpdate`'s resurrection leg and every insert
+  // builder use, against an instant sampled HERE. Two consequences. The stored
+  // bound is the one this layer judged rather than the backend's strictly later
+  // sample, so one write has one instant (issue #413). And a create carrying
+  // only a historical `validTo` reaches the same stored shape on a tombstoned
+  // id as on a fresh one — no lower bound (I12).
+  const resurrectionInstant = nowIso();
+  const resurrectionBound = resolveStampedValidityLowerBound(
+    prepared.insertParams.validFrom,
+    prepared.insertParams.validTo,
+    resurrectionInstant,
+  );
   try {
     return await applyNodeUpdate(
       createNodeWriteContext(ctx.graphId, ctx.registry, lock),
@@ -1341,9 +1390,10 @@ async function resurrectPreparedNode<G extends GraphDef>(
         schema: prepared.nodeKind.schema,
         validatedProps: prepared.validatedProps,
         uniqueConstraints: prepared.uniqueConstraints,
-        ...(prepared.insertParams.validFrom === undefined ?
-          {}
-        : { validFrom: prepared.insertParams.validFrom }),
+        // The decision itself, never an absence — see the same spelling on
+        // `performNodeUpdate`'s resurrection leg.
+        // eslint-disable-next-line unicorn/no-null -- `validFrom: null` means "store NULL"; omitting the key means "decide for me", and this path has already decided. See UpdateNodeParams.validFrom.
+        validFrom: resurrectionBound ?? null,
         ...(prepared.insertParams.validTo === undefined ?
           {}
         : { validTo: prepared.insertParams.validTo }),
