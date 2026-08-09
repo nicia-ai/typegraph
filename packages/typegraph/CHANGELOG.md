@@ -1,5 +1,22 @@
 # @nicia-ai/typegraph
 
+## 0.46.1
+
+### Patch Changes
+
+- [#456](https://github.com/nicia-ai/typegraph/pull/456) [`a091902`](https://github.com/nicia-ai/typegraph/commit/a091902264fcbcd8336179c893a1e0a16eab528c) Thanks [@pdlug](https://github.com/pdlug)! - Add an explicit event-materializer policy for node upserts. Passing
+  `onImmutableLowerBound: "preserve"` applies `validFrom` when the upsert creates
+  or resurrects a row, but preserves a live row's stored lower bound while still
+  applying props and `validTo`. The strict `IMMUTABLE_VALIDITY_LOWER_BOUND`
+  refusal remains the default. The policy is available on `upsertById`,
+  `upsertByIdFromRecord`, and each `bulkUpsertById` item, including unchanged
+  coalescing replays.
+
+  Widen the optional `better-sqlite3` peer range through 13.x and exercise 13.0.3
+  in this repository. Correct the event-log projector guidance to update existing
+  endpoint-matched edges, document historical replay window requirements, and
+  clarify that `MergeReport.validityEnds` only reports inherited-row claims.
+
 ## 0.46.0
 
 ### Minor Changes
