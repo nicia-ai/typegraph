@@ -209,6 +209,78 @@ describe("merge plan V1 wire format", () => {
     if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
   });
 
+  it("uses the producer's id-first endpoint order for escaped ids", async () => {
+    const input = resolutionPlanInput();
+    const first = { kind: "Patient", id: '"' };
+    const second = { kind: "Patient", id: "/" };
+    const artifact = await constructMergePlanArtifact({
+      ...input,
+      guards: {
+        ...input.guards,
+        canonicalMappings: [
+          { member: first, canonical: first },
+          { member: second, canonical: first },
+        ],
+      },
+      review: {
+        ...input.review,
+        resolutions: [
+          {
+            canonicalId: first.id,
+            memberIds: [first.id, second.id],
+            kind: first.kind,
+            branchOrigins: ["branch-a"],
+            decisiveEdges: [
+              {
+                a: first,
+                b: second,
+                sources: [{ kind: "block", sourceId: "exactKey" }],
+                decision: "scored",
+                strategy: { kind: "fulltext", fields: ["name"] },
+                score: 0.9,
+                threshold: 0.8,
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    await expect(validateMergePlanArtifact(artifact)).resolves.toMatchObject({
+      success: true,
+    });
+  });
+
+  it("round-trips legal empty fulltext strategy fields", async () => {
+    const input = resolutionPlanInput();
+    const resolution = requireDefined(input.review.resolutions[0]);
+    const evidence = requireDefined(resolution.decisiveEdges[0]);
+    const artifact = await constructMergePlanArtifact({
+      ...input,
+      review: {
+        ...input.review,
+        resolutions: [
+          {
+            ...resolution,
+            decisiveEdges: [
+              {
+                ...evidence,
+                decision: "scored",
+                strategy: { kind: "fulltext", fields: [] },
+                score: 0.9,
+                threshold: 0.8,
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    await expect(validateMergePlanArtifact(artifact)).resolves.toMatchObject({
+      success: true,
+    });
+  });
+
   it("rejects contradictory writes and proposal counts", async () => {
     const artifact = await constructMergePlanArtifact(planInput());
     const malformed = {

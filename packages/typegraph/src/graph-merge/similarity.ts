@@ -96,9 +96,9 @@ const TRIGRAM_LENGTH = 3;
 const TRIGRAM_PAD = " ";
 
 /**
- * Clamps an arbitrary number into the `[0, 1]` similarity codomain. `NaN`
- * collapses to {@link MIN_SCORE} so a misbehaving custom scorer can never inject
- * a non-comparable score into clustering.
+ * Clamps a finite number into the `[0, 1]` similarity codomain. Custom scorers
+ * are checked for finiteness before reaching this helper; built-in strategies
+ * only produce finite values.
  */
 function clampScore(value: number): number {
   if (Number.isNaN(value)) {

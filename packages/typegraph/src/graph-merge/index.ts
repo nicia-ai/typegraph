@@ -78,6 +78,7 @@ export type {
   MergePlanSchemaFence,
   MergePlanSimilarityStrategy,
   MergePlanTargetFence,
+  MergePlanTypeReconciliation,
   MergePlanWrites,
 } from "./plan-schema";
 export {

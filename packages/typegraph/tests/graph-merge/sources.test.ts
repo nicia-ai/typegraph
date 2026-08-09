@@ -371,6 +371,9 @@ describe("candidate sources + scoring stage (step 0)", () => {
     const blocks = blockNodes([alice, bob], textlessAtZero);
     const pairs = pairsFromBlocks(blocks);
     expect(pairs).toHaveLength(1); // both unblocked → compared all-vs-all
+    expect(pairs[0]?.sources).toEqual([
+      { kind: "keyless", sourceId: "keyless" },
+    ]);
 
     const scored = scoreCandidates(
       { pairs, forcedEdges: [] },

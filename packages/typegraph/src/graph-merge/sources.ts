@@ -306,8 +306,22 @@ export function pairsFromBlocks(
       continue;
     }
     const members = sortMembersById(blocks.get(bucketKey) ?? []);
-    if (keyless !== undefined && bucketKey === UNBLOCKED_BUCKET_KEY) {
-      pairs.push(...windowedPairs(members, keyless));
+    if (bucketKey === UNBLOCKED_BUCKET_KEY) {
+      if (keyless !== undefined) {
+        pairs.push(...windowedPairs(members, keyless));
+        continue;
+      }
+      for (let index = 0; index < members.length; index += 1) {
+        for (let index_ = index + 1; index_ < members.length; index_ += 1) {
+          pairs.push(
+            orderEndpoints(
+              requireDefined(members[index]),
+              requireDefined(members[index_]),
+              [{ kind: "keyless", sourceId: "keyless" }],
+            ),
+          );
+        }
+      }
       continue;
     }
     for (let index = 0; index < members.length; index += 1) {
@@ -587,6 +601,7 @@ export const baseUniqueSource: CandidateSource = {
         {
           details: {
             kind,
+            source: "baseUnique",
             sourceId: "baseUnique",
             operation: "generate",
           },
@@ -737,7 +752,12 @@ export const baseKeySource: CandidateSource = {
       throw new CandidateSourceError(
         "baseKeySource requires nodes and store in the source scope.",
         {
-          details: { kind, sourceId: "baseKey", operation: "generate" },
+          details: {
+            kind,
+            source: "baseKey",
+            sourceId: "baseKey",
+            operation: "generate",
+          },
         },
       );
     }

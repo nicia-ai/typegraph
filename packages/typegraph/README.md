@@ -95,7 +95,7 @@ candidate generation, scoring, embeddings, or policy callbacks. Plans require a
 target with `revisionTracking: true` or `history: true`. They may contain
 sensitive application data, and their digest provides integrity/identity—not a
 signature, authentication, or authorization. `merge()` and `mergeIncremental()`
-remain the one-call wrappers over the same lifecycle.
+remain one-call compatibility APIs over the same resolution and write owners.
 
 It lives in the core package because the primitive is defined over TypeGraph
 stores, schemas, indexes, backends, and ontology semantics rather than as a

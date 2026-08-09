@@ -2555,7 +2555,7 @@ export type MatchSource = Readonly<{
 }> | Readonly<{
     kind: "custom";
     sourceId: string;
-    metadata?: JsonValue;
+    metadata?: JsonValue | undefined;
 }>;
 
 // @public
@@ -2873,6 +2873,11 @@ export type MergePlanGuards = Readonly<{
     canonicalMappings: readonly MergePlanCanonicalMapping[];
     retypes: readonly MergePlanRetype[];
     deletedNodes: readonly MergePlanEntityRef[];
+    incremental?: Readonly<{
+        tombstoneResurrection: "refuse";
+        lossyUpdates: "refuse";
+        edgeIdentity: "preserve";
+    }>;
 }>;
 
 // @public (undocumented)
@@ -2990,7 +2995,7 @@ export type MergePlanReview = Readonly<{
     resolutions: readonly MergePlanEntityResolution[];
     conflicts: readonly JsonValue[];
     deleteModifyConflicts: readonly JsonValue[];
-    typeReconciliations: readonly JsonValue[];
+    typeReconciliations: readonly MergePlanTypeReconciliation[];
     dropped: readonly JsonValue[];
     validityEnds: readonly JsonValue[];
     baseAmbiguities: readonly JsonValue[];
@@ -3047,6 +3052,14 @@ export class MergePlanTargetMismatchError extends InvalidMergePlanError {
     // (undocumented)
     readonly code: "GRAPH_MERGE_PLAN_TARGET_MISMATCH";
 }
+
+// @public (undocumented)
+export type MergePlanTypeReconciliation = Readonly<{
+    entityId: string;
+    fromTypes: readonly string[];
+    toType: string;
+    decisiveEdges?: readonly MergePlanMatchEvidence[] | undefined;
+}>;
 
 // @public (undocumented)
 export type MergePlanWrites = Readonly<{
@@ -5193,6 +5206,7 @@ export type TypeReconciliation = Readonly<{
     entityId: NodeId<NodeType>;
     fromTypes: readonly string[];
     toType: string;
+    decisiveEdges?: readonly MatchEvidence[];
 }>;
 
 // @public

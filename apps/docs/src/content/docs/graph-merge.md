@@ -598,6 +598,10 @@ identities normally has N−1 edges. Endpoints retain both kind and id, so
 same-id nodes of different kinds remain distinguishable during ontology
 reconciliation.
 
+A same-id ontology retype remains a `TypeReconciliation`, rather than creating
+an id-merge resolution. Its optional `decisiveEdges` carries the accepted retype
+witness without changing the meaning of the existing resolution collection.
+
 Each edge records every candidate source that proposed the pair in stable order.
 Definitional evidence names the trusted rule, such as a unique constraint, and
 does not pretend the internal forced match was a perfect similarity score.

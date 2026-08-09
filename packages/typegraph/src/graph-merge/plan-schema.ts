@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { canonicalValueKey } from "./canonical-props";
+import { compareEntityRefs, compareMatchSources } from "./evidence";
 import type { JsonValue } from "./typegraph-internal";
 
 export const MERGE_PLAN_FORMAT_VERSION = 1 as const;
@@ -109,6 +109,11 @@ export type MergePlanGuards = Readonly<{
   canonicalMappings: readonly MergePlanCanonicalMapping[];
   retypes: readonly MergePlanRetype[];
   deletedNodes: readonly MergePlanEntityRef[];
+  incremental?: Readonly<{
+    tombstoneResurrection: "refuse";
+    lossyUpdates: "refuse";
+    edgeIdentity: "preserve";
+  }>;
 }>;
 
 export type MergePlanMatchSource =
@@ -190,11 +195,18 @@ export type MergePlanDiagnostics = Readonly<{
   truncated: boolean;
 }>;
 
+export type MergePlanTypeReconciliation = Readonly<{
+  entityId: string;
+  fromTypes: readonly string[];
+  toType: string;
+  decisiveEdges?: readonly MergePlanMatchEvidence[] | undefined;
+}>;
+
 export type MergePlanReview = Readonly<{
   resolutions: readonly MergePlanEntityResolution[];
   conflicts: readonly JsonValue[];
   deleteModifyConflicts: readonly JsonValue[];
-  typeReconciliations: readonly JsonValue[];
+  typeReconciliations: readonly MergePlanTypeReconciliation[];
   dropped: readonly JsonValue[];
   validityEnds: readonly JsonValue[];
   baseAmbiguities: readonly JsonValue[];
@@ -389,6 +401,14 @@ const mergePlanGuardsSchema = z
         .strict(),
     ),
     deletedNodes: z.array(mergePlanEntityRefSchema),
+    incremental: z
+      .object({
+        tombstoneResurrection: z.literal("refuse"),
+        lossyUpdates: z.literal("refuse"),
+        edgeIdentity: z.literal("preserve"),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -556,6 +576,7 @@ const mergePlanReviewSchema = z
           entityId: nonEmptyStringSchema,
           fromTypes: z.array(nonEmptyStringSchema),
           toType: nonEmptyStringSchema,
+          decisiveEdges: z.array(mergePlanMatchEvidenceSchema).optional(),
         })
         .strict(),
     ),
@@ -660,6 +681,17 @@ function addSemanticIssues(
       code: "custom",
       path: ["anchors", "kind"],
       message: `Expected ${artifact.mode} anchors for a ${artifact.mode} plan.`,
+    });
+  }
+  if (
+    (artifact.mode === "incremental") !==
+    (artifact.guards.incremental !== undefined)
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["guards", "incremental"],
+      message:
+        "Incremental write guards must be present exactly for incremental plans.",
     });
   }
 
@@ -776,6 +808,26 @@ function addSemanticIssues(
   for (const [index, resolution] of artifact.review.resolutions.entries()) {
     addResolutionEvidenceIssues(artifact, resolution, index, ctx);
   }
+  for (const [
+    reconciliationIndex,
+    reconciliation,
+  ] of artifact.review.typeReconciliations.entries()) {
+    for (const [edgeIndex, evidence] of (
+      reconciliation.decisiveEdges ?? []
+    ).entries()) {
+      addEvidenceIssues(
+        evidence,
+        [
+          "review",
+          "typeReconciliations",
+          reconciliationIndex,
+          "decisiveEdges",
+          edgeIndex,
+        ],
+        ctx,
+      );
+    }
+  }
 }
 
 function addResolutionEvidenceIssues(
@@ -868,17 +920,14 @@ function addEvidenceIssues(
   path: readonly (string | number)[],
   ctx: z.RefinementCtx,
 ): void {
-  const sourceKeys = evidence.sources.map((source) => matchSourceKey(source));
-  const sourcesCanonical = sourceKeys.every((key, index) => {
-    const previous = sourceKeys[index - 1];
-    return previous === undefined || previous < key;
+  const sourcesCanonical = evidence.sources.every((source, index) => {
+    const previous = evidence.sources[index - 1];
+    return previous === undefined || compareMatchSources(previous, source) < 0;
   });
   const invalidStrategy =
     evidence.decision === "scored" &&
-    ((evidence.strategy.kind !== "custom" &&
-      evidence.strategy.fields.length === 0) ||
-      (evidence.strategy.kind === "vector" &&
-        evidence.strategy.fields.length !== 1) ||
+    ((evidence.strategy.kind === "vector" &&
+      evidence.strategy.fields.length !== 1) ||
       (evidence.strategy.kind === "hybrid" &&
         (evidence.strategy.weights.vector < 0 ||
           evidence.strategy.weights.vector > 1 ||
@@ -890,7 +939,7 @@ function addEvidenceIssues(
               1,
           ) > Number.EPSILON)));
   if (
-    entityKey(evidence.a) >= entityKey(evidence.b) ||
+    compareEntityRefs(evidence.a, evidence.b) >= 0 ||
     evidence.sources.length === 0 ||
     !sourcesCanonical ||
     (evidence.decision === "scored" &&
@@ -906,53 +955,6 @@ function addEvidenceIssues(
       message:
         "Evidence endpoints and sources must be canonical, and scored values must be within [0, 1].",
     });
-  }
-}
-
-function matchSourceKey(
-  source: ParsedMergePlanArtifactV1Input["review"]["resolutions"][number]["decisiveEdges"][number]["sources"][number],
-): string {
-  const order = {
-    block: 0,
-    unique: 1,
-    baseUnique: 2,
-    baseIndex: 3,
-    keyless: 4,
-    retype: 5,
-    custom: 6,
-  } as const;
-  switch (source.kind) {
-    case "block":
-    case "keyless":
-    case "retype": {
-      return JSON.stringify([order[source.kind], source.sourceId]);
-    }
-    case "unique":
-    case "baseUnique": {
-      return JSON.stringify([
-        order[source.kind],
-        source.sourceId,
-        source.constraintName,
-      ]);
-    }
-    case "baseIndex": {
-      return JSON.stringify([
-        order.baseIndex,
-        source.sourceId,
-        source.indexName,
-      ]);
-    }
-    case "custom": {
-      return JSON.stringify([
-        order.custom,
-        source.sourceId,
-        source.metadata === undefined ? "" : canonicalValueKey(source.metadata),
-      ]);
-    }
-    default: {
-      const exhaustive: never = source;
-      return exhaustive;
-    }
   }
 }
 

@@ -39,7 +39,7 @@ export type MatchSource =
   | Readonly<{
       kind: "custom";
       sourceId: string;
-      metadata?: JsonValue;
+      metadata?: JsonValue | undefined;
     }>;
 
 /** JSON-safe description of the strategy that actually scored a pair. */
@@ -153,6 +153,25 @@ function sourceKey(source: MatchSource): string {
   }
 }
 
+/** Total order shared by evidence producers and wire validation. */
+export function compareMatchSources(
+  left: MatchSource,
+  right: MatchSource,
+): number {
+  return compareStrings(sourceKey(left), sourceKey(right));
+}
+
+/** Canonical endpoint order shared by evidence producers and wire validation. */
+export function compareEntityRefs(
+  left: Readonly<{ kind: string; id: string }>,
+  right: Readonly<{ kind: string; id: string }>,
+): number {
+  return compareMergeKeys(
+    mergeKey(left.kind, left.id),
+    mergeKey(right.kind, right.id),
+  );
+}
+
 /** Stable, duplicate-free union of every attribution for an endpoint pair. */
 export function normalizeMatchSources(
   sources: readonly MatchSource[],
@@ -162,7 +181,7 @@ export function normalizeMatchSources(
     byKey.set(sourceKey(source), source);
   }
   return [...byKey]
-    .sort(([left], [right]) => compareStrings(left, right))
+    .sort(([, left], [, right]) => compareMatchSources(left, right))
     .map(([, source]) => source);
 }
 
@@ -204,11 +223,7 @@ export function compareMatchEvidence(
   left: MatchEvidence,
   right: MatchEvidence,
 ): number {
-  const leftA = mergeKey(left.a.kind, left.a.id);
-  const rightA = mergeKey(right.a.kind, right.a.id);
-  const byA = compareMergeKeys(leftA, rightA);
+  const byA = compareEntityRefs(left.a, right.a);
   if (byA !== 0) return byA;
-  const leftB = mergeKey(left.b.kind, left.b.id);
-  const rightB = mergeKey(right.b.kind, right.b.id);
-  return compareMergeKeys(leftB, rightB);
+  return compareEntityRefs(left.b, right.b);
 }

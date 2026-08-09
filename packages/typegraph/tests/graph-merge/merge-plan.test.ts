@@ -335,6 +335,41 @@ describe("public merge plan lifecycle", () => {
     ).toBeDefined();
   });
 
+  it("preserves the incremental tombstone-resurrection guard", async () => {
+    const forkPoint = await makeBase();
+    const source = await makeBranch(forkPoint, "incremental-tombstone-source");
+    await source.store.nodes.Person.create(
+      { name: "Branch Alice", group: "g" },
+      { id: "reused-id" },
+    );
+    const target = await makeBase();
+    await target.nodes.Person.create(
+      { name: "Committed Alice", group: "g" },
+      { id: "reused-id" },
+    );
+    await target.nodes.Person.delete(asNodeId("reused-id"));
+
+    const artifact = unwrap(
+      await planMergeIncremental({
+        forkPoint,
+        target,
+        branches: [source],
+      }),
+    );
+    expect(artifact.guards.incremental).toEqual({
+      tombstoneResurrection: "refuse",
+      lossyUpdates: "refuse",
+      edgeIdentity: "preserve",
+    });
+
+    const applied = await applyMergePlan(target, artifact);
+    expect(isErr(applied)).toBe(true);
+    if (isErr(applied)) {
+      expect(applied.error).toBeInstanceOf(InvalidMergePlanError);
+      expect(applied.error.message).toMatch(/resurrect soft-deleted/i);
+    }
+  });
+
   it("canonicalizes plans and diagnostics independently of branch enumeration", async () => {
     const base = await makeBase();
     const branches = await Promise.all([

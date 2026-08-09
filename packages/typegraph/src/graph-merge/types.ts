@@ -436,6 +436,8 @@ export type TypeReconciliation = Readonly<{
   entityId: NodeId<NodeType>;
   fromTypes: readonly string[];
   toType: string;
+  /** Accepted ontology-retype witness, when emitted by graph merge. */
+  decisiveEdges?: readonly MatchEvidence[];
 }>;
 
 /**
