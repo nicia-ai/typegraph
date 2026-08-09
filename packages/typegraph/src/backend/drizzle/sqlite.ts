@@ -1158,8 +1158,13 @@ function createSqliteOperationBackend(
  * that every statement from every wrapper over it runs on, in order.
  *
  * `protocol === "file"` is the client's own answer to "am I local?" — it covers
- * `file:` paths, `:memory:` databases, and an embedded replica's local file. A
- * REMOTE client (`http` / `ws`) opens an independent stream per transaction and
+ * `file:` paths, `:memory:` databases, and an embedded replica's local file. An
+ * embedded replica (`protocol: "file"` PLUS a `syncUrl`) is deliberately marked
+ * on the same evidence as any other local client: `syncUrl` names where the
+ * replica pulls FROM, while every statement this client executes still routes
+ * through the one local handle, so an open export snapshot on one wrapper still
+ * holds the connection another wrapper's import needs. A REMOTE client
+ * (`http` / `ws`) opens an independent stream per transaction and
  * must never be treated as one serialized resource; refusing concurrent work
  * there would refuse work that succeeds. The libsql methods are required
  * alongside the protocol so an unrelated object that happens to carry

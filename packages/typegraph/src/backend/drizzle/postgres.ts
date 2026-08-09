@@ -1695,23 +1695,26 @@ export function createPostgresBackend(
  *   An export's `BEGIN ... READ ONLY` stays open across the whole stream, so a
  *   concurrent import's INSERT lands inside it ("cannot execute INSERT in a
  *   read-only transaction").
- * - **A `Pool` explicitly configured with `max: 1`** — the export checks out the
+ * - **A `Pool` whose resolved cap is one connection** — the export checks out the
  *   pool's only connection for the duration, so a concurrent import waits for a
- *   connection that is never released.
- * - **A postgres-js client built with `{ max: 1 }`** — the same cap on a
- *   CALLABLE client. postgres-js's `begin` reserves a connection from its own
- *   pool for the transaction, so with a pool of one an export snapshot holds the
- *   only connection every other wrapper's statement needs.
+ *   connection that is never released. Every spelling pg-pool resolves into that
+ *   cap counts; {@link isSingleConnectionPgPoolCap} owns which ones those are.
+ * - **A postgres-js client whose resolved cap is one connection** — the same cap
+ *   on a CALLABLE client. postgres-js's `begin` reserves a connection from its
+ *   own pool for the transaction, so with a pool of one an export snapshot holds
+ *   the only connection every other wrapper's statement needs.
+ *   {@link isSingleConnectionPostgresJsCap} owns that driver's reading of a cap,
+ *   which is NOT the same decision as pg-pool's.
  *
  * Deliberately NOT marked: a default pool (independent connection per
  * checkout), a postgres-js client at default size (`max` defaults to 10), a
  * neon-http tagged template (session-less HTTP), and anything unrecognized. A
  * false positive refuses legitimate concurrent work, so the predicate requires
  * positive evidence and abstains otherwise. A pool capped at one connection by
- * means other than an explicit `max` option (a global `pg.defaults.max`, a
- * driver-specific connection string) is therefore not detected, and a
- * serialized-connection import there still fails the way it did before this
- * guard existed.
+ * means other than the cap pg-pool resolves (a global `pg.defaults.max`, a
+ * `pg` connection string's `?max=1` — neither of which pg honors, so neither
+ * caps anything) is therefore not detected, and a serialized-connection import
+ * there still fails the way it did before this guard existed.
  */
 function getSerializedPostgresClient(db: AnyPgDatabase): object | undefined {
   const pgliteClient = getPgliteClient(db);
@@ -1735,11 +1738,33 @@ function isSingleConnectionPgPool(
   candidate: Readonly<Record<string, unknown>>,
 ): boolean {
   // `options` is a pg.Pool member (pg.Client has none), and holds the resolved
-  // pool configuration. Only an explicit `max: 1` is treated as serialized: the
-  // default is 10, so an absent/other `max` says nothing.
+  // pool configuration. The default is 10, so an absent/other `max` says
+  // nothing; what a cap of one looks like is the cap predicate's decision.
   const options: unknown = candidate["options"];
   if (typeof options !== "object" || options === null) return false;
-  return (options as Readonly<Record<string, unknown>>)["max"] === 1;
+  return isSingleConnectionPgPoolCap(
+    (options as Readonly<Record<string, unknown>>)["max"],
+  );
+}
+
+/**
+ * Whether a pg-pool `options.max` means ONE connection.
+ *
+ * Numeric 1 is the obvious form. A STRING `"1"` is not a typo: pg-pool's
+ * `options.max = options.max || options.poolSize || 10` (pg-pool 3.x
+ * `index.js:89`) never coerces, so `new Pool({ max: process.env.PG_MAX })` —
+ * and the legacy `new Pool({ poolSize: "1" })`, which lands in the same
+ * `options.max` — keeps a string that its own `this._clients.length >=
+ * this.options.max` comparison (`index.js:120`) then coerces. The pool really
+ * is capped at one.
+ *
+ * `"5"` is NOT evidence: `1 >= "5"` is false, so that pool genuinely opens five
+ * connections. This is the whole reason the decision is per driver — postgres-js
+ * reads the identical value differently, and
+ * {@link isSingleConnectionPostgresJsCap} owns that reading.
+ */
+function isSingleConnectionPgPoolCap(value: unknown): boolean {
+  return value === 1 || (typeof value === "string" && Number(value) === 1);
 }
 
 /**
@@ -1752,11 +1777,11 @@ function isSingleConnectionPgPool(
  *   adapter that already discriminates postgres-js from the other callable
  *   client (neon-http). Without it, `options.max` on an unknown callable means
  *   nothing we can act on.
- * - `options.max === 1` — postgres-js exposes its RESOLVED options on the
- *   callable, and its `max` defaults to 10, so only an explicit cap of one says
- *   "every statement lands on the same connection". An absent or larger `max`
- *   abstains: postgres-js at default size hands each `begin` its own connection
- *   and marking it would refuse concurrent work that succeeds.
+ * - {@link isSingleConnectionPostgresJsCap} — postgres-js exposes its RESOLVED
+ *   options on the callable, and its `max` defaults to 10, so only a cap of one
+ *   says "every statement lands on the same connection". An absent or larger
+ *   `max` abstains: postgres-js at default size hands each `begin` its own
+ *   connection and marking it would refuse concurrent work that succeeds.
  *
  * NOT covered: Bun's `SQL`. Nothing in this package positively identifies that
  * driver (the SQLite side recognizes `BunSQLiteSession`; there is no Postgres
@@ -1773,7 +1798,32 @@ function isSingleConnectionCallablePgClient(client: unknown): boolean {
   ];
   if (!isPostgresJsClient(client)) return false;
   if (typeof options !== "object" || options === null) return false;
-  return (options as Readonly<Record<string, unknown>>)["max"] === 1;
+  return isSingleConnectionPostgresJsCap(
+    (options as Readonly<Record<string, unknown>>)["max"],
+  );
+}
+
+/**
+ * Whether a postgres-js `options.max` means ONE connection.
+ *
+ * postgres-js resolves `max` from the options object, the URL query string and
+ * the `PGMAX` environment variable, and does not coerce it (`max` is absent from
+ * its `ints` list, postgres@3.4.9 `src/index.js:447`). So `postgres(url +
+ * "?max=1")` and `PGMAX=1` both yield the STRING `"1"`, which is one connection
+ * and is marked, exactly as the numeric `postgres(url, { max: 1 })` is.
+ *
+ * KNOWN, DELIBERATE GAP: `[...Array(options.max)]` (`src/index.js:65`) yields
+ * length 1 for ANY non-numeric string, so `postgres(url + "?max=5")` also opens
+ * exactly one connection today and can genuinely wedge a stream pair. It is NOT
+ * marked, because marking on it means marking on an upstream bug: the moment
+ * postgres-js coerces `max`, that configuration becomes a five-connection pool
+ * and the mark would refuse legitimate concurrent work. This is why the decision
+ * is separate from {@link isSingleConnectionPgPoolCap} — the two predicates read
+ * the same value with two justifications, and it is those justifications, not
+ * the bodies, that will diverge as either driver changes.
+ */
+function isSingleConnectionPostgresJsCap(value: unknown): boolean {
+  return value === 1 || (typeof value === "string" && Number(value) === 1);
 }
 
 /** Whether a `pg`-shaped client owns exactly one connection (Client, not Pool). */

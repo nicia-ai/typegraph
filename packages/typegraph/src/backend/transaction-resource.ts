@@ -116,16 +116,22 @@
  *   `dumpDataDir`).
  * - Bare `pg` / `@neondatabase/serverless` `Client`, including a checked-out
  *   `PoolClient` — same site, via `isBarePgClient`.
- * - `pg` / neon-serverless `Pool` whose resolved `options.max === 1` — same
- *   site, via `isSingleConnectionPgPool`. pg-pool normalizes `max` (and the
- *   legacy `poolSize`) into `options`, so every cap that pool honors is visible
- *   there.
- * - postgres-js built with `{ max: 1 }` — same site, via
- *   `isSingleConnectionCallablePgClient`. The client is CALLABLE, so it needed a
+ * - `pg` / neon-serverless `Pool` capped at one connection — same site, via
+ *   `isSingleConnectionPgPool`, which asks `isSingleConnectionPgPoolCap` what a
+ *   cap of one looks like. pg-pool normalizes `max` (and the legacy `poolSize`)
+ *   into `options` without coercing either, so `{ max: 1 }`, `{ max: "1" }` and
+ *   `{ poolSize: "1" }` are one and the same one-connection pool, and all three
+ *   are marked.
+ * - postgres-js capped at one connection — same site, via
+ *   `isSingleConnectionCallablePgClient`, which asks
+ *   `isSingleConnectionPostgresJsCap`. The client is CALLABLE, so it needed a
  *   resolver arm of its own; `begin` reserves the sole connection, making an
  *   export snapshot hold the connection every other wrapper writes through.
- *   Requires postgres-js identity (`isPostgresJsClient`) as well as the cap: a
- *   cap on a callable we cannot attribute to a known driver is not evidence.
+ *   postgres-js resolves `max` from the options object, the URL query string and
+ *   `PGMAX` and coerces none of them, so `{ max: 1 }`, `?max=1` and `PGMAX=1`
+ *   are all marked. Requires postgres-js identity (`isPostgresJsClient`) as well
+ *   as the cap: a cap on a callable we cannot attribute to a known driver is not
+ *   evidence.
  * - Cloudflare Durable Object storage (`drizzle(ctx.storage)`) —
  *   `createSqliteBackend` via `getDurableObjectStorageClient`, the same
  *   full-shape evidence `transactionMode: "do-sqlite"` requires to run a
@@ -170,6 +176,15 @@
  *   `expo-sqlite`, `op-sqlite`, `sqlite-proxy` and `better-sqlite3`, and no
  *   `node-sqlite` entrypoint, so no `createSqliteBackend` call can be handed
  *   one. Re-check when the Drizzle floor moves; nothing to mark until then.
+ * - postgres-js given a NON-NUMERIC string cap other than one, e.g.
+ *   `postgres(url + "?max=5")`: `[...Array(options.max)]` (postgres@3.4.9
+ *   `src/index.js:65`) yields length 1 for any such string, so that client
+ *   really does open exactly one connection today and really can wedge a stream
+ *   pair. Unmarked on purpose — marking it would be marking on an upstream bug,
+ *   and the day postgres-js coerces `max` the same configuration becomes a
+ *   five-connection pool whose concurrent work we would then refuse. A caller on
+ *   that shape materializes the export or imports into an independent backend,
+ *   exactly as before this guard existed.
  * - Bun `SQL` (Postgres) built with `{ max: 1 }`: genuinely serialized, but
  *   nothing in this package positively identifies that driver — there is no
  *   Postgres equivalent of the SQLite driver shapes above — so `options.max`
