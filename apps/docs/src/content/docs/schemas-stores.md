@@ -1543,6 +1543,7 @@ store.edges.worksAt.getOrCreateByEndpoints(
     ifExists?: "return" | "update"; // Default: "return"
     validFrom?: string;
     validTo?: string;
+    onImmutableLowerBound?: "refuse" | "preserve"; // Default: "refuse"
   }
 ): Promise<{
   edge: Edge<worksAt>;
@@ -1550,17 +1551,18 @@ store.edges.worksAt.getOrCreateByEndpoints(
 }>;
 ```
 
-`validFrom` applies when the operation creates the edge and when it resurrects
-one. An `"updated"` live match leaves the existing start unchanged, because a
-live row's lower bound is history — so a `validFrom` naming a different instant
-is refused rather than ignored, see
-[Immutable validity lower bounds](/errors/#immutable_validity_lower_bound);
-restating the bound the edge already holds is accepted. On a resurrection, naming
-`validFrom` asserts
-the COMPLETE window: an accompanying `validTo` is applied, and an omitted one
-reopens the revived row rather than keeping the tombstoned incarnation's end.
-`validTo` applies when the edge is created, updated, or resurrected, and may not
-precede the row's effective start — see
+`validFrom` applies when the operation creates or resurrects the edge. On an
+`"updated"` live match, `onImmutableLowerBound: "preserve"` treats it as
+create/resurrection-only input: the stored start remains unchanged while props
+and `validTo` are applied. The default `"refuse"` policy instead refuses a
+`validFrom` naming a different instant; restating the bound the edge already
+holds is accepted. See
+[Immutable validity lower bounds](/errors/#immutable_validity_lower_bound).
+On a resurrection, naming `validFrom` asserts the COMPLETE window: an
+accompanying `validTo` is applied, and an omitted one reopens the revived row
+rather than keeping the tombstoned incarnation's end. `validTo` applies when
+the edge is created, updated, or resurrected, and may not precede the row's
+effective start — see
 [Inverted validity windows](/errors/#inverted_validity_window). When `ifExists`
 is omitted or `"return"`, a live match produces the `"found"` action and neither
 temporal option changes the edge.
@@ -1577,6 +1579,7 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
     props: { role: string };
     validFrom?: string;
     validTo?: string;
+    onImmutableLowerBound?: "refuse" | "preserve";
   }[],
   options?: {
     matchOn?: readonly ("role")[];
@@ -1590,14 +1593,14 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
 >;
 ```
 
-Temporal fields belong to each item so identities with different endpoints or
-`matchOn` values can carry different validity windows in one batch. Items with
-the same endpoint-plus-`matchOn` identity are duplicates: the first item
-supplies the write values and later items return that edge with the `"found"`
-action. To represent multiple periods between the same endpoints, add a stable
-period or source-event field to the edge schema and include it in `matchOn`.
-Their create, update, and resurrection semantics otherwise match the single
-operation.
+Temporal fields and `onImmutableLowerBound` belong to each item so identities
+with different endpoints or `matchOn` values can carry independent validity
+windows and lower-bound policies in one batch. Items with the same
+endpoint-plus-`matchOn` identity are duplicates: the first item supplies the
+write values and later items return that edge with the `"found"` action. To
+represent multiple periods between the same endpoints, add a stable period or
+source-event field to the edge schema and include it in `matchOn`. Their create,
+update, and resurrection semantics otherwise match the single operation.
 
 #### `findByEndpoints(from, to, options?, temporal?)`
 

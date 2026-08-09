@@ -750,6 +750,15 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
      */
     validFrom?: string;
     /**
+     * How an `ifExists: "update"` write treats a stated `validFrom` that differs
+     * from the live edge's stored lower bound. Default: `"refuse"`.
+     *
+     * `"preserve"` makes `validFrom` create/resurrection-only input: it is still
+     * validated, but a live update keeps the stored lower bound while applying
+     * properties and `validTo`.
+     */
+    onImmutableLowerBound?: "preserve" | "refuse";
+    /**
      * Valid-time end for a created, updated, or resurrected edge. Ignored when
      * the operation returns an existing edge without writing. May not precede
      * the row's effective start; see `INVERTED_VALIDITY_WINDOW_CODE`.
@@ -1498,6 +1507,7 @@ export type EdgeCollection<
       props: z.input<E["schema"]>;
       validFrom?: string;
       validTo?: string;
+      onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
     options?: Pick<
       EdgeGetOrCreateByEndpointsOptions<E>,

@@ -1444,6 +1444,7 @@ export type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeTy
         props: z.input<E["schema"]>;
         validFrom?: string;
         validTo?: string;
+        onImmutableLowerBound?: "preserve" | "refuse";
     }>[], options?: Pick<EdgeGetOrCreateByEndpointsOptions<E>, "matchOn" | "ifExists">) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>[]>;
 }>;
 
@@ -1496,6 +1497,7 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> = Readonly<
     matchOn?: readonly (keyof z.input<E["schema"]>)[];
     ifExists?: IfExistsMode;
     validFrom?: string;
+    onImmutableLowerBound?: "preserve" | "refuse";
     validTo?: string;
 }>;
 

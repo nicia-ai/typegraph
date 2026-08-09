@@ -145,6 +145,7 @@ export type EdgeCollectionConfig = Readonly<{
       ifExists?: IfExistsMode;
       validFrom?: string;
       validTo?: string;
+      onImmutableLowerBound?: "preserve" | "refuse";
     }>,
   ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>>;
   executeBulkGetOrCreateByEndpoints: (
@@ -157,6 +158,7 @@ export type EdgeCollectionConfig = Readonly<{
       props: Record<string, unknown>;
       validFrom?: string;
       validTo?: string;
+      onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{
@@ -234,11 +236,15 @@ type EdgeUpdateInput = Readonly<{
  *
  * The public `update()` API cannot reach this member: its options type exposes
  * `validTo` only, and it builds its input through {@link buildUpdateEdgeInput}.
- * Only `bulkUpsertById`, which accepts `validFrom` by contract, routes through
- * {@link buildUpsertUpdateEdgeInput}.
+ * `bulkUpsertById` and endpoint-matched upserts route through this input because
+ * both may accept `validFrom`; only the endpoint surface currently exposes the
+ * create/resurrection-only policy.
  */
 export type UpsertUpdateEdgeInput = EdgeUpdateInput &
-  Readonly<{ validFrom?: string }>;
+  Readonly<{
+    validFrom?: string;
+    onImmutableLowerBound?: "preserve" | "refuse";
+  }>;
 
 function buildUpdateEdgeInput(
   kind: string,
@@ -1096,6 +1102,9 @@ export function createEdgeCollection<
           validFrom: options.validFrom,
         }),
         ...(options?.validTo !== undefined && { validTo: options.validTo }),
+        ...(options?.onImmutableLowerBound !== undefined && {
+          onImmutableLowerBound: options.onImmutableLowerBound,
+        }),
       };
 
       const result = await config.executeGetOrCreateByEndpoints(
@@ -1118,6 +1127,7 @@ export function createEdgeCollection<
         props: z.input<E["schema"]>;
         validFrom?: string;
         validTo?: string;
+        onImmutableLowerBound?: "preserve" | "refuse";
       }>[],
       options?: Pick<
         EdgeGetOrCreateByEndpointsOptions<E>,
@@ -1134,6 +1144,9 @@ export function createEdgeCollection<
         props: item.props,
         ...(item.validFrom !== undefined && { validFrom: item.validFrom }),
         ...(item.validTo !== undefined && { validTo: item.validTo }),
+        ...(item.onImmutableLowerBound !== undefined && {
+          onImmutableLowerBound: item.onImmutableLowerBound,
+        }),
       }));
 
       const getOrCreateOptions = {

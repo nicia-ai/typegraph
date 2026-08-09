@@ -208,6 +208,9 @@ export type EdgeOperations = Readonly<{
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
+      validFrom?: string;
+      validTo?: string;
+      onImmutableLowerBound?: "preserve" | "refuse";
     }>,
   ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>>;
   executeBulkGetOrCreateByEndpoints: (
@@ -218,6 +221,9 @@ export type EdgeOperations = Readonly<{
       toKind: string;
       toId: string;
       props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
+      onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{

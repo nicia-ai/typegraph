@@ -459,6 +459,117 @@ export function registerEdgeOperationIntegrationTests(
       expect(stored?.meta.validTo).toBeUndefined();
     });
 
+    it("preserves a live edge lower bound when an endpoint update opts in", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const created = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+      const updated = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Manager" },
+        {
+          ifExists: "update",
+          validFrom: SECOND_VALID_FROM,
+          // The source pair is inverted, but the effective stored window is
+          // ordered. Preserve mode must judge the window the write will keep.
+          validTo: FIRST_VALID_TO,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+
+      expect(updated.action).toBe("updated");
+      expect(updated.edge.id).toBe(created.edge.id);
+      expect(updated.edge.role).toBe("Manager");
+      expect(updated.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(updated.edge.meta.validTo).toBe(FIRST_VALID_TO);
+    });
+
+    it("still validates a preserved endpoint lower bound", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      await store.edges.worksAt.create(alice, acme, { role: "Engineer" });
+
+      await expect(
+        store.edges.worksAt.getOrCreateByEndpoints(
+          alice,
+          acme,
+          { role: "Manager" },
+          {
+            ifExists: "update",
+            validFrom: "not-a-date",
+            onImmutableLowerBound: "preserve",
+          },
+        ),
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validFrom"/);
+    });
+
+    it("still refuses an effectively inverted preserved endpoint window", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+
+      await expect(
+        store.edges.worksAt.getOrCreateByEndpoints(
+          alice,
+          acme,
+          { role: "Manager" },
+          {
+            ifExists: "update",
+            validFrom: "2017-01-01T00:00:00.000Z",
+            validTo: "2018-01-01T00:00:00.000Z",
+            onImmutableLowerBound: "preserve",
+          },
+        ),
+      ).rejects.toThrow(/Inverted validity window/);
+    });
+
+    it("applies a preserved lower bound on create and resurrection", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const created = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        {
+          validFrom: FIRST_VALID_FROM,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+      expect(created.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+
+      await store.edges.worksAt.delete(created.edge.id);
+      const resurrected = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Manager" },
+        {
+          validFrom: SECOND_VALID_FROM,
+          validTo: SECOND_VALID_TO,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+
+      expect(resurrected.action).toBe("resurrected");
+      expect(resurrected.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
+      expect(resurrected.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
     it("restating the bound a live edge already holds is accepted", async () => {
       const store = context.getStore();
       const alice = await store.nodes.Person.create({ name: "Alice" });
@@ -613,6 +724,172 @@ export function registerEdgeOperationIntegrationTests(
       expect(stored?.role).toBe("Engineer");
       expect(stored?.meta.validFrom).toBe(FIRST_VALID_FROM);
       expect(stored?.meta.validTo).toBeUndefined();
+    });
+
+    it("applies per-item lower-bound policy across bulk update, resurrection, and create", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const charlie = await store.nodes.Person.create({ name: "Charlie" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const live = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+      const deleted = await store.edges.worksAt.create(
+        bob,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+      await store.edges.worksAt.delete(deleted.id);
+
+      const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
+        [
+          {
+            from: alice,
+            to: acme,
+            props: { role: "Manager" },
+            validFrom: SECOND_VALID_FROM,
+            validTo: FIRST_VALID_TO,
+            onImmutableLowerBound: "preserve",
+          },
+          {
+            from: bob,
+            to: acme,
+            props: { role: "Director" },
+            validFrom: SECOND_VALID_FROM,
+            validTo: SECOND_VALID_TO,
+            onImmutableLowerBound: "preserve",
+          },
+          {
+            from: charlie,
+            to: acme,
+            props: { role: "Analyst" },
+            validFrom: SECOND_VALID_FROM,
+            validTo: SECOND_VALID_TO,
+            onImmutableLowerBound: "preserve",
+          },
+        ],
+        { ifExists: "update" },
+      );
+
+      expect(results.map((result) => result.action)).toEqual([
+        "updated",
+        "resurrected",
+        "created",
+      ]);
+      expect(results[0]?.edge.id).toBe(live.id);
+      expect(results[0]?.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(results[0]?.edge.meta.validTo).toBe(FIRST_VALID_TO);
+      expect(results[1]?.edge.id).toBe(deleted.id);
+      expect(results[1]?.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
+      expect(results[1]?.edge.meta.validTo).toBe(SECOND_VALID_TO);
+      expect(results[2]?.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
+      expect(results[2]?.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    it("keeps strict and preserve policies isolated in an atomic bulk update", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      const [aliceEdge, bobEdge] = await store.edges.worksAt.bulkCreate([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+        {
+          from: bob,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+      ]);
+
+      await expectImmutableLowerBoundRefusal(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints(
+          [
+            {
+              from: alice,
+              to: acme,
+              props: { role: "Manager" },
+              validFrom: SECOND_VALID_FROM,
+              onImmutableLowerBound: "preserve",
+            },
+            {
+              from: bob,
+              to: acme,
+              props: { role: "Director" },
+              validFrom: SECOND_VALID_FROM,
+              onImmutableLowerBound: "refuse",
+            },
+          ],
+          { ifExists: "update" },
+        ),
+      );
+
+      const storedAliceEdge = await store.edges.worksAt.getById(
+        requireDefined(aliceEdge).id,
+      );
+      const storedBobEdge = await store.edges.worksAt.getById(
+        requireDefined(bobEdge).id,
+      );
+      expect(storedAliceEdge?.role).toBe("Engineer");
+      expect(storedBobEdge?.role).toBe("Engineer");
+    });
+
+    it("rejects malformed per-item preserve input before applying a bulk update", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      const [aliceEdge] = await store.edges.worksAt.bulkCreate([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+        {
+          from: bob,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+      ]);
+
+      await expect(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints(
+          [
+            {
+              from: alice,
+              to: acme,
+              props: { role: "Manager" },
+              validFrom: SECOND_VALID_FROM,
+              onImmutableLowerBound: "preserve",
+            },
+            {
+              from: bob,
+              to: acme,
+              props: { role: "Director" },
+              validFrom: "not-a-date",
+              onImmutableLowerBound: "preserve",
+            },
+          ],
+          { ifExists: "update" },
+        ),
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validFrom"/);
+
+      const storedAliceEdge = await store.edges.worksAt.getById(
+        requireDefined(aliceEdge).id,
+      );
+      expect(storedAliceEdge?.role).toBe("Engineer");
     });
   });
 }
