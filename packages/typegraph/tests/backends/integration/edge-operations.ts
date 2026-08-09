@@ -791,5 +791,105 @@ export function registerEdgeOperationIntegrationTests(
       expect(results[2]?.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
       expect(results[2]?.edge.meta.validTo).toBe(SECOND_VALID_TO);
     });
+
+    it("keeps strict and preserve policies isolated in an atomic bulk update", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      const [aliceEdge, bobEdge] = await store.edges.worksAt.bulkCreate([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+        {
+          from: bob,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+      ]);
+
+      await expectImmutableLowerBoundRefusal(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints(
+          [
+            {
+              from: alice,
+              to: acme,
+              props: { role: "Manager" },
+              validFrom: SECOND_VALID_FROM,
+              onImmutableLowerBound: "preserve",
+            },
+            {
+              from: bob,
+              to: acme,
+              props: { role: "Director" },
+              validFrom: SECOND_VALID_FROM,
+              onImmutableLowerBound: "refuse",
+            },
+          ],
+          { ifExists: "update" },
+        ),
+      );
+
+      const storedAliceEdge = await store.edges.worksAt.getById(
+        requireDefined(aliceEdge).id,
+      );
+      const storedBobEdge = await store.edges.worksAt.getById(
+        requireDefined(bobEdge).id,
+      );
+      expect(storedAliceEdge?.role).toBe("Engineer");
+      expect(storedBobEdge?.role).toBe("Engineer");
+    });
+
+    it("rejects malformed per-item preserve input before applying a bulk update", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      const [aliceEdge] = await store.edges.worksAt.bulkCreate([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+        {
+          from: bob,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+      ]);
+
+      await expect(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints(
+          [
+            {
+              from: alice,
+              to: acme,
+              props: { role: "Manager" },
+              validFrom: SECOND_VALID_FROM,
+              onImmutableLowerBound: "preserve",
+            },
+            {
+              from: bob,
+              to: acme,
+              props: { role: "Director" },
+              validFrom: "not-a-date",
+              onImmutableLowerBound: "preserve",
+            },
+          ],
+          { ifExists: "update" },
+        ),
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validFrom"/);
+
+      const storedAliceEdge = await store.edges.worksAt.getById(
+        requireDefined(aliceEdge).id,
+      );
+      expect(storedAliceEdge?.role).toBe("Engineer");
+    });
   });
 }
