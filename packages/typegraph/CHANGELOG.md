@@ -1,5 +1,18 @@
 # @nicia-ai/typegraph
 
+## 0.46.2
+
+### Patch Changes
+
+- [#459](https://github.com/nicia-ai/typegraph/pull/459) [`0e2afe2`](https://github.com/nicia-ai/typegraph/commit/0e2afe2d76381b5bc8309485d3a7e84c7bda092e) Thanks [@pdlug](https://github.com/pdlug)! - Extend `onImmutableLowerBound: "preserve"` to endpoint-matched edge writes.
+  `getOrCreateByEndpoints` accepts the policy in its options, and
+  `bulkGetOrCreateByEndpoints` accepts it per item alongside `validFrom` and
+  `validTo`. The policy applies a stated `validFrom` on create or resurrection,
+  while a live `ifExists: "update"` preserves the stored lower bound and still
+  applies properties and `validTo`. Strict refusal remains the default.
+
+- [#462](https://github.com/nicia-ai/typegraph/pull/462) [`44f60cf`](https://github.com/nicia-ai/typegraph/commit/44f60cfbfaa6290323b02fb33fad2ca3541b1127) Thanks [@pdlug](https://github.com/pdlug)! - Surface lost fulltext contribution storage on gated operations as a typed `ContributionUnavailableError` with `state: "physical-storage-missing"` and rebuild guidance. Healthy operations retain the cached marker fast path; the error path translates only a missing-relation failure whose same driver error names the declared fulltext table.
+
 ## 0.46.1
 
 ### Patch Changes
