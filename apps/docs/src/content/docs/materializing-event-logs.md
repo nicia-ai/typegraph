@@ -231,9 +231,10 @@ built for. It is also the one that churns recorded history the hardest: every
 re-delivery of a byte-identical change rewrites its row, allocating a fresh
 recorded instant and a new history row per delivery. Enable
 [`coalesceUnchangedUpserts: true`](/schemas-stores/#createstoregraph-backend-options)
-on the store to suppress that: an `upsertById` whose validated props already
-equal the live row performs no write, no history row, and no revision advance,
-and resolves with the existing node. See
+on the store to suppress that. A node `upsertById` and an edge endpoint
+get-or-create update performs no write, history row, or revision advance when
+its validated props and requested window already equal the live row. Their bulk
+forms have the same behavior. See
 [Transaction Receipts](#transaction-receipts) for how a coalesced upsert reads on
 a receipt.
 

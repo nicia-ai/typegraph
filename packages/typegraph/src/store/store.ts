@@ -1788,7 +1788,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           options,
         ),
       // Present only when opted in; its absence is the coalesce off switch.
-      ...(this.#options?.coalesceUnchangedUpserts === true && {
+      ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           nodeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
@@ -1874,7 +1874,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       executeUpsertUpdate: (input, backend, options) =>
         executeEdgeUpsertUpdate(ctx, input, backend, options),
       // Present only when opted in; its absence is the coalesce off switch.
-      ...(this.#options?.coalesceUnchangedUpserts === true && {
+      ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           edgeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
@@ -4863,6 +4863,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
       ...(identityConfig === undefined ?
@@ -4924,14 +4925,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
-      coalesceUnchangedUpsertsEnabled:
-        this.#options?.coalesceUnchangedUpserts === true,
+      coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
       withOperationHooks: runHooks,
     };
+  }
+
+  /** The single owner of the store-wide unchanged-upsert enablement decision. */
+  #coalescesUnchangedUpserts(): boolean {
+    return this.#options?.coalesceUnchangedUpserts === true;
   }
 
   // === Internal: Hook Helpers ===

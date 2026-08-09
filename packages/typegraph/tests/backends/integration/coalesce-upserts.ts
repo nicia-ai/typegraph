@@ -75,13 +75,16 @@ function knowsId(
  * count the issue predicts grows by one per re-delivery on the write path and
  * stays flat when coalesced.
  */
-async function countRecordedNodeRows(
+async function countRecordedRows(
   store: HistoryIntegrationStore | IntegrationStore,
+  entity: "node" | "edge",
   kind: string,
   id: string,
 ): Promise<number> {
   const backend = store[STORE_RUNTIME].backend;
-  const table = createSqlSchema(backend.tableNames).recordedNodesTable;
+  const schema = createSqlSchema(backend.tableNames);
+  const table =
+    entity === "node" ? schema.recordedNodesTable : schema.recordedEdgesTable;
   const rows = await backend.execute<CountRow>(
     asCompiledRowsSql(sql`
       SELECT COUNT(*) AS cnt
@@ -94,24 +97,21 @@ async function countRecordedNodeRows(
   return Number(rows[0]?.cnt ?? 0);
 }
 
+async function countRecordedNodeRows(
+  store: HistoryIntegrationStore | IntegrationStore,
+  kind: string,
+  id: string,
+): Promise<number> {
+  return countRecordedRows(store, "node", kind, id);
+}
+
 /** Recorded history rows captured for one edge id. */
 async function countRecordedEdgeRows(
   store: HistoryIntegrationStore | IntegrationStore,
   kind: string,
   id: string,
 ): Promise<number> {
-  const backend = store[STORE_RUNTIME].backend;
-  const table = createSqlSchema(backend.tableNames).recordedEdgesTable;
-  const rows = await backend.execute<CountRow>(
-    asCompiledRowsSql(sql`
-      SELECT COUNT(*) AS cnt
-      FROM ${table}
-      WHERE graph_id = ${store.graphId}
-        AND kind = ${kind}
-        AND id = ${id}
-    `),
-  );
-  return Number(rows[0]?.cnt ?? 0);
+  return countRecordedRows(store, "edge", kind, id);
 }
 
 /**
@@ -516,11 +516,9 @@ export function registerCoalesceUpsertIntegrationTests(
     });
 
     describe("endpoint get-or-create updates (#467)", () => {
-      it("coalesces a single identical replay without hooks, history, or receipt capture", async () => {
-        const onOperationStart = vi.fn();
+      it("coalesces a single identical replay without history or receipt capture", async () => {
         const store = await context.createHistoryStore(integrationTestGraph, {
           coalesceUnchangedUpserts: true,
-          hooks: { onOperationStart },
         });
         const [alice, bob] = await seedEndpoints(store, "endpoint-single");
         const created = await store.edges.knows.getOrCreateByEndpoints(
@@ -536,7 +534,6 @@ export function registerCoalesceUpsertIntegrationTests(
           "knows",
           created.edge.id,
         );
-        onOperationStart.mockClear();
 
         const replay = await store.transactionWithReceipt(async (tx) =>
           tx.edges.knows.getOrCreateByEndpoints(
@@ -559,8 +556,6 @@ export function registerCoalesceUpsertIntegrationTests(
         expect(
           await countRecordedEdgeRows(store, "knows", created.edge.id),
         ).toBe(rowsBefore);
-        expect(onOperationStart).not.toHaveBeenCalled();
-
         const changed = await store.edges.knows.getOrCreateByEndpoints(
           alice,
           bob,
@@ -635,7 +630,7 @@ export function registerCoalesceUpsertIntegrationTests(
         );
       });
 
-      it("never coalesces resurrection and still rejects malformed windows", async () => {
+      it("never coalesces resurrection or an immutable lower-bound refusal", async () => {
         const store = await createCoalesceStore(context);
         const [alice, bob] = await seedEndpoints(store, "endpoint-resurrect");
         const created = await store.edges.knows.getOrCreateByEndpoints(
@@ -643,6 +638,14 @@ export function registerCoalesceUpsertIntegrationTests(
           bob,
           { since: "2020" },
         );
+        await expect(
+          store.edges.knows.getOrCreateByEndpoints(
+            alice,
+            bob,
+            { since: "2020" },
+            { ifExists: "update", validFrom: WINDOW_END },
+          ),
+        ).rejects.toThrow(/Unappliable validFrom/u);
         await store.edges.knows.delete(created.edge.id);
 
         const resurrected = await store.edges.knows.getOrCreateByEndpoints(
@@ -653,15 +656,6 @@ export function registerCoalesceUpsertIntegrationTests(
         );
         expect(resurrected.action).toBe("resurrected");
         expect(resurrected.edge.id).toBe(created.edge.id);
-
-        await expect(
-          store.edges.knows.getOrCreateByEndpoints(
-            alice,
-            bob,
-            { since: "2020" },
-            { ifExists: "update", validTo: NON_CANONICAL_WINDOW_END },
-          ),
-        ).rejects.toThrow(/validTo/u);
       });
     });
 

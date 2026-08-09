@@ -170,6 +170,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
+  coalesceUnchangedUpsertsEnabled: boolean;
   revisionSchema: SqlSchema;
   registry: KindRegistry;
   createOperationContext: (

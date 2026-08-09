@@ -1293,6 +1293,7 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     clearDeleted?: boolean;
     resurrectCardinality?: EdgeResurrectCardinality;
     coalesceUnchanged?: boolean;
+    coalesceCandidate?: BackendEdgeRow;
   }>,
 ): Promise<EdgeUpsertUpdateOutcome> {
   const resurrectCardinality = options?.resurrectCardinality;
@@ -1318,7 +1319,9 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
       }
 
       if (options?.coalesceUnchanged === true && !options.clearDeleted) {
-        const existing = await target.getEdge(ctx.graphId, input.id);
+        const existing =
+          options.coalesceCandidate ??
+          (await target.getEdge(ctx.graphId, input.id));
         if (existing !== undefined && existing.deleted_at === undefined) {
           assertEdgeIdentityMatches(
             input.id,
@@ -1352,9 +1355,9 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
       // An in-place props update re-derives no constraint verdict: endpoints
       // are immutable, so cardinality cannot change under it.
       fencesConstraintProbe:
-        resurrectCardinality === undefined ? undefined : (
-          edgeWriteNeedsConstraintFence(resurrectCardinality.cardinality)
-        ),
+        options?.coalesceUnchanged === true ? "edgeMatchKeyConvergence"
+        : resurrectCardinality === undefined ? undefined
+        : edgeWriteNeedsConstraintFence(resurrectCardinality.cardinality),
       didWrite: (outcome) => outcome.wrote,
     },
   );
@@ -1876,7 +1879,19 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
           }),
         },
         backend,
-        { coalesceUnchanged: ctx.coalesceUnchangedUpsertsEnabled },
+        {
+          coalesceUnchanged:
+            ctx.coalesceUnchangedUpsertsEnabled &&
+            shouldCoalesceUpsert(liveRow, options, () =>
+              edgeUpsertDirtyCheck(
+                ctx,
+                liveRow.kind,
+                liveRow.id,
+                rowPropsToObject(liveRow.props),
+                validatedProps,
+              ),
+            ),
+        },
       );
       return {
         edge: outcome.edge,
@@ -2351,7 +2366,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                 }),
               },
               target,
-              { coalesceUnchanged: ctx.coalesceUnchangedUpsertsEnabled },
+              {
+                coalesceUnchanged: ctx.coalesceUnchangedUpsertsEnabled,
+                coalesceCandidate: entry.row,
+              },
             );
             results[entry.index] = {
               edge: outcome.edge,

@@ -432,9 +432,8 @@ export type BaseStoreOptions = Readonly<{
    *      batch already queued (a create or an update).
    *   2. That row is not soft-deleted (a deleted row resurrects — a real
    *      change — and is never coalesced).
-   *   3. The caller passed no explicit `validFrom` / `validTo` (an explicit
-   *      temporal override is a deliberate request and is never coalesced;
-   *      applied per item in the bulk path).
+   *   3. Any requested `validFrom` / `validTo` names the window already stored;
+   *      a changed or inapplicable temporal request reaches the write path.
    *   4. The new props, merged over the stored props and run through the
    *      kind's Zod schema (defaults applied, values normalized), are deeply
    *      value-identical to the stored props (key order aside).
