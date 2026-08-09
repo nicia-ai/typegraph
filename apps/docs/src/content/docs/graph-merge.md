@@ -723,6 +723,11 @@ the target already held, `claimedBy` names the branch claims that were thrown
 away, and nothing was written or credited for the row. A row no branch claimed
 at all produces no entry, since there was nothing to discard.
 
+`validityEnds` reports claims about rows inherited from the fork point. If the
+fork point is empty, every branch row is branch-created and the array is always
+empty. A demo or topology that needs to exercise this report must seed the row
+before branching, then end that inherited row on one or more branches.
+
 Because an ending is not a modification, `onDeleteModifyConflict` never sees
 one: a row whose *only* change is its window loses to a concurrent deletion even
 under `"prefer-modify"`, since there is no modification to prefer. A row with a

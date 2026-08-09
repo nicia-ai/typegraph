@@ -40,23 +40,47 @@ async function projectChange(
   tx: TransactionContext<typeof graph>,
   change: Change,
 ) {
-  const issue = await tx.nodes.Issue.upsertById(change.issueId, {
-    title: change.title,
-    state: change.state,
-  });
+  const issue = await tx.nodes.Issue.upsertById(
+    change.issueId,
+    {
+      title: change.title,
+      state: change.state,
+    },
+    {
+      validFrom: change.issueValidFrom,
+      onImmutableLowerBound: "preserve",
+    },
+  );
 
   const actor = await tx.nodes.Actor.upsertById(change.actorId, {
     name: change.actorName,
   });
 
-  await tx.edges.changedBy.getOrCreateByEndpoints(issue, actor, {
-    action: change.action,
-  });
+  await tx.edges.changedBy.getOrCreateByEndpoints(
+    issue,
+    actor,
+    { action: change.action },
+    {
+      ifExists: "update",
+      validFrom: change.relationshipValidFrom,
+      validTo: change.relationshipValidTo,
+    },
+  );
 }
 ```
 
 The important rule is that the second delivery of the same change takes the same
 code path and reaches the same row identities.
+
+The node's `"preserve"` policy makes `validFrom` create/resurrection-only input:
+a later revision updates props without trying to rewrite the live row's start.
+Without it, the default `"refuse"` policy raises
+`IMMUTABLE_VALIDITY_LOWER_BOUND` when a revision states a different start. The
+edge explicitly selects `ifExists: "update"`; the default is `"return"`, which
+is right for create-once relationships but writes neither revised props nor a
+closing `validTo` when the edge already exists. The decoder supplies
+`relationshipValidFrom` only on the event that creates the relationship; later
+live-edge revisions omit it unless they restate the stored bound exactly.
 
 ### `matchOn` widens the identity key — don't reach for it by default
 
@@ -243,6 +267,14 @@ supersede each other. It also leaves a spurious `a=2 → a=1 → a=2` band in th
 live store's recorded history, stamped at replay time. To rebuild without
 either cost, replay into a **fresh store** and publish it, rather than
 re-applying the log over the current state.
+
+**Historical ends need a historical start on the creating event.** When a fresh
+store creates a row without a stated `validFrom`, TypeGraph uses the ingest
+instant. A later replayed event whose historical `validTo` precedes that ingest
+instant is therefore an `INVERTED_VALIDITY_WINDOW`, even if the source timeline
+itself was ordered. An event-time decoder must emit `validFrom` on the event
+that first creates each row; `onImmutableLowerBound: "preserve"` then lets later
+revisions carry their source bound without trying to move the stored start.
 
 ### In-graph cursors and the receipt
 
