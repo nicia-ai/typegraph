@@ -5,6 +5,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type {
   CardinalityErrorDetails,
+  ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
   DisjointErrorDetails,
   EagerMaterializationErrorDetails,
@@ -30,6 +31,7 @@ import {
   CardinalityError,
   CompilerInvariantError,
   ConfigurationError,
+  ContributionUnavailableError,
   DatabaseOperationError,
   DisjointError,
   EagerMaterializationError,
@@ -936,6 +938,31 @@ describe("StoreNotInitializedError", () => {
       reason: "stale",
       logicalName: "vector:summary",
     });
+  });
+});
+
+describe("ContributionUnavailableError", () => {
+  it("directs orphaned fulltext storage to a rebuild", () => {
+    const cause = new Error("no such table: typegraph_node_fulltext");
+    const error = new ContributionUnavailableError(
+      "lib",
+      "typegraph_node_fulltext",
+      { cause },
+    );
+
+    expect(error.message).toContain("disappeared after initialization");
+    expect(error.message).toContain('rebuildContribution("fulltext")');
+    expect(error.suggestion).toContain('rebuildContribution("fulltext")');
+    expect(error.cause).toBe(cause);
+    expect(error.details).toEqual({
+      graphId: "lib",
+      logicalName: "fulltext",
+      physicalName: "typegraph_node_fulltext",
+      state: "physical-storage-missing",
+    });
+    expectTypeOf(
+      error.details,
+    ).toEqualTypeOf<ContributionUnavailableErrorDetails>();
   });
 });
 

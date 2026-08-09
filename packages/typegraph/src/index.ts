@@ -319,6 +319,7 @@ export {
 export type {
   CardinalityErrorDetails,
   ContributionRebuildRefusal,
+  ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
   DisjointErrorDetails,
   EagerMaterializationErrorDetails,
@@ -359,6 +360,7 @@ export {
   CompilerInvariantError,
   ConfigurationError,
   ContributionRebuildUnsupportedError,
+  ContributionUnavailableError,
   DatabaseOperationError,
   DisjointError,
   EagerMaterializationError,

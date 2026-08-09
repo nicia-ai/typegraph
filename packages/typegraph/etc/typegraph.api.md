@@ -591,6 +591,23 @@ export type ContributionRepopulationStats = Readonly<{
 }>;
 
 // @public
+export class ContributionUnavailableError extends TypeGraphError {
+    constructor(graphId: string, physicalName: string, options?: Readonly<{
+        cause?: unknown;
+    }>);
+    // (undocumented)
+    readonly details: ContributionUnavailableErrorDetails;
+}
+
+// @public
+export type ContributionUnavailableErrorDetails = Readonly<{
+    graphId: string;
+    logicalName: "fulltext";
+    physicalName: string;
+    state: "physical-storage-missing";
+}>;
+
+// @public
 abstract class CoordinatePinnedView<G extends GraphDef> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
     get algorithms(): StoreViewGraphAlgorithms<G>;

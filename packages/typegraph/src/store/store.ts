@@ -4156,8 +4156,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * path. The cost is that a database whose contribution tables were dropped
    * out of band (a partial restore, a hand-run `DROP`, a schema-scoped
    * restore that missed them) opens completely clean and then fails at the
-   * first read of the affected slot. This is the explicit, operator-invoked
-   * check for that state; it is not, and should not become, a boot step.
+   * first read or write that depends on the affected slot. This is the
+   * explicit, operator-invoked check for that state; it is not, and should not
+   * become, a boot step.
    *
    * Purely read-only: one existence query per distinct contribution table
    * plus one marker read per graph, no DDL and no writes, so it is safe to
@@ -4246,8 +4247,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Read-only readiness check for the search projections: is search
-   * coherent with the graph right now, or is a query about to hit a
+   * Read-only readiness check for the search projections: are dependent reads
+   * and writes coherent with the graph right now, or are they about to hit a
    * degraded index?
    *
    * The read-only half of {@link Store.repairContributions}, and the
