@@ -920,7 +920,11 @@ Creates or updates a node by ID.
 store.nodes.Person.upsertById(
   id: string,
   props: { name: string; email?: string },
-  options?: { validFrom?: string; validTo?: string }
+  options?: {
+    validFrom?: string;
+    validTo?: string;
+    onImmutableLowerBound?: "refuse" | "preserve";
+  }
 ): Promise<Node<Person>>;
 ```
 
@@ -952,6 +956,14 @@ In a receipt, a coalesced upsert still counts as one write intent
 (`writes.total`) but captures nothing (`recorded` stays `undefined`) — the same
 shape as a no-op delete.
 
+**Create-only event time.** The default
+`onImmutableLowerBound: "refuse"` treats `validFrom` as an assertion on every
+branch. Event projectors that carry the source start on every revision can use
+`"preserve"`: create and resurrection still validate and store `validFrom`,
+while a live-row update preserves the bound already stored and applies the new
+props and `validTo`. This is an explicit branch policy, not a silent drop, and
+avoids catching `IMMUTABLE_VALIDITY_LOWER_BOUND` as normal control flow.
+
 #### `upsertByIdFromRecord(id, data, options?)`
 
 Upserts a node from untyped data, relying on runtime Zod validation. Same behavior
@@ -961,7 +973,11 @@ as `upsertById` but accepts `Record<string, unknown>` instead of the typed schem
 store.nodes.Person.upsertByIdFromRecord(
   id: string,
   data: Record<string, unknown>,
-  options?: { validFrom?: string; validTo?: string }
+  options?: {
+    validFrom?: string;
+    validTo?: string;
+    onImmutableLowerBound?: "refuse" | "preserve";
+  }
 ): Promise<Node<Person>>;
 ```
 
@@ -1021,6 +1037,7 @@ store.nodes.Person.bulkUpsertById(
     props: { name: string; email?: string };
     validFrom?: string;
     validTo?: string;
+    onImmutableLowerBound?: "refuse" | "preserve";
   }[]
 ): Promise<Node<Person>[]>;
 ```

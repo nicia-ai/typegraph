@@ -416,6 +416,20 @@ export type ValidityWindowVerdict = Readonly<{
 }>;
 
 /**
+ * Whether a node upsert explicitly treats its stated lower bound as
+ * create/resurrection-only input.
+ *
+ * This predicate owns the policy decision for both write execution and
+ * unchanged-upsert coalescing, so those paths cannot drift on whether a live
+ * row's stored lower bound is preserved.
+ */
+export function preservesImmutableLowerBound(
+  policy: "preserve" | "refuse" | undefined,
+): policy is "preserve" {
+  return policy === "preserve";
+}
+
+/**
  * Refuses a stated `validFrom` the write would not apply.
  *
  * A live row's lower bound is HISTORY: it records when the row started being

@@ -186,6 +186,10 @@ What deliberately does not raise it:
   `validFrom` is stored — that is the way to give a row a different lower bound.
 - **`getOrCreateByEndpoints` returning an existing edge.** That branch performs
   no write, so its window options describe the row to create if none is found.
+- **A node upsert with `onImmutableLowerBound: "preserve"`.** This explicitly
+  treats `validFrom` as create/resurrection-only input. A live-row update keeps
+  its stored lower bound while still applying props and `validTo`; the default
+  remains `"refuse"` so an unqualified bound is never silently dropped.
 
 It reaches every path that accepts `validFrom` against a live row: `upsertById`,
 `bulkUpsertById` (including a repeated id in one batch, judged against the row

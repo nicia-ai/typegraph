@@ -69,7 +69,7 @@
   "dependencies": {
     "@ladybugdb/core": "^0.18.0",
     "@nicia-ai/typegraph": "workspace:*",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "drizzle-orm": "^0.45.2",
     "neo4j-driver": "^6.2.0",
     "pg": "^8.22.0",

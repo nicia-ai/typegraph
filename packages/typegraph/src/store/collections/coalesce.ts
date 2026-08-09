@@ -1,4 +1,8 @@
-import { isCanonicalIsoDate, statedBoundMatchesStored } from "../../utils/date";
+import {
+  isCanonicalIsoDate,
+  preservesImmutableLowerBound,
+  statedBoundMatchesStored,
+} from "../../utils/date";
 
 /**
  * Coalesce dirty-check shared by `upsertById` / `bulkUpsertById`.
@@ -69,7 +73,11 @@ export type UpsertWindow = Readonly<{
 }>;
 
 /** The window bounds an upsert item may request. */
-type RequestedWindow = Readonly<{ validFrom?: string; validTo?: string }>;
+type RequestedWindow = Readonly<{
+  validFrom?: string;
+  validTo?: string;
+  onImmutableLowerBound?: "preserve" | "refuse";
+}>;
 
 /** A window to compare against — a row, or an {@link UpsertWindow}. */
 type CurrentWindow = Readonly<{
@@ -107,6 +115,20 @@ function windowFieldChanges(
   return !statedBoundMatchesStored(requested, stored);
 }
 
+/** Whether the requested lower bound prevents an unchanged upsert from coalescing. */
+function lowerBoundRequiresWrite(
+  requested: RequestedWindow | undefined,
+  stored: string | undefined,
+): boolean {
+  const requestedValidFrom = requested?.validFrom;
+  if (!preservesImmutableLowerBound(requested?.onImmutableLowerBound)) {
+    return windowFieldChanges(requestedValidFrom, stored);
+  }
+  return (
+    requestedValidFrom !== undefined && !isCanonicalIsoDate(requestedValidFrom)
+  );
+}
+
 /**
  * Whether an upsert item's requested window differs from the one its target
  * already holds.
@@ -125,7 +147,7 @@ export function upsertWindowChanges(
   current: CurrentWindow,
 ): boolean {
   return (
-    windowFieldChanges(requested?.validFrom, current.valid_from) ||
+    lowerBoundRequiresWrite(requested, current.valid_from) ||
     windowFieldChanges(requested?.validTo, current.valid_to)
   );
 }

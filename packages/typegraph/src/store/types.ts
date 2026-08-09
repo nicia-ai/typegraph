@@ -882,12 +882,19 @@ export type NodeCollection<
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
-   * bound the row already holds is accepted and changes nothing.
+   * bound the row already holds is accepted and changes nothing. Set
+   * `onImmutableLowerBound: "preserve"` for event materializers whose
+   * `validFrom` is create/resurrection input: a live update then preserves the
+   * stored lower bound while still applying props and `validTo`.
    */
   upsertById: (
     id: string,
     props: z.input<N["schema"]>,
-    options?: Readonly<{ validFrom?: string; validTo?: string }>,
+    options?: Readonly<{
+      validFrom?: string;
+      validTo?: string;
+      onImmutableLowerBound?: "preserve" | "refuse";
+    }>,
   ) => Promise<Node<N>>;
 
   /**
@@ -903,12 +910,17 @@ export type NodeCollection<
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
-   * bound the row already holds is accepted and changes nothing.
+   * bound the row already holds is accepted and changes nothing. Set
+   * `onImmutableLowerBound: "preserve"` for create/resurrection-only input.
    */
   upsertByIdFromRecord: (
     id: string,
     data: Record<string, unknown>,
-    options?: Readonly<{ validFrom?: string; validTo?: string }>,
+    options?: Readonly<{
+      validFrom?: string;
+      validTo?: string;
+      onImmutableLowerBound?: "preserve" | "refuse";
+    }>,
   ) => Promise<Node<N>>;
 
   /**
@@ -946,7 +958,9 @@ export type NodeCollection<
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
-   * bound the row already holds is accepted and changes nothing.
+   * bound the row already holds is accepted and changes nothing. Per-item
+   * `onImmutableLowerBound: "preserve"` makes the bound create/resurrection
+   * input while a live update preserves the stored lower bound.
    *
    * **Limitation — a batch cannot hand a unique value from one row to
    * another.** Item order settles which value each id ends up with, but the
@@ -967,6 +981,7 @@ export type NodeCollection<
       props: z.input<N["schema"]>;
       validFrom?: string;
       validTo?: string;
+      onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
   ) => Promise<Node<N>[]>;
 

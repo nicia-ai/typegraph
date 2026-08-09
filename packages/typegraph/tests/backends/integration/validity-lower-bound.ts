@@ -36,6 +36,7 @@ const OTHER_FOREIGN_VALID_FROM = "2001-01-01T00:00:00.000Z";
 /** A past window for the resurrection cases, ordered and permanently so. */
 const REVIVED_VALID_FROM = "2023-01-01T00:00:00.000Z";
 const REVIVED_VALID_TO = "2024-12-31T23:59:59.999Z";
+const FUTURE_VALID_TO = "2100-01-01T00:00:00.000Z";
 
 type PersonNode = Node<typeof integrationTestGraph.nodes.Person.type>;
 
@@ -149,6 +150,53 @@ export function registerValidityLowerBoundIntegrationTests(
           expect(stored?.age).toBe(1);
         });
 
+        it("preserves a live node's lower bound when the upsert opts in", async () => {
+          const store = await context.createStore(integrationTestGraph, {
+            coalesceUnchangedUpserts,
+          });
+          const id = `vlb-preserve-${String(coalesceUnchangedUpserts)}`;
+          const seeded = await seedPerson(store, id);
+
+          const updated = await store.nodes.Person.upsertById(
+            id,
+            { name: "Win", age: 2 },
+            {
+              validFrom: FOREIGN_VALID_FROM,
+              validTo: FUTURE_VALID_TO,
+              onImmutableLowerBound: "preserve",
+            },
+          );
+
+          expect(updated.age).toBe(2);
+          expect(canonicalizeDatabaseTimestamp(updated.meta.validFrom)).toBe(
+            canonicalizeDatabaseTimestamp(seeded.meta.validFrom),
+          );
+          expect(canonicalizeDatabaseTimestamp(updated.meta.validTo)).toBe(
+            FUTURE_VALID_TO,
+          );
+        });
+
+        it("still validates a preserved live node lower bound", async () => {
+          const store = await context.createStore(integrationTestGraph, {
+            coalesceUnchangedUpserts,
+          });
+          const id = `vlb-preserve-invalid-${String(coalesceUnchangedUpserts)}`;
+          await seedPerson(store, id);
+
+          await expect(
+            store.nodes.Person.upsertById(
+              id,
+              { name: "Win", age: 1 },
+              {
+                validFrom: "not-a-date",
+                onImmutableLowerBound: "preserve",
+              },
+            ),
+          ).rejects.toThrow(
+            /Invalid canonical ISO 8601 datetime for "validFrom"/,
+          );
+        });
+
         it("refuses a differing validFrom on a bulk edge upsert", async () => {
           const store = await context.createStore(integrationTestGraph, {
             coalesceUnchangedUpserts,
@@ -194,6 +242,27 @@ export function registerValidityLowerBoundIntegrationTests(
       registerFlagCases(false);
     });
 
+    it("coalesces an unchanged preserve-mode replay with a different source bound", async () => {
+      const store = await context.createStore(integrationTestGraph, {
+        coalesceUnchangedUpserts: true,
+      });
+      const seeded = await seedPerson(store, "vlb-preserve-coalesced");
+
+      const replayed = await store.nodes.Person.upsertById(
+        "vlb-preserve-coalesced",
+        { name: "Win", age: 1 },
+        {
+          validFrom: FOREIGN_VALID_FROM,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+
+      expect(replayed.meta.version).toBe(seeded.meta.version);
+      expect(canonicalizeDatabaseTimestamp(replayed.meta.validFrom)).toBe(
+        canonicalizeDatabaseTimestamp(seeded.meta.validFrom),
+      );
+    });
+
     it("accepts a validFrom that restates the bound a live row holds", async () => {
       const store = await context.createStore(integrationTestGraph, {});
       const seeded = await seedPerson(store, "vlb-restated");
@@ -208,6 +277,84 @@ export function registerValidityLowerBoundIntegrationTests(
       expect(updated.age).toBe(2);
       expect(canonicalizeDatabaseTimestamp(updated.meta.validFrom)).toBe(
         canonicalizeDatabaseTimestamp(storedValidFrom),
+      );
+    });
+
+    it("supports create-only validFrom through the record-input upsert", async () => {
+      const store = await context.createStore(integrationTestGraph, {});
+      const id = "vlb-record-preserve";
+      const created = await store.nodes.Person.upsertByIdFromRecord(
+        id,
+        { name: "Win", age: 1 },
+        {
+          validFrom: REVIVED_VALID_FROM,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+      const updated = await store.nodes.Person.upsertByIdFromRecord(
+        id,
+        { name: "Win", age: 2 },
+        {
+          validFrom: OTHER_FOREIGN_VALID_FROM,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+
+      expect(updated.age).toBe(2);
+      expect(canonicalizeDatabaseTimestamp(updated.meta.validFrom)).toBe(
+        canonicalizeDatabaseTimestamp(created.meta.validFrom),
+      );
+    });
+
+    it("supports create-only validFrom in a bulk node upsert", async () => {
+      const store = await context.createStore(integrationTestGraph, {});
+      const id = "vlb-bulk-preserve";
+      const [created] = await store.nodes.Person.bulkUpsertById([
+        {
+          id,
+          props: { name: "Win", age: 1 },
+          validFrom: REVIVED_VALID_FROM,
+          onImmutableLowerBound: "preserve",
+        },
+      ]);
+      const [updated] = await store.nodes.Person.bulkUpsertById([
+        {
+          id,
+          props: { name: "Win", age: 2 },
+          validFrom: OTHER_FOREIGN_VALID_FROM,
+          onImmutableLowerBound: "preserve",
+        },
+      ]);
+      const createdNode = requireDefined(created);
+      const updatedNode = requireDefined(updated);
+
+      expect(updatedNode.age).toBe(2);
+      expect(canonicalizeDatabaseTimestamp(updatedNode.meta.validFrom)).toBe(
+        canonicalizeDatabaseTimestamp(createdNode.meta.validFrom),
+      );
+    });
+
+    it("still applies validFrom when preserve-mode upsert resurrects a node", async () => {
+      const store = await context.createStore(integrationTestGraph, {});
+      const id = "vlb-preserve-revived";
+      const created = await seedPerson(store, id);
+      await store.nodes.Person.delete(created.id);
+
+      const revived = await store.nodes.Person.upsertById(
+        id,
+        { name: "Win", age: 3 },
+        {
+          validFrom: REVIVED_VALID_FROM,
+          validTo: REVIVED_VALID_TO,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+
+      expect(canonicalizeDatabaseTimestamp(revived.meta.validFrom)).toBe(
+        REVIVED_VALID_FROM,
+      );
+      expect(canonicalizeDatabaseTimestamp(revived.meta.validTo)).toBe(
+        REVIVED_VALID_TO,
       );
     });
 
