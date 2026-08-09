@@ -56,6 +56,14 @@ import {
   type TemporalReadParams,
 } from "./temporal-read-params";
 
+type OnImmutableLowerBound = "preserve" | "refuse";
+
+type NodeUpsertOptions = Readonly<{
+  validFrom?: string;
+  validTo?: string;
+  onImmutableLowerBound?: OnImmutableLowerBound;
+}>;
+
 /**
  * Narrows unparameterized Node to Node<N>.
  * Safe: props are validated by Zod at creation/update boundaries.
@@ -140,7 +148,10 @@ function evaluateNodePredicate<N extends NodeType>(
  * through {@link buildUpsertUpdateInput}.
  */
 export type UpsertUpdateNodeInput = UpdateNodeInput &
-  Readonly<{ validFrom?: string }>;
+  Readonly<{
+    validFrom?: string;
+    onImmutableLowerBound?: OnImmutableLowerBound;
+  }>;
 
 /**
  * Config for creating a NodeCollection.
@@ -276,7 +287,7 @@ function buildUpsertUpdateInput(
   kind: string,
   id: string,
   props: Record<string, unknown>,
-  options?: Readonly<{ validFrom?: string; validTo?: string }>,
+  options?: NodeUpsertOptions,
 ): UpsertUpdateNodeInput {
   const input: {
     kind: string;
@@ -284,9 +295,13 @@ function buildUpsertUpdateInput(
     props: Partial<Record<string, unknown>>;
     validFrom?: string;
     validTo?: string;
+    onImmutableLowerBound?: OnImmutableLowerBound;
   } = { kind, id, props };
   if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.onImmutableLowerBound !== undefined) {
+    input.onImmutableLowerBound = options.onImmutableLowerBound;
+  }
   return input as UpsertUpdateNodeInput;
 }
 
@@ -563,7 +578,7 @@ export function createNodeCollection<
     async upsertById(
       id: string,
       props: z.input<N["schema"]>,
-      options?: Readonly<{ validFrom?: string; validTo?: string }>,
+      options?: NodeUpsertOptions,
     ): Promise<Node<N>> {
       return this.upsertByIdFromRecord(id, props, options);
     },
@@ -571,7 +586,7 @@ export function createNodeCollection<
     async upsertByIdFromRecord(
       id: string,
       data: Record<string, unknown>,
-      options?: Readonly<{ validFrom?: string; validTo?: string }>,
+      options?: NodeUpsertOptions,
     ): Promise<Node<N>> {
       const existing = await backend.getNode(graphId, kind, id);
 
@@ -687,6 +702,7 @@ export function createNodeCollection<
         props: z.input<N["schema"]>;
         validFrom?: string;
         validTo?: string;
+        onImmutableLowerBound?: OnImmutableLowerBound;
       }>[],
     ): Promise<Node<N>[]> {
       if (items.length === 0) return [];

@@ -103,6 +103,7 @@ import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
   nowIso,
+  preservesImmutableLowerBound,
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
@@ -919,10 +920,6 @@ async function performNodeUpdate<G extends GraphDef>(
   );
   const nodeKind = registration.type;
 
-  const validFrom = validateOptionalCanonicalIsoDate(
-    input.validFrom,
-    "validFrom",
-  );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
   // A node resurrection RESETS `valid_from` (see `buildUpdateNode`), so the
   // effective lower bound is the write instant rather than the row's stored
@@ -937,6 +934,19 @@ async function performNodeUpdate<G extends GraphDef>(
     options?.clearDeleted === true && existing.deleted_at !== undefined ?
       nowIso()
     : undefined;
+  // Event materializers may state the source row's lower bound on every
+  // delivery while asking a live update to preserve the bound already stored.
+  // This is explicit create/resurrection-only input, not the old silent drop:
+  // the default remains `"refuse"`, and a resurrection still validates and
+  // stores the stated value below.
+  const preservesLiveLowerBound =
+    resurrectionInstant === undefined &&
+    preservesImmutableLowerBound(input.onImmutableLowerBound);
+  const statedValidFrom = validateOptionalCanonicalIsoDate(
+    input.validFrom,
+    "validFrom",
+  );
+  const validFrom = preservesLiveLowerBound ? undefined : statedValidFrom;
   // A resurrection STORES a stated `validFrom` (it rewrites the whole window);
   // an in-place update never does, so one that differs from the row's stored
   // bound is refused rather than accepted and dropped.

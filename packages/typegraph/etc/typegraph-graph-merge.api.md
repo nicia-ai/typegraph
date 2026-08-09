@@ -2725,10 +2725,12 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
     upsertById: (id: string, props: z.input<N["schema"]>, options?: Readonly<{
         validFrom?: string;
         validTo?: string;
+        onImmutableLowerBound?: "preserve" | "refuse";
     }>) => Promise<Node<N>>;
     upsertByIdFromRecord: (id: string, data: Record<string, unknown>, options?: Readonly<{
         validFrom?: string;
         validTo?: string;
+        onImmutableLowerBound?: "preserve" | "refuse";
     }>) => Promise<Node<N>>;
     bulkCreate: (items: readonly Readonly<{
         props: z.input<N["schema"]>;
@@ -2741,6 +2743,7 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
         props: z.input<N["schema"]>;
         validFrom?: string;
         validTo?: string;
+        onImmutableLowerBound?: "preserve" | "refuse";
     }>[]) => Promise<Node<N>[]>;
     bulkInsert: (items: readonly Readonly<{
         props: z.input<N["schema"]>;
