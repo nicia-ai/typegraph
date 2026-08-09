@@ -35,7 +35,11 @@ import { requireDefined } from "../utils/presence";
  * requirement and the caller is responsible for honoring it.
  */
 import { canonicalValueKey } from "./canonical-props";
-import { SimilarityUnavailableError } from "./errors";
+import {
+  MatchEvidenceError,
+  type MergeError,
+  SimilarityUnavailableError,
+} from "./errors";
 import type { MergeKey } from "./node-key";
 import type { Result } from "./result";
 import { err, ok } from "./result";
@@ -92,9 +96,9 @@ const TRIGRAM_LENGTH = 3;
 const TRIGRAM_PAD = " ";
 
 /**
- * Clamps an arbitrary number into the `[0, 1]` similarity codomain. `NaN`
- * collapses to {@link MIN_SCORE} so a misbehaving custom scorer can never inject
- * a non-comparable score into clustering.
+ * Clamps a finite number into the `[0, 1]` similarity codomain. Custom scorers
+ * are checked for finiteness before reaching this helper; built-in strategies
+ * only produce finite values.
  */
 function clampScore(value: number): number {
   if (Number.isNaN(value)) {
@@ -447,12 +451,42 @@ function scorePrepared<K extends NodeType>(
   right: PreparedNode<K>,
   strategy: SimilarityStrategy,
   ctx: SimilarityContext,
-): Result<number, SimilarityUnavailableError> {
+): Result<number, MergeError> {
   switch (strategy.kind) {
     case "custom": {
-      // The caller owns symmetry here; we only clamp into the codomain so a
-      // stray out-of-range or NaN score cannot corrupt clustering.
-      const raw = strategy.score(left.node, right.node);
+      // The caller owns symmetry here. A non-finite result cannot be represented
+      // faithfully in JSON evidence, so refuse it instead of silently converting
+      // NaN to zero or Infinity to a perfect match.
+      let raw: number;
+      try {
+        raw = strategy.score(left.node, right.node);
+      } catch (error) {
+        return err(
+          new MatchEvidenceError("Custom similarity scorer failed.", {
+            details: {
+              kind: left.node.kind,
+              sourceId: "similarity:custom",
+              operation: "score",
+            },
+            cause: error,
+          }),
+        );
+      }
+      if (!Number.isFinite(raw)) {
+        return err(
+          new MatchEvidenceError(
+            "Custom similarity scorer returned a non-finite score.",
+            {
+              details: {
+                kind: left.node.kind,
+                sourceId: "similarity:custom",
+                operation: "score",
+                score: String(raw),
+              },
+            },
+          ),
+        );
+      }
       return ok(clampScore(raw));
     }
     case "fulltext": {
@@ -532,7 +566,7 @@ export function scorePair<K extends NodeType>(
   b: Node<K>,
   strategy: SimilarityStrategy,
   ctx: SimilarityContext,
-): Result<number, SimilarityUnavailableError> {
+): Result<number, MergeError> {
   const result = scorePrepared(
     prepareNode(a, strategy),
     prepareNode(b, strategy),
@@ -563,7 +597,7 @@ export function createPairScorer<K extends NodeType>(
   left: Node<K>,
   b: MergeKey,
   right: Node<K>,
-) => Result<number, SimilarityUnavailableError> {
+) => Result<number, MergeError> {
   const prepared = new Map<MergeKey, PreparedNode<K>>();
   const prepare = (key: MergeKey, node: Node<K>): PreparedNode<K> => {
     const cached = prepared.get(key);

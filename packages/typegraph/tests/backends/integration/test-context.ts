@@ -22,6 +22,8 @@ export type IntegrationTestContext = Readonly<{
    * backend rather than through the pre-built store.
    */
   getBackend: () => AdapterBackend<unknown>;
+  /** Creates an independently-owned backend for branch working copies. */
+  createIsolatedBackend: () => Promise<AdapterBackend<unknown>>;
   createStore: <G extends GraphDef>(
     graph: G,
     options?: LiveStoreOptions,

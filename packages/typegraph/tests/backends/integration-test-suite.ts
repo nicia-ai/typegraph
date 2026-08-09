@@ -37,6 +37,7 @@ import {
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerFulltextIntegrationTests,
+  registerGraphMergePlanIntegrationTests,
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
   registerIdentityIntegrationTests,
@@ -89,9 +90,15 @@ type BackendFactory<TNativeTransaction> = () =>
 /**
  * Options for the integration test suite.
  */
-type IntegrationTestSuiteOptions = Readonly<{
+type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
   /** Skip tests that require specific dialect features */
   skipDialectSpecific?: boolean;
+  /**
+   * Creates a physically isolated backend for concurrently live working
+   * copies. Defaults to the suite backend factory when that factory already
+   * owns independent storage (for example, in-memory SQLite).
+   */
+  createIsolatedBackend?: BackendFactory<TIsolatedTransaction>;
 }>;
 
 /**
@@ -101,15 +108,19 @@ type IntegrationTestSuiteOptions = Readonly<{
  * @param createBackend - Factory function that returns a fresh backend
  * @param options - Optional test configuration
  */
-export function createIntegrationTestSuite<TNativeTransaction>(
+export function createIntegrationTestSuite<
+  TNativeTransaction,
+  TIsolatedTransaction = TNativeTransaction,
+>(
   name: string,
   createBackend: BackendFactory<TNativeTransaction>,
-  _options: IntegrationTestSuiteOptions = {},
+  options: IntegrationTestSuiteOptions<TIsolatedTransaction> = {},
 ): void {
   describe(`${name} Integration Tests`, () => {
     let store: IntegrationStore | undefined;
     let adapterBackend: AdapterBackend<TNativeTransaction> | undefined;
     let cleanup: (() => void | Promise<void>) | undefined;
+    const isolatedCleanups: (() => void | Promise<void>)[] = [];
 
     const context = {
       getStore: () => {
@@ -125,6 +136,14 @@ export function createIntegrationTestSuite<TNativeTransaction>(
           throw new Error("Integration backend is not initialized.");
         }
         return adapterBackend as AdapterBackend<unknown>;
+      },
+      createIsolatedBackend: async () => {
+        const result =
+          options.createIsolatedBackend === undefined ?
+            await createBackend()
+          : await options.createIsolatedBackend();
+        if (result.cleanup !== undefined) isolatedCleanups.push(result.cleanup);
+        return result.backend as AdapterBackend<unknown>;
       },
       createStore: async (graph, options) => {
         if (adapterBackend === undefined) {
@@ -164,6 +183,9 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     });
 
     afterEach(async () => {
+      for (const isolatedCleanup of isolatedCleanups.splice(0).toReversed()) {
+        await isolatedCleanup();
+      }
       if (cleanup) {
         await cleanup();
         cleanup = undefined;
@@ -204,6 +226,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerStoreViewIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
     registerFulltextIntegrationTests(context);
+    registerGraphMergePlanIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);
     registerIdentityImportIntegrationTests(context);

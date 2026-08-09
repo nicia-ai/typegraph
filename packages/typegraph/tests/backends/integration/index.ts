@@ -14,6 +14,7 @@ export { registerAdvancedEdgePropertyIntegrationTests } from "./edge-properties-
 export type { IntegrationStore } from "./fixtures";
 export { integrationTestGraph } from "./fixtures";
 export { registerFulltextIntegrationTests } from "./fulltext";
+export { registerGraphMergePlanIntegrationTests } from "./graph-merge-plan";
 export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";

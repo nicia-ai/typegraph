@@ -329,6 +329,56 @@ if (isErr(result)) {
 }
 ```
 
+### Merge plan and evidence errors
+
+The reviewable merge lifecycle also returns errors in its `Result` arm. It does
+not throw them:
+
+```typescript
+import {
+  applyMergePlan,
+  isErr,
+  planMerge,
+  StaleMergePlanError,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const planned = await planMerge(store, branches, options);
+if (isErr(planned)) throw planned.error;
+
+const applied = await applyMergePlan(store, planned.data);
+if (isErr(applied)) {
+  if (applied.error instanceof StaleMergePlanError) {
+    // The reviewed artifact no longer describes the target. Plan and review again.
+  }
+  throw applied.error;
+}
+```
+
+| Error | Code | Meaning |
+| --- | --- | --- |
+| `MergePlanCapabilityError` | `GRAPH_MERGE_PLAN_CAPABILITY` | The target cannot supply a durable revision fence for a cross-time plan. Enable `revisionTracking` or `history`; the contiguous `merge()` wrappers retain their documented compatibility behavior. |
+| `MergePlanningStaleError` | `GRAPH_MERGE_PLANNING_STALE` | The target revision changed between the planner's opening and closing observations. No artifact is returned. |
+| `StaleMergePlanError` | `GRAPH_MERGE_PLAN_STALE` | The target moved after planning, the plan already succeeded, or another concurrent application won. No plan writes committed. |
+| `InvalidMergePlanError` | `GRAPH_MERGE_PLAN_INVALID` | The value failed the versioned plan schema or a semantic invariant. |
+| `UnsupportedMergePlanVersionError` | `GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED` | `formatVersion` is not supported by this TypeGraph version. |
+| `MergePlanDigestMismatchError` | `GRAPH_MERGE_PLAN_DIGEST_MISMATCH` | Canonical plan content differs from the recorded digest. |
+| `MergePlanTargetMismatchError` | `GRAPH_MERGE_PLAN_TARGET_MISMATCH` | The plan names a different graph id from the supplied target. |
+| `MergePlanSchemaMismatchError` | `GRAPH_MERGE_PLAN_SCHEMA_MISMATCH` | The plan was resolved under a different active schema version or hash. |
+| `MergePlanOriginMismatchError` | `GRAPH_MERGE_PLAN_ORIGIN_MISMATCH` | The target has an independently-created revision clock, even if its numeric revision happens to match. |
+| `CandidateSourceError` | `GRAPH_MERGE_CANDIDATE_SOURCE` | A built-in candidate source failed. `details` identifies its source id, entity kind, and operation context. |
+| `MatchEvidenceError` | `GRAPH_MERGE_EVIDENCE` | Candidate evidence is malformed or a score is non-finite. `NaN` and infinity are refused, never serialized or silently dropped. |
+
+Plan validation and the target/schema/origin/revision fence run before canonical
+writes. The revision check is inside the same transaction as apply, so two
+concurrent attempts cannot both commit. A stale plan is not repaired or adapted:
+create a new plan and obtain approval for its new `digest`.
+
+Plans may contain the complete proposed application data. Their digest detects
+content changes and gives approval systems a stable identity, but it is not a
+signature and does not authenticate storage, authorize a caller, or prove who
+created the artifact. Protect plan data and enforce those trust decisions in the
+application before calling `applyMergePlan()`.
+
 ### `EndpointError`
 
 Thrown when an edge is created with invalid endpoint types.

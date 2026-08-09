@@ -12,6 +12,7 @@
  * runtime merge logic.
  */
 
+import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
 import type {
   EdgeId,
   GetNodeType,
@@ -249,6 +250,16 @@ export type DeleteModifyPolicy = "deleteWins" | "modifyWins" | "flag";
 export type ComparisonCeilingPolicy = "error" | "mergeByIdOnly";
 
 /**
+ * Opt-in retention policy for candidate-level scoring diagnostics. The limit is
+ * a deterministic global ceiling over the canonically ordered scored pairs;
+ * planning still evaluates candidates according to the normal comparison
+ * ceiling, then retains at most this many accepted/rejected decisions.
+ */
+export type CandidateDiagnosticsOptions = Readonly<{
+  limit: number;
+}>;
+
+/**
  * Ontology type-reconciliation mode. `"off"` is a no-op (default); `"ontology"`
  * collapses compatible types to the most-specific via the public subClassOf
  * closure (T2a / T10).
@@ -325,6 +336,11 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
   /** Safety ceiling on candidate comparisons per kind. Default: unbounded. */
   maxComparisonsPerKind?: number;
   /**
+   * Retain bounded accepted/rejected scored-pair diagnostics. Omitted by
+   * default so ordinary plans and reports contain only decisive evidence.
+   */
+  candidateDiagnostics?: CandidateDiagnosticsOptions;
+  /**
    * Optional single-link diameter guard. When set, clusters whose pairwise
    * distance exceeds it are split by the deterministic drop-weakest rule (T8).
    */
@@ -370,6 +386,8 @@ export type EntityResolution = Readonly<{
   memberIds: readonly NodeId<NodeType>[];
   kind: string;
   branchOrigins: readonly BranchId[];
+  /** Deterministic minimal accepted-edge witness for this resolution. */
+  decisiveEdges: readonly MatchEvidence[];
 }>;
 
 /**
@@ -418,6 +436,8 @@ export type TypeReconciliation = Readonly<{
   entityId: NodeId<NodeType>;
   fromTypes: readonly string[];
   toType: string;
+  /** Accepted ontology-retype witness, when emitted by graph merge. */
+  decisiveEdges?: readonly MatchEvidence[];
 }>;
 
 /**
@@ -596,6 +616,8 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
    * graph still committed). Empty on a clean merge.
    */
   warnings: readonly string[];
+  /** Bounded accepted/rejected scored-pair diagnostics when explicitly enabled. */
+  candidateDiagnostics?: CandidateDiagnostics;
   /**
    * Present only when `persistProvenance` ran and SUCCEEDED: the sidecar provenance
    * graph id and how many `{branch, sourceId}` rows were upserted. Absent when
