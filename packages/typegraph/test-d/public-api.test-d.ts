@@ -224,7 +224,8 @@ declare const identityStore: Store<typeof identityGraph>;
 declare const identityPerson: Awaited<
   ReturnType<typeof identityStore.nodes.Person.create>
 >;
-declare const dynamicIdentityCollection: DynamicNodeCollection<"RuntimeTag">;
+const dynamicIdentityCollection =
+  identityStore.getNodeCollectionOrThrow("RuntimeTag");
 declare const dynamicIdentityNode: Awaited<
   ReturnType<typeof dynamicIdentityCollection.create>
 >;
