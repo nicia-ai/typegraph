@@ -21,7 +21,12 @@ import {
   IdentityMergeConflictError,
   MERGE_ERROR_CODES,
 } from "../../src/graph-merge/errors";
-import { merge } from "../../src/graph-merge/merge";
+import {
+  applyMergePlan,
+  merge,
+  mergeIncremental,
+  planMerge,
+} from "../../src/graph-merge/merge";
 import {
   assertNoContradictoryIdentityClosure,
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
@@ -39,6 +44,7 @@ import { enumerateAllNodes } from "../../src/graph-merge/state-diff";
 import type { IdentityTransferAssertion } from "../../src/graph-merge/typegraph-internal";
 import type { BranchId } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { storeRuntime } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, getStoreBackend } from "./test-utils";
 
@@ -263,6 +269,166 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(current.map((entry) => entry.id)).toEqual([reasserted.assertion.id]);
     expect(await store.identity.areSame(first, second)).toBe(true);
   });
+
+  it("applies the exact reviewed windows for multiple and unrelated retractions", async () => {
+    const [store] = await createStoreWithSchema(graph, await makeBackend(), {
+      history: true,
+      revisionTracking: true,
+    });
+    const nodes = await store.nodes.Person.bulkCreate(
+      [
+        "same-a",
+        "same-b",
+        "different-a",
+        "different-b",
+        "only-a",
+        "only-b",
+      ].map((id) => ({
+        id: `plan-window-${id}`,
+        props: { name: id },
+        validFrom: "2019-01-01T00:00:00.000Z",
+      })),
+    );
+    const sameA = requireDefined(nodes[0]);
+    const sameB = requireDefined(nodes[1]);
+    const differentA = requireDefined(nodes[2]);
+    const differentB = requireDefined(nodes[3]);
+    const onlyA = requireDefined(nodes[4]);
+    const onlyB = requireDefined(nodes[5]);
+    const baseSame = await store.identity.assertSame(sameA, sameB);
+    const baseDifferent = await store.identity.assertDifferent(
+      differentA,
+      differentB,
+    );
+    const baseOnly = await store.identity.assertSame(onlyA, onlyB);
+    const source = unwrap(
+      await branch(store, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const retractedSame = requireDefined(
+      await source.store.identity.retractAssertion(baseSame.assertion.id),
+    );
+    const replacementDifferent = await source.store.identity.assertDifferent(
+      sameA,
+      sameB,
+    );
+    const retractedDifferent = requireDefined(
+      await source.store.identity.retractAssertion(baseDifferent.assertion.id),
+    );
+    const replacementSame = await source.store.identity.assertSame(
+      differentA,
+      differentB,
+    );
+    const retractedOnly = requireDefined(
+      await source.store.identity.retractAssertion(baseOnly.assertion.id),
+    );
+
+    const artifact = unwrap(await planMerge(store, [source]));
+    const applied = unwrap(await applyMergePlan(store, artifact));
+    expect(applied.merged.identity).toEqual({ asserted: 2, retracted: 3 });
+
+    const archival = await storeRuntime(store).identityAssertionsAtTarget(
+      storeRuntime(store).backend,
+      "archival",
+    );
+    const committedById = new Map(
+      archival.map((assertion) => [assertion.id, assertion]),
+    );
+    for (const retraction of artifact.writes.identityRetractions) {
+      expect(committedById.get(retraction.id)?.validTo).toBe(
+        retraction.validTo,
+      );
+    }
+    for (const assertion of artifact.writes.identityAssertions) {
+      expect(committedById.get(assertion.id)).toEqual(assertion);
+    }
+    expect(committedById.get(baseSame.assertion.id)?.validTo).toBe(
+      retractedSame.validTo,
+    );
+    expect(committedById.get(baseDifferent.assertion.id)?.validTo).toBe(
+      retractedDifferent.validTo,
+    );
+    expect(committedById.get(baseOnly.assertion.id)?.validTo).toBe(
+      retractedOnly.validTo,
+    );
+    expect(
+      committedById.get(replacementDifferent.assertion.id)?.validFrom,
+    ).toBe(replacementDifferent.assertion.validFrom);
+    expect(committedById.get(replacementSame.assertion.id)?.validFrom).toBe(
+      replacementSame.assertion.validFrom,
+    );
+  });
+
+  it.each([
+    ["same", "different"],
+    ["different", "same"],
+  ] as const)(
+    "keeps an incremental %s-to-%s replacement idempotent",
+    async (initialRelation, replacementRelation) => {
+      const [forkPoint] = await createStoreWithSchema(
+        graph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      const first = await forkPoint.nodes.Person.create(
+        { name: "Replay first" },
+        { id: `replay-${initialRelation}-first` },
+      );
+      const second = await forkPoint.nodes.Person.create(
+        { name: "Replay second" },
+        { id: `replay-${initialRelation}-second` },
+      );
+      const initial =
+        initialRelation === "same" ?
+          await forkPoint.identity.assertSame(first, second)
+        : await forkPoint.identity.assertDifferent(first, second);
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), {
+          id: asBranchId(`target-${initialRelation}`),
+        }),
+      ).store;
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), {
+          id: asBranchId(`source-${initialRelation}`),
+        }),
+      );
+      const retraction = requireDefined(
+        await source.store.identity.retractAssertion(initial.assertion.id),
+      );
+      const replacement =
+        replacementRelation === "same" ?
+          await source.store.identity.assertSame(first, second)
+        : await source.store.identity.assertDifferent(first, second);
+      const args = {
+        forkPoint,
+        target,
+        branches: [source],
+        options: { branchOrder: [source.id] },
+      } as const;
+
+      const firstMerge = unwrap(await mergeIncremental(args));
+      expect(firstMerge.merged.identity).toEqual({
+        asserted: 1,
+        retracted: 1,
+      });
+      const secondMerge = unwrap(await mergeIncremental(args));
+      expect(secondMerge.merged.identity).toEqual({
+        asserted: 0,
+        retracted: 0,
+      });
+
+      const archival = await storeRuntime(target).identityAssertionsAtTarget(
+        storeRuntime(target).backend,
+        "archival",
+      );
+      expect(
+        archival.find((assertion) => assertion.id === initial.assertion.id)
+          ?.validTo,
+      ).toBe(retraction.validTo);
+      expect(
+        archival.find((assertion) => assertion.id === replacement.assertion.id),
+      ).toEqual(replacement.assertion);
+    },
+  );
 
   it("rejects assertion-free same-id nodes of disjoint kinds at plan time", async () => {
     // Neither branch writes any assertion: the contradiction is entirely

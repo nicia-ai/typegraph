@@ -212,18 +212,23 @@ describe("identity review fixes", () => {
     const aRef = { kind: "Person", id: a.id };
     const bRef = { kind: "Person", id: b.id };
     const existing = await store.identity.assertSame(a, b);
+    const replacementValidFrom = new Date().toISOString();
     const replacement = transfer(
       "d1",
       "different",
       aRef,
       bRef,
-      existing.assertion.validFrom,
+      replacementValidFrom,
     );
+    const retraction = {
+      ...existing.assertion,
+      validTo: replacementValidFrom,
+    };
 
     await expect(
       storeRuntime(store).applyIdentityMergeAtTarget(
         store.backend,
-        [existing.assertion.id],
+        [retraction],
         [replacement],
       ),
     ).resolves.toEqual({ created: 1, retracted: 1 });
@@ -241,10 +246,11 @@ describe("identity review fixes", () => {
       (assertion) => assertion.id === "d1",
     );
     expect(currentDifferent?.validFrom).toBe(endedSame?.validTo);
+    expect(currentDifferent?.validFrom).toBe(replacementValidFrom);
     await expect(
       storeRuntime(store).applyIdentityMergeAtTarget(
         store.backend,
-        [existing.assertion.id],
+        [retraction],
         [replacement],
       ),
     ).resolves.toEqual({ created: 0, retracted: 0 });

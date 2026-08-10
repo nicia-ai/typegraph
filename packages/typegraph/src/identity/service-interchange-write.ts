@@ -7,14 +7,13 @@ import {
 } from "../errors";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
 import { nowIso } from "../utils/date";
-import { identityAssertionSemanticKey } from "./assertion-key";
 import {
   requireLiveEndpoints,
   requireStructuralEndpoints,
 } from "./service-components";
 import {
   partitionRetractedEndpoints,
-  retractByIds,
+  retractPlannedAssertions,
   runIdentityMutation,
 } from "./service-facade";
 import {
@@ -224,44 +223,6 @@ function rethrowTaggedWithAssertion(
     });
   }
   throw error;
-}
-
-function reconcileReplacementWindows(
-  assertions: readonly IdentityTransferAssertion[],
-  retractions: Iterable<IdentityAssertionStorageRow>,
-): readonly IdentityTransferAssertion[] {
-  const retractionEndByReplacement = new Map<string, string>();
-  for (const retraction of retractions) {
-    if (retraction.valid_to === undefined) continue;
-    const replacementRelation =
-      retraction.rel === "same" ? "different" : "same";
-    const key = identityAssertionSemanticKey(
-      replacementRelation,
-      { kind: retraction.a_kind, id: retraction.a_id },
-      { kind: retraction.b_kind, id: retraction.b_id },
-    );
-    const existingEnd = retractionEndByReplacement.get(key);
-    if (existingEnd === undefined || existingEnd < retraction.valid_to) {
-      retractionEndByReplacement.set(key, retraction.valid_to);
-    }
-  }
-  return assertions.map((assertion) => {
-    if (assertion.validTo !== undefined) return assertion;
-    const retractionEnd = retractionEndByReplacement.get(
-      identityAssertionSemanticKey(
-        assertion.relation,
-        assertion.a,
-        assertion.b,
-      ),
-    );
-    if (retractionEnd === undefined || assertion.validFrom >= retractionEnd) {
-      return assertion;
-    }
-    // A merge replacement is current truth from the instant its opposing
-    // target assertion is retracted. Keeping the branch's earlier start
-    // would manufacture a historical overlap that neither side resolved.
-    return { ...assertion, validFrom: retractionEnd };
-  });
 }
 
 /**
@@ -499,14 +460,19 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
 
 export async function applyIdentityChangesForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
-  retractionIds: readonly string[],
+  retractions: readonly IdentityTransferAssertion[],
   assertions: readonly IdentityTransferAssertion[],
 ): Promise<Readonly<{ created: number; retracted: number }>> {
-  if (retractionIds.length === 0 && assertions.length === 0) {
+  if (retractions.length === 0 && assertions.length === 0) {
     return { created: 0, retracted: 0 };
   }
   return runIdentityMutation(ctx, async (target, touch, markWritten) => {
-    const retracted = await retractByIds(ctx, target, retractionIds, touch);
+    const retracted = await retractPlannedAssertions(
+      ctx,
+      target,
+      retractions,
+      touch,
+    );
     const { closureReferences, separationReferences } =
       partitionRetractedEndpoints(retracted);
     // Repair the closure from the retractions BEFORE importing: a batch that
@@ -528,20 +494,10 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
       ctx.graphId,
       separationReferences,
     );
-    const retractionRows = await loadAssertionsByIds(
-      target,
-      ctx.schema,
-      ctx.graphId,
-      retractionIds,
-    );
-    const reconciledAssertions = reconcileReplacementWindows(
-      assertions,
-      retractionRows.values(),
-    );
     const summary = await importIdentityAssertionsIntoTarget(
       ctx,
       target,
-      reconciledAssertions,
+      assertions,
       "archival",
       new Set(retracted.map((assertion) => assertion.id)),
     );

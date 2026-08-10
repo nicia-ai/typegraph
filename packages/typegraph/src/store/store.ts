@@ -1057,8 +1057,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.foldImportedIdentityNodes(target, references),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
-      applyIdentityMergeAtTarget: (target, retractionIds, assertions) =>
-        this.applyIdentityMergeAtTarget(target, retractionIds, assertions),
+      applyIdentityMergeAtTarget: (target, retractions, assertions) =>
+        this.applyIdentityMergeAtTarget(target, retractions, assertions),
       assertIdentityClassesConsistentAtTarget: (target, seeds) =>
         this.assertIdentityClassesConsistentAtTarget(target, seeds),
     };
@@ -1353,10 +1353,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** @internal Mechanical graph-merge apply through the mutation coordinator. */
   applyIdentityMergeAtTarget(
     target: GraphBackend | TransactionBackend,
-    retractionIds: readonly string[],
+    retractions: readonly IdentityTransferAssertion[],
     assertions: readonly IdentityTransferAssertion[],
   ): Promise<Readonly<{ created: number; retracted: number }>> {
-    if (retractionIds.length === 0 && assertions.length === 0) {
+    if (retractions.length === 0 && assertions.length === 0) {
       return Promise.resolve({ created: 0, retracted: 0 });
     }
     if (this.#graph.identity === undefined) {
@@ -1367,7 +1367,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
     return applyIdentityChangesForContext(
       this.#identityContext(target),
-      retractionIds,
+      retractions,
       assertions,
     );
   }

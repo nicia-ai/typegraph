@@ -1,5 +1,6 @@
 import { type GraphDef } from "../core/define-graph";
 import {
+  ConfigurationError,
   IdentityContradictionError,
   type IdentityContradictionErrorDetails,
 } from "../errors";
@@ -58,7 +59,10 @@ import {
   registeredPlainRef,
   visibleMembersAtCoordinate,
 } from "./service-read";
-import { type IdentityServiceContext } from "./service-types";
+import {
+  type IdentityServiceContext,
+  type IdentityTransferAssertion,
+} from "./service-types";
 import {
   executeIdentityStatement,
   identityChunkSize,
@@ -397,11 +401,15 @@ async function retractById(
   return ended;
 }
 
-export async function retractByIds(
+async function retractCurrentAssertions(
   ctx: IdentityServiceContext<GraphDef>,
   target: Backend,
   ids: readonly string[],
   touch: IdentityTouch,
+  resolveValidTo: (
+    row: IdentityAssertionStorageRow,
+    operationInstant: string,
+  ) => string,
 ): Promise<readonly IdentityAssertionStorageRow[]> {
   const uniqueIds = [...new Set(ids)];
   if (uniqueIds.length === 0) return [];
@@ -429,14 +437,14 @@ export async function retractByIds(
     current.push(...rows.map((row) => normalizeIdentityAssertionRow(row)));
   }
   if (current.length === 0) return [];
-  const now = nowIso();
+  const operationInstant = nowIso();
   // A single UPDATE cannot clamp per-row against each row's own valid_from, so
-  // group ids by the clamped valid_to they need. Rows without skew share the
-  // common `now` window; only skewed rows split into their own clamped update.
+  // group ids by the valid_to they need. Ordinary API retractions share the
+  // operation clock; merge retractions preserve each reviewed plan boundary.
   const byValidTo = new Map<string, string[]>();
   const endedById = new Map<string, string>();
   for (const row of current) {
-    const validTo = clampValidTo(now, row.valid_from);
+    const validTo = resolveValidTo(row, operationInstant);
     endedById.set(row.id, validTo);
     const group = byValidTo.get(validTo) ?? [];
     group.push(row.id);
@@ -457,7 +465,7 @@ export async function retractByIds(
         target,
         sql`
           UPDATE ${ctx.schema.identityAssertionsTable}
-          SET valid_to = ${validTo}, updated_at = ${now}
+          SET valid_to = ${validTo}, updated_at = ${operationInstant}
           WHERE graph_id = ${ctx.graphId}
             AND id IN (${placeholders})
             AND valid_to IS NULL
@@ -473,7 +481,7 @@ export async function retractByIds(
       {
         ...row,
         valid_to: requireDefined(endedById.get(row.id)),
-        updated_at: now,
+        updated_at: operationInstant,
       },
     ];
   });
@@ -481,6 +489,57 @@ export async function retractByIds(
     touch(ctx.graphId, row.id, { ...row });
   }
   return ended;
+}
+
+export async function retractByIds(
+  ctx: IdentityServiceContext<GraphDef>,
+  target: Backend,
+  ids: readonly string[],
+  touch: IdentityTouch,
+): Promise<readonly IdentityAssertionStorageRow[]> {
+  return retractCurrentAssertions(
+    ctx,
+    target,
+    ids,
+    touch,
+    (row, operationInstant) => clampValidTo(operationInstant, row.valid_from),
+  );
+}
+
+/** Ends merge assertions at the exact valid-time boundaries in the reviewed plan. */
+export async function retractPlannedAssertions(
+  ctx: IdentityServiceContext<GraphDef>,
+  target: Backend,
+  retractions: readonly IdentityTransferAssertion[],
+  touch: IdentityTouch,
+): Promise<readonly IdentityAssertionStorageRow[]> {
+  const retractionById = new Map(
+    retractions.map((retraction) => [retraction.id, retraction]),
+  );
+  return retractCurrentAssertions(
+    ctx,
+    target,
+    retractions.map((retraction) => retraction.id),
+    touch,
+    (row, operationInstant) => {
+      const retraction = requireDefined(retractionById.get(row.id));
+      if (retraction.validTo === undefined) {
+        throw new ConfigurationError(
+          `Identity merge retraction ${retraction.id} is missing validTo.`,
+          {
+            code: "IDENTITY_MERGE_RETRACTION_REQUIRES_END",
+            assertionId: retraction.id,
+          },
+        );
+      }
+      return requireDefined(
+        resolveIdentityValidityWindow(
+          { validFrom: row.valid_from, validTo: retraction.validTo },
+          operationInstant,
+        ).validTo,
+      );
+    },
+  );
 }
 
 export async function runIdentityMutation<G extends GraphDef, T>(

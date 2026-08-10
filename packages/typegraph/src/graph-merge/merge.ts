@@ -1943,7 +1943,7 @@ async function applyIdentityRows<G extends GraphDef>(
   try {
     const applied = await storeRuntime(target).applyIdentityMergeAtTarget(
       txBackend,
-      retractions.map((retraction) => retraction.id),
+      retractions,
       assertions,
     );
     if (assertConsistent !== undefined) await assertConsistent();
