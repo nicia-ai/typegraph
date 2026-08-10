@@ -12,7 +12,6 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
-import { type IdentityTransferAssertion } from "../identity/service-types";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
@@ -214,8 +213,24 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   ) => Promise<Readonly<{ created: number; skipped: number }>>;
   applyIdentityMergeAtTarget: (
     target: GraphBackend | TransactionBackend,
-    retractions: readonly IdentityTransferAssertion[],
-    assertions: readonly IdentityTransferAssertion[],
+    retractions: readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
+    }>[],
+    assertions: readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
+    }>[],
   ) => Promise<Readonly<{ created: number; retracted: number }>>;
   /**
    * Proves the identity classes of `seeds` carry no contradiction in the state
