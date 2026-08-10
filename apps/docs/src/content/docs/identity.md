@@ -96,9 +96,29 @@ When you hold a plain assertion-ID string that came from persistence or an
 interchange document, re-enter the branded type with the `asIdentityAssertionId(value)`
 caster rather than a `as` assertion.
 
-Reference reads return graph-bounded `{ kind, id }` values whose IDs retain the
-node kind's `NodeId` brand. `nodesOf` hydrates the class into a kind-discriminated
-node union. A missing, deleted, or
+Runtime-evolved nodes carry a nominal dynamic-node type, so they flow through
+the same identity surface without a cast:
+
+```typescript
+const evolved = await store.evolve(extension);
+const person = await evolved.nodes.Person.create({ name: "Alice" });
+const tag = await evolved
+  .getNodeCollectionOrThrow("Tag")
+  .create({ label: "author" });
+
+await evolved.identity.assertSame(person, tag);
+await evolved.identity.membersOf(tag);
+```
+
+Reference reads return `IdentityNodeReference<G>` values covering both
+compile-time graph kinds and registered runtime kinds. This widening is
+necessary even when a read starts from `person`, because its class can contain
+`tag`. Their IDs retain the appropriate nominal brand, and `nodesOf` hydrates
+the class into static kind-discriminated members or `DynamicNode` values for
+runtime members. A plain `{ kind: string, id: string }` does not prove that the
+kind came through the evolved Store; pass the dynamic node or a nominal dynamic
+reference returned by an identity read. Unknown and removed kinds still fail
+at runtime with `KindNotFoundError`. A missing, deleted, or
 coordinate-invisible input returns `undefined`, `[]`, or `false` according to
 the method. A visible singleton returns itself from `membersOf` and
 `representativeOf`, and `areSame(ref, ref)` is true. `areDifferent` lifts an

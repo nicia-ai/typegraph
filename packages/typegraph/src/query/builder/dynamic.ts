@@ -43,7 +43,13 @@ import {
 declare const DYNAMIC_NODE_BRAND: unique symbol;
 declare const DYNAMIC_EDGE_BRAND: unique symbol;
 
-export type DynamicNodeType = NodeType &
+/** A runtime-registered node kind whose collection lookup preserved `K`. */
+export type DynamicNodeKind<K extends string = string> = K &
+  Readonly<{ [DYNAMIC_NODE_BRAND]: true }>;
+
+export type DynamicNodeType<K extends string = string> = NodeType<
+  DynamicNodeKind<K>
+> &
   Readonly<{ [DYNAMIC_NODE_BRAND]: true }>;
 
 export type DynamicEdgeType = AnyEdgeType &

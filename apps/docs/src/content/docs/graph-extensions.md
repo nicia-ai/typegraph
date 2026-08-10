@@ -372,8 +372,24 @@ the call site rather than crashing later on `papers!.create(...)`.
 
 `DynamicNodeCollection` exposes the same CRUD surface as
 `store.nodes.X` — `create`, `getById`, `find`, `update`, `delete`,
-etc. — but with widened `Node<NodeType>` element types since the
-specific Zod schema isn't visible to TypeScript at the call site.
+etc. — but with `DynamicNode` element types since the specific Zod schema isn't
+visible to TypeScript at the call site.
+
+In TypeScript, nodes returned by a dynamic collection carry the nominal
+`DynamicNode<K>` type, preserving the requested kind literal. That proof lets
+runtime kinds participate directly in Operational Identity without weakening
+compile-time references to arbitrary string kinds:
+
+```ts
+const paper = await evolved
+  .getNodeCollectionOrThrow("Paper")
+  .create({ title: "Runtime schemas" });
+
+await evolved.identity.assertSame(document, paper);
+```
+
+Identity reads can consequently return `IdentityNodeReference<G>` values for
+either compile-time or runtime kinds. See [Operational Identity](/identity).
 
 For consumers that need the live Zod schema itself — MCP tool wrappers
 that validate inputs before forwarding to `collection.create`, or

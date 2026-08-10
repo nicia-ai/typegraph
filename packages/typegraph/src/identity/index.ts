@@ -5,6 +5,7 @@ export type {
   IdentityAssertionResult,
   IdentityFacade,
   IdentityNode,
+  IdentityNodeReference,
   IdentityNodeRefInput,
   IdentityPair,
   IdentityReadFacade,

@@ -40,6 +40,8 @@ export type ValidityEndMutation = BackendValidityEndMutation;
 import type {
   DynamicEdgeAccessor,
   DynamicNodeAccessor,
+  DynamicNodeKind,
+  DynamicNodeType,
 } from "../query/builder";
 import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
 import {
@@ -1909,7 +1911,9 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
    * `Store.getNodeCollection`. Returns `undefined` when `kind` is not
    * registered in this graph.
    */
-  getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
+  getNodeCollection: <const K extends string>(
+    kind: K,
+  ) => DynamicNodeCollection<K> | undefined;
 }> &
   (G["identity"] extends GraphIdentityConfig ?
     Readonly<{ identity: IdentityFacade<G> }>
@@ -1990,6 +1994,23 @@ export type MeasurableAdapterTransactionContext<
 // ============================================================
 
 /**
+ * A node returned by a runtime string-keyed collection.
+ *
+ * Its nominal node-type brand proves the value passed through the dynamic
+ * collection API while its properties remain runtime-schema-shaped.
+ */
+export type DynamicNode<K extends string = string> = Node<DynamicNodeType<K>>;
+
+declare const DYNAMIC_NODE_REFERENCE_BRAND: unique symbol;
+
+/** A nominal lightweight reference returned by runtime-aware identity reads. */
+export type DynamicNodeReference<K extends string = string> = Readonly<{
+  kind: DynamicNodeKind<K>;
+  id: NodeId<DynamicNodeType<K>>;
+  [DYNAMIC_NODE_REFERENCE_BRAND]: true;
+}>;
+
+/**
  * Replace branded `NodeId` / `EdgeId` with plain `string` in each
  * method's parameter list. Return types are preserved unchanged.
  *
@@ -2025,16 +2046,16 @@ type UnbrandRecord<T extends Record<string, unknown>> = {
  * A node collection with widened generics for runtime string-keyed access.
  *
  * This is the return type of `store.getNodeCollection(kind)`. It exposes
- * the full `NodeCollection` API but with `NodeType` and `string` constraint
- * names instead of the specific generic parameters, since the concrete type
- * is not known at compile time.
+ * the full `NodeCollection` API but with a nominal `DynamicNodeType` and
+ * `string` constraint names instead of the specific generic parameters, since
+ * the concrete type is not known at compile time.
  *
  * ID parameters accept plain `string` instead of branded `NodeId<N>`, since
  * the dynamic path typically receives IDs from edge metadata, snapshots,
  * or external input where the brand is not available.
  */
-export type DynamicNodeCollection = WidenBrandedIds<
-  NodeCollection<NodeType, string>
+export type DynamicNodeCollection<K extends string = string> = WidenBrandedIds<
+  NodeCollection<DynamicNodeType<K>, string>
 >;
 
 /**
