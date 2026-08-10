@@ -96,6 +96,9 @@ const employeeGraph = defineGraph({
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
 const IDENTITY_CONFLICT_CODE = MERGE_ERROR_CODES.identityConflict;
+function narrowedAssertionWarning(assertionId: string): string {
+  return `Identity assertion ${JSON.stringify(assertionId)} was narrowed from [2020-01-01T00:00:00.000Z, open) to [2022-01-01T00:00:00.000Z, open) to fit its remapped endpoint windows.`;
+}
 
 describe.each(backendMatrix())("identity merge [$name]", (entry) => {
   let cleanups: (() => Promise<void>)[];
@@ -130,6 +133,56 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       : undefined;
     return { store, first, second, assertion };
   }
+
+  async function createPatientRemapScenario() {
+    const backend = await makeBackend();
+    const [baseStore] = await createStoreWithSchema(patientGraph, backend, {
+      revisionTracking: true,
+    });
+    const anchor = await baseStore.nodes.Patient.create(
+      { name: "Anchor Person", birthDate: "1990-01-01" },
+      { id: "anchor", validFrom: "2019-01-01T00:00:00.000Z" },
+    );
+    const branchA = unwrap(
+      await branch(baseStore, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchB = unwrap(
+      await branch(baseStore, () => makeBackend(), { id: BRANCH_B }),
+    );
+    const anna = await branchA.store.nodes.Patient.create(
+      { name: "Anna Rivera", birthDate: "1974-03-09" },
+      {
+        id: "p-anna",
+        validFrom: "2020-01-01T00:00:00.000Z",
+      },
+    );
+    const { assertion } = await branchA.store.identity.assertSame(
+      anna,
+      anchor,
+      {
+        validFrom: "2020-01-01T00:00:00.000Z",
+      },
+    );
+    await branchB.store.nodes.Patient.create(
+      { name: "Ana Rivera", birthDate: "1974-03-09" },
+      {
+        id: "p-ana",
+        validFrom: "2022-01-01T00:00:00.000Z",
+      },
+    );
+    return { backend, baseStore, anchor, branchA, branchB, assertion };
+  }
+
+  const patientRemapOptions = {
+    resolve: {
+      Patient: {
+        block: (node: unknown) => (node as { birthDate?: string }).birthDate,
+        similarity: { kind: "fulltext", fields: ["name"] },
+        threshold: 0.85,
+      },
+    },
+    branchOrder: [BRANCH_A, BRANCH_B],
+  } as const;
 
   it("plans and applies adjacent historical identity relations", async () => {
     const [store] = await createStoreWithSchema(graph, await makeBackend());
@@ -656,46 +709,17 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
   });
 
   it("remaps a folded assertion endpoint onto the cluster survivor (#2)", async () => {
-    const backend = await makeBackend();
-    const [baseStore] = await createStoreWithSchema(patientGraph, backend);
-    const anchor = await baseStore.nodes.Patient.create(
-      { name: "Anchor Person", birthDate: "1990-01-01" },
-      { id: "anchor" },
+    const { backend, baseStore, anchor, branchA, branchB, assertion } =
+      await createPatientRemapScenario();
+    const result = await merge(
+      baseStore,
+      [branchA, branchB],
+      patientRemapOptions,
     );
-
-    const branchA = unwrap(
-      await branch(baseStore, () => makeBackend(), { id: BRANCH_A }),
-    );
-    const branchB = unwrap(
-      await branch(baseStore, () => makeBackend(), { id: BRANCH_B }),
-    );
-
-    // Branch A's Patient has the LARGER id ("p-anna" > "p-ana"), so it is the
-    // NON-survivor. Its identity assertion endpoint must be remapped onto branch
-    // B's surviving node, or the commit-time endpoint guard rejects the dangling id.
-    const anna = await branchA.store.nodes.Patient.create(
-      { name: "Anna Rivera", birthDate: "1974-03-09" },
-      { id: "p-anna" },
-    );
-    await branchA.store.identity.assertSame(anna, anchor);
-
-    await branchB.store.nodes.Patient.create(
-      { name: "Ana Rivera", birthDate: "1974-03-09" },
-      { id: "p-ana" },
-    );
-
-    const result = await merge(baseStore, [branchA, branchB], {
-      resolve: {
-        Patient: {
-          block: (node) =>
-            (node as unknown as { birthDate?: string }).birthDate,
-          similarity: { kind: "fulltext", fields: ["name"] },
-          threshold: 0.85,
-        },
-      },
-      branchOrder: [BRANCH_A, BRANCH_B],
-    });
     expect(isOk(result)).toBe(true);
+    expect(unwrap(result).warnings).toEqual([
+      narrowedAssertionWarning(assertion.id),
+    ]);
 
     // The two duplicate patients collapsed to one survivor ("p-ana").
     const rows = await enumerateAllNodes(backend, baseStore.graphId, "Patient");
@@ -720,6 +744,20 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(requireDefined(appliedAssertion).validFrom).toBe(
       survivorRow.valid_from,
     );
+  });
+
+  it("round-trips a narrowing warning through a portable plan", async () => {
+    const { baseStore, branchA, branchB, assertion } =
+      await createPatientRemapScenario();
+    const artifact = unwrap(
+      await planMerge(baseStore, [branchA, branchB], patientRemapOptions),
+    );
+    const expectedWarnings = [narrowedAssertionWarning(assertion.id)];
+    expect(artifact.review.warnings).toEqual(expectedWarnings);
+
+    const parsed = JSON.parse(JSON.stringify(artifact)) as typeof artifact;
+    const report = unwrap(await applyMergePlan(baseStore, parsed));
+    expect(report.warnings).toEqual(expectedWarnings);
   });
 
   it("rejects opposing relations created by endpoint reconciliation", async () => {
@@ -1571,6 +1609,78 @@ describe("remapIdentityAssertionEndpoints validity", () => {
         b: { kind: "Person", id: "survivor" },
         validTo: "2023-01-01T00:00:00.000Z",
       },
+    ]);
+  });
+
+  it("does not warn for a narrowed assertion removed by dedupe", () => {
+    const survivor: IdentityTransferAssertion = {
+      ...assertion,
+      id: "a-survivor",
+      a: { kind: "Person", id: "survivor" },
+      validFrom: "2022-01-01T00:00:00.000Z",
+      validTo: "2024-01-01T00:00:00.000Z",
+    };
+    const narrowedLoser = { ...assertion, id: "z-narrowed-loser" };
+    const result = remapIdentityAssertionEndpoints(
+      [narrowedLoser, survivor],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          {
+            validFrom: "2022-01-01T00:00:00.000Z",
+            validTo: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+      ]),
+    );
+
+    expect(result.assertions.map((entry) => entry.id)).toEqual([survivor.id]);
+    expect(result.dropped).toContainEqual({
+      kind: "identity",
+      id: narrowedLoser.id,
+      reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+    });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("orders warnings by the surviving assertions' semantic keys", () => {
+    const laterSemanticKey: IdentityTransferAssertion = {
+      id: "a-warning",
+      relation: "same",
+      a: { kind: "Person", id: "z-first" },
+      b: { kind: "Person", id: "z-second" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2025-01-01T00:00:00.000Z",
+    };
+    const earlierSemanticKey: IdentityTransferAssertion = {
+      ...laterSemanticKey,
+      id: "z-warning",
+      a: { kind: "Person", id: "a-first" },
+      b: { kind: "Person", id: "a-second" },
+    };
+    const result = remapIdentityAssertionEndpoints(
+      [laterSemanticKey, earlierSemanticKey],
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "z-first"),
+          { validFrom: "2023-01-01T00:00:00.000Z" },
+        ],
+        [
+          mergeKey("Person", "a-first"),
+          { validFrom: "2022-01-01T00:00:00.000Z" },
+        ],
+      ]),
+    );
+
+    expect(result.warnings).toEqual([
+      'Identity assertion "z-warning" was narrowed from [2020-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to [2022-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to fit its remapped endpoint windows.',
+      'Identity assertion "a-warning" was narrowed from [2020-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to [2023-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to fit its remapped endpoint windows.',
     ]);
   });
 });
