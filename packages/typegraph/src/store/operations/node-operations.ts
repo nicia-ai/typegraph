@@ -79,6 +79,7 @@ import {
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
 import { refKey } from "../../identity/service";
+import { type IdentityTarget } from "../../identity/sql-target";
 import {
   compileIndexWhere,
   compileNodeIndexFieldKeys,
@@ -153,7 +154,6 @@ import {
 } from "./write-plan";
 import {
   type NodeInsertWork,
-  unfencedTarget,
   type WriteSession,
   type WriteTarget,
 } from "./write-session";
@@ -188,14 +188,21 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     ctx: BulkOperationHookContext,
     fn: () => Promise<T>,
   ) => Promise<T>;
+  /**
+   * The identity hooks a node write participates in, on {@link IdentityTarget}
+   * — the projection identity STATEMENTS run against — so a fold or a detach
+   * can be issued from inside a write frame, whose handle is the read-only
+   * {@link WriteTarget}. Identity assertions are not node rows: they never
+   * travel through the session, and this is their seam.
+   */
   identity?: Readonly<{
-    lock: (target: GraphBackend | TransactionBackend) => Promise<void>;
+    lock: (target: IdentityTarget) => Promise<void>;
     foldCreated: (
-      target: GraphBackend | TransactionBackend,
+      target: IdentityTarget,
       references: readonly Readonly<{ kind: string; id: string }>[],
     ) => Promise<void>;
     detachDeleted: (
-      target: GraphBackend | TransactionBackend,
+      target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
       mode: "soft" | "hard",
     ) => Promise<void>;
@@ -399,12 +406,29 @@ function resolveConstraint<G extends GraphDef>(
 // in the batch can see earlier ones during validation.
 // ============================================================
 
-export function createNodeBatchValidationBackend(
+/**
+ * The reads a batch's pending-aware validation answers itself.
+ *
+ * Published as the OVERLAY SPEC alongside the reader built from it, because
+ * two different handles have to carry these answers: the caller reads through
+ * `reader`, and interchange import ALSO hands the spec to the executor, which
+ * decorates the write frame's own target with it so a session can be minted
+ * over the same pending state. A decorated backend alone could not do that —
+ * its static type would have to be the full backend union for the session mint
+ * to accept it, which is the widening this seam exists to remove — and two
+ * independently built overlays would be two spellings of one decision.
+ */
+export type NodeBatchValidationReads = Readonly<
+  Pick<WriteTarget, "getNode" | "checkUnique">
+>;
+
+export function createNodeBatchValidationSeams(
   graphId: string,
   registry: KindRegistry,
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
 ): Readonly<{
-  backend: GraphBackend | TransactionBackend;
+  reads: NodeBatchValidationReads;
+  reader: WriteTarget;
   registerPendingNode: (params: InsertNodeParams) => void;
   registerPendingUniqueEntries: (
     kind: string,
@@ -626,13 +650,14 @@ export function createNodeBatchValidationBackend(
     uniqueCache.set(cacheKey, row);
   }
 
-  const validationBackend = createBackendOverlay(backend, {
+  const reads: NodeBatchValidationReads = {
     getNode: getNodeCached,
     checkUnique: checkUniqueCached,
-  } satisfies Partial<GraphBackend | TransactionBackend>);
+  };
 
   return {
-    backend: validationBackend,
+    reads,
+    reader: createBackendOverlay(backend, reads),
     registerPendingNode,
     registerPendingUniqueEntries,
     registerAppliedNodeUpdate,
@@ -730,7 +755,7 @@ function draftNodeCreate<G extends GraphDef>(
 async function finishNodeCreatePreparation<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   draft: NodeCreateDraft,
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
 
@@ -779,7 +804,7 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
   id: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   options?: NodeCreateInternalOptions,
 ): Promise<NodeCreatePrepared> {
   return finishNodeCreatePreparation(
@@ -1135,7 +1160,7 @@ function nodeUpdateRaceError(
 export async function primeBatchValidationCaches(
   ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
   drafts: readonly NodeCreateDraft[],
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   seams: Readonly<{
     seedNodeRow: (kind: string, id: string, row: CachedNodeRow) => void;
     seedUniqueRow: (
@@ -1219,16 +1244,16 @@ export async function primeBatchValidationCaches(
 async function prepareBatchCreates<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   options?: NodeCreateInternalOptions,
 ): Promise<readonly NodeCreatePrepared[]> {
   const {
-    backend: validationBackend,
+    reader: validationBackend,
     registerPendingNode,
     registerPendingUniqueEntries,
     seedNodeRow,
     seedUniqueRow,
-  } = createNodeBatchValidationBackend(ctx.graphId, ctx.registry, backend);
+  } = createNodeBatchValidationSeams(ctx.graphId, ctx.registry, backend);
 
   // Pass 1 (synchronous): validate every input and assign ids. This
   // surfaces a later row's validation error before an earlier row's
@@ -1367,7 +1392,7 @@ async function resurrectPreparedNode<G extends GraphDef>(
 // ============================================================
 
 async function findUniqueRowAcrossKinds(
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   graphId: string,
   constraintName: string,
   key: string,
@@ -1397,7 +1422,7 @@ interface UniqueMatchRow {
 }
 
 async function batchCheckUniqueAcrossKinds(
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   graphId: string,
   constraintName: string,
   uniqueKeys: readonly string[],
@@ -1465,12 +1490,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     backend,
     async (session, target) => {
       const identity = ctx.identity;
-      const rawTarget = unfencedTarget(target);
       const prepared = await validateAndPrepareNodeCreate(
         ctx,
         input,
         id,
-        rawTarget,
+        target,
         options,
       );
 
@@ -1483,7 +1507,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           prepared,
         );
         if (identity !== undefined) {
-          await identity.foldCreated(rawTarget, foldReferences([prepared]));
+          await identity.foldCreated(target, foldReferences([prepared]));
         }
         return shouldReturnRow ? rowToNode(resurrected) : undefined;
       }
@@ -1507,7 +1531,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       });
 
       if (identity !== undefined) {
-        await identity.foldCreated(rawTarget, foldReferences([prepared]));
+        await identity.foldCreated(target, foldReferences([prepared]));
       }
 
       if (row === undefined) return;
@@ -1565,8 +1589,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     backend,
     async (session, target) => {
       const identity = ctx.identity;
-      const rawTarget = unfencedTarget(target);
-      const preparedCreates = await prepareBatchCreates(ctx, inputs, rawTarget);
+      const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
 
       const partition = partitionCreates(preparedCreates);
       // ## Resurrections follow the whole insert unit
@@ -1591,7 +1614,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
         await resurrectPreparedNode(ctx, session, target, prepared);
       }
       if (identity !== undefined) {
-        await identity.foldCreated(rawTarget, foldReferences(preparedCreates));
+        await identity.foldCreated(target, foldReferences(preparedCreates));
       }
     },
   );
@@ -1623,11 +1646,10 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
     backend,
     async (session, target) => {
       const identity = ctx.identity;
-      const rawTarget = unfencedTarget(target);
       const preparedCreates = await prepareBatchCreates(
         ctx,
         inputs,
-        rawTarget,
+        target,
         options,
       );
 
@@ -1658,7 +1680,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         ),
       );
       if (identity !== undefined) {
-        await identity.foldCreated(rawTarget, foldReferences(preparedCreates));
+        await identity.foldCreated(target, foldReferences(preparedCreates));
       }
 
       return rows.map((row) => rowToNode(row));
@@ -1704,7 +1726,7 @@ export async function executeNodeUpdate<G extends GraphDef>(
       );
       const identity = ctx.identity;
       if (options?.clearDeleted && identity !== undefined) {
-        await identity.foldCreated(unfencedTarget(target), [
+        await identity.foldCreated(target, [
           { kind: input.kind, id: input.id },
         ]);
       }
@@ -1899,7 +1921,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
       );
       const identity = ctx.identity;
       if (options?.clearDeleted && identity !== undefined) {
-        await identity.foldCreated(unfencedTarget(target), [
+        await identity.foldCreated(target, [
           { kind: input.kind, id: input.id },
         ]);
       }
@@ -1954,11 +1976,7 @@ export async function executeNodeDelete<G extends GraphDef>(
         onDelete: registration.onDelete,
       });
       if (identity !== undefined) {
-        await identity.detachDeleted(
-          unfencedTarget(target),
-          { kind, id },
-          "soft",
-        );
+        await identity.detachDeleted(target, { kind, id }, "soft");
       }
     },
   );
@@ -1983,7 +2001,6 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
     backend,
     async (session, target) => {
       const identity = ctx.identity;
-      const rawTarget = unfencedTarget(target);
       const registration = getNodeRegistration(ctx.graph, kind);
       let affectedCount = 0;
 
@@ -2001,7 +2018,7 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
           onDelete: registration.onDelete,
         });
         if (identity !== undefined) {
-          await identity.detachDeleted(rawTarget, { kind, id }, "soft");
+          await identity.detachDeleted(target, { kind, id }, "soft");
         }
         affectedCount += 1;
       }
@@ -2059,11 +2076,7 @@ export async function executeNodeHardDelete<G extends GraphDef>(
         onDelete: registration.onDelete,
       });
       if (identity !== undefined) {
-        await identity.detachDeleted(
-          unfencedTarget(target),
-          { kind, id },
-          "hard",
-        );
+        await identity.detachDeleted(target, { kind, id }, "hard");
       }
     },
   );

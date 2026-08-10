@@ -77,12 +77,19 @@ const RATCHET = {
   managedWriteEntryPoints: 2,
   /**
    * `unfencedTarget()` escapes — the typed hole that hands row work the full
-   * backend union back. Its ceiling is the number of union-typed signatures
-   * the final batch re-types. It is nonzero from the first batch that moves
-   * call sites onto the executor and returns to zero when those signatures are
-   * re-typed.
+   * backend union back. It was nonzero from the first batch that moved call
+   * sites onto the executor and fell to one as the union-typed preparation
+   * helpers, constraint and uniqueness probes, and identity hooks were
+   * re-typed onto the read projection.
+   *
+   * ONE is a reasoned floor, not slack. The bulk getOrCreate's nested legs
+   * re-enter the executor against their enclosing frame's target, and re-entry
+   * mints a session, which writes — so it needs the full union by
+   * construction. Removing it would mean inlining those legs' row work, which
+   * would drop the nested frames' schema fence and revision-clock advance: a
+   * behavior change. A SECOND escape is migration debt, and fails here.
    */
-  unfencedTargetEscapes: 64,
+  unfencedTargetEscapes: 1,
 } as const;
 
 /**

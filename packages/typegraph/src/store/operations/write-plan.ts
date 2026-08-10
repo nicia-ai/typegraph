@@ -32,7 +32,7 @@ import { type ConstraintFenceReason } from "../constraints";
  * permanently allowlisted rather than migrated: they gain no session, no
  * fences and no sidecars from a plan.
  */
-export type RowWorkKind = "node" | "edge" | "identity";
+type RowWorkKind = "node" | "edge" | "identity";
 
 /**
  * Why identity participates in this write. The executor acquires the identity

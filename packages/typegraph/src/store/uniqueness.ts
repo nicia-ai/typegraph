@@ -7,6 +7,7 @@ import {
   type GraphBackend,
   type InsertUniqueParams,
   type TransactionBackend,
+  type UniqueConstraintBackend,
 } from "../backend/types";
 import {
   checkWherePredicate,
@@ -27,12 +28,35 @@ export type UniquenessContext = Readonly<{
   backend: GraphBackend | TransactionBackend;
 }>;
 
-/** Builds a {@link UniquenessContext} — the one constructor every call site shares. */
-export function createUniquenessContext(
+/**
+ * Context for the uniqueness PROBE, whose single backend member is the read.
+ *
+ * Stated separately because the probe runs on handles that cannot write: a
+ * write frame's row work holds the read-only `WriteTarget`, and pre-checking a
+ * key there is the whole point of the probe. Every {@link UniquenessContext}
+ * satisfies this one, so a writer passes its own context unchanged.
+ */
+export type UniquenessProbeContext = Readonly<{
+  graphId: string;
+  registry: KindRegistry;
+  backend: Pick<UniqueConstraintBackend, "checkUnique">;
+}>;
+
+/**
+ * Builds a uniqueness context — the one constructor every call site shares.
+ *
+ * Generic in the handle so it yields exactly what it was given: a full backend
+ * produces a {@link UniquenessContext} that can also apply the sidecar writes,
+ * and a read-only projection produces a {@link UniquenessProbeContext}, which
+ * is all the probe needs and all row work can offer.
+ */
+export function createUniquenessContext<
+  T extends Pick<UniqueConstraintBackend, "checkUnique">,
+>(
   graphId: string,
   registry: KindRegistry,
-  backend: GraphBackend | TransactionBackend,
-): UniquenessContext {
+  backend: T,
+): Readonly<{ graphId: string; registry: KindRegistry; backend: T }> {
   return { graphId, registry, backend };
 }
 
@@ -51,7 +75,7 @@ export function createUniquenessContext(
  *   scope.
  */
 async function probeUniqueKey(
-  ctx: UniquenessContext,
+  ctx: UniquenessProbeContext,
   kind: string,
   id: string,
   constraint: UniqueConstraint,
@@ -95,7 +119,7 @@ async function probeUniqueKey(
  * @throws ValidationError if any constraint is violated
  */
 export async function checkUniquenessConstraints(
-  ctx: UniquenessContext,
+  ctx: UniquenessProbeContext,
   kind: string,
   id: string,
   props: Record<string, unknown>,

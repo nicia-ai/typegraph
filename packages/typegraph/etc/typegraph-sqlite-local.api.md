@@ -1823,6 +1823,9 @@ type IdentityTableNames = Readonly<{
 }>;
 
 // @public
+type IdentityTarget = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>;
+
+// @public
 type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
     includeIdentityMembers?: boolean;
 }> : Readonly<{
@@ -3863,12 +3866,12 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         nextAfter?: string;
         done: boolean;
     }>>;
-    lockIdentityImportTarget: (target: GraphBackend | TransactionBackend) => Promise<void>;
-    foldImportedIdentityNodes: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
+    lockIdentityImportTarget: (target: IdentityTarget) => Promise<void>;
+    foldImportedIdentityNodes: (target: IdentityTarget, references: readonly Readonly<{
         kind: string;
         id: string;
     }>[]) => Promise<void>;
-    importIdentityAssertionsAtTarget: (target: GraphBackend | TransactionBackend, assertions: readonly Readonly<{
+    importIdentityAssertionsAtTarget: (target: IdentityTarget, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{

@@ -15,6 +15,7 @@
  * both.
  */
 import {
+  createBackendOverlay,
   type GraphBackend,
   type TransactionBackend,
 } from "../../backend/types";
@@ -76,9 +77,9 @@ export type WritePlanOptions<T> = Omit<
 
 /**
  * Mints a second session for THIS write frame over a READ OVERLAY of its
- * target: a backend that answers some reads from a pending-aware cache and
- * delegates everything else, which is what
- * `createNodeBatchValidationBackend` builds.
+ * target: the frame's own handle, answering some reads from a pending-aware
+ * cache and delegating everything else, which is what
+ * `createNodeBatchValidationSeams` describes.
  *
  * It exists because a fused step reads and writes through ONE handle.
  * Interchange import's batched slice has to route the uniqueness pre-check
@@ -90,13 +91,22 @@ export type WritePlanOptions<T> = Omit<
  * and re-checking uniqueness outside the step would be a second spelling of a
  * decision the step owns.
  *
+ * What this TAKES is the reads to answer, not a backend to write through. Row
+ * work holds the read-only {@link WriteTarget}, so it cannot produce a
+ * writable overlay without widening the very projection this seam exists to
+ * keep narrow; the EXECUTOR owns the decoration, over the raw target it
+ * already has. `Partial<WriteTarget>` is the exact bound that follows: an
+ * overlay may redirect any read row work can see, and no write member at all.
+ *
  * What this hands out is the CAPABILITY, not the evidence: the frame's
  * {@link GraphWriteLock} stays inside the executor, so row work still cannot
  * reach a step module directly. All it can obtain is another fused session,
  * whose methods apply the same sidecars and the same fences as the first.
  */
+type WriteTargetReadOverlay = Partial<WriteTarget>;
+
 export type OverlaidSessionMint = (
-  overlay: GraphBackend | TransactionBackend,
+  reads: WriteTargetReadOverlay,
 ) => WriteSession;
 
 /** Row work: the only place a plan-driven write may read or write rows. */
@@ -133,14 +143,19 @@ function planFrame<T>(
     }
     // ONE spelling of "mint a session for this frame", used for the frame's own
     // session and for any overlaid one, so the two cannot be built from
-    // different context or a different lock.
-    const mintSession: OverlaidSessionMint = (sessionTarget) =>
-      createWriteSession(ctx, sessionTarget, lock);
+    // different context or a different lock. The overlaid variant is that
+    // spelling applied to a decorated target — the decoration is the ONLY
+    // difference between them, and the frame's own session pays for no proxy.
+    const mintSessionOver = (
+      sessionTarget: GraphBackend | TransactionBackend,
+    ): WriteSession => createWriteSession(ctx, sessionTarget, lock);
+    const mintOverlaidSession: OverlaidSessionMint = (reads) =>
+      mintSessionOver(createBackendOverlay(target, reads));
     // The two handles are the SAME object: the session closes over the raw
     // target (its step modules probe optional members on it), while row work
     // sees it through the type-only `WriteTarget` projection. One value, two
     // static views.
-    return rowWork(mintSession(target), target, mintSession);
+    return rowWork(mintSessionOver(target), target, mintOverlaidSession);
   };
 }
 

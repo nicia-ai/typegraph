@@ -57,7 +57,6 @@ import {
   isLiveNodeRow,
   type LiveNodeRow,
   rowPropsToObject,
-  type TransactionBackend,
 } from "../backend/types";
 import { validateEdgeEndpoints } from "../constraints";
 import {
@@ -84,9 +83,10 @@ import {
   IDENTITY_IMPORT_FAILED_ASSERTION,
   IDENTITY_IMPORT_PROGRESS,
 } from "../identity/service";
+import { type IdentityTarget } from "../identity/sql-target";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
-  createNodeBatchValidationBackend,
+  createNodeBatchValidationSeams,
   type NodeCreateDraft,
   primeBatchValidationCaches,
 } from "../store/operations/node-operations";
@@ -98,7 +98,6 @@ import { nodeWritePlan } from "../store/operations/write-plan";
 import {
   type EdgeInsertWork,
   type NodeInsertWork,
-  unfencedTarget,
   type WriteSession,
   type WriteTarget,
 } from "../store/operations/write-session";
@@ -226,14 +225,15 @@ export async function withImportStreamLease<G extends GraphDef, T>(
  * carries its uniqueness, fulltext and embedding rows because the session
  * fuses them, not because this module remembered to call the sidecars after
  * the insert. `target` is the read projection the same frame hands out, and
- * `unfencedTarget` widens it back for the preparation helpers that still take
- * the raw backend union — each such widening counted by the ratchet, so the
- * prose here deliberately does not spell it as a call.
+ * every preparation helper, constraint probe and identity statement this
+ * module reaches now takes that projection rather than the backend union — so
+ * no leg here widens it back.
  *
  * `overlaidSession` is needed by exactly one leg — the batched node slice,
  * whose in-slice update must plan its uniqueness against the pending-aware
  * overlay — and rides on the frame rather than being threaded to that leg
- * alone, because it is a property of the frame, not of the leg.
+ * alone, because it is a property of the frame, not of the leg. It takes the
+ * READS to answer; the executor owns decorating its own target with them.
  */
 type ImportWriteFrame = Readonly<{
   session: WriteSession;
@@ -306,7 +306,7 @@ async function importGraphData<G extends GraphDef>(
         importedNodeIds,
       );
       await runtime.foldImportedIdentityNodes(
-        unfencedTarget(target),
+        target,
         data.nodes
           .filter((node) =>
             importedNodeIds.has(makeNodeKey(node.kind, node.id)),
@@ -328,7 +328,7 @@ async function importGraphData<G extends GraphDef>(
       if (data.identity !== undefined) {
         await importIdentitySection(
           runtime,
-          unfencedTarget(target),
+          target,
           graphId,
           data.identity,
           result,
@@ -907,7 +907,7 @@ function isIdentityAssertionValidationError(
  */
 async function importIdentitySection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
-  target: GraphBackend | TransactionBackend,
+  target: IdentityTarget,
   graphId: string,
   identity: NonNullable<GraphData["identity"]>,
   result: ImportResult,
@@ -1265,19 +1265,19 @@ async function processNodeSlice(
 
   // Prime the validation caches with batched reads, then route each row
   // against memory in input order.
-  const rawTarget = unfencedTarget(frame.target);
   const {
-    backend: validationBackend,
+    reads,
+    reader: validationBackend,
     registerPendingNode,
     registerPendingUniqueEntries,
     registerAppliedNodeUpdate,
     seedNodeRow,
     seedUniqueRow,
-  } = createNodeBatchValidationBackend(graphId, registry, rawTarget);
+  } = createNodeBatchValidationSeams(graphId, registry, frame.target);
   await primeBatchValidationCaches(
     { graphId, registry },
     candidates.map((candidate) => candidate.draft),
-    rawTarget,
+    frame.target,
     { seedNodeRow, seedUniqueRow },
   );
 
@@ -1288,8 +1288,10 @@ async function processNodeSlice(
   // error exactly as the sequential path does, rather than claiming the key on
   // the real backend and colliding with that create at flush (which would
   // throw and roll back the whole import). The overlay overrides reads only;
-  // every write it is handed still lands on the real backend.
-  const overlaidSession = frame.overlaidSession(validationBackend);
+  // every write it is handed still lands on the real backend. The frame is
+  // handed the same read spec this slice reads through, so the two views
+  // cannot answer differently.
+  const overlaidSession = frame.overlaidSession(reads);
   const accepted: NodeImportCandidate[] = [];
   for (const candidate of candidates) {
     const { node, schemaEntry, props } = candidate;
@@ -1989,7 +1991,7 @@ async function processNode(
   // insert would bypass.
   const uniquenessResult = await catchUniquenessError(() =>
     checkUniquenessConstraints(
-      { graphId, registry, backend: unfencedTarget(frame.target) },
+      { graphId, registry, backend: frame.target },
       node.kind,
       node.id,
       propsResult.data,

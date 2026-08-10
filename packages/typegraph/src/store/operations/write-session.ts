@@ -134,13 +134,23 @@ export type WriteTarget = Readonly<
  * THE COUNTED HOLE: widens the row-work projection back to the full backend
  * union.
  *
- * 64 signatures across `node-operations.ts`, `edge-operations.ts` and
- * `interchange/import.ts` are typed `GraphBackend | TransactionBackend`,
- * including the identity hooks. Re-typing all of them in the same batch that
- * moves the call sites would make every batch a whole-module retype, so the
- * widening is EXPLICIT, NAMED and COUNTED instead, and the ratchet drives the
- * count to zero. An `as` cast at each site would have been the same unsoundness
- * with no counter.
+ * It existed because the migration moved call sites one module at a time while
+ * their preparation helpers, constraint probes, uniqueness probes and identity
+ * hooks were still typed `GraphBackend | TransactionBackend`; re-typing all of
+ * those in the same batch that moved the call sites would have made every batch
+ * a whole-module retype. So the widening was EXPLICIT, NAMED and COUNTED, and
+ * the ratchet drove the count down as those signatures were re-typed. An `as`
+ * cast at each site would have been the same unsoundness with no counter.
+ *
+ * **Exactly one caller remains, and it is structural, not debt.**
+ * `executeEdgeBulkGetOrCreateByEndpoints` runs nested managed writes inside its
+ * own frame: each nested leg re-enters the executor against THIS transaction
+ * target, and re-entry needs the full union by construction — it mints a
+ * session, which writes. Inlining those legs' row work would drop the nested
+ * frames' schema fence and revision-clock advance, i.e. change behavior. The
+ * ratchet therefore records ONE as a reasoned floor, the same way it records
+ * two permanently allowlisted managed-write entry points, rather than pretending
+ * a zero it would have to buy with a statement change.
  */
 export function unfencedTarget(
   target: WriteTarget,
@@ -155,7 +165,7 @@ export type WriteSessionContext = Readonly<{
 }>;
 
 /** The derived data a node insert obliges, alongside the row itself. */
-export type NodeInsertSideEffects = Readonly<{
+type NodeInsertSideEffects = Readonly<{
   kind: string;
   id: string;
   schema: z.ZodType;
@@ -178,7 +188,7 @@ export type NodeInsertWork = Readonly<{
  * write's fence, passed separately and required, so an update that forgot to
  * carry the bound its verdict read cannot be spelled.
  */
-export type NodeUpdateWork = Readonly<{
+type NodeUpdateWork = Readonly<{
   schema: z.ZodType;
   validatedProps: Record<string, unknown>;
   uniqueConstraints: readonly UniqueConstraint[];
@@ -188,7 +198,7 @@ export type NodeUpdateWork = Readonly<{
   NodeUpdateTarget;
 
 /** One node soft delete, including the delete behavior its edges obey. */
-export type NodeDeleteWork = Readonly<{
+type NodeDeleteWork = Readonly<{
   existing: LiveNodeRow;
   schema: z.ZodType;
   uniqueConstraints: readonly UniqueConstraint[];
@@ -196,7 +206,7 @@ export type NodeDeleteWork = Readonly<{
 }>;
 
 /** One node hard delete. */
-export type NodeHardDeleteWork = Readonly<{
+type NodeHardDeleteWork = Readonly<{
   kind: string;
   id: string;
   schema: z.ZodType;
@@ -204,7 +214,7 @@ export type NodeHardDeleteWork = Readonly<{
 }>;
 
 /** One node resurrection: reopen a tombstone with its stored props. */
-export type NodeResurrectWork = Readonly<{
+type NodeResurrectWork = Readonly<{
   existing: TombstonedNodeRow;
   schema: z.ZodType;
   uniqueConstraints: readonly UniqueConstraint[];

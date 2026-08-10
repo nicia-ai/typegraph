@@ -12,6 +12,7 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
+import { type IdentityTarget } from "../identity/sql-target";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
@@ -191,15 +192,13 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       done: boolean;
     }>
   >;
-  lockIdentityImportTarget: (
-    target: GraphBackend | TransactionBackend,
-  ) => Promise<void>;
+  lockIdentityImportTarget: (target: IdentityTarget) => Promise<void>;
   foldImportedIdentityNodes: (
-    target: GraphBackend | TransactionBackend,
+    target: IdentityTarget,
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
   importIdentityAssertionsAtTarget: (
-    target: GraphBackend | TransactionBackend,
+    target: IdentityTarget,
     assertions: readonly Readonly<{
       id: string;
       relation: "same" | "different";

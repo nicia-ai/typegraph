@@ -44,8 +44,8 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 319,
-    sha256: "1cac8627b07d6a5488dc1982cc4a79f758bdb78cdf6a3f86f6003e92e4a548cd",
+    count: 320,
+    sha256: "54ed2c630d57af7f48cd2caa7422f6578f97d5e5b9b6f97771f68b3757a60830",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
@@ -84,36 +84,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "0f36d8f84e9a9d75255b39940c5308ae4df2c3dbe1e0cb2683b00ee8cb974f73",
   },
   "./graph-merge": {
-    count: 573,
-    sha256: "2d7014a692655335e91ebbc993546f2a5e3d98189af33740ef3b98260e1feed7",
+    count: 574,
+    sha256: "3182bfdb5dbc641363d592aa84fee1ecc63b67d40a1bfee8536e35a8f4f6b5f2",
   },
   "./indexes": {
     count: 43,
     sha256: "49144a0eeda76d83d8ebe63f533e25796e1b7d46fe521a4adc997fb58cb876bb",
   },
   "./interchange": {
-    count: 559,
-    sha256: "232f184ff2ba2469d900060588cd91cb9bf1560331923aa4ee02a57e3660fd5f",
+    count: 560,
+    sha256: "0252b3de2944200d4d86ce21b2b8edca33cce0932acf53df96cdf28e5744a722",
   },
   "./postgres/pglite": {
-    count: 563,
-    sha256: "d0b2e1b07c66897fce0c4991577634581407bae0fb2a33a85dac8c88586cda1e",
+    count: 564,
+    sha256: "437a3486dcb3359063e3392aca1d592a7a5d0e0045352aa6c21bcb0b1ba9d810",
   },
   "./profiler": {
-    count: 561,
-    sha256: "f6fff0334b7382c40fe168eea072aaaa0d37173807c37a14eb7ab427c2b99356",
+    count: 562,
+    sha256: "2c74aa68b03fc4cd956a655d3b2ed05f1afc917f3c625d1cd161bb862a886134",
   },
   "./provenance": {
-    count: 567,
-    sha256: "72aa460c20d18fd5d6c2e0a271ba325abffdb44bcf12c596b226c31186f28750",
+    count: 568,
+    sha256: "55eeb96960e0720b386edbabbe34d4b80477647cba83a096453de50658d317f6",
   },
   "./schema": {
     count: 209,
     sha256: "806c2c9dfd03fd890b2e075bb9c8865bb2d89cd56317601f907767a17baf08c8",
   },
   "./sqlite/local": {
-    count: 563,
-    sha256: "d0b2e1b07c66897fce0c4991577634581407bae0fb2a33a85dac8c88586cda1e",
+    count: 564,
+    sha256: "437a3486dcb3359063e3392aca1d592a7a5d0e0045352aa6c21bcb0b1ba9d810",
   },
 };
 

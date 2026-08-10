@@ -37,6 +37,21 @@ import { type PlainNodeRef } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
 
 /**
+ * What importing a ledger of assertions reads off the service context: the
+ * graph it writes for, the registry it validates kinds against, the SQL schema
+ * its statements are built from, and the folding mode.
+ *
+ * A SLICE, not the whole context, because the target these statements run
+ * against is passed separately — and the caller that passes it may hold only a
+ * write frame's read projection, which cannot supply the context's backend (the
+ * transaction opener). The same idiom `validateCurrentRelation` already uses.
+ */
+type IdentityAssertionImportContext = Pick<
+  IdentityServiceContext<GraphDef>,
+  "graphId" | "registry" | "schema" | "sameIdAcrossKinds"
+>;
+
+/**
  * Every transfer-shape rejection reports the same way: one issue against the
  * `identity.assertions` path, attributed to the offending assertion id.
  */
@@ -57,8 +72,8 @@ function transferShapeError(
   });
 }
 
-function validateTransferShape<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+function validateTransferShape(
+  ctx: IdentityAssertionImportContext,
   assertion: IdentityTransferAssertion,
   mode: "state" | "archival",
 ): readonly [PlainNodeRef, PlainNodeRef] {
@@ -244,8 +259,8 @@ function rethrowTaggedWithAssertion(
  * The caller owns import conflict policy and acquires the graph identity lock;
  * this coordinator owns integrity, persistence, capture, and closure repair.
  */
-export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+export async function importIdentityAssertionsIntoTarget(
+  ctx: IdentityAssertionImportContext,
   target: Backend,
   assertions: readonly IdentityTransferAssertion[],
   mode: "state" | "archival",

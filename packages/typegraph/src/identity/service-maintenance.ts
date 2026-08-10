@@ -1,3 +1,4 @@
+import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError, IdentityContradictionError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
@@ -77,7 +78,7 @@ function requireAtomicIdentityBackend(backend: Backend, graphId: string): void {
  * has no `transaction` method to nest with, so it runs as-is.
  */
 async function runOnTransactionIfSupported(
-  backend: Backend,
+  backend: GraphBackend | TransactionBackend,
   fn: (target: Backend) => Promise<void>,
 ): Promise<void> {
   if ("transaction" in backend) {

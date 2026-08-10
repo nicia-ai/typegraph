@@ -281,10 +281,8 @@ function incrementPendingCount(counts: Map<string, number>, key: string): void {
   counts.set(key, previous + 1);
 }
 
-function createEdgeBatchValidationBackend(
-  backend: GraphBackend | TransactionBackend,
-): Readonly<{
-  backend: GraphBackend | TransactionBackend;
+function createEdgeBatchValidationBackend(backend: WriteTarget): Readonly<{
+  backend: WriteTarget;
   registerPendingEdgeForCardinality: (
     insertParams: InsertEdgeParams,
     cardinality: Cardinality,
@@ -418,7 +416,7 @@ function createEdgeBatchValidationBackend(
     getNode: getNodeCached,
     countEdgesFrom: countEdgesFromCached,
     edgeExistsBetween: edgeExistsBetweenCached,
-  } satisfies Partial<GraphBackend | TransactionBackend>);
+  } satisfies Partial<WriteTarget>);
 
   return {
     backend: validationBackend,
@@ -431,7 +429,7 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
   id: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
 ): Promise<EdgeCreatePrepared> {
   const kind = input.kind;
   const fromKind = input.fromKind;
@@ -648,7 +646,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         ctx,
         input,
         id,
-        unfencedTarget(target),
+        target,
       );
 
       // An edge create has no existence probe at all — its id is either
@@ -708,7 +706,7 @@ export async function executeEdgeCreateNoReturn<G extends GraphDef>(
 async function primeEdgeBatchValidationCache<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   seedEndpointRow: (
     graphId: string,
     kind: string,
@@ -750,7 +748,7 @@ async function primeEdgeBatchValidationCache<G extends GraphDef>(
 async function prepareEdgeBatchCreates<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
 ): Promise<{
   preparedCreates: EdgeCreatePrepared[];
   batchInsertParams: InsertEdgeParams[];
@@ -809,7 +807,7 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
       const { batchInsertParams } = await prepareEdgeBatchCreates(
         ctx,
         inputs,
-        unfencedTarget(target),
+        target,
       );
       await withAlreadyExistsTranslation("edge", () =>
         session.createEdgesNoReturn(batchInsertParams),
@@ -844,7 +842,7 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
       const { batchInsertParams } = await prepareEdgeBatchCreates(
         ctx,
         inputs,
-        unfencedTarget(target),
+        target,
       );
 
       const rows = await withAlreadyExistsTranslation("edge", () =>
@@ -1208,7 +1206,7 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
           {
             graphId: ctx.graphId,
             registry: ctx.registry,
-            backend: unfencedTarget(target),
+            backend: target,
           },
           input.identity.kind,
           resurrectCardinality.cardinality,
@@ -2104,9 +2102,17 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       edgeWritePlan("edgeMatchKeyConvergence"),
       backend,
       async (session, target) => {
-        // The nested legs are whole managed writes of their own: each opens
-        // its own plan against THIS transaction target, which is why they take
-        // the raw union rather than the session this frame minted.
+        // ## The one widening the migration cannot remove
+        //
+        // The nested legs are whole managed writes of their own: each opens its
+        // OWN plan against THIS transaction target, which is why they take the
+        // raw union rather than the session this frame minted. Re-entering the
+        // executor is not decoration — the nested frame re-takes the schema
+        // fence and, on a revision-tracking store, advances the revision clock —
+        // so inlining their row work here to avoid the widening would change
+        // emitted statements and revision numbers, which the no-behavior-change
+        // invariant forbids. Every other escape is gone; this one is the
+        // ratchet's stated floor, not migration debt.
         const rawTarget = unfencedTarget(target);
         const { toCreate, toFetch, duplicateOf } = partitionEntries(
           await fetchRowsByEndpoint(target),

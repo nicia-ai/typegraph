@@ -1,8 +1,9 @@
+import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { type ReadCoordinate } from "../core/temporal";
 import { type SqlSchema } from "../query/compiler/schema";
 import { type KindRegistry } from "../registry/kind-registry";
-import { type IdentityTarget, type PlainNodeRef } from "./sql-target";
+import { type PlainNodeRef } from "./sql-target";
 import { type IdentityNode } from "./types";
 
 export type IdentityServiceContext<G extends GraphDef> = Readonly<{
@@ -10,7 +11,15 @@ export type IdentityServiceContext<G extends GraphDef> = Readonly<{
   graphId: string;
   schemaVersion: number | undefined;
   registry: KindRegistry;
-  backend: IdentityTarget;
+  /**
+   * The handle the service opens its OWN write frames on, so it is the full
+   * backend union rather than {@link IdentityTarget}: `runIdentityMutation`
+   * hands it to `runInWriteTransaction`, which needs the top-level
+   * `transaction` member to tell "open one" from "already inside one" apart.
+   * {@link IdentityTarget} is the narrower thing the statements inside those
+   * frames run against.
+   */
+  backend: GraphBackend | TransactionBackend;
   schema: SqlSchema;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;

@@ -2956,9 +2956,15 @@ type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
  * Backend wrappers use this instead of object spread so proxy backends keep
  * getters and non-enumerable members. GraphBackend functions are receiver-free
  * by contract, so delegated methods are returned unchanged.
+ *
+ * `T` is constrained to `object`, not to the backend union, so a decorated
+ * PROJECTION — the write pipeline's read-only row-work target, say — is
+ * decorable too. `ExactBackendOverlay` still rejects any key `T` does not
+ * declare, so the looser bound cannot smuggle a member onto a surface that
+ * withholds it.
  */
 export function createBackendOverlay<
-  T extends GraphBackend | TransactionBackend,
+  T extends object,
   const O extends Partial<T> = Partial<T>,
 >(target: T, overlay: ExactBackendOverlay<T, O>): T {
   function hasOverlayProperty(property: PropertyKey): boolean {

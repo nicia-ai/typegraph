@@ -59,7 +59,7 @@ export function createWriteParamsDraft(): WriteParamsDraft {
 }
 
 /** Applies one fence key's predicate to the draft. */
-export type FenceApplier<F, K extends keyof F> = (
+type FenceApplier<F, K extends keyof F> = (
   fence: F[K],
   draft: WriteParamsDraft,
 ) => void;

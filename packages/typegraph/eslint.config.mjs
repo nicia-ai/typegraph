@@ -127,13 +127,20 @@ const DIALECT_SEAM_RESTRICTIONS = [
 ];
 
 /**
- * The five audited overlay files: they legitimately drop the backend-overlay
- * ban (they ARE the audited decorators), so they are their own restriction
- * profile rather than an `ignores` hole in the store profile.
+ * The audited overlay files: they legitimately drop the backend-overlay ban
+ * (they ARE the audited decorators), so they are their own restriction profile
+ * rather than an `ignores` hole in the store profile.
+ *
+ * `write-executor.ts` is here because the write frame owns the ONE decoration
+ * row work can ask for: a session over a read overlay of the frame's target.
+ * Row work states the reads and the executor applies them, precisely so that
+ * a caller holding the read-only projection never has to hold — or decorate —
+ * a writable backend of its own.
  */
 const AUDITED_OVERLAY_FILES = [
   "src/store/operations/edge-operations.ts",
   "src/store/operations/node-operations.ts",
+  "src/store/operations/write-executor.ts",
   "src/store/recorded-capture.ts",
   "src/store/recorded-read-service.ts",
   "src/store/store.ts",
