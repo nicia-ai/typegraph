@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { param as parameter } from "../../../src";
+import { isCanonicalIsoDate } from "../../../src/utils/date";
+import { requireDefined } from "../../../src/utils/presence";
 import { TEMPORAL_ANCHORS } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -138,6 +140,50 @@ export function registerTemporalIntegrationTests(
       );
 
       expect(edge.meta.validTo).toBe(pastDate);
+    });
+
+    it("returns canonical metadata timestamps consistently from stores and compiled queries (#463)", async () => {
+      const store = context.getStore();
+      const validTo = "2099-01-01T00:00:00.000Z";
+      const alice = await store.nodes.Person.create(
+        { name: "Canonical Alice" },
+        { validTo },
+      );
+      const acme = await store.nodes.Company.create({ name: "Canonical Acme" });
+      const worksAt = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Canonical Tester" },
+        { validTo },
+      );
+
+      const projections = await store
+        .query()
+        .from("Person", "person")
+        .whereNode("person", (person) => person.name.eq("Canonical Alice"))
+        .traverse("worksAt", "employment")
+        .to("Company", "company")
+        .select((selection) => ({
+          person: selection.person,
+          employment: selection.employment,
+        }))
+        .execute();
+      const projected = requireDefined(projections[0]);
+
+      expect(projected.person.meta).toEqual(alice.meta);
+      expect(projected.employment.meta).toEqual(worksAt.meta);
+      for (const timestamp of [
+        projected.person.meta.validFrom,
+        projected.person.meta.validTo,
+        projected.person.meta.createdAt,
+        projected.person.meta.updatedAt,
+        projected.employment.meta.validFrom,
+        projected.employment.meta.validTo,
+        projected.employment.meta.createdAt,
+        projected.employment.meta.updatedAt,
+      ]) {
+        expect(isCanonicalIsoDate(requireDefined(timestamp))).toBe(true);
+      }
     });
 
     it("includes ended edges with includeEnded mode", async () => {

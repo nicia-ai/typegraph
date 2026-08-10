@@ -50,6 +50,32 @@ describe("RowProps mapping", () => {
       expect(mapped.props).toBe(jsonText);
     });
 
+    it("canonicalizes postgres.js timestamp text through the shared row owner", () => {
+      const postgresJsTimestamp = "2026-08-09 11:52:09.617+00";
+      const mapped = mapNode({
+        ...rawNodeRow({ name: "Alice" }),
+        valid_from: postgresJsTimestamp,
+        valid_to: postgresJsTimestamp,
+        created_at: postgresJsTimestamp,
+        updated_at: postgresJsTimestamp,
+        deleted_at: postgresJsTimestamp,
+      });
+
+      expect({
+        validFrom: mapped.valid_from,
+        validTo: mapped.valid_to,
+        createdAt: mapped.created_at,
+        updatedAt: mapped.updated_at,
+        deletedAt: mapped.deleted_at,
+      }).toEqual({
+        validFrom: "2026-08-09T11:52:09.617Z",
+        validTo: "2026-08-09T11:52:09.617Z",
+        createdAt: "2026-08-09T11:52:09.617Z",
+        updatedAt: "2026-08-09T11:52:09.617Z",
+        deletedAt: "2026-08-09T11:52:09.617Z",
+      });
+    });
+
     it("keeps schema_doc a JSON string even when jsonb arrives parsed", () => {
       const mapSchema = createSchemaVersionRowMapper(
         POSTGRES_ROW_MAPPER_CONFIG,
