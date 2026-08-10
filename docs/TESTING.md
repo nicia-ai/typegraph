@@ -390,20 +390,23 @@ it("closure is transitive", () => {
 
 ## CI Integration
 
-Every pull request to `main` must pass the full gate defined in
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). It is much broader
-than the local `pnpm test` default (which runs only SQLite unit/property
-tests). The jobs are:
+Every code-changing pull request to `main` must pass the full gate defined in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Release changes that
+only update changesets, changelogs, and the package version skip the heavy jobs;
+the parsed package manifest must otherwise be identical.
+The full gate is much broader than the local `pnpm test` default (which runs
+only SQLite unit/property tests). The jobs are:
 
 | Job | What it runs |
 |-----|--------------|
 | **Lint & Type Check** | `typecheck`, `lint` (ESLint), `prettier`, `test:docs` (markdownlint), `test:unused` (knip) |
-| **Test (SQLite)** | `test:unit` + `test:property` on Node 22 and 24, plus a SQLite perf sanity check and an example smoke test |
-| **Test (Coverage)** | `test:coverage` — enforces the coverage thresholds |
-| **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.2 |
+| **Test (SQLite)** | Two `test:unit` shards on Node 22, `test:property` on Node 24, plus a SQLite perf sanity check and example smoke tests |
+| **Test (Coverage)** | Four V8 coverage shards on Node 24; a merge job combines their blob reports and enforces the coverage thresholds |
+| **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.3 |
 | **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |
 | **Test (Durable Objects SQLite)** | `test:do` — the workerd / Cloudflare Durable Objects SQLite lane |
-| **Build** | `turbo run build` — gated on every job above |
+| **Build artifacts** | `turbo run build` in parallel with the test jobs |
+| **Build** | Final required gate that succeeds only after the build and every test job above pass |
 
 A separate [release workflow](../.github/workflows/release.yml) packs the npm
 tarball after CI passes and smoke-imports every public subpath (ESM + CJS)
