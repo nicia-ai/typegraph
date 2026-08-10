@@ -25,6 +25,7 @@ import {
   searchable,
   StoreNotInitializedError,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
 import { assertSchemaCurrent } from "../src/schema";
@@ -109,8 +110,7 @@ describe("createVerifiedStore", () => {
     const bootBackend = freshBackend(sqlite);
     await createStoreWithSchema(graphV1(), bootBackend);
     const baseRuntimeBackend = freshBackend(sqlite);
-    const runtimeBackend: GraphBackend = {
-      ...baseRuntimeBackend,
+    const runtimeBackend: GraphBackend = deriveBackend(baseRuntimeBackend, {
       async transaction(fn, options) {
         return baseRuntimeBackend.transaction((tx) => {
           const {
@@ -121,7 +121,7 @@ describe("createVerifiedStore", () => {
           return fn(withoutFence);
         }, options);
       },
-    };
+    });
     const [store] = await createVerifiedStore(graphV1(), runtimeBackend);
 
     const error = await store.nodes.Person.create({ name: "Alice" }).catch(

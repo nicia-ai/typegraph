@@ -361,8 +361,8 @@ export function explainQueryPlan(
  * lease's no-op arm exactly as `independent` would.
  *
  * Recorded as a declared entry in the conversion ratchet
- * (tests/backend-derivation-population.test.ts), not as a silent omission: it
- * must be resolved before a `tests/**` construction ban can land.
+ * (tests/backend-derivation-population.test.ts) and suppressed inline with that
+ * reason, not as a silent omission.
  */
 export function disableTransactions<TNativeTransaction>(
   backend: AdapterBackend<TNativeTransaction>,
@@ -370,6 +370,7 @@ export function disableTransactions<TNativeTransaction>(
 export function disableTransactions(backend: GraphBackend): GraphBackend;
 export function disableTransactions(backend: GraphBackend): GraphBackend {
   return {
+    // eslint-disable-next-line no-restricted-syntax -- A fresh object is the point: see this function's doc comment. Deriving through the seam would carry the base's serialized verdict onto a double that models a driver which is NOT a serialized resource, and the write-once audit refuses to overwrite it with `independent`.
     ...backend,
     capabilities: { ...backend.capabilities, transactions: false },
     transaction: () =>
@@ -447,12 +448,15 @@ function toZonedTimestampText(value: string | undefined): string | undefined {
  * nothing copies through the seam into a fresh object, which carries the
  * verdict and is legal to decorate.
  *
- * Only the two doubles that are handed `store.backend` need it; a double over a
- * factory-built backend decorates it directly.
+ * Exported because every double that may be handed `store.backend` needs the
+ * same re-box, and one owner for that decision is what keeps a caller from
+ * discovering the Proxy invariant the hard way. A double over a factory-built
+ * backend may decorate it directly; going through here costs one shallow copy
+ * and is never wrong.
  */
-function unfrozenSeamCopy(base: GraphBackend): GraphBackend;
-function unfrozenSeamCopy(base: TransactionBackend): TransactionBackend;
-function unfrozenSeamCopy(
+export function unfrozenSeamCopy(base: GraphBackend): GraphBackend;
+export function unfrozenSeamCopy(base: TransactionBackend): TransactionBackend;
+export function unfrozenSeamCopy(
   base: GraphBackend | TransactionBackend,
 ): GraphBackend | TransactionBackend {
   return projectBackendWithout(base, []);

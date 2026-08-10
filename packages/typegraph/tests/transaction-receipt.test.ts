@@ -80,8 +80,7 @@ function recordBackendCalls(
   const calls: string[] = [];
   return {
     calls,
-    backend: {
-      ...backend,
+    backend: deriveBackend(backend, {
       async insertNode(params) {
         calls.push("insertNode");
         return backend.insertNode(params);
@@ -97,7 +96,7 @@ function recordBackendCalls(
           options,
         );
       },
-    },
+    }),
   };
 }
 

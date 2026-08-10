@@ -184,6 +184,7 @@ describe("portable runtime capability boundaries", () => {
   });
 
   it("preserves the absence of optional members in backend projections", () => {
+    // eslint-disable-next-line no-restricted-syntax -- The destructure IS the fixture: this asserts that a projection preserves the ABSENCE of an optional member on a structurally wider input, and feeding it a projectBackendWithout result would make the input already a projection and the assertion tautological.
     const { executeRaw: omittedExecuteRaw, ...backendWithoutExecuteRaw } =
       createTestBackend();
     expect(omittedExecuteRaw).toBeDefined();

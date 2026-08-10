@@ -18,7 +18,10 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { projectBackendWithout } from "../src/backend/derive-backend";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { createSqliteTables } from "../src/backend/sqlite";
 import { type GraphBackend } from "../src/backend/types";
 import { defineGraph, defineNode } from "../src/core";
@@ -46,15 +49,14 @@ function withOneShotTransactionFailure(
   base: GraphBackend,
   shouldFailNow: () => boolean,
 ): GraphBackend {
-  return {
-    ...base,
+  return deriveBackend(base, {
     async schemaWriteTransaction(graphId, fn) {
       if (shouldFailNow()) {
         throw new Error("injected recorded-close failure");
       }
       return requireDefined(base.schemaWriteTransaction)(graphId, fn);
     },
-  };
+  });
 }
 
 const Person = defineNode("Person", {
@@ -87,13 +89,12 @@ describe("evolve against a DB missing typegraph_kind_removals", () => {
       "ensureKindRemovalsTable",
     ]);
     let bootstrapCalls = 0;
-    const backend: GraphBackend = {
-      ...backendWithoutFocusedEnsure,
+    const backend: GraphBackend = deriveBackend(backendWithoutFocusedEnsure, {
       async bootstrapTables() {
         bootstrapCalls += 1;
         await requireDefined(baseBackend.bootstrapTables)();
       },
-    };
+    });
     const [store] = await createStoreWithSchema(baseGraph, backend);
     bootstrapCalls = 0;
     await requireDefined(backend.executeDdl)(
@@ -125,13 +126,12 @@ describe("evolve against a DB missing typegraph_kind_removals", () => {
   it("does not bootstrap the queue for a no-op evolve", async () => {
     const baseBackend = createTestBackend();
     let ensureCalls = 0;
-    const backend: GraphBackend = {
-      ...baseBackend,
+    const backend: GraphBackend = deriveBackend(baseBackend, {
       async ensureKindRemovalsTable() {
         ensureCalls += 1;
         await requireDefined(baseBackend.ensureKindRemovalsTable)();
       },
-    };
+    });
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(tagExtension);
     ensureCalls = 0;

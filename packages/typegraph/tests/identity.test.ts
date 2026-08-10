@@ -14,6 +14,7 @@ import {
   rebuildIdentityClosure,
   type TransactionBackend,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
   type RecordedInstant,
   recordedInstantRevision,
@@ -280,8 +281,7 @@ describe("Operational Identity", () => {
     const getNodes = requireDefined(baseBackend.getNodes);
     let singleReads = 0;
     let batchReads = 0;
-    const backend: GraphBackend = {
-      ...baseBackend,
+    const backend: GraphBackend = deriveBackend(baseBackend, {
       getNode: async (graphId, kind, id) => {
         singleReads += 1;
         return baseBackend.getNode(graphId, kind, id);
@@ -290,7 +290,7 @@ describe("Operational Identity", () => {
         batchReads += 1;
         return getNodes(graphId, kind, ids);
       },
-    };
+    });
     const store = await createInitializedStore(graph, backend);
     const person = await store.nodes.Person.create({ name: "Alice" });
     const alias = await store.nodes.Person.create({ name: "Alias" });
@@ -366,8 +366,7 @@ describe("Operational Identity", () => {
     const base = createTestBackend();
     let executeCalls = 0;
     let statementCalls = 0;
-    const backend: GraphBackend = {
-      ...base,
+    const backend: GraphBackend = deriveBackend(base, {
       execute(query) {
         executeCalls += 1;
         return base.execute(query);
@@ -376,7 +375,7 @@ describe("Operational Identity", () => {
         statementCalls += 1;
         await base.executeStatement?.(query);
       },
-    };
+    });
     const store = createStore(disabledGraph, backend);
 
     await store.nodes.Person.create({ name: "Alice" }, { id: "alice" });

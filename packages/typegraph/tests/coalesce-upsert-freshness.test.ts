@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { asNodeId, defineGraph, defineNode } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type GraphBackend,
@@ -59,18 +60,23 @@ function interposingBackend(
   // top-level backend would report the pre-fix round-trip count and pass either
   // way. Interposition stays on the top-level read alone — that is the
   // observation the skip decision used to be made from.
-  function counted<T extends GraphBackend | TransactionBackend>(target: T): T {
-    return {
-      ...target,
+  // An overload pair over a concrete union implementation signature, not a
+  // type parameter: `deriveBackend`'s overlay is `Partial<T>`, and an object
+  // literal is not assignable to `Partial<T>` for an unresolved `T`.
+  function counted(target: GraphBackend): GraphBackend;
+  function counted(target: TransactionBackend): TransactionBackend;
+  function counted(
+    target: GraphBackend | TransactionBackend,
+  ): GraphBackend | TransactionBackend {
+    return deriveBackend(target, {
       getNode: async (graphId: string, kind: string, id: string) => {
         reads += 1;
         return target.getNode(graphId, kind, id);
       },
-    };
+    });
   }
 
-  const backend: GraphBackend = {
-    ...counted(base),
+  const backend: GraphBackend = deriveBackend(counted(base), {
     getNode: async (graphId: string, kind: string, id: string) => {
       reads += 1;
       const row = await base.getNode(graphId, kind, id);
@@ -82,7 +88,7 @@ function interposingBackend(
     },
     transaction: (fn, options) =>
       base.transaction((target) => fn(counted(target)), options),
-  };
+  });
   return {
     backend,
     arm: () => {

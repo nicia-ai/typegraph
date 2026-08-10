@@ -497,4 +497,21 @@ export default [
       ],
     },
   },
+
+  // The construction ratchet applies to the test tree too: a double built by
+  // spreading a backend is the #435 defect written in a fixture, and the
+  // fixture is what the store under test then runs against. Only the
+  // construction group is installed — SOURCE_WIDE_RESTRICTIONS and the import
+  // bans are source-only by design, and the runtime-port ban would forbid the
+  // accessors the suite legitimately reaches for.
+  //
+  // The two sites this cannot reach are suppressed inline, each with its
+  // reason, and both are enumerated by the exemption ratchet in
+  // `tests/backend-derivation-population.test.ts`.
+  {
+    files: ["tests/**/*.ts"],
+    rules: {
+      "no-restricted-syntax": ["error", ...BACKEND_CONSTRUCTION_RESTRICTIONS],
+    },
+  },
 ];

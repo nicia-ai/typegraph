@@ -1,19 +1,33 @@
 /**
  * The conversion ratchets for `tests/**` (T27, T28).
  *
- * `tests/**` has no `no-restricted-syntax` block yet — the construction ban is
- * `src`-only until the bulk conversion lands — so the thing that keeps the gap
- * from widening in the meantime is measurement, not lint: the type-aware
- * scanner counts every backend derivation in the test tree, by class, and both
- * counts are ratcheted non-increasing.
+ * `tests/**` now carries the `no-restricted-syntax` construction block, so a new
+ * `{ ...backend }` is a lint error and the two sites that cannot be converted
+ * are suppressed inline with their reason.
  *
- * The scanner sees what a name-based selector cannot (a spread of `real`, of
- * `base`, of a generic parameter), which is the point of running it here rather
- * than trusting the selectors: a new `{ ...backend }` fails this file whether or
- * not ESLint would ever have reported it.
+ * The block is NAME-based, though, and both classes have members it cannot see:
+ * a `{ ...real }` is audit-relevant and reports nothing, and the
+ * transaction-scoped sources are named `tx` / `target`. So both counting
+ * ratchets survive the block rather than retiring with it — the type-aware
+ * scanner applies the same decision a type-aware rule would, and it is already
+ * being built here for the transaction-scoped class, so keeping the
+ * audit-relevant count costs one more assertion over the same scan.
+ *
+ * The exemption list is measured against ESLint's OWN report: an entry here is
+ * a suppression ESLint says it applied, not a claim this file makes about the
+ * tree. Both directions are asserted, so neither a converted site with a
+ * lingering entry nor an inline directive nobody declared survives.
  */
+import fs from "node:fs";
+import path from "node:path";
+
+import { ESLint } from "eslint";
 import { describe, expect, it } from "vitest";
 
+import {
+  BACKEND_MUTATION_MESSAGE,
+  BACKEND_SEAM_MESSAGE,
+} from "../eslint.config.mjs";
 import {
   type BackendDerivationClass,
   scanSelectorVisibleLines,
@@ -21,14 +35,20 @@ import {
   sitesOfClass,
 } from "./backend-derivation-scan";
 
+const packageRoot = path.resolve(import.meta.dirname, "..");
+
 /**
  * Audit-relevant derivations still built outside the seam.
  *
- * Emitted by the scanner in this commit, not transcribed: 95 sites awaiting the
- * bulk conversion, plus the one declared exemption below that cannot be
- * converted at all.
+ * Both are declared exemptions with an inline directive (see EXEMPT_SITES), so
+ * the baseline is the exemption list's size: every convertible site is
+ * converted. The ratchet is not redundant with the lint block — the block's
+ * selectors are name-based, so a `{ ...real }` or a `{ ...double }` is
+ * audit-relevant and reports nothing, and this scan resolves the type instead.
+ *
+ * Emitted by the scanner in this commit, not transcribed.
  */
-const AUDIT_RELEVANT_BASELINE = 96;
+const AUDIT_RELEVANT_BASELINE = 2;
 
 /**
  * Transaction-scoped derivations — the reasoned exemption class.
@@ -38,8 +58,16 @@ const AUDIT_RELEVANT_BASELINE = 96;
  * is structurally unreachable through them. The count is ratcheted so the class
  * cannot grow, and it becomes audit-relevant (and converted) the day
  * transaction-scoped backends start carrying a verdict.
+ *
+ * Emitted by the scanner in this commit, not transcribed.
  */
-const TRANSACTION_SCOPED_BASELINE = 36;
+const TRANSACTION_SCOPED_BASELINE = 35;
+
+/** The two messages the construction block reports. */
+const CONSTRUCTION_MESSAGES = new Set([
+  BACKEND_SEAM_MESSAGE,
+  BACKEND_MUTATION_MESSAGE,
+]);
 
 type ExemptSite = Readonly<{
   /** Package-relative, POSIX-separated. */
@@ -47,50 +75,28 @@ type ExemptSite = Readonly<{
   /** The offending source line, trimmed. */
   text: string;
   derivationClass: BackendDerivationClass;
-  /** Why this site is not converted. Mandatory. */
-  reason: string;
 }>;
 
 /**
  * Sites that stay unconverted for a stated reason, rather than because nobody
  * has got to them yet.
  *
- * In this commit the list is measured by the scanner above. The commit that
- * adds the `tests/**` ESLint block re-points the selector-visibility half at
- * ESLint's own report and adds the inline `eslint-disable` directives these
- * entries stand in for — one cannot land earlier, because
- * `reportUnusedDisableDirectives` makes a directive that precedes its rule a
- * lint error in its own right.
+ * The reason itself is NOT repeated here: it lives in the inline
+ * `eslint-disable-next-line no-restricted-syntax -- …` justification at the
+ * site, which is where a reader meets the code, and the assertion below reads
+ * that justification out of ESLint's report. One owner for the reason, so the
+ * two copies cannot drift apart.
  */
 const EXEMPT_SITES: readonly ExemptSite[] = [
   {
     file: "tests/transaction-surface-honesty.test.ts",
     text: "const { executeRaw: omittedExecuteRaw, ...backendWithoutExecuteRaw } =",
     derivationClass: "audit-relevant",
-    reason:
-      "The destructure IS the fixture. The case asserts that a projection preserves the ABSENCE of an optional member on a structurally wider input; feeding it a projectBackendWithout result makes the input already a projection and the assertion tautological — a load-bearing test converted into a decorative one.",
   },
   {
     file: "tests/test-utils.ts",
     text: "...backend,",
     derivationClass: "audit-relevant",
-    reason:
-      "`disableTransactions` models a driver that is NOT a serialized resource, so the double must not read as one. deriveBackend carries the base's verdict and a verdict is written once, so deriving from a better-sqlite3-backed base and then auditing the result `independent` throws the write-once refusal. A fresh object leaves the double unaudited, which takes the stream lease's no-op arm exactly as `independent` would. Blocks the `tests/**` block: it is selector-visible.",
-  },
-];
-
-/**
- * Transaction-scoped sites the name selectors DO report (`...txBackend` ends in
- * `Backend`). They cannot stay in the exempt class past the commit that adds
- * the `tests/**` block, so they are declared as scheduled work rather than as
- * exemptions.
- */
-const PENDING_CONVERSIONS: readonly Omit<ExemptSite, "derivationClass">[] = [
-  {
-    file: "tests/collection-api.test.ts",
-    text: "...txBackend,",
-    reason:
-      "Selector-visible transaction-scoped derivation; converted with the rest of this file in the bulk conversion, in the same commit as the `tests/**` construction ban.",
   },
 ];
 
@@ -103,6 +109,80 @@ const PENDING_CONVERSIONS: readonly Omit<ExemptSite, "derivationClass">[] = [
  */
 function siteKey(site: Readonly<{ file: string; text: string }>): string {
   return `${site.file}\u0000${site.text}`;
+}
+
+/** Every `tests/**` module, as a package-relative POSIX path. */
+function testModules(): readonly string[] {
+  return fs
+    .readdirSync(path.join(packageRoot, "tests"), {
+      encoding: "utf8",
+      recursive: true,
+    })
+    .filter((entry) => entry.endsWith(".ts"))
+    .map((entry) => path.posix.join("tests", entry.split(path.sep).join("/")))
+    .toSorted();
+}
+
+/**
+ * The `tests/**` modules that carry an inline suppression of the construction
+ * ban, whatever it suppresses.
+ *
+ * A text scan rather than a lint of the whole tree: linting `tests/**` under
+ * the project service costs minutes, and the files that can possibly hold a
+ * suppression are exactly the files that spell the directive. Every one of them
+ * is then linted for real, so an undeclared directive is caught.
+ */
+function modulesWithInlineSuppression(): readonly string[] {
+  return testModules().filter((file) => {
+    const source = fs.readFileSync(path.join(packageRoot, file), "utf8");
+    return (
+      source.includes("eslint-disable") &&
+      source.includes("no-restricted-syntax")
+    );
+  });
+}
+
+type ReportedSuppression = Readonly<{
+  file: string;
+  line: number;
+  text: string;
+  justification: string;
+}>;
+
+/**
+ * Every construction-ban report ESLint suppressed in `files`, as ESLint itself
+ * reports it.
+ */
+async function reportedSuppressions(
+  files: readonly string[],
+): Promise<readonly ReportedSuppression[]> {
+  if (files.length === 0) return [];
+  const eslint = new ESLint({ cwd: packageRoot });
+  const results = await eslint.lintFiles([...files]);
+  return results.flatMap((result) => {
+    const file = path
+      .relative(packageRoot, result.filePath)
+      .split(path.sep)
+      .join("/");
+    const lines = fs
+      .readFileSync(result.filePath, "utf8")
+      .split("\n")
+      .map((line) => line.trim());
+    return result.suppressedMessages
+      .filter(
+        (message) =>
+          message.ruleId === "no-restricted-syntax" &&
+          CONSTRUCTION_MESSAGES.has(message.message),
+      )
+      .map((message) => ({
+        file,
+        line: message.line,
+        text: lines[message.line - 1] ?? "",
+        justification: message.suppressions
+          .map((suppression) => suppression.justification)
+          .join(" "),
+      }));
+  });
 }
 
 describe("backend derivation population", () => {
@@ -118,6 +198,7 @@ describe("backend derivation population", () => {
       throw new Error(
         `tests/** now builds ${auditRelevant.length} audit-relevant backend derivations outside the seam; the recorded baseline is ${AUDIT_RELEVANT_BASELINE}.\n\n` +
           `Build the new one through src/backend/derive-backend.ts — deriveBackend to decorate, projectBackendWithout to narrow by omission — so it carries the source's serialized-resource verdict. A spread builds a NEW object the audit does not follow, and the import/clone guards then let a read-and-write-through-one-connection stream proceed into a deadlock (#435).\n\n` +
+          `The tests/** lint block reports the spellings a NAME selector can see; this scan resolves the type, so it also reports the ones it cannot.\n\n` +
           `Current sites:\n${added.join("\n")}`,
       );
     }
@@ -163,7 +244,7 @@ describe("backend derivation population", () => {
     expect(stale.map((entry) => `${entry.file}  ${entry.text}`)).toEqual([]);
   });
 
-  it("keeps every exemption in the class its reason argues about", () => {
+  it("keeps every exemption in the class it was filed under", () => {
     const classByKey = new Map(
       scan.sites.map((site) => [siteKey(site), site.derivationClass]),
     );
@@ -174,35 +255,67 @@ describe("backend derivation population", () => {
   });
 
   it(
+    "declares exactly the suppressions ESLint reports, each with a reason",
+    { timeout: 120_000 },
+    async () => {
+      // The list is checked against the linter's own answer, not against a
+      // re-implementation of it: a site that no longer violates has an unused
+      // directive (a lint error in its own right under
+      // `reportUnusedDisableDirectives`) and drops out of this report, and a
+      // directive nobody declared shows up here without an entry.
+      const suppressions = await reportedSuppressions(
+        modulesWithInlineSuppression(),
+      );
+
+      const declared = new Set(EXEMPT_SITES.map((entry) => siteKey(entry)));
+      const undeclared = suppressions.filter(
+        (suppression) => !declared.has(siteKey(suppression)),
+      );
+      expect(
+        undeclared.map(
+          (suppression) =>
+            `${suppression.file}:${suppression.line}  ${suppression.text}`,
+        ),
+      ).toEqual([]);
+
+      const suppressed = new Set(
+        suppressions.map((suppression) => siteKey(suppression)),
+      );
+      const unsuppressed = EXEMPT_SITES.filter(
+        (entry) => !suppressed.has(siteKey(entry)),
+      );
+      expect(
+        unsuppressed.map((entry) => `${entry.file}  ${entry.text}`),
+      ).toEqual([]);
+
+      // A suppression with no justification is an exemption with no reason.
+      const unreasoned = suppressions.filter(
+        (suppression) => suppression.justification.trim().length === 0,
+      );
+      expect(
+        unreasoned.map(
+          (suppression) => `${suppression.file}:${suppression.line}`,
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it(
     "leaves no exempt-class member visible to the construction selectors",
     { timeout: 120_000 },
     async () => {
-      // What makes the exempt class safe once `tests/**` gains the construction
-      // ban: a member the selectors DO report would make that commit red. Only
-      // the sites declared as scheduled work may be visible.
+      // What makes the exempt class safe now that `tests/**` carries the
+      // construction ban: a member the selectors DO report would be a lint
+      // error, and the only way to keep it would be a suppression for a site
+      // whose exemption argues from a class the ban does not cover.
       const files = [...new Set(transactionScoped.map((site) => site.file))];
       const visibleLines = await scanSelectorVisibleLines(files);
       const visible = transactionScoped.filter((site) =>
         visibleLines.get(site.file)?.has(site.line),
       );
-      const scheduled = new Set(
-        PENDING_CONVERSIONS.map((entry) => siteKey(entry)),
-      );
-
-      const undeclared = visible.filter(
-        (site) => !scheduled.has(siteKey(site)),
-      );
       expect(
-        undeclared.map((site) => `${site.file}:${site.line}  ${site.text}`),
+        visible.map((site) => `${site.file}:${site.line}  ${site.text}`),
       ).toEqual([]);
-
-      // ...and in the other direction: a scheduled entry that is no longer
-      // visible has been converted, and its entry must go with it.
-      const visibleKeys = new Set(visible.map((site) => siteKey(site)));
-      const stale = PENDING_CONVERSIONS.filter(
-        (entry) => !visibleKeys.has(siteKey(entry)),
-      );
-      expect(stale.map((entry) => `${entry.file}  ${entry.text}`)).toEqual([]);
     },
   );
 });

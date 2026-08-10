@@ -1258,8 +1258,7 @@ describe("Query Execution (SQLite)", () => {
         "compileSql",
         "executeRaw",
       ]);
-      const backendWithoutRaw: GraphBackend = { ...restBackend };
-      const storeWithoutRaw = createStore(testGraph, backendWithoutRaw);
+      const storeWithoutRaw = createStore(testGraph, restBackend);
 
       const prepared = storeWithoutRaw
         .query()
@@ -1320,7 +1319,7 @@ describe("Query Execution (SQLite)", () => {
         "compileSql",
         "executeRaw",
       ]);
-      const fallbackStore = createStore(testGraph, { ...restBackend });
+      const fallbackStore = createStore(testGraph, restBackend);
       const fallbackPrepared = makePrepared(fallbackStore);
       await expect(fallbackPrepared.execute({ id: nullValue })).rejects.toThrow(
         "must not be null",
@@ -1349,7 +1348,7 @@ describe("Query Execution (SQLite)", () => {
         "compileSql",
         "executeRaw",
       ]);
-      const fallbackStore = createStore(testGraph, { ...restBackend });
+      const fallbackStore = createStore(testGraph, restBackend);
       const fallbackPrepared = makePrepared(fallbackStore);
       await expect(
         fallbackPrepared.execute({ needle: 42 as unknown as string }),
@@ -1378,7 +1377,7 @@ describe("Query Execution (SQLite)", () => {
         "compileSql",
         "executeRaw",
       ]);
-      const fallbackStore = createStore(testGraph, { ...restBackend });
+      const fallbackStore = createStore(testGraph, restBackend);
       const fallbackPrepared = makePrepared(fallbackStore);
       await expect(
         fallbackPrepared.execute({ id: [1, 2, 3] as unknown as string }),

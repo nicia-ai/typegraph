@@ -32,6 +32,7 @@ import {
   defineGraph,
   defineNode,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type { GraphBackend } from "../../../src/backend/types";
@@ -101,13 +102,12 @@ function withStatementCapture(backend: GraphBackend): {
   if (compileSql === undefined) {
     throw new Error("Postgres backend must expose compileSql");
   }
-  const captured: GraphBackend = {
-    ...backend,
+  const captured: GraphBackend = deriveBackend(backend, {
     execute: (query) => {
       statements.push(compileSql(query).sql);
       return backend.execute(query);
     },
-  };
+  });
   return { backend: captured, statements };
 }
 

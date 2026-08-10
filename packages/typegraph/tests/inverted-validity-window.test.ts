@@ -49,6 +49,7 @@ import {
   defineNode,
   INVERTED_VALIDITY_WINDOW_CODE,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import type { GraphData } from "../src/interchange";
 import {
   exportGraph,
@@ -820,8 +821,7 @@ describe("inverted valid-time windows", () => {
      */
     function clockSteppingBackend(): GraphBackend {
       const base = createTestBackend();
-      return {
-        ...base,
+      return deriveBackend(base, {
         transaction: (fn, options) =>
           base.transaction((transactionTarget) => {
             const steppingTarget = new Proxy(transactionTarget, {
@@ -845,7 +845,7 @@ describe("inverted valid-time windows", () => {
             });
             return fn(steppingTarget);
           }, options),
-      } satisfies GraphBackend;
+      });
     }
 
     /**

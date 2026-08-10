@@ -25,6 +25,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type CompiledStatementSql,
   createStoreWithSchema,
   defineGraph,
   defineNode,
@@ -32,6 +33,7 @@ import {
   IdentityContradictionError,
   IdentitySeparationViolationError,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
@@ -45,7 +47,7 @@ import { buildKindRegistry } from "../src/registry/builders";
 import { getActiveSchema, migrateSchema } from "../src/schema";
 import { storeRuntime } from "../src/store/runtime-port";
 import { requireDefined } from "../src/utils/presence";
-import { matchingObject } from "./test-utils";
+import { expectAuditedBackend, matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -263,8 +265,7 @@ function backendLosingCreateRace(
   let attempts = 0;
   return {
     attempts: () => attempts,
-    backend: {
-      ...result.backend,
+    backend: deriveBackend(result.backend, {
       schemaWriteTransaction: <T>(
         graphId: string,
         fn: Parameters<typeof fence<T>>[1],
@@ -274,7 +275,7 @@ function backendLosingCreateRace(
           fn(targetLosingDdlRace(target, remaining)),
         );
       },
-    },
+    }),
   };
 }
 
@@ -429,11 +430,14 @@ function upgradeActivityBackend(result: LocalSqliteBackendResult): Readonly<{
     }
   }
 
-  // A Proxy rather than a spread: transaction targets carry methods on a
-  // prototype that spreading would drop. The rebuild runs against a
-  // transaction target, so counting only the top-level backend would miss it
-  // entirely — and the test would pass whatever the predicate decided.
-  function countStatements<T extends object>(target: T): T {
+  // A Proxy rather than a spread for the SCOPED targets — the transaction
+  // target and the schema fence's preflight target. Their methods live on a
+  // prototype that spreading would drop, and neither carries a
+  // serialized-resource verdict, so a fresh object loses nothing. The rebuild
+  // runs against a transaction target, so counting only the top-level backend
+  // would miss it entirely — and the test would pass whatever the predicate
+  // decided.
+  function countScopedStatements<T extends object>(target: T): T {
     return new Proxy(target, {
       get(source, property, receiver) {
         const value: unknown = Reflect.get(source, property, receiver);
@@ -448,6 +452,12 @@ function upgradeActivityBackend(result: LocalSqliteBackendResult): Readonly<{
     });
   }
 
+  // The ROOT backend goes through the seam instead of a wrapping Proxy. A
+  // hand-rolled Proxy is a distinct object and the serialized-resource audit is
+  // WeakMap-keyed, so wrapping a derived backend in one discards the verdict
+  // `deriveBackend` just carried — exactly the loss the spread had.
+  const baseExecuteStatement = requireDefined(result.backend.executeStatement);
+
   return {
     closureRewrites: () => closureRewrites,
     fences: () => fences,
@@ -455,20 +465,46 @@ function upgradeActivityBackend(result: LocalSqliteBackendResult): Readonly<{
       fences = 0;
       closureRewrites = 0;
     },
-    backend: countStatements({
-      ...result.backend,
+    backend: deriveBackend(result.backend, {
+      executeStatement: (query: CompiledStatementSql): Promise<void> => {
+        countIfClosureRewrite(query);
+        return baseExecuteStatement(query);
+      },
       transaction: (fn, options) =>
-        result.backend.transaction((tx) => fn(countStatements(tx)), options),
+        result.backend.transaction(
+          (tx) => fn(countScopedStatements(tx)),
+          options,
+        ),
       schemaWriteTransaction: <T>(
         graphId: string,
         fn: Parameters<typeof fence<T>>[1],
       ): Promise<T> => {
         fences += 1;
-        return fence(graphId, async (target) => fn(countStatements(target)));
+        return fence(graphId, async (target) =>
+          fn(countScopedStatements(target)),
+        );
       },
-    } satisfies GraphBackend),
+    }),
   };
 }
+
+describe("the upgrade-activity double itself", () => {
+  it("stays on the base's serialized resource", async () => {
+    // The double is what the upgrade cases run against, so if it reads as
+    // unowned they exercise a schema fence whose import/clone guards have lost
+    // their subject. Neither the `tests/**` lint block nor the type-aware
+    // scanner can see the shape that loses it — a hand-rolled Proxy over the
+    // derived backend is a distinct object and the audit is WeakMap-keyed — so
+    // the verdict is asserted at runtime here.
+    const result = createLocalSqliteBackend();
+    try {
+      const observed = upgradeActivityBackend(result);
+      expect(expectAuditedBackend(observed.backend)).toBe("serialized");
+    } finally {
+      await result.backend.close();
+    }
+  });
+});
 
 describe("a live assertion the registry does not declare", () => {
   it("does not make the upgrade re-run on every open", async () => {
@@ -761,15 +797,14 @@ describe("in-commit provisioning capability", () => {
       const commitWithPreflight = requireDefined(
         result.backend.commitSchemaVersionWithPreflight,
       );
-      const withoutDdl: GraphBackend = {
-        ...result.backend,
+      const withoutDdl: GraphBackend = deriveBackend(result.backend, {
         commitSchemaVersionWithPreflight: (params, preflight) =>
           commitWithPreflight(params, (target) => {
             const stripped: Record<string, unknown> = { ...target };
             Reflect.deleteProperty(stripped, "executeSchemaDdl");
             return preflight(stripped as SchemaCommitPreflightBackend);
           }),
-      };
+      });
 
       await expect(
         migrateSchema(withoutDdl, foldGraph, activeRow.version),
@@ -814,15 +849,14 @@ describe("in-commit provisioning capability", () => {
       );
       const remaining = { count: 1 };
       let commits = 0;
-      const racing: GraphBackend = {
-        ...result.backend,
+      const racing: GraphBackend = deriveBackend(result.backend, {
         commitSchemaVersionWithPreflight: (params, preflight) => {
           commits += 1;
           return commitWithPreflight(params, (target) =>
             preflight(targetLosingDdlRace(target, remaining)),
           );
         },
-      };
+      });
 
       await migrateSchema(racing, foldGraph, activeRow.version);
 
@@ -848,15 +882,14 @@ describe("in-commit provisioning capability", () => {
       );
       const remaining = { count: 2 };
       let commits = 0;
-      const racing: GraphBackend = {
-        ...result.backend,
+      const racing: GraphBackend = deriveBackend(result.backend, {
         commitSchemaVersionWithPreflight: (params, preflight) => {
           commits += 1;
           return commitWithPreflight(params, (target) =>
             preflight(targetLosingDdlRace(target, remaining)),
           );
         },
-      };
+      });
 
       // Bounded at one, exactly as on the fenced path: a second failure is no
       // longer a creator about to commit, and the schema commit must not

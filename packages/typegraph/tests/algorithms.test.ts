@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type {
   GraphBackend,
@@ -178,8 +179,7 @@ function createCountingBackend(
   backend: GraphBackend,
   collected: string[],
 ): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(backend, {
     transaction<T>(
       fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
@@ -201,15 +201,14 @@ function createCountingBackend(
         return fn(observedTransaction);
       }, options);
     },
-  };
+  });
 }
 
 function createPostgresTemporaryStatementFailureBackend(
   backend: GraphBackend,
   failure: Error,
 ): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(backend, {
     dialect: "postgres",
     transaction<T>(
       fn: (tx: TransactionBackend) => Promise<T>,
@@ -226,7 +225,7 @@ function createPostgresTemporaryStatementFailureBackend(
         return fn(failingTransaction);
       }, options);
     },
-  };
+  });
 }
 
 /**
@@ -237,13 +236,12 @@ function createPostgresTransactionOpenFailureBackend(
   backend: GraphBackend,
   failure: Error,
 ): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(backend, {
     dialect: "postgres",
     transaction<T>(): Promise<T> {
       return Promise.reject(failure);
     },
-  };
+  });
 }
 
 function postgresError(message: string, code: string): Error {
@@ -945,10 +943,12 @@ describe("store.algorithms", () => {
         kind: "Person",
       });
 
-      const inlineStore = createStore(testGraph, {
-        ...backend,
-        capabilities: { ...backend.capabilities, transactions: false },
-      });
+      const inlineStore = createStore(
+        testGraph,
+        deriveBackend(backend, {
+          capabilities: { ...backend.capabilities, transactions: false },
+        }),
+      );
       const inlinePath = await inlineStore.algorithms.weightedShortestPath(
         a,
         targetId,
@@ -984,10 +984,9 @@ describe("store.algorithms", () => {
 
     it("produces identical results through the inline fallback", async () => {
       const roads = await seedRoads();
-      const inlineBackend: GraphBackend = {
-        ...backend,
+      const inlineBackend: GraphBackend = deriveBackend(backend, {
         capabilities: { ...backend.capabilities, transactions: false },
-      };
+      });
       const inlineStore = createStore(testGraph, inlineBackend);
 
       const workingTablePath = await store.algorithms.weightedShortestPath(
@@ -1077,14 +1076,13 @@ describe("store.algorithms", () => {
 
     it("uses bounded frontier queries and stops when the frontier is empty", async () => {
       const statements: string[] = [];
-      const observedBackend: GraphBackend = {
-        ...backend,
+      const observedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: { ...backend.capabilities, transactions: false },
         execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
           statements.push(requireDefined(backend.compileSql)(query).sql);
           return backend.execute<T>(query);
         },
-      };
+      });
       const observedStore = createStore(testGraph, observedBackend);
 
       const reachable = await observedStore.algorithms.reachable(ids.alice, {
@@ -1101,8 +1099,7 @@ describe("store.algorithms", () => {
 
     it("deduplicates edge targets before node visibility without ranking predecessors", async () => {
       const statements: string[] = [];
-      const observedBackend: GraphBackend = {
-        ...backend,
+      const observedBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -1120,7 +1117,7 @@ describe("store.algorithms", () => {
             return fn(observedTransaction);
           }, options);
         },
-      };
+      });
       const observedStore = createStore(testGraph, observedBackend);
 
       await observedStore.algorithms.reachable(ids.alice, {
@@ -1141,14 +1138,13 @@ describe("store.algorithms", () => {
     });
 
     it("chunks duplicate edge filters within a small bind budget", async () => {
-      const constrainedBackend: GraphBackend = {
-        ...backend,
+      const constrainedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
           transactions: false,
           maxBindParameters: 100,
         },
-      };
+      });
       const constrainedStore = createStore(testGraph, constrainedBackend);
 
       const reachable = await constrainedStore.algorithms.reachable(ids.alice, {
@@ -1174,8 +1170,7 @@ describe("store.algorithms", () => {
     it("drops the temporary working table when initialization fails", async () => {
       const temporaryStatements: string[] = [];
       let failNextRead = false;
-      const failingBackend: GraphBackend = {
-        ...backend,
+      const failingBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -1206,7 +1201,7 @@ describe("store.algorithms", () => {
             return fn(failingTransaction);
           }, options);
         },
-      };
+      });
       const failingStore = createStore(testGraph, failingBackend);
 
       await expect(
@@ -1315,8 +1310,7 @@ describe("store.algorithms", () => {
       // parsers) deliver INTEGER columns as BigInt. A meeting must still be
       // detected — regression for a typeof guard that silently dropped
       // BigInt rows and made shortestPath return undefined.
-      const bigintBackend: GraphBackend = {
-        ...backend,
+      const bigintBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -1338,7 +1332,7 @@ describe("store.algorithms", () => {
             return fn(observedTransaction);
           }, options);
         },
-      };
+      });
       const bigintStore = createStore(testGraph, bigintBackend);
 
       const path = await bigintStore.algorithms.shortestPath(
@@ -1593,13 +1587,12 @@ describe("store.algorithms", () => {
     });
 
     it("rejects a backend without graph-analytics support", async () => {
-      const unsupportedBackend: GraphBackend = {
-        ...backend,
+      const unsupportedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
           graphAnalytics: { supported: false, mathFunctions: false },
         },
-      };
+      });
       const unsupportedStore = createStore(testGraph, unsupportedBackend);
 
       await expect(
@@ -1892,13 +1885,12 @@ describe("store.algorithms", () => {
         ).rejects.toBeInstanceOf(ConfigurationError);
       }
 
-      const unsupportedBackend: GraphBackend = {
-        ...backend,
+      const unsupportedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
           graphAnalytics: { supported: false, mathFunctions: false },
         },
-      };
+      });
       const unsupportedStore = createStore(testGraph, unsupportedBackend);
       await expect(
         unsupportedStore.algorithms.labelPropagation({ edges: ["knows"] }),
@@ -1914,8 +1906,7 @@ describe("store.algorithms", () => {
 
     it("preserves a mid-run failure over cleanup of the auxiliary table", async () => {
       const temporaryStatements: string[] = [];
-      const failingBackend: GraphBackend = {
-        ...backend,
+      const failingBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -1946,7 +1937,7 @@ describe("store.algorithms", () => {
             return fn(failingTransaction);
           }, options);
         },
-      };
+      });
       const failingStore = createStore(testGraph, failingBackend);
 
       await expect(
@@ -1966,8 +1957,7 @@ describe("store.algorithms", () => {
 
     it("propagates an auxiliary-cleanup failure after a computed result", async () => {
       const temporaryStatements: string[] = [];
-      const failingBackend: GraphBackend = {
-        ...backend,
+      const failingBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -1993,7 +1983,7 @@ describe("store.algorithms", () => {
             return fn(failingTransaction);
           }, options);
         },
-      };
+      });
       const failingStore = createStore(testGraph, failingBackend);
 
       await expect(
@@ -2265,13 +2255,12 @@ describe("store.algorithms", () => {
     });
 
     it("rejects a backend without graph-analytics support", async () => {
-      const unsupportedBackend: GraphBackend = {
-        ...backend,
+      const unsupportedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
           graphAnalytics: { supported: false, mathFunctions: false },
         },
-      };
+      });
       const unsupportedStore = createStore(testGraph, unsupportedBackend);
 
       await expect(
@@ -2300,14 +2289,13 @@ describe("store.algorithms", () => {
     });
 
     it("requires window functions for label algorithms but not PageRank", async () => {
-      const noWindowFunctionsBackend: GraphBackend = {
-        ...backend,
+      const noWindowFunctionsBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
           graphAnalytics: { supported: true, mathFunctions: true },
           windowFunctions: false,
         },
-      };
+      });
       const noWindowFunctionsStore = createStore(
         testGraph,
         noWindowFunctionsBackend,

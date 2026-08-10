@@ -27,6 +27,7 @@ import {
   defineGraph,
   defineNode,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type {
@@ -109,8 +110,7 @@ function withTransactionCapture(backend: GraphBackend): {
     throw new Error("Postgres backend must expose compileSql");
   }
   const statements: CapturedStatement[] = [];
-  const captured: GraphBackend = {
-    ...backend,
+  const captured: GraphBackend = deriveBackend(backend, {
     transaction<T>(
       fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
@@ -132,7 +132,7 @@ function withTransactionCapture(backend: GraphBackend): {
         return fn(observedTransaction);
       }, options);
     },
-  };
+  });
   return { backend: captured, statements };
 }
 

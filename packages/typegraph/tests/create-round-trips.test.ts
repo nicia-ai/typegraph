@@ -2,17 +2,20 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type CompiledRowsSql,
   DatabaseOperationError,
   defineGraph,
   defineNode,
   type GraphBackend,
   type TransactionBackend,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import type { UpdateNodeParams } from "../src/backend/types";
 import { type SqlFragment } from "../src/query/sql-fragment";
 import {
   createInitializedStore,
   createTestBackend,
+  expectAuditedBackend,
   expectImmutableLowerBoundRefusal,
 } from "./test-utils";
 
@@ -78,12 +81,13 @@ function countingBackend(targetId: string): Readonly<{
   const base = createTestBackend();
   const counts = { targetNodeReads: 0, foldProbes: 0 };
 
-  function countReads<T extends GraphBackend | TransactionBackend>(
-    target: T,
-  ): T {
-    // A Proxy rather than a spread: transaction targets carry methods on a
-    // prototype, and spreading one silently drops `getNodes`, which would make
-    // the batch path look unprimed.
+  function countTransactionReads(
+    target: TransactionBackend,
+  ): TransactionBackend {
+    // A Proxy rather than a spread for TRANSACTION targets: their methods live
+    // on a prototype, and spreading one silently drops `getNodes`, which would
+    // make the batch path look unprimed. A transaction-scoped backend is
+    // unaudited by construction, so a fresh object loses nothing.
     return new Proxy(target, {
       get(source, property, receiver) {
         const value: unknown = Reflect.get(source, property, receiver);
@@ -106,11 +110,22 @@ function countingBackend(targetId: string): Readonly<{
     });
   }
 
-  const backend: GraphBackend = countReads({
-    ...base,
+  // The ROOT backend goes through the seam instead of a second Proxy. A
+  // hand-rolled Proxy is a distinct object and the serialized-resource audit is
+  // WeakMap-keyed, so wrapping a derived backend in one discards the verdict
+  // `deriveBackend` just carried — exactly the loss the spread had.
+  const backend: GraphBackend = deriveBackend(base, {
+    getNode: (graphId: string, kind: string, id: string) => {
+      if (id === targetId) counts.targetNodeReads += 1;
+      return base.getNode(graphId, kind, id);
+    },
+    execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+      if (isFoldProbe(query)) counts.foldProbes += 1;
+      return base.execute<T>(query);
+    },
     transaction: (fn, options) =>
-      base.transaction((tx) => fn(countReads(tx)), options),
-  } satisfies GraphBackend);
+      base.transaction((tx) => fn(countTransactionReads(tx)), options),
+  });
 
   return {
     backend,
@@ -124,8 +139,7 @@ function countingBackend(targetId: string): Readonly<{
 
 function peerResurrectionBackend(targetId: string): GraphBackend {
   const base = createTestBackend();
-  return {
-    ...base,
+  return deriveBackend(base, {
     transaction: (fn, options) =>
       base.transaction((transactionTarget) => {
         let peerInjected = false;
@@ -173,7 +187,7 @@ function peerResurrectionBackend(targetId: string): GraphBackend {
         });
         return fn(racingTarget);
       }, options),
-  } satisfies GraphBackend;
+  });
 }
 
 /**
@@ -193,8 +207,7 @@ function peerResurrectionBackend(targetId: string): GraphBackend {
  */
 function resurrectThenRetombstoneBackend(targetId: string): GraphBackend {
   const base = createTestBackend();
-  return {
-    ...base,
+  return deriveBackend(base, {
     transaction: (fn, options) =>
       base.transaction((transactionTarget) => {
         let peerResurrected = false;
@@ -249,8 +262,21 @@ function resurrectThenRetombstoneBackend(targetId: string): GraphBackend {
         });
         return fn(racingTarget);
       }, options),
-  } satisfies GraphBackend;
+  });
 }
+
+describe("the read-counting double itself", () => {
+  it("stays on the base's serialized resource", () => {
+    // The double is what every case below runs against, so if it reads as
+    // unowned the suite exercises write paths whose import/clone guards have
+    // lost their subject. Neither the `tests/**` lint block nor the type-aware
+    // scanner can see the shape that loses it — a hand-rolled Proxy over the
+    // derived backend is a distinct object and the audit is WeakMap-keyed — so
+    // the verdict is asserted at runtime here.
+    const { backend } = countingBackend("target");
+    expect(expectAuditedBackend(backend)).toBe("serialized");
+  });
+});
 
 describe("create-path round trips", () => {
   it("reads the created id exactly once on a plain graph", async () => {

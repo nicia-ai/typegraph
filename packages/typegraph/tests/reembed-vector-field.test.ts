@@ -16,6 +16,7 @@ import {
   EmbeddingDimensionChangedError,
   type GraphBackend,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend, generateSqliteDDL } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
@@ -224,13 +225,12 @@ describe("store.reembedVectorField (sqlite-vec)", () => {
       return;
     }
     const recorded: string[] = [];
-    const recordingBackend: GraphBackend = {
-      ...backend,
+    const recordingBackend: GraphBackend = deriveBackend(backend, {
       vectorSearch: (params) => {
         recorded.push(params.metric);
         return requireDefined(backend.vectorSearch)(params);
       },
-    };
+    });
     const [store] = await createStoreWithSchema(l2Graph, recordingBackend);
     await store.nodes.Doc.create({ title: "a", embedding: [1, 0, 0] });
 

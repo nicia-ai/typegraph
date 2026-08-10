@@ -1,6 +1,10 @@
 /**
- * The `src/**` half of the construction ratchet, asserted through ESLint itself
- * (T19, T20), plus the placement of the two import bans that carry I1 and I2.
+ * The construction ratchet, asserted through ESLint itself (T19, T20), plus the
+ * placement of the two import bans that carry I1 and I2.
+ *
+ * The ban is installed for `src/**` and for `tests/**`, from two different
+ * blocks, so each is fired at the fixture separately: a block that stopped
+ * matching one of the two trees would still leave the other's assertions green.
  *
  * A `no-restricted-syntax` selector that matches nothing is indistinguishable
  * from a guardrail that is switched off, and both read as "protected" in the
@@ -42,6 +46,9 @@ const packageRoot = path.resolve(import.meta.dirname, "..");
  * Its own content is never linted here — only its path is borrowed.
  */
 const BORROWED_SRC_PATH = "src/backend/transaction-resource.ts";
+
+/** The same, under the `tests/**` block. */
+const BORROWED_TESTS_PATH = "tests/test-utils.ts";
 
 /** The two modules whose `commonOperationMembers` rename the ratchet forced. */
 const AUDITED_FACTORIES = [
@@ -212,9 +219,12 @@ const eslint = new ESLint({ cwd: packageRoot });
  * type-aware rules over the fixture, so an unrelated report must not be able to
  * masquerade as the selector firing.
  */
-async function constructionReports(source: string): Promise<readonly string[]> {
+async function constructionReports(
+  source: string,
+  borrowedPath: string,
+): Promise<readonly string[]> {
   const results = await eslint.lintText(source, {
-    filePath: path.join(packageRoot, BORROWED_SRC_PATH),
+    filePath: path.join(packageRoot, borrowedPath),
   });
   return results
     .flatMap((result) => result.messages)
@@ -226,40 +236,66 @@ async function constructionReports(source: string): Promise<readonly string[]> {
     .map((message) => message.message);
 }
 
+/**
+ * Fires each selector group at a fixture linted under `borrowedPath`.
+ *
+ * One helper for both trees: the two blocks install the SAME group, so a case
+ * that held for `src` and not for `tests` would be a block that forgot the
+ * spread, not a different contract.
+ */
+async function expectEverySelectorFires(borrowedPath: string): Promise<void> {
+  const declarations =
+    "declare const someBackend: { getNode: unknown };\n" +
+    "declare function getBackend(): { getNode: unknown; getEdge: unknown };\n";
+
+  expect(
+    await constructionReports(
+      `${declarations}export const copy = { ...someBackend };`,
+      borrowedPath,
+    ),
+  ).toEqual([BACKEND_SEAM_MESSAGE]);
+
+  expect(
+    await constructionReports(
+      `${declarations}const { getNode, ...rest } = getBackend();\nexport { getNode, rest };`,
+      borrowedPath,
+    ),
+  ).toEqual([BACKEND_SEAM_MESSAGE]);
+
+  // Object.assign is split so a mutation and a copy do not share one
+  // message: the first argument is MUTATED, later arguments are copied.
+  expect(
+    await constructionReports(
+      `${declarations}export const mutated = Object.assign(someBackend, {});`,
+      borrowedPath,
+    ),
+  ).toEqual([BACKEND_MUTATION_MESSAGE]);
+
+  expect(
+    await constructionReports(
+      `${declarations}export const copied = Object.assign({}, someBackend);`,
+      borrowedPath,
+    ),
+  ).toEqual([BACKEND_SEAM_MESSAGE]);
+}
+
 describe("backend construction lint ratchet", () => {
   it(
     "reports every derivation-shaped construction in src",
     { timeout: 120_000 },
     async () => {
-      const declarations =
-        "declare const someBackend: { getNode: unknown };\n" +
-        "declare function getBackend(): { getNode: unknown; getEdge: unknown };\n";
+      await expectEverySelectorFires(BORROWED_SRC_PATH);
+    },
+  );
 
-      expect(
-        await constructionReports(
-          `${declarations}export const copy = { ...someBackend };`,
-        ),
-      ).toEqual([BACKEND_SEAM_MESSAGE]);
-
-      expect(
-        await constructionReports(
-          `${declarations}const { getNode, ...rest } = getBackend();\nexport { getNode, rest };`,
-        ),
-      ).toEqual([BACKEND_SEAM_MESSAGE]);
-
-      // Object.assign is split so a mutation and a copy do not share one
-      // message: the first argument is MUTATED, later arguments are copied.
-      expect(
-        await constructionReports(
-          `${declarations}export const mutated = Object.assign(someBackend, {});`,
-        ),
-      ).toEqual([BACKEND_MUTATION_MESSAGE]);
-
-      expect(
-        await constructionReports(
-          `${declarations}export const copied = Object.assign({}, someBackend);`,
-        ),
-      ).toEqual([BACKEND_SEAM_MESSAGE]);
+  it(
+    "reports every derivation-shaped construction in tests",
+    { timeout: 120_000 },
+    async () => {
+      // The test tree's own block, which lands with the bulk conversion. Before
+      // it existed this same fixture reported NOTHING under a `tests/**` path —
+      // deleting the block puts it back to zero and fails here.
+      await expectEverySelectorFires(BORROWED_TESTS_PATH);
     },
   );
 

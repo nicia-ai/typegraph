@@ -70,6 +70,10 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../../src/backend/derive-backend";
 import type { NodeRow } from "../../src/backend/types";
 import { asEdgeId } from "../../src/core/types";
 import { branch } from "../../src/graph-merge/branch";
@@ -230,7 +234,7 @@ function countingFenceBackend(backend: GraphBackend): Readonly<{
     return fence(graphId, fn);
   };
   return {
-    backend: { ...backend, schemaWriteTransaction: counting },
+    backend: deriveBackend(backend, { schemaWriteTransaction: counting }),
     fenceCount: () => opened,
   };
 }
@@ -260,7 +264,7 @@ function backendRacingTheClaim(
     injected = true;
     return injection().then(() => fence(graphId, fn));
   };
-  return { ...backend, schemaWriteTransaction: racing };
+  return deriveBackend(backend, { schemaWriteTransaction: racing });
 }
 
 /**
@@ -306,7 +310,7 @@ function backendRecordingFencedSql(backend: GraphBackend): Readonly<{
       ),
     );
   return {
-    backend: { ...backend, schemaWriteTransaction: recording },
+    backend: deriveBackend(backend, { schemaWriteTransaction: recording }),
     statements: () => [...recorded],
   };
 }
@@ -331,8 +335,7 @@ function backendFailingSchemaCommit(backend: GraphBackend): GraphBackend {
   }
   const withPreflight = backend.commitSchemaVersionWithPreflight;
   const ifKindsEmpty = backend.commitSchemaVersionIfKindsEmpty;
-  return {
-    ...backend,
+  return deriveBackend(backend, {
     commitSchemaVersion: (params) =>
       failOnce(() => backend.commitSchemaVersion(params)),
     ...(withPreflight === undefined ?
@@ -351,7 +354,7 @@ function backendFailingSchemaCommit(backend: GraphBackend): GraphBackend {
           probes: Parameters<typeof ifKindsEmpty>[1],
         ) => failOnce(() => ifKindsEmpty(params, probes)),
       }),
-  };
+  });
 }
 
 /** What the injected post-commit sidecar row-read failure throws. */
@@ -414,9 +417,7 @@ function backendFailingRowReadsFor(
 
 /** The same backend with its transactional schema fence withheld. */
 function backendWithoutSchemaFence(backend: GraphBackend): GraphBackend {
-  const withheld: Record<string, unknown> = { ...backend };
-  Reflect.deleteProperty(withheld, "schemaWriteTransaction");
-  return withheld as unknown as GraphBackend;
+  return projectBackendWithout(backend, ["schemaWriteTransaction"]);
 }
 
 /** One pre-marker `Provenance` row as a bulk-create input. */

@@ -32,6 +32,7 @@ import {
   rebuildIdentityClosure,
   StaleVersionError,
 } from "../src";
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
@@ -176,9 +177,7 @@ function backendWithoutPort(
   backend: GraphBackend,
   port: "schemaWriteTransaction" | "identityTableDdl",
 ): GraphBackend {
-  const withheld: Record<string, unknown> = { ...backend };
-  Reflect.deleteProperty(withheld, port);
-  return withheld as unknown as GraphBackend;
+  return projectBackendWithout(backend, [port]);
 }
 
 describe("Operational Identity provisioning + enablement gating", () => {

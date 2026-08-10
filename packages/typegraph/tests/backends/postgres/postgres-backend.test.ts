@@ -24,6 +24,7 @@ import {
   StaleVersionError,
   subClassOf,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import {
   generatePostgresDDL,
   generatePostgresMigrationSQL,
@@ -341,8 +342,7 @@ function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
   const statements: string[] = [];
   return {
     statements,
-    backend: {
-      ...backend,
+    backend: deriveBackend(backend, {
       transaction<T>(
         fn: (tx: TransactionBackend) => Promise<T>,
         options?: TransactionOptions,
@@ -360,7 +360,7 @@ function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
           return fn(observedTransaction);
         }, options);
       },
-    },
+    }),
   };
 }
 
@@ -621,8 +621,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       const insertReached = createGate();
       const releaseInsert = createGate();
       let pauseCompanyInsert = false;
-      const observedBackend: GraphBackend = {
-        ...backend,
+      const observedBackend: GraphBackend = deriveBackend(backend, {
         async transaction(fn, options) {
           return backend.transaction(
             (tx) =>
@@ -639,7 +638,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
             options,
           );
         },
-      };
+      });
       const [store] = await createStoreWithSchema(testGraph, observedBackend);
 
       pauseCompanyInsert = true;

@@ -188,13 +188,12 @@ describe("Store.evolve — basic flow", () => {
   });
 
   it("does not row-count probe for purely additive extensions", async () => {
-    const backend = {
-      ...createTestBackend(),
+    const backend = deriveBackend(createTestBackend(), {
       countNodesByKind: () =>
         Promise.reject(new Error("additive evolve should not count node rows")),
       countEdgesByKind: () =>
         Promise.reject(new Error("additive evolve should not count edge rows")),
-    } satisfies ReturnType<typeof createTestBackend>;
+    });
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
     const evolved = await store.evolve(
