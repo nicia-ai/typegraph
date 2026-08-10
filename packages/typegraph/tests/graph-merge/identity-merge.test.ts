@@ -963,6 +963,54 @@ describe("plan-time derived identity contradictions", () => {
     ).not.toThrow();
   });
 
+  it("preserves insertion order in ontology-conflict details after rollback", () => {
+    const earlierClass: IdentityTransferAssertion = {
+      id: "earlier-class",
+      relation: "same",
+      a: { kind: "Gamma", id: "z" },
+      b: { kind: "Alpha", id: "m" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const laterConflict: IdentityTransferAssertion = {
+      id: "later-conflict",
+      relation: "same",
+      a: earlierClass.a,
+      b: { kind: "Zed", id: "a" },
+      validFrom: requireDefined(earlierClass.validTo),
+    };
+    let thrown: unknown;
+
+    try {
+      assertNoContradictoryIdentityClosure(
+        [earlierClass, laterConflict],
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        {
+          sameIdAcrossKinds: undefined,
+          areDisjoint: (left, right) =>
+            new Set([left, right, "Gamma", "Zed"]).size === 2,
+        },
+        [],
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(IdentityMergeConflictError);
+    if (!(thrown instanceof IdentityMergeConflictError)) throw thrown;
+    expect(thrown.details).toEqual({
+      disjointKinds: ["Gamma", "Zed"],
+      sameClass: [
+        { kind: "Zed", id: "a" },
+        { kind: "Gamma", id: "z" },
+      ],
+    });
+  });
+
   it("rejects overlapping historical truth and accepts adjacent windows", () => {
     const same: IdentityTransferAssertion = {
       id: "historical-same",

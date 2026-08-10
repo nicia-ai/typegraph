@@ -39,9 +39,15 @@ type TemporalEvents = Readonly<{
 type ComponentState = Readonly<{
   parent: number[];
   sizes: number[];
-  kinds: Set<string>[];
+  kindFirstReference: Map<string, number>[];
   differentAssertions: Set<number>[];
   violatesOntology: boolean[];
+}>;
+
+type KindFirstReferenceChange = Readonly<{
+  kind: string;
+  previousFirstReference: number | undefined;
+  nextFirstReference: number;
 }>;
 
 type TemporalClosureState = Readonly<{
@@ -85,11 +91,11 @@ function findRoot(components: ComponentState, index: number): number {
 
 function componentKindsConflict(
   state: TemporalClosureState,
-  leftKinds: ReadonlySet<string>,
-  rightKinds: ReadonlySet<string>,
+  leftKinds: ReadonlyMap<string, number>,
+  rightKinds: ReadonlyMap<string, number>,
 ): boolean {
-  for (const left of leftKinds) {
-    for (const right of rightKinds) {
+  for (const left of leftKinds.keys()) {
+    for (const right of rightKinds.keys()) {
       if (left !== right && areDisjoint(state, left, right)) return true;
     }
   }
@@ -113,8 +119,8 @@ function unionReferences(
     ) ?
       [leftRoot, rightRoot]
     : [rightRoot, leftRoot];
-  const parentKinds = requireDefined(components.kinds[parentRoot]);
-  const childKinds = requireDefined(components.kinds[childRoot]);
+  const parentKinds = requireDefined(components.kindFirstReference[parentRoot]);
+  const childKinds = requireDefined(components.kindFirstReference[childRoot]);
   const parentDifferent = requireDefined(
     components.differentAssertions[parentRoot],
   );
@@ -125,7 +131,23 @@ function unionReferences(
   const previousViolation = requireDefined(
     components.violatesOntology[parentRoot],
   );
-  const addedKinds = [...childKinds].filter((kind) => !parentKinds.has(kind));
+  const changedKinds: KindFirstReferenceChange[] = [...childKinds].flatMap(
+    ([kind, childFirstReference]) => {
+      const previousFirstReference = parentKinds.get(kind);
+      return (
+          previousFirstReference === undefined ||
+            childFirstReference < previousFirstReference
+        ) ?
+          [
+            {
+              kind,
+              previousFirstReference,
+              nextFirstReference: childFirstReference,
+            },
+          ]
+        : [];
+    },
+  );
   const addedDifferent = [...childDifferent].filter(
     (assertionIndex) => !parentDifferent.has(assertionIndex),
   );
@@ -139,7 +161,9 @@ function unionReferences(
   components.parent[childRoot] = parentRoot;
   components.sizes[parentRoot] =
     previousParentSize + requireDefined(components.sizes[childRoot]);
-  for (const kind of addedKinds) parentKinds.add(kind);
+  for (const { kind, nextFirstReference } of changedKinds) {
+    parentKinds.set(kind, nextFirstReference);
+  }
   for (const assertionIndex of addedDifferent) {
     parentDifferent.add(assertionIndex);
   }
@@ -173,7 +197,10 @@ function unionReferences(
     for (const assertionIndex of addedDifferent) {
       parentDifferent.delete(assertionIndex);
     }
-    for (const kind of addedKinds) parentKinds.delete(kind);
+    for (const { kind, previousFirstReference } of changedKinds) {
+      if (previousFirstReference === undefined) parentKinds.delete(kind);
+      else parentKinds.set(kind, previousFirstReference);
+    }
     components.sizes[parentRoot] = previousParentSize;
     components.parent[childRoot] = childRoot;
   });
@@ -294,6 +321,15 @@ function activeClassMembers(
     );
 }
 
+function componentKindsInReferenceOrder(
+  state: TemporalClosureState,
+  root: number,
+): readonly string[] {
+  return [...requireDefined(state.components.kindFirstReference[root])]
+    .toSorted((left, right) => left[1] - right[1])
+    .map(([kind]) => kind);
+}
+
 function assertCoordinateConsistent(state: TemporalClosureState): void {
   if (state.sharedIdViolationCount.value > 0) {
     const activeById = new Map<string, IdentityReference[]>();
@@ -333,21 +369,18 @@ function assertCoordinateConsistent(state: TemporalClosureState): void {
     );
   }
 
-  for (const [
-    index,
-    violatesOntology,
-  ] of state.components.violatesOntology.entries()) {
-    if (
-      !violatesOntology ||
-      state.components.parent[index] !== index ||
-      state.activeReferences[index] !== true
-    ) {
-      continue;
-    }
-    const sameClass = activeClassMembers(state, index);
-    const disjointKinds = firstDisjointPair(state, [
-      ...new Set(sameClass.map((member) => member.kind)),
-    ]);
+  const checkedRoots = new Set<number>();
+  for (const [referenceIndex, active] of state.activeReferences.entries()) {
+    if (!active) continue;
+    const root = findRoot(state.components, referenceIndex);
+    if (checkedRoots.has(root)) continue;
+    checkedRoots.add(root);
+    if (!requireDefined(state.components.violatesOntology[root])) continue;
+    const sameClass = activeClassMembers(state, root);
+    const disjointKinds = firstDisjointPair(
+      state,
+      componentKindsInReferenceOrder(state, root),
+    );
     if (disjointKinds === undefined) continue;
     throw new IdentityMergeConflictError(
       "The merged identity ledger would join two ontology-disjoint kinds into one class.",
@@ -514,7 +547,9 @@ export function assertTemporalIdentityClosureConsistent(
     components: {
       parent: references.map((_reference, index) => index),
       sizes: references.map(() => 1),
-      kinds: references.map((reference) => new Set([reference.kind])),
+      kindFirstReference: references.map(
+        (reference, index) => new Map([[reference.kind, index]]),
+      ),
       differentAssertions: references.map(() => new Set<number>()),
       violatesOntology: references.map(() => false),
     },
