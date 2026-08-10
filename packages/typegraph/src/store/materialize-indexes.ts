@@ -63,6 +63,7 @@ import { serializeIndexDeclaration } from "../schema/serializer";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import { requireDefined } from "../utils/presence";
+import { isPostgresConcurrentDdlRaceError } from "../utils/sql-errors";
 import {
   ensureFocusedStatusTable,
   runBucketedMaterialization,
@@ -82,6 +83,7 @@ import {
 const CLAIM_LEASE_MS = 15 * 60_000;
 const CLAIM_RETRY_DELAY_MS = 200;
 const CLAIM_WAIT_TIMEOUT_MS = CLAIM_LEASE_MS + 60_000;
+const TRIGRAM_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
 
 const INDEX_DIALECT_BEHAVIOR = {
   postgres: {
@@ -121,6 +123,21 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+async function ensureTrigramExtension(backend: GraphBackend): Promise<void> {
+  if (backend.ensureTrigramExtension !== undefined) {
+    await backend.ensureTrigramExtension();
+    return;
+  }
+
+  const executeDdl = requireDefined(backend.executeDdl);
+  try {
+    await executeDdl(TRIGRAM_EXTENSION_DDL);
+  } catch (error) {
+    if (!isPostgresConcurrentDdlRaceError(error)) throw error;
+    await executeDdl(TRIGRAM_EXTENSION_DDL);
+  }
 }
 
 export type MaterializeIndexesOptions = Readonly<{
@@ -453,11 +470,11 @@ async function materializeRelationalIndex(
     run: async () => {
       if (declaration.method === "trigram") {
         // gin_trgm_ops lives in the pg_trgm extension (contrib — present
-        // on stock Postgres and the hosted variants). Idempotent, and a
-        // permission failure surfaces as this index's `failed` entry.
-        await requireDefined(backend.executeDdl)(
-          "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
-        );
+        // on stock Postgres and the hosted variants). Extension installation
+        // is database-global, so the backend serializes it independently of
+        // this index-name claim. A permission failure surfaces as this
+        // index's `failed` entry.
+        await ensureTrigramExtension(backend);
       }
       await requireDefined(backend.executeDdl)(ddl);
     },

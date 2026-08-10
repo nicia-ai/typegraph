@@ -2056,6 +2056,13 @@ export type GraphBackend = Readonly<{
   ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
 
   /**
+   * Install the PostgreSQL `pg_trgm` extension under a database-global
+   * concurrency fence. Relational trigram index materialization calls this
+   * before emitting its index DDL; non-PostgreSQL backends omit it.
+   */
+  ensureTrigramExtension?: (this: void) => Promise<void>;
+
+  /**
    * Idempotently ensure ONLY the `typegraph_revision_origins` table exists.
    *
    * Revision-tracked stores use this per-graph, durable random origin together

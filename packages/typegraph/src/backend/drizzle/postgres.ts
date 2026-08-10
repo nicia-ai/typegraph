@@ -387,6 +387,9 @@ const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
   "identitySeparation",
 ]);
 
+const TRIGRAM_EXTENSION_DDL_LOCK_KEY = "typegraph:pg-trgm-ddl";
+const TRIGRAM_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
+
 // ============================================================
 // Utilities
 // ============================================================
@@ -1033,6 +1036,19 @@ export function createPostgresBackend(
       await executeConcurrentCreateDdl(
         `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
       );
+    },
+
+    async ensureTrigramExtension(): Promise<void> {
+      if (!capabilities.transactions) {
+        await executeConcurrentCreateDdl(TRIGRAM_EXTENSION_DDL);
+        return;
+      }
+      await db.transaction(async (tx) => {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${TRIGRAM_EXTENSION_DDL_LOCK_KEY}), 0)`,
+        );
+        await tx.execute(sql.raw(TRIGRAM_EXTENSION_DDL));
+      });
     },
 
     async claimIndexMaterialization(

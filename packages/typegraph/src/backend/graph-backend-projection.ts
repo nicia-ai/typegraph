@@ -73,6 +73,7 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "deleteFulltextBatch",
   "fulltextSearch",
   "ensureIndexMaterializationsTable",
+  "ensureTrigramExtension",
   "ensureRevisionOriginsTable",
   "getIndexMaterialization",
   "getIndexMaterializations",
