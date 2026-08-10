@@ -15,7 +15,7 @@ function definedTableNameOverrides(
   if (override === undefined) return {};
   return Object.fromEntries(
     Object.entries(override).filter(([, tableName]) => tableName !== undefined),
-  ) as Partial<SqlTableNames>;
+  );
 }
 
 /**
@@ -33,7 +33,7 @@ export function resolvedTableNames(
   override: Partial<SqlTableNames> | undefined,
 ): ResolvedSqlTableNames {
   return createSqlSchema({
-    ...(backend.tableNames ?? {}),
+    ...backend.tableNames,
     ...definedTableNameOverrides(override),
   }).tables;
 }

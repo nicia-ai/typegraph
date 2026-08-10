@@ -1456,9 +1456,6 @@ export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdge
 // @public
 export type RepairRelationScope = "live" | "live-and-recorded";
 
-// @public
-export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
-
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
     nodes: string;
@@ -1474,6 +1471,9 @@ export type ResolvedSqlTableNames = Readonly<{
     fulltext: string;
     uniques: string;
 }>;
+
+// @public
+export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
 
 // @public
 export type RowProps = string | Readonly<Record<string, unknown>>;
