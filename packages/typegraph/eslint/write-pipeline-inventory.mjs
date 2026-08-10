@@ -172,7 +172,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
   {
     path: "src/store/operations/node-operations.ts",
     reason:
-      "Migrates to the session in B1 (the create leg) and B1b (the set update's two hoists).",
+      "The set update's two hoists (updateNodeSet, hardDeleteUniquesByNodeIds) and their requireDefined calls; they move into applyNodeSetUpdate in B1b. Every other write in this module is already on the session.",
     permanent: false,
   },
   {

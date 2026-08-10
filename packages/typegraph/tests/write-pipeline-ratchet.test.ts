@@ -70,11 +70,13 @@ const RATCHET = {
    * `store.ts`) are the permanent floor: they gain no session, no fences and
    * no sidecars from a plan.
    */
-  managedWriteEntryPoints: 21,
+  managedWriteEntryPoints: 13,
   /**
    * `unfencedTarget()` escapes — the typed hole that hands row work the full
    * backend union back. Its ceiling is the number of union-typed signatures
-   * the final batch re-types; the count is zero until call sites move.
+   * the final batch re-types. It is nonzero from the first batch that moves
+   * call sites onto the executor and returns to zero when those signatures are
+   * re-typed.
    */
   unfencedTargetEscapes: 64,
 } as const;

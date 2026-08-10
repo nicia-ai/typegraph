@@ -36,7 +36,6 @@ const config: KnipConfig = {
         "src/store/operations/write-plan.ts",
         "src/store/operations/write-fences.ts",
         "src/store/operations/write-session.ts",
-        "src/store/operations/write-executor.ts",
       ],
     },
     "apps/docs": {
