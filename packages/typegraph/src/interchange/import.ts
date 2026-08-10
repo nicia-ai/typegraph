@@ -137,8 +137,7 @@ import {
 
 /** A normal Store or an opaque ingestion branch that interchange may stage. */
 export type ImportTarget<G extends GraphDef> =
-  | Store<G>
-  | IngestionImportTarget<G>;
+  Store<G> | IngestionImportTarget<G>;
 
 /**
  * Import graph data into a store or opaque ingestion branch.
