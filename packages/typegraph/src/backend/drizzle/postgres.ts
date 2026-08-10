@@ -390,6 +390,51 @@ const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
 const TRIGRAM_EXTENSION_DDL_LOCK_KEY = "typegraph:pg-trgm-ddl";
 const TRIGRAM_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
 
+type ExecutePostgresStatement = (statement: ExecutableSql) => Promise<void>;
+
+function reportParallelWorkerResetFailure(
+  tableName: string,
+  resetError: unknown,
+): void {
+  try {
+    if (typeof console === "undefined" || typeof console.error !== "function") {
+      return;
+    }
+    console.error(
+      `[typegraph] The serial vector index rebuild failed and PostgreSQL also failed to restore the durable parallel_workers setting on table ${JSON.stringify(tableName)}. Run ALTER TABLE <table> RESET (parallel_workers) after resolving the database error.`,
+      resetError,
+    );
+  } catch {
+    // A hostile or replaced logger cannot displace the index-build failure.
+  }
+}
+
+/** @internal */
+export async function runSerialVectorIndexBuild(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+): Promise<void> {
+  const table = portableSql.identifier(tableName);
+  await execute(portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`);
+
+  let buildFailure: Readonly<{ error: unknown }> | undefined;
+  try {
+    await execute(indexStatement);
+  } catch (error) {
+    buildFailure = { error };
+  }
+
+  try {
+    await execute(portableSql`ALTER TABLE ${table} RESET (parallel_workers)`);
+  } catch (resetError) {
+    if (buildFailure === undefined) throw resetError;
+    reportParallelWorkerResetFailure(tableName, resetError);
+  }
+
+  if (buildFailure !== undefined) throw buildFailure.error;
+}
+
 // ============================================================
 // Utilities
 // ============================================================
@@ -2392,23 +2437,16 @@ function createPostgresOperationBackend(
           if (dropStatement !== undefined) {
             await execRun(dropStatement);
           }
-          const table = portableSql.identifier(
-            vectorStrategy.tableName(
-              slot.graphId,
-              slot.nodeKind,
-              slot.fieldPath,
-            ),
+          const strategyTableName = vectorStrategy.tableName(
+            slot.graphId,
+            slot.nodeKind,
+            slot.fieldPath,
           );
-          await execRun(
-            portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`,
+          await runSerialVectorIndexBuild(
+            execRun,
+            strategyTableName,
+            indexStatement,
           );
-          try {
-            await execRun(indexStatement);
-          } finally {
-            await execRun(
-              portableSql`ALTER TABLE ${table} RESET (parallel_workers)`,
-            );
-          }
         }
       }
     },
