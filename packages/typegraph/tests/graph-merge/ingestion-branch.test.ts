@@ -501,10 +501,22 @@ describe.each(backendMatrix())(
         },
       ]);
       const expectedAssertions = [
-        [singleSameLeft, singleSame.assertion],
-        [singleDifferentLeft, singleDifferent.assertion],
-        [bulkSameLeft, requireDefined(bulkSame).assertion],
-        [bulkDifferentLeft, requireDefined(bulkDifferent).assertion],
+        [singleSameLeft, singleSame.assertion, "2020-06-01T00:00:00.000Z"],
+        [
+          singleDifferentLeft,
+          singleDifferent.assertion,
+          "2021-06-01T00:00:00.000Z",
+        ],
+        [
+          bulkSameLeft,
+          requireDefined(bulkSame).assertion,
+          "2022-06-01T00:00:00.000Z",
+        ],
+        [
+          bulkDifferentLeft,
+          requireDefined(bulkDifferent).assertion,
+          "2023-06-01T00:00:00.000Z",
+        ],
       ] as const;
 
       expect(
@@ -540,10 +552,10 @@ describe.each(backendMatrix())(
       );
       unwrap(await applyMergePlan(targetClone.store, plan));
 
-      for (const [ref, assertion] of expectedAssertions) {
-        expect(await targetClone.store.identity.assertionsOf(ref)).toEqual([
-          assertion,
-        ]);
+      for (const [ref, assertion, asOf] of expectedAssertions) {
+        expect(
+          await targetClone.store.asOf(asOf).identity.assertionsOf(ref),
+        ).toEqual([assertion]);
       }
     });
 
