@@ -20,6 +20,11 @@
  *    that lives one module away from the others and is easy to forget exactly
  *    because of that.
  *
+ * An EDGE write obliges none of them, and the seven edge rows say so with an
+ * empty sidecar list. That empty list is a CLAIM, not an omission, so it is
+ * asserted as one: a case that declares no sidecars must issue its row
+ * statement and NOTHING else off the watched set.
+ *
  * Observed as backend member CALLS through the same counting-wrapper idiom
  * `bulk-create-batching.test.ts` uses: what is under test is which statements
  * the fused unit issues, not what the rows end up looking like.
@@ -28,7 +33,10 @@
  * `write-session.ts` (`applyNodeInsertSideEffects` from `createNode`,
  * `applyNodeInsertSideEffectsBatch` from `createNodes`, the
  * `enforceNodeDeleteBehavior`-bearing `applyNodeSoftDelete` from `retireNode`,
- * …) and exactly that method's case fails.
+ * …) and exactly that method's case fails. The edge methods have no sidecar
+ * call to delete, so theirs is the row write itself: make `retireEdge`
+ * delegate to `applyEdgeHardDelete`, or `createEdges` to `runInsertBatch`, and
+ * exactly that method's case fails.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -57,8 +65,13 @@ import {
   runWritePlan,
   type WritePlanContext,
 } from "../src/store/operations/write-executor";
-import { nodeWritePlan } from "../src/store/operations/write-plan";
 import {
+  edgeWritePlan,
+  nodeWritePlan,
+  type WritePlan,
+} from "../src/store/operations/write-plan";
+import {
+  type EdgeInsertWork,
   type NodeInsertWork,
   type WriteSession,
 } from "../src/store/operations/write-session";
@@ -110,6 +123,11 @@ const WATCHED_MEMBERS = [
   "upsertEmbedding",
   "upsertEmbeddingBatch",
   "deleteEmbedding",
+  "insertEdge",
+  "insertEdgeNoReturn",
+  "insertEdgesBatch",
+  "insertEdgesBatchReturning",
+  "updateEdge",
   "deleteEdge",
   "deleteEdgesBatch",
   "hardDeleteEdge",
@@ -201,6 +219,19 @@ function insertWork(id: string): NodeInsertWork {
   };
 }
 
+function edgeInsertWork(id: string, endpointId: string): EdgeInsertWork {
+  return {
+    graphId: GRAPH_ID,
+    id,
+    kind: "links",
+    fromKind: "Doc",
+    fromId: endpointId,
+    toKind: "Doc",
+    toId: endpointId,
+    props: {},
+  };
+}
+
 /** The fixture every case starts from: one live node, one connected edge. */
 async function seed(
   backend: GraphBackend,
@@ -247,11 +278,24 @@ type Case = Readonly<{
   run: (
     raw: GraphBackend,
   ) => Promise<(session: WriteSession) => Promise<unknown>>;
-  /** Members this method MUST reach, each at least once. */
+  /**
+   * Members this method MUST reach, each at least once. An EMPTY list is the
+   * claim "this write obliges no derived data" and is asserted as such: see the
+   * exclusivity check in the runner.
+   */
   sidecars: readonly WatchedMember[];
   /** The primary row statement, asserted so a no-op case cannot pass. */
   row: WatchedMember;
+  /**
+   * The plan this row work runs under. It selects no behavior here — neither
+   * the constraint probe nor identity participation is under test — but a node
+   * case running an edge plan (or the reverse) would misdescribe the write.
+   */
+  plan: WritePlan;
 }>;
+
+const NODE_PLAN = nodeWritePlan(undefined, undefined);
+const EDGE_PLAN = edgeWritePlan(undefined);
 
 /**
  * Exhaustive over the session by type: a method with no case here does not
@@ -263,12 +307,14 @@ const CASES: Record<keyof WriteSession, Case> = {
       Promise.resolve((session) => session.createNode(insertWork("a"))),
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "insertNode",
+    plan: NODE_PLAN,
   },
   createNodeNoReturn: {
     run: () =>
       Promise.resolve((session) => session.createNodeNoReturn(insertWork("b"))),
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "insertNodeNoReturn",
+    plan: NODE_PLAN,
   },
   createNodes: {
     run: () =>
@@ -281,6 +327,7 @@ const CASES: Record<keyof WriteSession, Case> = {
       "upsertEmbeddingBatch",
     ],
     row: "insertNodesBatchReturning",
+    plan: NODE_PLAN,
   },
   createNodesNoReturn: {
     run: () =>
@@ -293,6 +340,7 @@ const CASES: Record<keyof WriteSession, Case> = {
       "upsertEmbeddingBatch",
     ],
     row: "insertNodesBatch",
+    plan: NODE_PLAN,
   },
   reviseNode: {
     run: async (raw) => {
@@ -321,6 +369,7 @@ const CASES: Record<keyof WriteSession, Case> = {
       "upsertEmbedding",
     ],
     row: "updateNode",
+    plan: NODE_PLAN,
   },
   retireNode: {
     run: async (raw) => {
@@ -341,6 +390,7 @@ const CASES: Record<keyof WriteSession, Case> = {
       "deleteEmbedding",
     ],
     row: "deleteNode",
+    plan: NODE_PLAN,
   },
   purgeNode: {
     run: async (raw) => {
@@ -356,6 +406,7 @@ const CASES: Record<keyof WriteSession, Case> = {
     },
     sidecars: ["hardDeleteEdgesBatch", "deleteEmbedding"],
     row: "hardDeleteNode",
+    plan: NODE_PLAN,
   },
   reviveNode: {
     run: async (raw) => {
@@ -366,6 +417,7 @@ const CASES: Record<keyof WriteSession, Case> = {
     },
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "updateNode",
+    plan: NODE_PLAN,
   },
   reviseNodeSet: {
     run: async (raw) => {
@@ -402,6 +454,90 @@ const CASES: Record<keyof WriteSession, Case> = {
       "upsertEmbeddingBatch",
     ],
     row: "updateNodeSet",
+    plan: NODE_PLAN,
+  },
+  createEdge: {
+    run: async (raw) => {
+      await seed(raw, "l");
+      const work = edgeInsertWork("edge-new-l", "l");
+      return (session) => session.createEdge(work);
+    },
+    sidecars: [],
+    row: "insertEdge",
+    plan: EDGE_PLAN,
+  },
+  createEdgeNoReturn: {
+    run: async (raw) => {
+      await seed(raw, "m");
+      const work = edgeInsertWork("edge-new-m", "m");
+      return (session) => session.createEdgeNoReturn(work);
+    },
+    sidecars: [],
+    row: "insertEdgeNoReturn",
+    plan: EDGE_PLAN,
+  },
+  createEdges: {
+    run: async (raw) => {
+      await seed(raw, "n");
+      const work = [
+        edgeInsertWork("edge-new-n1", "n"),
+        edgeInsertWork("edge-new-n2", "n"),
+      ];
+      return (session) => session.createEdges(work);
+    },
+    sidecars: [],
+    row: "insertEdgesBatchReturning",
+    plan: EDGE_PLAN,
+  },
+  createEdgesNoReturn: {
+    run: async (raw) => {
+      await seed(raw, "o");
+      const work = [
+        edgeInsertWork("edge-new-o1", "o"),
+        edgeInsertWork("edge-new-o2", "o"),
+      ];
+      return (session) => session.createEdgesNoReturn(work);
+    },
+    sidecars: [],
+    row: "insertEdgesBatch",
+    plan: EDGE_PLAN,
+  },
+  reviseEdge: {
+    run: async (raw) => {
+      await seed(raw, "p");
+      const work = { id: "edge-p", props: {} };
+      return (session) =>
+        session.reviseEdge(work, {
+          validityLowerBound: {},
+          // The kind the seeded row carries: an edge update always asserts the
+          // identity it resolved the row under, and the applier carries it
+          // into the statement's own `WHERE`.
+          edgeIdentity: { kind: "links" },
+        });
+    },
+    sidecars: [],
+    row: "updateEdge",
+    plan: EDGE_PLAN,
+  },
+  retireEdge: {
+    run: async (raw) => {
+      await seed(raw, "q");
+      const work = { id: "edge-q", kind: "links" };
+      return (session) => session.retireEdge(work);
+    },
+    sidecars: [],
+    row: "deleteEdge",
+    plan: EDGE_PLAN,
+  },
+  purgeEdge: {
+    run: async (raw) => {
+      await seed(raw, "r");
+      const work = { id: "edge-r", kind: "links" };
+      return (session) => session.purgeEdge(work);
+    },
+    sidecars: [],
+    row: "hardDeleteEdge",
+    plan: EDGE_PLAN,
   },
 };
 
@@ -417,17 +553,27 @@ describe("write session sidecar completeness", () => {
         const rowWork = await testCase.run(raw);
         const { backend, counts } = withCallCounts(raw);
 
-        await runWritePlan(
-          writeContext(),
-          nodeWritePlan(undefined, undefined),
-          backend,
-          (session) => rowWork(session),
+        await runWritePlan(writeContext(), testCase.plan, backend, (session) =>
+          rowWork(session),
         );
 
         const missing = [testCase.row, ...testCase.sidecars].filter(
           (member) => counts[member] === 0,
         );
         expect(missing).toEqual([]);
+
+        // A method that declares NO sidecars is claiming something, not
+        // omitting something — an edge write obliges no derived data — so the
+        // empty list is asserted rather than trusted: nothing but the row
+        // statement may reach the backend. A method that DOES declare sidecars
+        // is checked by the list above; this adds nothing for it.
+        const undeclared =
+          testCase.sidecars.length === 0 ?
+            WATCHED_MEMBERS.filter(
+              (member) => member !== testCase.row && counts[member] > 0,
+            )
+          : [];
+        expect(undeclared).toEqual([]);
       } finally {
         await raw.close();
       }

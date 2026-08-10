@@ -364,4 +364,16 @@ describe("a fenced session method cannot be called without its fence", () => {
     const fences: Parameters<WriteSession["reviseNodeSet"]>[1] = {};
     expect(fences).toEqual({});
   });
+
+  it("rejects an edge update that states its window but not its identity", () => {
+    // The same check for `reviseEdge` (B2), whose record has TWO required keys
+    // — so the omission this catches is a PARTIAL fence, which is the shape a
+    // real caller would get wrong: it stated the bound its verdict read and
+    // forgot the identity components it also asserted.
+    // @ts-expect-error -- `edgeIdentity` is required and is not stated here
+    const fences: Parameters<WriteSession["reviseEdge"]>[1] = {
+      validityLowerBound: {},
+    };
+    expect(fences).toEqual({ validityLowerBound: {} });
+  });
 });

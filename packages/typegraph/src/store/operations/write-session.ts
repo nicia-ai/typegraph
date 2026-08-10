@@ -21,10 +21,11 @@
  * A method exists only once the step module it delegates to exists. B0 shipped
  * the eight node methods whose delegates (`node-write-pipeline.ts`'s four
  * steps, `insert-dispatch.ts`'s four insert shapes) were already here; B1b
- * added `reviseNodeSet` in the same commit as `applyNodeSetUpdate`, and the
- * edge methods arrive with `edge-write-pipeline.ts`. That schedule is what lets this module spell NO
- * banned member call at any commit — which is why it needs no lint exemption
- * on the day it lands or on any day after.
+ * added `reviseNodeSet` in the same commit as `applyNodeSetUpdate`, and B2
+ * added the seven edge methods in the same commit as `edge-write-pipeline.ts`.
+ * That schedule is what lets this module spell NO banned member call at any
+ * commit — which is why it needs no lint exemption on the day it lands or on
+ * any day after.
  *
  * ## Four insert shapes, not three
  *
@@ -39,9 +40,11 @@ import { type z } from "zod";
 
 import {
   type BackendIdentity,
+  type EdgeRow,
   type FulltextOperationBackend,
   type GraphBackend,
   type GraphEntityReadBackend,
+  type InsertEdgeParams,
   type InsertNodeParams,
   type LiveNodeRow,
   type NodeRow,
@@ -58,12 +61,21 @@ import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { type Assert, type Equal } from "../../utils/type-assert";
 import {
+  edgeInsertDispatch,
   nodeInsertDispatch,
   runInsertBatch,
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "../insert-dispatch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import {
+  applyEdgeHardDelete,
+  applyEdgeSoftDelete,
+  applyEdgeUpdate,
+  createEdgeWriteContext,
+  type EdgeDeleteWork,
+  type EdgeUpdateWork,
+} from "./edge-write-pipeline";
 import {
   applyNodeHardDelete,
   applyNodeInsertSideEffects,
@@ -81,6 +93,8 @@ import {
 import {
   applyWriteFences,
   createWriteParamsDraft,
+  EDGE_UPDATE_FENCE_APPLIERS,
+  type EdgeUpdateFences,
   NODE_SET_UPDATE_FENCE_APPLIERS,
   NODE_UPDATE_FENCE_APPLIERS,
   type NodeSetUpdateFences,
@@ -196,6 +210,23 @@ export type NodeResurrectWork = Readonly<{
   uniqueConstraints: readonly UniqueConstraint[];
 }>;
 
+/**
+ * One edge insert.
+ *
+ * An edge write obliges NO derived data — no uniqueness entries, no fulltext,
+ * no embeddings — so, unlike {@link NodeInsertWork}, there is nothing that has
+ * to travel alongside the row params: the work IS the params. The alias exists
+ * so the session's edge methods read like its node methods, and so that the day
+ * an edge grows a sidecar there is one type to widen and every caller is
+ * already routed through it.
+ *
+ * The update and delete work records live in `edge-write-pipeline.ts` instead,
+ * beside the steps that consume them; these four methods have no step module of
+ * their own (they delegate to `insert-dispatch.ts`), so their work record lives
+ * here with them.
+ */
+export type EdgeInsertWork = InsertEdgeParams;
+
 export type WriteSession = Readonly<{
   // ---- B0: delegates to node-write-pipeline.ts + insert-dispatch.ts
   createNode: (work: NodeInsertWork) => Promise<NodeRow>;
@@ -218,6 +249,18 @@ export type WriteSession = Readonly<{
     work: NodeSetUpdateWork,
     fences: NodeSetUpdateFences,
   ) => Promise<NodeSetUpdateResult>;
+
+  // ---- B2: delegates to edge-write-pipeline.ts + insert-dispatch.ts
+  createEdge: (work: EdgeInsertWork) => Promise<EdgeRow>;
+  createEdgeNoReturn: (work: EdgeInsertWork) => Promise<void>;
+  createEdges: (work: readonly EdgeInsertWork[]) => Promise<readonly EdgeRow[]>;
+  createEdgesNoReturn: (work: readonly EdgeInsertWork[]) => Promise<void>;
+  reviseEdge: (
+    work: EdgeUpdateWork,
+    fences: EdgeUpdateFences,
+  ) => Promise<EdgeRow>;
+  retireEdge: (work: EdgeDeleteWork) => Promise<void>;
+  purgeEdge: (work: EdgeDeleteWork) => Promise<void>;
 }>;
 
 // No session method may collide with a banned backend member name: the lint
@@ -244,6 +287,8 @@ export function createWriteSession(
 ): WriteSession {
   const writeContext = createNodeWriteContext(ctx.graphId, ctx.registry, lock);
   const dispatch = nodeInsertDispatch(target);
+  const edgeContext = createEdgeWriteContext(ctx.graphId, lock);
+  const edgeDispatch = edgeInsertDispatch(target);
 
   return {
     createNode: async (work) => {
@@ -308,5 +353,26 @@ export function createWriteSession(
       );
       return applyNodeSetUpdate(writeContext, work, target);
     },
+
+    // The edge methods apply no sidecars because an edge write obliges none —
+    // stated here rather than implied by their absence, and pinned by the
+    // completeness matrix, which is exhaustive over this type.
+    createEdge: (work) => edgeDispatch.one(work),
+
+    createEdgeNoReturn: (work) => runInsertNoReturn(edgeDispatch, work),
+
+    createEdges: (work) => runInsertBatchReturning(edgeDispatch, work),
+
+    createEdgesNoReturn: (work) => runInsertBatch(edgeDispatch, work),
+
+    reviseEdge: (work, fences) => {
+      const draft = createWriteParamsDraft();
+      applyWriteFences(EDGE_UPDATE_FENCE_APPLIERS, fences, draft);
+      return applyEdgeUpdate(edgeContext, { ...work, ...draft }, target);
+    },
+
+    retireEdge: (work) => applyEdgeSoftDelete(edgeContext, work, target),
+
+    purgeEdge: (work) => applyEdgeHardDelete(edgeContext, work, target),
   };
 }

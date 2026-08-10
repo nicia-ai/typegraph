@@ -170,10 +170,10 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     permanent: true,
   },
   {
-    path: "src/store/operations/edge-operations.ts",
+    path: "src/store/operations/edge-write-pipeline.ts",
     reason:
-      "Migrates in B2, when the raw edge row writes move into edge-write-pipeline.ts.",
-    permanent: false,
+      "The edge step bodies themselves (updateEdge, deleteEdge, hardDeleteEdge), reachable only through the session.",
+    permanent: true,
   },
   {
     path: "src/interchange/import.ts",
