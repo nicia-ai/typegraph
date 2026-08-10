@@ -14,6 +14,9 @@ importers:
       '@changesets/cli':
         specifier: ^2.31.0
         version: 2.31.0(@types/node@25.0.3)
+      '@typegraph/eslint-config':
+        specifier: workspace:*
+        version: link:packages/eslint-config
       knip:
         specifier: ^6.24.0
         version: 6.24.0
@@ -197,9 +200,6 @@ importers:
       '@stryker-mutator/vitest-runner':
         specifier: ^9.6.1
         version: 9.6.1(@stryker-mutator/core@9.6.1(@types/node@24.13.2))(vitest@4.1.9)
-      '@typegraph/eslint-config':
-        specifier: workspace:*
-        version: link:../eslint-config
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13
