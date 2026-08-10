@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { createStoreWithSchema, param as parameter } from "../../../src";
-import { createGraphBackendProjection } from "../../../src/backend/graph-backend-projection";
 import {
-  createBackendOverlay,
-  type GraphBackend,
-} from "../../../src/backend/types";
+  deriveBackend,
+  projectGraphBackend,
+} from "../../../src/backend/derive-backend";
+import { type GraphBackend } from "../../../src/backend/types";
 import { type CompiledRowsSql } from "../../../src/query/sql-intent";
 import { integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
@@ -15,11 +15,11 @@ function createStatementCounter(backend: GraphBackend): Readonly<{
   count: () => number;
   reset: () => void;
 }> {
-  const projected = createGraphBackendProjection(backend);
+  const projected = projectGraphBackend(backend);
   const executeRaw = projected.executeRaw;
   let statementCount = 0;
 
-  const countingBackend = createBackendOverlay(projected, {
+  const countingBackend = deriveBackend(projected, {
     execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
       statementCount += 1;
       return projected.execute<T>(query);

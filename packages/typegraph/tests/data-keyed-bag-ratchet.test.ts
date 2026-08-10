@@ -77,7 +77,7 @@ const ALLOWLIST: readonly AllowedSite[] = [
       "An identity sentinel compared by reference; no key is ever assigned to it.",
   },
   {
-    file: "backend/graph-backend-projection.ts",
+    file: "backend/graph-backend-keys.ts",
     line: "> = {};",
     reason:
       "A compile-time exhaustiveness witness (`Record<Exclude<keyof GraphBackend, …>, never>`); never read, never assigned.",

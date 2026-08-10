@@ -18,56 +18,46 @@ jobs:
     name: Detect release metadata push
     runs-on: ubuntu-24.04
     outputs:
-      skip_push_ci: ${{ steps.detect.outputs.skip_push_ci }}
+      skip_heavy_ci: ${{ steps.detect.outputs.skip_heavy_ci }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Detect release metadata-only push
+      - name: Detect release metadata-only change
         id: detect
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ "${{ github.event_name }}" != "push" ]]; then
-            echo "skip_push_ci=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          base_sha="${{ github.event.before }}"
-          head_sha="${{ github.sha }}"
+          case "${{ github.event_name }}" in
+            push)
+              base_sha="${{ github.event.before }}"
+              head_sha="${{ github.sha }}"
+              ;;
+            pull_request)
+              base_sha="${{ github.event.pull_request.base.sha }}"
+              head_sha="${{ github.event.pull_request.head.sha }}"
+              ;;
+            *)
+              echo "skip_heavy_ci=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
 
           if [[ "$base_sha" == "0000000000000000000000000000000000000000" ]]; then
-            echo "skip_push_ci=false" >> "$GITHUB_OUTPUT"
+            echo "skip_heavy_ci=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          mapfile -t changed_files < <(git diff --name-only "$base_sha" "$head_sha")
-
-          if [[ "${#changed_files[@]}" -eq 0 ]]; then
-            echo "skip_push_ci=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          skip_push_ci=true
-          for changed_file in "${changed_files[@]}"; do
-            case "$changed_file" in
-              .changeset/*.md | CHANGELOG.md | */CHANGELOG.md | packages/typegraph/package.json) ;;
-              *)
-                skip_push_ci=false
-                break
-                ;;
-            esac
-          done
-
-          echo "skip_push_ci=$skip_push_ci" >> "$GITHUB_OUTPUT"
+          skip_heavy_ci="$(.github/scripts/is-release-metadata-only.sh "$base_sha" "$head_sha")"
+          echo "skip_heavy_ci=$skip_heavy_ci" >> "$GITHUB_OUTPUT"
 
   lint-and-check:
     name: Lint & Type Check
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -104,7 +94,7 @@ jobs:
     name: Test Unit (SQLite, Node 22, shard ${{ matrix.shard }})
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -130,7 +120,7 @@ jobs:
     name: Test Property (SQLite, Node 24)
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -152,7 +142,7 @@ jobs:
     name: Test Smoke (SQLite, Node 24)
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -177,7 +167,7 @@ jobs:
     name: Test Strict Packed Consumers (TypeScript 5 and 6)
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -199,16 +189,20 @@ jobs:
     name: Coverage shard ${{ matrix.shard }}
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
-    timeout-minutes: 20
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard: "1/2"
+          - shard: "1/4"
             artifact: coverage-blob-1
-          - shard: "2/2"
+          - shard: "2/4"
             artifact: coverage-blob-2
+          - shard: "3/4"
+            artifact: coverage-blob-3
+          - shard: "4/4"
+            artifact: coverage-blob-4
     steps:
       - uses: actions/checkout@v6
 
@@ -250,7 +244,7 @@ jobs:
     if: >-
       ${{
         always() &&
-        needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' &&
+        needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' &&
         needs.test-coverage.result != 'skipped'
       }}
     timeout-minutes: 10
@@ -287,7 +281,7 @@ jobs:
     name: Type Tests (TS ${{ matrix.typescript-version }})
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -319,7 +313,7 @@ jobs:
     name: Test (PostgreSQL, shard ${{ matrix.shard }})
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -406,7 +400,7 @@ jobs:
     name: Test (Durable Objects SQLite)
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -424,22 +418,12 @@ jobs:
       - name: Run Durable Objects SQLite tests (workerd)
         run: pnpm --filter @nicia-ai/typegraph test:do
 
-  build:
-    name: Build
+  build-artifacts:
+    name: Build artifacts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs:
-      - detect-release-metadata-push
-      - lint-and-check
-      - test-sqlite-unit
-      - test-sqlite-property
-      - test-sqlite-smoke
-      - test-strict-local-consumers
-      - test-coverage-merge
-      - test-typescript-compat
-      - test-postgres
-      - test-durable-objects
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -459,11 +443,42 @@ jobs:
           NICIA_EMAIL_LIST_API_URL: ${{ secrets.NICIA_EMAIL_LIST_API_URL }}
           NICIA_EMAIL_LIST_API_KEY: ${{ secrets.NICIA_EMAIL_LIST_API_KEY }}
 
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    needs:
+      - build-artifacts
+      - detect-release-metadata-push
+      - lint-and-check
+      - test-sqlite-unit
+      - test-sqlite-property
+      - test-sqlite-smoke
+      - test-strict-local-consumers
+      - test-coverage-merge
+      - test-typescript-compat
+      - test-postgres
+      - test-durable-objects
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true'
+      }}
+    steps:
+      - name: Confirm required jobs passed
+        env:
+          REQUIRED_JOBS: ${{ toJSON(needs) }}
+        run: |
+          failed_jobs="$(jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")' <<< "$REQUIRED_JOBS")"
+          if [[ -n "$failed_jobs" ]]; then
+            echo "Required CI jobs did not pass: $failed_jobs" >&2
+            exit 1
+          fi
+
   release-metadata-push:
     name: Release metadata push check
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci == 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci == 'true' }}
     steps:
-      - name: Skip heavy CI on release metadata-only push
-        run: echo "Skipping heavy CI for release metadata-only push to main."
+      - name: Skip heavy CI on release metadata-only change
+        run: echo "Skipping heavy CI because only release metadata changed."

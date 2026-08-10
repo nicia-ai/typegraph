@@ -23,6 +23,7 @@ import {
   searchable,
   type StoreSearch,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import {
   type GraphBackend,
   rowPropsToJsonText,
@@ -61,6 +62,7 @@ import { requireDefined } from "../../../src/utils/presence";
 import {
   recordedInstantFromDriver,
   recordedRevisionFromDriver,
+  unfrozenSeamCopy,
 } from "../../test-utils";
 import { type HistoryIntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
@@ -333,8 +335,10 @@ function withTransactionBindLimit(
 function withBindLimit(backend: GraphBackend, maxParams: number): GraphBackend {
   const executeStatement = backend.executeStatement;
   const executeRaw = backend.executeRaw;
-  return {
-    ...backend,
+  // Re-boxed first: the callers hand this `store.backend`, which `createStore`
+  // FREEZES, and a Proxy may not answer a `get` for a non-configurable,
+  // non-writable own property with anything but the target's own value.
+  return deriveBackend(unfrozenSeamCopy(backend), {
     // Advertise the simulated ceiling so recorded reads/writes chunk to it the
     // same way they chunk to a real engine's `maxBindParameters`; the execution
     // guards below then prove no top-level or transaction-scoped statement
@@ -373,7 +377,7 @@ function withBindLimit(backend: GraphBackend, maxParams: number): GraphBackend {
         options,
       );
     },
-  };
+  });
 }
 
 function hideInsertBatchHelpers(
@@ -394,30 +398,28 @@ function hideInsertBatchHelpers(
 function withoutTransactionInsertBatchHelpers(
   backend: GraphBackend,
 ): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(unfrozenSeamCopy(backend), {
     async transaction(fn, options) {
       return backend.transaction(
         (target) => fn(hideInsertBatchHelpers(target)),
         options,
       );
     },
-  };
+  });
 }
 
 // Strips the batch edge-read helper from the transaction target so recorded
 // edge capture must fall back to per-id `getEdge` when reading after-images —
 // the path a minimal custom backend that implements only `getEdge` would hit.
 function withoutTransactionGetEdges(backend: GraphBackend): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(unfrozenSeamCopy(backend), {
     async transaction(fn, options) {
       return backend.transaction((target) => {
         const { getEdges: _getEdges, ...rest } = target;
         return fn(rest);
       }, options);
     },
-  };
+  });
 }
 
 function rejectUniqueFinalization(): Promise<never> {
@@ -425,8 +427,7 @@ function rejectUniqueFinalization(): Promise<never> {
 }
 
 function withFailingUniqueFinalization(backend: GraphBackend): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(unfrozenSeamCopy(backend), {
     insertUnique(): Promise<void> {
       return rejectUniqueFinalization();
     },
@@ -441,7 +442,7 @@ function withFailingUniqueFinalization(backend: GraphBackend): GraphBackend {
         return fn(failingTarget);
       }, options);
     },
-  };
+  });
 }
 
 function requireBackendHelper<T>(helper: T | undefined, name: string): T {

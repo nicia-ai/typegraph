@@ -114,12 +114,15 @@ export {
   type IdentityAssertion,
   type IdentityAssertionId,
   type IdentityAssertionResult,
+  type IdentityAssertionWriteFacade,
   type IdentityFacade,
   type IdentityNode,
+  type IdentityNodeReference,
   type IdentityNodeRefInput,
   type IdentityPair,
   type IdentityReadFacade,
   type IdentityRelation,
+  type IdentityValidityWindow,
   type IdentityWriteSummary,
   rebuildIdentityClosure,
 } from "./identity";
@@ -246,6 +249,13 @@ export {
   type MigrateLegacyEmbeddingsOptions,
   type MigrateLegacyEmbeddingsResult,
 } from "./backend/migrate-vectors";
+export {
+  repairInvertedValidityWindows,
+  type RepairInvertedWindowsOptions,
+  type RepairInvertedWindowsReport,
+  type RepairRelation,
+  type RepairRelationScope,
+} from "./backend/repair-validity-windows";
 
 // ============================================================
 // Core Types
@@ -320,6 +330,7 @@ export {
 export type {
   CardinalityErrorDetails,
   ContributionRebuildRefusal,
+  ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
   DisjointErrorDetails,
   EagerMaterializationErrorDetails,
@@ -329,7 +340,9 @@ export type {
   EndpointNotFoundErrorDetails,
   ErrorCategory,
   IdentityContradictionErrorDetails,
+  IdentityEndpointValidityErrorDetails,
   IdentitySeparationViolationErrorDetails,
+  IdentityValidityWindowErrorDetails,
   InvalidEdgeWeightErrorDetails,
   InvalidEdgeWeightReason,
   KindNotFoundErrorDetails,
@@ -360,6 +373,7 @@ export {
   CompilerInvariantError,
   ConfigurationError,
   ContributionRebuildUnsupportedError,
+  ContributionUnavailableError,
   DatabaseOperationError,
   DisjointError,
   EagerMaterializationError,
@@ -370,11 +384,14 @@ export {
   EndpointNotFoundError,
   ENTITY_ALREADY_EXISTS_CODE,
   ExportStreamCancelledError,
+  ExportStreamIdleTimeoutError,
   // Error utility functions
   getErrorSuggestion,
   GraphAlgorithmConvergenceError,
   IdentityContradictionError,
+  IdentityEndpointValidityError,
   IdentitySeparationViolationError,
+  IdentityValidityWindowError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   InvalidEdgeWeightError,
   INVERTED_VALIDITY_WINDOW_CODE,
@@ -562,7 +579,9 @@ export type {
   CreateEdgeInput,
   CreateNodeInput,
   DynamicEdgeCollection,
+  DynamicNode,
   DynamicNodeCollection,
+  DynamicNodeReference,
   Edge,
   EdgeBulkFindEndpointOptions,
   EdgeBulkFindOptions,
@@ -603,6 +622,7 @@ export type {
   UnboundLiveStoreOptions,
   UpdateEdgeInput,
   UpdateNodeInput,
+  ValidityEndMutation,
 } from "./store/types";
 
 // ============================================================
@@ -622,6 +642,7 @@ export type {
   DynamicEdgeType,
   DynamicFieldBuilder,
   DynamicNodeAccessor,
+  DynamicNodeKind,
   DynamicNodeType,
   DynamicSelectableEdge,
   DynamicSelectableNode,

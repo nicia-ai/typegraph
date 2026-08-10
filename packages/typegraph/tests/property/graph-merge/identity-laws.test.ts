@@ -72,6 +72,7 @@ import {
   EdgeNotFoundError,
   EndpointNotFoundError,
   IdentityContradictionError,
+  IdentityEndpointValidityError,
   NodeNotFoundError,
 } from "../../../src/errors";
 import { branch } from "../../../src/graph-merge/branch";
@@ -677,7 +678,10 @@ function branchEdgeId(from: number, to: number): string {
  */
 async function seedUniverse(store: Store<LawGraph>): Promise<void> {
   for (const id of NODE_IDS) {
-    await store.nodes.Agent.create({ name: id }, { id });
+    await store.nodes.Agent.create(
+      { name: id },
+      { id, validFrom: "2020-01-01T00:00:00.000Z" },
+    );
   }
   for (const edge of SEED_EDGES) {
     await store.edges.relatesTo.create(
@@ -705,6 +709,18 @@ async function applyOp(
     switch (op.op) {
       case "same":
       case "different": {
+        const endpointRows = await Promise.all(
+          [op.left, op.right].map((index) => {
+            const ref = nodeRef(index);
+            return storeBackend(store).getNode(store.graphId, ref.kind, ref.id);
+          }),
+        );
+        // Default operational assertions intentionally require endpoint
+        // liveness at the write event, not an unbounded future-validity
+        // promise. A state export cannot distinguish that legacy default from
+        // an explicitly open temporal window, so keep this merge law's random
+        // histories within the portable subset when an endpoint is pre-ended.
+        if (endpointRows.some((row) => row?.valid_to !== undefined)) break;
         const outcome =
           op.op === "same" ?
             await store.identity.assertSame(nodeRef(op.left), nodeRef(op.right))
@@ -782,7 +798,16 @@ async function applyOp(
         ).filter((row) => row.a.id === id || row.b.id === id);
         await store.nodes.Agent.delete(id as never);
         await store.nodes.Agent.hardDelete(id as never);
-        await store.nodes.Agent.create({ name: id }, { id });
+        await store.nodes.Agent.create(
+          { name: id },
+          {
+            id,
+            // A distinct lower bound makes the resurrection observable from
+            // snapshots; otherwise it is indistinguishable from an authored
+            // validTo clear and the law would classify the wrong operation.
+            validFrom: "2021-01-01T00:00:00.000Z",
+          },
+        );
         for (const row of killed) {
           history.retractedTruths.add(rowIdentityKey(row));
         }
@@ -848,6 +873,7 @@ async function applyOp(
   } catch (error) {
     const expectedRefusal =
       error instanceof IdentityContradictionError ||
+      error instanceof IdentityEndpointValidityError ||
       error instanceof NodeNotFoundError ||
       // A missing row on the edge side: the target of an ending is gone
       // (`EdgeNotFoundError`), or an endpoint an earlier op deleted

@@ -1,9 +1,12 @@
 import {
+  CardinalityError,
   createStoreWithSchema,
+  DatabaseOperationError,
   defineGraph,
   defineNode,
   generateId,
   TypeGraphError,
+  UniquenessError,
 } from "@nicia-ai/typegraph";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -11,10 +14,14 @@ import { z } from "zod";
 import {
   BaseVersionMismatchError,
   BranchError,
+  IdentityMergeConflictError,
   InvalidMergeOptionsError,
   MergeConflictError,
+  MergeConstraintConflictError,
   MergeError,
   SimilarityUnavailableError,
+  StaleMergePlanError,
+  translateMergeCommitError,
 } from "../../src/graph-merge/errors";
 import type { Result } from "../../src/graph-merge/result";
 import { err, isErr, isOk, ok, unwrap } from "../../src/graph-merge/result";
@@ -143,6 +150,63 @@ describe("MergeError hierarchy", () => {
     expect(error.details).toEqual({ entityId: "n1", property: "name" });
   });
 
+  it("translates deterministic commit constraints with actionable details and cause", () => {
+    const cardinality = new CardinalityError({
+      edgeKind: "primaryEncounter",
+      fromKind: "Patient",
+      fromId: "pat-1",
+      cardinality: "oneActive",
+      existingCount: 1,
+    });
+    const translated = translateMergeCommitError(cardinality);
+
+    expect(translated).toBeInstanceOf(MergeConstraintConflictError);
+    const conflict = translated as MergeConstraintConflictError;
+    expect(conflict).toBeInstanceOf(MergeError);
+    expect(conflict.code).toBe("GRAPH_MERGE_CONSTRAINT_CONFLICT");
+    expect(conflict.category).toBe("constraint");
+    expect(conflict.cause).toBe(cardinality);
+    expect(conflict.details).toMatchObject({
+      constraintCode: "CARDINALITY_ERROR",
+      constraintErrorName: "CardinalityError",
+      edgeKind: "primaryEncounter",
+      fromId: "pat-1",
+      cardinality: "oneActive",
+      existingCount: 1,
+    });
+    expect(conflict.details.constraintDetails).toBe(cardinality.details);
+  });
+
+  it("covers uniqueness without reclassifying system or stale-plan failures", () => {
+    const uniqueness = new UniquenessError({
+      constraintName: "byMrn",
+      kind: "Patient",
+      existingId: "pat-1",
+      newId: "pat-2",
+      fields: ["mrn"],
+    });
+    const uniquenessConflict = translateMergeCommitError(
+      uniqueness,
+    ) as MergeConstraintConflictError;
+    expect(uniquenessConflict).toBeInstanceOf(MergeConstraintConflictError);
+    expect(uniquenessConflict.details["constraintName"]).toBe("byMrn");
+    expect(uniquenessConflict.details.constraintErrorName).toBe(
+      "UniquenessError",
+    );
+
+    const backendFailure = new DatabaseOperationError("offline", {
+      operation: "insert",
+      entity: "node",
+    });
+    const stale = new StaleMergePlanError("target moved");
+    const identityConflict = new IdentityMergeConflictError(
+      "identity truth conflicts",
+    );
+    expect(translateMergeCommitError(backendFailure)).toBe(backendFailure);
+    expect(translateMergeCommitError(stale)).toBe(stale);
+    expect(translateMergeCommitError(identityConflict)).toBe(identityConflict);
+  });
+
   it("BaseVersionMismatchError discriminates with its own code", () => {
     const error = new BaseVersionMismatchError(
       "branch base@V differs from target",
@@ -168,6 +232,15 @@ describe("MergeError hierarchy", () => {
       new InvalidMergeOptionsError("invalid").code,
       new SimilarityUnavailableError("c").code,
       new MergeConflictError("d").code,
+      new MergeConstraintConflictError(
+        new CardinalityError({
+          edgeKind: "e",
+          fromKind: "N",
+          fromId: "n",
+          cardinality: "one",
+          existingCount: 1,
+        }),
+      ).code,
       new BaseVersionMismatchError("e").code,
     ];
     expect(new Set(codes).size).toBe(codes.length);

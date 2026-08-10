@@ -19,6 +19,7 @@ import { z } from "zod";
 import { count, defineEdge, defineGraph, defineNode } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import {
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
@@ -192,15 +193,33 @@ describe("PostgreSQL Adapter (postgres-js driver)", () => {
       await clearTestData();
     });
 
-    createIntegrationTestSuite("PostgreSQL (postgres-js)", () => {
-      const { sql, db } = createConnection();
-      return {
-        backend: createPostgresBackend(db),
-        cleanup: async () => {
-          await sql.end();
+    createIntegrationTestSuite(
+      "PostgreSQL (postgres-js)",
+      () => {
+        const { sql, db } = createConnection();
+        return {
+          backend: createPostgresBackend(db),
+          cleanup: async () => {
+            await sql.end();
+          },
+          // The suite's own client runs at `max: 4` and is audited
+          // `independent`; `{ max: 1 }` is its serialized shape.
+          createSerializedBackend: () => {
+            const serializedSql = postgres(TEST_DATABASE_URL, { max: 1 });
+            return Promise.resolve({
+              backend: createPostgresBackend(drizzle(serializedSql)),
+              close: () => serializedSql.end(),
+            });
+          },
+        };
+      },
+      {
+        createIsolatedBackend: async () => {
+          const { backend } = await createLocalPgliteBackend();
+          return { backend, cleanup: () => backend.close() };
         },
-      };
-    });
+      },
+    );
   });
 });
 

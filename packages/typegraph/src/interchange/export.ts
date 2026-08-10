@@ -14,7 +14,11 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
-import { ExportStreamCancelledError } from "../errors";
+import {
+  ConfigurationError,
+  ExportStreamCancelledError,
+  ExportStreamIdleTimeoutError,
+} from "../errors";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { nowIso } from "../utils/date";
@@ -134,10 +138,13 @@ export async function exportGraph<G extends GraphDef>(
  *
  * A consumer that pulls `next()` and then simply DROPS the iterator has no
  * cooperative exit — async-generator `finally` blocks do not run on garbage
- * collection — so it must pass {@link ExportOptions.signal} and abort it.
- * Without that, the snapshot transaction stays open for the life of the
- * process and every later interchange stream on that connection is refused on
- * behalf of a stream nobody is reading.
+ * collection — so it must pass {@link ExportOptions.signal} and abort it, or
+ * configure {@link ExportStreamOptions.idleTimeoutMs}. The idle clock covers
+ * only time after a chunk is delivered and before the consumer asks for the
+ * next one; database read time is not consumer idleness. Without either
+ * mechanism, the snapshot transaction stays open for the life of the process
+ * and every later interchange stream on that connection is refused on behalf
+ * of a stream nobody is reading.
  *
  * ### Why there is no garbage-collection safety net (#429)
  *
@@ -151,8 +158,8 @@ export async function exportGraph<G extends GraphDef>(
  * just `channel.abort` is enough to stop the stream being collected, while
  * publishing an unrelated object is not. The net's own bookkeeping would
  * therefore be what kept the entry from ever firing — a safety promise that
- * reads as protection and is not there. The signal is the mechanism, and it is
- * a contract rather than a hint.
+ * reads as protection and is not there. Explicit cancellation and the idle
+ * timeout are the mechanisms, and they are contracts rather than hints.
  */
 export function exportGraphStream<G extends GraphDef>(
   store: Store<G>,
@@ -170,10 +177,61 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
   backend: GraphBackend,
   options?: ExportStreamOptionsInput,
 ): AsyncIterable<GraphInterchangeChunk> {
-  const resolved = ExportStreamOptionsSchema.parse(options ?? {});
+  const parsed = ExportStreamOptionsSchema.parse(options ?? {});
+  // Identity rows carry their effective-time windows unconditionally. Their
+  // endpoint rows must therefore carry temporal bounds too, or the store's own
+  // export could not prove on re-import that each endpoint existed throughout
+  // an assertion's window.
+  const exportsIdentity = store.graph.identity !== undefined;
+  const explicitlyDisabledTemporalFields = options?.includeTemporal === false;
+  if (exportsIdentity && explicitlyDisabledTemporalFields) {
+    throw new ConfigurationError(
+      "Identity export requires temporal endpoint fields.",
+      {
+        code: "IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS",
+        identityMode: parsed.identityMode,
+        includeTemporal: false,
+      },
+      {
+        suggestion:
+          "Remove includeTemporal or set it to true when exporting an identity-enabled graph.",
+      },
+    );
+  }
+  const resolved =
+    exportsIdentity ? { ...parsed, includeTemporal: true } : parsed;
   const signal = resolved.signal;
+  const idleTimeoutMs = resolved.idleTimeoutMs;
   const channel = createRendezvousChannel<GraphInterchangeChunk>();
-  const abortStream = (): void => {
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let subscribedToSignal = false;
+  function unsubscribeFromSignal(): void {
+    if (!subscribedToSignal) return;
+    signal?.removeEventListener("abort", abortStream);
+    subscribedToSignal = false;
+  }
+  function clearIdleTimer(): void {
+    if (idleTimer === undefined) return;
+    clearTimeout(idleTimer);
+    idleTimer = undefined;
+  }
+  function armIdleTimer(): void {
+    if (idleTimeoutMs === undefined) return;
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      unsubscribeFromSignal();
+      channel.abort(
+        new ExportStreamIdleTimeoutError(
+          store.graphId,
+          idleTimeoutMs,
+          backend.capabilities.transactions,
+        ),
+      );
+    }, idleTimeoutMs);
+    unrefTimer(idleTimer);
+  }
+  function abortStream(): void {
+    clearIdleTimer();
     channel.abort(
       exportStreamCancelled(
         "mid-stream",
@@ -182,10 +240,7 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
         backend.capabilities.transactions,
       ),
     );
-  };
-  const unsubscribeFromSignal = (): void => {
-    signal?.removeEventListener("abort", abortStream);
-  };
+  }
   // REGISTER, THEN RE-CHECK — and in that order, because the two halves cover
   // different instants and neither covers both:
   //
@@ -203,6 +258,7 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
   // Nothing between them can yield, so there is no instant at which an abort is
   // neither seen by the re-check nor delivered to the listener.
   signal?.addEventListener("abort", abortStream, { once: true });
+  subscribedToSignal = signal !== undefined;
   if (signal?.aborted === true) {
     // Nothing has been claimed or opened yet, so this stream is over before it
     // started rather than cancelled in flight — and it must leave no listener
@@ -289,7 +345,9 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
     for (;;) {
       const delivery = await channel.take();
       if (delivery === undefined) return;
+      armIdleTimer();
       yield delivery.value;
+      clearIdleTimer();
       delivery.acknowledge();
     }
   } finally {
@@ -299,8 +357,20 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
     // caller reuses for its next export must not still reach this one, nor keep
     // this generator's scope alive for as long as the caller holds it.
     unsubscribeFromSignal();
+    clearIdleTimer();
     channel.cancel();
     await producer;
+  }
+}
+
+/** Do not let an opt-in safety timer keep a Node.js process alive by itself. */
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  if (
+    typeof timer === "object" &&
+    "unref" in timer &&
+    typeof timer.unref === "function"
+  ) {
+    timer.unref();
   }
 }
 

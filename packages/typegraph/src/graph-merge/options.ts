@@ -18,6 +18,7 @@ import { createDataKeyedBag } from "../utils/object";
 import type { GraphDef } from "./typegraph-internal";
 import type {
   BranchId,
+  CandidateDiagnosticsOptions,
   ComparisonCeilingPolicy,
   DeleteModifyPolicy,
   Embedder,
@@ -100,6 +101,15 @@ const mergeOptionsScalarSchema = z.object({
     .number()
     .positive({ message: "clusterMaxDiameter must be positive" })
     .optional(),
+  candidateDiagnostics: z
+    .object({
+      limit: z
+        .number()
+        .int({ message: "candidateDiagnostics.limit must be an integer" })
+        .min(0, { message: "candidateDiagnostics.limit must be >= 0" }),
+    })
+    .strict()
+    .optional(),
 });
 
 /**
@@ -126,6 +136,7 @@ export type NormalizedMergeOptions<G extends GraphDef = GraphDef> = Readonly<{
   target?: MergeOptions<G>["target"];
   maxComparisonsPerKind?: number;
   clusterMaxDiameter?: number;
+  candidateDiagnostics?: CandidateDiagnosticsOptions;
   branchOrder?: readonly BranchId[];
   provenanceWeights?: ReadonlyMap<BranchId, number>;
 }>;
@@ -247,6 +258,9 @@ export function normalizeMergeOptions<G extends GraphDef>(
     ...(options.clusterMaxDiameter === undefined ?
       {}
     : { clusterMaxDiameter: options.clusterMaxDiameter }),
+    ...(options.candidateDiagnostics === undefined ?
+      {}
+    : { candidateDiagnostics: options.candidateDiagnostics }),
   });
 
   const onPropertyConflict = validatePropertyConflictPolicy(
@@ -301,6 +315,9 @@ export function normalizeMergeOptions<G extends GraphDef>(
     ...(scalar.clusterMaxDiameter === undefined ?
       {}
     : { clusterMaxDiameter: scalar.clusterMaxDiameter }),
+    ...(scalar.candidateDiagnostics === undefined ?
+      {}
+    : { candidateDiagnostics: scalar.candidateDiagnostics }),
     ...(options.branchOrder === undefined ?
       {}
     : { branchOrder: options.branchOrder }),

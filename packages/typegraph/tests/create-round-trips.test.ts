@@ -2,16 +2,20 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type CompiledRowsSql,
   DatabaseOperationError,
   defineGraph,
   defineNode,
   type GraphBackend,
   type TransactionBackend,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
+import type { UpdateNodeParams } from "../src/backend/types";
 import { type SqlFragment } from "../src/query/sql-fragment";
 import {
   createInitializedStore,
   createTestBackend,
+  expectAuditedBackend,
   expectImmutableLowerBoundRefusal,
 } from "./test-utils";
 
@@ -43,6 +47,7 @@ const identityGraph = defineGraph({
 });
 
 const PEER_RESURRECTION_VALID_FROM = "2024-01-01T00:00:00.000Z";
+const RACED_RESURRECTION_VALID_FROM = "2023-06-01T00:00:00.000Z";
 
 type ReadCounts = Readonly<{
   /** `getNode` probes issued for the node being created. */
@@ -76,12 +81,13 @@ function countingBackend(targetId: string): Readonly<{
   const base = createTestBackend();
   const counts = { targetNodeReads: 0, foldProbes: 0 };
 
-  function countReads<T extends GraphBackend | TransactionBackend>(
-    target: T,
-  ): T {
-    // A Proxy rather than a spread: transaction targets carry methods on a
-    // prototype, and spreading one silently drops `getNodes`, which would make
-    // the batch path look unprimed.
+  function countTransactionReads(
+    target: TransactionBackend,
+  ): TransactionBackend {
+    // A Proxy rather than a spread for TRANSACTION targets: their methods live
+    // on a prototype, and spreading one silently drops `getNodes`, which would
+    // make the batch path look unprimed. A transaction-scoped backend is
+    // unaudited by construction, so a fresh object loses nothing.
     return new Proxy(target, {
       get(source, property, receiver) {
         const value: unknown = Reflect.get(source, property, receiver);
@@ -104,11 +110,22 @@ function countingBackend(targetId: string): Readonly<{
     });
   }
 
-  const backend: GraphBackend = countReads({
-    ...base,
+  // The ROOT backend goes through the seam instead of a second Proxy. A
+  // hand-rolled Proxy is a distinct object and the serialized-resource audit is
+  // WeakMap-keyed, so wrapping a derived backend in one discards the verdict
+  // `deriveBackend` just carried — exactly the loss the spread had.
+  const backend: GraphBackend = deriveBackend(base, {
+    getNode: (graphId: string, kind: string, id: string) => {
+      if (id === targetId) counts.targetNodeReads += 1;
+      return base.getNode(graphId, kind, id);
+    },
+    execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+      if (isFoldProbe(query)) counts.foldProbes += 1;
+      return base.execute<T>(query);
+    },
     transaction: (fn, options) =>
-      base.transaction((tx) => fn(countReads(tx)), options),
-  } satisfies GraphBackend);
+      base.transaction((tx) => fn(countTransactionReads(tx)), options),
+  });
 
   return {
     backend,
@@ -122,8 +139,7 @@ function countingBackend(targetId: string): Readonly<{
 
 function peerResurrectionBackend(targetId: string): GraphBackend {
   const base = createTestBackend();
-  return {
-    ...base,
+  return deriveBackend(base, {
     transaction: (fn, options) =>
       base.transaction((transactionTarget) => {
         let peerInjected = false;
@@ -171,8 +187,96 @@ function peerResurrectionBackend(targetId: string): GraphBackend {
         });
         return fn(racingTarget);
       }, options),
-  } satisfies GraphBackend;
+  });
 }
+
+/**
+ * A backend whose transaction target loses TWO races, in the one order that
+ * makes a resurrecting upsert's `clearDeleted` statement match a row its own
+ * read judged LIVE:
+ *
+ *  1. a peer resurrects the tombstone between the collection's probe and
+ *     `performNodeUpdate`'s read, stamping the window itself, so that read finds
+ *     a live row and the window guard measures the row's STORED lower bound;
+ *  2. the peer re-tombstones it before the UPDATE, so `deleted_at IS NOT NULL`
+ *     matches after all instead of affecting zero rows and falling through to
+ *     the resurrection recovery.
+ *
+ * Both peer writes are real calls against the same target — the state
+ * transitions a competitor would commit, not a masked read.
+ */
+function resurrectThenRetombstoneBackend(targetId: string): GraphBackend {
+  const base = createTestBackend();
+  return deriveBackend(base, {
+    transaction: (fn, options) =>
+      base.transaction((transactionTarget) => {
+        let peerResurrected = false;
+        let peerReTombstoned = false;
+        const racingTarget = new Proxy(transactionTarget, {
+          get(source, property, receiver) {
+            const value: unknown = Reflect.get(source, property, receiver);
+            if (typeof value !== "function") return value;
+            if (property === "getNode") {
+              const getNode = value as TransactionBackend["getNode"];
+              return async (graphId: string, kind: string, id: string) => {
+                const row = await getNode(graphId, kind, id);
+                if (
+                  peerResurrected ||
+                  id !== targetId ||
+                  row?.deleted_at === undefined
+                ) {
+                  return row;
+                }
+                peerResurrected = true;
+                await transactionTarget.updateNode({
+                  graphId,
+                  kind,
+                  id,
+                  props: { name: "Peer" },
+                  clearDeleted: true,
+                  validFrom: RACED_RESURRECTION_VALID_FROM,
+                });
+                return getNode(graphId, kind, id);
+              };
+            }
+            if (property === "updateNode") {
+              const updateNode = value as TransactionBackend["updateNode"];
+              return async (params: UpdateNodeParams) => {
+                if (
+                  !peerReTombstoned &&
+                  params.id === targetId &&
+                  params.clearDeleted === true
+                ) {
+                  peerReTombstoned = true;
+                  await transactionTarget.deleteNode({
+                    graphId: params.graphId,
+                    kind: params.kind,
+                    id: params.id,
+                  });
+                }
+                return updateNode(params);
+              };
+            }
+            return value;
+          },
+        });
+        return fn(racingTarget);
+      }, options),
+  });
+}
+
+describe("the read-counting double itself", () => {
+  it("stays on the base's serialized resource", () => {
+    // The double is what every case below runs against, so if it reads as
+    // unowned the suite exercises write paths whose import/clone guards have
+    // lost their subject. Neither the `tests/**` lint block nor the type-aware
+    // scanner can see the shape that loses it — a hand-rolled Proxy over the
+    // derived backend is a distinct object and the audit is WeakMap-keyed — so
+    // the verdict is asserted at runtime here.
+    const { backend } = countingBackend("target");
+    expect(expectAuditedBackend(backend)).toBe("serialized");
+  });
+});
 
 describe("create-path round trips", () => {
   it("reads the created id exactly once on a plain graph", async () => {
@@ -274,6 +378,32 @@ describe("create-path round trips", () => {
     // left tombstoned rather than revived — which is also the proof the late
     // writer's props did not half-apply.
     expect(await store.nodes.Person.getById(original.id)).toBeUndefined();
+  });
+
+  it("keeps the bound it accepted when the resurrection target is read live", async () => {
+    const store = await createInitializedStore(
+      plainGraph,
+      resurrectThenRetombstoneBackend("raced-resurrection"),
+    );
+    const original = await store.nodes.Person.create(
+      { name: "Original" },
+      { id: "raced-resurrection" },
+    );
+    await store.nodes.Person.delete(original.id);
+
+    // The peer's bound restated verbatim: the guard sees a live row, compares
+    // the stated bound against the stored one, and ACCEPTS it. An accepted
+    // option is applied, so the row must come back carrying it — the leg cannot
+    // state a resurrection decision it never reached and write the bound away
+    // as SQL NULL.
+    const revived = await store.nodes.Person.upsertById(
+      "raced-resurrection",
+      { name: "Late writer" },
+      { validFrom: RACED_RESURRECTION_VALID_FROM },
+    );
+
+    expect(revived.name).toBe("Late writer");
+    expect(revived.meta.validFrom).toBe(RACED_RESURRECTION_VALID_FROM);
   });
 
   it("skips the identity fold probe for generated ids", async () => {

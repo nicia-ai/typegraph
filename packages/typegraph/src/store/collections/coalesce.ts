@@ -3,6 +3,7 @@ import {
   preservesImmutableLowerBound,
   statedBoundMatchesStored,
 } from "../../utils/date";
+import { validityEndAfterMutation } from "../validity-end";
 
 /**
  * Coalesce dirty-check shared by `upsertById` / `bulkUpsertById`.
@@ -76,6 +77,7 @@ export type UpsertWindow = Readonly<{
 type RequestedWindow = Readonly<{
   validFrom?: string;
   validTo?: string;
+  clearValidTo?: true;
   onImmutableLowerBound?: "preserve" | "refuse";
 }>;
 
@@ -148,6 +150,10 @@ export function upsertWindowChanges(
 ): boolean {
   return (
     lowerBoundRequiresWrite(requested, current.valid_from) ||
+    (requested?.clearValidTo === true &&
+      validityEndAfterMutation(requested, current.valid_to) !==
+        current.valid_to) ||
+    (requested?.clearValidTo === true && requested.validTo !== undefined) ||
     windowFieldChanges(requested?.validTo, current.valid_to)
   );
 }
@@ -157,16 +163,25 @@ export function upsertWindowChanges(
  * COMPLETE window — leaves the row holding, for a later item with the same id in
  * the same batch to compare against.
  *
- * An omitted `validFrom` is stamped with the write instant by the backend, a
- * value this layer cannot know, so it stays `undefined`. A later copy naming a
- * lower bound therefore counts as a change and writes, rather than coalescing
- * against a guess: the bulk path may spend a write the sequential path would
- * skip, but it never skips one the sequential path makes.
+ * An omitted `validFrom` is left `undefined`, and that prediction is now EXACT in
+ * one case and conservative in the other:
+ *
+ *  - BORN-ENDED (a stated `validTo` at or before the write instant): the backend
+ *    stamps no lower bound at all, so `undefined` is precisely what the row will
+ *    hold, and a later copy restating that shape coalesces correctly;
+ *  - every other create: the backend stamps its own write instant, a value this
+ *    layer cannot know, so `undefined` remains a deliberate under-approximation.
+ *    A later copy naming a lower bound counts as a change and writes, rather than
+ *    coalescing against a guess — the bulk path may spend a write the sequential
+ *    path would skip, but it never skips one the sequential path makes.
  */
 export function windowAfterUpsertCreate(
   requested: RequestedWindow,
 ): UpsertWindow {
-  return { valid_from: requested.validFrom, valid_to: requested.validTo };
+  return {
+    valid_from: requested.validFrom,
+    valid_to: validityEndAfterMutation(requested, undefined),
+  };
 }
 
 /**
@@ -180,7 +195,7 @@ export function windowAfterUpsertUpdate(
 ): UpsertWindow {
   return {
     valid_from: current.valid_from,
-    valid_to: requested.validTo ?? current.valid_to,
+    valid_to: validityEndAfterMutation(requested, current.valid_to),
   };
 }
 
@@ -203,7 +218,13 @@ export function shouldCoalesceUpsert(
     valid_from?: string | undefined;
     valid_to?: string | undefined;
   }>,
-  options: Readonly<{ validFrom?: string; validTo?: string }> | undefined,
+  options:
+    | Readonly<{
+        validFrom?: string;
+        validTo?: string;
+        clearValidTo?: true;
+      }>
+    | undefined,
   runDirtyCheck: (() => UpsertDirtyCheck) | undefined,
 ): boolean {
   // An explicit temporal override blocks coalescing ONLY when it would

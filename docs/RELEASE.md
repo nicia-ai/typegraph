@@ -29,8 +29,8 @@ changelog generation, npm publishing, and GitHub Releases.
 
 ## Pre-release Verification
 
-CI must pass the complete release surface before the Version Packages PR is
-merged:
+Code-changing PRs must pass the complete release surface before their
+changesets reach `main`:
 
 - formatting, lint, typechecking, and the SQLite/PGlite test suite;
 - the PostgreSQL integration suite;
@@ -38,6 +38,13 @@ merged:
 - the documentation build, rendered internal links and anchors, and TypeGraph
   imports extracted from current documentation code blocks;
 - strict packed-consumer tests and API-report checks.
+
+The generated Version Packages PR only changes release metadata, so CI skips
+those heavy jobs after verifying that its changes are limited to changesets,
+changelogs, and the package version. Any other package manifest or source
+change runs the complete gate. After the Version Packages PR merges, the
+release workflow still builds and smoke-imports the npm tarball before
+publishing.
 
 The corresponding local commands are:
 

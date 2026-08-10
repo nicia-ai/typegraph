@@ -45,7 +45,12 @@ import {
   type IfExistsMode,
   type NodeRef,
   type QueryOptions,
+  type ValidityEndMutation,
 } from "../types";
+import {
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+} from "../validity-end";
 import {
   findRepeatedUpsertIds,
   type UpsertDirtyCheck,
@@ -105,6 +110,7 @@ export type EdgeCollectionConfig = Readonly<{
       identity: EdgeIdentityExpectation;
       props: Partial<Record<string, unknown>>;
       validTo?: string;
+      clearValidTo?: true;
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
@@ -145,6 +151,7 @@ export type EdgeCollectionConfig = Readonly<{
       ifExists?: IfExistsMode;
       validFrom?: string;
       validTo?: string;
+      clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
     }>,
   ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>>;
@@ -158,6 +165,7 @@ export type EdgeCollectionConfig = Readonly<{
       props: Record<string, unknown>;
       validFrom?: string;
       validTo?: string;
+      clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
     backend: GraphBackend | TransactionBackend,
@@ -224,6 +232,7 @@ type EdgeUpdateInput = Readonly<{
   identity: EdgeIdentityExpectation;
   props: Partial<Record<string, unknown>>;
   validTo?: string;
+  clearValidTo?: true;
 }>;
 
 /**
@@ -250,15 +259,17 @@ function buildUpdateEdgeInput(
   kind: string,
   id: string,
   props: Record<string, unknown>,
-  options?: Readonly<{ validTo?: string }>,
+  options?: ValidityEndMutation,
 ): EdgeUpdateInput {
   const input: {
     id: string;
     identity: EdgeIdentityExpectation;
     props: Partial<Record<string, unknown>>;
     validTo?: string;
+    clearValidTo?: true;
   } = { id, identity: { kind }, props };
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
   return input;
 }
 
@@ -269,7 +280,11 @@ function buildUpsertUpdateEdgeInput(
   from: NodeRef,
   to: NodeRef,
   props: Record<string, unknown>,
-  options?: Readonly<{ validFrom?: string; validTo?: string }>,
+  options?: Readonly<{
+    validFrom?: string;
+    validTo?: string;
+    clearValidTo?: true;
+  }>,
 ): UpsertUpdateEdgeInput {
   const input: {
     id: string;
@@ -277,6 +292,7 @@ function buildUpsertUpdateEdgeInput(
     props: Partial<Record<string, unknown>>;
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
   } = {
     id,
     identity: {
@@ -290,6 +306,7 @@ function buildUpsertUpdateEdgeInput(
   };
   if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
   return input;
 }
 
@@ -601,7 +618,7 @@ export function createEdgeCollection<
     async update(
       id: string,
       props: Partial<z.input<E["schema"]>>,
-      options?: Readonly<{ validTo?: string }>,
+      options?: ValidityEndMutation,
     ): Promise<Edge<E>> {
       const result = await executeEdgeUpdate(
         buildUpdateEdgeInput(kind, id, props, options),
@@ -775,9 +792,21 @@ export function createEdgeCollection<
         props?: z.input<E["schema"]>;
         validFrom?: string;
         validTo?: string;
+        clearValidTo?: true;
       }>[],
     ): Promise<Edge<E>[]> {
       if (items.length === 0) return [];
+
+      for (const item of items) {
+        assertValidityEndMutation(item, {
+          entityType: "edge",
+          kind,
+          id: item.id,
+        });
+        if (item.clearValidTo === true) {
+          assertClearValidToSupported(backend, "edge");
+        }
+      }
 
       const upsertAll = async (
         target: GraphBackend | TransactionBackend,
@@ -1091,6 +1120,10 @@ export function createEdgeCollection<
       props: z.input<E["schema"]>,
       options?: EdgeGetOrCreateByEndpointsOptions<E>,
     ): Promise<EdgeGetOrCreateByEndpointsResult<E>> {
+      assertValidityEndMutation(options ?? {}, {
+        entityType: "edge",
+        kind,
+      });
       const getOrCreateOptions = {
         ...(options?.matchOn !== undefined && {
           matchOn: options.matchOn as readonly string[],
@@ -1102,6 +1135,7 @@ export function createEdgeCollection<
           validFrom: options.validFrom,
         }),
         ...(options?.validTo !== undefined && { validTo: options.validTo }),
+        ...(options?.clearValidTo === true && { clearValidTo: true as const }),
         ...(options?.onImmutableLowerBound !== undefined && {
           onImmutableLowerBound: options.onImmutableLowerBound,
         }),
@@ -1127,6 +1161,7 @@ export function createEdgeCollection<
         props: z.input<E["schema"]>;
         validFrom?: string;
         validTo?: string;
+        clearValidTo?: true;
         onImmutableLowerBound?: "preserve" | "refuse";
       }>[],
       options?: Pick<
@@ -1136,6 +1171,13 @@ export function createEdgeCollection<
     ): Promise<EdgeGetOrCreateByEndpointsResult<E>[]> {
       if (items.length === 0) return [];
 
+      for (const item of items) {
+        assertValidityEndMutation(item, {
+          entityType: "edge",
+          kind,
+        });
+      }
+
       const mappedItems = items.map((item) => ({
         fromKind: item.from.kind,
         fromId: item.from.id,
@@ -1144,6 +1186,7 @@ export function createEdgeCollection<
         props: item.props,
         ...(item.validFrom !== undefined && { validFrom: item.validFrom }),
         ...(item.validTo !== undefined && { validTo: item.validTo }),
+        ...(item.clearValidTo === true && { clearValidTo: true as const }),
         ...(item.onImmutableLowerBound !== undefined && {
           onImmutableLowerBound: item.onImmutableLowerBound,
         }),

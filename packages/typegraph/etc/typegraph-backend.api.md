@@ -32,6 +32,7 @@ export function assertVectorSearchLimit(limit: number): void;
 export type BackendCapabilities = Readonly<{
     transactions: boolean;
     windowFunctions: boolean;
+    clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
     readonly constraintClaims?: boolean;
@@ -52,6 +53,15 @@ export type BackendMaintenance = Pick<GraphBackend, "refreshStatistics">;
 
 // @public (undocumented)
 export type BackendTransactions = Pick<GraphBackend, "transaction">;
+
+// @public
+type BackendValidityEndMutation = Readonly<{
+    validTo?: string;
+    clearValidTo?: never;
+}> | Readonly<{
+    validTo?: never;
+    clearValidTo: true;
+}>;
 
 // @public
 export const BASE_CONTRIBUTION_OWNER = "base";
@@ -922,6 +932,7 @@ export type GraphBackend = Readonly<{
     deleteFulltextBatch?: (this: void, params: DeleteFulltextBatchParams) => Promise<void>;
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
+    ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -1513,6 +1524,32 @@ export function renderSqlInline(fragment: SqlFragment, dialect: SqlDialect): str
 // @public
 export function renderSqlite(fragment: SqlFragment, bindings?: Readonly<Record<string, unknown>>): RenderedSql;
 
+// @public
+export function repairInvertedValidityWindows(options: RepairInvertedWindowsOptions): Promise<RepairInvertedWindowsReport>;
+
+// @public
+export type RepairInvertedWindowsOptions = Readonly<{
+    backend: GraphBackend;
+    graphId?: string | undefined;
+    relations: RepairRelationScope;
+    mode: "report" | "apply";
+    tableNames?: Partial<SqlTableNames> | undefined;
+}>;
+
+// @public
+export type RepairInvertedWindowsReport = Readonly<{
+    relations: RepairRelationScope;
+    counts: Readonly<Record<RepairRelation, number | undefined>>;
+    nonCanonical: Readonly<Record<RepairRelation, number | undefined>>;
+    atomic: boolean;
+}>;
+
+// @public
+export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdges";
+
+// @public
+export type RepairRelationScope = "live" | "live-and-recorded";
+
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
     nodes: string;
@@ -1529,6 +1566,9 @@ export type ResolvedSqlTableNames = Readonly<{
     uniques: string;
     edgeClaims: string;
 }>;
+
+// @public
+export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
 
 // @public
 export type RowProps = string | Readonly<Record<string, unknown>>;
@@ -1839,10 +1879,10 @@ export type UpdateEdgeParams = Readonly<{
     toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
+    expectedValidTo?: string | null;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 export type UpdateNodeParams = Readonly<{
@@ -1851,11 +1891,10 @@ export type UpdateNodeParams = Readonly<{
     id: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 export type UpdateNodeSetParams = Readonly<{

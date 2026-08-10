@@ -154,6 +154,10 @@ describe.each(backendMatrix())("keyless source [$name]", (entry) => {
     expect(names).toHaveLength(5);
     expect(names.filter((name) => name.includes("Rivera"))).toHaveLength(1);
     expect(result.data.resolutions.length).toBeGreaterThanOrEqual(1);
+    expect(result.data.resolutions[0]?.decisiveEdges[0]).toMatchObject({
+      decision: "scored",
+      sources: [{ kind: "keyless" }],
+    });
   });
 
   it("is DETERMINISTIC: shuffled creation order yields the same committed graph", async () => {

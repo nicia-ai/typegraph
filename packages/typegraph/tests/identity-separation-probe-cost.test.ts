@@ -12,12 +12,15 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type CompiledRowsSql,
+  type CompiledStatementSql,
   defineGraph,
   defineNode,
   type GraphBackend,
   renderPostgres,
   type TransactionBackend,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { separationRebuildRequired } from "../src/identity/separation";
 import { MAX_REFERENCE_CHUNK_SIZE } from "../src/identity/sql-target";
 import { type GraphData, importGraph } from "../src/interchange";
@@ -25,7 +28,11 @@ import { createSqlSchema } from "../src/query/compiler/schema";
 import { type SqlFragment } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry";
 import { requireDefined } from "../src/utils/presence";
-import { createInitializedStore, createTestBackend } from "./test-utils";
+import {
+  createInitializedStore,
+  createTestBackend,
+  expectAuditedBackend,
+} from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -87,11 +94,12 @@ function relationCountingBackend(): Readonly<{
     }
   }
 
-  // A Proxy rather than a spread: transaction targets carry methods on a
-  // prototype that spreading would drop.
-  function countStatements<T extends GraphBackend | TransactionBackend>(
-    target: T,
-  ): T {
+  // A Proxy rather than a spread for TRANSACTION targets: their methods live on
+  // a prototype that spreading would drop, and a transaction-scoped backend is
+  // unaudited by construction, so a fresh object loses nothing.
+  function countTransactionStatements(
+    target: TransactionBackend,
+  ): TransactionBackend {
     return new Proxy(target, {
       get(source, property, receiver) {
         const value: unknown = Reflect.get(source, property, receiver);
@@ -108,11 +116,23 @@ function relationCountingBackend(): Readonly<{
     });
   }
 
-  const backend: GraphBackend = countStatements({
-    ...base,
+  // The ROOT backend goes through the seam instead of a second Proxy. A
+  // hand-rolled Proxy is a distinct object and the serialized-resource audit is
+  // WeakMap-keyed, so wrapping a derived backend in one discards the verdict
+  // `deriveBackend` just carried — exactly the loss the spread had.
+  const baseExecuteStatement = requireDefined(base.executeStatement);
+  const backend: GraphBackend = deriveBackend(base, {
+    execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+      count(query);
+      return base.execute<T>(query);
+    },
+    executeStatement: (query: CompiledStatementSql): Promise<void> => {
+      count(query);
+      return baseExecuteStatement(query);
+    },
     transaction: (fn, options) =>
-      base.transaction((tx) => fn(countStatements(tx)), options),
-  } satisfies GraphBackend);
+      base.transaction((tx) => fn(countTransactionStatements(tx)), options),
+  });
 
   return {
     backend,
@@ -124,6 +144,19 @@ function relationCountingBackend(): Readonly<{
     },
   };
 }
+
+describe("the counting double itself", () => {
+  it("stays on the base's serialized resource", () => {
+    // The double is what every case below runs against, so if it reads as
+    // unowned the suite exercises an import/clone guard that has lost its
+    // subject. Neither the `tests/**` lint block nor the type-aware scanner can
+    // see the shape that loses it — a hand-rolled Proxy over the derived
+    // backend is a distinct object and the audit is WeakMap-keyed — so the
+    // verdict is asserted at runtime here.
+    const { backend } = relationCountingBackend();
+    expect(expectAuditedBackend(backend)).toBe("serialized");
+  });
+});
 
 describe("cost of a current different-ness read", () => {
   it("probes the relation once and never reads the ledger, whatever the class size", async () => {
@@ -223,8 +256,18 @@ function sameOnlyImport(run: string, count: number): GraphData {
     exportedAt: now,
     source: { type: "external", description: "guard cost" },
     nodes: ids.flatMap((id) => [
-      { kind: "Person", id: `a-${id}`, properties: { name: id } },
-      { kind: "Person", id: `b-${id}`, properties: { name: id } },
+      {
+        kind: "Person",
+        id: `a-${id}`,
+        properties: { name: id },
+        validFrom: now,
+      },
+      {
+        kind: "Person",
+        id: `b-${id}`,
+        properties: { name: id },
+        validFrom: now,
+      },
     ]),
     edges: [],
     identity: {

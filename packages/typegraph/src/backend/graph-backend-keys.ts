@@ -1,15 +1,20 @@
-import { inheritSerializedTransactionResource } from "./transaction-resource";
 import { type GraphBackend } from "./types";
 
 /**
  * Runtime allowlist for the portable GraphBackend port.
  *
+ * Data only: the projection constructors that consume this allowlist live in
+ * `derive-backend.ts`, the one seam that carries a backend's
+ * serialized-resource audit.
+ *
  * `satisfies` rejects misspelled/non-port keys. The coverage record below
  * rejects every newly added GraphBackend key until it is deliberately added
  * here, so a port expansion can neither leak through structural forwarding nor
  * silently disappear from a narrowed backend.
+ *
+ * @internal
  */
-const GRAPH_BACKEND_PROJECTION_KEYS = [
+export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "dialect",
   "capabilities",
   "tableNames",
@@ -78,6 +83,7 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "deleteFulltextBatch",
   "fulltextSearch",
   "ensureIndexMaterializationsTable",
+  "ensureTrigramExtension",
   "ensureRevisionOriginsTable",
   "getIndexMaterialization",
   "getIndexMaterializations",
@@ -123,50 +129,12 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "close",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
-type ProjectedGraphBackendKey = (typeof GRAPH_BACKEND_PROJECTION_KEYS)[number];
+/** @internal */
+export type ProjectedGraphBackendKey =
+  (typeof GRAPH_BACKEND_PROJECTION_KEYS)[number];
 
 const MISSING_GRAPH_BACKEND_PROJECTION_KEYS: Record<
   Exclude<keyof GraphBackend, ProjectedGraphBackendKey>,
   never
 > = {};
 void MISSING_GRAPH_BACKEND_PROJECTION_KEYS;
-
-/** @internal */
-export function projectBackendMembers<
-  TBackend extends object,
-  const TKey extends keyof TBackend,
->(backend: TBackend, keys: readonly TKey[]): Readonly<Pick<TBackend, TKey>> {
-  const entries = keys.flatMap((key) => {
-    if (!Reflect.has(backend, key)) return [];
-    return [[key, Reflect.get(backend, key)] as const];
-  });
-
-  // Keys are constrained to TBackend and values are copied from that same
-  // object without reshaping. Optional members remain absent.
-  const projection = Object.fromEntries(entries) as Readonly<
-    Pick<TBackend, TKey>
-  >;
-  // A projection forwards every statement to the SAME connection as its source,
-  // so it owns the same serialized transaction resource. Inheriting here rather
-  // than at each call site keeps the marker attached through the projections
-  // built deep inside the store (recorded-time capture, hooked query backends),
-  // where an import guard would otherwise see an unmarked backend and let a
-  // read-and-write-through-one-connection stream proceed into a deadlock.
-  inheritSerializedTransactionResource(projection, backend);
-  return projection;
-}
-
-/**
- * Creates a runtime GraphBackend projection.
- *
- * Structurally wider inputs (for example AdapterBackend) lose every property
- * not named by the portable GraphBackend allowlist. Optional port members stay
- * absent when the source does not provide them.
- *
- * @internal
- */
-export function createGraphBackendProjection(
-  backend: GraphBackend,
-): GraphBackend {
-  return projectBackendMembers(backend, GRAPH_BACKEND_PROJECTION_KEYS);
-}

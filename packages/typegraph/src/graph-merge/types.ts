@@ -12,10 +12,13 @@
  * runtime merge logic.
  */
 
+import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
+import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
 import type {
   EdgeId,
   GetNodeType,
   GraphDef,
+  IdentityAssertionWriteFacade,
   JsonValue,
   Node,
   NodeId,
@@ -77,6 +80,61 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
    */
   schemaAnchor?: Readonly<{ version: number; hash: string }> | undefined;
 }>;
+
+declare const INGESTION_BRANCH_BRAND: unique symbol;
+
+/**
+ * Node collections exposed by an {@link IngestionBranch}. They retain normal
+ * validation, reads, and staging writes, but omit APIs that claim a declared
+ * uniqueness constraint exists on the relaxed physical working copy.
+ */
+export type IngestionNodeCollections<G extends GraphDef> = Readonly<{
+  [K in keyof Store<G>["nodes"]]-?: Pick<
+    Store<G>["nodes"][K],
+    | "create"
+    | "getById"
+    | "getByIds"
+    | "update"
+    | "updateWhere"
+    | "delete"
+    | "hardDelete"
+    | "find"
+    | "count"
+    | "createFromRecord"
+    | "upsertById"
+    | "upsertByIdFromRecord"
+    | "bulkCreate"
+    | "bulkUpsertById"
+    | "bulkInsert"
+    | "bulkDelete"
+    | "bulkFindByIndex"
+  >;
+}>;
+
+/**
+ * Opaque handle for an untrusted ingestion working copy.
+ *
+ * The ordinary {@link Store} is intentionally absent: callers may stage and
+ * inspect graph data through the typed collections, then pass this handle to
+ * merge planning, but cannot access schema evolution, transactions, or runtime
+ * internals. `close()` releases the private working-copy backend.
+ */
+export type IngestionBranch<G extends GraphDef> = IngestionImportTarget<G> &
+  Readonly<{
+    [INGESTION_BRANCH_BRAND]: true;
+    id: BranchId;
+    base: BaseVersion;
+    nodes: IngestionNodeCollections<G>;
+    edges: Store<G>["edges"];
+    close: () => Promise<void>;
+  }> &
+  ("identity" extends keyof Store<G> ?
+    Readonly<{ identity: IdentityAssertionWriteFacade<G> }>
+  : Readonly<Record<never, never>>);
+
+/** A normal branch or an opaque ingestion branch accepted by merge entrypoints. */
+export type MergeBranch<G extends GraphDef> =
+  GraphBranch<G> | IngestionBranch<G>;
 
 /**
  * Options for {@link GraphBranch} creation. `id` is optional — when omitted a
@@ -249,6 +307,16 @@ export type DeleteModifyPolicy = "deleteWins" | "modifyWins" | "flag";
 export type ComparisonCeilingPolicy = "error" | "mergeByIdOnly";
 
 /**
+ * Opt-in retention policy for candidate-level scoring diagnostics. The limit is
+ * a deterministic global ceiling over the canonically ordered scored pairs;
+ * planning still evaluates candidates according to the normal comparison
+ * ceiling, then retains at most this many accepted/rejected decisions.
+ */
+export type CandidateDiagnosticsOptions = Readonly<{
+  limit: number;
+}>;
+
+/**
  * Ontology type-reconciliation mode. `"off"` is a no-op (default); `"ontology"`
  * collapses compatible types to the most-specific via the public subClassOf
  * closure (T2a / T10).
@@ -325,6 +393,11 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
   /** Safety ceiling on candidate comparisons per kind. Default: unbounded. */
   maxComparisonsPerKind?: number;
   /**
+   * Retain bounded accepted/rejected scored-pair diagnostics. Omitted by
+   * default so ordinary plans and reports contain only decisive evidence.
+   */
+  candidateDiagnostics?: CandidateDiagnosticsOptions;
+  /**
    * Optional single-link diameter guard. When set, clusters whose pairwise
    * distance exceeds it are split by the deterministic drop-weakest rule (T8).
    */
@@ -358,7 +431,7 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
 export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
   forkPoint: Store<G>;
   target: Store<G>;
-  branches: readonly GraphBranch<G>[];
+  branches: readonly MergeBranch<G>[];
   options?: Omit<MergeOptions<G>, "target">;
 }>;
 
@@ -370,6 +443,8 @@ export type EntityResolution = Readonly<{
   memberIds: readonly NodeId<NodeType>[];
   kind: string;
   branchOrigins: readonly BranchId[];
+  /** Deterministic minimal accepted-edge witness for this resolution. */
+  decisiveEdges: readonly MatchEvidence[];
 }>;
 
 /**
@@ -418,6 +493,8 @@ export type TypeReconciliation = Readonly<{
   entityId: NodeId<NodeType>;
   fromTypes: readonly string[];
   toType: string;
+  /** Accepted ontology-retype witness, when emitted by graph merge. */
+  decisiveEdges?: readonly MatchEvidence[];
 }>;
 
 /**
@@ -442,9 +519,9 @@ export type DroppedItem =
 export const VALIDITY_END_TARGET_PRECEDENCE = "target" as const;
 
 /**
- * One inherited row whose end-of-validity the merge RESOLVED: the instant that
- * stands and every branch that claimed an end for the row (including the ones whose
- * claim lost the least-claim tie-break).
+ * One inherited row whose end-of-validity the merge RESOLVED: the explicit set or
+ * clear that stands and every branch that claimed a change for the row (including
+ * the ones whose claim lost arbitration).
  *
  * `id` is bare because `entity` + `kind` already disambiguate it — a node and an
  * edge, or two kinds, that share an id string are distinct entries.
@@ -453,26 +530,32 @@ export type ValidityEndResolution = Readonly<{
   entity: "node" | "edge";
   kind: string;
   id: string;
-  /**
-   * The row's end-of-validity as a canonical UTC ISO 8601 string: the instant the
-   * commit WROTE, or — under {@link VALIDITY_END_TARGET_PRECEDENCE} — the instant
-   * the target already held and the merge left alone.
-   */
-  validTo: string;
-  /** Every branch that claimed an end, sorted; length > 1 means arbitration. */
+  /** Every branch that claimed a change, sorted; length > 1 means arbitration. */
   claimedBy: readonly BranchId[];
   /**
    * Present only as {@link VALIDITY_END_TARGET_PRECEDENCE}, marking an entry the
-   * merge did NOT decide: the incremental target had already moved this end, so
-   * `validTo` is the target's own committed instant, every claim in `claimedBy` was
-   * discarded, and nothing was written or credited for the row.
+   * merge did NOT decide: the incremental target had already changed this end, so
+   * the set/clear fields describe the target's own committed state, every claim in
+   * `claimedBy` was discarded, and nothing was written or credited for the row.
    *
-   * ABSENT means the merge decided the end — `validTo` is the instant it wrote and
-   * `claimedBy` names the claims it arbitrated between. A consumer that ignores the
-   * field therefore keeps reading the entries it always read.
+   * ABSENT means the merge decided the change — `validTo` or `clearValidTo` names
+   * what it wrote and `claimedBy` names the claims it arbitrated between. A consumer
+   * that ignores the field therefore keeps reading the entries it always read.
    */
   precedence?: typeof VALIDITY_END_TARGET_PRECEDENCE;
-}>;
+}> &
+  (
+    | Readonly<{
+        /** The canonical instant the merge set, or the target already held. */
+        validTo: string;
+        clearValidTo?: never;
+      }>
+    | Readonly<{
+        /** Marks a resolution that reopened the row by clearing its upper bound. */
+        clearValidTo: true;
+        validTo?: never;
+      }>
+  );
 
 /**
  * A `(kind, id)` node identity as surfaced in the merge report. Node identity is the
@@ -563,8 +646,9 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
   typeReconciliations: readonly TypeReconciliation[];
   dropped: readonly DroppedItem[];
   /**
-   * Every inherited row whose END-OF-VALIDITY the merge resolved, with the instant
-   * that stands and the branches that claimed an end.
+   * Every inherited row whose END-OF-VALIDITY the merge resolved, with the end
+   * update that stands and the branches that claimed it. A set carries `validTo`;
+   * a reopening carries `clearValidTo: true`.
    *
    * Reported because the resolution is silent by design: two branches ending the
    * same row at different instants are not in conflict (an ending is a monotone
@@ -589,6 +673,8 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
    * graph still committed). Empty on a clean merge.
    */
   warnings: readonly string[];
+  /** Bounded accepted/rejected scored-pair diagnostics when explicitly enabled. */
+  candidateDiagnostics?: CandidateDiagnostics;
   /**
    * Present only when `persistProvenance` ran and SUCCEEDED: the sidecar provenance
    * graph id and how many `{branch, sourceId}` rows were upserted. Absent when

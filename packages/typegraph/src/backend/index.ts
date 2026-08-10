@@ -70,6 +70,7 @@ export type {
   IntentSql,
   SqlIntent,
 } from "../query/sql-intent";
+export { resolveStampedValidityLowerBound } from "../utils/date";
 export {
   deleteLegacyRecordedAnchorMap,
   type DeleteLegacyRecordedAnchorMapOptions,
@@ -79,6 +80,13 @@ export {
   migrateRecordedAnchor,
   type MigrateRecordedAnchorOptions,
 } from "./migrate-recorded-time";
+export {
+  repairInvertedValidityWindows,
+  type RepairInvertedWindowsOptions,
+  type RepairInvertedWindowsReport,
+  type RepairRelation,
+  type RepairRelationScope,
+} from "./repair-validity-windows";
 export type {
   StrategyTableContribution,
   TableContribution,

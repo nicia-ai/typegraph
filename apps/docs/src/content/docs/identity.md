@@ -21,15 +21,22 @@ const graph = defineGraph({
 });
 ```
 
-The option is serialized with the schema. Enabled graph types expose
-`store.identity`, `tx.identity`, read-only `StoreView.identity`, and the
-identity traversal option. All three use the same conditional-**presence**
-encoding: on an identity-disabled graph type, `identity` does not exist on
-`Store`, `TransactionContext`, or the read-only views at all — reaching for it
-is a compile error, not a `never`-typed property. A runtime `ConfigurationError`
-with details code `IDENTITY_NOT_ENABLED` backs every one of those getters too,
-for the widened or `any`-typed handles TypeScript can't check (a JavaScript
-caller, or a store handle that lost its precise graph type).
+The option is serialized with the schema. Enabled graph types expose the full
+facade as `store.identity` and `tx.identity`, a read-only facade as
+`StoreView.identity`, and the identity traversal option. These surfaces use
+conditional **presence**: on an identity-disabled graph type, `identity` does
+not exist on `Store`, `TransactionContext`, or the read-only views at all —
+reaching for it is a compile error, not a `never`-typed property. A runtime
+`ConfigurationError` with details code `IDENTITY_NOT_ENABLED` backs those
+getters too, for widened or `any`-typed handles TypeScript can't check (a
+JavaScript caller, or a store handle that lost its precise graph type).
+
+Constraint-aware `IngestionBranch` handles follow the same conditional-presence
+contract, but expose only `assertSame`, `assertDifferent`, and their bulk forms.
+Reads and retractions stay unavailable so untrusted batches can stage identity
+evidence without gaining the full operational surface. See
+[Constraint-aware ingestion branches](/graph-merge/#constraint-aware-ingestion-branches)
+for the staging and merge workflow.
 
 At runtime, a disabled graph does no identity work: no identity locks, probes,
 closure computation, or identity SQL run. That guarantee is scoped to runtime
@@ -96,9 +103,50 @@ When you hold a plain assertion-ID string that came from persistence or an
 interchange document, re-enter the branded type with the `asIdentityAssertionId(value)`
 caster rather than a `as` assertion.
 
-Reference reads return graph-bounded `{ kind, id }` values whose IDs retain the
-node kind's `NodeId` brand. `nodesOf` hydrates the class into a kind-discriminated
-node union. A missing, deleted, or
+Assertions may state an explicit half-open validity window. Scalar methods take
+the window as their third argument; bulk methods carry one window per pair:
+
+```typescript
+await store.identity.assertSame(alice, legacyAlice, {
+  validFrom: "2020-01-01T00:00:00.000Z",
+  validTo: "2022-01-01T00:00:00.000Z",
+});
+await store.identity.bulkAssertDifferent([
+  { a: alice, b: bob, validFrom: "2023-01-01T00:00:00.000Z" },
+  { a: alice, b: carol }, // ordinary current assertion semantics
+]);
+```
+
+A past-ended window affects historical reads only. An open window beginning in
+the past affects both historical and current reads. Repeating the exact
+relation, pair, and window is idempotent. A second open window for an already
+current semantic pair is refused rather than silently collapsed onto a
+different `validFrom`. Empty objects retain the ordinary unwindowed semantics,
+including inside a mixed bulk call.
+
+Runtime-evolved nodes carry a nominal dynamic-node type, so they flow through
+the same identity surface without a cast:
+
+```typescript
+const evolved = await store.evolve(extension);
+const person = await evolved.nodes.Person.create({ name: "Alice" });
+const tag = await evolved
+  .getNodeCollectionOrThrow("Tag")
+  .create({ label: "author" });
+
+await evolved.identity.assertSame(person, tag);
+await evolved.identity.membersOf(tag);
+```
+
+Reference reads return `IdentityNodeReference<G>` values covering both
+compile-time graph kinds and registered runtime kinds. This widening is
+necessary even when a read starts from `person`, because its class can contain
+`tag`. Their IDs retain the appropriate nominal brand, and `nodesOf` hydrates
+the class into static kind-discriminated members or `DynamicNode` values for
+runtime members. A plain `{ kind: string, id: string }` does not prove that the
+kind came through the evolved Store; pass the dynamic node or a nominal dynamic
+reference returned by an identity read. Unknown and removed kinds still fail
+at runtime with `KindNotFoundError`. A missing, deleted, or
 coordinate-invisible input returns `undefined`, `[]`, or `false` according to
 the method. A visible singleton returns itself from `membersOf` and
 `representativeOf`, and `areSame(ref, ref)` is true. `areDifferent` lifts an
@@ -108,7 +156,15 @@ code-point-smallest `(kind, id)` visible member wins.
 
 ## Integrity and lifecycle
 
-Assertions require live endpoints. `assertSame` fails when a current
+Ordinary unwindowed assertions require live endpoints. Explicit windows require
+both endpoint rows to cover the assertion's whole half-open interval; an ended
+or late-starting endpoint raises `IdentityEndpointValidityError`. Future bounds
+and inverted windows raise `IdentityValidityWindowError`. Zero-width windows
+are accepted as empty history. Contradictions are checked throughout every
+overlapping segment, including transitive `same` paths; adjacent half-open
+windows do not overlap.
+
+`assertSame` fails when a current
 `different` assertion spans the two classes or when any member kinds are
 ontology-disjoint. `assertDifferent` fails when both endpoints are already in
 one class. These checks, folding, node deletion, import, schema-transition
@@ -124,13 +180,17 @@ its properties are replaced and its validity window is reset, so `validFrom`
 becomes the resurrection instant — unless the write carries an explicit
 window, which is honored as given (this is how merge preserves
 branch-authored windows). A resurrecting node write that supplies only a
-historical `validTo` is refused as a `ValidationError` rather than
-persisting a window that ends before it begins; pass both bounds for a
-historical window. (Edge resurrection instead keeps its stored lower bound,
-so `getOrCreateByEndpoints` can resurrect an edge directly into the ended
-state — but the end it names is held to that retained bound, so reviving
-an edge into a window that closed before the edge began likewise means
-passing both.) This graph-wide rule does not depend on the
+historical `validTo` takes the same **born-already-ended** exception a create
+takes: no lower bound is stored ("ended at T, start unknown") rather than a
+start after its own end, so the row reads back at every `asOf` before that end
+and `meta.validFrom` is `undefined`. One stated window reaches one stored shape
+whichever node path resets it — `create()` on a fresh id, `create()` on a
+tombstone, or a resurrecting `upsertById()`. (Edge resurrection instead keeps
+its stored lower bound, so `getOrCreateByEndpoints` can resurrect an edge
+directly into the ended state — but the end it names is held to that retained
+bound, so reviving an edge into a window that closed before the edge began is
+refused as a `ValidationError`, and means passing both bounds.) This graph-wide
+rule does not depend on the
 identity profile. Resurrection does not revive ended assertions, but folding
 runs again over the resurrected node when configured. Kind removal
 cascades assertion and closure rows for the removed kinds. Tightening ontology
@@ -175,6 +235,13 @@ both explicit `same` assertions and same-ID folding edges. A structurally
 existing but coordinate-invisible bridge can conduct identity without being
 returned as a member. Recorded assertions are captured in the same commit as
 the truth-bearing write.
+
+The assertion's validity window and the commit that recorded it are independent
+coordinates. A retrospective assertion is therefore invisible before its
+recorded-time commit even when its valid-time window reaches farther into the
+past. Archival export includes the endpoint temporal bounds needed to validate
+those windows on import, and graph merge carries branch-authored bounded
+assertions without turning them into current truth.
 
 Identity profile and ontology rules are schema-level interpretation, not a
 third temporal dimension. Historical views apply the Store's pinned
@@ -302,6 +369,11 @@ const archive = await exportGraph(store, {
   includeDeleted: true,
 });
 ```
+
+Identity-enabled exports default `includeTemporal` to `true`, because importing
+identity truth must prove that both endpoints existed throughout each assertion
+window. Explicitly setting `includeTemporal: false` on an identity-enabled graph
+is refused.
 
 Archival mode also includes ended assertions. Those rows are restored after
 shape validation and do not affect current closure. An ending a node deletion

@@ -4,7 +4,9 @@
   "testRunner": "vitest",
   "plugins": ["@stryker-mutator/vitest-runner"],
   "mutate": [
-    "src/backend/graph-backend-projection.ts",
+    "src/backend/derive-backend.ts",
+    "src/backend/graph-backend-keys.ts",
+    "src/backend/transaction-resource.ts",
     "src/provenance/**/*.ts",
     "src/interchange/import.ts",
     "src/store/operations/node-write-pipeline.ts",

@@ -130,6 +130,10 @@ import {
 } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { encodeTupleKey } from "../utils/tuple-key";
+import {
+  type IngestionImportTarget,
+  resolveIngestionImportTarget,
+} from "./ingestion-import-target";
 import { exportStreamBackend } from "./stream-source";
 import {
   type GraphData,
@@ -152,8 +156,13 @@ import {
 // Import Function
 // ============================================================
 
+/** A normal Store or an opaque ingestion branch that interchange may stage. */
+export type ImportTarget<G extends GraphDef> =
+  | Store<G>
+  | IngestionImportTarget<G>;
+
 /**
- * Import graph data into a store.
+ * Import graph data into a store or opaque ingestion branch.
  *
  * Nodes are imported first to satisfy edge reference validation.
  * The import runs within a transaction for atomicity when supported.
@@ -177,7 +186,7 @@ import {
  * streamed import cannot commit part of itself and only then discover it could
  * not be fenced.
  *
- * @param store - The graph store to import into
+ * @param target - The graph store or ingestion branch to import into
  * @param data - Graph data in interchange format
  * @param options - Import configuration
  * @returns Import statistics and any errors
@@ -193,10 +202,11 @@ import {
  * ```
  */
 export async function importGraph<G extends GraphDef>(
-  store: Store<G>,
+  target: ImportTarget<G>,
   data: GraphData,
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
+  const store = resolveIngestionImportTarget<G>(target);
   // Parse ONCE at the public boundary: schema defaults (batchSize, ...)
   // only exist after parsing, and every internal stage reads them
   // directly.
@@ -405,10 +415,11 @@ async function importGraphData<G extends GraphDef>(
  * `backend/transaction-resource.ts`.
  */
 export async function importGraphStream<G extends GraphDef>(
-  store: Store<G>,
+  target: ImportTarget<G>,
   chunks: AsyncIterable<GraphInterchangeChunk>,
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
+  const store = resolveIngestionImportTarget<G>(target);
   const options = ImportOptionsSchema.parse(rawOptions);
   const sourceBackend = exportStreamBackend(chunks);
   const targetBackend = storeBackend(store);
@@ -1872,8 +1883,11 @@ function validateValidityWindow(
     validateOptionalCanonicalIsoDate(entity.validTo, "validTo");
     // On an INSERT only a stated pair is judged — a lone historical validTo
     // means "born already ended", exactly as it does on `create` (see
-    // assertWritableValidityWindow). `null` is a confirmed open-left window and
-    // is not a lower bound at all.
+    // assertWritableValidityWindow) — and that is the WHOLE rule, not a partial
+    // one: the insert path this feeds stamps NO lower bound for such a row
+    // (`resolveStampedValidityLowerBound`), so a document accepted here cannot
+    // become a row readable at no coordinate. `null` is a confirmed open-left
+    // window and is not a lower bound at all.
     assertOrderedValidityWindow(
       `${entity.kind} "${entity.id}"`,
       entity.validFrom ?? undefined,

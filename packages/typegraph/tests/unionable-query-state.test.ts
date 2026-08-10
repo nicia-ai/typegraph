@@ -273,12 +273,30 @@ describe("UnionableQuery state preservation", () => {
     it("returns raw rows when no select function is set", async () => {
       const mockBackend = {
         capabilities: MOCK_BACKEND_CAPABILITIES,
-        execute: vi
-          .fn()
-          .mockResolvedValue([
-            { raw_column: "value1" },
-            { raw_column: "value2" },
-          ]),
+        execute: vi.fn().mockResolvedValue([
+          {
+            p_id: "person-1",
+            p_kind: "Person",
+            p_props: '{"name":"Alice"}',
+            p_version: 1,
+            p_valid_from: undefined,
+            p_valid_to: undefined,
+            p_created_at: "2024-01-01T00:00:00.000Z",
+            p_updated_at: "2024-01-01T00:00:00.000Z",
+            p_deleted_at: undefined,
+          },
+          {
+            p_id: "person-2",
+            p_kind: "Person",
+            p_props: '{"name":"Bob"}',
+            p_version: 1,
+            p_valid_from: undefined,
+            p_valid_to: undefined,
+            p_created_at: "2024-01-01T00:00:00.000Z",
+            p_updated_at: "2024-01-01T00:00:00.000Z",
+            p_deleted_at: undefined,
+          },
+        ]),
       };
 
       // Create queries without select function by using the internal state

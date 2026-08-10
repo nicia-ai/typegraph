@@ -29,6 +29,7 @@ export type AnyPgTransaction = PgTransaction<PgQueryResultHKT, Record<string, un
 type BackendCapabilities = Readonly<{
     transactions: boolean;
     windowFunctions: boolean;
+    clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
     readonly constraintClaims?: boolean;
@@ -40,6 +41,15 @@ type BackendCapabilities = Readonly<{
 
 // @public (undocumented)
 type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy">;
+
+// @public
+type BackendValidityEndMutation = Readonly<{
+    validTo?: string;
+    clearValidTo?: never;
+}> | Readonly<{
+    validTo?: never;
+    clearValidTo: true;
+}>;
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
@@ -4147,6 +4157,7 @@ type GraphBackend = Readonly<{
     deleteFulltextBatch?: (this: void, params: DeleteFulltextBatchParams) => Promise<void>;
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
+    ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -4734,6 +4745,7 @@ export type PostgresBackendOptions = Readonly<{
     capabilities?: Partial<BackendCapabilities>;
     prepareStatements?: boolean;
     preparedStatementCacheMax?: number;
+    serializedResource?: SerializedResourceDeclaration;
 }>;
 
 // @public
@@ -5735,6 +5747,16 @@ type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
+}>;
+
+// @public
+export type SerializedResourceDeclaration = Readonly<{
+    mode: "detect";
+}> | Readonly<{
+    mode: "shared";
+    resource: object;
+}> | Readonly<{
+    mode: "independent";
 }>;
 
 // @public
@@ -8901,10 +8923,10 @@ type UpdateEdgeParams = Readonly<{
     toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
+    expectedValidTo?: string | null;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 type UpdateNodeParams = Readonly<{
@@ -8913,11 +8935,10 @@ type UpdateNodeParams = Readonly<{
     id: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 type UpdateNodeSetParams = Readonly<{

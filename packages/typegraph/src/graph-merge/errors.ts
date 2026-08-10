@@ -20,8 +20,20 @@ export const MERGE_ERROR_CODES = {
   branch: "GRAPH_MERGE_BRANCH_ERROR",
   similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE",
   conflict: "GRAPH_MERGE_CONFLICT",
+  constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT",
   identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT",
   baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH",
+  planCapability: "GRAPH_MERGE_PLAN_CAPABILITY",
+  planInvalid: "GRAPH_MERGE_PLAN_INVALID",
+  planVersionUnsupported: "GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED",
+  planDigestMismatch: "GRAPH_MERGE_PLAN_DIGEST_MISMATCH",
+  planTargetMismatch: "GRAPH_MERGE_PLAN_TARGET_MISMATCH",
+  planSchemaMismatch: "GRAPH_MERGE_PLAN_SCHEMA_MISMATCH",
+  planOriginMismatch: "GRAPH_MERGE_PLAN_ORIGIN_MISMATCH",
+  planStale: "GRAPH_MERGE_PLAN_STALE",
+  planningStale: "GRAPH_MERGE_PLANNING_STALE",
+  candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE",
+  evidence: "GRAPH_MERGE_EVIDENCE",
 } as const;
 
 /**
@@ -133,6 +145,58 @@ export class MergeConflictError extends MergeError {
   }
 }
 
+/** Details copied from the deterministic store constraint that refused commit. */
+export type MergeConstraintConflictErrorDetails = Readonly<{
+  /** Stable code of the underlying store constraint error. */
+  constraintCode: string;
+  /** Class name of the underlying store constraint error. */
+  constraintErrorName: string;
+  /** Constraint-specific fields, also copied onto this details object. */
+  constraintDetails: Readonly<Record<string, unknown>>;
+  [key: string]: unknown;
+}>;
+
+/** Raised when a resolved merge would commit a graph that violates a constraint. */
+export class MergeConstraintConflictError extends MergeError {
+  protected static override readonly errorCategory = "constraint";
+  override readonly code = MERGE_ERROR_CODES.constraintConflict;
+  declare readonly category: "constraint";
+  declare readonly cause: TypeGraphError;
+  declare readonly details: MergeConstraintConflictErrorDetails;
+
+  constructor(cause: TypeGraphError) {
+    super(`The resolved merge would violate ${cause.name}: ${cause.message}`, {
+      cause,
+      details: {
+        ...cause.details,
+        constraintCode: cause.code,
+        constraintErrorName: cause.name,
+        constraintDetails: cause.details,
+      },
+      suggestion:
+        cause.suggestion ??
+        "Change the branch data or target state so the resolved graph satisfies its constraints, then retry the merge.",
+    });
+    this.name = "MergeConstraintConflictError";
+  }
+}
+
+/**
+ * Translates only deterministic store-constraint refusals at a merge commit
+ * boundary. Identity conflicts have their own established merge error surface;
+ * infrastructure and stale-plan failures are not category `constraint`.
+ *
+ * @internal
+ */
+export function translateMergeCommitError(error: unknown): unknown {
+  if (error instanceof MergeError) return error;
+  if (!(error instanceof TypeGraphError)) return error;
+  if (error.category !== "constraint" || error.code.startsWith("IDENTITY_")) {
+    return error;
+  }
+  return new MergeConstraintConflictError(error);
+}
+
 /** Raised when identity branches contain opposing or retract/reassert truth. */
 export class IdentityMergeConflictError extends MergeError {
   override readonly code = MERGE_ERROR_CODES.identityConflict;
@@ -159,6 +223,123 @@ export class BaseVersionMismatchError extends MergeError {
         "Re-branch from the current target so the branch base matches before merging.",
     });
     this.name = "BaseVersionMismatchError";
+  }
+}
+
+/** Raised when a target cannot provide the durable plan/apply guarantees. */
+export class MergePlanCapabilityError extends MergeError {
+  protected static override readonly errorCategory = "user";
+  override readonly code = MERGE_ERROR_CODES.planCapability;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "MergePlanCapabilityError";
+  }
+}
+
+/** Raised when a serialized plan is structurally or semantically malformed. */
+export class InvalidMergePlanError extends MergeError {
+  protected static override readonly errorCategory = "user";
+  override readonly code: string = MERGE_ERROR_CODES.planInvalid;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "InvalidMergePlanError";
+  }
+}
+
+/** Raised when a plan uses a wire format this library version cannot read. */
+export class UnsupportedMergePlanVersionError extends InvalidMergePlanError {
+  override readonly code = MERGE_ERROR_CODES.planVersionUnsupported;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "UnsupportedMergePlanVersionError";
+  }
+}
+
+/** Raised when a plan's canonical content no longer matches its digest. */
+export class MergePlanDigestMismatchError extends InvalidMergePlanError {
+  override readonly code = MERGE_ERROR_CODES.planDigestMismatch;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "MergePlanDigestMismatchError";
+  }
+}
+
+/** Raised when a plan names a different target graph. */
+export class MergePlanTargetMismatchError extends InvalidMergePlanError {
+  override readonly code = MERGE_ERROR_CODES.planTargetMismatch;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "MergePlanTargetMismatchError";
+  }
+}
+
+/** Raised when a plan was produced for another active schema. */
+export class MergePlanSchemaMismatchError extends InvalidMergePlanError {
+  override readonly code = MERGE_ERROR_CODES.planSchemaMismatch;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "MergePlanSchemaMismatchError";
+  }
+}
+
+/** Raised when a plan belongs to an independently-created revision clock. */
+export class MergePlanOriginMismatchError extends InvalidMergePlanError {
+  override readonly code = MERGE_ERROR_CODES.planOriginMismatch;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "MergePlanOriginMismatchError";
+  }
+}
+
+/** Raised when the target revision no longer equals the plan's fence. */
+export class StaleMergePlanError extends MergeError {
+  override readonly code: string = MERGE_ERROR_CODES.planStale;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, {
+      ...options,
+      suggestion:
+        options.suggestion ??
+        "Create a new merge plan against the target's current revision, review it, and apply that plan instead.",
+    });
+    this.name = "StaleMergePlanError";
+  }
+}
+
+/** Raised when the target moved while a plan was being computed. */
+export class MergePlanningStaleError extends StaleMergePlanError {
+  override readonly code = MERGE_ERROR_CODES.planningStale;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "MergePlanningStaleError";
+  }
+}
+
+/** Raised when a built-in candidate source cannot produce attributed output. */
+export class CandidateSourceError extends MergeError {
+  override readonly code = MERGE_ERROR_CODES.candidateSource;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "CandidateSourceError";
+  }
+}
+
+/** Raised when match evidence is invalid or contains a non-finite score. */
+export class MatchEvidenceError extends MergeError {
+  override readonly code = MERGE_ERROR_CODES.evidence;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "MatchEvidenceError";
   }
 }
 

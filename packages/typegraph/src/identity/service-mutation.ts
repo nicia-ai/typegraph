@@ -2,14 +2,18 @@ import { type GraphDef } from "../core/define-graph";
 import {
   IdentityContradictionError,
   type IdentityContradictionErrorDetails,
+  IdentityEndpointValidityError,
+  IdentityValidityWindowError,
+  NodeNotFoundError,
 } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
-import { nowIso } from "../utils/date";
+import { canonicalizeDatabaseTimestamp } from "../utils/date";
 import { generateId } from "../utils/id";
 import { requireDefined } from "../utils/presence";
+import { spanningDifferentAssertion } from "./different-assertion";
 import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
 import {
   normalizeIdentityAssertionRow,
@@ -66,7 +70,12 @@ import {
   type IdentityAssertionResult,
   type IdentityNodeRefInput,
   type IdentityRelation,
+  type IdentityValidityWindow,
 } from "./types";
+import {
+  type ResolvedIdentityValidityWindow,
+  resolveIdentityValidityWindow,
+} from "./validity-window";
 
 export async function validateCurrentRelation(
   ctx: Pick<
@@ -165,6 +174,40 @@ export async function currentAssertionForPair(
     : normalizeIdentityAssertionRow(rows[0]);
 }
 
+export async function assertionForExactWindow(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  relation: IdentityRelation,
+  a: PlainNodeRef,
+  b: PlainNodeRef,
+  window: ResolvedIdentityValidityWindow,
+): Promise<IdentityAssertionStorageRow | undefined> {
+  const validToMatch =
+    window.validTo === undefined ?
+      sql`valid_to IS NULL`
+    : sql`valid_to = ${window.validTo}`;
+  const rows = await target.execute<RawIdentityAssertionRow>(
+    asCompiledRowsSql(sql`
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
+      FROM ${schema.identityAssertionsTable}
+      WHERE graph_id = ${graphId}
+        AND rel = ${relation}
+        AND a_kind = ${a.kind}
+        AND a_id = ${a.id}
+        AND b_kind = ${b.kind}
+        AND b_id = ${b.id}
+        AND valid_from = ${window.validFrom}
+        AND ${validToMatch}
+        AND deleted_at IS NULL
+      LIMIT 1
+    `),
+  );
+  return rows[0] === undefined ?
+      undefined
+    : normalizeIdentityAssertionRow(rows[0]);
+}
+
 export async function insertAssertion(
   target: Backend,
   schema: SqlSchema,
@@ -172,11 +215,22 @@ export async function insertAssertion(
   relation: IdentityRelation,
   a: PlainNodeRef,
   b: PlainNodeRef,
-  timestamp: string,
+  operationInstant: string,
   touch: IdentityTouch,
-  preserved?: Readonly<{ id: string; validFrom: string }>,
+  options?: Readonly<{
+    id?: string;
+    validFrom?: string;
+    validTo?: string;
+  }>,
 ): Promise<IdentityAssertionStorageRow> {
-  const row = buildAssertionRow(graphId, relation, a, b, timestamp, preserved);
+  const row = buildAssertionRow(
+    graphId,
+    relation,
+    a,
+    b,
+    operationInstant,
+    options,
+  );
   await insertAssertionRows(target, schema, [row]);
   touch(graphId, row.id, row);
   return row;
@@ -188,24 +242,471 @@ export function buildAssertionRow(
   a: PlainNodeRef,
   b: PlainNodeRef,
   timestamp: string,
-  preserved?: Readonly<{ id: string; validFrom: string }>,
+  options?: Readonly<{
+    id?: string;
+    validFrom?: string;
+    validTo?: string;
+  }>,
 ): IdentityAssertionStorageRow {
   return {
     graph_id: graphId,
-    id: preserved?.id ?? generateId(),
+    id: options?.id ?? generateId(),
     rel: relation,
     a_kind: a.kind,
     a_id: a.id,
     b_kind: b.kind,
     b_id: b.id,
-    valid_from: preserved?.validFrom ?? timestamp,
-    valid_to: undefined,
+    valid_from: options?.validFrom ?? timestamp,
+    valid_to: options?.validTo,
     created_at: timestamp,
     updated_at: timestamp,
     deleted_at: undefined,
     ended_by_kind: undefined,
     ended_by_id: undefined,
   };
+}
+
+function canonicalEndpointTimestamp(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return canonicalizeDatabaseTimestamp(value);
+}
+
+export async function requireEndpointsCoverIdentityWindow(
+  target: Backend,
+  graphId: string,
+  references: readonly PlainNodeRef[],
+  window: ResolvedIdentityValidityWindow,
+): Promise<void> {
+  for (const ref of references) {
+    const row = await target.getNode(graphId, ref.kind, ref.id);
+    if (row === undefined) throw new NodeNotFoundError(ref.kind, ref.id);
+    if (window.effective === "empty") continue;
+    const validFrom = canonicalEndpointTimestamp(row.valid_from);
+    const validTo = canonicalEndpointTimestamp(row.valid_to);
+    const deletedAt = canonicalEndpointTimestamp(row.deleted_at);
+    const endpointWindow = {
+      ...(validFrom === undefined ? {} : { validFrom }),
+      ...(validTo === undefined ? {} : { validTo }),
+      ...(deletedAt === undefined ? {} : { deletedAt }),
+    };
+    const startsTooLate =
+      endpointWindow.validFrom !== undefined &&
+      endpointWindow.validFrom > window.validFrom;
+    const effectiveEnd = [endpointWindow.validTo, endpointWindow.deletedAt]
+      .filter((value): value is string => value !== undefined)
+      .toSorted()[0];
+    const endsTooEarly =
+      window.validTo === undefined ?
+        effectiveEnd !== undefined
+      : effectiveEnd !== undefined && effectiveEnd < window.validTo;
+    if (!startsTooLate && !endsTooEarly) continue;
+    throw new IdentityEndpointValidityError({
+      endpoint: ref,
+      assertionWindow: {
+        validFrom: window.validFrom,
+        ...(window.validTo === undefined ? {} : { validTo: window.validTo }),
+      },
+      endpointWindow,
+    });
+  }
+}
+
+type RawIdentityWindowLedgerRow = RawIdentityAssertionRow &
+  Readonly<{
+    row_type: "assertion" | "node";
+    node_kind?: unknown;
+    node_id?: unknown;
+    node_created_at?: unknown;
+    node_deleted_at?: unknown;
+  }>;
+
+type IdentityWindowNode = Readonly<{
+  ref: PlainNodeRef;
+  createdAt: string;
+  deletedAt?: string;
+}>;
+
+export type IdentityWindowValidationRequest = Readonly<{
+  references: readonly PlainNodeRef[];
+  window: ResolvedIdentityValidityWindow;
+}>;
+
+export type IdentityWindowValidator = Readonly<{
+  validate: (
+    relation: IdentityRelation,
+    operation: IdentityContradictionErrorDetails["operation"],
+    a: PlainNodeRef,
+    b: PlainNodeRef,
+    window: ResolvedIdentityValidityWindow,
+  ) => void;
+  record: (assertion: IdentityAssertionStorageRow) => void;
+}>;
+
+function windowOverlapSql(
+  alias: string,
+  lowerBoundary: string,
+  upperBoundary: string,
+): SqlFragment {
+  const column = (name: string) =>
+    sql`${sql.identifier(alias)}.${sql.identifier(name)}`;
+  return sql`
+    ${column("deleted_at")} IS NULL
+    AND ${column("valid_from")} <= ${upperBoundary}
+    AND (${column("valid_to")} IS NULL OR ${column("valid_to")} > ${lowerBoundary})
+  `;
+}
+
+async function loadIdentityWindowLedger(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  requests: readonly IdentityWindowValidationRequest[],
+  operationInstant: string,
+  sameIdAcrossKinds: "fold" | "ignore",
+): Promise<
+  Readonly<{
+    nodes: readonly IdentityWindowNode[];
+    assertions: IdentityAssertionStorageRow[];
+  }>
+> {
+  const activeRequests = requests.filter(
+    (request) => request.window.effective !== "empty",
+  );
+  if (activeRequests.length === 0) return { nodes: [], assertions: [] };
+  const referencesByKey = new Map<string, PlainNodeRef>();
+  for (const request of activeRequests) {
+    for (const reference of request.references) {
+      referencesByKey.set(refKey(reference), reference);
+    }
+  }
+  const references = [...referencesByKey.values()];
+  const lowerBoundary = requireDefined(
+    activeRequests.map((request) => request.window.validFrom).toSorted()[0],
+  );
+  const upperBoundary = requireDefined(
+    activeRequests
+      .map((request) => request.window.validTo ?? operationInstant)
+      .toSorted()
+      .at(-1),
+  );
+  const seedChunkSize = identityChunkSize(target, {
+    fixedParameters: 20,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  const rows: RawIdentityWindowLedgerRow[] = [];
+  for (const referenceChunk of chunk(references, seedChunkSize)) {
+    const seedRows = sql.join(
+      referenceChunk.map(
+        (reference) => sql`(${reference.kind}, ${reference.id})`,
+      ),
+      sql`, `,
+    );
+    const component =
+      sameIdAcrossKinds === "fold" ?
+        sql`
+          neighbor_modes(mode) AS (
+            VALUES ('assertion'), ('fold')
+          ),
+          component(kind, id) AS (
+            SELECT seed_kind, seed_id FROM seeds
+            UNION
+            SELECT CASE
+                     WHEN neighbor_modes.mode = 'fold' THEN folded.kind
+                     WHEN assertion.a_kind = component.kind AND assertion.a_id = component.id
+                       THEN assertion.b_kind
+                     ELSE assertion.a_kind
+                   END,
+                   CASE
+                     WHEN neighbor_modes.mode = 'fold' THEN folded.id
+                     WHEN assertion.a_kind = component.kind AND assertion.a_id = component.id
+                       THEN assertion.b_id
+                     ELSE assertion.a_id
+                   END
+            FROM component
+            JOIN neighbor_modes ON 1 = 1
+            LEFT JOIN ${schema.identityAssertionsTable} assertion
+              ON neighbor_modes.mode = 'assertion'
+             AND assertion.graph_id = ${graphId}
+             AND assertion.rel = 'same'
+             AND ${windowOverlapSql("assertion", lowerBoundary, upperBoundary)}
+             AND ((assertion.a_kind = component.kind AND assertion.a_id = component.id)
+               OR (assertion.b_kind = component.kind AND assertion.b_id = component.id))
+            LEFT JOIN ${schema.nodesTable} folded
+              ON neighbor_modes.mode = 'fold'
+             AND folded.graph_id = ${graphId}
+             AND folded.id = component.id
+            WHERE assertion.id IS NOT NULL OR folded.id IS NOT NULL
+          )
+        `
+      : sql`
+        component(kind, id) AS (
+          SELECT seed_kind, seed_id FROM seeds
+          UNION
+          SELECT CASE
+                   WHEN assertion.a_kind = component.kind AND assertion.a_id = component.id
+                     THEN assertion.b_kind
+                   ELSE assertion.a_kind
+                 END,
+                 CASE
+                   WHEN assertion.a_kind = component.kind AND assertion.a_id = component.id
+                     THEN assertion.b_id
+                   ELSE assertion.a_id
+                 END
+          FROM component
+          JOIN ${schema.identityAssertionsTable} assertion
+            ON assertion.graph_id = ${graphId}
+           AND assertion.rel = 'same'
+           AND ${windowOverlapSql("assertion", lowerBoundary, upperBoundary)}
+           AND ((assertion.a_kind = component.kind AND assertion.a_id = component.id)
+             OR (assertion.b_kind = component.kind AND assertion.b_id = component.id))
+        )
+      `;
+    rows.push(
+      ...(await target.execute<RawIdentityWindowLedgerRow>(
+        asCompiledRowsSql(sql`
+          WITH RECURSIVE
+          seeds(seed_kind, seed_id) AS (VALUES ${seedRows}),
+          ${component},
+          selected_assertions AS (
+            SELECT DISTINCT assertion.*
+            FROM ${schema.identityAssertionsTable} assertion
+            JOIN component
+              ON (assertion.a_kind = component.kind AND assertion.a_id = component.id)
+              OR (assertion.b_kind = component.kind AND assertion.b_id = component.id)
+            WHERE assertion.graph_id = ${graphId}
+              AND ${windowOverlapSql("assertion", lowerBoundary, upperBoundary)}
+          )
+          SELECT 'assertion' AS row_type, ${IDENTITY_ASSERTION_COLUMNS},
+                 NULL AS node_kind, NULL AS node_id,
+                 NULL AS node_created_at, NULL AS node_deleted_at
+          FROM selected_assertions
+          UNION ALL
+          SELECT 'node', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                 NULL, NULL, NULL, NULL, NULL,
+                 node.kind, node.id, node.created_at, node.deleted_at
+          FROM ${schema.nodesTable} node
+          JOIN component ON component.kind = node.kind AND component.id = node.id
+          WHERE node.graph_id = ${graphId}
+        `),
+      )),
+    );
+  }
+  const nodesByKey = new Map<string, IdentityWindowNode>();
+  const assertionsById = new Map<string, IdentityAssertionStorageRow>();
+  for (const row of rows) {
+    if (row.row_type === "assertion") {
+      const assertion = normalizeIdentityAssertionRow(row);
+      assertionsById.set(assertion.id, assertion);
+      continue;
+    }
+    if (typeof row.node_kind !== "string" || typeof row.node_id !== "string")
+      continue;
+    const createdAt = canonicalEndpointTimestamp(row.node_created_at);
+    if (createdAt === undefined) continue;
+    const deletedAt = canonicalEndpointTimestamp(row.node_deleted_at);
+    const node = {
+      ref: { kind: row.node_kind, id: row.node_id },
+      createdAt,
+      ...(deletedAt === undefined ? {} : { deletedAt }),
+    } satisfies IdentityWindowNode;
+    nodesByKey.set(refKey(node.ref), node);
+  }
+  return {
+    nodes: [...nodesByKey.values()],
+    assertions: [...assertionsById.values()],
+  };
+}
+
+function identityWindowCheckpoints(
+  window: ResolvedIdentityValidityWindow,
+  operationInstant: string,
+  nodes: readonly IdentityWindowNode[],
+  assertions: readonly IdentityAssertionStorageRow[],
+): readonly string[] {
+  if (window.effective === "empty") return [];
+  const checkpoints = new Set([window.validFrom]);
+  if (window.validTo === undefined) checkpoints.add(operationInstant);
+  for (const row of [...assertions, ...nodes]) {
+    for (const value of [
+      "valid_from" in row ? row.valid_from : undefined,
+      "valid_to" in row ? row.valid_to : undefined,
+      "createdAt" in row ? row.createdAt : undefined,
+      "deletedAt" in row ? row.deletedAt : undefined,
+    ]) {
+      const boundary = canonicalEndpointTimestamp(value);
+      if (boundary === undefined || boundary < window.validFrom) continue;
+      if (window.validTo !== undefined && boundary >= window.validTo) continue;
+      if (boundary > operationInstant) continue;
+      checkpoints.add(boundary);
+    }
+  }
+  return [...checkpoints].toSorted();
+}
+
+function validateRelationAgainstLedger(
+  ctx: Pick<IdentityServiceContext<GraphDef>, "registry" | "sameIdAcrossKinds">,
+  nodes: readonly IdentityWindowNode[],
+  assertions: readonly IdentityAssertionStorageRow[],
+  relation: IdentityRelation,
+  operation: IdentityContradictionErrorDetails["operation"],
+  a: PlainNodeRef,
+  b: PlainNodeRef,
+  window: ResolvedIdentityValidityWindow,
+  operationInstant: string,
+): void {
+  const checkpoints = identityWindowCheckpoints(
+    window,
+    operationInstant,
+    nodes,
+    assertions,
+  );
+  for (const instant of checkpoints) {
+    const structuralNodes = nodes.map((node) => node.ref);
+    const activeAssertions = assertions.filter(
+      (assertion) =>
+        assertion.deleted_at === undefined &&
+        assertion.valid_from <= instant &&
+        (assertion.valid_to === undefined || assertion.valid_to > instant),
+    );
+    const activeFoldReferences = nodes
+      .filter(
+        (node) =>
+          node.createdAt <= instant &&
+          (node.deletedAt === undefined || node.deletedAt > instant),
+      )
+      .map((node) => node.ref);
+    const foldAssertions: Pick<
+      IdentityAssertionStorageRow,
+      "rel" | "a_kind" | "a_id" | "b_kind" | "b_id"
+    >[] = [];
+    if (ctx.sameIdAcrossKinds === "fold") {
+      const byId = new Map<string, PlainNodeRef[]>();
+      for (const reference of activeFoldReferences) {
+        const sameId = byId.get(reference.id) ?? [];
+        sameId.push(reference);
+        byId.set(reference.id, sameId);
+      }
+      for (const sameId of byId.values()) {
+        const first = sameId[0];
+        if (first === undefined) continue;
+        for (const other of sameId.slice(1)) {
+          foldAssertions.push({
+            rel: "same",
+            a_kind: first.kind,
+            a_id: first.id,
+            b_kind: other.kind,
+            b_id: other.id,
+          });
+        }
+      }
+    }
+    const components = buildComponents(
+      structuralNodes,
+      [...activeAssertions, ...foldAssertions],
+      "ignore",
+    );
+    const aClass = components.get(refKey(a)) ?? [];
+    const bClass = components.get(refKey(b)) ?? [];
+    if (relation === "different") {
+      if (!containsRef(aClass, b)) continue;
+      throw new IdentityContradictionError({
+        operation,
+        a,
+        b,
+        reason: "same-class",
+      });
+    }
+    const different = spanningDifferentAssertion(
+      activeAssertions,
+      aClass,
+      bClass,
+    );
+    if (different !== undefined) {
+      throw new IdentityContradictionError({
+        operation,
+        a,
+        b,
+        reason: "different-assertion",
+        conflictingAssertionId: different.id,
+      });
+    }
+    const disjointKinds = classHasDisjointKinds(ctx.registry, aClass, bClass);
+    if (disjointKinds === undefined) continue;
+    throw new IdentityContradictionError({
+      operation,
+      a,
+      b,
+      reason: "disjoint-kinds",
+      conflictingKinds: disjointKinds,
+    });
+  }
+}
+
+export async function createIdentityWindowValidator(
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "registry" | "sameIdAcrossKinds" | "schema"
+  >,
+  target: Backend,
+  requests: readonly IdentityWindowValidationRequest[],
+  operationInstant: string,
+  ignoredAssertionIds: ReadonlySet<string> = new Set(),
+): Promise<IdentityWindowValidator> {
+  const ledger = await loadIdentityWindowLedger(
+    target,
+    ctx.schema,
+    ctx.graphId,
+    requests,
+    operationInstant,
+    ctx.sameIdAcrossKinds,
+  );
+  if (ignoredAssertionIds.size > 0) {
+    const retained = ledger.assertions.filter(
+      (assertion) => !ignoredAssertionIds.has(assertion.id),
+    );
+    ledger.assertions.splice(0, ledger.assertions.length, ...retained);
+  }
+  return {
+    validate(relation, operation, a, b, window) {
+      validateRelationAgainstLedger(
+        ctx,
+        ledger.nodes,
+        ledger.assertions,
+        relation,
+        operation,
+        a,
+        b,
+        window,
+        operationInstant,
+      );
+    },
+    record(assertion) {
+      ledger.assertions.push(assertion);
+    },
+  };
+}
+
+async function validateRelationThroughoutIdentityWindow(
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "registry" | "sameIdAcrossKinds" | "schema"
+  >,
+  target: Backend,
+  relation: IdentityRelation,
+  operation: IdentityContradictionErrorDetails["operation"],
+  a: PlainNodeRef,
+  b: PlainNodeRef,
+  window: ResolvedIdentityValidityWindow,
+  operationInstant: string,
+): Promise<void> {
+  const validator = await createIdentityWindowValidator(
+    ctx,
+    target,
+    [{ references: [a, b], window }],
+    operationInstant,
+  );
+  validator.validate(relation, operation, a, b, window);
 }
 
 /**
@@ -651,35 +1152,111 @@ export async function assertPair<G extends GraphDef>(
   firstInput: IdentityNodeRefInput<G>,
   secondInput: IdentityNodeRefInput<G>,
   touch: IdentityTouch,
+  windowInput: IdentityValidityWindow | undefined,
+  operationInstant: string,
+  windowValidator?: IdentityWindowValidator,
 ): Promise<IdentityAssertionResult<G>> {
   const first = registeredPlainRef(ctx, firstInput);
   const second = registeredPlainRef(ctx, secondInput);
   if (refKey(first) === refKey(second)) throw selfAssertionError(relation);
   const [a, b] = normalizePair(first, second);
-  await Promise.all([
-    requireLiveEndpoint(target, ctx.graphId, a),
-    requireLiveEndpoint(target, ctx.graphId, b),
-  ]);
-  const existing = await currentAssertionForPair(
+  if (windowInput === undefined) {
+    const current = await currentAssertionForPair(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      relation,
+      a,
+      b,
+    );
+    if (current !== undefined) {
+      return assertionResult(publicAssertion(current), "existing");
+    }
+    await Promise.all([
+      requireLiveEndpoint(target, ctx.graphId, a),
+      requireLiveEndpoint(target, ctx.graphId, b),
+    ]);
+    await validateCurrentRelation(
+      ctx,
+      target,
+      relation,
+      relation === "same" ? "assertSame" : "assertDifferent",
+      a,
+      b,
+    );
+    const row = await insertAssertion(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      relation,
+      a,
+      b,
+      operationInstant,
+      touch,
+    );
+    windowValidator?.record(row);
+    if (relation === "same") {
+      await mergeCurrentClasses(target, ctx.schema, ctx.graphId, a, b);
+    } else {
+      await replaceSeparationForReferences(target, ctx.schema, ctx.graphId, [
+        a,
+        b,
+      ]);
+    }
+    return assertionResult(publicAssertion(row), "created");
+  }
+  const window = resolveIdentityValidityWindow(windowInput, operationInstant);
+  await requireEndpointsCoverIdentityWindow(
+    target,
+    ctx.graphId,
+    [a, b],
+    window,
+  );
+  const existing = await assertionForExactWindow(
     target,
     ctx.schema,
     ctx.graphId,
     relation,
     a,
     b,
+    window,
   );
   if (existing !== undefined) {
     return assertionResult(publicAssertion(existing), "existing");
   }
+  if (window.effective === "current") {
+    const current = await currentAssertionForPair(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      relation,
+      a,
+      b,
+    );
+    if (current !== undefined) {
+      throw new IdentityValidityWindowError({
+        reason: "overlapping-open-window",
+        validFrom: window.validFrom,
+        operationInstant,
+      });
+    }
+  }
 
-  await validateCurrentRelation(
-    ctx,
-    target,
-    relation,
-    relation === "same" ? "assertSame" : "assertDifferent",
-    a,
-    b,
-  );
+  const operation = relation === "same" ? "assertSame" : "assertDifferent";
+  if (windowValidator === undefined) {
+    await validateRelationThroughoutIdentityWindow(
+      ctx,
+      target,
+      relation,
+      operation,
+      a,
+      b,
+      window,
+      operationInstant,
+    );
+  } else {
+    windowValidator.validate(relation, operation, a, b, window);
+  }
   const row = await insertAssertion(
     target,
     ctx.schema,
@@ -687,9 +1264,17 @@ export async function assertPair<G extends GraphDef>(
     relation,
     a,
     b,
-    nowIso(),
+    operationInstant,
     touch,
+    {
+      validFrom: window.validFrom,
+      ...(window.validTo === undefined ? {} : { validTo: window.validTo }),
+    },
   );
+  windowValidator?.record(row);
+  if (window.effective !== "current") {
+    return assertionResult(publicAssertion(row), "created");
+  }
   if (relation === "same") {
     await mergeCurrentClasses(target, ctx.schema, ctx.graphId, a, b);
   } else {

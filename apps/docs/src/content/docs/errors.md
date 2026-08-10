@@ -147,8 +147,11 @@ try {
 Interchange import records the same refusal as a per-row error prefixed with the
 code, so one bad row does not abort the import; trusted import refuses the whole
 stream with `TrustedImportError` reason `invalid_stream`. A zero-width window
-(`validTo === validFrom`) is legal and never raises this, and so is a create
-carrying only a historical `validTo`.
+(`validTo === validFrom`) is legal and never raises this, and neither is a write
+that STAMPS its own start while carrying only a historical `validTo`: any create,
+and a node resurrection through `upsertById` / `bulkUpsertById`. Both store no
+lower bound instead. An edge resurrection RETAINS the bound the row already
+holds, so a `validTo` before that bound still raises this.
 
 #### `IMMUTABLE_VALIDITY_LOWER_BOUND`
 
@@ -185,7 +188,9 @@ What deliberately does not raise it:
 - **A create, or a resurrection.** Both write a fresh window, so a stated
   `validFrom` is stored — that is the way to give a row a different lower bound.
 - **`getOrCreateByEndpoints` returning an existing edge.** That branch performs
-  no write, so its window options describe the row to create if none is found.
+  no write, so `validFrom` / `validTo` describe the row to create if none is
+  found. `clearValidTo` is refused on a live return-mode match because it names
+  a mutation; use `ifExists: "update"`.
 - **A node upsert or endpoint-matched edge update with
   `onImmutableLowerBound: "preserve"`.** This explicitly treats `validFrom` as
   create/resurrection-only input. A live-row update keeps its stored lower
@@ -297,6 +302,20 @@ try {
 }
 ```
 
+### Identity validity errors
+
+`IdentityValidityWindowError` refuses a future start, future end, inverted
+window, or a second non-identical open window for one current semantic pair.
+Its code identifies the reason: `IDENTITY_VALIDITY_FUTURE_START`,
+`IDENTITY_VALIDITY_FUTURE_END`, `IDENTITY_VALIDITY_INVERTED`, or
+`IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT`.
+
+`IdentityEndpointValidityError` (`IDENTITY_ENDPOINT_VALIDITY`) means an
+explicit assertion window extends outside an endpoint node's own validity or
+deletion bounds. Future or inverted identity windows are user-category input
+errors. A second non-identical open window and an endpoint-window conflict are
+constraint-category errors. Both classes are package-root exports.
+
 ### `IdentityMergeConflictError`
 
 Detected at merge **plan time** when the branches being merged carry opposing
@@ -326,6 +345,90 @@ if (isErr(result)) {
   throw result.error;
 }
 ```
+
+### `MergeConstraintConflictError`
+
+Returned when `merge()`, `mergeIncremental()`, or `applyMergePlan()` resolves a
+plan whose final graph violates a deterministic store constraint. The store
+remains the owner of constraint enforcement: the merge translates its typed
+refusal only at the commit boundary, after the transaction has rolled back.
+
+```typescript
+import {
+  isErr,
+  merge,
+  MergeConstraintConflictError,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, branches);
+if (isErr(result) && result.error instanceof MergeConstraintConflictError) {
+  console.log(result.error.code); // "GRAPH_MERGE_CONSTRAINT_CONFLICT"
+  console.log(result.error.category); // "constraint"
+  console.log(result.error.details.constraintCode); // e.g. "CARDINALITY_ERROR"
+  console.log(result.error.details.edgeKind); // copied from the store error
+  console.log(result.error.cause); // the original CardinalityError, etc.
+}
+```
+
+Cardinality, uniqueness, endpoint, disjointness, and restricted-delete
+refusals share this surface when they arise from node or edge application.
+The planner normally co-buckets nodes with the same declared unique key, but a
+late store-owned uniqueness refusal uses the same completeness boundary rather
+than falling back to a system error.
+Identity truth conflicts retain `IdentityMergeConflictError`; backend,
+environment, and stale-plan failures retain their existing system errors.
+Constraint failure is atomic: neither graph writes nor merge provenance records
+survive.
+
+### Merge plan and evidence errors
+
+The reviewable merge lifecycle also returns errors in its `Result` arm. It does
+not throw them:
+
+```typescript
+import {
+  applyMergePlan,
+  isErr,
+  planMerge,
+  StaleMergePlanError,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const planned = await planMerge(store, branches, options);
+if (isErr(planned)) throw planned.error;
+
+const applied = await applyMergePlan(store, planned.data);
+if (isErr(applied)) {
+  if (applied.error instanceof StaleMergePlanError) {
+    // The reviewed artifact no longer describes the target. Plan and review again.
+  }
+  throw applied.error;
+}
+```
+
+| Error | Code | Meaning |
+| --- | --- | --- |
+| `MergePlanCapabilityError` | `GRAPH_MERGE_PLAN_CAPABILITY` | The target cannot supply a durable revision fence for a cross-time plan. Enable `revisionTracking` or `history`; the contiguous `merge()` wrappers retain their documented compatibility behavior. |
+| `MergePlanningStaleError` | `GRAPH_MERGE_PLANNING_STALE` | The target revision changed between the planner's opening and closing observations. No artifact is returned. |
+| `StaleMergePlanError` | `GRAPH_MERGE_PLAN_STALE` | The target moved after planning, the plan already succeeded, or another concurrent application won. No plan writes committed. |
+| `InvalidMergePlanError` | `GRAPH_MERGE_PLAN_INVALID` | The value failed the versioned plan schema or a semantic invariant. |
+| `UnsupportedMergePlanVersionError` | `GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED` | `formatVersion` is not supported by this TypeGraph version. |
+| `MergePlanDigestMismatchError` | `GRAPH_MERGE_PLAN_DIGEST_MISMATCH` | Canonical plan content differs from the recorded digest. |
+| `MergePlanTargetMismatchError` | `GRAPH_MERGE_PLAN_TARGET_MISMATCH` | The plan names a different graph id from the supplied target. |
+| `MergePlanSchemaMismatchError` | `GRAPH_MERGE_PLAN_SCHEMA_MISMATCH` | The plan was resolved under a different active schema version or hash. |
+| `MergePlanOriginMismatchError` | `GRAPH_MERGE_PLAN_ORIGIN_MISMATCH` | The target has an independently-created revision clock, even if its numeric revision happens to match. |
+| `CandidateSourceError` | `GRAPH_MERGE_CANDIDATE_SOURCE` | A built-in candidate source failed. `details` identifies its source id, entity kind, and operation context. |
+| `MatchEvidenceError` | `GRAPH_MERGE_EVIDENCE` | Candidate evidence is malformed or a score is non-finite. `NaN` and infinity are refused, never serialized or silently dropped. |
+
+Plan validation and the target/schema/origin/revision fence run before canonical
+writes. The revision check is inside the same transaction as apply, so two
+concurrent attempts cannot both commit. A stale plan is not repaired or adapted:
+create a new plan and obtain approval for its new `digest`.
+
+Plans may contain the complete proposed application data. Their digest detects
+content changes and gives approval systems a stable identity, but it is not a
+signature and does not authenticate storage, authorize a caller, or prove who
+created the artifact. Protect plan data and enforce those trust decisions in the
+application before calling `applyMergePlan()`.
 
 ### `EndpointError`
 
@@ -627,6 +730,7 @@ Operational Identity lifecycle failures use stable `details.code` values on
 | `IDENTITY_SCHEMA_CONTRADICTION` | Existing nodes or assertions contradict the proposed identity profile or ontology, or the materialized closure disagrees with the assertions it was derived from. Run `rebuildIdentityClosure(store)` to recover from a closure mismatch. |
 | `IDENTITY_IMPORT_REQUIRES_PROFILE` | An interchange document carries an `identity` section but the target graph does not have the profile enabled. |
 | `IDENTITY_MERGE_REQUIRES_PROFILE` | A branch carries identity changes but the merge target graph does not have the profile enabled. |
+| `IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An identity-enabled export explicitly disabled temporal fields. Remove `includeTemporal` or set it to `true`; endpoint bounds are required to validate assertion windows on import. |
 | `IDENTITY_IMPORT_ID_CONFLICT` | An imported assertion id already exists in the target ledger identifying different truth (relation, endpoints, or validity window). |
 | `RECORDED_IDENTITY_SCHEMA_MISSING` | A `history: true` open of an identity-enabled graph could not find the recorded identity relation. Bundled backends provision it, so this is rare there and more likely on a custom backend. |
 
@@ -715,6 +819,44 @@ independent. See
 [Scaling branches and interchange](/graph-merge#scaling-branches-and-interchange)
 for which drivers are recognized as serialized.
 
+##### Declaring a connection the driver hides
+
+Recognition is a duck-type over the client object, so a serialized driver
+TypeGraph cannot identify (`expo-sqlite`, `op-sqlite`, `sqlite-proxy`,
+`pg-proxy`, Bun `SQL`, a postgres-js client capped through a string it does not
+coerce) is left unmarked and its stream pairs are not refused.
+`createSqliteBackend` and `createPostgresBackend` accept a `serializedResource`
+declaration for that gap — `{ mode: "shared", resource: client }` — and for the
+reverse case, `{ mode: "independent" }`, when the detection is wrong for your
+topology. See [Serialized connections](/backend-setup#serialized-connections).
+
+The declaration is applied or refused, never quietly ignored:
+
+| Declaration | Outcome |
+| --- | --- |
+| `{ mode: "shared", resource }` on a connection TypeGraph did not detect, or naming the client it did detect | The named object is the serialized resource; two backends naming the same object are one connection |
+| `{ mode: "shared", resource }` naming a **different** object than the one detected | `ConfigurationError` (`code: "CONFIGURATION_ERROR"`) from the factory, with `details.reason: "serialized-resource-conflict"` and `details.declaredKind` / `details.detectedKind` naming what each side was |
+| `{ mode: "independent" }` | Honored, whatever was detected — the documented escape hatch |
+
+The conflict is refused rather than resolved because two wrappers over one
+connection given two different sentinels would stop being seen as a pair, which
+is precisely the refusal this guard exists to make.
+
+The two `*Kind` details are constructor names (`"Database"`, `"BoundPool"`), not
+the handles themselves: `details` is what `toLogString()` serializes, and a
+driver handle there would print whatever that driver stores — a `pg.Pool` keeps
+its `connectionString`, password included — into your logs.
+
+`{ mode: "independent" }` lifts the shared-resource arm between two distinct
+backend objects. It does **not** lift
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`: one SQLite backend exporting into
+itself holds the one snapshot transaction its own import writes through, which
+is a fact about a single handle rather than a claim about connection topology.
+Pass a second backend for that case. That surviving refusal is SQLite-only, so
+on PostgreSQL a backend declared independent exporting into itself is not
+refused either — a client that hands out independent connections is exactly
+what the declaration claims.
+
 #### `ExportStreamCancelledError`
 
 An export stream whose `signal` fires settles with `ExportStreamCancelledError`
@@ -729,6 +871,20 @@ says which.
 `details.graphId` names the exported graph and `cause` carries the signal's own
 `reason` when the caller supplied one. A signal that is already aborted refuses
 the export before any transaction is opened. See
+[Cancelling an export](/interchange#cancelling-an-export).
+
+#### `ExportStreamIdleTimeoutError`
+
+An `exportGraphStream` configured with `idleTimeoutMs` settles with
+`ExportStreamIdleTimeoutError` (`code: "INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT"`)
+when its consumer does not request another chunk within that bound. The timeout
+measures only the interval after a chunk is yielded; time spent waiting for the
+backend to produce the next chunk does not count. `details.graphId` identifies
+the graph and
+`details.idleTimeoutMs` carries the configured bound. As with explicit
+cancellation, a transactional export rolls its snapshot back and releases its
+stream lease before the error is delivered; a non-transactional export held
+neither and abandons its remaining reads. See
 [Cancelling an export](/interchange#cancelling-an-export).
 
 #### Recorded-capture guard codes
@@ -1020,7 +1176,13 @@ try {
 | `VALIDATION_ERROR` | `ValidationError` | user | Schema validation failed |
 | `DISJOINT_ERROR` | `DisjointError` | constraint | Disjointness constraint violated |
 | `IDENTITY_CONTRADICTION` | `IdentityContradictionError` | constraint | Identity mutation would make the assertion ledger contradictory |
+| `IDENTITY_VALIDITY_FUTURE_START` | `IdentityValidityWindowError` | user | Identity assertion starts after the operation clock |
+| `IDENTITY_VALIDITY_FUTURE_END` | `IdentityValidityWindowError` | user | Identity assertion ends after the operation clock |
+| `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | user | Identity assertion ends before it starts |
+| `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
+| `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
+| `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
@@ -1035,3 +1197,4 @@ try {
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported |
 | `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation |
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
+| `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |

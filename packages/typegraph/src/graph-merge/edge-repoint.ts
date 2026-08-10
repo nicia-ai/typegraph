@@ -89,6 +89,7 @@ import type {
   JsonValue,
   NodeId,
   NodeType,
+  ValidityEndMutation,
 } from "./typegraph-internal";
 import type {
   BranchId,
@@ -184,8 +185,8 @@ export type StagedEdge = Readonly<{
    * a monotone claim that must not be lost to the survivor pick.
    */
   validFrom?: string;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 /**
  * A surviving merged edge after repoint + dedupe. `id` is the canonical survivor
@@ -207,8 +208,8 @@ export type MergedEdge = Readonly<{
   mergedIds: readonly EdgeId[];
   /** The survivor's {@link StagedEdge} window, if it carried one. */
   validFrom?: string;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 /**
  * The outcome of the repoint + dedupe cascade: the surviving merged edges, every
@@ -691,16 +692,26 @@ function foldEdgeSet(
   // only end any branch claimed.
   const preferredSurvivorEnd =
     survivor.staged.branchId === preferredBranchId ?
-      survivor.staged.validTo
+      typeof survivor.staged.validTo === "string" ?
+        { kind: "set" as const, validTo: survivor.staged.validTo }
+      : survivor.staged.clearValidTo === true ? { kind: "clear" as const }
+      : undefined
     : undefined;
   const foldedEnd =
     preferredSurvivorEnd ??
     resolveEndClaims(
       foldSet
-        .filter((edge) => edge.staged.validTo !== undefined)
+        .filter(
+          (edge) =>
+            edge.staged.validTo !== undefined ||
+            edge.staged.clearValidTo === true,
+        )
         .map((edge) => ({
           branchId: edge.staged.branchId,
-          validTo: requireDefined(edge.staged.validTo),
+          change:
+            typeof edge.staged.validTo === "string" ?
+              { kind: "set" as const, validTo: edge.staged.validTo }
+            : { kind: "clear" as const },
         })),
       preferredBranchId,
     );
@@ -708,7 +719,9 @@ function foldEdgeSet(
     ...(survivor.staged.validFrom === undefined ?
       {}
     : { validFrom: survivor.staged.validFrom }),
-    ...(foldedEnd === undefined ? {} : { validTo: foldedEnd }),
+    ...(foldedEnd?.kind === "set" ? { validTo: foldedEnd.validTo }
+    : foldedEnd?.kind === "clear" ? { clearValidTo: true as const }
+    : {}),
   };
 
   const contentKeys = new Set(foldSet.map((edge) => edge.dedupeKey));

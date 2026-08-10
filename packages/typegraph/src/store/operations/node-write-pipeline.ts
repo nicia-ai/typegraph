@@ -332,6 +332,7 @@ export async function applyNodeUpdate(
     uniqueConstraints: readonly UniqueConstraint[];
     validFrom?: string | null;
     validTo?: string;
+    clearValidTo?: true;
     /** See {@link UpdateNodeParams.expectedValidFrom}. */
     expectedValidFrom?: string | null;
   }> &
@@ -358,7 +359,6 @@ export async function applyNodeUpdate(
     id: string;
     props: Record<string, unknown>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
@@ -370,7 +370,6 @@ export async function applyNodeUpdate(
     incrementVersion: true,
   };
   if (args.validFrom !== undefined) updateParams.validFrom = args.validFrom;
-  if (args.validTo !== undefined) updateParams.validTo = args.validTo;
   if (args.expectedValidFrom !== undefined) {
     updateParams.expectedValidFrom = args.expectedValidFrom;
   }
@@ -381,7 +380,13 @@ export async function applyNodeUpdate(
     kind,
     id,
     plan,
-    () => backend.updateNode(updateParams),
+    () =>
+      backend.updateNode({
+        ...updateParams,
+        ...(args.clearValidTo === true ? { clearValidTo: true as const }
+        : args.validTo === undefined ? {}
+        : { validTo: args.validTo }),
+      }),
   );
 
   await Promise.all([

@@ -62,6 +62,7 @@ export {
   type PostgresTables,
   tables,
 } from "../drizzle/postgres";
+export type { SerializedResourceDeclaration } from "../transaction-resource";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,

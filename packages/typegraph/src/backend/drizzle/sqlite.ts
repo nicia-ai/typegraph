@@ -138,7 +138,11 @@ import {
   nowIso,
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
-import { markSerializedTransactionResource } from "../transaction-resource";
+import {
+  auditBackendResource,
+  resolveDeclaredBackendResource,
+  type SerializedResourceDeclaration,
+} from "../transaction-resource";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -236,6 +240,18 @@ export type SqliteBackendOptions = Readonly<{
    * may lower, but cannot raise, a hosted platform's hard parameter ceiling.
    */
   capabilities?: Partial<BackendCapabilities>;
+  /**
+   * Declare the connection this backend serializes every statement onto, when
+   * TypeGraph's driver predicates cannot see it (`expo-sqlite`, `op-sqlite`,
+   * `sqlite-proxy`, a bespoke adapter) — or declare that it serializes on
+   * nothing, when detection is wrong for your topology.
+   *
+   * Defaults to `{ mode: "detect" }`. See
+   * {@link SerializedResourceDeclaration} for what each mode means and for the
+   * one refusal it cannot lift (`same-sqlite-backend`: one backend object
+   * exporting into itself).
+   */
+  serializedResource?: SerializedResourceDeclaration;
 }>;
 
 const NODE_INSERT_PARAM_COUNT = 9;
@@ -685,7 +701,7 @@ function createSqliteOperationBackend(
   const batchConfig = computeSqliteBatchChunkSizes(
     capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
   );
-  const commonBackend = createCommonOperationBackend({
+  const commonOperationMembers = createCommonOperationBackend({
     batchConfig,
     execution: {
       execAll,
@@ -958,7 +974,7 @@ function createSqliteOperationBackend(
       };
 
   const operationBackend: InternalOperationBackend = {
-    ...commonBackend,
+    ...commonOperationMembers,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
     /**
@@ -1018,7 +1034,9 @@ function createSqliteOperationBackend(
       // read has no post-wait row recheck that could drop the active row from
       // its own snapshot. An absent row here therefore always means the graph
       // genuinely has no active schema.
-      const active = await commonBackend.getActiveSchema(params.graphId);
+      const active = await commonOperationMembers.getActiveSchema(
+        params.graphId,
+      );
       assertActiveSchemaVersion(
         params.graphId,
         params.expectedVersion,
@@ -1156,8 +1174,13 @@ function createSqliteOperationBackend(
  * that every statement from every wrapper over it runs on, in order.
  *
  * `protocol === "file"` is the client's own answer to "am I local?" — it covers
- * `file:` paths, `:memory:` databases, and an embedded replica's local file. A
- * REMOTE client (`http` / `ws`) opens an independent stream per transaction and
+ * `file:` paths, `:memory:` databases, and an embedded replica's local file. An
+ * embedded replica (`protocol: "file"` PLUS a `syncUrl`) is deliberately marked
+ * on the same evidence as any other local client: `syncUrl` names where the
+ * replica pulls FROM, while every statement this client executes still routes
+ * through the one local handle, so an open export snapshot on one wrapper still
+ * holds the connection another wrapper's import needs. A REMOTE client
+ * (`http` / `ws`) opens an independent stream per transaction and
  * must never be treated as one serialized resource; refusing concurrent work
  * there would refuse work that succeeds. The libsql methods are required
  * alongside the protocol so an unrelated object that happens to carry
@@ -1253,7 +1276,12 @@ export function createSqliteBackend(
 ): AdapterBackend<AnySqliteDatabase> {
   // Resolved before the backend exists so marking below is a lookup, never
   // work that could fail after wrappers already observed an unmarked backend.
-  const serializedConnection = getSerializedSqliteConnection(db);
+  // A `serializedResource` declaration that contradicts detection is refused
+  // here too, before any object a caller could hold has been built.
+  const resourceAudit = resolveDeclaredBackendResource(
+    getSerializedSqliteConnection(db),
+    options.serializedResource,
+  );
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? fts5Strategy;
   const profileHints = options.executionProfile ?? {};
@@ -1718,7 +1746,11 @@ export function createSqliteBackend(
       vectorStrategy,
       contributionMaterializer,
     });
-    return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
+    return gateFulltext(
+      txBackend,
+      contributionMaterializer.assertInitialized,
+      contributionMaterializer.refuseUnavailableFulltext,
+    );
   }
 
   const backend: AdapterBackend<AnySqliteDatabase> = {
@@ -1815,6 +1847,7 @@ export function createSqliteBackend(
     ...gateFulltextMethods(
       operations,
       contributionMaterializer.assertInitialized,
+      contributionMaterializer.refuseUnavailableFulltext,
     ),
 
     async executeDdl(ddl: string): Promise<void> {
@@ -2213,6 +2246,7 @@ export function createSqliteBackend(
               gateFulltext(
                 txBackend,
                 contributionMaterializer.assertInitialized,
+                contributionMaterializer.refuseUnavailableFulltext,
               ),
               db,
             );
@@ -2278,11 +2312,11 @@ export function createSqliteBackend(
     },
   };
 
-  // INVARIANT: mark before any wrapper can observe this backend — see
-  // transaction-resource.ts.
-  if (serializedConnection !== undefined) {
-    markSerializedTransactionResource(backend, serializedConnection);
-  }
+  // INVARIANT: audit before any wrapper can observe this backend — see
+  // transaction-resource.ts. Unconditional: an abstention recorded as
+  // "independent" is a verdict the guards can tell apart from a backend nobody
+  // looked at.
+  auditBackendResource(backend, resourceAudit);
 
   return backend;
 }

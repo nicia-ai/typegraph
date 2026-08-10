@@ -5,8 +5,11 @@ import type { CandidateEdge } from "../../src/graph-merge/candidate-gen";
 import type { ClusterResult } from "../../src/graph-merge/clustering";
 import {
   connectedComponents,
+  decisiveEdgesForCluster,
   enforceDiameter,
+  enforceDiameterWithEdges,
 } from "../../src/graph-merge/clustering";
+import { entityRef } from "../../src/graph-merge/evidence";
 import type { MergeKey } from "../../src/graph-merge/node-key";
 import { requireDefined } from "../../src/utils/presence";
 
@@ -23,9 +26,21 @@ function nodeId(value: string): MergeKey {
 function edge(a: string, b: string, score: number): CandidateEdge {
   const left = nodeId(a);
   const right = nodeId(b);
-  return left < right ?
-      { a: left, b: right, score }
-    : { a: right, b: left, score };
+  const endpoints =
+    left < right ? { a: left, b: right } : { a: right, b: left };
+  return {
+    ...endpoints,
+    score,
+    evidence: {
+      a: entityRef(endpoints.a),
+      b: entityRef(endpoints.b),
+      sources: [{ kind: "block", sourceId: "test" }],
+      decision: "scored",
+      strategy: { kind: "fulltext", fields: ["name"] },
+      score,
+      threshold: 0.5,
+    },
+  };
 }
 
 /** A stable, comparable view of a cluster partition for deep-equal assertions. */
@@ -162,6 +177,48 @@ describe("connectedComponents", () => {
       );
 
       expect(partitionOf(clusters)).toEqual([["A", "B"], ["C"]]);
+    });
+
+    it("builds the witness only from post-split surviving edges", () => {
+      // A-B is a weak cycle edge: it is dropped first without disconnecting A/B.
+      // C-D is then dropped to satisfy diameter 2. A/B remain together, proving a
+      // witness selected from the original graph could incorrectly cite A-B.
+      const edges = [
+        edge("A", "B", 0.1),
+        edge("A", "C", 0.9),
+        edge("B", "C", 0.9),
+        edge("C", "D", 0.2),
+        edge("D", "E", 0.9),
+      ];
+      const allIds = ["A", "B", "C", "D", "E"].map((value) => nodeId(value));
+      const guarded = enforceDiameterWithEdges(
+        connectedComponents(edges, allIds),
+        edges,
+        2,
+      );
+      expect(partitionOf(guarded.clusters)).toEqual([
+        ["A", "B", "C"],
+        ["D", "E"],
+      ]);
+      expect(
+        guarded.excludedEdges.map(({ edge: excluded }) => [
+          excluded.a,
+          excluded.b,
+        ]),
+      ).toEqual([
+        ["A", "B"],
+        ["C", "D"],
+      ]);
+
+      const abc = requireDefined(guarded.clusters[0]);
+      const decisive = decisiveEdgesForCluster(abc, guarded.survivingEdges);
+      expect(decisive).toHaveLength(2);
+      expect(
+        decisive.map((evidence) => [evidence.a.id, evidence.b.id]),
+      ).toEqual([
+        ["A", "C"],
+        ["B", "C"],
+      ]);
     });
   });
 

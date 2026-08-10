@@ -289,6 +289,17 @@ Three rules, each distilled from a recurring class of real defects:
   prefer returning the decision itself (the predicate, the fence, the plan)
   over a flag a caller re-derives it from — a consumer that cannot spell its
   own version cannot drift.
+- **A backend is derived through `src/backend/derive-backend.ts`, never
+  copied.** `deriveBackend` to decorate, `projectBackend` /
+  `projectBackendWithout` / `projectGraphBackend` to narrow. A spread,
+  `Object.assign` copy or rest-omission builds a NEW object that the
+  serialized-resource audit does not follow, and the import/clone guards then
+  let a read-and-write-through-one-connection stream proceed into a deadlock.
+- **An identifier ending in `Backend` denotes a whole backend object; name a
+  members fragment `*Members`.** The construction ratchet is a name selector, so
+  this is not a style preference: calling a `Pick<TransactionBackend, …>`
+  fragment `commonBackend` made the guardrail fire on a primitive construction,
+  and calling a real backend `members` would make it silent on a real copy.
 
 # Error Handling
 

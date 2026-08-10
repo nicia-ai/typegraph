@@ -81,6 +81,7 @@ type NormalizedResolution = Readonly<{
   kind: string;
   memberIds: readonly string[];
   branchOrigins: readonly string[];
+  decisiveEdges: MergeReport["resolutions"][number]["decisiveEdges"];
 }>;
 
 /** A delete/modify conflict in canonical form. */
@@ -116,7 +117,8 @@ type NormalizedValidityEnd = Readonly<{
   entity: string;
   kind: string;
   id: string;
-  validTo: string;
+  validTo: string | undefined;
+  clearValidTo: true | undefined;
   claimedBy: readonly string[];
   precedence: string | undefined;
 }>;
@@ -218,6 +220,7 @@ export function normalizeReport<G extends GraphDef>(
       branchOrigins: [...resolution.branchOrigins]
         .map((id) => id as string)
         .sort((left, right) => compareStrings(left, right)),
+      decisiveEdges: resolution.decisiveEdges,
     }))
     .sort((left, right) => compareStrings(left.canonicalId, right.canonicalId));
 
@@ -279,6 +282,7 @@ export function normalizeReport<G extends GraphDef>(
       kind: entry.kind,
       id: entry.id,
       validTo: entry.validTo,
+      clearValidTo: entry.clearValidTo,
       claimedBy: [...entry.claimedBy]
         .map((branchId) => branchId as string)
         .sort((left, right) => compareStrings(left, right)),

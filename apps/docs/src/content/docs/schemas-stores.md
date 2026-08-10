@@ -523,7 +523,7 @@ function createStore<G extends GraphDef>(
 | `schema` | `SqlSchema` | Custom table name configuration created with `createSqlSchema(...)` |
 | `queryDefaults.traversalExpansion` | `TraversalExpansion` | Default ontology expansion mode for traversals (default: `"inverse"`) |
 | `autoRefreshStatistics` | `false \| number` | Row threshold at which a single autocommit `bulkCreate`/`bulkInsert` triggers an automatic planner-statistics refresh (default: `1000`); `false` disables. See [Refreshing planner statistics](/backend-setup#refreshing-planner-statistics-after-bulk-loads). |
-| `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById` / `bulkUpsertById` item whose validated props already equal the existing live row (default: `false`). For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options) and [Materializing external event logs](/materializing-event-logs). |
+| `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById` or endpoint get-or-create update whose validated props and requested window already equal the existing live row; bulk forms behave identically (default: `false`). Node `getOrCreateByConstraint` updates are not coalesced; use `upsertById` for replay projectors that must avoid unchanged node history churn. For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options), [`getOrCreateByEndpoints`](#getorcreatebyendpointsfrom-to-props-options), and [Materializing external event logs](/materializing-event-logs). |
 
 **Example:**
 
@@ -692,8 +692,35 @@ The store provides typed node and edge collections via `store.nodes.*` and `stor
 Every write method below that accepts a `validFrom` option (`create`,
 `createFromRecord`, `upsertById`, `upsertByIdFromRecord`, `bulkCreate`,
 `bulkInsert`, `bulkUpsertById`, and their edge equivalents) defaults it to
-that operation's own creation timestamp when omitted — `validFrom` is never
-left open-ended. `validTo` remains optional and open-ended until set.
+that operation's own creation timestamp when omitted. `validTo` remains
+optional and open-ended until set.
+
+The one exception is a row **born already ended**: a write that CREATES or
+RESETS a row's window while stating a `validTo` at or before its own instant and
+no `validFrom` stores **no lower bound** ("ended at T, start unknown") rather
+than a start after its own end, and `meta.validFrom` reads back as `undefined`.
+Such a row is visible at every `asOf` coordinate before its end and at none after
+it. A `validTo` in the future is unaffected — it still stamps the creation
+timestamp, so the row is invisible at instants before it existed.
+
+One stated window reaches one stored shape. Every **node** write that resets the
+window takes the exception: `create`, `bulkCreate` and `bulkInsert` on a fresh id
+or on one naming a tombstone, and `upsertById` / `bulkUpsertById` resurrecting a
+tombstoned node — all of them store no lower bound for a lone historical
+`validTo`, and `meta.validFrom` reads back as `undefined` in every case. An
+**edge** is different, and deliberately: an edge create never lands on a
+tombstone (a taken id raises `Edge already exists`), and a tombstoned edge is
+reachable again only through `bulkUpsertById` or `getOrCreateByEndpoints`, both
+of which RETAIN the bound that row already carries and judge the stated `validTo`
+against it — so a `validTo` before that bound is refused. Pass `validFrom`
+alongside a historical `validTo` when an edge upsert may land on a tombstone.
+
+Writes that accept a validity-end mutation have three explicit states: omit both
+fields to preserve the stored end, pass `{ validTo }` to set or move it, or pass
+`{ clearValidTo: true }` to remove it and reopen the window. `validTo` and
+`clearValidTo` are mutually exclusive. Clearing is supported by node `update`,
+`upsertById`, `upsertByIdFromRecord`, and `bulkUpsertById`, plus edge `update`,
+`bulkUpsertById`, and both endpoint get-or-create forms.
 
 A window may not have negative width. Stating both endpoints out of order, or
 updating a row with a `validTo` that precedes its stored `validFrom`, raises a
@@ -702,7 +729,8 @@ a row stopped being true before it started, so no `asOf` coordinate could ever
 observe it. Two related shapes are legal: a ZERO-width window
 (`validTo === validFrom`), which is what a same-instant retraction produces; and
 a create carrying only a historical `validTo`, which means "born already ended"
-and is read back with the `includeEnded` temporal mode.
+and is read back at any `asOf` coordinate before that end, or through the
+`includeEnded` temporal mode.
 
 ### Node Collections
 
@@ -779,14 +807,15 @@ const [alice, bob, unknown] = await store.nodes.Person.getByIds([
 // unknown: undefined
 ```
 
-#### `update(id, props)`
+#### `update(id, props, options?)`
 
 Updates node properties.
 
 ```typescript
 store.nodes.Person.update(
   id: NodeId<Person>,
-  props: Partial<{ name: string; email?: string }>
+  props: Partial<{ name: string; email?: string }>,
+  options?: { validTo?: string } | { clearValidTo: true },
 ): Promise<Node<Person>>;
 ```
 
@@ -923,6 +952,7 @@ store.nodes.Person.upsertById(
   options?: {
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
   }
 ): Promise<Node<Person>>;
@@ -945,7 +975,8 @@ otherwise rewrite every row and grow recorded history by one per delivery. A
 write still happens (never coalesced) when the row is soft-deleted (an upsert
 resurrects it), when an explicit `validFrom` / `validTo` MOVES the window the row
 already holds, or when any prop differs after Zod normalization. Re-stating the
-window a row already holds coalesces like any other unchanged value, and a
+window a row already holds — including clearing an already-open end — coalesces
+like any other unchanged value after backend capability validation, and a
 `validFrom` naming a bound a live row does not hold is refused rather than
 written (see
 [Immutable validity lower bounds](/errors/#immutable_validity_lower_bound)) —
@@ -976,6 +1007,7 @@ store.nodes.Person.upsertByIdFromRecord(
   options?: {
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
   }
 ): Promise<Node<Person>>;
@@ -1037,6 +1069,7 @@ store.nodes.Person.bulkUpsertById(
     props: { name: string; email?: string };
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
   }[]
 ): Promise<Node<Person>[]>;
@@ -1275,7 +1308,7 @@ Updates edge properties.
 store.edges.worksAt.update(
   id: EdgeId<worksAt>,
   props: Partial<{ role: string }>,
-  options?: { validTo?: string }
+  options?: { validTo?: string } | { clearValidTo: true }
 ): Promise<Edge<worksAt>>;
 ```
 
@@ -1524,6 +1557,7 @@ store.edges.worksAt.bulkUpsertById(
     props?: { role: string };
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
   }[]
 ): Promise<Edge<worksAt>[]>;
 ```
@@ -1543,6 +1577,7 @@ store.edges.worksAt.getOrCreateByEndpoints(
     ifExists?: "return" | "update"; // Default: "return"
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve"; // Default: "refuse"
   }
 ): Promise<{
@@ -1566,6 +1601,20 @@ effective start — see
 [Inverted validity windows](/errors/#inverted_validity_window). When `ifExists`
 is omitted or `"return"`, a live match produces the `"found"` action and neither
 temporal option changes the edge.
+`clearValidTo` is the exception: a live match can apply it only under
+`ifExists: "update"`. Supplying it with the default/`"return"` mode refuses with
+`ConfigurationError` code `CLEAR_VALID_TO_REQUIRES_UPDATE` instead of silently
+returning an ended edge. A create or tombstone resurrection can still apply the
+clear request.
+
+With `coalesceUnchangedUpserts: true`, an `ifExists: "update"` match whose
+validated props and requested validity bounds already equal the live edge is a
+no-op. It returns the existing edge with action `"found"`; action `"updated"`
+therefore always means an UPDATE ran. The same rule applies per item to
+`bulkGetOrCreateByEndpoints`. Confirming that no-op requires the endpoint
+match-key convergence fence; a top-level backend without transactions refuses
+it with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` rather than eliding the write from
+an unfenced read.
 
 #### `bulkGetOrCreateByEndpoints(items, options?)`
 
@@ -1579,6 +1628,7 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
     props: { role: string };
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
   }[],
   options?: {

@@ -21,7 +21,10 @@ import {
   defineGraph,
   defineNode,
   type DynamicEdgeCollection,
+  type DynamicNode,
   type DynamicNodeCollection,
+  type DynamicNodeKind,
+  type DynamicNodeReference,
   type Edge,
   type EdgeId,
   type ExternalRecordedReadSource,
@@ -33,6 +36,14 @@ import {
   type AdapterStore,
   type HistoryStore,
   type HistoryStoreBackend,
+  type IdentityAssertion,
+  type IdentityAssertionResult,
+  IdentityEndpointValidityError,
+  type IdentityNode,
+  type IdentityNodeRefInput,
+  type IdentityNodeReference,
+  type IdentityValidityWindow,
+  IdentityValidityWindowError,
   type LiveStoreOptions,
   type MeasurableAdapterHistoryTransactionContext,
   type MeasurableTransactionContext,
@@ -42,6 +53,7 @@ import {
   type KindAnnotations,
   type NodeId,
   type NodeRef,
+  type RecordedInstant,
   recordedRelation,
   type RecordedReadStore,
   type ResolvedSqlTableNames,
@@ -201,6 +213,184 @@ const graph = defineGraph({
   },
   ontology: [],
 });
+
+const identityGraph = defineGraph({
+  id: "public_api_identity_test_graph",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+declare const identityStore: Store<typeof identityGraph>;
+declare const identityPerson: Awaited<
+  ReturnType<typeof identityStore.nodes.Person.create>
+>;
+const dynamicIdentityCollection =
+  identityStore.getNodeCollectionOrThrow("RuntimeTag");
+declare const dynamicIdentityNode: Awaited<
+  ReturnType<typeof dynamicIdentityCollection.create>
+>;
+declare const dynamicIdentityReference: DynamicNodeReference<"RuntimeTag">;
+declare const recordedInstant: RecordedInstant;
+
+expectType<DynamicNodeCollection<"RuntimeTag">>(dynamicIdentityCollection);
+expectType<DynamicNodeKind<"RuntimeTag">>(dynamicIdentityNode.kind);
+expectAssignable<"RuntimeTag">(dynamicIdentityNode.kind);
+expectAssignable<DynamicNode>(dynamicIdentityNode);
+expectAssignable<DynamicNodeReference>(dynamicIdentityReference);
+expectAssignable<IdentityNodeRefInput<typeof identityGraph>>(
+  dynamicIdentityNode,
+);
+expectAssignable<IdentityNodeRefInput<typeof identityGraph>>(
+  dynamicIdentityReference,
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    kind: "RuntimeTypo",
+    id: "runtime-id",
+  }),
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    kind: "RuntimeTypo",
+    id: dynamicIdentityNode.id,
+  }),
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    ...dynamicIdentityNode,
+    kind: "RuntimeTypo",
+  }),
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    ...dynamicIdentityReference,
+    kind: "RuntimeTypo",
+  }),
+);
+expectError(identityStore.identity.membersOf({ id: "missing-kind" }));
+expectError(identityStore.identity.membersOf({ kind: "missing-id" }));
+
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore.identity.representativeOf(dynamicIdentityNode),
+);
+expectType<Promise<readonly IdentityNodeReference<typeof identityGraph>[]>>(
+  identityStore.identity.membersOf(dynamicIdentityNode),
+);
+expectType<Promise<readonly IdentityNodeReference<typeof identityGraph>[]>>(
+  identityStore.identity.membersOf(dynamicIdentityReference),
+);
+expectType<Promise<readonly IdentityNode<typeof identityGraph>[]>>(
+  identityStore.identity.nodesOf(dynamicIdentityNode),
+);
+expectType<Promise<boolean>>(
+  identityStore.identity.areSame(identityPerson, dynamicIdentityNode),
+);
+expectType<Promise<boolean>>(
+  identityStore.identity.areDifferent(identityPerson, dynamicIdentityNode),
+);
+expectType<Promise<readonly IdentityAssertion<typeof identityGraph>[]>>(
+  identityStore.identity.assertionsOf(dynamicIdentityNode),
+);
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.identity.assertSame(identityPerson, dynamicIdentityNode),
+);
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.identity.assertSame(identityPerson, dynamicIdentityReference),
+);
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.identity.assertDifferent(identityPerson, dynamicIdentityNode),
+);
+expectAssignable<IdentityValidityWindow>({
+  validFrom: "2020-01-01T00:00:00.000Z",
+  validTo: "2021-01-01T00:00:00.000Z",
+});
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.identity.assertSame(identityPerson, dynamicIdentityNode, {
+    validFrom: "2020-01-01T00:00:00.000Z",
+  }),
+);
+expectType<Promise<readonly IdentityAssertionResult<typeof identityGraph>[]>>(
+  identityStore.identity.bulkAssertSame([
+    {
+      a: identityPerson,
+      b: dynamicIdentityNode,
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2021-01-01T00:00:00.000Z",
+    },
+  ]),
+);
+expectAssignable<Error>(
+  new IdentityValidityWindowError({
+    reason: "inverted",
+    validFrom: "2021-01-01T00:00:00.000Z",
+    validTo: "2020-01-01T00:00:00.000Z",
+    operationInstant: "2022-01-01T00:00:00.000Z",
+  }),
+);
+expectAssignable<Error>(
+  new IdentityEndpointValidityError({
+    endpoint: { kind: "Person", id: "person" },
+    assertionWindow: { validFrom: "2020-01-01T00:00:00.000Z" },
+    endpointWindow: { validFrom: "2021-01-01T00:00:00.000Z" },
+  }),
+);
+expectType<Promise<readonly IdentityAssertionResult<typeof identityGraph>[]>>(
+  identityStore.identity.bulkAssertDifferent([
+    { a: identityPerson, b: dynamicIdentityNode },
+  ]),
+);
+expectType<Promise<IdentityAssertion<typeof identityGraph> | undefined>>(
+  identityStore.identity.retractSameAssertion(
+    identityPerson,
+    dynamicIdentityNode,
+  ),
+);
+expectType<Promise<IdentityAssertion<typeof identityGraph> | undefined>>(
+  identityStore.identity.retractDifferentAssertion(
+    identityPerson,
+    dynamicIdentityNode,
+  ),
+);
+
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore.transaction((tx) =>
+    tx.identity.representativeOf(dynamicIdentityNode),
+  ),
+);
+expectType<DynamicNodeCollection<"RuntimeTag"> | undefined>(
+  identityStore.getNodeCollection("RuntimeTag"),
+);
+expectType<Promise<void>>(
+  identityStore.transaction(async (tx) => {
+    const collection = tx.getNodeCollection("RuntimeTag");
+    expectType<DynamicNodeCollection<"RuntimeTag"> | undefined>(collection);
+    if (collection === undefined) return;
+    const node = await collection.create({ label: "transactional" });
+    await tx.identity.assertSame(identityPerson, node);
+  }),
+);
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.transaction((tx) =>
+    tx.identity.assertSame(identityPerson, dynamicIdentityNode),
+  ),
+);
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore
+    .asOf("2026-01-01T00:00:00.000Z")
+    .identity.representativeOf(dynamicIdentityNode),
+);
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore
+    .asOfRecorded(recordedInstant)
+    .identity.representativeOf(dynamicIdentityNode),
+);
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore.snapshot().identity.representativeOf(dynamicIdentityNode),
+);
 
 declare const store: Store<typeof graph>;
 declare const backend: GraphBackend;

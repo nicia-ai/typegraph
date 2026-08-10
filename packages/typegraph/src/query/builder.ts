@@ -62,6 +62,7 @@ export type {
   DynamicEdgeType,
   DynamicFieldBuilder,
   DynamicNodeAccessor,
+  DynamicNodeKind,
   DynamicNodeType,
   DynamicSelectableEdge,
   DynamicSelectableNode,

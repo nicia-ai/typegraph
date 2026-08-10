@@ -15,6 +15,7 @@ import {
   StaleVersionError,
   TrustedImportError,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import type { GraphBackend, TrustedImportOptions } from "../src/backend/types";
 import {
@@ -131,13 +132,12 @@ describe("trusted import", () => {
     const backend = createTestBackend();
     const trustedImport = requireDefined(backend.trustedImport);
     const observedOptions: (TrustedImportOptions | undefined)[] = [];
-    const observedBackend: GraphBackend = {
-      ...backend,
+    const observedBackend: GraphBackend = deriveBackend(backend, {
       async trustedImport(fn, options) {
         observedOptions.push(options);
         return trustedImport(fn, options);
       },
-    };
+    });
     const [store] = await createStoreWithSchema(trustedGraph, observedBackend);
     const empty = graphData([]);
     const { nodes, edges, ...header } = empty;

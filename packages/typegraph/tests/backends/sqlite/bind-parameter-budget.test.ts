@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineGraph, defineNode } from "../../../src";
+import { wrapWithManagedClose } from "../../../src/backend/derive-backend";
 import {
   computeSqliteBatchChunkSizes,
   createSqliteBackend,
@@ -22,7 +23,6 @@ import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import {
   DURABLE_OBJECT_MAX_BIND_PARAMETERS,
   SQLITE_MAX_BIND_PARAMETERS,
-  wrapWithManagedClose,
 } from "../../../src/backend/types";
 import { requireDefined } from "../../../src/utils/presence";
 import { createTestBackend, createTestDatabase } from "../../test-utils";

@@ -94,6 +94,16 @@ interface WriteTransactionSession {
 
 const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
 
+/** Forces the enclosing managed Store transaction to consume one revision. */
+export function forceWriteTransactionRevision(
+  target: TransactionBackend,
+): boolean {
+  const session = writeTransactionSessions.get(target);
+  if (session === undefined) return false;
+  session.wrote = true;
+  return true;
+}
+
 /**
  * Graphs whose per-graph write lock a still-running {@link runInWriteTransaction}
  * frame already holds on a given target.

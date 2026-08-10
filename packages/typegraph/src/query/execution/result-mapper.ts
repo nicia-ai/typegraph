@@ -3,6 +3,10 @@
  *
  * Transforms raw database rows into typed SelectContext and result objects.
  */
+import {
+  normalizeRequiredRowTimestamp,
+  normalizeRowTimestamp,
+} from "../../backend/row-mappers";
 import { type NodeType } from "../../core/types";
 import { normalizePath } from "../../utils";
 import { createDataKeyedBag } from "../../utils/object";
@@ -103,14 +107,6 @@ const RESERVED_EDGE_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Converts null to undefined for consistent typing.
- * Database backends return null for missing values, but our types use undefined.
- */
-function nullToUndefined<T>(value: T | null | undefined): T | undefined {
-  return value === null ? undefined : value;
-}
-
-/**
  * The props to spread onto a selectable node/edge, with reserved keys dropped
  * so user props cannot collide with system fields (id, kind, meta, …).
  *
@@ -157,14 +153,25 @@ export function buildSelectableNode(
   // Metadata columns - these are now always projected in CTEs
   // Normalize null → undefined for optional fields
   const version = row[`${alias}_version`] as number;
-  const validFrom = nullToUndefined(
-    row[`${alias}_valid_from`] as string | null,
+  const validFrom = normalizeRowTimestamp(
+    row[`${alias}_valid_from`],
+    `${alias}_valid_from`,
   );
-  const validTo = nullToUndefined(row[`${alias}_valid_to`] as string | null);
-  const createdAt = row[`${alias}_created_at`] as string;
-  const updatedAt = row[`${alias}_updated_at`] as string;
-  const deletedAt = nullToUndefined(
-    row[`${alias}_deleted_at`] as string | null,
+  const validTo = normalizeRowTimestamp(
+    row[`${alias}_valid_to`],
+    `${alias}_valid_to`,
+  );
+  const createdAt = normalizeRequiredRowTimestamp(
+    row[`${alias}_created_at`],
+    `${alias}_created_at`,
+  );
+  const updatedAt = normalizeRequiredRowTimestamp(
+    row[`${alias}_updated_at`],
+    `${alias}_updated_at`,
+  );
+  const deletedAt = normalizeRowTimestamp(
+    row[`${alias}_deleted_at`],
+    `${alias}_deleted_at`,
   );
 
   const result: Record<string, unknown> = {
@@ -230,14 +237,25 @@ function buildSelectableEdge(
 
   // Metadata columns - these are always projected in traversal CTEs
   // Normalize null → undefined for optional fields
-  const validFrom = nullToUndefined(
-    row[`${alias}_valid_from`] as string | null,
+  const validFrom = normalizeRowTimestamp(
+    row[`${alias}_valid_from`],
+    `${alias}_valid_from`,
   );
-  const validTo = nullToUndefined(row[`${alias}_valid_to`] as string | null);
-  const createdAt = row[`${alias}_created_at`] as string;
-  const updatedAt = row[`${alias}_updated_at`] as string;
-  const deletedAt = nullToUndefined(
-    row[`${alias}_deleted_at`] as string | null,
+  const validTo = normalizeRowTimestamp(
+    row[`${alias}_valid_to`],
+    `${alias}_valid_to`,
+  );
+  const createdAt = normalizeRequiredRowTimestamp(
+    row[`${alias}_created_at`],
+    `${alias}_created_at`,
+  );
+  const updatedAt = normalizeRequiredRowTimestamp(
+    row[`${alias}_updated_at`],
+    `${alias}_updated_at`,
+  );
+  const deletedAt = normalizeRowTimestamp(
+    row[`${alias}_deleted_at`],
+    `${alias}_deleted_at`,
   );
 
   const result: Record<string, unknown> = {

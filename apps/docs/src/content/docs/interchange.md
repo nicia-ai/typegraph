@@ -96,10 +96,12 @@ interface GraphData {
 
 `validFrom` has three states: the key **absent** means it wasn't requested
 (`includeTemporal: false`, the default) — import defaults it to the
-import's own creation timestamp. An **explicit `null`** means the source
-row is confirmed to have no lower bound (open-left validity) — import
-preserves that instead of re-stamping it. A **string** is an explicit
-value, carried through unchanged.
+import's own creation timestamp, unless the record also states a `validTo`
+at or before that instant, in which case it is imported with no lower bound
+("ended at T, start unknown") rather than one past its own end. An
+**explicit `null`** means the source row is confirmed to have no lower bound
+(open-left validity) — import preserves that instead of re-stamping it. A
+**string** is an explicit value, carried through unchanged.
 
 ### Format Version Compatibility
 
@@ -194,14 +196,32 @@ recorded as an `entityType: "identity"` entry in `result.errors`.
 | `identityMode` | `"state" \| "archival"` | `"state"` | Export current identity assertions, or current plus ended assertions |
 | `signal` | `AbortSignal` | none | Cancel the export: roll its snapshot transaction back and release the connection. See [Cancelling an export](#cancelling-an-export) |
 
+`exportGraphStream` also accepts `idleTimeoutMs`, a positive integer with no
+default. It bounds how long a delivered chunk may remain unacknowledged before
+the stream settles itself. The clock stops as soon as the consumer requests the
+next chunk, so a slow database read does not count as consumer idleness.
+
 **Round-trip caveat:** with the default `includeTemporal: false`, exported
 records carry no `validFrom`/`validTo`. On import, an omitted `validFrom`
-defaults to the *import's own* creation timestamp — so a plain
+defaults to the *import's own* creation timestamp (a born-already-ended record
+is the exception noted above, and keeps no lower bound) — so a plain
 `exportGraph` + `importGraph` round trip does **not** reproduce the
 source's original valid-time window; every imported record becomes valid
 from import time forward. Pass `includeTemporal: true` on export when the
 clone needs to match the source's `asOf` behavior exactly (this is what
 `branch()` does internally).
+
+Identity-enabled graphs are the exception: their exports default temporal
+fields on, because assertion windows cannot be validated against endpoints
+without the endpoint bounds. Explicit `includeTemporal: false` is refused for
+those graphs.
+
+**Repair a legacy graph before exporting it.** A row an older library version
+stored with a backwards window (`valid_from > valid_to`) exports as it is stored
+and is then refused **per row** on re-import, because the import validates the
+stated pair — so an unrepaired graph does not round-trip. Run
+[`repairInvertedValidityWindows`](/schema-management#repairing-inverted-validity-windows)
+first; it normalizes those rows to the open-left shape import accepts.
 
 **`includeTemporal: true` with `onConflict: "update"`:** an update leg sends the
 document's `validTo` and never its `validFrom`, because a live row's lower bound
@@ -234,13 +254,14 @@ cooperative exit. Async-generator `finally` blocks do not run on garbage
 collection, so that snapshot transaction stays open for the life of the process
 — and on a serialized connection every later export and every later import is
 then refused for a stream nobody is reading. If you might abandon an iterator,
-pass a `signal`:
+pass a `signal` or configure an idle timeout:
 
 ```typescript
 const controller = new AbortController();
 const iterator = exportGraphStream(store, {
   batchSize: 1000,
   signal: controller.signal,
+  idleTimeoutMs: 30_000,
 })[Symbol.asyncIterator]();
 
 try {
@@ -275,11 +296,21 @@ already finished does nothing, so a single controller can safely span a whole
 job. `exportGraph` accepts `signal` too — there it simply makes the call reject
 instead of running to completion.
 
+When `idleTimeoutMs` expires, a later pull rejects with
+[`ExportStreamIdleTimeoutError`](/errors#exportstreamidletimeouterror), with code
+`"INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT"`. Its `details.graphId` and
+`details.idleTimeoutMs` identify the stream and configured bound. The timeout is
+stream-only: `exportGraph` owns and promptly advances its internal consumer, so
+it accepts `signal` but not `idleTimeoutMs`. The option has no default because a
+stream may intentionally spend an unbounded amount of time processing a chunk;
+callers that cannot choose a safe idle bound should retain an `AbortController`
+and abort on their own job deadline instead.
+
 There is deliberately no garbage-collection fallback. A `FinalizationRegistry`
 cannot close this gap: any cleanup state able to settle an abandoned stream has
 to reach the stream's internals, and a registry holds its state strongly, so
 doing so would keep the abandoned stream reachable and the finalizer would never
-run. The signal is the mechanism.
+run. Explicit cancellation and the idle timeout are the mechanisms.
 
 ## Importing Data
 
@@ -689,6 +720,20 @@ transaction opens rather than when the iterable is constructed. The codes (`INTE
 `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`) and the `details.requested` /
 `details.heldBy` pairing they carry are documented in
 [Interchange serialized-connection guard codes](/errors#interchange-serialized-connection-guard-codes).
+
+Which connections count as serialized is read off the driver, so a driver
+TypeGraph cannot identify is left unmarked and a stream pair on it can still
+wedge. `createSqliteBackend` and `createPostgresBackend` take a
+`serializedResource` declaration for both directions of that gap —
+`{ mode: "shared", resource: client }` marks a connection TypeGraph cannot see,
+`{ mode: "independent" }` escapes a detection that is wrong for your topology.
+The escape hatch lifts the shared-resource refusal between two distinct backends
+only: one SQLite backend exporting into **itself** stays refused with
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`, because that is one handle holding
+the one snapshot transaction its own import needs. That surviving refusal is
+SQLite-only, so on PostgreSQL a backend declared independent may export into
+itself. See
+[Serialized connections](/backend-setup#serialized-connections).
 
 ## Best Practices
 

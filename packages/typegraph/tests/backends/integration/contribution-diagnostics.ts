@@ -33,6 +33,7 @@ import { z } from "zod";
 
 import {
   ContributionRebuildUnsupportedError,
+  ContributionUnavailableError,
   defineGraph,
   defineNode,
   resolveGraphVectorSlots,
@@ -680,6 +681,84 @@ export function registerContributionDiagnosticIntegrationTests(
             ]
           : [{ contribution: "fulltext", state: "ready" }];
         expect(result.entries).toEqual(expected);
+      });
+
+      it("refuses a searchable write with a typed error after fulltext storage disappears", async () => {
+        const store = context.getStore();
+        const contribution = fulltextContribution();
+        const nodeId = "orphaned-fulltext-write";
+
+        await executeDdl(
+          context.getBackend(),
+          `DROP TABLE IF EXISTS ${contribution.tableName}`,
+        );
+
+        const error = await captureRejection(
+          store.nodes.Article.create(
+            {
+              title: "Orphaned write",
+              body: "This node insert must roll back.",
+              category: "health",
+              published: true,
+            },
+            { id: nodeId },
+          ),
+        );
+
+        expect(error).toBeInstanceOf(ContributionUnavailableError);
+        if (!(error instanceof ContributionUnavailableError)) {
+          throw new Error("Expected ContributionUnavailableError");
+        }
+        expect(error).toMatchObject({
+          code: "CONTRIBUTION_UNAVAILABLE",
+          details: {
+            graphId: integrationTestGraph.id,
+            logicalName: "fulltext",
+            physicalName: contribution.tableName,
+            state: "physical-storage-missing",
+          },
+        });
+        expect(error.cause).toBeDefined();
+        expect(
+          await store.nodes.Article.getById(nodeId as never),
+        ).toBeUndefined();
+      });
+
+      it("refuses fulltext search with a typed error after its storage disappears", async () => {
+        const store = context.getStore();
+        const contribution = fulltextContribution();
+        await store.nodes.Article.create({
+          title: "Orphaned search",
+          body: "Warm the fulltext write path before dropping its storage.",
+          category: "health",
+          published: true,
+        });
+        await executeDdl(
+          context.getBackend(),
+          `DROP TABLE IF EXISTS ${contribution.tableName}`,
+        );
+
+        const error = await captureRejection(
+          store.search.fulltext("Article", {
+            query: "orphaned",
+            limit: 10,
+          }),
+        );
+
+        expect(error).toBeInstanceOf(ContributionUnavailableError);
+        if (!(error instanceof ContributionUnavailableError)) {
+          throw new Error("Expected ContributionUnavailableError");
+        }
+        expect(error).toMatchObject({
+          code: "CONTRIBUTION_UNAVAILABLE",
+          details: {
+            graphId: integrationTestGraph.id,
+            logicalName: "fulltext",
+            physicalName: contribution.tableName,
+            state: "physical-storage-missing",
+          },
+        });
+        expect(error.cause).toBeDefined();
       });
 
       it("escalates a dropped fulltext table through repair to rebuild", async (ctx) => {

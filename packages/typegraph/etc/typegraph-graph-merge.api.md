@@ -68,6 +68,9 @@ type AndPredicate = Readonly<{
 // @public
 type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, readonly NodeType[] | undefined>;
 
+// @public
+export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact): Promise<Result<MergeReport<G>, MergeError>>;
+
 // @public (undocumented)
 type ArrayFieldAccessor<U> = BaseFieldAccessor & Readonly<{
     contains: (value: U) => Predicate;
@@ -105,6 +108,7 @@ export function asBranchId(value: string): BranchId;
 type BackendCapabilities = Readonly<{
     transactions: boolean;
     windowFunctions: boolean;
+    clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
     readonly constraintClaims?: boolean;
@@ -116,6 +120,15 @@ type BackendCapabilities = Readonly<{
 
 // @public (undocumented)
 type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy">;
+
+// @public
+type BackendValidityEndMutation = Readonly<{
+    validTo?: string;
+    clearValidTo?: never;
+}> | Readonly<{
+    validTo?: never;
+    clearValidTo: true;
+}>;
 
 // @public
 export type BaseAmbiguity = Readonly<{
@@ -144,6 +157,8 @@ type BaseMember = Readonly<{
     kind: string;
     props: Readonly<Record<string, JsonValue>>;
     origin: "base";
+    validFrom?: string;
+    validTo?: string;
 }>;
 
 // @public
@@ -296,10 +311,46 @@ type BulkFindEdgesFromResult<G extends GraphDef, K extends EdgeKinds<G>> = Reado
 }>;
 
 // @public
+export type CandidateDiagnostic = Readonly<{
+    evidence: Extract<MatchEvidence, Readonly<{
+        decision: "scored";
+    }>>;
+    scoreDecision: "accepted" | "rejected";
+    reason?: "noComparableValues";
+    clusterDisposition?: "retained" | Readonly<{
+        kind: "excluded";
+        reason: "diameter" | "baseAmbiguity";
+    }>;
+}> | Readonly<{
+    evidence: Extract<MatchEvidence, Readonly<{
+        decision: "definitional";
+    }>>;
+    scoreDecision: "accepted";
+    clusterDisposition: Readonly<{
+        kind: "excluded";
+        reason: "diameter" | "baseAmbiguity";
+    }>;
+}>;
+
+// @public
+export type CandidateDiagnostics = Readonly<{
+    entries: readonly CandidateDiagnostic[];
+    total: number;
+    limit: number;
+    truncated: boolean;
+}>;
+
+// @public
+export type CandidateDiagnosticsOptions = Readonly<{
+    limit: number;
+}>;
+
+// @public
 type CandidateEdge = Readonly<{
     a: MergeKey;
     b: MergeKey;
     score: number;
+    evidence: MatchEvidence;
 }>;
 
 // @public
@@ -308,6 +359,7 @@ type CandidatePair<K extends NodeType = NodeType> = Readonly<{
     b: MergeKey;
     left: Node<K>;
     right: Node<K>;
+    sources: readonly MatchSource[];
 }>;
 
 // @public
@@ -315,6 +367,13 @@ export type CandidateSource = Readonly<{
     readonly id: string;
     generate(scope: SourceScope): Promise<SourceResult>;
 }>;
+
+// @public
+export class CandidateSourceError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_CANDIDATE_SOURCE";
+}
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
@@ -835,6 +894,9 @@ const DYNAMIC_EDGE_BRAND: unique symbol;
 const DYNAMIC_NODE_BRAND: unique symbol;
 
 // @public (undocumented)
+const DYNAMIC_NODE_REFERENCE_BRAND: unique symbol;
+
+// @public (undocumented)
 type DynamicEdgeAccessor = Readonly<{
     id: StringFieldAccessor;
     kind: StringFieldAccessor;
@@ -862,6 +924,9 @@ type DynamicFieldBuilder = BaseFieldAccessor & Readonly<{
 }>;
 
 // @public
+type DynamicNode<K extends string = string> = Node<DynamicNodeType<K>>;
+
+// @public
 type DynamicNodeAccessor = Readonly<{
     id: StringFieldAccessor;
     kind: StringFieldAccessor;
@@ -870,10 +935,22 @@ type DynamicNodeAccessor = Readonly<{
 }>;
 
 // @public
-type DynamicNodeCollection = WidenBrandedIds<NodeCollection<NodeType, string>>;
+type DynamicNodeCollection<K extends string = string> = WidenBrandedIds<NodeCollection<DynamicNodeType<K>, string>>;
+
+// @public
+type DynamicNodeKind<K extends string = string> = K & Readonly<{
+    [DYNAMIC_NODE_BRAND]: true;
+}>;
+
+// @public
+type DynamicNodeReference<K extends string = string> = Readonly<{
+    kind: DynamicNodeKind<K>;
+    id: NodeId<DynamicNodeType<K>>;
+    [DYNAMIC_NODE_REFERENCE_BRAND]: true;
+}>;
 
 // @public (undocumented)
-type DynamicNodeType = NodeType & Readonly<{
+type DynamicNodeType<K extends string = string> = NodeType<DynamicNodeKind<K>> & Readonly<{
     [DYNAMIC_NODE_BRAND]: true;
 }>;
 
@@ -962,9 +1039,7 @@ type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To 
     create: (from: NodeRef<From>, to: NodeRef<To>, ...args: EdgeCreateArguments<E>) => Promise<Edge<E, From, To>>;
     getById: (id: EdgeId<E>, options?: QueryOptions) => Promise<Edge<E, From, To> | undefined>;
     getByIds: (ids: readonly EdgeId<E>[], options?: QueryOptions) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
-    update: (id: EdgeId<E>, props: Partial<z.input<E["schema"]>>, options?: Readonly<{
-        validTo?: string;
-    }>) => Promise<Edge<E, From, To>>;
+    update: (id: EdgeId<E>, props: Partial<z.input<E["schema"]>>, options?: ValidityEndMutation) => Promise<Edge<E, From, To>>;
     findFrom: (from: NodeRef<From>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
     bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
@@ -992,14 +1067,13 @@ type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To 
         validFrom?: string;
         validTo?: string;
     }>[]) => Promise<Edge<E, From, To>[]>;
-    bulkUpsertById: (items: readonly Readonly<{
+    bulkUpsertById: (items: readonly (Readonly<{
         id: EdgeId<E>;
         from: NodeRef<From>;
         to: NodeRef<To>;
         props?: z.input<E["schema"]>;
         validFrom?: string;
-        validTo?: string;
-    }>[]) => Promise<Edge<E, From, To>[]>;
+    }> & ValidityEndMutation)[]) => Promise<Edge<E, From, To>[]>;
     bulkInsert: (items: readonly Readonly<{
         from: NodeRef<From>;
         to: NodeRef<To>;
@@ -1011,14 +1085,13 @@ type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To 
     bulkDelete: (ids: readonly EdgeId<E>[]) => Promise<void>;
     findByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, options?: EdgeFindByEndpointsOptions<E>, temporal?: QueryOptions) => Promise<Edge<E, From, To> | undefined>;
     getOrCreateByEndpoints: (from: NodeRef<From>, to: NodeRef<To>, props: z.input<E["schema"]>, options?: EdgeGetOrCreateByEndpointsOptions<E>) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>>;
-    bulkGetOrCreateByEndpoints: (items: readonly Readonly<{
+    bulkGetOrCreateByEndpoints: (items: readonly (Readonly<{
         from: NodeRef<From>;
         to: NodeRef<To>;
         props: z.input<E["schema"]>;
         validFrom?: string;
-        validTo?: string;
         onImmutableLowerBound?: "preserve" | "refuse";
-    }>[], options?: Pick<EdgeGetOrCreateByEndpointsOptions<E>, "matchOn" | "ifExists">) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>[]>;
+    }> & ValidityEndMutation)[], options?: Pick<EdgeGetOrCreateByEndpointsOptions<E>, "matchOn" | "ifExists">) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>[]>;
 }>;
 
 // @public
@@ -1068,8 +1141,7 @@ type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> = Readonly<{
     ifExists?: IfExistsMode;
     validFrom?: string;
     onImmutableLowerBound?: "preserve" | "refuse";
-    validTo?: string;
-}>;
+}> & ValidityEndMutation;
 
 // @public
 type EdgeGetOrCreateByEndpointsResult<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType> = Readonly<{
@@ -1204,11 +1276,18 @@ type EncodeTilde<S extends string> = S extends `${infer Head}~${infer Tail}` ? `
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
+export type EntityRef = Readonly<{
+    kind: string;
+    id: NodeId<NodeType>;
+}>;
+
+// @public
 export type EntityResolution = Readonly<{
     canonicalId: NodeId<NodeType>;
     memberIds: readonly NodeId<NodeType>[];
     kind: string;
     branchOrigins: readonly BranchId[];
+    decisiveEdges: readonly MatchEvidence[];
 }>;
 
 // @public
@@ -1744,6 +1823,7 @@ type GraphBackend = Readonly<{
     deleteFulltextBatch?: (this: void, params: DeleteFulltextBatchParams) => Promise<void>;
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
+    ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -2011,8 +2091,8 @@ type HybridVectorOptions = Readonly<{
 type IdentityAssertion<G extends GraphDef> = Readonly<{
     id: IdentityAssertionId;
     relation: IdentityRelation;
-    a: GraphNodeReference<G>;
-    b: GraphNodeReference<G>;
+    a: IdentityNodeReference<G>;
+    b: IdentityNodeReference<G>;
     validFrom: string;
     validTo?: string;
 }>;
@@ -2029,6 +2109,9 @@ type IdentityAssertionResult<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
+export type IdentityAssertionWriteFacade<G extends GraphDef> = Pick<IdentityFacade<G>, "assertSame" | "assertDifferent" | "bulkAssertSame" | "bulkAssertDifferent">;
+
+// @public
 type IdentityChange = Readonly<{
     type: ChangeType;
     severity: ChangeSeverity;
@@ -2037,8 +2120,8 @@ type IdentityChange = Readonly<{
 
 // @public
 type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
-    assertSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertionResult<G>>;
-    assertDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertionResult<G>>;
+    assertSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
+    assertDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
     bulkAssertSame: (pairs: readonly IdentityPair<G>[]) => Promise<readonly IdentityAssertionResult<G>[]>;
     bulkAssertDifferent: (pairs: readonly IdentityPair<G>[]) => Promise<readonly IdentityAssertionResult<G>[]>;
     retractAssertion: (id: IdentityAssertionId) => Promise<IdentityAssertion<G> | undefined>;
@@ -2057,21 +2140,24 @@ export class IdentityMergeConflictError extends MergeError {
 // @public
 type IdentityNode<G extends GraphDef> = {
     [K in NodeKinds<G>]: Node<G["nodes"][K]["type"]>;
-}[NodeKinds<G>];
+}[NodeKinds<G>] | DynamicNode;
 
 // @public
-type IdentityNodeRefInput<G extends GraphDef> = NodeRef<AllNodeTypes<G>>;
+type IdentityNodeReference<G extends GraphDef> = GraphNodeReference<G> | DynamicNodeReference;
+
+// @public
+type IdentityNodeRefInput<G extends GraphDef> = NodeRef<AllNodeTypes<G>> | DynamicNode | DynamicNodeReference;
 
 // @public
 type IdentityPair<G extends GraphDef> = Readonly<{
     a: IdentityNodeRefInput<G>;
     b: IdentityNodeRefInput<G>;
-}>;
+}> & IdentityValidityWindow;
 
 // @public
 type IdentityReadFacade<G extends GraphDef> = Readonly<{
-    representativeOf: (ref: IdentityNodeRefInput<G>) => Promise<GraphNodeReference<G> | undefined>;
-    membersOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly GraphNodeReference<G>[]>;
+    representativeOf: (ref: IdentityNodeRefInput<G>) => Promise<IdentityNodeReference<G> | undefined>;
+    membersOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityNodeReference<G>[]>;
     nodesOf: (ref: IdentityNodeRefInput<G>) => Promise<readonly IdentityNode<G>[]>;
     areSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
     areDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<boolean>;
@@ -2094,6 +2180,12 @@ type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphId
     includeIdentityMembers?: boolean;
 }> : Readonly<{
     includeIdentityMembers?: never;
+}>;
+
+// @public
+type IdentityValidityWindow = Readonly<{
+    validFrom?: string;
+    validTo?: string;
 }>;
 
 // @public
@@ -2220,6 +2312,37 @@ type IndexWhereOperand = Readonly<{
 // @public
 type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
+// @public (undocumented)
+const INGESTION_BRANCH_BRAND: unique symbol;
+
+// @public
+const INGESTION_IMPORT_TARGET_BRAND: unique symbol;
+
+// @public
+export type IngestionBranch<G extends GraphDef> = IngestionImportTarget<G> & Readonly<{
+    [INGESTION_BRANCH_BRAND]: true;
+    id: BranchId;
+    base: BaseVersion;
+    nodes: IngestionNodeCollections<G>;
+    edges: Store<G>["edges"];
+    close: () => Promise<void>;
+}> & ("identity" extends keyof Store<G> ? Readonly<{
+    identity: IdentityAssertionWriteFacade<G>;
+}> : Readonly<Record<never, never>>);
+
+// @public
+export function ingestionBranch<G extends GraphDef>(baseStore: GraphBranch<G>["store"], makeBackend: MakeBackend, options?: BranchOptions): Promise<Result<IngestionBranch<G>, BranchError>>;
+
+// @public
+export type IngestionImportTarget<G extends GraphDef> = Readonly<{
+    [INGESTION_IMPORT_TARGET_BRAND]: G;
+}>;
+
+// @public
+export type IngestionNodeCollections<G extends GraphDef> = Readonly<{
+    [K in keyof Store<G>["nodes"]]-?: Pick<Store<G>["nodes"][K], "create" | "getById" | "getByIds" | "update" | "updateWhere" | "delete" | "hardDelete" | "find" | "count" | "createFromRecord" | "upsertById" | "upsertByIdFromRecord" | "bulkCreate" | "bulkUpsertById" | "bulkInsert" | "bulkDelete" | "bulkFindByIndex">;
+}>;
+
 // @public
 type InitialQueryBuilder<G extends GraphDef, CoordinateState extends QueryCoordinateState = "open"> = QueryBuilder<G, EmptyAliasMap, EmptyEdgeAliasMap, EmptyRecursiveAliasMap, CoordinateState>;
 
@@ -2329,6 +2452,15 @@ export class InvalidMergeOptionsError extends MergeError {
     constructor(message: string, options?: MergeErrorOptions);
     // (undocumented)
     readonly code: "GRAPH_MERGE_INVALID_OPTIONS";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public
+export class InvalidMergePlanError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: string;
     // (undocumented)
     protected static readonly errorCategory = "user";
 }
@@ -2556,6 +2688,75 @@ type MatchesOptions = Readonly<{
 }>;
 
 // @public
+export type MatchEvidence = Readonly<{
+    a: EntityRef;
+    b: EntityRef;
+    sources: readonly MatchSource[];
+    decision: "definitional";
+}> | Readonly<{
+    a: EntityRef;
+    b: EntityRef;
+    sources: readonly MatchSource[];
+    decision: "scored";
+    strategy: MatchStrategy;
+    score: number;
+    threshold: number;
+}>;
+
+// @public
+export class MatchEvidenceError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_EVIDENCE";
+}
+
+// @public
+export type MatchSource = Readonly<{
+    kind: "block";
+    sourceId: string;
+}> | Readonly<{
+    kind: "unique";
+    sourceId: string;
+    constraintName: string;
+}> | Readonly<{
+    kind: "baseUnique";
+    sourceId: string;
+    constraintName: string;
+}> | Readonly<{
+    kind: "baseIndex";
+    sourceId: string;
+    indexName: string;
+}> | Readonly<{
+    kind: "keyless";
+    sourceId: string;
+}> | Readonly<{
+    kind: "retype";
+    sourceId: string;
+}> | Readonly<{
+    kind: "custom";
+    sourceId: string;
+    metadata?: JsonValue | undefined;
+}>;
+
+// @public
+export type MatchStrategy = Readonly<{
+    kind: "fulltext";
+    fields: readonly string[];
+}> | Readonly<{
+    kind: "vector";
+    fields: readonly string[];
+}> | Readonly<{
+    kind: "hybrid";
+    fields: readonly string[];
+    weights: Readonly<{
+        vector: number;
+        fulltext: number;
+    }>;
+}> | Readonly<{
+    kind: "custom";
+}>;
+
+// @public
 type MaterializeIndexesEntry = Readonly<{
     indexName: string;
     entity: IndexEntity;
@@ -2618,7 +2819,7 @@ type MeasurableTransactionContext<G extends GraphDef> = TransactionContext<G> & 
 }>;
 
 // @public
-export function merge<G extends GraphDef>(store: Store<G>, branches: readonly GraphBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergeReport<G>, MergeError>>;
+export function merge<G extends GraphDef>(store: Store<G>, branchInputs: readonly MergeBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergeReport<G>, MergeError>>;
 
 // @public
 export const MERGE_ERROR_CODES: {
@@ -2627,8 +2828,20 @@ export const MERGE_ERROR_CODES: {
     readonly branch: "GRAPH_MERGE_BRANCH_ERROR";
     readonly similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE";
     readonly conflict: "GRAPH_MERGE_CONFLICT";
+    readonly constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
     readonly identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT";
     readonly baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH";
+    readonly planCapability: "GRAPH_MERGE_PLAN_CAPABILITY";
+    readonly planInvalid: "GRAPH_MERGE_PLAN_INVALID";
+    readonly planVersionUnsupported: "GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED";
+    readonly planDigestMismatch: "GRAPH_MERGE_PLAN_DIGEST_MISMATCH";
+    readonly planTargetMismatch: "GRAPH_MERGE_PLAN_TARGET_MISMATCH";
+    readonly planSchemaMismatch: "GRAPH_MERGE_PLAN_SCHEMA_MISMATCH";
+    readonly planOriginMismatch: "GRAPH_MERGE_PLAN_ORIGIN_MISMATCH";
+    readonly planStale: "GRAPH_MERGE_PLAN_STALE";
+    readonly planningStale: "GRAPH_MERGE_PLANNING_STALE";
+    readonly candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE";
+    readonly evidence: "GRAPH_MERGE_EVIDENCE";
 };
 
 // @public
@@ -2642,12 +2855,44 @@ export const MERGE_OPTION_DEFAULTS: {
     readonly persistProvenance: false;
 };
 
+// @public (undocumented)
+export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
+
+// @public (undocumented)
+export const MERGE_PLAN_FORMAT_VERSION: 1;
+
+// @public
+export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G>;
+
 // @public
 export class MergeConflictError extends MergeError {
     constructor(message: string, options?: MergeErrorOptions);
     // (undocumented)
     readonly code: "GRAPH_MERGE_CONFLICT";
 }
+
+// @public
+export class MergeConstraintConflictError extends MergeError {
+    constructor(cause: TypeGraphError);
+    // (undocumented)
+    readonly category: "constraint";
+    // (undocumented)
+    readonly cause: TypeGraphError;
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
+    // (undocumented)
+    readonly details: MergeConstraintConflictErrorDetails;
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
+}
+
+// @public
+export type MergeConstraintConflictErrorDetails = Readonly<{
+    constraintCode: string;
+    constraintErrorName: string;
+    constraintDetails: Readonly<Record<string, unknown>>;
+    [key: string]: unknown;
+}>;
 
 // @public
 export type MergedCounts = Readonly<{
@@ -2680,7 +2925,7 @@ export function mergeIncremental<G extends GraphDef>(args: MergeIncrementalArgs<
 export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
     forkPoint: Store<G>;
     target: Store<G>;
-    branches: readonly GraphBranch<G>[];
+    branches: readonly MergeBranch<G>[];
     options?: Omit<MergeOptions<G>, "target">;
 }>;
 
@@ -2703,9 +2948,334 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
     embedder?: Embedder;
     target?: Store<G>;
     maxComparisonsPerKind?: number;
+    candidateDiagnostics?: CandidateDiagnosticsOptions;
     clusterMaxDiameter?: number;
     branchOrder?: readonly BranchId[];
     provenanceWeights?: ReadonlyMap<BranchId, number>;
+}>;
+
+// @public (undocumented)
+export type MergePlanAnchors = Readonly<{
+    kind: "snapshot";
+    base: Readonly<{
+        graphId: string;
+        baseVersion: string;
+    }>;
+    branches: readonly MergePlanBranchAnchor[];
+}> | Readonly<{
+    kind: "incremental";
+    forkPoint: Readonly<{
+        graphId: string;
+        baseVersion: string;
+        schema: MergePlanSchemaFence;
+    }>;
+    branches: readonly MergePlanBranchAnchor[];
+}>;
+
+// @public
+export type MergePlanArtifact = MergePlanArtifactV1;
+
+// @public (undocumented)
+export type MergePlanArtifactV1 = Readonly<{
+    formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
+    digest: MergePlanDigest;
+    mode: "snapshot" | "incremental";
+    target: MergePlanTargetFence;
+    anchors: MergePlanAnchors;
+    proposed: MergePlanProposedSummary;
+    writes: MergePlanWrites;
+    guards: MergePlanGuards;
+    review: MergePlanReview;
+    provenance: MergePlanProvenanceOptions;
+}>;
+
+// @public (undocumented)
+export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+
+// @public (undocumented)
+export type MergePlanBranchAnchor = Readonly<{
+    branchId: string;
+    baseVersion: string;
+}>;
+
+// @public (undocumented)
+export type MergePlanCandidateDiagnostic = Readonly<{
+    evidence: MergePlanMatchEvidence;
+    scoreDecision: "accepted" | "rejected";
+    reason?: "noComparableValues" | undefined;
+    clusterDisposition?: "retained" | Readonly<{
+        kind: "excluded";
+        reason: "diameter" | "baseAmbiguity";
+    }> | undefined;
+}>;
+
+// @public (undocumented)
+export type MergePlanCanonicalMapping = Readonly<{
+    member: MergePlanEntityRef;
+    canonical: MergePlanEntityRef;
+}>;
+
+// @public
+export class MergePlanCapabilityError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_PLAN_CAPABILITY";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public (undocumented)
+export type MergePlanDiagnostics = Readonly<{
+    entries: readonly MergePlanCandidateDiagnostic[];
+    total: number;
+    limit: number;
+    truncated: boolean;
+}>;
+
+// @public (undocumented)
+export type MergePlanDigest = Readonly<{
+    algorithm: typeof MERGE_PLAN_DIGEST_ALGORITHM;
+    value: string;
+}>;
+
+// @public
+export class MergePlanDigestMismatchError extends InvalidMergePlanError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_PLAN_DIGEST_MISMATCH";
+}
+
+// @public (undocumented)
+export type MergePlanEdgeDelete = MergePlanEntityRef;
+
+// @public (undocumented)
+export type MergePlanEdgeUpsert = Readonly<{
+    kind: string;
+    id: string;
+    from: MergePlanEntityRef;
+    to: MergePlanEntityRef;
+    setProps: Readonly<Record<string, JsonValue>>;
+    unsetProps: readonly string[];
+    validFrom?: string | undefined;
+    validTo?: string | undefined;
+}>;
+
+// @public (undocumented)
+export type MergePlanEntityRef = Readonly<{
+    kind: string;
+    id: string;
+}>;
+
+// @public (undocumented)
+export type MergePlanEntityResolution = Readonly<{
+    canonicalId: string;
+    memberIds: readonly string[];
+    kind: string;
+    branchOrigins: readonly string[];
+    decisiveEdges: readonly MergePlanMatchEvidence[];
+}>;
+
+// @public (undocumented)
+export type MergePlanGuards = Readonly<{
+    canonicalMappings: readonly MergePlanCanonicalMapping[];
+    retypes: readonly MergePlanRetype[];
+    deletedNodes: readonly MergePlanEntityRef[];
+    incremental?: Readonly<{
+        tombstoneResurrection: "refuse";
+        lossyUpdates: "refuse";
+        edgeIdentity: "preserve";
+    }>;
+}>;
+
+// @public (undocumented)
+export type MergePlanIdentityAssertion = Readonly<{
+    id: string;
+    relation: "same" | "different";
+    a: MergePlanEntityRef;
+    b: MergePlanEntityRef;
+    validFrom: string;
+    validTo?: string | undefined;
+    endedBy?: MergePlanEntityRef | undefined;
+}>;
+
+// @public (undocumented)
+export type MergePlanMatchEvidence = Readonly<{
+    a: MergePlanEntityRef;
+    b: MergePlanEntityRef;
+    sources: readonly MergePlanMatchSource[];
+    decision: "definitional";
+}> | Readonly<{
+    a: MergePlanEntityRef;
+    b: MergePlanEntityRef;
+    sources: readonly MergePlanMatchSource[];
+    decision: "scored";
+    strategy: MergePlanSimilarityStrategy;
+    score: number;
+    threshold: number;
+}>;
+
+// @public (undocumented)
+export type MergePlanMatchSource = Readonly<{
+    kind: "block";
+    sourceId: string;
+}> | Readonly<{
+    kind: "unique";
+    sourceId: string;
+    constraintName: string;
+}> | Readonly<{
+    kind: "baseUnique";
+    sourceId: string;
+    constraintName: string;
+}> | Readonly<{
+    kind: "baseIndex";
+    sourceId: string;
+    indexName: string;
+}> | Readonly<{
+    kind: "keyless";
+    sourceId: string;
+}> | Readonly<{
+    kind: "retype";
+    sourceId: string;
+}> | Readonly<{
+    kind: "custom";
+    sourceId: string;
+    metadata?: JsonValue | undefined;
+}>;
+
+// @public
+export class MergePlanningStaleError extends StaleMergePlanError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_PLANNING_STALE";
+}
+
+// @public (undocumented)
+export type MergePlanNodeDelete = MergePlanEntityRef;
+
+// @public (undocumented)
+export type MergePlanNodeUpsert = Readonly<{
+    kind: string;
+    id: string;
+    setProps: Readonly<Record<string, JsonValue>>;
+    unsetProps: readonly string[];
+    validFrom?: string | undefined;
+    validTo?: string | undefined;
+}>;
+
+// @public
+export class MergePlanOriginMismatchError extends InvalidMergePlanError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_PLAN_ORIGIN_MISMATCH";
+}
+
+// @public (undocumented)
+export type MergePlanProposedSummary = Readonly<{
+    nodes: Readonly<{
+        upserts: number;
+        deletions: number;
+    }>;
+    edges: Readonly<{
+        upserts: number;
+        deletions: number;
+    }>;
+    identity: Readonly<{
+        assertions: number;
+        retractions: number;
+    }>;
+}>;
+
+// @public (undocumented)
+export type MergePlanProvenanceOptions = Readonly<{
+    includeInReport: boolean;
+    persist: boolean;
+}>;
+
+// @public (undocumented)
+export type MergePlanRetype = Readonly<{
+    entity: MergePlanEntityRef;
+    toKind: string;
+}>;
+
+// @public (undocumented)
+export type MergePlanReview = Readonly<{
+    resolutions: readonly MergePlanEntityResolution[];
+    conflicts: readonly JsonValue[];
+    deleteModifyConflicts: readonly JsonValue[];
+    typeReconciliations: readonly MergePlanTypeReconciliation[];
+    dropped: readonly JsonValue[];
+    validityEnds: readonly JsonValue[];
+    baseAmbiguities: readonly JsonValue[];
+    provenanceRecords: readonly JsonValue[];
+    warnings: readonly string[];
+    diagnostics?: MergePlanDiagnostics | undefined;
+}>;
+
+// @public (undocumented)
+export type MergePlanRevisionFence = Readonly<{
+    origin: string;
+    revision: string | null;
+}>;
+
+// @public (undocumented)
+export type MergePlanSchemaFence = Readonly<{
+    managed: boolean;
+    version: number;
+    hash: string;
+}>;
+
+// @public
+export class MergePlanSchemaMismatchError extends InvalidMergePlanError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_PLAN_SCHEMA_MISMATCH";
+}
+
+// @public (undocumented)
+export type MergePlanSimilarityStrategy = Readonly<{
+    kind: "fulltext" | "vector";
+    fields: readonly string[];
+}> | Readonly<{
+    kind: "hybrid";
+    fields: readonly string[];
+    weights: Readonly<{
+        vector: number;
+        fulltext: number;
+    }>;
+}> | Readonly<{
+    kind: "custom";
+}>;
+
+// @public (undocumented)
+export type MergePlanTargetFence = Readonly<{
+    graphId: string;
+    schema: MergePlanSchemaFence;
+    revision: MergePlanRevisionFence;
+}>;
+
+// @public
+export class MergePlanTargetMismatchError extends InvalidMergePlanError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_PLAN_TARGET_MISMATCH";
+}
+
+// @public (undocumented)
+export type MergePlanTypeReconciliation = Readonly<{
+    entityId: string;
+    fromTypes: readonly string[];
+    toType: string;
+    decisiveEdges?: readonly MergePlanMatchEvidence[] | undefined;
+}>;
+
+// @public (undocumented)
+export type MergePlanWrites = Readonly<{
+    nodeDeletes: readonly MergePlanNodeDelete[];
+    nodeUpserts: readonly MergePlanNodeUpsert[];
+    edgeDeletes: readonly MergePlanEdgeDelete[];
+    edgeUpserts: readonly MergePlanEdgeUpsert[];
+    identityAssertions: readonly MergePlanIdentityAssertion[];
+    identityRetractions: readonly MergePlanIdentityAssertion[];
 }>;
 
 // @public
@@ -2720,6 +3290,7 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
     baseAmbiguities: readonly BaseAmbiguity[];
     provenance: ProvenanceIndex;
     warnings: readonly string[];
+    candidateDiagnostics?: CandidateDiagnostics;
     provenancePersisted?: Readonly<{
         graphId: string;
         count: number;
@@ -2805,9 +3376,7 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
     }>) => Promise<Node<N>>;
     getById: (id: NodeId<N>, options?: QueryOptions) => Promise<Node<N> | undefined>;
     getByIds: (ids: readonly NodeId<N>[], options?: QueryOptions) => Promise<readonly (Node<N> | undefined)[]>;
-    update: (id: NodeId<N>, props: Partial<z.input<N["schema"]>>, options?: Readonly<{
-        validTo?: string;
-    }>) => Promise<Node<N>>;
+    update: (id: NodeId<N>, props: Partial<z.input<N["schema"]>>, options?: ValidityEndMutation) => Promise<Node<N>>;
     updateWhere: (params: Readonly<{
         patch: Partial<z.input<N["schema"]>>;
         where?: (accessor: string extends N["kind"] ? DynamicNodeAccessor : NodeAccessor<N>) => Predicate;
@@ -2837,27 +3406,24 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
     }>) => Promise<Node<N>>;
     upsertById: (id: string, props: z.input<N["schema"]>, options?: Readonly<{
         validFrom?: string;
-        validTo?: string;
         onImmutableLowerBound?: "preserve" | "refuse";
-    }>) => Promise<Node<N>>;
+    }> & ValidityEndMutation) => Promise<Node<N>>;
     upsertByIdFromRecord: (id: string, data: Record<string, unknown>, options?: Readonly<{
         validFrom?: string;
-        validTo?: string;
         onImmutableLowerBound?: "preserve" | "refuse";
-    }>) => Promise<Node<N>>;
+    }> & ValidityEndMutation) => Promise<Node<N>>;
     bulkCreate: (items: readonly Readonly<{
         props: z.input<N["schema"]>;
         id?: string;
         validFrom?: string;
         validTo?: string;
     }>[]) => Promise<Node<N>[]>;
-    bulkUpsertById: (items: readonly Readonly<{
+    bulkUpsertById: (items: readonly (Readonly<{
         id: string;
         props: z.input<N["schema"]>;
         validFrom?: string;
-        validTo?: string;
         onImmutableLowerBound?: "preserve" | "refuse";
-    }>[]) => Promise<Node<N>[]>;
+    }> & ValidityEndMutation)[]) => Promise<Node<N>[]>;
     bulkInsert: (items: readonly Readonly<{
         props: z.input<N["schema"]>;
         id?: string;
@@ -2992,6 +3558,7 @@ export type NormalizedMergeOptions<G extends GraphDef = GraphDef> = Readonly<{
     target?: MergeOptions<G>["target"];
     maxComparisonsPerKind?: number;
     clusterMaxDiameter?: number;
+    candidateDiagnostics?: CandidateDiagnosticsOptions;
     branchOrder?: readonly BranchId[];
     provenanceWeights?: ReadonlyMap<BranchId, number>;
 }>;
@@ -3169,6 +3736,12 @@ class Placeholder {
     // (undocumented)
     readonly name: string;
 }
+
+// @public
+export function planMerge<G extends GraphDef>(store: Store<G>, branchInputs: readonly MergeBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+
+// @public
+export function planMergeIncremental<G extends GraphDef>(args: MergeIncrementalArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
 
 // @public (undocumented)
 type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
@@ -4173,6 +4746,13 @@ type SqlTextChunk = Readonly<{
 }>;
 
 // @public
+export class StaleMergePlanError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: string;
+}
+
+// @public
 type Store<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, Store<G>>;
 
 // @public (undocumented)
@@ -4193,8 +4773,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     edges: GraphEdgeCollections<G>;
     algorithms: GraphAlgorithms<G>;
     search: StoreSearch<G>;
-    getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
-    getNodeCollectionOrThrow: (kind: string) => DynamicNodeCollection;
+    getNodeCollection: <const K extends string>(kind: K) => DynamicNodeCollection<K> | undefined;
+    getNodeCollectionOrThrow: <const K extends string>(kind: K) => DynamicNodeCollection<K>;
     getEdgeCollection: (kind: string) => DynamicEdgeCollection | undefined;
     getEdgeCollectionOrThrow: (kind: string) => DynamicEdgeCollection;
     getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
@@ -4269,6 +4849,7 @@ interface StoreRef<in out T> {
 // @internal
 type StoreRuntime<G extends GraphDef> = Readonly<{
     backend: GraphBackend;
+    queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
     recordedNodeGetById: <N extends NodeType>(kind: string, id: NodeId<N>, coordinate: ReadCoordinate) => Promise<Node<N> | undefined>;
     recordedNodeGetByIds: <N extends NodeType>(kind: string, ids: readonly NodeId<N>[], coordinate: ReadCoordinate) => Promise<readonly (Node<N> | undefined)[]>;
@@ -4281,6 +4862,17 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
+    applyResolvedNodeUniqueness: <Output>(target: TransactionBackend, writes: Readonly<{
+        upserts: readonly Readonly<{
+            kind: string;
+            id: string;
+            props: Readonly<Record<string, unknown>>;
+        }>[];
+        releases: readonly Readonly<{
+            kind: string;
+            id: string;
+        }>[];
+    }>, apply: () => Promise<Output>) => Promise<Output>;
     readCurrentIdentityAssertions: (mode: "state" | "archival", options?: Readonly<{
         nodeKinds?: readonly string[];
         includeDeleted?: boolean;
@@ -4402,7 +4994,24 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         created: number;
         skipped: number;
     }>>;
-    applyIdentityMergeAtTarget: (target: GraphBackend | TransactionBackend, retractionIds: readonly string[], assertions: readonly Readonly<{
+    applyIdentityMergeAtTarget: (target: GraphBackend | TransactionBackend, retractions: readonly Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        b: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        validFrom: string;
+        validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
+    }>[], assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{
@@ -4711,7 +5320,7 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
     nodes: GraphNodeCollections<G>;
     edges: GraphEdgeCollections<G>;
     backend: TransactionReadBackend;
-    getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
+    getNodeCollection: <const K extends string>(kind: K) => DynamicNodeCollection<K> | undefined;
 }> & (G["identity"] extends GraphIdentityConfig ? Readonly<{
     identity: IdentityFacade<G>;
 }> : Readonly<Record<never, never>>);
@@ -4845,6 +5454,7 @@ export type TypeReconciliation = Readonly<{
     entityId: NodeId<NodeType>;
     fromTypes: readonly string[];
     toType: string;
+    decisiveEdges?: readonly MatchEvidence[];
 }>;
 
 // @public
@@ -4942,6 +5552,13 @@ type UniqueRow = Readonly<{
 }>;
 
 // @public
+export class UnsupportedMergePlanVersionError extends InvalidMergePlanError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED";
+}
+
+// @public
 export function unwrap<T, E>(result: Result<T, E>): T;
 
 // @public
@@ -4955,10 +5572,10 @@ type UpdateEdgeParams = Readonly<{
     toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
+    expectedValidTo?: string | null;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 type UpdateNodeParams = Readonly<{
@@ -4967,11 +5584,10 @@ type UpdateNodeParams = Readonly<{
     id: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 type UpdateNodeSetParams = Readonly<{
@@ -5041,14 +5657,22 @@ type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, 
 export const VALIDITY_END_TARGET_PRECEDENCE: "target";
 
 // @public
+type ValidityEndMutation = BackendValidityEndMutation;
+
+// @public
 export type ValidityEndResolution = Readonly<{
     entity: "node" | "edge";
     kind: string;
     id: string;
-    validTo: string;
     claimedBy: readonly BranchId[];
     precedence?: typeof VALIDITY_END_TARGET_PRECEDENCE;
-}>;
+}> & (Readonly<{
+    validTo: string;
+    clearValidTo?: never;
+}> | Readonly<{
+    clearValidTo: true;
+    validTo?: never;
+}>);
 
 // @public
 type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" | "embedding" | "unknown";

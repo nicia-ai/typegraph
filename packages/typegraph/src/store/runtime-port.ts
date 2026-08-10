@@ -40,6 +40,22 @@ export const STORE_RUNTIME: unique symbol =
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
+  /**
+   * @internal The backend this Store's queries actually execute through for
+   * `target` — the Store's own backend when `target` is omitted.
+   *
+   * It is the SAME private construction the query path uses rather than a
+   * reconstruction of it, because the object it returns is the one a lost
+   * derivation corrupts: the hooked query backend is a transient local inside
+   * query construction that is stored nowhere, so no other handle on it exists
+   * and a regression there is invisible to every assertion about
+   * {@link StoreRuntime.backend}.
+   *
+   * NOTE for anything asserting on it: with no query hook configured this
+   * returns its argument unchanged, so a hookless Store answers with the very
+   * object it was handed and a comparison against that object is a tautology.
+   */
+  queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
   sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
   recordedNodeGetById: <N extends NodeType>(
     kind: string,
@@ -85,6 +101,23 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
   rebuildIdentityClosure: () => Promise<void>;
   validateIdentity: () => Promise<void>;
+  /**
+   * Validates one final resolved node write set, then clears the affected
+   * uniqueness sidecars so its upserts may claim their approved keys in any
+   * order. The caller must supply a transaction-bound backend.
+   */
+  applyResolvedNodeUniqueness: <Output>(
+    target: TransactionBackend,
+    writes: Readonly<{
+      upserts: readonly Readonly<{
+        kind: string;
+        id: string;
+        props: Readonly<Record<string, unknown>>;
+      }>[];
+      releases: readonly Readonly<{ kind: string; id: string }>[];
+    }>,
+    apply: () => Promise<Output>,
+  ) => Promise<Output>;
   /**
    * @internal Reads the graph's identity assertions in transfer shape, honoring
    * this store's SQL binding. Used by interchange export, base-version
@@ -213,7 +246,15 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   ) => Promise<Readonly<{ created: number; skipped: number }>>;
   applyIdentityMergeAtTarget: (
     target: GraphBackend | TransactionBackend,
-    retractionIds: readonly string[],
+    retractions: readonly Readonly<{
+      id: string;
+      relation: "same" | "different";
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+      validFrom: string;
+      validTo?: string | undefined;
+      endedBy?: Readonly<{ kind: string; id: string }> | undefined;
+    }>[],
     assertions: readonly Readonly<{
       id: string;
       relation: "same" | "different";
@@ -253,6 +294,17 @@ export function storeBackend<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
 ): GraphBackend {
   return storeRuntime(store).backend;
+}
+
+/**
+ * The backend a Store's queries execute through — see
+ * {@link StoreRuntime.queryBackend}, including its note about hookless Stores.
+ */
+export function storeQueryBackend<G extends GraphDef>(
+  store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
+  target?: GraphBackend | TransactionBackend,
+): GraphBackend {
+  return storeRuntime(store).queryBackend(target);
 }
 
 type TransactionRuntimePort = Readonly<{

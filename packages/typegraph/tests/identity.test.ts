@@ -12,17 +12,26 @@ import {
   defineNode,
   type GraphBackend,
   rebuildIdentityClosure,
+  type TransactionBackend,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
   type RecordedInstant,
   recordedInstantRevision,
 } from "../src/core/temporal";
-import { ConfigurationError, IdentityContradictionError } from "../src/errors";
+import {
+  ConfigurationError,
+  IdentityContradictionError,
+  IdentityEndpointValidityError,
+} from "../src/errors";
 import { exportGraph, importGraph } from "../src/interchange";
 import { disjointWith } from "../src/ontology";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
-import { asCompiledRowsSql } from "../src/query/sql-intent";
+import {
+  asCompiledRowsSql,
+  type CompiledRowsSql,
+} from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,
@@ -89,7 +98,140 @@ function requireRecordedInstant(
   return instant;
 }
 
+describe("temporal identity validation scope", () => {
+  it("does not reconstruct at unrelated assertion boundaries", async () => {
+    const base = createTestBackend();
+    let recursiveQueries = 0;
+    function wrap(target: GraphBackend): GraphBackend;
+    function wrap(target: TransactionBackend): TransactionBackend;
+    function wrap(
+      target: GraphBackend | TransactionBackend,
+    ): GraphBackend | TransactionBackend {
+      return deriveBackend(target, {
+        execute<T>(statement: CompiledRowsSql): Promise<readonly T[]> {
+          const text = statement.chunks
+            .map((chunk) =>
+              chunk.kind === "text" || chunk.kind === "identifier" ?
+                chunk.value
+              : "",
+            )
+            .join(" ");
+          if (text.includes("WITH RECURSIVE")) recursiveQueries += 1;
+          return target.execute<T>(statement);
+        },
+      });
+    }
+    const backend = wrap(
+      deriveBackend(base, {
+        transaction: (fn, options) =>
+          base.transaction((transaction) => fn(wrap(transaction)), options),
+      }),
+    );
+    const store = await createInitializedStore(graph, backend);
+    const endpointStart = "2000-01-01T00:00:00.000Z";
+    for (let index = 0; index < 8; index += 1) {
+      const first = await store.nodes.Person.create(
+        { name: `Unrelated first ${index}` },
+        { id: `unrelated-first-${index}`, validFrom: endpointStart },
+      );
+      const second = await store.nodes.Person.create(
+        { name: `Unrelated second ${index}` },
+        { id: `unrelated-second-${index}`, validFrom: endpointStart },
+      );
+      await store.identity.assertSame(first, second, {
+        validFrom: `${2011 + index}-01-01T00:00:00.000Z`,
+        validTo: `${2012 + index}-01-01T00:00:00.000Z`,
+      });
+    }
+    const first = await store.nodes.Person.create(
+      { name: "Relevant first" },
+      { id: "relevant-first", validFrom: endpointStart },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Relevant second" },
+      { id: "relevant-second", validFrom: endpointStart },
+    );
+
+    recursiveQueries = 0;
+    await store.identity.assertSame(first, second, {
+      validFrom: "2010-01-01T00:00:00.000Z",
+      validTo: "2020-01-01T00:00:00.000Z",
+    });
+
+    expect(recursiveQueries).toBe(1);
+  });
+});
+
 describe("Operational Identity", () => {
+  it("refuses ending an endpoint before its open assertions", async () => {
+    const store = await createInitializedStore(
+      assertionOnlyGraph,
+      createTestBackend(),
+    );
+    const first = await store.nodes.Person.create(
+      { name: "First" },
+      { id: "validity-first" },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Second" },
+      { id: "validity-second" },
+    );
+    await store.identity.assertSame(first, second);
+
+    await expect(
+      store.nodes.Person.update(
+        first.id,
+        {},
+        { validTo: "2100-01-01T00:00:00.000Z" },
+      ),
+    ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+    const unchangedFirst = await store.nodes.Person.getById(first.id);
+    expect(unchangedFirst?.meta.validTo).toBeUndefined();
+  });
+
+  it("refuses ending an endpoint before a retracted assertion", async () => {
+    const store = await createInitializedStore(
+      assertionOnlyGraph,
+      createTestBackend(),
+    );
+    const first = await store.nodes.Person.create(
+      { name: "First" },
+      {
+        id: "historical-validity-first",
+        validFrom: "2020-01-01T00:00:00.000Z",
+      },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Second" },
+      {
+        id: "historical-validity-second",
+        validFrom: "2020-01-01T00:00:00.000Z",
+      },
+    );
+    const assertion = await store.identity.assertSame(first, second, {
+      validFrom: "2021-01-01T00:00:00.000Z",
+    });
+    const ended = requireDefined(
+      await store.identity.retractAssertion(assertion.assertion.id),
+    );
+
+    await expect(
+      store.nodes.Person.update(
+        first.id,
+        {},
+        { validTo: "2022-01-01T00:00:00.000Z" },
+      ),
+    ).rejects.toMatchObject({
+      code: "IDENTITY_ENDPOINT_VALIDITY",
+      details: {
+        assertionWindow: {
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: ended.validTo,
+        },
+      },
+    });
+  });
+
   it("supports the identity ledger without implicitly folding equal ids", async () => {
     const store = await createInitializedStore(
       assertionOnlyGraph,
@@ -139,8 +281,7 @@ describe("Operational Identity", () => {
     const getNodes = requireDefined(baseBackend.getNodes);
     let singleReads = 0;
     let batchReads = 0;
-    const backend: GraphBackend = {
-      ...baseBackend,
+    const backend: GraphBackend = deriveBackend(baseBackend, {
       getNode: async (graphId, kind, id) => {
         singleReads += 1;
         return baseBackend.getNode(graphId, kind, id);
@@ -149,7 +290,7 @@ describe("Operational Identity", () => {
         batchReads += 1;
         return getNodes(graphId, kind, ids);
       },
-    };
+    });
     const store = await createInitializedStore(graph, backend);
     const person = await store.nodes.Person.create({ name: "Alice" });
     const alias = await store.nodes.Person.create({ name: "Alias" });
@@ -225,8 +366,7 @@ describe("Operational Identity", () => {
     const base = createTestBackend();
     let executeCalls = 0;
     let statementCalls = 0;
-    const backend: GraphBackend = {
-      ...base,
+    const backend: GraphBackend = deriveBackend(base, {
       execute(query) {
         executeCalls += 1;
         return base.execute(query);
@@ -235,7 +375,7 @@ describe("Operational Identity", () => {
         statementCalls += 1;
         await base.executeStatement?.(query);
       },
-    };
+    });
     const store = createStore(disabledGraph, backend);
 
     await store.nodes.Person.create({ name: "Alice" }, { id: "alice" });
@@ -408,7 +548,11 @@ describe("Operational Identity", () => {
     const tag = await evolved.getNodeCollectionOrThrow("Tag").create({
       label: "author",
     });
-    await evolved.identity.assertSame(person, tag as never);
+    await evolved.identity.assertSame(person, tag);
+    expect(await evolved.identity.membersOf(person)).toEqual([
+      { kind: "Person", id: person.id },
+      { kind: "Tag", id: tag.id },
+    ]);
     const beforeRemoval = requireRecordedInstant(
       await evolved.recordedNow(),
       "expected a recorded instant before kind removal",
@@ -428,9 +572,7 @@ describe("Operational Identity", () => {
     expect(await removed.identity.membersOf(person)).toEqual([
       { kind: "Person", id: person.id },
     ]);
-    await expect(
-      removed.identity.membersOf({ kind: "Tag", id: tag.id } as never),
-    ).rejects.toMatchObject({
+    await expect(removed.identity.membersOf(tag)).rejects.toMatchObject({
       code: "KIND_NOT_FOUND",
       details: matchingObject({ kindName: "Tag" }),
     });

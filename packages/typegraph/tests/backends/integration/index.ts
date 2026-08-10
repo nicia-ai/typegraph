@@ -1,5 +1,6 @@
 export { registerAggregateIntegrationTests } from "./aggregates";
 export { registerAlgorithmIntegrationTests } from "./algorithms";
+export { registerBackendProvenanceIntegrationTests } from "./backend-provenance";
 export { registerBulkFindByIndexIntegrationTests } from "./bulk-find-by-index";
 export { registerBulkFindEndpointIntegrationTests } from "./bulk-find-endpoints";
 export { registerBulkFindHeterogeneousIntegrationTests } from "./bulk-find-heterogeneous";
@@ -21,6 +22,7 @@ export { registerAdvancedEdgePropertyIntegrationTests } from "./edge-properties-
 export type { IntegrationStore } from "./fixtures";
 export { integrationTestGraph } from "./fixtures";
 export { registerFulltextIntegrationTests } from "./fulltext";
+export { registerGraphMergePlanIntegrationTests } from "./graph-merge-plan";
 export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";
@@ -46,8 +48,10 @@ export { registerSetOperationIntegrationTests } from "./set-operations";
 export { registerStoreViewIntegrationTests } from "./store-view";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerTemporalIntegrationTests } from "./temporal";
+export { registerTemporalOracleIntegrationTests } from "./temporal-oracle";
 export type { IntegrationTestContext } from "./test-context";
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
+export { registerValidityEndClearingIntegrationTests } from "./validity-end-clearing";
 export { registerValidityLowerBoundIntegrationTests } from "./validity-lower-bound";

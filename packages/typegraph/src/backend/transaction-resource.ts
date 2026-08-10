@@ -36,10 +36,12 @@
  *    | export snapshot | export snapshot  | nested BEGIN                       |
  *
  *    So the lease is EXCLUSIVE, not refcounted: at most one stream of any kind
- *    holds a given serialized resource, and the second one is refused with the
- *    holder's kind named (see {@link acquireSerializedStreamLease}). Refcounting
- *    admitted the two same-kind rows above, which then failed on the driver
- *    after chunks had already committed.
+ *    holds a given serialized resource, and at most one holds a transactional
+ *    SQLite backend object even when its resource is declared independent. The
+ *    second stream is refused with the holder's kind named (see
+ *    {@link acquireSerializedStreamLease}). Refcounting admitted the two
+ *    same-kind rows above, which then failed on the driver after chunks had
+ *    already committed.
  *
  *    `"import-stream"` is the kind of EVERY long-lived import, not only the
  *    chunk-streaming one: an in-memory `importGraph` and a `trustedImport`
@@ -116,16 +118,22 @@
  *   `dumpDataDir`).
  * - Bare `pg` / `@neondatabase/serverless` `Client`, including a checked-out
  *   `PoolClient` — same site, via `isBarePgClient`.
- * - `pg` / neon-serverless `Pool` whose resolved `options.max === 1` — same
- *   site, via `isSingleConnectionPgPool`. pg-pool normalizes `max` (and the
- *   legacy `poolSize`) into `options`, so every cap that pool honors is visible
- *   there.
- * - postgres-js built with `{ max: 1 }` — same site, via
- *   `isSingleConnectionCallablePgClient`. The client is CALLABLE, so it needed a
+ * - `pg` / neon-serverless `Pool` capped at one connection — same site, via
+ *   `isSingleConnectionPgPool`, which asks `isSingleConnectionPgPoolCap` what a
+ *   cap of one looks like. pg-pool normalizes `max` (and the legacy `poolSize`)
+ *   into `options` without coercing either, so `{ max: 1 }`, `{ max: "1" }` and
+ *   `{ poolSize: "1" }` are one and the same one-connection pool, and all three
+ *   are marked.
+ * - postgres-js capped at one connection — same site, via
+ *   `isSingleConnectionCallablePgClient`, which asks
+ *   `isSingleConnectionPostgresJsCap`. The client is CALLABLE, so it needed a
  *   resolver arm of its own; `begin` reserves the sole connection, making an
  *   export snapshot hold the connection every other wrapper writes through.
- *   Requires postgres-js identity (`isPostgresJsClient`) as well as the cap: a
- *   cap on a callable we cannot attribute to a known driver is not evidence.
+ *   postgres-js resolves `max` from the options object, the URL query string and
+ *   `PGMAX` and coerces none of them, so `{ max: 1 }`, `?max=1` and `PGMAX=1`
+ *   are all marked. Requires postgres-js identity (`isPostgresJsClient`) as well
+ *   as the cap: a cap on a callable we cannot attribute to a known driver is not
+ *   evidence.
  * - Cloudflare Durable Object storage (`drizzle(ctx.storage)`) —
  *   `createSqliteBackend` via `getDurableObjectStorageClient`, the same
  *   full-shape evidence `transactionMode: "do-sqlite"` requires to run a
@@ -151,13 +159,18 @@
  * - Transaction-scoped backends (`transaction()`, `adoptTransaction`): the
  *   caller's transaction already owns the connection and opens no second frame,
  *   and the guards run on the root backend a Store holds. Decorators over a root
- *   backend DO carry the mark, via
- *   {@link inheritSerializedTransactionResource}.
+ *   backend DO carry the verdict, via
+ *   {@link carryBackendResourceAudit}.
  *
  * KNOWN GAPS — serialized in fact, unmarked, so they keep only the
  * identity-based pre-flight in `importGraphStream` (which a `history: true`
  * store's overlay already defeats). Each is a coverage extension needing
- * positive evidence of the client shape, never a silent no-op:
+ * positive evidence of the client shape, never a silent no-op. Every one of
+ * them has the SAME sanctioned workaround until its shape is recognized: the
+ * caller declares the connection with
+ * `{ serializedResource: { mode: "shared", resource: client } }` (see
+ * {@link SerializedResourceDeclaration}), which is a claim the caller can make
+ * and this package cannot.
  *
  * - React Native / Expo SQLite drivers — `expo-sqlite` and `op-sqlite`. One
  *   connection each, and both are genuinely serialized, but neither exposes a
@@ -170,6 +183,15 @@
  *   `expo-sqlite`, `op-sqlite`, `sqlite-proxy` and `better-sqlite3`, and no
  *   `node-sqlite` entrypoint, so no `createSqliteBackend` call can be handed
  *   one. Re-check when the Drizzle floor moves; nothing to mark until then.
+ * - postgres-js given a NON-NUMERIC string cap other than one, e.g.
+ *   `postgres(url + "?max=5")`: `[...Array(options.max)]` (postgres@3.4.9
+ *   `src/index.js:65`) yields length 1 for any such string, so that client
+ *   really does open exactly one connection today and really can wedge a stream
+ *   pair. Unmarked on purpose — marking it would be marking on an upstream bug,
+ *   and the day postgres-js coerces `max` the same configuration becomes a
+ *   five-connection pool whose concurrent work we would then refuse. A caller on
+ *   that shape materializes the export or imports into an independent backend,
+ *   exactly as before this guard existed.
  * - Bun `SQL` (Postgres) built with `{ max: 1 }`: genuinely serialized, but
  *   nothing in this package positively identifies that driver — there is no
  *   Postgres equivalent of the SQLite driver shapes above — so `options.max`
@@ -179,9 +201,61 @@
  *   adapter): whether the far side serializes is unknowable from here, so they
  *   fall under the residual gap above.
  */
+import { ConfigurationError } from "../errors";
 import { type GraphBackend } from "./types";
 
-const SERIALIZED_TRANSACTION_RESOURCES = new WeakMap<object, object>();
+/**
+ * What we know about the connection a backend's statements land on.
+ *
+ * `independent` is a POSITIVE verdict — a factory looked and found statements
+ * that can run on independent connections. It is not the same runtime state as
+ * a backend nobody audited, which carries no record at all.
+ */
+export type BackendResourceAudit =
+  | Readonly<{ kind: "serialized"; resource: object }>
+  | Readonly<{
+      kind: "independent";
+      /** Stable key for the SQLite identity arm of an explicit declaration. */
+      identityLeaseResource?: object;
+    }>;
+
+/**
+ * Declare the connection this backend serializes on, when TypeGraph cannot
+ * detect it (Bun `SQL`, `expo-sqlite`, `op-sqlite`, `sqlite-proxy`, `pg-proxy`,
+ * a postgres-js pool capped through a string the driver does not coerce — the
+ * KNOWN GAPS in this module's inventory). Two wrappers that pass the same
+ * object are treated as one serialized resource, exactly as two wrappers over a
+ * detected client are.
+ *
+ * - `"detect"` (the default, and the same behavior as omitting the option):
+ *   whatever the factory's driver predicates find, and nothing else.
+ * - `"shared"`: the given object IS the serialized resource. Refused with a
+ *   {@link ConfigurationError} when the factory detected a DIFFERENT resource —
+ *   silently overriding would let two wrappers over one handle be given two
+ *   different sentinels and quietly de-serialize a pair that really does share.
+ * - `"independent"`: statements can run on independent connections. The
+ *   documented escape hatch for a mis-detection, so a user surprised by a
+ *   refusal is never stuck.
+ *
+ * SCOPE — read this before using `"independent"`: this option controls the
+ * SHARED-RESOURCE arm of {@link snapshotExportContention} only. It cannot lift
+ * the object-identity arm, under which ONE SQLite backend object exporting into
+ * ITSELF is refused with `same-sqlite-backend`. That arm is a driver fact (one
+ * handle, one open snapshot transaction), not a claim about connection
+ * topology, so no declaration can make it false.
+ *
+ * That surviving arm is SQLITE-ONLY, deliberately: it is gated on
+ * `dialect === "sqlite"`, so on Postgres a backend declared `"independent"`
+ * exporting into ITSELF is not refused either — a Postgres client that hands
+ * out independent connections is exactly what the declaration claims, and the
+ * snapshot and the writes it contends with land on different ones.
+ */
+export type SerializedResourceDeclaration =
+  | Readonly<{ mode: "detect" }>
+  | Readonly<{ mode: "shared"; resource: object }>
+  | Readonly<{ mode: "independent" }>;
+
+const BACKEND_RESOURCE_AUDITS = new WeakMap<object, BackendResourceAudit>();
 
 /**
  * The kinds of long-lived interchange stream that hold a serialized connection
@@ -191,11 +265,19 @@ export type SerializedStreamKind = "export-snapshot" | "import-stream";
 
 /**
  * The outcome of claiming a serialized resource for a long-lived stream: the
- * (idempotent) release when the claim succeeded, or the kind of stream already
- * holding it when it did not.
+ * (idempotent) release and the resource the claim was registered under when it
+ * succeeded, or the kind of stream already holding it when it did not.
+ *
+ * `resource` is the decision itself rather than a flag a caller re-derives
+ * from the backend: `undefined` means nothing was registered, because the
+ * backend runs on no known serialized resource.
  */
 export type SerializedStreamLease =
-  | Readonly<{ acquired: true; release: () => void }>
+  | Readonly<{
+      acquired: true;
+      resource: object | undefined;
+      release: () => void;
+    }>
   | Readonly<{ acquired: false; heldBy: SerializedStreamKind }>;
 
 /**
@@ -205,30 +287,252 @@ export type SerializedStreamLease =
  */
 const ACTIVE_SERIALIZED_STREAMS = new Map<object, SerializedStreamKind>();
 
-/**
- * Marks backends whose distinct wrappers still serialize on one connection.
- *
- * INVARIANT: a backend factory must call this before anything can wrap the
- * backend it built. Decorators (createBackendOverlay, wrapWithManagedClose,
- * projections) copy the mark at construction time, so a wrapper built before
- * the mark lands is silently unowned and evades the import/clone guards.
- */
-export function markSerializedTransactionResource(
-  backend: GraphBackend,
-  resource: object,
-): void {
-  SERIALIZED_TRANSACTION_RESOURCES.set(backend, resource);
+/** Whether two audits are the same verdict about the same connection. */
+function auditsAgree(
+  left: BackendResourceAudit,
+  right: BackendResourceAudit,
+): boolean {
+  if (left.kind === "serialized") {
+    return right.kind === "serialized" && left.resource === right.resource;
+  }
+  return (
+    right.kind === "independent" &&
+    left.identityLeaseResource === right.identityLeaseResource
+  );
 }
 
-/** Preserves serialized-resource ownership when decorating a backend. */
-export function inheritSerializedTransactionResource(
-  target: object,
-  source: object,
-): void {
-  const resource = SERIALIZED_TRANSACTION_RESOURCES.get(source);
-  if (resource !== undefined) {
-    SERIALIZED_TRANSACTION_RESOURCES.set(target, resource);
+/** Names a verdict for the write-once refusal below. */
+function formatAudit(audit: BackendResourceAudit): string {
+  return audit.kind === "serialized" ? "serialized" : "independent";
+}
+
+/**
+ * The two objects a refused `"shared"` declaration could not reconcile: the one
+ * the caller named and the one this package detected.
+ */
+export type SerializedResourceConflict = Readonly<{
+  declared: object;
+  detected: object;
+}>;
+
+/**
+ * The handles behind each refusal, held OFF the error object on purpose.
+ *
+ * `TypeGraphError.toLogString()` `JSON.stringify`s `details`, and the
+ * documented handler pattern is `console.error(error.toLogString())` — so a
+ * driver handle in `details` writes whatever that driver stores into the
+ * caller's logs, and a `pg.Pool` stores its `connectionString`, password
+ * included. The refusal therefore carries only a DESCRIPTION of each side
+ * (`declaredKind` / `detectedKind`), while the identities live here, reachable
+ * by asking for them and by nothing that walks an error's own properties.
+ */
+const SERIALIZED_RESOURCE_CONFLICTS = new WeakMap<
+  Error,
+  SerializedResourceConflict
+>();
+
+/**
+ * The two objects a serialized-resource refusal could not reconcile, or
+ * `undefined` for any other error.
+ *
+ * @internal
+ */
+export function serializedResourceConflict(
+  error: unknown,
+): SerializedResourceConflict | undefined {
+  return error instanceof ConfigurationError ?
+      SERIALIZED_RESOURCE_CONFLICTS.get(error)
+    : undefined;
+}
+
+/**
+ * How a refusal names one side of a conflict without publishing the handle:
+ * the constructor name (`"Database"`, `"BoundPool"`, `"Object"`), which says
+ * what KIND of thing each side is and carries no connection string.
+ */
+function describeSerializedResource(resource: object): string {
+  const constructorName = (
+    resource as Readonly<{ constructor?: Readonly<{ name?: unknown }> }>
+  ).constructor?.name;
+  return typeof constructorName === "string" && constructorName !== "" ?
+      constructorName
+    : "Object";
+}
+
+/**
+ * The verdict a backend factory records, from what its driver predicates
+ * detected and what the caller declared.
+ *
+ * The single owner of "what a {@link SerializedResourceDeclaration} means":
+ * both drizzle factories call it, so the two cannot drift about whether a
+ * declaration wins, loses, or is refused.
+ *
+ * Applied or refused, never ignored:
+ *
+ * - `"shared"` naming the resource detection already found, or naming one on a
+ *   backend detection could not classify → recorded as that resource.
+ * - `"shared"` naming a DIFFERENT resource than detection found → refused, so
+ *   two wrappers over one handle cannot be handed two different sentinels and
+ *   silently de-serialized.
+ * - `"independent"` → recorded, whatever detection found. This is the escape
+ *   hatch, not a conflict: detection is a duck-type over driver internals and
+ *   the caller knows their topology.
+ * - `"detect"` or absent → exactly what detection found.
+ *
+ * Called INSIDE the factory body before the backend object exists, so a
+ * refusal happens before any object is published (CTA-3) and a caller can never
+ * hold a backend whose declaration was rejected.
+ *
+ * @throws {ConfigurationError} `details.reason: "serialized-resource-conflict"`
+ * when a `"shared"` declaration names a resource detection disagrees with. Its
+ * `details` describe the two sides (`declaredKind` / `detectedKind`) rather
+ * than carrying them, because `details` is logged verbatim; the handles
+ * themselves come from {@link serializedResourceConflict}.
+ * @internal
+ */
+export function resolveDeclaredBackendResource(
+  detected: object | undefined,
+  declaration: SerializedResourceDeclaration | undefined,
+): BackendResourceAudit {
+  switch (declaration?.mode) {
+    case "shared": {
+      if (detected !== undefined && detected !== declaration.resource) {
+        const refusal = new ConfigurationError(
+          `serializedResource declared { mode: "shared" } naming an object ` +
+            `that is not the connection this backend was detected to run on. ` +
+            `Two wrappers over one connection must name the SAME object, or ` +
+            `the guards that refuse a concurrent export/import pair on it stop ` +
+            `seeing them as one resource.`,
+          {
+            reason: "serialized-resource-conflict",
+            declaredKind: describeSerializedResource(declaration.resource),
+            detectedKind: describeSerializedResource(detected),
+          },
+          {
+            suggestion:
+              `Declare the client TypeGraph already detected (or drop the ` +
+              `declaration and let detection stand). Use ` +
+              `{ mode: "independent" } if the detection is wrong and this ` +
+              `backend really does run on its own connection.`,
+          },
+        );
+        SERIALIZED_RESOURCE_CONFLICTS.set(refusal, {
+          declared: declaration.resource,
+          detected,
+        });
+        throw refusal;
+      }
+      return { kind: "serialized", resource: declaration.resource };
+    }
+    case "independent": {
+      return { kind: "independent", identityLeaseResource: {} };
+    }
+    case "detect":
+    case undefined: {
+      return detected === undefined ?
+          { kind: "independent" }
+        : { kind: "serialized", resource: detected };
+    }
   }
+}
+
+/**
+ * Records what a backend factory found about the connection its backend runs
+ * on.
+ *
+ * INVARIANT: recorded ONCE per backend, by the factory that built it, BEFORE
+ * the backend object escapes the factory body. Derived backends (deriveBackend,
+ * projectBackend, projectBackendWithout, projectGraphBackend,
+ * wrapWithManagedClose) carry the verdict at construction time, so a wrapper
+ * built before the audit lands is silently unaudited and evades the
+ * import/clone guards.
+ *
+ * A second call with an equal verdict is a no-op. A second call with a
+ * DIFFERENT verdict throws: the stream lease reads this value and closes over
+ * the resource it claimed, so a verdict that changes under a live lease
+ * de-serializes a pair that really does share a connection.
+ *
+ * The throw is an INTERNAL invariant assertion — no library path re-audits and
+ * a user cannot reach this function — so it is a plain `TypeError` naming both
+ * verdicts, matching the repo's internal-assertion spelling (`requireDefined`,
+ * src/utils/presence.ts). Deliberately not a `ConfigurationError`: that type is
+ * user-category and would route a library bug into user-facing handling.
+ *
+ * @internal
+ */
+export function auditBackendResource(
+  backend: GraphBackend,
+  audit: BackendResourceAudit,
+): void {
+  const recorded = BACKEND_RESOURCE_AUDITS.get(backend);
+  if (recorded !== undefined) {
+    if (auditsAgree(recorded, audit)) return;
+    throw new TypeError(
+      `A backend's serialized-resource audit is written once: this backend ` +
+        `was audited "${formatAudit(recorded)}" and a conflicting audit ` +
+        `"${formatAudit(audit)}"${
+          recorded.kind === "serialized" && audit.kind === "serialized" ?
+            " naming a different connection"
+          : ""
+        } was attempted. The stream lease closes over the resource it claimed, ` +
+        `so a verdict that changes under a live lease de-serializes a pair ` +
+        `that really does share a connection.`,
+    );
+  }
+  BACKEND_RESOURCE_AUDITS.set(backend, audit);
+}
+
+/**
+ * Copies a base backend's verdict onto a backend derived from it, or nothing
+ * when the base carries none.
+ *
+ * @internal The construction seam's carry. `src/backend/derive-backend.ts` is
+ * the only module allowed to import it.
+ */
+export function carryBackendResourceAudit(derived: object, base: object): void {
+  const audit = BACKEND_RESOURCE_AUDITS.get(base);
+  if (audit !== undefined) BACKEND_RESOURCE_AUDITS.set(derived, audit);
+}
+
+/**
+ * The verdict recorded for `backend`, or `undefined` when nobody audited it.
+ *
+ * A pure map read: the value is written once at construction, so two reads can
+ * never disagree and a lease cannot have its premise changed under it.
+ *
+ * @internal
+ */
+export function resolveBackendAudit(
+  backend: object,
+): BackendResourceAudit | undefined {
+  return BACKEND_RESOURCE_AUDITS.get(backend);
+}
+
+/**
+ * How a backend's connection was classified, as a single value.
+ *
+ * `"unaudited"` is NOT a verdict about the connection: it says nobody looked.
+ * Two populations are legitimately unaudited and always will be —
+ * transaction-scoped backends (`transaction()`, `adoptTransaction`), which are
+ * built from an operations fragment rather than derived from a root backend,
+ * and `GraphBackend`s users implement themselves. So `"unaudited"` on an
+ * arbitrary object proves nothing; on a backend one of this package's factories
+ * built, or on one derived from such a backend through `derive-backend.ts`, it
+ * proves the construction bypassed the seam.
+ */
+export type BackendResourceProvenance =
+  "serialized" | "independent" | "unaudited";
+
+/**
+ * The classification of `backend`'s connection — the decision itself rather
+ * than a flag every caller re-derives from {@link resolveBackendAudit}.
+ *
+ * @internal
+ */
+export function backendResourceProvenance(
+  backend: object,
+): BackendResourceProvenance {
+  return resolveBackendAudit(backend)?.kind ?? "unaudited";
 }
 
 /** Whether two backend wrappers cannot make snapshot reads and writes concurrently. */
@@ -236,10 +540,14 @@ export function sharesSerializedTransactionResource(
   left: GraphBackend,
   right: GraphBackend,
 ): boolean {
-  const leftResource = SERIALIZED_TRANSACTION_RESOURCES.get(left);
+  const leftAudit = resolveBackendAudit(left);
+  if (leftAudit?.kind !== "serialized") return false;
+  const rightAudit = resolveBackendAudit(right);
+  // Resource identity, not audit-record identity: two audits naming the same
+  // client object are the same connection however they were recorded.
   return (
-    leftResource !== undefined &&
-    leftResource === SERIALIZED_TRANSACTION_RESOURCES.get(right)
+    rightAudit?.kind === "serialized" &&
+    leftAudit.resource === rightAudit.resource
   );
 }
 
@@ -293,23 +601,43 @@ export function snapshotExportContention(
  * when this one claimed it" true for the whole stream, in whichever order two
  * streams start — the second one always finds the first's registration.
  *
- * Marked backends only: without a known serialized resource there is no shared
- * connection for anyone to be refused against, so an unmarked backend always
- * acquires and registers nothing (see the residual gap in the module doc).
+ * A known serialized resource is the normal lease key. A transactional SQLite
+ * backend audited `independent` instead uses its own identity: the declaration
+ * can separate distinct wrappers, but cannot make two streams on ONE backend
+ * object use different handles. An unaudited backend, and an independent
+ * Postgres backend, registers nothing (see the residual gap in the module doc).
  *
- * The returned release is idempotent and deletes only its own registration,
- * so an already-released stream can never evict the next stream's lease.
+ * The acquired arm reports the resource it registered under, so a caller reads
+ * the decision instead of re-deriving it from the backend; `undefined` is the
+ * no-op arm. The returned release is idempotent and deletes only its own
+ * registration, so an already-released stream can never evict the next
+ * stream's lease.
  */
+function streamLeaseResource(backend: GraphBackend): object | undefined {
+  const audit = resolveBackendAudit(backend);
+  if (audit?.kind === "serialized") return audit.resource;
+  if (
+    audit?.kind === "independent" &&
+    audit.identityLeaseResource !== undefined &&
+    backend.dialect === "sqlite" &&
+    backend.capabilities.transactions
+  ) {
+    return audit.identityLeaseResource;
+  }
+  return undefined;
+}
+
 export function acquireSerializedStreamLease(
   backend: GraphBackend,
   kind: SerializedStreamKind,
 ): SerializedStreamLease {
-  const resource = SERIALIZED_TRANSACTION_RESOURCES.get(backend);
+  const resource = streamLeaseResource(backend);
   if (resource === undefined) {
     return {
       acquired: true,
+      resource: undefined,
       release: () => {
-        // Nothing was registered: an unmarked backend has no known serialized
+        // Nothing was registered: this backend has no known serialized
         // resource, so there is nothing to give back.
       },
     };
@@ -320,6 +648,7 @@ export function acquireSerializedStreamLease(
   let released = false;
   return {
     acquired: true,
+    resource,
     release: () => {
       if (released) return;
       released = true;

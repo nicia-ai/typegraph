@@ -82,6 +82,22 @@ export function isUniqueBucketKey(key: string): boolean {
 }
 
 /**
+ * Returns the declared constraint name encoded in a unique bucket key. This is
+ * the single decoder for the private bucket-key format, so candidate evidence
+ * never has to parse an implementation detail or retain the compared value.
+ */
+export function uniqueConstraintNameForBucket(key: string): string | undefined {
+  if (!isUniqueBucketKey(key)) {
+    return undefined;
+  }
+  const constraintStart = UNIQUE_KEY_PREFIX.length + KEY_PART_SEPARATOR.length;
+  const constraintEnd = key.indexOf(KEY_PART_SEPARATOR, constraintStart);
+  return constraintEnd === -1 ? undefined : (
+      key.slice(constraintStart, constraintEnd)
+    );
+}
+
+/**
  * Builds the exact-match signature for one unique constraint from a node's
  * field values, or `undefined` when ANY of the constraint's fields is `null` /
  * `undefined` (a partial key cannot establish exact-match equality, and — since

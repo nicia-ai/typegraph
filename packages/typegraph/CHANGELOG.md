@@ -1,5 +1,203 @@
 # @nicia-ai/typegraph
 
+## 0.49.0
+
+### Minor Changes
+
+- [#488](https://github.com/nicia-ai/typegraph/pull/488) [`0db8f9c`](https://github.com/nicia-ai/typegraph/commit/0db8f9c68ae0a13c9363f393c889d56c48114f4c) Thanks [@pdlug](https://github.com/pdlug)! - Allow `importGraph` and `importGraphStream` to stage interchange data directly into an opaque ingestion branch while preserving its deferred-uniqueness boundary.
+
+- [#486](https://github.com/nicia-ai/typegraph/pull/486) [`b82d436`](https://github.com/nicia-ai/typegraph/commit/b82d436a5c151ee6fa230591861785f82aaee302) Thanks [@pdlug](https://github.com/pdlug)! - Let constraint-aware ingestion branches stage Operational Identity same and different assertions through a conditional assertion-only facade, so duplicate unique aliases and their identity evidence can reach merge planning together.
+
+### Patch Changes
+
+- [#485](https://github.com/nicia-ai/typegraph/pull/485) [`184fc96`](https://github.com/nicia-ai/typegraph/commit/184fc965e20973b6196fb1349e91e4139c3e6b27) Thanks [@pdlug](https://github.com/pdlug)! - Stop publishing a private workspace ESLint config in package metadata, preventing lockfile-refreshing pnpm installs from resolving an unpublished package.
+
+- [#489](https://github.com/nicia-ai/typegraph/pull/489) [`f4e31d9`](https://github.com/nicia-ai/typegraph/commit/f4e31d91d04faf93033b124bc351c39458ec16d3) Thanks [@pdlug](https://github.com/pdlug)! - Translate missing fulltext storage failures from Cloudflare Durable Objects SQLite into `ContributionUnavailableError` while preserving the underlying database error and transactional rollback.
+
+## 0.48.0
+
+### Minor Changes
+
+- [#476](https://github.com/nicia-ai/typegraph/pull/476) [`a58ba03`](https://github.com/nicia-ai/typegraph/commit/a58ba031b439f3befbcc073e016f896b178af00e) Thanks [@pdlug](https://github.com/pdlug)! - Store no validity lower bound for a write that would otherwise be born already
+  ended. A write that stamps a `valid_from` the caller did not state now stores
+  the write instant only when doing so leaves a window some coordinate can read:
+  if a stated `validTo` falls at or before that instant, the row is stored with no
+  lower bound at all — "ended at T, start unknown" — and reads back at every `asOf`
+  before its end instead of at none ([#407](https://github.com/nicia-ai/typegraph/issues/407)). The decision lives in the SQL builders,
+  so it holds for every `GraphBackend` caller, including interchange import and
+  trusted import, not only for the store paths.
+
+  Three consequences worth naming:
+
+  - `meta.validFrom` is `undefined` for such a row, where it used to be an instant
+    no query could match.
+  - A resurrecting `upsertById` / `bulkUpsertById` that names a lone historical
+    `validTo` on a tombstoned node **no longer refuses**: it reaches the same
+    stored shape a `create` on the same id reaches. One stated window, one outcome,
+    whichever entry point resets the window.
+  - A `validTo` in the future is unchanged — it still stamps the write instant, so
+    a scheduled-end row stays invisible before it existed.
+
+  Rows already stored with an inverted window are not rewritten; they stay
+  invisible at every coordinate until repaired.
+
+  Custom `GraphBackend` implementations should route node/edge insert stamping
+  and node resurrection stamping through `resolveStampedValidityLowerBound`, now
+  exported from `@nicia-ai/typegraph/backend`, so adapter-specific builders cannot
+  drift from the shared validity-window contract. Edge resurrection retains its
+  stored lower bound and therefore does not stamp one.
+
+- [#477](https://github.com/nicia-ai/typegraph/pull/477) [`09318d6`](https://github.com/nicia-ai/typegraph/commit/09318d672e05f50bc3b1c61a4c9037b5f6f0c1be) Thanks [@pdlug](https://github.com/pdlug)! - Recognize every spelling of a one-connection Postgres cap that its driver
+  actually honors, so interchange refuses the pairs that would otherwise hang.
+  Serialized-connection detection previously required a numeric `max: 1`, which
+  missed three configurations that really do run every statement on one
+  connection:
+
+  1. `new Pool({ max: "1" })` and the legacy `new Pool({ poolSize: "1" })` — the
+     shape `max: process.env.PG_MAX` produces. pg-pool never coerces the value, so
+     the cap stays a string, and its own `_clients.length >= options.max` check
+     then coerces it: the pool really is capped at one.
+  2. `postgres(url + "?max=1")` — postgres-js resolves `max` from the URL and does
+     not coerce it either.
+  3. `PGMAX=1` with postgres-js — the same cap through the environment.
+
+  On those three backends, a streaming export/import pair now throws
+  `INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` where it previously hung, and
+  two concurrent streaming imports now throw
+  `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS` where they previously interleaved
+  and succeeded slowly — the lease is exclusive across all four pairings, so this
+  one conservative refusal is inherited verbatim from the existing numeric
+  `max: 1` behavior. `store.withWorkingCopy` and branch cloning also switch from a
+  streamed clone to a fully materialized in-memory export on those backends, a
+  memory-profile change on large graphs.
+
+  Deliberately still unmarked: a postgres-js client given a non-numeric string cap
+  other than one (`?max=5`), which opens exactly one connection today only because
+  postgres-js does not coerce it — marking that would be marking on an upstream
+  bug, and would refuse legitimate concurrent work the day the driver fixes it.
+  A `pg` pool given `max: "5"` genuinely opens five connections and is likewise
+  unmarked. Existing correctly-detected backends see no change: same marks, same
+  refusal codes, same messages.
+
+  Shipping in the same release, so nobody surprised by a new refusal is stuck:
+  `createSqliteBackend` and `createPostgresBackend` gain an optional
+  `serializedResource` declaration. `{ mode: "shared", resource: client }` marks a
+  connection TypeGraph cannot detect — the `?max=5` shape above, Bun `SQL`,
+  `expo-sqlite`, `op-sqlite`, `sqlite-proxy`, `pg-proxy` — and two backends naming
+  the same object are one serialized resource. `{ mode: "independent" }` escapes a
+  detection that is wrong for your topology. A `"shared"` declaration naming a
+  different object than the one detected is refused with a `ConfigurationError`
+  carrying `details.reason: "serialized-resource-conflict"` and a constructor-name
+  description of each side (`details.declaredKind` / `details.detectedKind`, never
+  the handles themselves — `details` is what `toLogString()` serializes, and a
+  driver handle there would log the credentials that driver stores) rather than
+  silently preferred. `"independent"` lifts the shared-resource refusal between
+  two distinct backends — one SQLite backend exporting into itself still reports
+  `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`, which is a fact about one handle
+  rather than a claim about connection topology. That surviving refusal is
+  SQLite-only, so on PostgreSQL a backend declared independent may export into
+  itself.
+
+- [#479](https://github.com/nicia-ai/typegraph/pull/479) [`e285a71`](https://github.com/nicia-ai/typegraph/commit/e285a717a5d1df20868c3bc7a2c0f3a7914f5d40) Thanks [@pdlug](https://github.com/pdlug)! - Add constraint-aware ingestion branches that defer node uniqueness during staging and validate the resolved merge write set atomically.
+
+- [#476](https://github.com/nicia-ai/typegraph/pull/476) [`a58ba03`](https://github.com/nicia-ai/typegraph/commit/a58ba031b439f3befbcc073e016f896b178af00e) Thanks [@pdlug](https://github.com/pdlug)! - Add `repairInvertedValidityWindows`, the explicit operator action that makes
+  rows an older version stored with a backwards window (`valid_from > valid_to`)
+  observable again. Such a row is readable at no coordinate at all; upgrading
+  deliberately rewrites nothing, so repairing is a decision an operator takes
+  rather than a side effect of a deploy.
+
+  `mode: "report"` counts and writes nothing — it reads through `execute`, a
+  required backend member, so detection works on every backend including a
+  history-capturing one and one with no statement-execution support.
+  `mode: "apply"` normalizes the rows it counted to no lower bound ("ended at T,
+  start unknown"), the shape today's write paths store, and is idempotent and
+  convergent. `relations` is required and takes `"live"` or `"live-and-recorded"`;
+  `"live-and-recorded"` is recommended, because repairing only the live axis
+  leaves the recorded twin inverted and re-materializes the invisible row at any
+  `asOfRecorded` coordinate.
+
+  The repair mints no revision, bumps no `version` and does not move `updated_at`:
+  it normalizes storage for rows that were never observable, so it is not a
+  logical write. Run it with writers stopped, and re-baseline outstanding merge
+  branches afterwards — `valid_from` is part of the `base@V` content fingerprint.
+  `apply` refuses rather than guessing on the states it cannot honor: a backend
+  without statement execution, a recorded-capture backend, and (on SQLite, where
+  bounds compare as text) a relation holding non-canonical bounds it cannot
+  classify.
+
+## 0.47.0
+
+### Minor Changes
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Add an opt-in `idleTimeoutMs` safety bound to `exportGraphStream`. The timeout
+  measures how long a delivered chunk remains unacknowledged, then rolls back the
+  snapshot transaction, releases the serialized stream lease, and reports the new
+  typed `ExportStreamIdleTimeoutError`. Time spent waiting for the backend does
+  not count as consumer idleness, and existing `AbortSignal` and cooperative
+  `break`/`return` cancellation behavior is unchanged.
+
+- [#468](https://github.com/nicia-ai/typegraph/pull/468) [`c53c006`](https://github.com/nicia-ai/typegraph/commit/c53c0067f8a349e307f4f6d05e316172bcd726c2) Thanks [@pdlug](https://github.com/pdlug)! - Add public snapshot and incremental merge planning APIs that return stable,
+  JSON-serializable `MergePlanArtifact` values. Plans bind the reviewed write set
+  to the target graph, active schema, durable revision origin and revision, carry a
+  content digest, and can be applied exactly once with `applyMergePlan`. Applying a
+  plan validates the artifact and checks its fence atomically without re-running
+  candidate generation, scoring, embeddings, canonical selection, or conflict
+  callbacks. Existing `merge` and `mergeIncremental` entry points retain their
+  one-call compatibility behavior while sharing the same resolution, validation,
+  and mechanical write owners.
+
+  Explain entity resolution with deterministic decisive edges, complete built-in
+  candidate-source attribution, and scored strategy/score/threshold evidence while
+  keeping definitional matches distinct from similarity scores. Add opt-in,
+  deterministically bounded accepted/rejected candidate diagnostics. Default
+  evidence excludes raw compared values.
+
+  Custom similarity scorers that return `NaN` or infinity now fail with
+  `MatchEvidenceError`; non-finite values cannot be represented faithfully in a
+  serialized evidence artifact. Candidate-source failures now use the more
+  specific `CandidateSourceError`; legacy `details.source` remains available
+  alongside `details.sourceId` for base-source configuration failures.
+
+- [#473](https://github.com/nicia-ai/typegraph/pull/473) [`44d1486`](https://github.com/nicia-ai/typegraph/commit/44d1486938661bbde6d171bd0c99a0b269b597c3) Thanks [@pdlug](https://github.com/pdlug)! - Allow nodes returned by runtime string-keyed collections to participate directly
+  in Operational Identity reads, assertions, bulk operations, and pair
+  retractions. Identity result types now honestly include runtime-evolved members
+  alongside compile-time graph references.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Add explicit half-open validity windows to scalar and bulk Operational Identity assertions, with bounded temporal contradiction checks, endpoint coverage validation, archival interchange support, node-window integrity guards, scalable branch-merge validation, and report-visible window reconciliation.
+
+- [#469](https://github.com/nicia-ai/typegraph/pull/469) [`8e50bdb`](https://github.com/nicia-ai/typegraph/commit/8e50bdbda614942b2848c6355b9cfb11c6468d2f) Thanks [@pdlug](https://github.com/pdlug)! - Add `clearValidTo: true` across node and edge update/upsert APIs so applications can reopen an ended valid-time window without changing entity identity. Built-in SQLite and PostgreSQL backends apply the clear, unchanged replays coalesce, `oneActive` relationships are rechecked when reopening, unsupported custom backends refuse explicitly, and graph merge carries branch-authored reopenings while rejecting delete-and-resurrect window artifacts.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Return `MergeConstraintConflictError` when a resolved graph merge would violate a deterministic store constraint, preserving the typed store error as its cause and exposing actionable constraint details.
+
+### Patch Changes
+
+- [#470](https://github.com/nicia-ai/typegraph/pull/470) [`0b0022c`](https://github.com/nicia-ai/typegraph/commit/0b0022cf2b3c13483b468536404be4f35a8dfe39) Thanks [@pdlug](https://github.com/pdlug)! - Coalesce unchanged endpoint edge get-or-create updates when `coalesceUnchangedUpserts` is enabled. A coalesced replay now returns action `"found"`; `"updated"` means an update actually ran.
+
+  The coalescing check needs the endpoint match-key convergence fence. On a backend without top-level transactions, such as Cloudflare D1 or `neon-http`, an otherwise unchanged endpoint replay now refuses with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` instead of running unfenced. The bulk endpoint form and the create leg already required this fence.
+
+  This option does not coalesce node `getOrCreateByConstraint` updates; use `upsertById` for replay projectors that need unchanged node writes to avoid history churn.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Canonicalize node and edge metadata timestamps returned by compiled queries.
+  All supported database drivers now expose the same fixed-width UTC ISO 8601
+  rendering through compiled-query projections and store collection reads.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Serialize PostgreSQL `pg_trgm` extension installation across concurrent trigram index materializers.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Preserve PostgreSQL vector index build failures throughout serial-fallback preparation and durable `parallel_workers` cleanup, report the exact manual repair when cleanup fails, and reset built-in pgvector tables before every materialization attempt so recovery survives backend recreation without mutating custom strategy storage.
+
+## 0.46.2
+
+### Patch Changes
+
+- [#459](https://github.com/nicia-ai/typegraph/pull/459) [`0e2afe2`](https://github.com/nicia-ai/typegraph/commit/0e2afe2d76381b5bc8309485d3a7e84c7bda092e) Thanks [@pdlug](https://github.com/pdlug)! - Extend `onImmutableLowerBound: "preserve"` to endpoint-matched edge writes.
+  `getOrCreateByEndpoints` accepts the policy in its options, and
+  `bulkGetOrCreateByEndpoints` accepts it per item alongside `validFrom` and
+  `validTo`. The policy applies a stated `validFrom` on create or resurrection,
+  while a live `ifExists: "update"` preserves the stored lower bound and still
+  applies properties and `validTo`. Strict refusal remains the default.
+
+- [#462](https://github.com/nicia-ai/typegraph/pull/462) [`44f60cf`](https://github.com/nicia-ai/typegraph/commit/44f60cfbfaa6290323b02fb33fad2ca3541b1127) Thanks [@pdlug](https://github.com/pdlug)! - Surface lost fulltext contribution storage on gated operations as a typed `ContributionUnavailableError` with `state: "physical-storage-missing"` and rebuild guidance. Healthy operations retain the cached marker fast path; the error path translates only a missing-relation failure whose same driver error names the declared fulltext table.
+
 ## 0.46.1
 
 ### Patch Changes

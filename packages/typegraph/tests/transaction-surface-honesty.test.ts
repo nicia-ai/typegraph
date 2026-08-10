@@ -35,7 +35,7 @@ import {
   type TransactionContext,
   type TransactionReadBackend,
 } from "../src";
-import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
+import { projectGraphBackend } from "../src/backend/derive-backend";
 import {
   POSTGRES_CAPABILITIES,
   SQLITE_CAPABILITIES,
@@ -184,11 +184,12 @@ describe("portable runtime capability boundaries", () => {
   });
 
   it("preserves the absence of optional members in backend projections", () => {
+    // eslint-disable-next-line no-restricted-syntax -- The destructure IS the fixture: this asserts that a projection preserves the ABSENCE of an optional member on a structurally wider input, and feeding it a projectBackendWithout result would make the input already a projection and the assertion tautological.
     const { executeRaw: omittedExecuteRaw, ...backendWithoutExecuteRaw } =
       createTestBackend();
     expect(omittedExecuteRaw).toBeDefined();
 
-    const projection = createGraphBackendProjection(backendWithoutExecuteRaw);
+    const projection = projectGraphBackend(backendWithoutExecuteRaw);
 
     expect("executeRaw" in projection).toBe(false);
     expect(Object.hasOwn(projection, "executeRaw")).toBe(false);
@@ -219,6 +220,7 @@ describe("portable runtime capability boundaries", () => {
       "executeDdl",
       "executeRaw",
       "executeStatement",
+      "ensureTrigramExtension",
       "repairContributions",
       "schemaWriteTransaction",
       "transaction",

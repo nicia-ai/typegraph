@@ -26,7 +26,6 @@ import {
 } from "../query/sql-intent";
 import { type SerializedSchema } from "../schema/types";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
-import { inheritSerializedTransactionResource } from "./transaction-resource";
 
 // ============================================================
 // Vector Search Types
@@ -285,6 +284,13 @@ export type BackendCapabilities = Readonly<{
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
   /**
+   * Whether `updateNode` / `updateEdge` honor `clearValidTo: true` by storing
+   * SQL NULL in `valid_to`. Absent is `false`: custom backends must opt in so
+   * the store refuses every explicit clear-bearing call before lookup,
+   * coalescing, or write instead of making support depend on row state.
+   */
+  clearValidTo?: boolean;
+  /**
    * Whether the backend's `execute()` supports `UPDATE … RETURNING`. Absent or
    * `true` means supported (every engine TypeGraph ships — SQLite ≥ 3.35,
    * PostgreSQL ≥ 8.2 — supports it). A custom backend whose engine cannot run
@@ -494,7 +500,13 @@ export type InsertNodeParams = Readonly<{
   id: string;
   props: Readonly<Record<string, unknown>>;
   /**
-   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * Omitted (`undefined`): the insert stamps its own creation timestamp —
+   * UNLESS a stated `validTo` at or before that instant would make the stored
+   * window readable at no coordinate, in which case the row is stored with no
+   * lower bound ("ended at T, start unknown"). See
+   * `resolveStampedValidityLowerBound`, which every insert builder decides
+   * through. Custom backend implementations can import that owner from
+   * `@nicia-ai/typegraph/backend` rather than reimplementing the rule.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.
@@ -504,16 +516,35 @@ export type InsertNodeParams = Readonly<{
 }>;
 
 /**
- * Parameters for updating a node.
+ * A backend validity-end mutation. Omission preserves the stored end,
+ * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
+ * two write actions mutually exclusive without exposing SQL `NULL`.
  */
+export type BackendValidityEndMutation =
+  | Readonly<{ validTo?: string; clearValidTo?: never }>
+  | Readonly<{ validTo?: never; clearValidTo: true }>;
+
+/** Parameters for updating a node. */
 export type UpdateNodeParams = Readonly<{
   graphId: string;
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
-  /** Applied when resurrecting a tombstone; omitted means the resurrection instant. */
+  /**
+   * Applied when resurrecting a tombstone, which RESETS the window. Omitted
+   * means the resurrection instant — unless a stated `validTo` at or before it
+   * would leave the row readable at no coordinate, in which case the
+   * resurrection stores no lower bound. Same rule, same owner, as an insert:
+   * `resolveStampedValidityLowerBound`.
+   *
+   * The store's own resurrection paths never omit it. Their window guard has to
+   * judge the bound the write will STORE, so they resolve it through that owner
+   * against the instant they sampled and pass the result — `null` included,
+   * which is how "store no lower bound" is spelled here. Omission is for callers
+   * with no such verdict to honor; it lets this builder decide against its own,
+   * strictly later sample.
+   */
   validFrom?: string | null;
-  validTo?: string;
   /**
    * The effective `valid_from` this write ASSERTS the target row already
    * carries, stated only by a caller whose decision DEPENDED on it.
@@ -541,7 +572,8 @@ export type UpdateNodeParams = Readonly<{
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
   clearDeleted?: boolean;
-}>;
+}> &
+  BackendValidityEndMutation;
 
 /**
  * Parameters for updating a set of live nodes selected by a compiled
@@ -599,7 +631,13 @@ export type InsertEdgeParams = Readonly<{
   toId: string;
   props: Readonly<Record<string, unknown>>;
   /**
-   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * Omitted (`undefined`): the insert stamps its own creation timestamp —
+   * UNLESS a stated `validTo` at or before that instant would make the stored
+   * window readable at no coordinate, in which case the row is stored with no
+   * lower bound ("ended at T, start unknown"). See
+   * `resolveStampedValidityLowerBound`, which every insert builder decides
+   * through. Custom backend implementations can import that owner from
+   * `@nicia-ai/typegraph/backend` rather than reimplementing the rule.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.
@@ -679,7 +717,6 @@ export type UpdateEdgeParams = Readonly<{
    * Omitting `validFrom` on a resurrection leaves the stored window in place.
    */
   validFrom?: string | null;
-  validTo?: string;
   /**
    * The effective `valid_from` this write asserts the target row already
    * carries. Same three states, same NULL-safety, and the same MUST-apply
@@ -692,8 +729,14 @@ export type UpdateEdgeParams = Readonly<{
    * it must be fenced against it having changed.
    */
   expectedValidFrom?: string | null;
+  /**
+   * The `valid_to` state a constraint decision read. NULL-safe and MUST apply
+   * when present, like `expectedValidFrom`; used to fence ended-to-open edges.
+   */
+  expectedValidTo?: string | null;
   clearDeleted?: boolean;
-}>;
+}> &
+  BackendValidityEndMutation;
 
 /**
  * Parameters for deleting an edge (soft delete).
@@ -1263,7 +1306,7 @@ export type RecordContributionMaterializationParams = Readonly<{
  *   `DROP`, a schema-scoped restore that missed the contribution
  *   tables). The state {@link GraphBackend.verifyContributions} exists
  *   to surface: nothing on the open path probes the catalog, so this
- *   database opens clean and fails at the first read of the slot.
+ *   database opens clean and fails at the first dependent read or write.
  * - `missing-marker` — the physical table exists but no marker attests
  *   it as initialized (no row, no recorded success, or a recorded
  *   failure). Reads and writes are refused with
@@ -1399,9 +1442,10 @@ export type ContributionProbeContribution = "fulltext" | "vector";
  *   its durable marker and present in the catalog. Not a promise about
  *   future coherence: a write that lands after the probe returns is
  *   outside what any assessment can cover.
- * - `degraded` — at least one contribution is unusable. Queries against
- *   this projection will be refused (`StoreNotInitializedError`) or will
- *   read incomplete storage.
+ * - `degraded` — at least one contribution is unusable. Dependent operations
+ *   may be refused with a typed contribution error, fail at the engine boundary
+ *   when compiled SQL directly references missing storage, or observe
+ *   incomplete storage.
  *   {@link ContributionProbeEntry.detail} says which and why.
  * - `building` — **reserved.** No shipped path publishes it. Recording
  *   an in-flight marker would need a fifth
@@ -2144,6 +2188,13 @@ export type GraphBackend = Readonly<{
   ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
 
   /**
+   * Install the PostgreSQL `pg_trgm` extension under a database-global
+   * concurrency fence. Relational trigram index materialization calls this
+   * before emitting its index DDL; non-PostgreSQL backends omit it.
+   */
+  ensureTrigramExtension?: (this: void) => Promise<void>;
+
+  /**
    * Idempotently ensure ONLY the `typegraph_revision_origins` table exists.
    *
    * Revision-tracked stores use this per-graph, durable random origin together
@@ -2468,8 +2519,8 @@ export type GraphBackend = Readonly<{
    * per-instance signature cache and then on the marker row alone, which
    * is the right default for a hot path but leaves a database whose
    * contribution tables were dropped out of band opening clean and
-   * failing at the first read. This method is the explicit, operator-
-   * invoked catalog probe that fills that gap: it issues one uncached
+   * failing at the first dependent read or write. This method is the explicit,
+   * operator-invoked catalog probe that fills that gap: it issues one uncached
    * existence query per distinct physical table and performs ZERO DDL
    * and ZERO writes, so it is safe under a least-privilege runtime role.
    *
@@ -3076,149 +3127,6 @@ export function createTransactionReadBackend(
   });
 }
 
-type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
-  Readonly<Record<Exclude<keyof O, keyof T>, never>>;
-
-// ============================================================
-// Managed Backend Helper
-// ============================================================
-
-/**
- * Overlays selected backend methods without copying the backend object.
- *
- * This is a decoration primitive: every non-overridden target property remains
- * reachable. Never use it to narrow a capability surface; construct an
- * explicit allowlist projection first, then decorate that projection.
- *
- * Backend wrappers use this instead of object spread so proxy backends keep
- * getters and non-enumerable members. GraphBackend functions are receiver-free
- * by contract, so delegated methods are returned unchanged.
- */
-export function createBackendOverlay<
-  T extends GraphBackend | TransactionBackend,
-  const O extends Partial<T> = Partial<T>,
->(target: T, overlay: ExactBackendOverlay<T, O>): T {
-  function hasOverlayProperty(property: PropertyKey): boolean {
-    return Object.hasOwn(overlay, property);
-  }
-
-  const decoratedBackend = new Proxy(target, {
-    get(targetObject, property) {
-      if (hasOverlayProperty(property)) {
-        return Reflect.get(overlay, property, overlay);
-      }
-      return Reflect.get(targetObject, property, targetObject);
-    },
-
-    has(targetObject, property) {
-      return (
-        hasOverlayProperty(property) || Reflect.has(targetObject, property)
-      );
-    },
-
-    ownKeys(targetObject) {
-      return [
-        ...new Set([
-          ...Reflect.ownKeys(targetObject),
-          ...Reflect.ownKeys(overlay),
-        ]),
-      ];
-    },
-
-    getOwnPropertyDescriptor(targetObject, property) {
-      if (hasOverlayProperty(property)) {
-        const descriptor = Reflect.getOwnPropertyDescriptor(overlay, property);
-        if (descriptor === undefined) return;
-        return { ...descriptor, configurable: true };
-      }
-      return Reflect.getOwnPropertyDescriptor(targetObject, property);
-    },
-
-    set(targetObject, property, value) {
-      if (hasOverlayProperty(property)) {
-        return Reflect.set(overlay, property, value, overlay);
-      }
-      return Reflect.set(targetObject, property, value, targetObject);
-    },
-
-    defineProperty(targetObject, property, attributes) {
-      if (hasOverlayProperty(property)) {
-        return Reflect.defineProperty(overlay, property, attributes);
-      }
-      return Reflect.defineProperty(targetObject, property, attributes);
-    },
-
-    deleteProperty(targetObject, property) {
-      if (hasOverlayProperty(property)) {
-        return Reflect.deleteProperty(overlay, property);
-      }
-      return Reflect.deleteProperty(targetObject, property);
-    },
-  });
-  inheritSerializedTransactionResource(decoratedBackend, target);
-  return decoratedBackend;
-}
-
-/**
- * Wraps a GraphBackend with idempotent close that also runs a teardown
- * callback (e.g. closing the underlying database connection).
- */
-export function wrapWithManagedClose<TNativeTransaction>(
-  backend: AdapterBackend<TNativeTransaction>,
-  teardown: () => void | Promise<void>,
-): AdapterBackend<TNativeTransaction>;
-export function wrapWithManagedClose(
-  backend: GraphBackend,
-  teardown: () => void | Promise<void>,
-): GraphBackend;
-export function wrapWithManagedClose(
-  backend: GraphBackend,
-  teardown: () => void | Promise<void>,
-): GraphBackend {
-  let backendClosed = false;
-  let teardownComplete = false;
-  let closeInFlight: Promise<void> | undefined;
-
-  async function closeManagedResources(): Promise<void> {
-    const errors: unknown[] = [];
-    if (!backendClosed) {
-      try {
-        await backend.close();
-        backendClosed = true;
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-    if (!teardownComplete) {
-      try {
-        await teardown();
-        teardownComplete = true;
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) {
-      throw new AggregateError(
-        errors,
-        "The backend and its managed resource both failed to close.",
-      );
-    }
-  }
-
-  const closeOverlay: Pick<GraphBackend, "close"> = {
-    async close(): Promise<void> {
-      if (backendClosed && teardownComplete) return;
-      closeInFlight ??= closeManagedResources().finally(() => {
-        closeInFlight = undefined;
-      });
-      await closeInFlight;
-    },
-  };
-  return createBackendOverlay(backend, closeOverlay);
-}
-
 /**
  * Closes an owned resource after provisioning fails without replacing the
  * original domain error with a secondary cleanup failure.
@@ -3237,6 +3145,36 @@ export async function closeAfterFailure(
   throw provisioningError;
 }
 
+/** Options for {@link runOptionallyInTransaction}. */
+export type RunOptionallyInTransactionOptions = Readonly<{
+  /**
+   * Pass only when the toplevel backend method would recurse — pass the
+   * operation-level backend so the no-transaction path doesn't loop back
+   * through the same toplevel method.
+   */
+  fallback?: GraphBackend | TransactionBackend;
+  /**
+   * Options for the transaction this opens — most usefully
+   * `accessMode: "read_only"`, which lets a multi-statement READ declare itself
+   * to the engine instead of only promising it (SQLite issues `BEGIN` rather
+   * than reserving the single writer slot with `BEGIN IMMEDIATE`; PostgreSQL
+   * issues `BEGIN … READ ONLY`).
+   *
+   * Scopes the transaction and nothing else, so it is not honored on the
+   * fallthrough path: a backend reporting `transactions: false` opens no
+   * transaction to configure. The callback receives an explicit execution
+   * context stating whether a transaction was opened, so callers never infer
+   * atomicity from backend object identity.
+   */
+  transaction?: TransactionOptions;
+}>;
+
+/** What {@link runOptionallyInTransaction} actually did for this invocation. */
+export type OptionalTransactionExecution = Readonly<{
+  /** True only when the helper opened a transaction around the callback. */
+  atomic: boolean;
+}>;
+
 /**
  * Runs `fn` inside a transaction when given a top-level backend that supports
  * one, falling through to a direct invocation otherwise. Lets call sites benefit
@@ -3246,20 +3184,22 @@ export async function closeAfterFailure(
  * transaction-scoped backend. The single-statement race window is already
  * implicit on any backend that reports `transactions: false`; callers that
  * cannot tolerate it must branch on the capability themselves.
- *
- * Pass `fallback` only when the toplevel backend method would recurse
- * — pass the operation-level backend so the no-tx path doesn't loop
- * back through the same toplevel method.
  */
 export async function runOptionallyInTransaction<T>(
   backend: GraphBackend | TransactionBackend,
-  fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
-  fallback?: GraphBackend | TransactionBackend,
+  fn: (
+    target: GraphBackend | TransactionBackend,
+    execution: OptionalTransactionExecution,
+  ) => Promise<T>,
+  options?: RunOptionallyInTransactionOptions,
 ): Promise<T> {
   if ("transaction" in backend && backend.capabilities.transactions) {
-    return backend.transaction((tx) => fn(tx));
+    return backend.transaction(
+      (tx) => fn(tx, { atomic: true }),
+      options?.transaction,
+    );
   }
-  return fn(fallback ?? backend);
+  return fn(options?.fallback ?? backend, { atomic: false });
 }
 
 // ============================================================
@@ -3809,6 +3749,7 @@ export const POSTGRES_MAX_BIND_PARAMETERS = 65_533;
 export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   transactions: true, // SQLite supports transactions
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
+  clearValidTo: true,
   returning: true, // SQLite has supported RETURNING since 3.35.0
   // The bundled schema ships both claim relations and the shared operation
   // backend implements every claim member.
@@ -3825,6 +3766,7 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
 export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   transactions: true, // PostgreSQL supports transactions
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
+  clearValidTo: true,
   returning: true, // PostgreSQL has supported RETURNING since 8.2
   // The bundled schema ships both claim relations and the shared operation
   // backend implements every claim member.

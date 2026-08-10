@@ -15,6 +15,10 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import type { GraphBackend } from "../src/backend/types";
 import { createTestBackend } from "./test-utils";
 
@@ -33,45 +37,36 @@ function backendWithReturning(returning?: boolean): GraphBackend {
   // Drop the base flag so each case controls `returning` explicitly — omitting
   // it is the "undeclared" case the gate must treat as supported.
   const { returning: _baseReturning, ...capabilities } = base.capabilities;
-  return {
-    ...base,
+  return deriveBackend(base, {
     capabilities:
       returning === undefined ? capabilities : { ...capabilities, returning },
-  };
+  });
 }
 
 function postgresLikeBackend(): GraphBackend {
-  return { ...backendWithReturning(true), dialect: "postgres" };
+  return deriveBackend(backendWithReturning(true), { dialect: "postgres" });
 }
 
 function backendWithoutTransactions(): GraphBackend {
   const base = createTestBackend();
-  return {
-    ...base,
+  return deriveBackend(base, {
     capabilities: { ...base.capabilities, transactions: false },
-  };
+  });
 }
 
 function backendWithoutExecuteStatement(): GraphBackend {
   const base = createTestBackend();
-  const { executeStatement: _executeStatement, ...withoutExecuteStatement } =
-    base;
-  return withoutExecuteStatement;
+  return projectBackendWithout(base, ["executeStatement"]);
 }
 
 function backendWithoutTableNames(): GraphBackend {
   const base = createTestBackend();
-  const { tableNames: _tableNames, ...withoutTableNames } = base;
-  return withoutTableNames;
+  return projectBackendWithout(base, ["tableNames"]);
 }
 
 function backendWithoutRevisionOriginsTableBootstrap(): GraphBackend {
   const base = createTestBackend();
-  const {
-    ensureRevisionOriginsTable: _ensureRevisionOriginsTable,
-    ...withoutRevisionOriginsTableBootstrap
-  } = base;
-  return withoutRevisionOriginsTableBootstrap;
+  return projectBackendWithout(base, ["ensureRevisionOriginsTable"]);
 }
 
 describe("recorded-time capture capability gate", () => {
@@ -154,8 +149,7 @@ describe("recorded-time capture capability gate", () => {
       throw new Error("Test backend must bootstrap revision origins");
     }
     let bootstrapAttempts = 0;
-    const backend: GraphBackend = {
-      ...base,
+    const backend: GraphBackend = deriveBackend(base, {
       async ensureRevisionOriginsTable(): Promise<void> {
         bootstrapAttempts++;
         if (bootstrapAttempts === 1) {
@@ -163,7 +157,7 @@ describe("recorded-time capture capability gate", () => {
         }
         await ensureRevisionOriginsTable();
       },
-    };
+    });
     const store = createStore(graph, backend, { revisionTracking: true });
 
     await expect(store.revisionOriginNow()).rejects.toThrow(

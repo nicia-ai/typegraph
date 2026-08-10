@@ -682,6 +682,26 @@ Application code can continue importing the complete portable Store API from
 application deliberately owns a Drizzle connection or needs native transaction
 interop.
 
+Custom insert builders must apply the same born-ended validity rule as the
+built-in adapters. Import its public owner instead of duplicating the bound
+comparison:
+
+```typescript
+import { resolveStampedValidityLowerBound } from "@nicia-ai/typegraph/backend";
+
+const validFrom = resolveStampedValidityLowerBound(
+  params.validFrom,
+  params.validTo,
+  writeInstant,
+);
+```
+
+Use the same `writeInstant` for the decision and the row's creation/update
+stamp. This keeps custom node and edge inserts, plus node resurrection paths
+that reset the validity window, aligned with Store and interchange semantics at
+the zero-width boundary. Edge resurrection retains its stored lower bound and
+does not use this stamping helper.
+
 ## Managed Store Entrypoints
 
 For local applications that do not need direct database access, TypeGraph can
@@ -899,6 +919,17 @@ open: a standby refuses the read-write transaction itself, and a role without
 as `UnsupportedBackendCapabilityError`, with the PostgreSQL error retained as
 its `cause`.
 
+### Validity-end clearing capability
+
+Custom backends must advertise `capabilities.clearValidTo: true` only when both
+`updateNode` and `updateEdge` apply `clearValidTo: true` by storing SQL `NULL` in
+`valid_to`. The built-in SQLite and PostgreSQL adapters do. An explicit clear on
+a backend without that promise is refused with `ConfigurationError` code
+`CLEAR_VALID_TO_UNSUPPORTED` before coalescing or writes, so the result
+does not depend on whether the target row is already open. Omission still means
+preserve; custom backends that do not support clearing remain compatible with
+all writes that omit the option.
+
 ### Declared constraints require `transactions`
 
 A **constrained write** — one whose correctness rests on a check-then-write that
@@ -937,10 +968,14 @@ Unconstrained writes on those backends are untouched and keep working exactly as
 before: a `cardinality: "many"` edge created, updated and deleted; any node
 delete, including one whose kind participates in a disjointness axiom (a delete
 re-derives no cross-kind verdict); a node whose uniques are all `scope: "kind"`;
-and a `getOrCreateByEndpoints` that *finds* an existing edge, or resurrects a
-`many` one — that resurrection is an id-keyed `UPDATE` that re-derives nothing.
-The bulk `getOrCreateByEndpoints` form fences its whole batch, so it refuses on
-those backends whatever the outcome would have been.
+and a `getOrCreateByEndpoints` that *finds* an existing edge in the default
+`ifExists: "return"` mode, or resurrects a `many` one — that resurrection is an
+id-keyed `UPDATE` that re-derives nothing. With `coalesceUnchangedUpserts`
+enabled, confirming that a single `ifExists: "update"` endpoint replay is
+unchanged requires the endpoint match-key convergence fence and therefore
+refuses on these backends. The bulk `getOrCreateByEndpoints` form fences its
+whole batch, so it refuses on those backends whatever the outcome would have
+been.
 
 ### Claim relations, and what they do not promise
 
@@ -1137,6 +1172,77 @@ process.on("exit", () => {
 Here `store.close()` leaves `sqlite` open because the application supplied the
 connection. Close the driver or pool through its own API.
 
+### Serialized connections
+
+Some drivers run every statement through **one** connection. Two long-lived
+interchange streams cannot share such a connection — an export snapshot holds a
+read transaction for the whole stream while an import writes one per chunk — so
+TypeGraph refuses the second one with a typed error instead of letting it hang
+(see
+[Interchange serialized-connection guard codes](/errors#interchange-serialized-connection-guard-codes)).
+
+Recognizing a serialized connection means recognizing the *driver*, from the
+shape of the client object. That is deliberately conservative: a driver
+TypeGraph cannot positively identify is left unmarked, because refusing a pooled
+connection would refuse work that succeeds.
+
+| Driver / configuration                                                                        | Detected           | Notes                                                                                                          |
+| --------------------------------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| better-sqlite3, bun:sqlite, sql.js, local libSQL (`file:` / `:memory:`), Durable Object storage | ✓ automatic        | One handle, one connection                                                                                       |
+| PGlite                                                                                        | ✓ automatic        | One in-process WASM connection                                                                                   |
+| Bare `pg` / neon-serverless `Client`, a checked-out `PoolClient`                               | ✓ automatic        | One owned socket                                                                                                 |
+| `pg` `Pool` capped at one (`{ max: 1 }`, `{ max: "1" }`, `{ poolSize: "1" }`)                  | ✓ automatic        | pg-pool does not coerce the cap, so the string forms are the same one-connection pool                            |
+| postgres-js capped at one (`{ max: 1 }`, `?max=1`, `PGMAX=1`)                                  | ✓ automatic        | Same reasoning on the postgres-js side                                                                           |
+| Default-size pools, `neon-http`, D1, RDS Data API, remote libSQL (`http` / `ws`)               | — deliberately not | Each statement gets an independent connection; refusing would refuse work that succeeds                          |
+| `expo-sqlite`, `op-sqlite`, `sqlite-proxy`, `pg-proxy`, a bespoke adapter                      | ✗ **declare it**   | Serialized in fact, but the client exposes no shape TypeGraph can attribute to a known driver                    |
+| Bun `SQL` (Postgres) at `{ max: 1 }`                                                           | ✗ **declare it**   | The cap is readable, but nothing identifies the driver, and a cap on an unknown client is not evidence           |
+| postgres-js with a non-numeric string cap other than one, e.g. `?max=5`                        | ✗ **declare it**   | Opens exactly one connection today only because postgres-js does not coerce the value — marking it would encode an upstream bug that will one day be fixed |
+
+For the rows marked **declare it**, tell TypeGraph what it cannot see. The
+option is on `createSqliteBackend` and `createPostgresBackend` — the two
+factories that resolve it. The batteries-included wrappers
+(`createLibsqlBackend`, `createLocalSqliteBackend`, `createLocalPgliteBackend`)
+do not take it, because each already detects its own connection.
+
+```typescript
+const sql = postgres(process.env.DATABASE_URL + "?max=5");
+
+const backend = createPostgresBackend(drizzle(sql), {
+  // This client really does run every statement on one connection.
+  serializedResource: { mode: "shared", resource: sql },
+});
+```
+
+Two backends that name the **same** object are one serialized resource, exactly
+as two wrappers over a detected client are. Naming a *different* object than the
+one TypeGraph detected is refused with a `ConfigurationError`
+(`details.reason: "serialized-resource-conflict"`) rather than silently
+preferred: two wrappers over one connection given two different sentinels would
+stop being seen as a pair, which is the failure the guard exists to prevent.
+The refusal names each side by constructor (`details.declaredKind` /
+`details.detectedKind`) instead of carrying the two handles, because `details`
+is what `toLogString()` serializes and a driver handle there would log whatever
+that driver stores — a `pg.Pool` keeps its `connectionString`.
+
+The reverse declaration escapes a detection that is wrong for your topology:
+
+```typescript
+const backend = createSqliteBackend(db, {
+  serializedResource: { mode: "independent" },
+});
+```
+
+**Scope.** `{ mode: "independent" }` lifts the *shared-resource* refusal between
+two distinct backend objects. It does not lift the object-identity refusal, under
+which one SQLite backend exporting into **itself** is refused with
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`. That one is a fact about a single
+handle holding a single open snapshot transaction, not a claim about connection
+topology, so no declaration can make it false — pass a second backend instead.
+That surviving refusal is SQLite-only, so on PostgreSQL the declaration lifts
+the refusal for one backend exporting into itself as well: a client that hands
+out independent connections — which is exactly what the declaration claims —
+runs the snapshot and the writes it contends with on different ones.
+
 ## Database roles & least privilege
 
 `createStoreWithSchema()` and `createStore()` divide cleanly along DDL
@@ -1213,7 +1319,7 @@ reopen it through a managed factory before resuming version-fenced writes.
   role.**
   Every gate above trusts the marker row without probing the catalog, so
   a database whose strategy-owned tables were dropped out of band opens
-  clean and fails at the first read. This method compares each contribution
+  clean and fails at the first dependent read or write. This method compares each contribution
   currently expected by the active graph and backend strategies with its
   marker and the catalog. It does not audit retired marker rows, and a
   never-attempted contribution with neither marker nor table is omitted, so
