@@ -177,17 +177,42 @@ describe("identity review fixes", () => {
     const aRef = { kind: "Person", id: a.id };
     const bRef = { kind: "Person", id: b.id };
     const existing = await store.identity.assertSame(a, b);
+    const replacement = transfer(
+      "d1",
+      "different",
+      aRef,
+      bRef,
+      existing.assertion.validFrom,
+    );
 
     await expect(
       storeRuntime(store).applyIdentityMergeAtTarget(
         store.backend,
         [existing.assertion.id],
-        [transfer("d1", "different", aRef, bRef, new Date().toISOString())],
+        [replacement],
       ),
     ).resolves.toEqual({ created: 1, retracted: 1 });
 
     expect(await store.identity.areSame(a, b)).toBe(false);
     expect(await store.identity.areDifferent(a, b)).toBe(true);
+    const assertions = await storeRuntime(store).identityAssertionsAtTarget(
+      store.backend,
+      "archival",
+    );
+    const endedSame = assertions.find(
+      (assertion) => assertion.id === existing.assertion.id,
+    );
+    const currentDifferent = assertions.find(
+      (assertion) => assertion.id === "d1",
+    );
+    expect(currentDifferent?.validFrom).toBe(endedSame?.validTo);
+    await expect(
+      storeRuntime(store).applyIdentityMergeAtTarget(
+        store.backend,
+        [existing.assertion.id],
+        [replacement],
+      ),
+    ).resolves.toEqual({ created: 0, retracted: 0 });
   });
 
   it("#4 hard delete removes ended assertions left by a prior soft delete", async () => {

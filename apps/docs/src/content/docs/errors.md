@@ -309,7 +309,9 @@ Its code identifies the reason: `IDENTITY_VALIDITY_FUTURE_START`,
 
 `IdentityEndpointValidityError` (`IDENTITY_ENDPOINT_VALIDITY`) means an
 explicit assertion window extends outside an endpoint node's own validity or
-deletion bounds. Both errors are constraint-category package-root exports.
+deletion bounds. Future or inverted identity windows are user-category input
+errors. A second non-identical open window and an endpoint-window conflict are
+constraint-category errors. Both classes are package-root exports.
 
 ### `IdentityMergeConflictError`
 
@@ -1133,9 +1135,9 @@ try {
 | `VALIDATION_ERROR` | `ValidationError` | user | Schema validation failed |
 | `DISJOINT_ERROR` | `DisjointError` | constraint | Disjointness constraint violated |
 | `IDENTITY_CONTRADICTION` | `IdentityContradictionError` | constraint | Identity mutation would make the assertion ledger contradictory |
-| `IDENTITY_VALIDITY_FUTURE_START` | `IdentityValidityWindowError` | constraint | Identity assertion starts after the operation clock |
-| `IDENTITY_VALIDITY_FUTURE_END` | `IdentityValidityWindowError` | constraint | Identity assertion ends after the operation clock |
-| `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | constraint | Identity assertion ends before it starts |
+| `IDENTITY_VALIDITY_FUTURE_START` | `IdentityValidityWindowError` | user | Identity assertion starts after the operation clock |
+| `IDENTITY_VALIDITY_FUTURE_END` | `IdentityValidityWindowError` | user | Identity assertion ends after the operation clock |
+| `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | user | Identity assertion ends before it starts |
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |

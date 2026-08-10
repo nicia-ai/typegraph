@@ -10,7 +10,6 @@ import {
   type GraphBackend,
   IdentityContradictionError,
   IdentityEndpointValidityError,
-  IdentityValidityWindowError,
   rebuildIdentityClosure,
 } from "../../../src";
 import { exportGraph } from "../../../src/interchange";
@@ -324,19 +323,72 @@ export function registerIdentityIntegrationTests(
         store.identity.assertSame(person, company, {
           validFrom: "2099-01-01T00:00:00.000Z",
         }),
-      ).rejects.toBeInstanceOf(IdentityValidityWindowError);
+      ).rejects.toMatchObject({
+        code: "IDENTITY_VALIDITY_FUTURE_START",
+        category: "user",
+        details: { reason: "future-valid-from" },
+      });
       await expect(
         store.identity.assertSame(person, company, {
           validFrom: "2020-01-01T00:00:00.000Z",
           validTo: "2099-01-01T00:00:00.000Z",
         }),
-      ).rejects.toBeInstanceOf(IdentityValidityWindowError);
+      ).rejects.toMatchObject({
+        code: "IDENTITY_VALIDITY_FUTURE_END",
+        category: "user",
+        details: { reason: "future-valid-to" },
+      });
       await expect(
         store.identity.assertSame(person, company, {
           validFrom: "2024-01-01T00:00:00.000Z",
           validTo: "2023-01-01T00:00:00.000Z",
         }),
-      ).rejects.toBeInstanceOf(IdentityValidityWindowError);
+      ).rejects.toMatchObject({
+        code: "IDENTITY_VALIDITY_INVERTED",
+        category: "user",
+        details: { reason: "inverted" },
+      });
+    });
+
+    it("refuses a second non-identical open window in scalar and bulk writes", async () => {
+      const store = context.getStore();
+      const nodes = await store.nodes.Person.bulkCreate(
+        ["scalar-a", "scalar-b", "bulk-a", "bulk-b"].map((id) => ({
+          id: `open-window-${id}`,
+          props: { name: `Open window ${id}` },
+          validFrom: "2019-01-01T00:00:00.000Z",
+        })),
+      );
+      const scalarA = requireDefined(nodes[0]);
+      const scalarB = requireDefined(nodes[1]);
+      const bulkA = requireDefined(nodes[2]);
+      const bulkB = requireDefined(nodes[3]);
+      await store.identity.assertSame(scalarA, scalarB, {
+        validFrom: "2021-01-01T00:00:00.000Z",
+      });
+      await store.identity.assertSame(bulkA, bulkB, {
+        validFrom: "2021-01-01T00:00:00.000Z",
+      });
+      const expectedError = {
+        code: "IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT",
+        category: "constraint",
+        details: { reason: "overlapping-open-window" },
+      } as const;
+
+      await expect(
+        store.identity.assertSame(scalarA, scalarB, {
+          validFrom: "2020-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toMatchObject(expectedError);
+      await expect(
+        store.identity.bulkAssertSame([
+          {
+            a: bulkA,
+            b: bulkB,
+            validFrom: "2020-01-01T00:00:00.000Z",
+          },
+        ]),
+      ).rejects.toMatchObject(expectedError);
     });
 
     it("applies one validity window per bulk identity pair", async () => {

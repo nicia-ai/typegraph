@@ -713,7 +713,8 @@ export class IdentityValidityWindowError extends TypeGraphError {
       code,
       {
         details,
-        category: "user",
+        category:
+          details.reason === "overlapping-open-window" ? "constraint" : "user",
         suggestion:
           details.reason === "inverted" ? "Pass validFrom at or before validTo."
           : details.reason === "overlapping-open-window" ?

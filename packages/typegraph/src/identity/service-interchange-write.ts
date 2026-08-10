@@ -7,6 +7,7 @@ import {
 } from "../errors";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
 import { nowIso } from "../utils/date";
+import { identityAssertionSemanticKey } from "./assertion-key";
 import {
   requireLiveEndpoints,
   requireStructuralEndpoints,
@@ -223,6 +224,40 @@ function rethrowTaggedWithAssertion(
     });
   }
   throw error;
+}
+
+function reconcileReplacementWindows(
+  assertions: readonly IdentityTransferAssertion[],
+  retractions: Iterable<IdentityAssertionStorageRow>,
+): readonly IdentityTransferAssertion[] {
+  const retractionEndByReplacement = new Map<string, string>();
+  for (const retraction of retractions) {
+    if (retraction.valid_to === undefined) continue;
+    const replacementRelation =
+      retraction.rel === "same" ? "different" : "same";
+    const key = identityAssertionSemanticKey(
+      replacementRelation,
+      { kind: retraction.a_kind, id: retraction.a_id },
+      { kind: retraction.b_kind, id: retraction.b_id },
+    );
+    const existingEnd = retractionEndByReplacement.get(key);
+    if (existingEnd === undefined || existingEnd < retraction.valid_to) {
+      retractionEndByReplacement.set(key, retraction.valid_to);
+    }
+  }
+  return assertions.map((assertion) => {
+    if (assertion.validTo !== undefined) return assertion;
+    const retractionEnd = retractionEndByReplacement.get(
+      identityAssertionSemanticKey(assertion.relation, assertion.a, assertion.b),
+    );
+    if (retractionEnd === undefined || assertion.validFrom >= retractionEnd) {
+      return assertion;
+    }
+    // A merge replacement is current truth from the instant its opposing
+    // target assertion is retracted. Keeping the branch's earlier start
+    // would manufacture a historical overlap that neither side resolved.
+    return { ...assertion, validFrom: retractionEnd };
+  });
 }
 
 /**
@@ -494,10 +529,20 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
       ctx.graphId,
       separationReferences,
     );
+    const retractionRows = await loadAssertionsByIds(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      retractionIds,
+    );
+    const reconciledAssertions = reconcileReplacementWindows(
+      assertions,
+      retractionRows.values(),
+    );
     const summary = await importIdentityAssertionsIntoTarget(
       ctx,
       target,
-      assertions,
+      reconciledAssertions,
       "archival",
     );
     // The import records capture touches through its OWN recorded binding, so
