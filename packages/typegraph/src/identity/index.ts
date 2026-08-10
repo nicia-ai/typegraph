@@ -3,6 +3,7 @@ export type {
   IdentityAssertion,
   IdentityAssertionId,
   IdentityAssertionResult,
+  IdentityAssertionWriteFacade,
   IdentityFacade,
   IdentityNode,
   IdentityNodeReference,

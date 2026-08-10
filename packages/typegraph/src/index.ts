@@ -114,6 +114,7 @@ export {
   type IdentityAssertion,
   type IdentityAssertionId,
   type IdentityAssertionResult,
+  type IdentityAssertionWriteFacade,
   type IdentityFacade,
   type IdentityNode,
   type IdentityNodeReference,

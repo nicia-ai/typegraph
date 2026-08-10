@@ -107,6 +107,7 @@ export type {
   KeylessConfig,
   SourceScope,
 } from "./sources";
+export type { IdentityAssertionWriteFacade } from "./typegraph-internal";
 export type {
   BaseAmbiguity,
   BaseVersion,
