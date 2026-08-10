@@ -17,7 +17,10 @@ import type {
 } from "../../query/sql-intent";
 import { asCompiledStatementSql } from "../../query/sql-intent";
 import { type ClaimOwner, isSameClaimOwner } from "../../store/claims/axis";
-import { edgeCardinalityClaimTarget } from "../../store/claims/edge-claims";
+import {
+  type ConstrainedCardinality,
+  edgeCardinalityClaimTarget,
+} from "../../store/claims/edge-claims";
 import { chunk as chunkArray } from "../../utils/array";
 import {
   isDuplicatePrimaryKeyError,
@@ -34,6 +37,8 @@ import type {
   ClaimEdgeCardinalityParams,
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
+  ConstraintFenceViolationRows,
+  ContendedEdgeRow,
   CountEdgesByKindParams,
   CountEdgesFromParams,
   CountNodesByKindParams,
@@ -41,6 +46,7 @@ import type {
   DeleteEdgesBatchParams,
   DeleteNodeParams,
   DeleteUniqueParams,
+  DisjointOverlapRow,
   EdgeClaimOutcome,
   EdgeExistsBetweenParams,
   EdgeRow,
@@ -49,6 +55,7 @@ import type {
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  GraphBackend,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
   HardDeleteUniquesByConcreteKindParams,
@@ -59,6 +66,7 @@ import type {
   NodeRow,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
+  ReadConstraintFenceViolationsParams,
   SchemaKindEmptinessProbe,
   SchemaVersionRow,
   SetActiveVersionParams,
@@ -140,6 +148,14 @@ export type CommonOperationBackend = Pick<
   | "updateNodeSet"
 > &
   Readonly<{
+    /**
+     * The read-only fence audit. Not a `TransactionBackend` member — it is a
+     * diagnostic the store runs at the top-level backend, and nothing inside a
+     * write transaction reads it — so it is declared here rather than picked.
+     */
+    readConstraintFenceViolations: NonNullable<
+      GraphBackend["readConstraintFenceViolations"]
+    >;
     executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
     commitSchemaVersion: (
       params: CommitSchemaVersionParams,
@@ -1105,6 +1121,84 @@ export function createCommonOperationBackend(
         });
         await execution.execRun(query);
       }
+    },
+
+    async readConstraintFenceViolations(
+      params: ReadConstraintFenceViolationsParams,
+    ): Promise<ConstraintFenceViolationRows> {
+      const uniqueRows =
+        params.uniqueConstraintNames.length === 0 ?
+          []
+        : await execution.execAll<{
+            node_kind: string;
+            constraint_name: string;
+            key: string;
+            concrete_kind: string;
+            node_id: string;
+          }>(
+            operationStrategy.buildContendedUniqueRowAudit(
+              params.graphId,
+              params.uniqueConstraintNames,
+            ),
+          );
+      const contendedUniqueRows = uniqueRows.map((row) => ({
+        nodeKind: row.node_kind,
+        constraintName: row.constraint_name,
+        key: row.key,
+        concreteKind: row.concrete_kind,
+        nodeId: row.node_id,
+      }));
+
+      // One statement per declared cardinality, because that is the
+      // granularity at which the population's key and liveness differ.
+      const edgeKindsByCardinality = new Map<
+        ConstrainedCardinality,
+        string[]
+      >();
+      for (const declaration of params.edgeCardinalities) {
+        const kinds = edgeKindsByCardinality.get(declaration.cardinality) ?? [];
+        kinds.push(declaration.edgeKind);
+        edgeKindsByCardinality.set(declaration.cardinality, kinds);
+      }
+      const contendedEdgeRows: ContendedEdgeRow[] = [];
+      for (const [cardinality, edgeKinds] of edgeKindsByCardinality) {
+        const rows = await execution.execAll<{
+          edge_id: string;
+          edge_kind: string;
+          from_kind: string;
+          from_id: string;
+          to_kind: string;
+          to_id: string;
+        }>(
+          operationStrategy.buildContendedEdgeRowAudit(
+            params.graphId,
+            cardinality,
+            edgeKinds,
+          ),
+        );
+        for (const row of rows) {
+          contendedEdgeRows.push({
+            edgeKind: row.edge_kind,
+            cardinality,
+            edgeId: row.edge_id,
+            fromKind: row.from_kind,
+            fromId: row.from_id,
+            toKind: row.to_kind,
+            toId: row.to_id,
+          });
+        }
+      }
+
+      const disjointOverlaps: DisjointOverlapRow[] = [];
+      for (const kinds of params.disjointKindPairs) {
+        const rows = await execution.execAll<{ node_id: string }>(
+          operationStrategy.buildDisjointOverlapAudit(params.graphId, kinds),
+        );
+        for (const row of rows)
+          disjointOverlaps.push({ kinds, nodeId: row.node_id });
+      }
+
+      return { contendedUniqueRows, contendedEdgeRows, disjointOverlaps };
     },
 
     async checkUnique(

@@ -39,6 +39,7 @@ import { type ConstraintFenceReason } from "./backing";
 import {
   type ClaimPlacement,
   type ClaimRefusal,
+  type NodeClaimOperation,
   nodeClaimSites,
 } from "./sites";
 
@@ -126,7 +127,8 @@ function claimKeyFor(
  * it twice: to place each claim (a transition claims before the row it gates for
  * every scope, while a create only does so for an axis spanning kinds beyond its
  * own) and to decide the disjointness arm, which only a write bringing a node
- * into existence under a kind owes.
+ * into existence under a kind owes — `"create"` and `"resurrect"` alike, never
+ * `"update"`.
  */
 export function nodeClaimEntries(
   registry: KindRegistry,
@@ -134,7 +136,7 @@ export function nodeClaimEntries(
   id: string,
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
-  operation: "create" | "update",
+  operation: NodeClaimOperation,
 ): readonly NodeClaimEntry[] {
   return nodeClaimSites(registry, kind, constraints, operation).flatMap(
     (site) => {
@@ -213,12 +215,17 @@ function mapClaimRefusal(
  * Runs a claim statement, re-raising a foreign owner as the declared refusal of
  * whichever family owed the claim.
  *
- * One wrapper around every claim write of the CREATE seam, rather than a
- * translation at each of them: a claim statement that skipped it would report a
- * `disjointWith` violation as a uniqueness violation on a constraint name no
- * caller ever declared. The transition seam ({@link withNodeClaimTransition})
- * needs no wrapper — the disjointness site arm is create-only, so an update's
- * plan carries uniqueness entries and nothing else to translate.
+ * One wrapper around every claim write, rather than a translation at each of
+ * them: a claim statement that skipped it would report a `disjointWith`
+ * violation as a uniqueness violation on a constraint name no caller ever
+ * declared. Both the CREATE seam's `withNodeCreateClaimsIssuedBy` and the
+ * transition seam's {@link claimUniqueKeysThen} reuse it — a resurrect's plan
+ * can carry a disjointness entry exactly as a create's claim list does (see
+ * {@link planNodeClaimReinsert}), so the transition seam needs the same
+ * translation the create seam always did. For a plan whose claims are all
+ * uniqueness (an in-place update's diff), `mapClaimRefusal` finds no
+ * disjointness entry to remap and rethrows the original `UniquenessError`
+ * unchanged, so this is a no-op there.
  */
 async function issuingClaims(
   entries: readonly NodeClaimEntry[],
@@ -777,16 +784,29 @@ export async function planNodeClaimUpdate(
 
 /**
  * The plan a RESURRECTING write needs: every applying constraint re-reserved
- * from scratch.
+ * from scratch, uniqueness AND disjointness alike.
  *
  * A tombstoned node holds no live reservations — {@link deleteUniquenessEntries}
- * released them at soft-delete time — so the diff-based
- * {@link planNodeClaimUpdate} cannot be used here: it would skip an unchanged
- * key and leave the revived node holding NO reservation, letting a later create
- * silently duplicate the value.
+ * released them at soft-delete time, reading the wider `"create"` extent that
+ * already covers both families — so the diff-based {@link planNodeClaimUpdate}
+ * cannot be used here: it would skip an unchanged key and leave the revived
+ * node holding NO reservation, letting a later create (of this node's own key,
+ * or of a disjoint partner under this node's id) silently duplicate the value.
+ *
+ * Reads its entries at `"resurrect"`, the {@link NodeClaimOperation} that owes
+ * the same disjointness sites a create owes (see `nodeClaimSites`) — a
+ * resurrect brings a node back into existence under its kind exactly as a
+ * create does, so it owes the same cross-kind claim. A disjointness entry can
+ * never already be held by THIS node (its own reservation was released at
+ * soft-delete time, and nothing else could have taken it under this node's
+ * OWN id/kind pair), so unlike a uniqueness entry it needs no "already held by
+ * myself" probe — it is claimed fresh, exactly as a create claims it fresh.
  *
  * @throws UniquenessError if a key this node held was taken while it was
  *   tombstoned
+ * @throws DisjointError if a disjoint partner now holds this id (translated by
+ *   {@link claimUniqueKeysThen} from the `UniquenessError` `insertUnique`
+ *   itself reports)
  */
 export async function planNodeClaimReinsert(
   ctx: UniquenessContext,
@@ -802,11 +822,12 @@ export async function planNodeClaimReinsert(
     id,
     props,
     constraints,
-    "update",
-  ).filter((entry): entry is UniquenessClaimEntry =>
-    isUniquenessClaimEntry(entry),
+    "resurrect",
   )) {
-    const alreadyHeld = await probeUniqueKey(ctx, kind, id, entry);
+    const alreadyHeld =
+      isUniquenessClaimEntry(entry) ?
+        await probeUniqueKey(ctx, kind, id, entry)
+      : false;
 
     pending.push({
       constraintName: entry.constraintName,
@@ -883,6 +904,11 @@ async function releaseClaimedUniqueKeys(
 /**
  * Reserves the plan's new keys, runs the primary row write they gate, and undoes
  * the reservations if that write does not land.
+ *
+ * Each claim statement runs through {@link issuingClaims} — a resurrect's plan
+ * can carry a disjointness entry ({@link planNodeClaimReinsert}), and a foreign
+ * owner of THAT reservation must surface as `DisjointError`, not the raw
+ * `UniquenessError` `insertUnique` reports for every family alike.
  */
 async function claimUniqueKeysThen<T>(
   ctx: UniquenessContext,
@@ -896,14 +922,16 @@ async function claimUniqueKeysThen<T>(
     for (const mutation of plan) {
       const claim = mutation.claim;
       if (claim === undefined) continue;
-      await ctx.backend.insertUnique({
-        graphId: ctx.graphId,
-        nodeKind: claim.axis,
-        constraintName: mutation.constraintName,
-        key: claim.key,
-        nodeId: id,
-        concreteKind: kind,
-      });
+      await issuingClaims([claim], () =>
+        ctx.backend.insertUnique({
+          graphId: ctx.graphId,
+          nodeKind: claim.axis,
+          constraintName: mutation.constraintName,
+          key: claim.key,
+          nodeId: id,
+          concreteKind: kind,
+        }),
+      );
       claimed.push({
         axis: claim.axis,
         constraintName: mutation.constraintName,

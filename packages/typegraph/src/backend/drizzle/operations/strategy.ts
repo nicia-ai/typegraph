@@ -2,6 +2,7 @@ import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
+import { type ConstrainedCardinality } from "../../../store/claims/edge-claims";
 import { isPresent } from "../../../utils/presence";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import { nowIso } from "../../row-mappers";
@@ -56,6 +57,11 @@ import {
   buildFindEdgesByKind,
   buildFindNodesByKind,
 } from "./collections";
+import {
+  buildContendedEdgeRowAudit,
+  buildContendedUniqueRowAudit,
+  buildDisjointOverlapAudit,
+} from "./constraint-fence-audit";
 import {
   buildLockEdgeClaims,
   buildPurgeEdgeClaims,
@@ -267,6 +273,25 @@ export type CommonOperationStrategy = Readonly<{
     timestamp: string,
   ) => SQL;
   buildPurgeEdgeClaims: (params: PurgeEdgeClaimsParams) => SQL;
+  /**
+   * The three read-only fence-audit statements, one per constraint family.
+   * Members of this interface for the same reason the claim statements are:
+   * the type checker forces both dialects to have them, so a family cannot be
+   * audited on one backend and silently skipped on the other.
+   */
+  buildContendedUniqueRowAudit: (
+    graphId: string,
+    constraintNames: readonly string[],
+  ) => SQL;
+  buildContendedEdgeRowAudit: (
+    graphId: string,
+    cardinality: ConstrainedCardinality,
+    edgeKinds: readonly string[],
+  ) => SQL;
+  buildDisjointOverlapAudit: (
+    graphId: string,
+    kinds: readonly [string, string],
+  ) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
   buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
   buildGetSchemaVersion: (graphId: string, version: number) => SQL;
@@ -591,6 +616,30 @@ function createCommonOperationStrategy(
     },
     buildPurgeEdgeClaims(params: PurgeEdgeClaimsParams): SQL {
       return buildPurgeEdgeClaims(tables, params);
+    },
+    buildContendedUniqueRowAudit(
+      graphId: string,
+      constraintNames: readonly string[],
+    ): SQL {
+      return buildContendedUniqueRowAudit(tables, graphId, constraintNames);
+    },
+    buildContendedEdgeRowAudit(
+      graphId: string,
+      cardinality: ConstrainedCardinality,
+      edgeKinds: readonly string[],
+    ): SQL {
+      return buildContendedEdgeRowAudit(
+        tables,
+        graphId,
+        cardinality,
+        edgeKinds,
+      );
+    },
+    buildDisjointOverlapAudit(
+      graphId: string,
+      kinds: readonly [string, string],
+    ): SQL {
+      return buildDisjointOverlapAudit(tables, graphId, kinds);
     },
     buildGetActiveSchema(graphId: string): SQL {
       return buildGetActiveSchema(tables, graphId, dialect);

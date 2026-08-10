@@ -102,6 +102,16 @@ export function edgeWriteNeedsConstraintFence(
  * first site carrying it. Disjointness sites come first in that list, so a kind
  * qualifying on both counts keeps reporting the class it reports today, which
  * is what the refusal payload names.
+ *
+ * Deliberately typed over `"create" | "update"` alone, never the third
+ * {@link NodeClaimOperation} `"resurrect"`: this projection feeds the per-graph
+ * LOCK, whose trigger set this workstream leaves byte-identical to HEAD's, and
+ * a resurrect's disjointness claim needs none — `insertUnique`'s own
+ * `INSERT … ON CONFLICT … RETURNING` fences it, the same primary key that
+ * already fences an own-kind uniqueness claim with no lock. `nodeClaimEntries`
+ * reads `nodeClaimSites` at `"resurrect"` directly (see
+ * `claims/node-claims.ts:planNodeClaimReinsert`) without going through this
+ * projection at all.
  */
 export function nodeWriteNeedsConstraintFence(
   registry: KindRegistry,

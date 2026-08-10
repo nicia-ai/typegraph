@@ -55,6 +55,7 @@ const GRAPH_BACKEND_PROJECTION_KEYS = [
   "claimEdgeCardinality",
   "claimEdgeCardinalityBatch",
   "purgeEdgeClaims",
+  "readConstraintFenceViolations",
   "getActiveSchema",
   "getSchemaVersion",
   "commitSchemaVersion",

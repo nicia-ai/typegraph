@@ -103,6 +103,10 @@ const HISTORY_STORE_BACKEND_KEYS = [
   // Housekeeping for the relation above: drops claim rows whose holders are
   // already gone. Writes no graph row.
   "purgeEdgeClaims",
+  // Read-only fence audit. Writes nothing at all, so it can bypass no capture
+  // flush, and a history-enabled store that could not reach it would have no
+  // way to report which declared constraint its data already violates.
+  "readConstraintFenceViolations",
   "recordContributionMaterialization",
   "recordIndexMaterialization",
   "recordKindRemoval",

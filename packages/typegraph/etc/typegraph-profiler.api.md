@@ -227,6 +227,24 @@ type ClaimIndexMaterializationParams = Readonly<{
 }>;
 
 // @public
+type ClaimOwner = Readonly<{
+    concreteKind: string;
+    nodeId: string;
+}>;
+
+// @public
+type ClaimRelation = "uniques" | "edgeClaims";
+
+// @public
+type ClaimTarget = Readonly<{
+    relation: ClaimRelation;
+    graphId: string;
+    axis: string;
+    constraintName?: string;
+    key: string;
+}>;
+
+// @public
 type Collation = "binary" | "caseInsensitive";
 
 // @public
@@ -287,9 +305,47 @@ type CompileQueryOptions = Readonly<{
 type ComposableQuery = QueryAst | SetOperation;
 
 // @public
+type ConstraintFenceViolation = Readonly<{
+    family: "nodeUniqueness" | "nodeDisjointness";
+    target: ClaimTarget;
+    owners: readonly ClaimOwner[];
+}> | Readonly<{
+    family: "edgeCardinality";
+    target: ClaimTarget;
+    edgeIds: readonly string[];
+}>;
+
+// @public
+type ConstraintFenceViolationRows = Readonly<{
+    contendedUniqueRows: readonly ContendedUniqueRow[];
+    contendedEdgeRows: readonly ContendedEdgeRow[];
+    disjointOverlaps: readonly DisjointOverlapRow[];
+}>;
+
+// @public
 type ConstraintNames<R extends NodeRegistration> = "unique" extends keyof R ? R["unique"] extends readonly {
     readonly name: infer N;
 }[] ? N & string : string : never;
+
+// @public
+type ContendedEdgeRow = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
+type ContendedUniqueRow = Readonly<{
+    nodeKind: string;
+    constraintName: string;
+    key: string;
+    concreteKind: string;
+    nodeId: string;
+}>;
 
 // @public
 type ContributionCapabilities = Readonly<{
@@ -586,6 +642,12 @@ interface DepthDecrementMap {
 }
 
 // @public
+type DisjointOverlapRow = Readonly<{
+    kinds: readonly [string, string];
+    nodeId: string;
+}>;
+
+// @public
 type DropVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -695,6 +757,12 @@ type EdgeBulkFindEndpointOptions = QueryOptions & EdgeBulkFindOptions;
 // @public
 type EdgeBulkFindOptions = Readonly<{
     limitPerInput?: number;
+}>;
+
+// @public
+type EdgeCardinalityDeclaration = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
 }>;
 
 // @public
@@ -1439,6 +1507,7 @@ type GraphBackend = Readonly<{
     claimEdgeCardinality?: (this: void, params: ClaimEdgeCardinalityParams) => Promise<EdgeClaimOutcome>;
     claimEdgeCardinalityBatch?: (this: void, entries: readonly ClaimEdgeCardinalityParams[]) => Promise<readonly EdgeClaimOutcome[]>;
     purgeEdgeClaims?: (this: void, params: PurgeEdgeClaimsParams) => Promise<void>;
+    readConstraintFenceViolations?: (this: void, params: ReadConstraintFenceViolationsParams) => Promise<ConstraintFenceViolationRows>;
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
@@ -2153,6 +2222,7 @@ class KindRegistry {
     areEquivalent(a: string, b: string): boolean;
     // (undocumented)
     readonly broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    disjointKindPairs(): readonly (readonly [string, string])[];
     disjointPairLabel(a: string, b: string): string;
     // (undocumented)
     readonly disjointPairs: ReadonlySet<string>;
@@ -3039,6 +3109,14 @@ type ReachableOptions<G extends GraphDef> = BaseTraversalOptions<G> & Readonly<{
 }>;
 
 // @public
+type ReadConstraintFenceViolationsParams = Readonly<{
+    graphId: string;
+    uniqueConstraintNames: readonly string[];
+    disjointKindPairs: readonly (readonly [string, string])[];
+    edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+}>;
+
+// @public
 type ReadCoordinate = Readonly<{
     valid: Readonly<{
         mode: TemporalMode;
@@ -3698,6 +3776,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     materializeSystemIndexes: (options?: MaterializeSystemIndexesOptions) => Promise<MaterializeIndexesResult>;
     reembedVectorField: (kind: string, fieldPath: string, options?: ReembedVectorFieldOptions) => Promise<ReembedVectorFieldResult>;
     verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
+    verifyConstraintFences: () => Promise<readonly ConstraintFenceViolation[]>;
     repairContributions: () => Promise<ContributionRepairResult>;
     probeContributions: () => Promise<ContributionProbeResult>;
     rebuildContribution: (scope: ContributionRebuildScope, options?: RebuildContributionOptions) => Promise<ContributionRebuildResult>;

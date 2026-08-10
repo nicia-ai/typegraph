@@ -129,6 +129,33 @@ export function computeSchemaDiff(before: SerializedSchema, after: SerializedSch
 export function computeSchemaHash(schema: SerializedSchema): Promise<SchemaHash>;
 
 // @public
+type ConstraintFenceViolationRows = Readonly<{
+    contendedUniqueRows: readonly ContendedUniqueRow[];
+    contendedEdgeRows: readonly ContendedEdgeRow[];
+    disjointOverlaps: readonly DisjointOverlapRow[];
+}>;
+
+// @public
+type ContendedEdgeRow = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
+type ContendedUniqueRow = Readonly<{
+    nodeKind: string;
+    constraintName: string;
+    key: string;
+    concreteKind: string;
+    nodeId: string;
+}>;
+
+// @public
 type ContributionCapabilities = Readonly<{
     supported: boolean;
     probe: boolean;
@@ -370,6 +397,12 @@ export function deserializeSchema(schema: SerializedSchema): DeserializedSchema;
 export function deserializeWherePredicate(serialized: string): (builder: PredicateBuilder) => UniquePredicate;
 
 // @public
+type DisjointOverlapRow = Readonly<{
+    kinds: readonly [string, string];
+    nodeId: string;
+}>;
+
+// @public
 type DropVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -378,6 +411,12 @@ type DropVectorIndexParams = Readonly<{
 
 // @public
 const EDGE_TYPE_BRAND: "__edgeType";
+
+// @public
+type EdgeCardinalityDeclaration = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
+}>;
 
 // @public
 export type EdgeChange = Readonly<{
@@ -834,6 +873,7 @@ type GraphBackend = Readonly<{
     claimEdgeCardinality?: (this: void, params: ClaimEdgeCardinalityParams) => Promise<EdgeClaimOutcome>;
     claimEdgeCardinalityBatch?: (this: void, entries: readonly ClaimEdgeCardinalityParams[]) => Promise<readonly EdgeClaimOutcome[]>;
     purgeEdgeClaims?: (this: void, params: PurgeEdgeClaimsParams) => Promise<void>;
+    readConstraintFenceViolations?: (this: void, params: ReadConstraintFenceViolationsParams) => Promise<ConstraintFenceViolationRows>;
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
@@ -1293,6 +1333,7 @@ class KindRegistry {
     areEquivalent(a: string, b: string): boolean;
     // (undocumented)
     readonly broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    disjointKindPairs(): readonly (readonly [string, string])[];
     disjointPairLabel(a: string, b: string): string;
     // (undocumented)
     readonly disjointPairs: ReadonlySet<string>;
@@ -1515,6 +1556,14 @@ type RawQueryExecutionBackend = Pick<GraphBackend, "executeRaw" | "compileSql">;
 
 // @public (undocumented)
 type RawStatementExecutionBackend = Pick<GraphBackend, "executeStatement" | "executeTemporaryStatement" | "executeDdl">;
+
+// @public
+type ReadConstraintFenceViolationsParams = Readonly<{
+    graphId: string;
+    uniqueConstraintNames: readonly string[];
+    disjointKindPairs: readonly (readonly [string, string])[];
+    edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+}>;
 
 // @public
 type RecordContributionMaterializationParams = Readonly<{

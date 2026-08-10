@@ -251,6 +251,19 @@ export class KindRegistry {
   }
 
   /**
+   * Every declared disjoint pair, once each, as the two kinds it names.
+   *
+   * The inverse of {@link disjointPairLabel} lives in this module alone, so a
+   * caller enumerating the pairs — the fence audit is the one that needs them —
+   * never has to know how a label is spelled. Iterating the kinds and folding
+   * {@link getDisjointKinds} would be a second, order-dependent spelling of
+   * exactly this set.
+   */
+  disjointKindPairs(): readonly (readonly [string, string])[] {
+    return [...this.disjointPairs].map((pair) => disjointPairMembers(pair));
+  }
+
+  /**
    * Gets all kinds that are disjoint with the given kind.
    */
   getDisjointKinds(kind: string): readonly string[] {

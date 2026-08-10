@@ -1867,6 +1867,34 @@ export type GraphBackend = Readonly<{
     params: PurgeEdgeClaimsParams,
   ) => Promise<void>;
 
+  /**
+   * Read-only diagnostic: the rows that make a declared constraint currently
+   * violated, for a caller (`store.verifyConstraintFences()`) that folds them
+   * onto the claim axes they contend for.
+   *
+   * It reads the ENTITY relations for the two families whose pre-upgrade
+   * violations no claim row records — a database written before the claim
+   * relations existed holds no edge claims at all — and the `uniques` relation
+   * for uniqueness, where a pre-upgrade duplicate is exactly two live rows
+   * sitting at two different `node_kind`s. A scan of a claim relation's primary
+   * key can find neither, which is why this is not one.
+   *
+   * Returns the contending ROWS, not the verdict: the axis a `uniques` row
+   * belongs to is a fold over the graph's subclass component, and the key an
+   * edge's claim sits on is `EDGE_CARDINALITY_SPECS`' — both of which live
+   * above the backend, so a backend that decided either would be a second
+   * spelling of a decision the fence already owns.
+   *
+   * Writes nothing: no DDL, no claim writes. Safe on a replica and under a
+   * least-privilege role. Present only on backends that can run the audit;
+   * `store.verifyConstraintFences()` refuses with a typed error when absent
+   * rather than reporting an empty (and therefore reassuring) result.
+   */
+  readConstraintFenceViolations?: (
+    this: void,
+    params: ReadConstraintFenceViolationsParams,
+  ) => Promise<ConstraintFenceViolationRows>;
+
   // === Schema Operations ===
   getActiveSchema: (
     this: void,
@@ -3333,6 +3361,75 @@ export type EdgeClaimOutcome =
 export type PurgeEdgeClaimsParams = Readonly<{
   graphId: string;
   edgeIds: readonly string[];
+}>;
+
+/** One edge kind's declared cardinality, as the fence audit reads it. */
+export type EdgeCardinalityDeclaration = Readonly<{
+  edgeKind: string;
+  /** `many` declares nothing, so it is unrepresentable here. */
+  cardinality: Exclude<Cardinality, "many">;
+}>;
+
+/**
+ * What a constraint-fence audit asks the database about: the declarations the
+ * graph carries, one list per family.
+ *
+ * The declarations are passed rather than discovered because the backend holds
+ * no schema — and because the `uniqueConstraintNames` restriction is
+ * load-bearing rather than an optimization: the `uniques` relation also holds
+ * disjointness claims, whose `node_kind` is a pair label rather than a kind and
+ * for which no uniqueness axis can be computed. Those rows are covered by
+ * `disjointKindPairs`, from the nodes relation.
+ */
+export type ReadConstraintFenceViolationsParams = Readonly<{
+  graphId: string;
+  /** Every unique constraint name the graph declares, in any scope. */
+  uniqueConstraintNames: readonly string[];
+  /** Every declared `disjointWith` pair, each read as one intersection. */
+  disjointKindPairs: readonly (readonly [string, string])[];
+  /** Every edge kind declaring a cardinality other than `many`. */
+  edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+}>;
+
+/**
+ * One live `uniques` row that shares its `(constraint_name, key)` with at least
+ * one other live row — a candidate, not a verdict: two rows contend only when
+ * their `node_kind`s fold onto ONE claim axis, which the caller decides.
+ */
+export type ContendedUniqueRow = Readonly<{
+  nodeKind: string;
+  constraintName: string;
+  key: string;
+  concreteKind: string;
+  nodeId: string;
+}>;
+
+/**
+ * One live edge that shares its declared cardinality's population with at least
+ * one other live edge. The endpoints are returned whole so the caller can name
+ * the claim key through the one builder that renders it.
+ */
+export type ContendedEdgeRow = Readonly<{
+  edgeKind: string;
+  cardinality: Exclude<Cardinality, "many">;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
+/** One node id live under BOTH kinds of a declared disjoint pair. */
+export type DisjointOverlapRow = Readonly<{
+  kinds: readonly [string, string];
+  nodeId: string;
+}>;
+
+/** Everything one constraint-fence audit read, per family. */
+export type ConstraintFenceViolationRows = Readonly<{
+  contendedUniqueRows: readonly ContendedUniqueRow[];
+  contendedEdgeRows: readonly ContendedEdgeRow[];
+  disjointOverlaps: readonly DisjointOverlapRow[];
 }>;
 
 /**

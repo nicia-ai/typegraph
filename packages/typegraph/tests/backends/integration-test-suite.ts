@@ -35,6 +35,7 @@ import {
   registerCoalesceUpsertIntegrationTests,
   registerConstraintFenceErrorIntegrationTests,
   registerConstraintFenceTransactionHealthTests,
+  registerConstraintFenceVerificationIntegrationTests,
   registerContributionDiagnosticIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerCurrentIdentityTraversalTests,
@@ -201,6 +202,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerClaimLookupPreferenceIntegrationTests(context);
     registerConstraintFenceErrorIntegrationTests(context);
     registerConstraintFenceTransactionHealthTests(context);
+    registerConstraintFenceVerificationIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
     registerSetNodeMutationIntegrationTests(context);

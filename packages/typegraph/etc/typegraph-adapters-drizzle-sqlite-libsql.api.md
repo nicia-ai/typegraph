@@ -115,6 +115,33 @@ type CompiledStatementSql = IntentSql<"statement">;
 type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
+type ConstraintFenceViolationRows = Readonly<{
+    contendedUniqueRows: readonly ContendedUniqueRow[];
+    contendedEdgeRows: readonly ContendedEdgeRow[];
+    disjointOverlaps: readonly DisjointOverlapRow[];
+}>;
+
+// @public
+type ContendedEdgeRow = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
+type ContendedUniqueRow = Readonly<{
+    nodeKind: string;
+    constraintName: string;
+    key: string;
+    concreteKind: string;
+    nodeId: string;
+}>;
+
+// @public
 type ContributionCapabilities = Readonly<{
     supported: boolean;
     probe: boolean;
@@ -3306,10 +3333,22 @@ type DeleteUniqueParams = Readonly<{
 }>;
 
 // @public
+type DisjointOverlapRow = Readonly<{
+    kinds: readonly [string, string];
+    nodeId: string;
+}>;
+
+// @public
 type DropVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
     fieldPath: string;
+}>;
+
+// @public
+type EdgeCardinalityDeclaration = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
 }>;
 
 // @public
@@ -3698,6 +3737,7 @@ type GraphBackend = Readonly<{
     claimEdgeCardinality?: (this: void, params: ClaimEdgeCardinalityParams) => Promise<EdgeClaimOutcome>;
     claimEdgeCardinalityBatch?: (this: void, entries: readonly ClaimEdgeCardinalityParams[]) => Promise<readonly EdgeClaimOutcome[]>;
     purgeEdgeClaims?: (this: void, params: PurgeEdgeClaimsParams) => Promise<void>;
+    readConstraintFenceViolations?: (this: void, params: ReadConstraintFenceViolationsParams) => Promise<ConstraintFenceViolationRows>;
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
@@ -4168,6 +4208,14 @@ type RawQueryExecutionBackend = Pick<GraphBackend, "executeRaw" | "compileSql">;
 
 // @public (undocumented)
 type RawStatementExecutionBackend = Pick<GraphBackend, "executeStatement" | "executeTemporaryStatement" | "executeDdl">;
+
+// @public
+type ReadConstraintFenceViolationsParams = Readonly<{
+    graphId: string;
+    uniqueConstraintNames: readonly string[];
+    disjointKindPairs: readonly (readonly [string, string])[];
+    edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+}>;
 
 // @public
 type RecordContributionMaterializationParams = Readonly<{

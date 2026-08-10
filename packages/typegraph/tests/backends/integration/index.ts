@@ -10,6 +10,7 @@ export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identi
 export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
 export { registerConstraintFenceErrorIntegrationTests } from "./constraint-fence-errors";
 export { registerConstraintFenceTransactionHealthTests } from "./constraint-fence-transaction-health";
+export { registerConstraintFenceVerificationIntegrationTests } from "./constraint-fence-verification";
 export { registerContributionDiagnosticIntegrationTests } from "./contribution-diagnostics";
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerEdgeCaseIntegrationTests } from "./edge-cases";

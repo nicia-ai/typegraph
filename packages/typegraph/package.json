@@ -134,7 +134,8 @@
     "test:coverage": "vitest run --coverage",
     "test:coverage:merge": "vitest run --merge-reports=.vitest-reports --coverage",
     "test:mutation": "stryker run",
-    "test:mutation:critical": "stryker run stryker.critical.config.json"
+    "test:mutation:critical": "stryker run stryker.critical.config.json",
+    "test:mutation:claims": "stryker run stryker.claims.config.json"
   },
   "keywords": [
     "graph",

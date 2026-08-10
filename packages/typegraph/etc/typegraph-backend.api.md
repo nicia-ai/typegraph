@@ -149,6 +149,33 @@ export type CompiledStatementSql = IntentSql<"statement">;
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
+export type ConstraintFenceViolationRows = Readonly<{
+    contendedUniqueRows: readonly ContendedUniqueRow[];
+    contendedEdgeRows: readonly ContendedEdgeRow[];
+    disjointOverlaps: readonly DisjointOverlapRow[];
+}>;
+
+// @public
+export type ContendedEdgeRow = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
+export type ContendedUniqueRow = Readonly<{
+    nodeKind: string;
+    constraintName: string;
+    key: string;
+    concreteKind: string;
+    nodeId: string;
+}>;
+
+// @public
 export type ContributionCapabilities = Readonly<{
     supported: boolean;
     probe: boolean;
@@ -436,6 +463,12 @@ export type DialectStandardQueryStrategy = "cte_project";
 export type DialectVectorPredicateStrategy = "native" | "unsupported";
 
 // @public
+export type DisjointOverlapRow = Readonly<{
+    kinds: readonly [string, string];
+    nodeId: string;
+}>;
+
+// @public
 export type DropVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -444,6 +477,12 @@ export type DropVectorIndexParams = Readonly<{
 
 // @public
 export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
+
+// @public
+export type EdgeCardinalityDeclaration = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
+}>;
 
 // @public
 export type EdgeClaimOutcome = Readonly<{
@@ -837,6 +876,7 @@ export type GraphBackend = Readonly<{
     claimEdgeCardinality?: (this: void, params: ClaimEdgeCardinalityParams) => Promise<EdgeClaimOutcome>;
     claimEdgeCardinalityBatch?: (this: void, entries: readonly ClaimEdgeCardinalityParams[]) => Promise<readonly EdgeClaimOutcome[]>;
     purgeEdgeClaims?: (this: void, params: PurgeEdgeClaimsParams) => Promise<void>;
+    readConstraintFenceViolations?: (this: void, params: ReadConstraintFenceViolationsParams) => Promise<ConstraintFenceViolationRows>;
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
@@ -1387,6 +1427,14 @@ export type RawQueryExecutionBackend = Pick<GraphBackend, "executeRaw" | "compil
 
 // @public (undocumented)
 export type RawStatementExecutionBackend = Pick<GraphBackend, "executeStatement" | "executeTemporaryStatement" | "executeDdl">;
+
+// @public
+export type ReadConstraintFenceViolationsParams = Readonly<{
+    graphId: string;
+    uniqueConstraintNames: readonly string[];
+    disjointKindPairs: readonly (readonly [string, string])[];
+    edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+}>;
 
 // @public
 export type RecordContributionMaterializationParams = Readonly<{

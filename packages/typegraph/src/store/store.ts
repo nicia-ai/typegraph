@@ -175,6 +175,10 @@ import {
   type InternalGraphAlgorithms,
 } from "./algorithms";
 import {
+  type ConstraintFenceViolation,
+  verifyConstraintFences as verifyConstraintFencesImpl,
+} from "./claims/verify";
+import {
   createEdgeCollectionsProxy,
   createNodeCollectionsProxy,
   type EdgeOperations,
@@ -628,6 +632,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     options?: ReembedVectorFieldOptions,
   ) => Promise<ReembedVectorFieldResult>;
   verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
+  verifyConstraintFences: () => Promise<readonly ConstraintFenceViolation[]>;
   repairContributions: () => Promise<ContributionRepairResult>;
   probeContributions: () => Promise<ContributionProbeResult>;
   rebuildContribution: (
@@ -4204,6 +4209,34 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         resolveGraphVectorSlots(this.#graph)
       : [];
     return verify(this.graphId, vectorSlots);
+  }
+
+  /**
+   * Read-only diagnostic: every claim axis this graph's data ALREADY contends
+   * for — a scoped unique key two live nodes hold, an id live under both kinds
+   * of a `disjointWith` pair, or a declared edge cardinality two live edges
+   * exceed.
+   *
+   * The claim relations refuse a second claimant from the first write after
+   * upgrade onward, but they repair nothing that predates them: a database that
+   * carried a violation keeps carrying it until a write touches that axis, and
+   * is then refused with the ordinary typed error naming the incumbent. This is
+   * how an operator sees that state before a user does.
+   *
+   * Reports; never repairs. Which of two live claimants keeps the axis is a
+   * data-loss decision that belongs to the operator.
+   *
+   * @throws {ConfigurationError} `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` when the
+   *   backend cannot run the audit — an empty report from a backend that never
+   *   looked is indistinguishable from a clean database.
+   */
+  async verifyConstraintFences(): Promise<readonly ConstraintFenceViolation[]> {
+    return verifyConstraintFencesImpl({
+      graph: this.#graph,
+      registry: this.#registry,
+      graphId: this.graphId,
+      backend: this.#baseBackend,
+    });
   }
 
   /**

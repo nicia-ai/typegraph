@@ -886,6 +886,7 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `transactions`                                                             | Atomic transactions available (see note below)                                                      |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
+| `constraintClaims?`                                                        | The backend carries the claim relations that fence declared constraints without a lock (see below)  |
 | `graphAnalytics?.{supported,mathFunctions}`                                | Static support for whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions`         | Vector strategy capabilities (present once a vector strategy is configured)                         |
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
@@ -919,7 +920,14 @@ class needed the fence, because the way forward differs per class:
 | `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive` | Declare the edge `cardinality: "many"` and enforce the limit in application code |
 | `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` (single or bulk) taking its create leg — the match key is backed by no database key | Use `create` with a caller-chosen id, whose uniqueness the edges primary key enforces |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom | Drop the axiom and keep ids distinct across those kinds yourself |
+| `nodeUniquenessClaim` | **Updating or resurrecting** a node whose kind declares any unique constraint, of any scope — a transition reserves the new key *before* the row write it gates, and only a transaction can undo the pair together | Drop the constraint, or run updates on a transactional backend. Plain **creates** under a `scope: "kind"` unique are unaffected: their claim follows the row |
 | `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind | Scope the constraint to `"kind"`, which the uniques primary key enforces on its own |
+
+`importGraph` / `importGraphStream` is refused on the same backends whenever any
+node kind of the graph owes a claim ahead of its row — that is, declares **any**
+unique constraint or has a disjoint partner — or any edge kind is non-`many`.
+The import writes both creates and updates, so the widest of those placements is
+what decides it.
 
 This affects **Cloudflare D1**, **`drizzle-orm/neon-http`**, and any SQLite
 backend built with `transactionMode: "none"`. Durable Objects are unaffected —
@@ -933,6 +941,54 @@ and a `getOrCreateByEndpoints` that *finds* an existing edge, or resurrects a
 `many` one — that resurrection is an id-keyed `UPDATE` that re-derives nothing.
 The bulk `getOrCreateByEndpoints` form fences its whole batch, so it refuses on
 those backends whatever the outcome would have been.
+
+### Claim relations, and what they do not promise
+
+Underneath the lock, a declared constraint is also reserved in a **claim
+relation** whose primary key admits one live claimant per axis: `uniques` (for
+uniqueness scopes and `disjointWith` pairs) and `typegraph_edge_claims` (for
+`cardinality: "one" | "unique" | "oneActive"`). Both bundled backends carry them
+and report `capabilities.constraintClaims: true`. The claim is what makes those
+constraints hold for writers that hold no lock at all — `importGraph` is the one
+in the box — and what makes an out-of-band writer using raw SQL against the same
+tables collide rather than corrupt.
+
+Three properties of that mechanism are worth knowing before you rely on it:
+
+- **A claim row's lock is held to the end of the transaction, including on
+  refusal.** A caller that catches a typed constraint error and keeps going —
+  import's per-row recovery, or your own `try`/`catch` inside
+  `store.transaction` — still holds the lock on the row it was refused at, and
+  any other writer of that axis waits until the transaction ends. This is
+  inherent to every row-lock fence, not specific to this one.
+- **Above READ COMMITTED, PostgreSQL reports a serialization failure instead of
+  the typed error.** At `REPEATABLE READ` or `SERIALIZABLE`, `INSERT … ON
+  CONFLICT DO UPDATE` raises `40001` rather than resolving the conflict, so the
+  losing writer sees a serialization failure to retry rather than
+  `UniquenessError`. SQLite has no such mode. This is unchanged from earlier
+  versions, which already reserved single-kind uniqueness through the same
+  statement.
+- **Pre-existing violations are neither repaired nor refused at boot.** A
+  database that already held two live claimants of one axis before the claim
+  relations existed keeps holding them; the next write that touches that axis is
+  refused with the ordinary typed error naming the incumbent.
+  `store.verifyConstraintFences()` is the read-only diagnostic that makes that
+  state legible ahead of time:
+
+```typescript
+for (const violation of await store.verifyConstraintFences()) {
+  // violation.target names the claim row two claimants contend for
+  console.warn(violation.family, violation.target.axis, violation.target.key);
+}
+```
+
+It reports one entry per contended axis — `nodeUniqueness` and
+`nodeDisjointness` carry the conflicting `owners` (each a `concrete_kind` /
+`node_id` pair, because ids are unique only per kind), `edgeCardinality` carries
+the conflicting `edgeIds`. It reads the nodes, edges and `uniques` relations, so
+it finds violations that predate the claim tables; it writes nothing, and it
+repairs nothing — choosing which claimant keeps the axis is a data-loss decision
+that stays with you.
 
 ### SQLite ↔ PostgreSQL parity
 
@@ -958,6 +1014,9 @@ TypeGraph choosing separate query semantics per backend:
 | HNSW `efSearch` query tuning                           | ✗                                                 | ✓ transactional HNSW drivers               | Refused, never ignored: `UnsupportedBackendCapabilityError` with `details.capability` `vector.searchFrontierTuning` on **any** SQLite backend (vector and hybrid alike — neither `sqlite-vec`'s `vec0` KNN nor `libsql-native`'s DiskANN has a per-search frontier), and on transaction-less Postgres or a non-HNSW slot |
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
 | TypeGraph Identity Profile                             | ✓ transactional drivers                           | ✓ transactional drivers                    | Enabled graphs fail fast on non-atomic drivers; identity-disabled graphs retain their ordinary path                      |
+| Constraint claim relations (`capabilities.constraintClaims`) | ✓                                           | ✓                                          | Identical relations and identical statements on both dialects. A third-party backend that omits them declares `constraintClaims` absent and keeps the per-graph lock as its only fence |
+| Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
+| Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 
 Identity support also has a **driver** dimension inside each dialect:
 

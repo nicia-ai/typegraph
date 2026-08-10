@@ -79,11 +79,19 @@ export type NodeClaimSite = Readonly<{
 }>;
 
 /**
- * The disjointness sites a create of this kind owes: one per declared partner.
+ * The disjointness sites a write BRINGING A NODE INTO EXISTENCE under this kind
+ * owes: one per declared partner.
  *
- * CREATE only, matching the one place the disjointness probe runs — the create
- * preparation. An in-place update cannot change a node's kind, so it re-derives
- * no cross-kind verdict and owes no claim for one.
+ * `"create"` and `"resurrect"` only, matching the two places a node comes into
+ * existence under a kind — never `"update"`, because an in-place update cannot
+ * change a node's kind and so re-derives no cross-kind verdict and owes no
+ * claim for one. A resurrect owes exactly what a create owes here: reviving a
+ * tombstone re-introduces the same live id under the same kind that a fresh
+ * insert would, and {@link file://./node-claims.ts deleteUniquenessEntries}
+ * released this node's own disjointness reservations at soft-delete time (it
+ * reads the `"create"` extent precisely because it is the wider of the two), so
+ * a resurrect starts from the same "holds nothing yet" state a create does and
+ * must re-claim from scratch rather than diff.
  *
  * Pairwise rather than per component, because the registry's disjoint pairs are
  * literal unordered pairs: a node disjoint from two partners owes two claims,
@@ -92,7 +100,14 @@ export type NodeClaimSite = Readonly<{
  * Every one of them is `pre-insert` and `needsLockFence`: the nodes primary key
  * is `(graph_id, kind, id)`, so a disjoint namesake's row does not collide with
  * this node's own insert — the claim is the ONLY fence for the axis, and a
- * fence issued after the write it fences is not a fence.
+ * fence issued after the write it fences is not a fence. `needsLockFence` is
+ * read only by the lock projection (`nodeWriteNeedsConstraintFence`, consulted
+ * with `"create"` or `"update"` alone — never `"resurrect"`), so it stays inert
+ * for a resurrect: the per-graph lock's trigger set is unchanged by this site
+ * applying to a third operation, and the claim's own primary key — the same
+ * `INSERT … ON CONFLICT … RETURNING` `insertUnique` already uses for an
+ * own-kind uniqueness claim, which needs no lock either — is what fences a
+ * resurrect racing a disjoint partner's create.
  */
 function disjointnessSites(
   registry: KindRegistry,
@@ -107,6 +122,28 @@ function disjointnessSites(
     refusal: { kind: "disjointness" as const, ownKind: kind, otherKind },
   }));
 }
+
+/**
+ * The three shapes a node write can take, for claim purposes.
+ *
+ * `"create"` is a fresh id under a kind that has never held it live.
+ * `"update"` is an in-place change to a row that stays live throughout — it
+ * cannot change the node's kind, so it never owes a disjointness claim.
+ * `"resurrect"` is a tombstoned row coming back to life under its own kind —
+ * the SAME cross-kind event a create is, reached through the transition seam
+ * instead of the insert seam, which is why its uniqueness claims are placed
+ * like an update's (claim-first, {@link file://./node-claims.ts
+ * withNodeClaimTransition} is the only correct sequence for a transition) while
+ * its disjointness claims are owed like a create's.
+ *
+ * Two consumers read this vocabulary and each other's classification would be
+ * the wrong one to reuse: {@link nodeClaimEntries} (what a ROW owes, given its
+ * operation) reaches `"resurrect"`; `nodeWriteNeedsConstraintFence` (the lock
+ * projection, `../constraints.ts`) and its callers reach only `"create"` and
+ * `"update"`, by design — see {@link disjointnessSites}'s note on why that
+ * keeps the per-graph lock's trigger set unchanged.
+ */
+export type NodeClaimOperation = "create" | "update" | "resurrect";
 
 /**
  * THE owner of "what claims does a node of this kind owe, and when is each
@@ -133,10 +170,10 @@ function disjointnessSites(
  *   must precede the row it gates". On the CREATE path an own-kind claim keeps
  *   its shipped position after the row: the uniques primary key at that axis is
  *   already the complete fence for it, so moving it would buy no fence and cost
- *   a refusal on backends with no transactions. On the UPDATE path every claim
- *   is pre-insert, because the transition seam claims before its gated write
- *   for every scope — see `withNodeClaimTransition`, which explains why that is
- *   the only correct sequence for a transition.
+ *   a refusal on backends with no transactions. On the UPDATE and RESURRECT
+ *   paths every claim is pre-insert, because the transition seam claims before
+ *   its gated write for every scope — see `withNodeClaimTransition`, which
+ *   explains why that is the only correct sequence for a transition.
  *
  * A future claim family that breaks the coincidence between those two readings
  * must say WHICH it changes; that is why they are two named fields and not one.
@@ -145,7 +182,7 @@ export function nodeClaimSites(
   registry: KindRegistry,
   kind: string,
   uniqueConstraints: readonly UniqueConstraint[],
-  operation: "create" | "update",
+  operation: NodeClaimOperation,
 ): readonly NodeClaimSite[] {
   const uniqueness = uniqueConstraints.map((constraint) => {
     const target = uniquenessClaimTarget(kind, constraint.scope, registry);
@@ -154,7 +191,7 @@ export function nodeClaimSites(
       constraintName: constraint.name,
       needsLockFence: target.crossKind,
       placement:
-        operation === "update" || target.crossKind ?
+        operation !== "create" || target.crossKind ?
           "pre-insert"
         : ("post-insert" as const),
       refusalReason:
@@ -165,7 +202,7 @@ export function nodeClaimSites(
     } satisfies NodeClaimSite;
   });
 
-  return operation === "create" ?
+  return operation === "update" ? uniqueness : (
       [...disjointnessSites(registry, kind), ...uniqueness]
-    : uniqueness;
+    );
 }

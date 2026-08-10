@@ -240,10 +240,20 @@ A surviving mutant indicates a gap in test coverage - code that can change witho
 # Full run (slow - 6000+ mutants)
 pnpm test:mutation
 
-# Targeted run (recommended)
+# Scoped runs (recommended) — one config per high-risk subsystem
+pnpm test:mutation:critical   # write pipeline, import, provenance, history
+pnpm test:mutation:claims     # constraint claim axes, specs and statements
+
+# Ad-hoc targeted run
 npx stryker run --mutate "src/utils/*.ts"
 npx stryker run --mutate "src/query/builder/*.ts"
 ```
+
+`test:mutation:claims` covers `src/store/claims/**` plus the claim-statement and
+fence-audit builders under `src/backend/drizzle/operations`. Run it without
+`POSTGRES_URL`: the two-connection concurrency suite is timing-bound and skips
+itself there, while the cross-backend integration suite — which is what kills
+most of these mutants — runs either way.
 
 ### Interpreting Results
 
