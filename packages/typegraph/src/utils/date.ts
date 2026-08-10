@@ -285,6 +285,24 @@ export function isEmptyValidityWindow(
 }
 
 /**
+ * Whether a canonical instant belongs to the half-open validity interval
+ * `[validFrom, validTo)`. An omitted bound is unbounded on that side.
+ *
+ * This is the single JavaScript owner of validity-window membership. SQL read
+ * paths express the same decision through the shared temporal compiler.
+ */
+export function validityWindowContainsInstant(
+  validFrom: string | undefined,
+  validTo: string | undefined,
+  instant: string,
+): boolean {
+  return (
+    (validFrom === undefined || validFrom <= instant) &&
+    (validTo === undefined || instant < validTo)
+  );
+}
+
+/**
  * THE lower bound a write that STAMPS its own start stores, decided against the
  * instant it is about to stamp. One owner for every such write, so no two of them
  * can spell the decision differently. Three inputs, three outcomes:

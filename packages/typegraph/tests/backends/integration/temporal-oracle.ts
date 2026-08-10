@@ -171,11 +171,14 @@ function nextRunGraphId(label: string): string {
 }
 
 function freshStore(backend: GraphBackend, label: string): OracleStore {
-  return createStore(oracleGraph(nextRunGraphId(label)), backend);
+  return createStore(oracleGraph(nextRunGraphId(label)), backend, {
+    coalesceUnchangedUpserts: true,
+  });
 }
 
 function freshHistoryStore(backend: GraphBackend, label: string): OracleStore {
   return createStore(oracleGraph(nextRunGraphId(label)), backend, {
+    coalesceUnchangedUpserts: true,
     history: true,
   });
 }
@@ -423,6 +426,15 @@ function trackCreatedNode(
   if (!state.liveNodes.includes(node.id)) state.liveNodes.push(node.id);
 }
 
+function pickLiveNode(
+  state: ScriptState,
+  pick: number,
+): Node<typeof OraclePerson> | undefined {
+  const id = pickFrom(state.liveNodes, pick);
+  if (id === undefined) return undefined;
+  return state.nodesById.get(id);
+}
+
 function dropNode(state: ScriptState, id: string): void {
   state.liveNodes = state.liveNodes.filter((candidate) => candidate !== id);
   state.tombstonedNodes.push(id);
@@ -560,6 +572,23 @@ async function applyNodeOp(
       );
       return true;
     }
+    case "update-reopen": {
+      const id = nextId(state, "n");
+      const name = `update-reopen-${id}`;
+      await store.nodes.OraclePerson.create(
+        { name },
+        { id, validTo: futureAnchor(op.upperPick) },
+      );
+      trackCreatedNode(
+        state,
+        await store.nodes.OraclePerson.update(
+          asNodeId<typeof OraclePerson>(id),
+          {},
+          { clearValidTo: true },
+        ),
+      );
+      return true;
+    }
     case "soft-delete": {
       const id = pickFrom(state.liveNodes, op.targetPick);
       if (id === undefined) return true;
@@ -588,6 +617,41 @@ async function applyNodeOp(
       if (id === undefined) return true;
       const name = requireDefined(state.namesById.get(id), "tracked name");
       await store.nodes.OraclePerson.upsertById(id, { name });
+      return true;
+    }
+    case "upsert-reopen": {
+      const id = nextId(state, "n");
+      const name = `upsert-reopen-${id}`;
+      await store.nodes.OraclePerson.create(
+        { name },
+        { id, validTo: futureAnchor(op.upperPick) },
+      );
+      trackCreatedNode(
+        state,
+        await store.nodes.OraclePerson.upsertById(
+          id,
+          { name },
+          { clearValidTo: true },
+        ),
+      );
+      return true;
+    }
+    case "upsert-resurrect-reopen": {
+      const id = nextId(state, "n");
+      const name = `upsert-resurrect-reopen-${id}`;
+      const created = await store.nodes.OraclePerson.create(
+        { name },
+        { id, validTo: futureAnchor(op.upperPick) },
+      );
+      await store.nodes.OraclePerson.delete(created.id);
+      trackCreatedNode(
+        state,
+        await store.nodes.OraclePerson.upsertById(
+          id,
+          { name },
+          { clearValidTo: true },
+        ),
+      );
       return true;
     }
     case "bulk-create": {
@@ -621,17 +685,17 @@ async function applyNodeOp(
     case "edge-create-stated-window":
     case "edge-create-scheduled-end":
     case "edge-create-born-ended":
+    case "edge-update-reopen":
+    case "edge-endpoint-upsert-reopen":
+    case "edge-endpoint-resurrect-reopen":
     case "edge-soft-delete": {
       return false;
     }
   }
 }
 
-/** The edge-create shapes, i.e. every edge shape but the soft delete. */
-type EdgeCreateShape = Exclude<
-  Extract<TemporalOpShape, `edge-${string}`>,
-  "edge-soft-delete"
->;
+/** The edge shapes that create one row without a follow-up mutation. */
+type EdgeCreateShape = Extract<TemporalOpShape, `edge-create-${string}`>;
 
 function edgeWindowOptions(
   state: ScriptState,
@@ -674,18 +738,53 @@ async function applyEdgeOp(
     state.liveEdges = state.liveEdges.filter((candidate) => candidate !== id);
     return;
   }
+  if (
+    op.shape === "edge-update-reopen" ||
+    op.shape === "edge-endpoint-upsert-reopen" ||
+    op.shape === "edge-endpoint-resurrect-reopen"
+  ) {
+    if (state.liveNodes.length < 2) return;
+    const from = pickLiveNode(state, op.targetPick);
+    const to = pickLiveNode(state, op.targetPick + 1);
+    if (from === undefined || to === undefined) return;
+    const id = nextId(state, "e");
+    const since = `reopen-${id}`;
+    const created = await store.edges.oracleKnows.create(
+      from,
+      to,
+      { since },
+      { id, validTo: futureAnchor(op.upperPick) },
+    );
+    if (op.shape === "edge-endpoint-resurrect-reopen") {
+      await store.edges.oracleKnows.delete(created.id);
+    }
+    if (op.shape === "edge-update-reopen") {
+      await store.edges.oracleKnows.update(
+        created.id,
+        {},
+        { clearValidTo: true },
+      );
+    } else {
+      await store.edges.oracleKnows.getOrCreateByEndpoints(
+        from,
+        to,
+        { since },
+        {
+          matchOn: ["since"],
+          ifExists: "update",
+          clearValidTo: true,
+        },
+      );
+    }
+    state.allEdges.push(id);
+    state.liveEdges.push(id);
+    state.edgeEndpoints.set(id, { from: from.id, to: to.id });
+    return;
+  }
   if (!isEdgeCreateOp(op)) return;
   if (state.liveNodes.length < 2) return;
-  const fromId = requireDefined(
-    pickFrom(state.liveNodes, op.targetPick),
-    "edge source",
-  );
-  const toId = requireDefined(
-    pickFrom(state.liveNodes, op.targetPick + 1),
-    "edge target",
-  );
-  const from = state.nodesById.get(fromId);
-  const to = state.nodesById.get(toId);
+  const from = pickLiveNode(state, op.targetPick);
+  const to = pickLiveNode(state, op.targetPick + 1);
   if (from === undefined || to === undefined) return;
   const id = nextId(state, "e");
   const options = edgeWindowOptions(state, id, op);
@@ -697,7 +796,7 @@ async function applyEdgeOp(
   );
   state.allEdges.push(id);
   state.liveEdges.push(id);
-  state.edgeEndpoints.set(id, { from: fromId, to: toId });
+  state.edgeEndpoints.set(id, { from: from.id, to: to.id });
 }
 
 async function runHistory(

@@ -2,12 +2,13 @@
  * The valid-time semantics every TypeGraph read path must obey, re-derived in
  * TypeScript from the rows the backend actually persisted.
  *
- * TypeGraph spells the visibility decision in three places this suite drives —
+ * TypeGraph spells the visibility decision in three paths this suite drives —
  * the SQL compiler (`src/query/compiler/temporal.ts`), the collections
- * predicate (`src/backend/drizzle/operations/collections.ts`) and the in-memory
- * `#temporalRowMatcher` that `getById`/`getByIds` use instead of SQL filtering
- * (`src/store/store.ts`). Two of those agreeing is not evidence, so none of them
- * is checked against another: all are checked against this model, which
+ * predicate (`src/backend/drizzle/operations/collections.ts`) and the shared
+ * JavaScript owner used by the in-memory `#temporalRowMatcher` behind
+ * `getById`/`getByIds` (`src/utils/date.ts`). Two paths agreeing is not
+ * evidence, so none of them is checked against another: all are checked against
+ * this model, which
  * formulates visibility as INTERVAL MEMBERSHIP over epoch milliseconds rather
  * than as a column predicate over text or `timestamptz`. Model plus those three
  * is what invariant I7 calls the four-way check. The model shares no code with
@@ -15,12 +16,10 @@
  * against the semantics rather than a restatement of whatever the SQL happens
  * to do.
  *
- * OUT OF SCOPE, STATED. There is a further mirror of the same decision in
- * `isValidAt` (`src/provenance/index.ts`), and this suite does NOT exercise it:
- * it is module-private and reachable only through provenance role reads, which
- * are a different store surface with their own fixtures. Binding it wants its
- * own property against this model; until one exists, nothing here should be
- * read as covering it.
+ * OUT OF SCOPE, STATED. Provenance role reads also consume the shared JavaScript
+ * owner, but this suite does NOT exercise that store surface; provenance has its
+ * own fixtures. The implementation can no longer drift by re-spelling the
+ * predicate, while behavioral coverage of that surface remains separate.
  *
  * It reads the ledger — `nodes`, `edges`, and (for a history store)
  * `recorded_nodes` / `recorded_edges` — back out of the backend and derives:
@@ -488,16 +487,22 @@ export const TEMPORAL_OP_SHAPES = [
   "create-on-tombstone-born-ended",
   "update-props",
   "update-scheduled-end",
+  "update-reopen",
   "soft-delete",
   "upsert-resurrect",
   "upsert-resurrect-born-ended",
   "upsert-unchanged",
+  "upsert-reopen",
+  "upsert-resurrect-reopen",
   "bulk-create",
   "bulk-upsert-repeated-id",
   "edge-create-open",
   "edge-create-stated-window",
   "edge-create-scheduled-end",
   "edge-create-born-ended",
+  "edge-update-reopen",
+  "edge-endpoint-upsert-reopen",
+  "edge-endpoint-resurrect-reopen",
   "edge-soft-delete",
 ] as const;
 

@@ -24,3 +24,9 @@ Three consequences worth naming:
 
 Rows already stored with an inverted window are not rewritten; they stay
 invisible at every coordinate until repaired.
+
+Custom `GraphBackend` implementations should route node/edge insert stamping
+and node resurrection stamping through `resolveStampedValidityLowerBound`, now
+exported from `@nicia-ai/typegraph/backend`, so adapter-specific builders cannot
+drift from the shared validity-window contract. Edge resurrection retains its
+stored lower bound and therefore does not stamp one.

@@ -22,14 +22,16 @@
  * - **T7** `apply` is convergent and idempotent, and changes only inverted
  *   rows — a stated zero-width window is a legal shape and is left alone.
  * - **T7b** the three deployment shapes, each scoped per mode: custom table
- *   names are APPLIED in both modes; a backend without `executeStatement` and a
- *   recorded-capture backend both REPORT successfully and REFUSE `apply` with a
- *   typed error naming the state. The capture case carries T6's "writes
+ *   names, including partial patches, are APPLIED in both modes; a backend
+ *   without `executeStatement` and a recorded-capture backend both REPORT
+ *   successfully and REFUSE `apply` with a typed error naming the state. The
+ *   capture case carries T6's "writes
  *   nothing" onto the RECORDED axis — clock included — because that backend's
  *   `transaction` is the one read path that opens a capture scope.
  * - **T7c** `report` distinguishes "not scanned" (`undefined`) from "zero".
- * - **T7d** a backend without transactions still runs both modes, and says so
- *   with `report.atomic === false`.
+ * - **T7d** atomicity is reported from the transaction seam rather than object
+ *   identity; a backend without transactions still runs both modes and reports
+ *   `atomic === false`.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -44,10 +46,11 @@ import {
 } from "../src";
 import { createSqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { invertedValidityWindowPredicate } from "../src/backend/repair-validity-windows";
-import type {
-  GraphBackend,
-  TransactionBackend,
-  TransactionOptions,
+import {
+  createBackendOverlay,
+  type GraphBackend,
+  type TransactionBackend,
+  type TransactionOptions,
 } from "../src/backend/types";
 import { asNodeId } from "../src/core";
 import { renderSql, sql } from "../src/query/sql-fragment";
@@ -566,6 +569,25 @@ describe("repairInvertedValidityWindows", () => {
       expect(report.counts.nodes).toBe(1);
     });
 
+    it("merges a partial tableNames override over the backend's own", async () => {
+      const custom = await seedCustomTables();
+
+      const report = await repairInvertedValidityWindows({
+        backend: custom,
+        relations: "live-and-recorded",
+        mode: "report",
+        tableNames: {
+          nodes: CUSTOM_NAMES.nodes,
+          recordedNodes: undefined,
+        },
+      });
+
+      expect(report.counts.nodes).toBe(1);
+      expect(report.counts.edges).toBe(0);
+      expect(report.counts.recordedNodes).toBe(0);
+      expect(report.counts.recordedEdges).toBe(0);
+    });
+
     it("reports on a backend without executeStatement and refuses to apply", async () => {
       await seedGraph(backend);
       const { executeStatement, ...rest } = backend;
@@ -729,6 +751,29 @@ describe("repairInvertedValidityWindows", () => {
         relations: "live",
         mode: "report",
       });
+      expect(report.atomic).toBe(true);
+    });
+
+    it("reports the transaction seam rather than inferring from object identity", async () => {
+      await seedGraph(backend);
+      let sameIdentityBackend: GraphBackend;
+      sameIdentityBackend = createBackendOverlay(backend, {
+        transaction: <T>(
+          fn: (tx: TransactionBackend) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> =>
+          backend.transaction(
+            () => fn(sameIdentityBackend as TransactionBackend),
+            options,
+          ),
+      });
+
+      const report = await repairInvertedValidityWindows({
+        backend: sameIdentityBackend,
+        relations: "live",
+        mode: "report",
+      });
+
       expect(report.atomic).toBe(true);
     });
   });

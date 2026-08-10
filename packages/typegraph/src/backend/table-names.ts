@@ -9,19 +9,31 @@ import {
 } from "../query/compiler/schema";
 import type { GraphBackend } from "./types";
 
+function definedTableNameOverrides(
+  override: Partial<SqlTableNames> | undefined,
+): Partial<SqlTableNames> {
+  if (override === undefined) return {};
+  return Object.fromEntries(
+    Object.entries(override).filter(([, tableName]) => tableName !== undefined),
+  ) as Partial<SqlTableNames>;
+}
+
 /**
  * Resolves the relations an offline maintenance call targets.
  *
- * The policy is REPLACEMENT, not merge: a stated `override` is the whole
- * naming, so a partial one leaves every relation it does not mention on the
- * built-in default rather than on the backend's own name. That is a decision a
- * caller can be surprised by, which is exactly why it has a single owner —
- * `migrateLegacyRecordedTime` and `repairInvertedValidityWindows` document the
- * same rule and must not be able to drift into two rules.
+ * An override is a PATCH over the backend's own names. This matches the
+ * `Partial<SqlTableNames>` input contract: naming only `nodes`, for example,
+ * must not silently retarget edges and recorded relations to the built-in
+ * defaults. `migrateLegacyRecordedTime` and
+ * `repairInvertedValidityWindows` share this owner so an offline write can never
+ * resolve the same partial override two different ways.
  */
 export function resolvedTableNames(
   backend: Pick<GraphBackend, "tableNames">,
   override: Partial<SqlTableNames> | undefined,
 ): ResolvedSqlTableNames {
-  return createSqlSchema(override ?? backend.tableNames ?? {}).tables;
+  return createSqlSchema({
+    ...(backend.tableNames ?? {}),
+    ...definedTableNameOverrides(override),
+  }).tables;
 }

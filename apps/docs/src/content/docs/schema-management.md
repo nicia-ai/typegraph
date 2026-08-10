@@ -549,6 +549,10 @@ await repairInvertedValidityWindows({
 });
 ```
 
+If `tableNames` is supplied, it patches `backend.tableNames`; unstated relation
+names keep the backend's configured values. A partial override never sends the
+other relations back to TypeGraph's built-in defaults.
+
 `relations` is **required**, and `"live-and-recorded"` is the recommended scope.
 Repairing only the live axis leaves the recorded twin carrying the inverted
 window, which re-materializes the invisible row at any `asOfRecorded`
@@ -561,14 +565,14 @@ historical `asOfRecorded` reads keep returning the invisible shape.
 What an operator must know before running it:
 
 1. **Run `apply` with writers stopped**, the same guidance
-   `migrateLegacyRecordedTime()` carries. A concurrent update fences its write
-   on the validity lower bound it read, so a repair landing in between makes the
-   peer's `UPDATE` match no row: a store write surfaces a not-found refusal that
-   is safe to retry, and an interchange import reports that row as accepted but
-   not written. `report` needs no quiescing: it scans in a read-only transaction
+   `migrateLegacyRecordedTime()` carries. A concurrent window-bearing update
+   may fence its write on the validity lower bound it read, so a repair landing
+   in between can make the peer's first `UPDATE` match no row. Store node and
+   edge updates re-read and re-judge against the repaired bound; interchange
+   records a per-row target-changed error instead of claiming the row was
+   written. `report` needs no quiescing: it scans in a read-only transaction
    (`BEGIN` rather than SQLite's writer-reserving `BEGIN IMMEDIATE`, and
-   `BEGIN … READ ONLY` on PostgreSQL), so it neither blocks a live writer nor
-   can write itself.
+   `BEGIN … READ ONLY` on PostgreSQL), so it cannot write itself.
 2. **Repaired rows become visible** at `asOf` coordinates before their end. That
    is the point, and it is a read-visibility change to historical queries.
 3. **Outstanding `base@V` merge tokens are invalidated** for repaired rows —

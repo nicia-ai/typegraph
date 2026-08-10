@@ -491,7 +491,8 @@ export type InsertNodeParams = Readonly<{
    * window readable at no coordinate, in which case the row is stored with no
    * lower bound ("ended at T, start unknown"). See
    * `resolveStampedValidityLowerBound`, which every insert builder decides
-   * through.
+   * through. Custom backend implementations can import that owner from
+   * `@nicia-ai/typegraph/backend` rather than reimplementing the rule.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.
@@ -621,7 +622,8 @@ export type InsertEdgeParams = Readonly<{
    * window readable at no coordinate, in which case the row is stored with no
    * lower bound ("ended at T, start unknown"). See
    * `resolveStampedValidityLowerBound`, which every insert builder decides
-   * through.
+   * through. Custom backend implementations can import that owner from
+   * `@nicia-ai/typegraph/backend` rather than reimplementing the rule.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.
@@ -3167,12 +3169,17 @@ export type RunOptionallyInTransactionOptions = Readonly<{
    *
    * Scopes the transaction and nothing else, so it is not honored on the
    * fallthrough path: a backend reporting `transactions: false` opens no
-   * transaction to configure. That is visible to the callback rather than
-   * silent — it receives `backend` (or `fallback`) itself, not a transaction
-   * target — and callers that surface atomicity, such as
-   * `repairInvertedValidityWindows`, report it from exactly that fact.
+   * transaction to configure. The callback receives an explicit execution
+   * context stating whether a transaction was opened, so callers never infer
+   * atomicity from backend object identity.
    */
   transaction?: TransactionOptions;
+}>;
+
+/** What {@link runOptionallyInTransaction} actually did for this invocation. */
+export type OptionalTransactionExecution = Readonly<{
+  /** True only when the helper opened a transaction around the callback. */
+  atomic: boolean;
 }>;
 
 /**
@@ -3187,13 +3194,19 @@ export type RunOptionallyInTransactionOptions = Readonly<{
  */
 export async function runOptionallyInTransaction<T>(
   backend: GraphBackend | TransactionBackend,
-  fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
+  fn: (
+    target: GraphBackend | TransactionBackend,
+    execution: OptionalTransactionExecution,
+  ) => Promise<T>,
   options?: RunOptionallyInTransactionOptions,
 ): Promise<T> {
   if ("transaction" in backend && backend.capabilities.transactions) {
-    return backend.transaction((tx) => fn(tx), options?.transaction);
+    return backend.transaction(
+      (tx) => fn(tx, { atomic: true }),
+      options?.transaction,
+    );
   }
-  return fn(options?.fallback ?? backend);
+  return fn(options?.fallback ?? backend, { atomic: false });
 }
 
 // ============================================================

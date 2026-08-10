@@ -1433,7 +1433,7 @@ export function renderSqlite(fragment: SqlFragment, bindings?: Readonly<Record<s
 // @public
 export function repairInvertedValidityWindows(options: RepairInvertedWindowsOptions): Promise<RepairInvertedWindowsReport>;
 
-// @public (undocumented)
+// @public
 export type RepairInvertedWindowsOptions = Readonly<{
     backend: GraphBackend;
     graphId?: string | undefined;
@@ -1442,7 +1442,7 @@ export type RepairInvertedWindowsOptions = Readonly<{
     tableNames?: Partial<SqlTableNames> | undefined;
 }>;
 
-// @public (undocumented)
+// @public
 export type RepairInvertedWindowsReport = Readonly<{
     relations: RepairRelationScope;
     counts: Readonly<Record<RepairRelation, number | undefined>>;
@@ -1455,6 +1455,9 @@ export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdge
 
 // @public
 export type RepairRelationScope = "live" | "live-and-recorded";
+
+// @public
+export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
 
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{

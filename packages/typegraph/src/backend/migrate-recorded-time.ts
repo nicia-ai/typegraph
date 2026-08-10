@@ -90,7 +90,7 @@ type ColumnRow = Readonly<{ name: unknown }>;
 
 export type MigrateLegacyRecordedTimeOptions = Readonly<{
   backend: GraphBackend;
-  /** Override the backend's recorded table names. */
+  /** Patch selected backend table names; unstated names remain configured. */
   tableNames?: Partial<SqlTableNames> | undefined;
   /** Override the durable legacy-anchor mapping table name. */
   mappingTableName?: string | undefined;
@@ -111,6 +111,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
   backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames">;
   graphId: string;
   anchor: string;
+  /** Patch selected backend table names; unstated names remain configured. */
   tableNames?: Partial<SqlTableNames> | undefined;
   mappingTableName?: string | undefined;
 }>;
@@ -121,6 +122,7 @@ export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
     "dialect" | "execute" | "executeStatement" | "tableNames" | "transaction"
   >;
   graphId: string;
+  /** Patch selected backend table names; unstated names remain configured. */
   tableNames?: Partial<SqlTableNames> | undefined;
   mappingTableName?: string | undefined;
   /** Drop the mapping table when this deletion leaves it empty. */

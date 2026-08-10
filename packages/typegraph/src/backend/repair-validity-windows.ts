@@ -19,12 +19,13 @@
  *
  * Operator consequences, all of them stated in the docs as well:
  *
- * 1. **Run `"apply"` with writers stopped.** A concurrent update fences its
- *    write on the validity lower bound it read, so a repair that lands in
- *    between makes the peer's `UPDATE` match no row: a store write surfaces
- *    `NodeNotFound` (retryable) and an interchange import reports that row as
- *    accepted but not written. `"report"` needs no quiescing — it scans in a
- *    read-only transaction, so it neither blocks a live writer nor can write.
+ * 1. **Run `"apply"` with writers stopped.** A concurrent window-bearing update
+ *    may fence its write on the validity lower bound it read, so a repair that
+ *    lands in between can make the peer's first `UPDATE` match no row. Store
+ *    node/edge updates re-read and re-judge against the repaired bound; an
+ *    interchange update records a per-row target-changed error instead of
+ *    claiming the row was written. `"report"` needs no quiescing — it scans in
+ *    a read-only transaction, so it cannot write.
  * 2. **Repaired rows become visible** at `asOf` coordinates before their end.
  *    That is the point, and it is a read-visibility change to historical
  *    queries.
@@ -65,6 +66,7 @@ export type RepairRelation =
  */
 export type RepairRelationScope = "live" | "live-and-recorded";
 
+/** Inputs for detecting or repairing legacy inverted validity windows. */
 export type RepairInvertedWindowsOptions = Readonly<{
   backend: GraphBackend;
   /** Omit to sweep every graph in the database. */
@@ -77,13 +79,14 @@ export type RepairInvertedWindowsOptions = Readonly<{
    */
   mode: "report" | "apply";
   /**
-   * Override the backend's table names, exactly as migrate-recorded-time does —
-   * through the same owner, so the REPLACE-don't-merge policy is one rule. See
+   * Patch selected backend table names, exactly as migrate-recorded-time does.
+   * Unstated names continue to come from `backend.tableNames`; see
    * {@link resolvedTableNames}.
    */
   tableNames?: Partial<SqlTableNames> | undefined;
 }>;
 
+/** Counts and execution guarantees observed by one repair/report call. */
 export type RepairInvertedWindowsReport = Readonly<{
   /** Echoes the scope actually scanned — a count of 0 and "not scanned" are different facts. */
   relations: RepairRelationScope;
@@ -108,11 +111,11 @@ export type RepairInvertedWindowsReport = Readonly<{
    * backend that reports `capabilities.transactions === false`, where the call
    * degrades to per-relation statements.
    *
-   * Reported by the seam, not re-derived beside it: the flag is set inside
-   * {@link runOptionallyInTransaction}'s callback from the target it was handed
-   * (`target !== backend`), so it states what happened rather than restating
-   * the seam's own predicate. "One snapshot" and "four snapshots" are different
-   * facts about a report, and the report must not guess which.
+   * Reported by the seam, not inferred from backend object identity:
+   * {@link runOptionallyInTransaction} explicitly tells its callback whether it
+   * opened a transaction. "One snapshot" and "four snapshots" are different
+   * facts about a report, and the report must state which occurred even when a
+   * custom backend passes the same object into its transaction callback.
    *
    * When `false`, a `"report"`'s counts may come from different snapshots and a
    * crash mid-`"apply"` can leave the live axis repaired and the recorded axis
@@ -423,8 +426,7 @@ export async function repairInvertedValidityWindows(
 
   return runOptionallyInTransaction(
     options.backend,
-    async (target) => {
-      const atomic = target !== options.backend;
+    async (target, execution) => {
       const predicate = invertedValidityWindowPredicate({
         dialect: target.dialect,
         graphId: options.graphId,
@@ -461,7 +463,7 @@ export async function repairInvertedValidityWindows(
         relations: options.relations,
         counts: relationRecord(inverted),
         nonCanonical: relationRecord(nonCanonical),
-        atomic,
+        atomic: execution.atomic,
       };
     },
     transactionOptionsFor(options.mode),

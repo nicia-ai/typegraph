@@ -920,9 +920,10 @@ export type NodeCollection<
    * coordinate: NO lower bound is stored ("ended at T, start unknown") and
    * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
    * exception, decided against the instant it samples, so one stated window
-   * reaches ONE stored shape whether the id is fresh or names a tombstone. An update to a LIVE row stores no lower
-   * bound, because that row's is already history, so one naming a different
-   * instant is REFUSED (`ValidationError` carrying
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An
+   * update to a LIVE row stores no lower bound, because that row's is already
+   * history, so one naming a different instant is REFUSED (`ValidationError`
+   * carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
    * bound the row already holds is accepted and changes nothing. Set
    * `onImmutableLowerBound: "preserve"` for event materializers whose
@@ -953,9 +954,10 @@ export type NodeCollection<
    * coordinate: NO lower bound is stored ("ended at T, start unknown") and
    * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
    * exception, decided against the instant it samples, so one stated window
-   * reaches ONE stored shape whether the id is fresh or names a tombstone. An update to a LIVE row stores no lower
-   * bound, because that row's is already history, so one naming a different
-   * instant is REFUSED (`ValidationError` carrying
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An
+   * update to a LIVE row stores no lower bound, because that row's is already
+   * history, so one naming a different instant is REFUSED (`ValidationError`
+   * carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
    * bound the row already holds is accepted and changes nothing. Set
    * `onImmutableLowerBound: "preserve"` for create/resurrection-only input.
@@ -1447,9 +1449,8 @@ export type EdgeCollection<
    * reads back as `undefined`. A resurrection stamps nothing: an edge RETAINS
    * its stored lower bound unless the item names a new one, so a `validTo`
    * before the retained bound is REFUSED rather than stamped over. An update to
-   * a LIVE row stores no lower
-   * bound, because that row's is already history, so one naming a different
-   * instant is REFUSED (`ValidationError` carrying
+   * a LIVE row stores no lower bound, because that row's is already history, so
+   * one naming a different instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
    * bound the row already holds is accepted and changes nothing.
    *

@@ -4943,7 +4943,7 @@ export function renderSqlite(fragment: SqlFragment, bindings?: Readonly<Record<s
 // @public
 export function repairInvertedValidityWindows(options: RepairInvertedWindowsOptions): Promise<RepairInvertedWindowsReport>;
 
-// @public (undocumented)
+// @public
 export type RepairInvertedWindowsOptions = Readonly<{
     backend: GraphBackend;
     graphId?: string | undefined;
@@ -4952,7 +4952,7 @@ export type RepairInvertedWindowsOptions = Readonly<{
     tableNames?: Partial<SqlTableNames> | undefined;
 }>;
 
-// @public (undocumented)
+// @public
 export type RepairInvertedWindowsReport = Readonly<{
     relations: RepairRelationScope;
     counts: Readonly<Record<RepairRelation, number | undefined>>;

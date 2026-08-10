@@ -9,9 +9,11 @@
  * property can only reach by getting lucky with a clock.
  *
  * WHAT IS STATED HERE, AND OVER WHAT.
- * Three owners meet in this file, all in `src/utils/date.ts`:
+ * Four owners meet in this file, all in `src/utils/date.ts`:
  * `isInvertedValidityWindow` is the REFUSAL predicate (strict `>`),
  * `isEmptyValidityWindow` the CHOICE predicate (non-strict `>=`), and
+ * `validityWindowContainsInstant` the JavaScript membership predicate shared
+ * by store and provenance reads. Finally,
  * `resolveStampedValidityLowerBound` the one function every write that stamps a
  * bound its caller did not state decides through. The oracle model's
  * `expectedStoredLowerBound` is a second, independent encoding of that same
@@ -30,6 +32,7 @@ import {
   isEmptyValidityWindow,
   isInvertedValidityWindow,
   resolveStampedValidityLowerBound,
+  validityWindowContainsInstant,
 } from "../../src/utils/date";
 import { requireDefined } from "../../src/utils/presence";
 import {
@@ -85,6 +88,21 @@ function orderedTripleArb(): fc.Arbitrary<
 }
 
 describe("validity window algebra", () => {
+  it("the shared JavaScript predicate agrees with the independent interval model", () => {
+    fc.assert(
+      fc.property(windowArb(), instantArb(), (window, instant) => {
+        expect(
+          validityWindowContainsInstant(
+            window.validFrom,
+            window.validTo,
+            instant,
+          ),
+        ).toBe(intervalContains(intervalOf(window), instant));
+      }),
+      RUNS,
+    );
+  });
+
   it("membership is an interval: anything between two contained instants is contained", () => {
     fc.assert(
       fc.property(

@@ -70,6 +70,7 @@ export type {
   IntentSql,
   SqlIntent,
 } from "../query/sql-intent";
+export { resolveStampedValidityLowerBound } from "../utils/date";
 export {
   deleteLegacyRecordedAnchorMap,
   type DeleteLegacyRecordedAnchorMapOptions,
