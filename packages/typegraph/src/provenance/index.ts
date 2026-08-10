@@ -452,11 +452,7 @@ async function findNodeRows(
       orderBy: "id",
     });
     return rows.filter((row) =>
-      validityWindowContainsInstant(
-        row.valid_from,
-        row.valid_to,
-        options.asOf,
-      ),
+      validityWindowContainsInstant(row.valid_from, row.valid_to, options.asOf),
     );
   }
   return backend.findNodesByKind({
