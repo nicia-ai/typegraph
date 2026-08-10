@@ -823,6 +823,74 @@ operations mutate rows through their own preflights, and projecting the side
 effects into a merge would detach them from the schema change that caused
 them. Apply schema changes to the target first (or re-fork), then merge.
 
+### Constraint-aware ingestion branches
+
+Use `ingestionBranch()` when an untrusted ingestion batch may contain aliases
+that deliberately repeat a canonical node's unique key. An ordinary `branch()`
+keeps the complete graph schema and rejects the duplicate during staging,
+before entity resolution can review and collapse it. An ingestion branch
+materializes an honest working-copy schema with only node uniqueness deferred;
+schema validation, edge endpoint checks, disjointness, and edge cardinality
+still apply immediately.
+
+```typescript
+import {
+  applyMergePlan,
+  asBranchId,
+  ingestionBranch,
+  planMergeIncremental,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const incoming = unwrap(
+  await ingestionBranch(base, makeBackend, {
+    id: asBranchId("provider-a"),
+  }),
+);
+
+await incoming.nodes.Patient.create(
+  { name: "Ana Rivera", cohort: "C1", mrn: "MRN-123" },
+  { id: "incoming-patient" },
+);
+
+const plan = unwrap(
+  await planMergeIncremental({
+    forkPoint: base,
+    target: base,
+    branches: [incoming],
+    options: {
+      onBasePropertyConflict: "flag",
+      resolve: {
+        Patient: {
+          blockIndex: "patient_mrn_candidates",
+          similarity: { kind: "fulltext", fields: ["name"] },
+          threshold: 0.9,
+        },
+      },
+    },
+  }),
+);
+const applied = unwrap(await applyMergePlan(base, plan));
+await incoming.close();
+```
+
+The returned handle exposes ingestion collections, not the branch's underlying
+`Store`, so callers cannot bypass the deferred-constraint contract or run schema
+operations on the derived working copy. The original graph definition remains
+the merge contract: `applyMergePlan()` validates node uniqueness against the
+entire resolved write set in the target transaction. Valid key handoffs and
+swaps are accepted as one set. If reviewed resolution leaves two live owners of
+the same unique key, the merge returns `MergeConstraintConflictError` and
+commits no graph or provenance writes.
+
+The derived schema is persisted on the working-copy backend, so the relaxed
+contract is auditable and an explicit reattachment with an equivalent graph
+definition verifies the same constraint behavior. `ingestionBranch()` does not
+expose a general reopen/resume API. Deferral is not an in-memory flag and does
+not disable database constraints ad hoc. Ingestion branches require a backend
+with the batch uniqueness operations needed for atomic final validation.
+Unsupported backends are refused rather than falling back to sequential checks.
+
 ## Valid-time windows
 
 **A new row's window travels with the merge.** A branch-authored node or edge
@@ -955,7 +1023,7 @@ subclass you can branch on:
 
 | Error                        | When                                                                                                                                                                                                                                                                          |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BranchError`                | `branch()` could not materialize a working copy.                                                                                                                                                                                                                              |
+| `BranchError`                | `branch()` or `ingestionBranch()` could not materialize a working copy.                                                                                                                                                                                                        |
 | `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT`. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, and retract/reassert races. See the [identity guide](/identity/#interchange-and-branch-merge).                                  |
 | `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. The resolved plan would violate a deterministic store constraint, such as edge cardinality or node uniqueness. Its category is `constraint`, its `cause` is the original typed store error, and its details expose the original constraint fields. No graph or provenance writes commit. |
