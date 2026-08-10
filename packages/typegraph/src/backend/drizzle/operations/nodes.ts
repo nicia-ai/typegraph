@@ -2,6 +2,7 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { getDialect } from "../../../query/dialect";
 import { sql as portableSql } from "../../../query/sql-fragment";
+import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
   DeleteNodeParams,
   HardDeleteNodeParams,
@@ -14,7 +15,6 @@ import {
   expectedValidFromPredicate,
   nodeColumnList,
   quotedColumn,
-  resolveValidFrom,
   sqlNull,
   type Tables,
 } from "./shared";
@@ -22,6 +22,14 @@ import {
 /**
  * Builds an INSERT query for a node.
  * Uses raw column names in the column list (required by SQL syntax).
+ *
+ * The stored lower bound is decided by {@link resolveStampedValidityLowerBound}
+ * against the very `timestamp` this statement binds into `created_at` /
+ * `updated_at`, so a row cannot be stamped with a bound that disagrees with the
+ * instant it was created at. Deciding it HERE — below the store, below
+ * interchange, below trusted import — is what makes "no write stores a window
+ * readable at no coordinate" hold for every `GraphBackend` caller rather than for
+ * the store paths one reviewer enumerated.
  */
 export function buildInsertNode(
   tables: Tables,
@@ -36,7 +44,7 @@ export function buildInsertNode(
     INSERT INTO ${nodes} (${columns})
     VALUES (
       ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
-      1, ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}, ${sqlNull(params.validTo)},
+      1, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
     RETURNING *
@@ -59,7 +67,7 @@ export function buildInsertNodeNoReturn(
     INSERT INTO ${nodes} (${columns})
     VALUES (
       ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
-      1, ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}, ${sqlNull(params.validTo)},
+      1, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
   `;
@@ -77,7 +85,7 @@ export function buildInsertNodesBatch(
   const columns = nodeColumnList(nodes);
   const values = params.map((nodeParams) => {
     const propsJson = JSON.stringify(nodeParams.props);
-    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveValidFrom(nodeParams.validFrom, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveStampedValidityLowerBound(nodeParams.validFrom, nodeParams.validTo, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`
@@ -98,7 +106,7 @@ export function buildInsertNodesBatchReturning(
   const columns = nodeColumnList(nodes);
   const values = params.map((nodeParams) => {
     const propsJson = JSON.stringify(nodeParams.props);
-    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveValidFrom(nodeParams.validFrom, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveStampedValidityLowerBound(nodeParams.validFrom, nodeParams.validTo, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`
@@ -175,15 +183,19 @@ export function buildUpdateNode(
   }
 
   // A resurrection RESETS the window: `valid_from` is rewritten rather than
-  // retained (an edge retains it — see `buildUpdateEdge`). `timestamp` is only
-  // the fallback: the operations layer passes the instant its inverted-window
-  // guard measured against as an explicit `validFrom`, so the bound this stores
-  // is the bound that was checked. Falling back to a locally sampled instant
-  // would store a bound strictly later than the one the guard approved (issue
-  // #413).
+  // retained (an edge retains it — see `buildUpdateEdge`), so this leg STAMPS a
+  // bound when the caller states none, and it makes that choice through the same
+  // owner every insert builder uses. Two consequences, both load-bearing. A
+  // resurrection carrying only a past `validTo` — which `create` on a tombstoned
+  // id reaches with nothing stated — stores NO lower bound instead of a window
+  // readable at no coordinate, whoever called the backend (issue #407). And
+  // `timestamp` remains only the fallback: the operations layer passes the
+  // instant its inverted-window guard measured against as an explicit
+  // `validFrom`, so the bound this stores is the bound that was checked rather
+  // than a strictly later sample the guard never saw (issue #413).
   if (params.clearDeleted) {
     setParts.push(
-      sql`${quotedColumn(nodes.validFrom)} = ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}`,
+      sql`${quotedColumn(nodes.validFrom)} = ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}`,
       sql`${quotedColumn(nodes.validTo)} = ${sqlNull(params.validTo)}`,
     );
   } else if (params.clearValidTo === true) {

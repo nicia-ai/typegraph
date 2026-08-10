@@ -1430,6 +1430,32 @@ export function renderSqlInline(fragment: SqlFragment, dialect: SqlDialect): str
 // @public
 export function renderSqlite(fragment: SqlFragment, bindings?: Readonly<Record<string, unknown>>): RenderedSql;
 
+// @public
+export function repairInvertedValidityWindows(options: RepairInvertedWindowsOptions): Promise<RepairInvertedWindowsReport>;
+
+// @public
+export type RepairInvertedWindowsOptions = Readonly<{
+    backend: GraphBackend;
+    graphId?: string | undefined;
+    relations: RepairRelationScope;
+    mode: "report" | "apply";
+    tableNames?: Partial<SqlTableNames> | undefined;
+}>;
+
+// @public
+export type RepairInvertedWindowsReport = Readonly<{
+    relations: RepairRelationScope;
+    counts: Readonly<Record<RepairRelation, number | undefined>>;
+    nonCanonical: Readonly<Record<RepairRelation, number | undefined>>;
+    atomic: boolean;
+}>;
+
+// @public
+export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdges";
+
+// @public
+export type RepairRelationScope = "live" | "live-and-recorded";
+
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
     nodes: string;
@@ -1445,6 +1471,9 @@ export type ResolvedSqlTableNames = Readonly<{
     fulltext: string;
     uniques: string;
 }>;
+
+// @public
+export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
 
 // @public
 export type RowProps = string | Readonly<Record<string, unknown>>;

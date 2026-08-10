@@ -486,7 +486,13 @@ export type InsertNodeParams = Readonly<{
   id: string;
   props: Readonly<Record<string, unknown>>;
   /**
-   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * Omitted (`undefined`): the insert stamps its own creation timestamp —
+   * UNLESS a stated `validTo` at or before that instant would make the stored
+   * window readable at no coordinate, in which case the row is stored with no
+   * lower bound ("ended at T, start unknown"). See
+   * `resolveStampedValidityLowerBound`, which every insert builder decides
+   * through. Custom backend implementations can import that owner from
+   * `@nicia-ai/typegraph/backend` rather than reimplementing the rule.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.
@@ -510,7 +516,20 @@ export type UpdateNodeParams = Readonly<{
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
-  /** Applied when resurrecting a tombstone; omitted means the resurrection instant. */
+  /**
+   * Applied when resurrecting a tombstone, which RESETS the window. Omitted
+   * means the resurrection instant — unless a stated `validTo` at or before it
+   * would leave the row readable at no coordinate, in which case the
+   * resurrection stores no lower bound. Same rule, same owner, as an insert:
+   * `resolveStampedValidityLowerBound`.
+   *
+   * The store's own resurrection paths never omit it. Their window guard has to
+   * judge the bound the write will STORE, so they resolve it through that owner
+   * against the instant they sampled and pass the result — `null` included,
+   * which is how "store no lower bound" is spelled here. Omission is for callers
+   * with no such verdict to honor; it lets this builder decide against its own,
+   * strictly later sample.
+   */
   validFrom?: string | null;
   /**
    * The effective `valid_from` this write ASSERTS the target row already
@@ -598,7 +617,13 @@ export type InsertEdgeParams = Readonly<{
   toId: string;
   props: Readonly<Record<string, unknown>>;
   /**
-   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * Omitted (`undefined`): the insert stamps its own creation timestamp —
+   * UNLESS a stated `validTo` at or before that instant would make the stored
+   * window readable at no coordinate, in which case the row is stored with no
+   * lower bound ("ended at T, start unknown"). See
+   * `resolveStampedValidityLowerBound`, which every insert builder decides
+   * through. Custom backend implementations can import that owner from
+   * `@nicia-ai/typegraph/backend` rather than reimplementing the rule.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.
@@ -3127,6 +3152,36 @@ export async function closeAfterFailure(
   throw provisioningError;
 }
 
+/** Options for {@link runOptionallyInTransaction}. */
+export type RunOptionallyInTransactionOptions = Readonly<{
+  /**
+   * Pass only when the toplevel backend method would recurse — pass the
+   * operation-level backend so the no-transaction path doesn't loop back
+   * through the same toplevel method.
+   */
+  fallback?: GraphBackend | TransactionBackend;
+  /**
+   * Options for the transaction this opens — most usefully
+   * `accessMode: "read_only"`, which lets a multi-statement READ declare itself
+   * to the engine instead of only promising it (SQLite issues `BEGIN` rather
+   * than reserving the single writer slot with `BEGIN IMMEDIATE`; PostgreSQL
+   * issues `BEGIN … READ ONLY`).
+   *
+   * Scopes the transaction and nothing else, so it is not honored on the
+   * fallthrough path: a backend reporting `transactions: false` opens no
+   * transaction to configure. The callback receives an explicit execution
+   * context stating whether a transaction was opened, so callers never infer
+   * atomicity from backend object identity.
+   */
+  transaction?: TransactionOptions;
+}>;
+
+/** What {@link runOptionallyInTransaction} actually did for this invocation. */
+export type OptionalTransactionExecution = Readonly<{
+  /** True only when the helper opened a transaction around the callback. */
+  atomic: boolean;
+}>;
+
 /**
  * Runs `fn` inside a transaction when given a top-level backend that supports
  * one, falling through to a direct invocation otherwise. Lets call sites benefit
@@ -3136,20 +3191,22 @@ export async function closeAfterFailure(
  * transaction-scoped backend. The single-statement race window is already
  * implicit on any backend that reports `transactions: false`; callers that
  * cannot tolerate it must branch on the capability themselves.
- *
- * Pass `fallback` only when the toplevel backend method would recurse
- * — pass the operation-level backend so the no-tx path doesn't loop
- * back through the same toplevel method.
  */
 export async function runOptionallyInTransaction<T>(
   backend: GraphBackend | TransactionBackend,
-  fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
-  fallback?: GraphBackend | TransactionBackend,
+  fn: (
+    target: GraphBackend | TransactionBackend,
+    execution: OptionalTransactionExecution,
+  ) => Promise<T>,
+  options?: RunOptionallyInTransactionOptions,
 ): Promise<T> {
   if ("transaction" in backend && backend.capabilities.transactions) {
-    return backend.transaction((tx) => fn(tx));
+    return backend.transaction(
+      (tx) => fn(tx, { atomic: true }),
+      options?.transaction,
+    );
   }
-  return fn(fallback ?? backend);
+  return fn(options?.fallback ?? backend, { atomic: false });
 }
 
 // ============================================================

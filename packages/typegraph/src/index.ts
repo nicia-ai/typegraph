@@ -247,6 +247,13 @@ export {
   type MigrateLegacyEmbeddingsOptions,
   type MigrateLegacyEmbeddingsResult,
 } from "./backend/migrate-vectors";
+export {
+  repairInvertedValidityWindows,
+  type RepairInvertedWindowsOptions,
+  type RepairInvertedWindowsReport,
+  type RepairRelation,
+  type RepairRelationScope,
+} from "./backend/repair-validity-windows";
 
 // ============================================================
 // Core Types

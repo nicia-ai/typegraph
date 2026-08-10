@@ -29,7 +29,7 @@ import {
   type TransactionContext,
 } from "../store/types";
 import { compareStrings } from "../utils/compare";
-import { nowIso } from "../utils/date";
+import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { isPlainObject } from "../utils/object";
 
 export type {
@@ -429,22 +429,6 @@ function assertEdgeEndpoints<G extends GraphDef>(
 }
 
 /**
- * Whether a row's validity window contains `asOf`. The JS mirror of the SQL
- * `"current"`-mode predicate, for role reads that must include tombstoned
- * rows (which `"current"` cannot express) yet still respect validity.
- * Canonical fixed-width UTC ISO strings compare correctly as text.
- */
-function isValidAt(
-  row: Pick<NodeRow, "valid_from" | "valid_to">,
-  asOf: string,
-): boolean {
-  return (
-    (row.valid_from === undefined || row.valid_from <= asOf) &&
-    (row.valid_to === undefined || row.valid_to > asOf)
-  );
-}
-
-/**
  * Provenance reads follow the store's currency semantics: a source,
  * justification, or support edge counts only while currently valid (the
  * default `"current"` read mode), so a validity-expired source no longer
@@ -467,7 +451,9 @@ async function findNodeRows(
       temporalMode: "includeTombstones",
       orderBy: "id",
     });
-    return rows.filter((row) => isValidAt(row, options.asOf));
+    return rows.filter((row) =>
+      validityWindowContainsInstant(row.valid_from, row.valid_to, options.asOf),
+    );
   }
   return backend.findNodesByKind({
     graphId,

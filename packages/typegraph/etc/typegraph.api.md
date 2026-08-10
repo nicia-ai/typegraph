@@ -4941,6 +4941,32 @@ export function renderSqlInline(fragment: SqlFragment, dialect: SqlDialect): str
 export function renderSqlite(fragment: SqlFragment, bindings?: Readonly<Record<string, unknown>>): RenderedSql;
 
 // @public
+export function repairInvertedValidityWindows(options: RepairInvertedWindowsOptions): Promise<RepairInvertedWindowsReport>;
+
+// @public
+export type RepairInvertedWindowsOptions = Readonly<{
+    backend: GraphBackend;
+    graphId?: string | undefined;
+    relations: RepairRelationScope;
+    mode: "report" | "apply";
+    tableNames?: Partial<SqlTableNames> | undefined;
+}>;
+
+// @public
+export type RepairInvertedWindowsReport = Readonly<{
+    relations: RepairRelationScope;
+    counts: Readonly<Record<RepairRelation, number | undefined>>;
+    nonCanonical: Readonly<Record<RepairRelation, number | undefined>>;
+    atomic: boolean;
+}>;
+
+// @public
+export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdges";
+
+// @public
+export type RepairRelationScope = "live" | "live-and-recorded";
+
+// @public
 type ResolvedEmbeddingIndex = Readonly<{
     metric: EmbeddingMetric;
     indexType: EmbeddingIndexType;

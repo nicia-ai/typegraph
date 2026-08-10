@@ -950,26 +950,33 @@ describe("Bulk Operations (SQLite)", () => {
       expect(resurrected.meta.deletedAt).toBeUndefined();
     });
 
-    it("refuses a lone past validTo on a resurrecting upsert", async () => {
-      // A resurrection resets the lower bound to the write instant when no
-      // validFrom accompanies it, so a lone historical validTo would be born
-      // INVERTED — permanently invisible at every coordinate. The effective
-      // window is validated instead of silently persisting the corruption.
+    it("stores no lower bound for a lone past validTo on a resurrecting upsert", async () => {
+      // A resurrection RESETS the window, so with no `validFrom` accompanying a
+      // historical `validTo` there is no bound to invert against: the write
+      // stamps none, and the row means "ended at T, start unknown" — the same
+      // stored shape a create reaches for the same stated window.
+      //
+      // This case used to REFUSE, on the reasoning that the reset bound was the
+      // write instant. The write no longer chooses an instant that would leave
+      // the row readable at no coordinate, so there is nothing left to refuse.
       const person = await store.nodes.Person.createFromRecord(
         { name: "Windowed" },
         { id: "person-window" },
       );
       await store.nodes.Person.delete(person.id);
 
-      await expect(
-        store.nodes.Person.upsertByIdFromRecord(
-          "person-window",
-          { name: "Windowed Reborn" },
-          { validTo: "2021-01-01T00:00:00.000Z" },
-        ),
-      ).rejects.toThrow(ValidationError);
+      const reborn = await store.nodes.Person.upsertByIdFromRecord(
+        "person-window",
+        { name: "Windowed Reborn" },
+        { validTo: "2021-01-01T00:00:00.000Z" },
+      );
+      expect(reborn.meta.validFrom).toBeUndefined();
+      expect(reborn.meta.validTo).toBe("2021-01-01T00:00:00.000Z");
 
-      // The full historical window is the sanctioned form.
+      // Naming the full historical window still stores it verbatim. Tombstoned
+      // again first: the accepted upsert above left the row LIVE, and a live
+      // row's lower bound is history — only a resurrection writes one.
+      await store.nodes.Person.delete(person.id);
       const resurrected = await store.nodes.Person.upsertByIdFromRecord(
         "person-window",
         { name: "Windowed Reborn" },
@@ -979,6 +986,7 @@ describe("Bulk Operations (SQLite)", () => {
         },
       );
       expect(resurrected.id).toBe("person-window");
+      expect(resurrected.meta.validFrom).toBe("2020-01-01T00:00:00.000Z");
     });
 
     it("rejects invalid data at runtime via Zod validation", async () => {

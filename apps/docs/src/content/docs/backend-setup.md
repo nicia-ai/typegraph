@@ -682,6 +682,26 @@ Application code can continue importing the complete portable Store API from
 application deliberately owns a Drizzle connection or needs native transaction
 interop.
 
+Custom insert builders must apply the same born-ended validity rule as the
+built-in adapters. Import its public owner instead of duplicating the bound
+comparison:
+
+```typescript
+import { resolveStampedValidityLowerBound } from "@nicia-ai/typegraph/backend";
+
+const validFrom = resolveStampedValidityLowerBound(
+  params.validFrom,
+  params.validTo,
+  writeInstant,
+);
+```
+
+Use the same `writeInstant` for the decision and the row's creation/update
+stamp. This keeps custom node and edge inserts, plus node resurrection paths
+that reset the validity window, aligned with Store and interchange semantics at
+the zero-width boundary. Edge resurrection retains its stored lower bound and
+does not use this stamping helper.
+
 ## Managed Store Entrypoints
 
 For local applications that do not need direct database access, TypeGraph can

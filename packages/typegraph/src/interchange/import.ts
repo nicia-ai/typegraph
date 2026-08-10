@@ -1782,8 +1782,11 @@ function validateValidityWindow(
     validateOptionalCanonicalIsoDate(entity.validTo, "validTo");
     // On an INSERT only a stated pair is judged — a lone historical validTo
     // means "born already ended", exactly as it does on `create` (see
-    // assertWritableValidityWindow). `null` is a confirmed open-left window and
-    // is not a lower bound at all.
+    // assertWritableValidityWindow) — and that is the WHOLE rule, not a partial
+    // one: the insert path this feeds stamps NO lower bound for such a row
+    // (`resolveStampedValidityLowerBound`), so a document accepted here cannot
+    // become a row readable at no coordinate. `null` is a confirmed open-left
+    // window and is not a lower bound at all.
     assertOrderedValidityWindow(
       `${entity.kind} "${entity.id}"`,
       entity.validFrom ?? undefined,

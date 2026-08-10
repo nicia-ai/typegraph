@@ -8,6 +8,7 @@ import {
   type GraphBackend,
   type TransactionBackend,
 } from "../src";
+import type { UpdateNodeParams } from "../src/backend/types";
 import { type SqlFragment } from "../src/query/sql-fragment";
 import {
   createInitializedStore,
@@ -43,6 +44,7 @@ const identityGraph = defineGraph({
 });
 
 const PEER_RESURRECTION_VALID_FROM = "2024-01-01T00:00:00.000Z";
+const RACED_RESURRECTION_VALID_FROM = "2023-06-01T00:00:00.000Z";
 
 type ReadCounts = Readonly<{
   /** `getNode` probes issued for the node being created. */
@@ -174,6 +176,82 @@ function peerResurrectionBackend(targetId: string): GraphBackend {
   } satisfies GraphBackend;
 }
 
+/**
+ * A backend whose transaction target loses TWO races, in the one order that
+ * makes a resurrecting upsert's `clearDeleted` statement match a row its own
+ * read judged LIVE:
+ *
+ *  1. a peer resurrects the tombstone between the collection's probe and
+ *     `performNodeUpdate`'s read, stamping the window itself, so that read finds
+ *     a live row and the window guard measures the row's STORED lower bound;
+ *  2. the peer re-tombstones it before the UPDATE, so `deleted_at IS NOT NULL`
+ *     matches after all instead of affecting zero rows and falling through to
+ *     the resurrection recovery.
+ *
+ * Both peer writes are real calls against the same target — the state
+ * transitions a competitor would commit, not a masked read.
+ */
+function resurrectThenRetombstoneBackend(targetId: string): GraphBackend {
+  const base = createTestBackend();
+  return {
+    ...base,
+    transaction: (fn, options) =>
+      base.transaction((transactionTarget) => {
+        let peerResurrected = false;
+        let peerReTombstoned = false;
+        const racingTarget = new Proxy(transactionTarget, {
+          get(source, property, receiver) {
+            const value: unknown = Reflect.get(source, property, receiver);
+            if (typeof value !== "function") return value;
+            if (property === "getNode") {
+              const getNode = value as TransactionBackend["getNode"];
+              return async (graphId: string, kind: string, id: string) => {
+                const row = await getNode(graphId, kind, id);
+                if (
+                  peerResurrected ||
+                  id !== targetId ||
+                  row?.deleted_at === undefined
+                ) {
+                  return row;
+                }
+                peerResurrected = true;
+                await transactionTarget.updateNode({
+                  graphId,
+                  kind,
+                  id,
+                  props: { name: "Peer" },
+                  clearDeleted: true,
+                  validFrom: RACED_RESURRECTION_VALID_FROM,
+                });
+                return getNode(graphId, kind, id);
+              };
+            }
+            if (property === "updateNode") {
+              const updateNode = value as TransactionBackend["updateNode"];
+              return async (params: UpdateNodeParams) => {
+                if (
+                  !peerReTombstoned &&
+                  params.id === targetId &&
+                  params.clearDeleted === true
+                ) {
+                  peerReTombstoned = true;
+                  await transactionTarget.deleteNode({
+                    graphId: params.graphId,
+                    kind: params.kind,
+                    id: params.id,
+                  });
+                }
+                return updateNode(params);
+              };
+            }
+            return value;
+          },
+        });
+        return fn(racingTarget);
+      }, options),
+  } satisfies GraphBackend;
+}
+
 describe("create-path round trips", () => {
   it("reads the created id exactly once on a plain graph", async () => {
     const { backend, counts, reset } = countingBackend("solo");
@@ -274,6 +352,32 @@ describe("create-path round trips", () => {
     // left tombstoned rather than revived — which is also the proof the late
     // writer's props did not half-apply.
     expect(await store.nodes.Person.getById(original.id)).toBeUndefined();
+  });
+
+  it("keeps the bound it accepted when the resurrection target is read live", async () => {
+    const store = await createInitializedStore(
+      plainGraph,
+      resurrectThenRetombstoneBackend("raced-resurrection"),
+    );
+    const original = await store.nodes.Person.create(
+      { name: "Original" },
+      { id: "raced-resurrection" },
+    );
+    await store.nodes.Person.delete(original.id);
+
+    // The peer's bound restated verbatim: the guard sees a live row, compares
+    // the stated bound against the stored one, and ACCEPTS it. An accepted
+    // option is applied, so the row must come back carrying it — the leg cannot
+    // state a resurrection decision it never reached and write the bound away
+    // as SQL NULL.
+    const revived = await store.nodes.Person.upsertById(
+      "raced-resurrection",
+      { name: "Late writer" },
+      { validFrom: RACED_RESURRECTION_VALID_FROM },
+    );
+
+    expect(revived.name).toBe("Late writer");
+    expect(revived.meta.validFrom).toBe(RACED_RESURRECTION_VALID_FROM);
   });
 
   it("skips the identity fold probe for generated ids", async () => {

@@ -11,6 +11,7 @@ import {
   fts5Strategy,
   type InsertNodeParams,
   type NodeRow,
+  resolveStampedValidityLowerBound,
   sql as backendSql,
   type SqlIdentifierChunk,
   type SqlParameterChunk,
@@ -87,6 +88,11 @@ const backendNodeRow: NodeRow = {
 const publicTransactionOptions: BackendTransactionOptions = {
   accessMode: "read_only",
 };
+const backendResolvedLowerBound = resolveStampedValidityLowerBound(
+  undefined,
+  "2026-01-01T00:00:01.000Z",
+  "2026-01-01T00:00:00.000Z",
+);
 const rootTransactionOptions: TransactionOptions = publicTransactionOptions;
 if (false) {
   const privilegedOptions: BackendTransactionOptions = {
@@ -97,6 +103,7 @@ if (false) {
 }
 void backendNodeParams;
 void backendNodeRow;
+void backendResolvedLowerBound;
 void backendSqlTag;
 void rootTransactionOptions;
 void builtInStrategy;

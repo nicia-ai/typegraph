@@ -1,6 +1,7 @@
 import { TrustedImportError } from "../../errors";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledStatementSql } from "../../query/sql-intent";
+import { resolveStampedValidityLowerBound } from "../../utils/date";
 import type {
   InsertEdgeParams,
   InsertNodeParams,
@@ -191,13 +192,6 @@ export async function analyzeImportedTables(
   );
 }
 
-function resolvedValidFrom(
-  validFrom: string | null | undefined,
-  timestamp: string,
-): string | null {
-  return validFrom === undefined ? timestamp : validFrom;
-}
-
 /**
  * Encodes one-dimensional Postgres arrays as text accepted by an explicit
  * `::text[]` / `::timestamptz[]` cast. postgres.js's raw `unsafe` parameters
@@ -214,6 +208,17 @@ function postgresArray(values: readonly (string | null)[]): string {
     .join(",")}}`;
 }
 
+/**
+ * Both sessions below decide their stored lower bound through
+ * {@link resolveStampedValidityLowerBound}, the same owner the Drizzle insert
+ * builders use, mapping "no bound" to an explicit SQL NULL. Trusted import
+ * bypasses those builders for throughput, so a private copy of the decision here
+ * would keep minting rows readable at no coordinate long after the builders
+ * stopped — which is exactly what it did before issue #407 was closed. Its
+ * canonicality precondition is established per chunk by the stream's own format
+ * check (`src/interchange/trusted-import.ts`), which is what makes the
+ * lexicographic comparison inside the owner a chronological one here too.
+ */
 export function createSqliteTrustedImportSession(
   executionAdapter: SqliteExecutionAdapter,
   tableNames: TrustedImportTableNames,
@@ -244,7 +249,8 @@ export function createSqliteTrustedImportSession(
           item.kind,
           item.id,
           JSON.stringify(item.props),
-          resolvedValidFrom(item.validFrom, timestamp),
+          resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
+            DATABASE_NULL,
           item.validTo ?? DATABASE_NULL,
           timestamp,
           timestamp,
@@ -265,7 +271,8 @@ export function createSqliteTrustedImportSession(
           item.toKind,
           item.toId,
           JSON.stringify(item.props),
-          resolvedValidFrom(item.validFrom, timestamp),
+          resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
+            DATABASE_NULL,
           item.validTo ?? DATABASE_NULL,
           timestamp,
           timestamp,
@@ -310,7 +317,11 @@ export function createPostgresTrustedImportSession(
         postgresArray(params.map((item) => item.id)),
         postgresArray(params.map((item) => JSON.stringify(item.props))),
         postgresArray(
-          params.map((item) => resolvedValidFrom(item.validFrom, timestamp)),
+          params.map(
+            (item) =>
+              resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
+              DATABASE_NULL,
+          ),
         ),
         postgresArray(params.map((item) => item.validTo ?? DATABASE_NULL)),
         postgresArray(params.map(() => timestamp)),
@@ -329,7 +340,11 @@ export function createPostgresTrustedImportSession(
         postgresArray(params.map((item) => item.toId)),
         postgresArray(params.map((item) => JSON.stringify(item.props))),
         postgresArray(
-          params.map((item) => resolvedValidFrom(item.validFrom, timestamp)),
+          params.map(
+            (item) =>
+              resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
+              DATABASE_NULL,
+          ),
         ),
         postgresArray(params.map((item) => item.validTo ?? DATABASE_NULL)),
         postgresArray(params.map(() => timestamp)),

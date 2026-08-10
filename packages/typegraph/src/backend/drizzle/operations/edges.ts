@@ -1,5 +1,9 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import {
+  resolveStampedValidityLowerBound,
+  resolveStatedValidityLowerBound,
+} from "../../../utils/date";
 import type {
   CountEdgesFromParams,
   DeleteEdgeParams,
@@ -14,7 +18,6 @@ import {
   edgeColumnList,
   expectedValidFromPredicate,
   quotedColumn,
-  resolveValidFrom,
   sqlNull,
   type Tables,
 } from "./shared";
@@ -22,6 +25,11 @@ import {
 /**
  * Builds an INSERT query for an edge.
  * Uses raw column names in the column list (required by SQL syntax).
+ *
+ * As for nodes, the stored lower bound is decided by
+ * {@link resolveStampedValidityLowerBound} against the very `timestamp` this
+ * statement binds into `created_at` / `updated_at` — see `buildInsertNode` for
+ * why the decision lives in the builder rather than above it.
  */
 export function buildInsertEdge(
   tables: Tables,
@@ -37,7 +45,7 @@ export function buildInsertEdge(
     VALUES (
       ${params.graphId}, ${params.id}, ${params.kind},
       ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}, ${sqlNull(params.validTo)},
+      ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
     RETURNING *
@@ -61,7 +69,7 @@ export function buildInsertEdgeNoReturn(
     VALUES (
       ${params.graphId}, ${params.id}, ${params.kind},
       ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}, ${sqlNull(params.validTo)},
+      ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
   `;
@@ -79,7 +87,7 @@ export function buildInsertEdgesBatch(
   const columns = edgeColumnList(edges);
   const values = params.map((edgeParams) => {
     const propsJson = JSON.stringify(edgeParams.props);
-    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(resolveValidFrom(edgeParams.validFrom, timestamp))}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(edgeParams.validFrom, edgeParams.validTo, timestamp))}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`
@@ -100,7 +108,7 @@ export function buildInsertEdgesBatchReturning(
   const columns = edgeColumnList(edges);
   const values = params.map((edgeParams) => {
     const propsJson = JSON.stringify(edgeParams.props);
-    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(resolveValidFrom(edgeParams.validFrom, timestamp))}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(edgeParams.validFrom, edgeParams.validTo, timestamp))}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`
@@ -225,9 +233,16 @@ export function buildUpdateEdge(
   // window (only an explicit `valid_to` moves), which is what
   // `getOrCreateByEndpoints` relies on when it cardinality-checks the
   // tombstone's own `valid_to`.
+  //
+  // So this is the one window-writing site in the backend that does NOT stamp:
+  // the gate above guarantees the caller named a bound, and there is no instant
+  // to judge. It therefore passes the stated value through
+  // (`resolveStatedValidityLowerBound`) rather than routing through the stamping
+  // owner, which would silently turn "the caller said this" into "the write
+  // chose this" on a path where nothing was chosen.
   if (params.clearDeleted && params.validFrom !== undefined) {
     setParts.push(
-      sql`${quotedColumn(edges.validFrom)} = ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}`,
+      sql`${quotedColumn(edges.validFrom)} = ${sqlNull(resolveStatedValidityLowerBound(params.validFrom))}`,
       sql`${quotedColumn(edges.validTo)} = ${sqlNull(params.validTo)}`,
     );
   } else if (params.clearValidTo === true) {

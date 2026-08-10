@@ -166,7 +166,7 @@ import {
 import { type SchemaDiff } from "../schema/migration";
 import { serializeSchema } from "../schema/serializer";
 import { type SerializedSchema } from "../schema/types";
-import { nowIso } from "../utils/date";
+import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
@@ -5184,12 +5184,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         case "current":
         case "asOf": {
           // resolveTemporalReadParams always resolves an instant for these modes.
-          if (row.deleted_at) return false;
-          if (asOf !== undefined && row.valid_from && asOf < row.valid_from)
-            return false;
-          if (asOf !== undefined && row.valid_to && asOf >= row.valid_to)
-            return false;
-          return true;
+          if (row.deleted_at || asOf === undefined) return false;
+          return validityWindowContainsInstant(
+            row.valid_from,
+            row.valid_to,
+            asOf,
+          );
         }
         case "includeEnded": {
           return !row.deleted_at;

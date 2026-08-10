@@ -39,6 +39,10 @@ const graph = defineGraph({
 
 const SPECIAL_NAME = 'Alice "quoted" \\ path, {braces}\nand newline';
 
+/** A historical end, so a row stating it alone is BORN ALREADY ENDED. */
+const ENDED_AT = "2021-01-01T00:00:00.000Z";
+const BEFORE_ENDED_AT = "2020-01-01T00:00:00.000Z";
+
 function payload(): GraphData {
   return {
     formatVersion: FORMAT_VERSION,
@@ -106,6 +110,48 @@ export function registerTrustedImportIntegrationTests(
       );
       expect(alice?.name).toBe(isSupported ? SPECIAL_NAME : undefined);
       expect(edge?.since).toBe(isSupported ? 2020 : undefined);
+    });
+
+    it("stores no lower bound for a born-ended streamed row", async () => {
+      // Trusted import bypasses the Drizzle insert builders entirely — it binds
+      // its own INSERT per dialect for throughput — so it is the one write path
+      // that can keep minting rows readable at no coordinate after the builders
+      // stop. It carried a private copy of the lower-bound resolver until #407;
+      // this is the only test that fails if that copy comes back.
+      if (context.getStore().backend.trustedImport === undefined) return;
+      const store = await context.createStore(graph);
+
+      const data = payload();
+      await trustedImportGraph(store, {
+        ...data,
+        nodes: data.nodes.map((node) =>
+          node.id === "alice" ? { ...node, validTo: ENDED_AT } : node,
+        ),
+        edges: data.edges.map((edge) => ({ ...edge, validTo: ENDED_AT })),
+      });
+
+      const alice = await store.nodes.CrossBackendTrustedPerson.getById(
+        asNodeId<typeof TrustedPerson>("alice"),
+        { temporalMode: "includeEnded" },
+      );
+      expect(alice?.meta.validFrom).toBeUndefined();
+      expect(alice?.meta.validTo).toBe(ENDED_AT);
+
+      const edge = await store.edges.crossBackendTrustedKnows.getById(
+        asEdgeId<typeof TrustedKnows>("alice-knows-bob"),
+        { temporalMode: "includeEnded" },
+      );
+      expect(edge?.meta.validFrom).toBeUndefined();
+      expect(edge?.meta.validTo).toBe(ENDED_AT);
+
+      // The point of storing no bound rather than the write instant: the row
+      // reads back before its end instead of at no coordinate at all.
+      await expect(
+        store.nodes.CrossBackendTrustedPerson.getById(
+          asNodeId<typeof TrustedPerson>("alice"),
+          { temporalMode: "asOf", asOf: BEFORE_ENDED_AT },
+        ),
+      ).resolves.toBeDefined();
     });
 
     it("rolls back earlier chunks when the stream fails", async () => {
