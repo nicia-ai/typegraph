@@ -79,6 +79,8 @@ export type BaseMember = Readonly<{
   kind: string;
   props: Readonly<Record<string, JsonValue>>;
   origin: "base";
+  validFrom?: string;
+  validTo?: string;
 }>;
 
 /**
@@ -672,6 +674,12 @@ export const baseUniqueSource: CandidateSource = {
             id: base.id,
             kind: base.kind,
             props: nodeProps(base),
+            ...(base.meta.validFrom === undefined ?
+              {}
+            : { validFrom: base.meta.validFrom }),
+            ...(base.meta.validTo === undefined ?
+              {}
+            : { validTo: base.meta.validTo }),
           });
         }
         // A same-(kind,id) re-discovery is already ONE identity (the base member lands
@@ -802,6 +810,12 @@ export const baseKeySource: CandidateSource = {
             id: base.id,
             kind: base.kind,
             props: nodeProps(base),
+            ...(base.meta.validFrom === undefined ?
+              {}
+            : { validFrom: base.meta.validFrom }),
+            ...(base.meta.validTo === undefined ?
+              {}
+            : { validTo: base.meta.validTo }),
           });
         }
         // A same-(kind, id) re-discovery is already ONE identity; the base member lands

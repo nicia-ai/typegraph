@@ -18,7 +18,11 @@ import {
   type RecordedInstant,
   recordedInstantRevision,
 } from "../src/core/temporal";
-import { ConfigurationError, IdentityContradictionError } from "../src/errors";
+import {
+  ConfigurationError,
+  IdentityContradictionError,
+  IdentityEndpointValidityError,
+} from "../src/errors";
 import { exportGraph, importGraph } from "../src/interchange";
 import { disjointWith } from "../src/ontology";
 import { createSqlSchema } from "../src/query/compiler/schema";
@@ -156,6 +160,75 @@ describe("temporal identity validation scope", () => {
 });
 
 describe("Operational Identity", () => {
+  it("refuses ending an endpoint before its open assertions", async () => {
+    const store = await createInitializedStore(
+      assertionOnlyGraph,
+      createTestBackend(),
+    );
+    const first = await store.nodes.Person.create(
+      { name: "First" },
+      { id: "validity-first" },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Second" },
+      { id: "validity-second" },
+    );
+    await store.identity.assertSame(first, second);
+
+    await expect(
+      store.nodes.Person.update(
+        first.id,
+        {},
+        { validTo: "2100-01-01T00:00:00.000Z" },
+      ),
+    ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+    const unchangedFirst = await store.nodes.Person.getById(first.id);
+    expect(unchangedFirst?.meta.validTo).toBeUndefined();
+  });
+
+  it("refuses ending an endpoint before a retracted assertion", async () => {
+    const store = await createInitializedStore(
+      assertionOnlyGraph,
+      createTestBackend(),
+    );
+    const first = await store.nodes.Person.create(
+      { name: "First" },
+      {
+        id: "historical-validity-first",
+        validFrom: "2020-01-01T00:00:00.000Z",
+      },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Second" },
+      {
+        id: "historical-validity-second",
+        validFrom: "2020-01-01T00:00:00.000Z",
+      },
+    );
+    const assertion = await store.identity.assertSame(first, second, {
+      validFrom: "2021-01-01T00:00:00.000Z",
+    });
+    const ended = requireDefined(
+      await store.identity.retractAssertion(assertion.assertion.id),
+    );
+
+    await expect(
+      store.nodes.Person.update(
+        first.id,
+        {},
+        { validTo: "2022-01-01T00:00:00.000Z" },
+      ),
+    ).rejects.toMatchObject({
+      code: "IDENTITY_ENDPOINT_VALIDITY",
+      details: {
+        assertionWindow: {
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: ended.validTo,
+        },
+      },
+    });
+  });
+
   it("supports the identity ledger without implicitly folding equal ids", async () => {
     const store = await createInitializedStore(
       assertionOnlyGraph,

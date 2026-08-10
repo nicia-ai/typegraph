@@ -144,6 +144,10 @@ export const DUPLICATE_IDENTITY_ASSERTION_DROP_REASON =
 export const REDUNDANT_IDENTITY_ASSERTION_DROP_REASON =
   "identity:endpoints-collapsed";
 
+/** Reason recorded when endpoint remapping leaves no shared validity window. */
+export const EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON =
+  "identity:empty-remapped-window";
+
 /** The report entry for an identity assertion the merge did not apply. */
 function droppedIdentityAssertion(
   assertion: IdentityTransferAssertion,
@@ -493,6 +497,10 @@ export function remapIdentityAssertionEndpoints(
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
   retypeMap: ReadonlyMap<MergeKey, string>,
   storedRowsById: ReadonlyMap<string, LedgerAssertion>,
+  endpointWindows: ReadonlyMap<
+    MergeKey,
+    Readonly<{ validFrom?: string; validTo?: string }>
+  > = new Map(),
 ): Readonly<{
   assertions: readonly IdentityTransferAssertion[];
   dropped: readonly DroppedItem[];
@@ -526,7 +534,46 @@ export function remapIdentityAssertionEndpoints(
       continue;
     }
     const [a, b] = normalizeIdentityPair(remappedA, remappedB);
-    const result = { ...assertion, a, b };
+    const endpointWindowA = endpointWindows.get(mergeKeyOf(a));
+    const endpointWindowB = endpointWindows.get(mergeKeyOf(b));
+    const validFrom = [
+      assertion.validFrom,
+      endpointWindowA?.validFrom,
+      endpointWindowB?.validFrom,
+    ]
+      .filter((bound): bound is string => bound !== undefined)
+      .reduce((latest, bound) =>
+        compareCodePoints(latest, bound) < 0 ? bound : latest,
+      );
+    const validTo = [
+      assertion.validTo,
+      endpointWindowA?.validTo,
+      endpointWindowB?.validTo,
+    ]
+      .filter((bound): bound is string => bound !== undefined)
+      .reduce<string | undefined>(
+        (earliest, bound) =>
+          earliest === undefined || compareCodePoints(bound, earliest) < 0 ?
+            bound
+          : earliest,
+        undefined,
+      );
+    if (validTo !== undefined && compareCodePoints(validFrom, validTo) >= 0) {
+      dropped.push(
+        droppedIdentityAssertion(
+          assertion,
+          EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON,
+        ),
+      );
+      continue;
+    }
+    const result = {
+      ...assertion,
+      a,
+      b,
+      validFrom,
+      ...(validTo === undefined ? {} : { validTo }),
+    };
     // A COMMITTED row's endpoints must never be canonicalized away: the
     // applier cannot rewrite a stored row, so a plan carrying its id with
     // moved endpoints could only end as a false one-truth refusal or —
@@ -1364,16 +1411,17 @@ function identityRefusalCode(error: TypeGraphError): string | undefined {
  * SIMULATES the identity applier's rules to refuse illegal plans early and
  * typed — but a simulation can lag the applier, and an invariant it does not
  * (yet) mirror would surface as the generic merge wrapper around the applier's
- * refusal. Translating every refusal that escapes the IDENTITY-APPLIER
- * boundary (the `applyIdentityMergeAtTarget` call inside the commit) into the
- * typed conflict error (cause preserved) gives NEW applier invariants a typed
- * surface by construction instead of by hand-built plan-time twins.
+ * refusal. Translating every refusal that escapes an identity-owned commit
+ * boundary (the identity applier, plus the node-window guard that protects
+ * open assertions) into the typed conflict error (cause preserved) gives NEW
+ * invariants a typed surface by construction instead of by hand-built
+ * plan-time twins.
  *
- * Because this wraps ONLY the identity apply, a {@link NodeNotFoundError}
- * here can mean just one thing — an assertion endpoint the plan validated
- * vanished — so it translates too; the same error from a node or edge write
- * never reaches this function. Typed {@link MergeError}s (the guards' own
- * refusals) and non-identity failures pass through unchanged.
+ * A {@link NodeNotFoundError} is translated only at the identity-applier call,
+ * where it can mean just one thing — an assertion endpoint the plan validated
+ * vanished. Node writes invoke this translator only for their explicit
+ * identity-window refusal. Typed {@link MergeError}s (the guards' own refusals)
+ * and non-identity failures pass through unchanged.
  *
  * @internal Exported for isolated verification of the translation contract.
  */

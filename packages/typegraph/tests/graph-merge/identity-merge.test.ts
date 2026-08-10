@@ -25,6 +25,7 @@ import { merge } from "../../src/graph-merge/merge";
 import {
   assertNoContradictoryIdentityClosure,
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+  EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON,
   planIdentityChanges,
   REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
   remapIdentityAssertionEndpoints,
@@ -547,6 +548,12 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       requireDefined(appliedAssertion).b.id,
     ].sort();
     expect(endpointIds).toEqual(["anchor", "p-ana"]);
+    const survivorRow = requireDefined(
+      rows.find((row) => row.id === "p-ana" && row.deleted_at === undefined),
+    );
+    expect(requireDefined(appliedAssertion).validFrom).toBe(
+      survivorRow.valid_from,
+    );
   });
 
   it("rejects opposing relations created by endpoint reconciliation", async () => {
@@ -1089,6 +1096,97 @@ describe("remapIdentityAssertionEndpoints committed endpoints", () => {
         new Map([["z-target", committed]]),
       ),
     ).toThrow(IdentityMergeConflictError);
+  });
+});
+
+describe("remapIdentityAssertionEndpoints validity", () => {
+  const assertion: IdentityTransferAssertion = {
+    id: "branch-assertion",
+    relation: "same",
+    a: { kind: "Person", id: "folded" },
+    b: { kind: "Person", id: "anchor" },
+    validFrom: "2020-01-01T00:00:00.000Z",
+    validTo: "2025-01-01T00:00:00.000Z",
+  };
+  const canonicalOf = new Map([
+    [mergeKey("Person", "folded"), mergeKey("Person", "survivor")],
+  ]);
+
+  it("intersects a remapped assertion with the survivor window", () => {
+    const result = remapIdentityAssertionEndpoints(
+      [assertion],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          {
+            validFrom: "2022-01-01T00:00:00.000Z",
+            validTo: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+      ]),
+    );
+
+    expect(result.assertions).toEqual([
+      {
+        ...assertion,
+        a: { kind: "Person", id: "anchor" },
+        b: { kind: "Person", id: "survivor" },
+        validFrom: "2022-01-01T00:00:00.000Z",
+        validTo: "2024-01-01T00:00:00.000Z",
+      },
+    ]);
+    expect(result.dropped).toEqual([]);
+  });
+
+  it("drops a remapped assertion with no shared validity window", () => {
+    const result = remapIdentityAssertionEndpoints(
+      [assertion],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          { validFrom: "2025-01-01T00:00:00.000Z" },
+        ],
+      ]),
+    );
+
+    expect(result.assertions).toEqual([]);
+    expect(result.dropped).toEqual([
+      {
+        kind: "identity",
+        id: assertion.id,
+        reason: EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON,
+      },
+    ]);
+  });
+
+  it("honors a survivor window with only an upper bound", () => {
+    const result = remapIdentityAssertionEndpoints(
+      [assertion],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          { validTo: "2023-01-01T00:00:00.000Z" },
+        ],
+      ]),
+    );
+
+    expect(result.assertions).toEqual([
+      {
+        ...assertion,
+        a: { kind: "Person", id: "anchor" },
+        b: { kind: "Person", id: "survivor" },
+        validTo: "2023-01-01T00:00:00.000Z",
+      },
+    ]);
   });
 });
 

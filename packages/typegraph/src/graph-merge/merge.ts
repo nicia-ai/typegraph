@@ -1,4 +1,5 @@
 import { validateEdgeEndpoints } from "../constraints";
+import { IdentityEndpointValidityError } from "../errors";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
@@ -627,6 +628,8 @@ function clusterMembersFor(
         kind: base.kind,
         branchId: BASE_PROVENANCE_BRANCH,
         props: base.props,
+        ...(base.validFrom === undefined ? {} : { validFrom: base.validFrom }),
+        ...(base.validTo === undefined ? {} : { validTo: base.validTo }),
       });
     }
   }
@@ -1389,6 +1392,28 @@ function buildInternalMergePlan<G extends GraphDef>(
   const canonicalOf = buildCanonicalMap(clusters, (cluster) =>
     pickClusterCanonical(cluster, entityByIdentity),
   );
+  const canonicalEndpointWindows = new Map<
+    MergeKey,
+    Readonly<{ validFrom?: string; validTo?: string }>
+  >();
+  for (const entity of canonicalEntities) {
+    if (
+      entity.endpointValidFrom === undefined &&
+      entity.endpointValidTo === undefined
+    ) {
+      continue;
+    }
+    const sourceKey = mergeKey(entity.kind, entity.canonicalId);
+    const finalKind = reconciliation.retypeMap.get(sourceKey) ?? entity.kind;
+    canonicalEndpointWindows.set(mergeKey(finalKind, entity.canonicalId), {
+      ...(entity.endpointValidFrom === undefined ?
+        {}
+      : { validFrom: entity.endpointValidFrom }),
+      ...(entity.endpointValidTo === undefined ?
+        {}
+      : { validTo: entity.endpointValidTo }),
+    });
+  }
   // Repoint identity-assertion endpoints through the same canonical + retype maps
   // the edges use, so an assertion naming a folded or retyped branch node
   // references its survivor instead of a dangling `(kind, id)` the commit-time
@@ -1399,6 +1424,7 @@ function buildInternalMergePlan<G extends GraphDef>(
     canonicalOf,
     reconciliation.retypeMap,
     storedIdentityRowsById,
+    canonicalEndpointWindows,
   );
   assertIdentityEndpointsNotDeleted(
     identityRemap.assertions,
@@ -1912,7 +1938,7 @@ async function applyIdentityRows<G extends GraphDef>(
   txBackend: TransactionBackend,
   assertions: readonly IdentityTransferAssertion[],
   retractions: readonly IdentityTransferAssertion[],
-  assertConsistent: () => Promise<void>,
+  assertConsistent?: () => Promise<void>,
 ): Promise<Readonly<{ asserted: number; retracted: number }>> {
   try {
     const applied = await storeRuntime(target).applyIdentityMergeAtTarget(
@@ -1920,7 +1946,7 @@ async function applyIdentityRows<G extends GraphDef>(
       retractions.map((retraction) => retraction.id),
       assertions,
     );
-    await assertConsistent();
+    if (assertConsistent !== undefined) await assertConsistent();
     return { asserted: applied.created, retracted: applied.retracted };
   } catch (error) {
     throw translateIdentityCommitError(error);
@@ -1954,11 +1980,30 @@ async function applyInternalMergePlan<G extends GraphDef>(
     : write.validTo === undefined ? {}
     : { validTo: write.validTo }),
   }));
-  const committedNodes = await applyNodeRows(
-    nodesApi,
-    nodeDeletions,
-    nodeUpserts,
+  const validityEndedNodes = new Set(
+    nodeUpserts
+      .filter((write) => "validTo" in write)
+      .map((write) => mergeKey(write.kind, write.id)),
   );
+  const earlyIdentityRetractions = plan.identityRetractions.filter(
+    (retraction) =>
+      validityEndedNodes.has(mergeKeyOf(retraction.a)) ||
+      validityEndedNodes.has(mergeKeyOf(retraction.b)),
+  );
+  const earlyIdentity = await applyIdentityRows(
+    target,
+    txBackend,
+    [],
+    earlyIdentityRetractions,
+  );
+  let committedNodes: number;
+  try {
+    committedNodes = await applyNodeRows(nodesApi, nodeDeletions, nodeUpserts);
+  } catch (error) {
+    throw error instanceof IdentityEndpointValidityError ?
+        translateIdentityCommitError(error)
+      : error;
+  }
 
   const edgeDeletions = [...plan.edgeDeletions].map(([identity, kind]) => ({
     kind,
@@ -2030,7 +2075,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
     // partial commit.
     identity: {
       asserted: appliedIdentity.asserted,
-      retracted: appliedIdentity.retracted,
+      retracted: earlyIdentity.retracted + appliedIdentity.retracted,
     },
   };
 }

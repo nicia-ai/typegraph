@@ -109,6 +109,7 @@ import {
   rebuildIdentityClosureForContext,
   refKey,
   removeIdentityKindsForContext,
+  requireNodeValidityEndCompatible,
   toTransferAssertion,
   validateIdentityForContext,
 } from "../identity/service";
@@ -4908,6 +4909,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 target,
                 ref,
                 mode,
+              ),
+            requireValidityEndCompatible: (
+              target: GraphBackend | TransactionBackend,
+              ref: Readonly<{ kind: string; id: string }>,
+              validTo: string,
+            ) =>
+              requireNodeValidityEndCompatible(
+                {
+                  graphId: this.graphId,
+                  schema: this.#sqlSchema(),
+                },
+                target,
+                ref,
+                validTo,
               ),
           },
         }),

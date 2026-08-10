@@ -156,6 +156,8 @@ type BaseMember = Readonly<{
     kind: string;
     props: Readonly<Record<string, JsonValue>>;
     origin: "base";
+    validFrom?: string;
+    validTo?: string;
 }>;
 
 // @public
