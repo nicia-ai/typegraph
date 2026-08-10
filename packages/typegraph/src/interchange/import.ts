@@ -71,8 +71,10 @@ import {
   type UniqueConstraint,
 } from "../core/types";
 import {
+  CardinalityError,
   ConfigurationError,
   DatabaseOperationError,
+  DisjointError,
   IdentityContradictionError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   INVERTED_VALIDITY_WINDOW_CODE,
@@ -90,7 +92,10 @@ import {
   withNodeCreateClaims,
   withNodeCreateClaimsBatch,
 } from "../store/claims/node-claims";
-import { graphOwesClaims } from "../store/constraints";
+import {
+  checkDisjointnessConstraint,
+  graphOwesClaims,
+} from "../store/constraints";
 import {
   createNodeBatchValidationBackend,
   type NodeCreateDraft,
@@ -155,15 +160,14 @@ import {
  *
  * Also refused, with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, when the backend
  * reports `transactions: false` AND the graph owes a claim that must be written
- * before the row it gates — any unique constraint of any scope, or any edge
- * kind whose cardinality is not `many`. An import writes those reservations
- * like every other writer and takes no per-graph lock, so without a
- * transaction a failure between a reservation and its row would leave a key
- * blocked with no repair path. The verdict is per GRAPH rather than per
- * payload, and it is reached before the first row: a streamed import cannot
- * commit part of itself and only then discover it could not be fenced.
- * Disjointness owes no claim yet, so a disjoint-only graph is not refused
- * here — {@link graphOwesClaims} names the sites it folds.
+ * before the row it gates — any unique constraint of any scope, any node kind
+ * with a `disjointWith` partner, or any edge kind whose cardinality is not
+ * `many`. An import writes those reservations like every other writer and takes
+ * no per-graph lock, so without a transaction a failure between a reservation
+ * and its row would leave a key blocked with no repair path. The verdict is per
+ * GRAPH rather than per payload, and it is reached before the first row: a
+ * streamed import cannot commit part of itself and only then discover it could
+ * not be fenced.
  *
  * @param store - The graph store to import into
  * @param data - Graph data in interchange format
@@ -1366,17 +1370,28 @@ async function processNodeSlice(
       continue;
     }
 
-    const uniquenessResult = await catchUniquenessError(() =>
-      checkUniquenessConstraints(
+    // Both declared node constraints are probed here, per row, against the
+    // pending-aware overlay — so an in-slice pair (a `Person` and a `Company`
+    // sharing an id, two rows apart) is seen through `pendingNodes` and refuses
+    // the SECOND row while the first commits. The claim behind these probes is
+    // the fence for a concurrent violation, and that one aborts the import;
+    // this is the half that must not.
+    const constraintResult = await catchDeclaredConstraintRefusal(async () => {
+      await checkUniquenessConstraints(
         { graphId, registry, backend: validationBackend },
         node.kind,
         node.id,
         props,
         uniqueConstraints,
-      ),
-    );
-    if (!uniquenessResult.ok) {
-      record(node, { status: "error", error: uniquenessResult.error });
+      );
+      await checkDisjointnessConstraint(
+        { graphId, registry, backend: validationBackend },
+        node.kind,
+        node.id,
+      );
+    });
+    if (!constraintResult.ok) {
+      record(node, { status: "error", error: constraintResult.error });
       continue;
     }
 
@@ -1476,25 +1491,36 @@ type ProcessResult =
 /**
  * What a guard hands back when its refusal is a PER-ROW fact: either the value
  * the guard produced, or the message recorded against that row while the import
- * keeps going. Shared by the uniqueness guard and the window guard so the two
- * per-row recoveries have one shape.
+ * keeps going. Shared by the declared-constraint guard and the window guard so
+ * the two per-row recoveries have one shape.
  */
 type PerRowGuardResult<T> =
   Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: string }>;
 
 /**
- * Runs `fn` and reports a `UniquenessError` as a per-row result instead of
- * letting it abort the whole import — the same recovery both the node
- * uniqueness pre-check and the update path need. Any other error still
+ * Runs `fn` and reports a DECLARED-CONSTRAINT refusal as a per-row result
+ * instead of letting it abort the whole import. Any other error still
  * propagates.
+ *
+ * The subject is the family of refusals a declared constraint produces —
+ * uniqueness, disjointness and edge cardinality — rather than one class of it.
+ * A guard named for a single class is an invitation to forget the next family
+ * that arrives, which is exactly how the disjointness gap this closes came
+ * about: import gained a claim that could refuse a disjoint row and no per-row
+ * recovery that recognized the refusal, so a violation would have aborted the
+ * whole batch where the contract promises a refused ROW.
  */
-async function catchUniquenessError<T>(
+async function catchDeclaredConstraintRefusal<T>(
   fn: () => Promise<T>,
 ): Promise<PerRowGuardResult<T>> {
   try {
     return { ok: true, value: await fn() };
   } catch (error) {
-    if (error instanceof UniquenessError) {
+    if (
+      error instanceof UniquenessError ||
+      error instanceof DisjointError ||
+      error instanceof CardinalityError
+    ) {
       return { ok: false, error: error.message };
     }
     throw error;
@@ -1554,7 +1580,14 @@ async function updateImportedNode(
   }>,
 ): Promise<string | undefined> {
   try {
-    const result = await catchUniquenessError(() =>
+    // The widened guard wraps a WRITE here, not a probe, so what it recovers
+    // from is worth stating: `applyNodeUpdate` raises neither a `DisjointError`
+    // nor a `CardinalityError` — an in-place update cannot change a node's kind,
+    // so it re-derives no disjointness verdict, and it writes no edges — and
+    // the update path's claim set carries uniqueness entries only. Widening the
+    // guard therefore changes nothing here today; it is listed because a
+    // changed contract re-audits its consumers.
+    const result = await catchDeclaredConstraintRefusal(() =>
       applyNodeUpdate(
         writeContext,
         {
@@ -1986,20 +2019,28 @@ async function processNode(
     }
   }
 
-  // Create new node. Pre-check uniqueness (as the collection create does) so a
-  // conflict is a per-row error rather than an orphaned node row, then apply the
-  // integrity side effects the raw backend.insertNode would otherwise bypass.
-  const uniquenessResult = await catchUniquenessError(() =>
-    checkUniquenessConstraints(
+  // Create new node. Pre-check both declared node constraints (as the
+  // collection create does) so a conflict is a per-row error rather than an
+  // orphaned node row, then apply the integrity side effects the raw
+  // backend.insertNode would otherwise bypass. No pending state is needed here:
+  // this path writes each row as it goes, so the next row's probe reads the
+  // previous one from the same transaction.
+  const constraintResult = await catchDeclaredConstraintRefusal(async () => {
+    await checkUniquenessConstraints(
       { graphId, registry, backend },
       node.kind,
       node.id,
       propsResult.data,
       uniqueConstraints,
-    ),
-  );
-  if (!uniquenessResult.ok) {
-    return { status: "error", error: uniquenessResult.error };
+    );
+    await checkDisjointnessConstraint(
+      { graphId, registry, backend },
+      node.kind,
+      node.id,
+    );
+  });
+  if (!constraintResult.ok) {
+    return { status: "error", error: constraintResult.error };
   }
 
   await withNodeCreateClaims(

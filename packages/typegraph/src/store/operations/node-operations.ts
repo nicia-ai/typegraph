@@ -496,6 +496,7 @@ export function createNodeBatchValidationBackend(
     for (const entry of nodeClaimEntries(
       registry,
       kind,
+      id,
       props,
       constraints,
       "create",
@@ -535,12 +536,12 @@ export function createNodeBatchValidationBackend(
   ): void {
     const owner: ClaimOwner = { concreteKind: kind, nodeId: id };
     const oldEntries = new Map(
-      nodeClaimEntries(registry, kind, oldProps, constraints, "update").map(
+      nodeClaimEntries(registry, kind, id, oldProps, constraints, "update").map(
         (entry) => [entry.constraintName, entry],
       ),
     );
     const newEntries = new Map(
-      nodeClaimEntries(registry, kind, newProps, constraints, "update").map(
+      nodeClaimEntries(registry, kind, id, newProps, constraints, "update").map(
         (entry) => [entry.constraintName, entry],
       ),
     );
@@ -1199,11 +1200,16 @@ export async function primeBatchValidationCaches(
       for (const entry of nodeClaimEntries(
         ctx.registry,
         draft.kind,
+        draft.id,
         draft.validatedProps,
         draft.uniqueConstraints,
         "create",
       )) {
-        const constraint = entry.constraint;
+        // Uniqueness entries only: this primes the reads the UNIQUENESS probe
+        // makes. A disjointness entry's verdict comes from the disjoint
+        // partner's node row, which no `checkUnique` read would supply.
+        if (entry.refusal.kind !== "uniqueness") continue;
+        const constraint = entry.refusal.constraint;
         const key = entry.key;
         // Seeded over exactly the kinds the per-row probe reads — the axis and
         // the legacy kinds — so priming stays a batched substitute for those

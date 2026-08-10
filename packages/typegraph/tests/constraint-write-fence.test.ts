@@ -418,15 +418,19 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
       update: undefined,
       // The pair the non-transactional refusal turns on: its create claim
       // follows the row, its update claim precedes one.
-      createPlacements: ["post-insert"],
-      updatePlacements: ["pre-insert"],
+      createPlacements: ["uniqueness:post-insert"],
+      updatePlacements: ["uniqueness:pre-insert"],
     },
     {
       kind: "Partner",
       unique: [],
       create: "nodeDisjointness",
       update: undefined,
-      createPlacements: [],
+      // A disjoint create owes a claim although its kind declares no constraint
+      // of its own: the nodes primary key is `(graph_id, kind, id)`, so nothing
+      // but that claim can refuse a namesake under the partner kind. Its update
+      // owes none — an in-place update cannot change a node's kind.
+      createPlacements: ["disjointness:pre-insert"],
       updatePlacements: [],
     },
     {
@@ -434,18 +438,19 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
       unique: [SHARED_SCOPE_UNIQUE],
       create: "nodeUniquenessScope",
       update: "nodeUniquenessScope",
-      createPlacements: ["pre-insert"],
-      updatePlacements: ["pre-insert"],
+      createPlacements: ["uniqueness:pre-insert"],
+      updatePlacements: ["uniqueness:pre-insert"],
     },
     // Disjointness is scanned FIRST, so a kind qualifying on both counts keeps
-    // naming the class the refusal payload names today.
+    // naming the class the refusal payload names today — and its create owes
+    // TWO claims, one per family, both ahead of the row.
     {
       kind: "Rider",
       unique: [SHARED_SCOPE_UNIQUE],
       create: "nodeDisjointness",
       update: "nodeUniquenessScope",
-      createPlacements: ["pre-insert"],
-      updatePlacements: ["pre-insert"],
+      createPlacements: ["disjointness:pre-insert", "uniqueness:pre-insert"],
+      updatePlacements: ["uniqueness:pre-insert"],
     },
   ] as const;
 
@@ -465,12 +470,14 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
     shape: (typeof SHAPES)[number],
     operation: "create" | "update",
   ) {
+    // The FAMILY is in the reading too, so the table pins which site is which
+    // and in what order they are scanned — not merely how many there are.
     return nodeClaimSites(
       shapeRegistry,
       shape.kind,
       shape.unique,
       operation,
-    ).map((site) => site.placement);
+    ).map((site) => `${site.refusal.kind}:${site.placement}`);
   }
 
   for (const shape of SHAPES) {
@@ -504,11 +511,16 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
     }
   });
 
-  it("declares a backing for every fence class, with the shared-scope claim backed by the uniques key", () => {
+  it("declares a backing for every fence class, with both node families backed by the uniques key", () => {
     for (const reason of CONSTRAINT_FENCE_REASONS) {
       expect(CONSTRAINT_FENCE_BACKING[reason]).toBeDefined();
     }
     expect(CONSTRAINT_FENCE_BACKING.nodeUniquenessScope).toBe("uniques");
+    // Disjointness reserves in the same relation, at the declared PAIR's axis
+    // with the node's id as the key — so it is no longer fenced by the
+    // per-graph lock alone, and the table has to say so or a reader infers the
+    // opposite from the one place this is written down.
+    expect(CONSTRAINT_FENCE_BACKING.nodeDisjointness).toBe("uniques");
   });
 
   it("takes no lock for a kind-scoped node UPDATE either, not just its create", async () => {

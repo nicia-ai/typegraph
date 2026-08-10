@@ -21,8 +21,83 @@ import {
   subClassComponent,
 } from "../../constraints";
 import { type UniquenessScope } from "../../core/types";
+import { ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStrings } from "../../utils/compare";
+
+/**
+ * The one code point an axis component may not contain, written as an escape
+ * so it can never be mistaken for whitespace in a diff.
+ *
+ * Axes that are not kinds are built by joining with it — the disjointness pair
+ * axis below is the first — so a kind or constraint name containing it could
+ * spell a reserved axis and take a claim row the fence assigns to something
+ * else. {@link assertClaimAxisSafe} is what makes that unspellable, at
+ * graph-definition time.
+ */
+const AXIS_SEPARATOR = "\u001E";
+
+/** The prefix marking an axis as a disjoint PAIR rather than as a kind. */
+const DISJOINT_AXIS_PREFIX = `${AXIS_SEPARATOR}disjoint${AXIS_SEPARATOR}`;
+
+/**
+ * The `constraint_name` every disjointness claim is written under.
+ *
+ * Reserved rather than derived: it is what tells the claim seam that a refusal
+ * on this row is a `DisjointError` and not a `UniquenessError`, and what tells
+ * a reader of the relation that this row's `node_kind` is a pair label rather
+ * than a kind. {@link assertClaimAxisSafe} is what guarantees no declared
+ * constraint can carry the same name.
+ */
+export const DISJOINT_CONSTRAINT_NAME = `${AXIS_SEPARATOR}disjointWith`;
+
+/**
+ * THE axis a disjointness claim is written at: the registry's own canonical
+ * pair label, prefixed so it cannot collide with a kind.
+ *
+ * A fold of `KindRegistry.disjointPairLabel` rather than a second
+ * normalization of the same pair — the two kinds of one disjoint pair must
+ * compute ONE string, or their claims sit on two rows that can never collide
+ * and the fence refuses nothing.
+ *
+ * Pairwise, and deliberately not per component: the registry's disjoint pairs
+ * are literal unordered pairs and disjointness is not transitive here, so an
+ * axis keyed on a connected component would refuse an `A`/`C` pair under
+ * `A⊥B, B⊥C` that the graph never declared disjoint.
+ */
+export function disjointnessClaimAxis(
+  kind: string,
+  otherKind: string,
+  registry: KindRegistry,
+): string {
+  return `${DISJOINT_AXIS_PREFIX}${registry.disjointPairLabel(kind, otherKind)}`;
+}
+
+/**
+ * Refuses a kind name or constraint name that could spell a reserved claim
+ * axis or the reserved disjointness constraint name.
+ *
+ * Runs at graph-definition time, the one gate every kind and every declared
+ * constraint passes before a claim can be written for it — so the reserved
+ * vocabulary is unspellable by construction rather than re-checked at each
+ * write, and the claim seam can read "this refusal is a disjointness refusal"
+ * off the reserved constraint name without a caller being able to forge it. A
+ * new refusal, on an input no real schema carries.
+ *
+ * `subject` names the ROLE (`Node kind`, `Unique constraint`); the name itself
+ * is quoted through `JSON.stringify` so the offending code point reads as an
+ * escape instead of as an invisible character.
+ */
+export function assertClaimAxisSafe(name: string, subject: string): void {
+  if (!name.includes(AXIS_SEPARATOR)) return;
+  throw new ConfigurationError(
+    `${subject} name ${JSON.stringify(name)} contains U+001E, which TypeGraph reserves for claim axes.`,
+    { name },
+    {
+      suggestion: `Rename it without the U+001E (record separator) character.`,
+    },
+  );
+}
 
 /**
  * WHERE a uniqueness claim for this kind and scope is written, and whether that

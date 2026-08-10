@@ -23,6 +23,9 @@
  * - `C11` the same id under two kinds in one scope. Before the owner pair the
  *   second writer read its own id back out of `RETURNING` and was accepted,
  *   silently transferring the incumbent's claim.
+ * - `C2`/`C12` two DISJOINT kinds racing on one id. There is no key here at all
+ *   — the nodes primary key is `(graph_id, kind, id)`, so the two rows never
+ *   collide — and the claim on the declared PAIR is the entire fence.
  *
  * The interleaving is FORCED rather than hoped for. Each case parks the import
  * leg between its uniqueness probe and its claim, runs the store leg to
@@ -45,6 +48,9 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  disjointWith,
+  type GraphDef,
+  type Store,
   subClassOf,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
@@ -144,6 +150,28 @@ const orderGraph = defineGraph({
   ontology: [subClassOf(OrderEmailFirst, OrderAliasFirst)],
 });
 
+/**
+ * A third graph for the DISJOINTNESS case (C2/C12): two kinds declared disjoint
+ * and nothing else — no unique constraint, so nothing but the pair claim can
+ * refuse either writer.
+ */
+const ClaimPerson = defineNode("ClaimPerson", {
+  schema: z.object({ name: z.string() }),
+});
+const ClaimCompany = defineNode("ClaimCompany", {
+  schema: z.object({ name: z.string() }),
+});
+
+const disjointGraph = defineGraph({
+  id: "concurrent-claim-disjoint",
+  nodes: {
+    ClaimPerson: { type: ClaimPerson },
+    ClaimCompany: { type: ClaimCompany },
+  },
+  edges: {},
+  ontology: [disjointWith(ClaimPerson, ClaimCompany)],
+});
+
 const IMPORT_OPTIONS: ImportOptions = {
   onConflict: "update",
   onUnknownProperty: "error",
@@ -214,6 +242,18 @@ async function createOrderStore(
 ) {
   const [store] = await createStoreWithSchema(
     orderGraph,
+    decorate(createPostgresBackend(database)),
+  );
+  return store;
+}
+
+/** The same, for the DISJOINT graph. */
+async function createDisjointStore(
+  database: NodePgDatabase,
+  decorate: (backend: GraphBackend) => GraphBackend = (backend) => backend,
+) {
+  const [store] = await createStoreWithSchema(
+    disjointGraph,
     decorate(createPostgresBackend(database)),
   );
   return store;
@@ -419,26 +459,38 @@ function refusalText(outcome: PromiseSettledResult<unknown>): string {
   return (result?.errors ?? []).map((entry) => entry.error).join(" | ");
 }
 
+/** How one case builds its two legs' stores — one factory per fixture graph. */
+type StoreFactory<G extends GraphDef> = (
+  database: NodePgDatabase,
+  decorate?: (backend: GraphBackend) => GraphBackend,
+) => Promise<Store<G>>;
+
 /**
- * Runs the import leg up to its claim, lets the store leg take the key and
- * commit, then releases the claim into a key that is now held — the window a
- * lock-free writer has no other protection in.
+ * Runs the import leg up to its claim, lets the store leg take the claim row
+ * and commit, then releases the claim into a row that is now held — the window
+ * a lock-free writer has no other protection in.
  */
-async function raceStoreAgainstParkedImport(
+async function raceStoreAgainstParkedImport<G extends GraphDef>(
+  createStoreFor: StoreFactory<G>,
   payload: GraphData,
-  storeWrite: (
-    store: Awaited<ReturnType<typeof createGraphStore>>,
-  ) => Promise<unknown>,
+  storeWrite: (store: Store<G>) => Promise<unknown>,
 ): Promise<Readonly<{ importRefusal: string }>> {
   const live = requirePostgres();
   const gate = createClaimGate();
-  const importStore = await createGraphStore(live.importDb, (backend) =>
+  const importStore = await createStoreFor(live.importDb, (backend) =>
     backendPausingBeforeClaim(backend, gate),
   );
-  const store = await createGraphStore(live.storeDb);
+  const store = await createStoreFor(live.storeDb);
 
   const importRun = importGraph(importStore, payload, IMPORT_OPTIONS);
-  await gate.reached;
+  // Raced against the import's own completion, so a leg that issues NO claim —
+  // which is exactly what deleting the fence produces — reports the missing
+  // fence as a failed OUTCOME assertion rather than as a 20-second timeout. A
+  // test that can only fail by hanging certifies nothing about what it hung on.
+  const importSettled = Promise.allSettled([importRun]).then(
+    (): undefined => undefined,
+  );
+  await Promise.race([gate.reached, importSettled]);
   await storeWrite(store);
   gate.release();
 
@@ -454,6 +506,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const { importRefusal } = await raceStoreAgainstParkedImport(
+          createGraphStore,
           importPayload([
             {
               kind: "Employee",
@@ -493,6 +546,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
         );
 
         const { importRefusal } = await raceStoreAgainstParkedImport(
+          createGraphStore,
           importPayload([
             {
               kind: "Employee",
@@ -523,6 +577,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const { importRefusal } = await raceStoreAgainstParkedImport(
+          createGraphStore,
           importPayload([
             {
               kind: "Employee",
@@ -551,6 +606,50 @@ describe.runIf(process.env["POSTGRES_URL"])(
           { concrete_kind: "Contractor", node_id: "c11-shared" },
         ]);
         expect(importRefusal).toContain(STAFF_EMAIL_CONSTRAINT);
+      },
+    );
+
+    it(
+      "refuses an import whose id a store create already holds under a DISJOINT kind",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        // C2 and C12. Nothing about these two rows collides at the database
+        // level — the nodes primary key is `(graph_id, kind, id)`, and neither
+        // kind declares a unique constraint — so before the pair claim existed
+        // both writers committed and the graph carried a violation of an axiom
+        // it declares. The refusal here can only be the claim's.
+        const { importRefusal } = await raceStoreAgainstParkedImport(
+          createDisjointStore,
+          importPayload([
+            {
+              kind: "ClaimCompany",
+              id: "c12-shared",
+              properties: { name: "C" },
+            },
+          ]),
+          (store) =>
+            store.nodes.ClaimPerson.create({ name: "P" }, { id: "c12-shared" }),
+        );
+
+        const live = requirePostgres();
+        const reader = await createDisjointStore(live.storeDb);
+        expect(await reader.nodes.ClaimPerson.find()).toHaveLength(1);
+        expect(await reader.nodes.ClaimCompany.find()).toHaveLength(0);
+
+        // One live claim row, still owned by the writer whose node survived —
+        // C12's half: comparing ids alone would have matched the "already mine"
+        // arm of the upsert and flipped `concrete_kind` to the loser's kind.
+        const claims = await requireDefined(storePool).query(
+          "SELECT concrete_kind, node_id FROM typegraph_node_uniques WHERE deleted_at IS NULL",
+        );
+        expect(claims.rows).toEqual([
+          { concrete_kind: "ClaimPerson", node_id: "c12-shared" },
+        ]);
+
+        // And the loser was told the FAMILY's own error, naming both kinds.
+        expect(importRefusal).toContain("Disjoint constraint violation");
+        expect(importRefusal).toContain("ClaimCompany");
+        expect(importRefusal).toContain("ClaimPerson");
       },
     );
 

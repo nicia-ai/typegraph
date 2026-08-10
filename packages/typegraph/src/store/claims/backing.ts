@@ -47,14 +47,17 @@ type ConstraintFenceBacking = "uniques" | "lockOnly";
  * contend for one row. `nodeUniquenessClaim` is the same relation seen from the
  * other side: the claim row is the fence, and the class exists because a write
  * that must issue it BEFORE the row it gates needs a transaction to undo the
- * pair together — which is what its refusal names. The classes still marked
- * `lockOnly` are fenced by the per-graph write lock alone, which is why they
- * are also the classes a non-transactional backend refuses.
+ * pair together — which is what its refusal names. `nodeDisjointness` is the
+ * same relation again, at a third kind of axis: a claim keyed on the declared
+ * PAIR and on the node's id, which is the axis disjointness actually declares
+ * and the one the nodes primary key `(graph_id, kind, id)` cannot fence. The
+ * classes still marked `lockOnly` are fenced by the per-graph write lock alone,
+ * which is why they are also the classes a non-transactional backend refuses.
  */
 export const CONSTRAINT_FENCE_BACKING = {
   edgeCardinality: "lockOnly",
   edgeMatchKeyConvergence: "lockOnly",
-  nodeDisjointness: "lockOnly",
+  nodeDisjointness: "uniques",
   nodeUniquenessClaim: "uniques",
   nodeUniquenessScope: "uniques",
 } as const satisfies Record<ConstraintFenceReason, ConstraintFenceBacking>;

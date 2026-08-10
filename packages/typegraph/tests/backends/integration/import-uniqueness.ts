@@ -19,18 +19,26 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createStore,
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  DisjointError,
+  disjointWith,
   type NodeId,
   subClassOf,
 } from "../../../src";
+import { type GraphBackend } from "../../../src/backend/types";
 import {
   FORMAT_VERSION,
   type GraphData,
   importGraph,
   type ImportOptions,
 } from "../../../src/interchange";
+import {
+  DISJOINT_CONSTRAINT_NAME,
+  disjointnessClaimAxis,
+} from "../../../src/store/claims/axis";
 import { type IntegrationTestContext } from "./test-context";
 
 const ImportPerson = defineNode("ImportPerson", {
@@ -98,6 +106,95 @@ function buildImportHierarchyGraph(graphId: string) {
       subClassOf(ImportContractor, ImportWorker),
     ],
   });
+}
+
+const ImportHuman = defineNode("ImportHuman", {
+  schema: z.object({ name: z.string() }),
+});
+const ImportOrg = defineNode("ImportOrg", {
+  schema: z.object({ name: z.string() }),
+});
+
+/**
+ * A disjoint pair and nothing else: no unique constraint anywhere, so the only
+ * thing that can refuse a row here is the disjointness family.
+ */
+function buildImportDisjointGraph(graphId: string) {
+  return defineGraph({
+    id: graphId,
+    nodes: {
+      ImportHuman: { type: ImportHuman },
+      ImportOrg: { type: ImportOrg },
+    },
+    edges: {},
+    ontology: [disjointWith(ImportHuman, ImportOrg)],
+  });
+}
+
+const ImportAlpha = defineNode("ImportAlpha", {
+  schema: z.object({ name: z.string() }),
+});
+const ImportBeta = defineNode("ImportBeta", {
+  schema: z.object({ name: z.string() }),
+});
+
+/**
+ * TWO unrelated disjoint pairs, so a single batch/slice can carry disjointness
+ * entries for both. `ImportAlpha`/`ImportBeta`'s claim axis is the
+ * alphabetically SMALLER of the two pair labels
+ * (`disjointnessClaimAxis`/`disjointPairLabel` sort the pair's own kind
+ * names), so its entry sorts BEFORE `ImportHuman`/`ImportOrg`'s in
+ * `compareClaimTargets` order — load-bearing for the regression below, which
+ * needs a matcher keyed on anything other than axis to name the WRONG pair.
+ */
+function buildImportTwoDisjointPairsGraph(graphId: string) {
+  return defineGraph({
+    id: graphId,
+    nodes: {
+      ImportHuman: { type: ImportHuman },
+      ImportOrg: { type: ImportOrg },
+      ImportAlpha: { type: ImportAlpha },
+      ImportBeta: { type: ImportBeta },
+    },
+    edges: {},
+    ontology: [
+      disjointWith(ImportHuman, ImportOrg),
+      disjointWith(ImportAlpha, ImportBeta),
+    ],
+  });
+}
+
+/**
+ * The same backend with the disjointness probe blinded for ONE kind:
+ * `getNode` reports that kind's rows as absent, so a create whose partner is
+ * that kind reaches its CLAIM instead of being refused by the app-level probe
+ * — deterministically reproducing the window a genuine concurrent writer
+ * would open between the probe and the claim.
+ */
+function backendWithHiddenKind(
+  backend: GraphBackend,
+  hiddenKind: string,
+): GraphBackend {
+  const getNode: GraphBackend["getNode"] = (graphId, kind, id) =>
+    kind === hiddenKind ?
+      Promise.resolve(undefined)
+    : backend.getNode(graphId, kind, id);
+  return {
+    ...backend,
+    getNode,
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) =>
+          run({
+            ...target,
+            getNode: (graphId, kind, id) =>
+              kind === hiddenKind ?
+                Promise.resolve(undefined)
+              : target.getNode(graphId, kind, id),
+          }),
+        options,
+      ),
+  };
 }
 
 let graphIdCounter = 0;
@@ -334,6 +431,179 @@ export function registerImportUniquenessIntegrationTests(
       const contractors = await store.nodes.ImportContractor.find();
       expect(employees).toHaveLength(1);
       expect(contractors).toHaveLength(0);
+    });
+
+    it("refuses only the second of two disjoint same-id rows in one slice", async () => {
+      // Newly enforced: at HEAD an import ran no disjointness probe at all, so
+      // BOTH rows committed and the graph carried a violation of an axiom it
+      // declares. The refusal has to be per ROW — the first row committed, the
+      // second reported — which is only true because the probe runs against the
+      // pending-aware overlay inside the widened per-row guard. The claim behind
+      // it is the fence for the concurrent case, and that one aborts the import.
+      graphIdCounter += 1;
+      const graph = buildImportDisjointGraph(
+        `import_disjoint_slice_${graphIdCounter}`,
+      );
+      const [store] = await createStoreWithSchema(
+        graph,
+        context.getStore().backend,
+      );
+
+      const result = await importGraph(
+        store,
+        payload([
+          {
+            kind: "ImportHuman",
+            id: "disjoint-x",
+            properties: { name: "H" },
+          },
+          { kind: "ImportOrg", id: "disjoint-x", properties: { name: "O" } },
+        ]),
+        options(100),
+      );
+
+      expect(result.nodes.created).toBe(1);
+      expect(
+        result.errors.map((entry) => ({
+          id: entry.id,
+          isDisjointRefusal: entry.error.includes("Disjoint constraint"),
+        })),
+      ).toEqual([{ id: "disjoint-x", isDisjointRefusal: true }]);
+
+      expect(await store.nodes.ImportHuman.find()).toHaveLength(1);
+      expect(await store.nodes.ImportOrg.find()).toHaveLength(0);
+
+      // The claim table holds exactly the accepted row's live claim: one
+      // reservation on the PAIR axis, owned by the row that committed. Read
+      // through the backend so nothing about it is inferred from the store.
+      const claim = await context.getStore().backend.checkUnique({
+        graphId: graph.id,
+        nodeKind: disjointnessClaimAxis(
+          "ImportHuman",
+          "ImportOrg",
+          store.registry,
+        ),
+        constraintName: DISJOINT_CONSTRAINT_NAME,
+        key: "disjoint-x",
+      });
+      expect(claim).toMatchObject({
+        concrete_kind: "ImportHuman",
+        node_id: "disjoint-x",
+      });
+    });
+
+    it("names the row that actually lost when two unrelated disjoint pairs share an id in one slice", async () => {
+      // `mapClaimRefusal` (`store/claims/node-claims.ts`) locates the entry a
+      // backend refusal belongs to. Every `disjointWith` pair shares the SAME
+      // reserved `DISJOINT_CONSTRAINT_NAME`, so a matcher keyed on
+      // `(constraintName, key)` alone cannot tell `ImportHuman`/`ImportOrg`'s
+      // entry apart from `ImportAlpha`/`ImportBeta`'s when both claim the same
+      // literal id in one batch — it would report whichever entry happens to
+      // sort first, not the one the backend actually refused.
+      //
+      // `ImportOrg` "two-pairs-shared" is a live incumbent created BEFORE this
+      // import, so `ImportHuman`'s row is the one that must lose; the probe is
+      // blinded to `ImportOrg` so the CLAIM is what refuses it (the window a
+      // genuine concurrent writer opens) rather than the app-level probe.
+      // `ImportAlpha` shares nothing with either kind except the id and the
+      // reserved constraint name, and its axis sorts BEFORE the colliding
+      // pair's — the exact ordering that made the un-fixed matcher name it.
+      graphIdCounter += 1;
+      const graph = buildImportTwoDisjointPairsGraph(
+        `import_disjoint_two_pairs_${graphIdCounter}`,
+      );
+      const [store] = await createStoreWithSchema(
+        graph,
+        context.getStore().backend,
+      );
+      await store.nodes.ImportOrg.create(
+        { name: "O" },
+        { id: "two-pairs-shared" },
+      );
+
+      const blindStore = createStore(
+        graph,
+        backendWithHiddenKind(context.getStore().backend, "ImportOrg"),
+      );
+
+      let caught: unknown;
+      try {
+        await importGraph(
+          blindStore,
+          payload([
+            {
+              kind: "ImportAlpha",
+              id: "two-pairs-shared",
+              properties: { name: "A" },
+            },
+            {
+              kind: "ImportHuman",
+              id: "two-pairs-shared",
+              properties: { name: "H" },
+            },
+          ]),
+          options(100),
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(DisjointError);
+      expect((caught as DisjointError).details).toEqual({
+        nodeId: "two-pairs-shared",
+        // The row that actually collided with the live `ImportOrg` — never
+        // `ImportAlpha`, which the graph never even declared disjoint with
+        // `ImportOrg`.
+        attemptedKind: "ImportHuman",
+        conflictingKind: "ImportOrg",
+      });
+
+      // The whole slice's claim statement rolled back with the refusal: no
+      // half-committed row from either pair, and the incumbent untouched.
+      expect(await store.nodes.ImportHuman.find()).toHaveLength(0);
+      expect(await store.nodes.ImportAlpha.find()).toHaveLength(0);
+      expect(await store.nodes.ImportOrg.find()).toHaveLength(1);
+    });
+
+    it("refuses a disjoint row on the per-row path after the slice flush", async () => {
+      // The second `ImportOrg` repeats an id already seen in the slice, so it is
+      // deferred to the per-row path, which probes against the REAL backend
+      // rather than the overlay. Both rows must be refused, and neither may
+      // leave the graph carrying a violation.
+      graphIdCounter += 1;
+      const graph = buildImportDisjointGraph(
+        `import_disjoint_per_row_${graphIdCounter}`,
+      );
+      const [store] = await createStoreWithSchema(
+        graph,
+        context.getStore().backend,
+      );
+
+      await importGraph(
+        store,
+        payload([
+          { kind: "ImportHuman", id: "deferred-y", properties: { name: "H" } },
+        ]),
+        options(100),
+      );
+
+      const result = await importGraph(
+        store,
+        payload([
+          { kind: "ImportOrg", id: "deferred-y", properties: { name: "O1" } },
+          { kind: "ImportOrg", id: "deferred-y", properties: { name: "O2" } },
+        ]),
+        options(100),
+      );
+
+      expect(result.nodes.created).toBe(0);
+      expect(
+        result.errors.map((entry) =>
+          entry.error.includes("Disjoint constraint"),
+        ),
+      ).toEqual([true, true]);
+      expect(await store.nodes.ImportOrg.find()).toHaveLength(0);
+      expect(await store.nodes.ImportHuman.find()).toHaveLength(1);
     });
   });
 }

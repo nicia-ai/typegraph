@@ -889,6 +889,10 @@ export function createCommonOperationBackend(
           existingId: result.node_id,
           newId: params.nodeId,
           fields: [],
+          // The axis THIS statement attempted — `mapClaimRefusal`'s only way to
+          // tell two disjoint pairs (or two scoped constraints) sharing a key
+          // apart, since `constraintName` alone does not.
+          axis: params.nodeKind,
         });
       }
     },
@@ -921,6 +925,7 @@ export function createCommonOperationBackend(
             existingId: existing.nodeId,
             newId: entry.nodeId,
             fields: [],
+            axis: entry.nodeKind,
           });
         }
       }
@@ -956,6 +961,7 @@ export function createCommonOperationBackend(
               existingId: owner.nodeId,
               newId: entry.nodeId,
               fields: [],
+              axis: entry.nodeKind,
             });
           }
         }

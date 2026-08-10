@@ -1368,3 +1368,51 @@ describe("uniqueness `where` clauses naming an undeclared field", () => {
     ).toBe(true);
   });
 });
+
+describe("names that could spell a reserved claim axis", () => {
+  // The disjointness axis and the constraint name its rows carry are built by
+  // joining with U+001E, so a kind or constraint name containing that code
+  // point could spell a reserved axis and take a claim row assigned to
+  // something else. `defineNode` and `defineGraph` are the gates every name
+  // passes before a claim can be written for it.
+  const RESERVED = "\u001E";
+
+  it("refuses a node kind name at defineNode", () => {
+    expect(() =>
+      defineNode(`Ghost${RESERVED}disjoint`, { schema: z.object({}) }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("refuses a unique constraint name at defineGraph", () => {
+    const Account = defineNode("ReservedAccount", {
+      schema: z.object({ email: z.string() }),
+    });
+
+    expect(() =>
+      defineGraph({
+        id: "reserved_constraint_name",
+        nodes: {
+          ReservedAccount: {
+            type: Account,
+            unique: [
+              {
+                name: `${RESERVED}disjointWith`,
+                fields: ["email"],
+                scope: "kind",
+                collation: "binary",
+              },
+            ],
+          },
+        },
+        edges: {},
+        ontology: [],
+      }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("accepts every name that does not contain it", () => {
+    expect(() =>
+      defineNode("PlainGhost", { schema: z.object({}) }),
+    ).not.toThrow();
+  });
+});

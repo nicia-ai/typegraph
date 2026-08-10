@@ -20,6 +20,8 @@ import {
   createStore,
   defineGraph,
   defineNode,
+  DisjointError,
+  disjointWith,
   subClassOf,
   UniquenessError,
 } from "../../../src";
@@ -45,15 +47,33 @@ const Contractor = defineNode("Contractor", {
   schema: z.object({ email: z.string() }),
 });
 
+/**
+ * A disjoint pair, declaring no unique constraint: the second refuser for these
+ * two can only be the disjointness claim, whose axis is the PAIR and whose
+ * refusal the claim seam has to translate back into the family's own error.
+ */
+const FenceGhost = defineNode("FenceGhost", {
+  schema: z.object({ email: z.string() }),
+});
+const FenceSpirit = defineNode("FenceSpirit", {
+  schema: z.object({ email: z.string() }),
+});
+
 const errorGraph = defineGraph({
   id: "constraint_fence_errors",
   nodes: {
     Worker: { type: Worker, unique: [STAFF_EMAIL_UNIQUE] },
     Employee: { type: Employee, unique: [STAFF_EMAIL_UNIQUE] },
     Contractor: { type: Contractor, unique: [STAFF_EMAIL_UNIQUE] },
+    FenceGhost: { type: FenceGhost },
+    FenceSpirit: { type: FenceSpirit },
   },
   edges: {},
-  ontology: [subClassOf(Employee, Worker), subClassOf(Contractor, Worker)],
+  ontology: [
+    subClassOf(Employee, Worker),
+    subClassOf(Contractor, Worker),
+    disjointWith(FenceGhost, FenceSpirit),
+  ],
 });
 
 /**
@@ -96,11 +116,62 @@ function refusalShape(error: unknown): unknown {
   };
 }
 
-async function captureRefusal(run: () => Promise<unknown>): Promise<unknown> {
+/**
+ * The same backend with the DISJOINTNESS probe blinded: `getNode` reports the
+ * partner kind's rows as absent, so the create reaches its claim and the claim
+ * is what refuses. Only the partner kind is hidden — the create's own existence
+ * gate still reads its own kind, so the write is otherwise the one the store
+ * issues.
+ */
+function backendWithoutDisjointnessProbe(
+  backend: GraphBackend,
+  hiddenKind: string,
+): GraphBackend {
+  const getNode: GraphBackend["getNode"] = (graphId, kind, id) =>
+    kind === hiddenKind ?
+      Promise.resolve(undefined)
+    : backend.getNode(graphId, kind, id);
+  return {
+    ...backend,
+    getNode,
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) =>
+          run({
+            ...target,
+            getNode: (graphId, kind, id) =>
+              kind === hiddenKind ?
+                Promise.resolve(undefined)
+              : target.getNode(graphId, kind, id),
+          }),
+        options,
+      ),
+  };
+}
+
+/** The disjointness twin of {@link refusalShape}. */
+function disjointRefusalShape(error: unknown): unknown {
+  const disjoint = error as DisjointError;
+  return {
+    name: disjoint.name,
+    code: disjoint.code,
+    isDisjointError: disjoint instanceof DisjointError,
+    details: {
+      nodeId: disjoint.details.nodeId,
+      attemptedKind: disjoint.details.attemptedKind,
+      conflictingKind: disjoint.details.conflictingKind,
+    },
+  };
+}
+
+async function captureRefusal(
+  run: () => Promise<unknown>,
+  shape: (error: unknown) => unknown = refusalShape,
+): Promise<unknown> {
   try {
     await run();
   } catch (error) {
-    return refusalShape(error);
+    return shape(error);
   }
   throw new Error("expected the write to be refused");
 }
@@ -170,6 +241,53 @@ export function registerConstraintFenceErrorIntegrationTests(
 
       expect(fromSetUpdate).toMatchObject({
         details: { kind: "Employee", existingId: incumbent.id },
+      });
+    });
+
+    it("reports the same disjointness refusal from the probe and from the claim", async () => {
+      // Two families share one claim relation, and the backend reports every
+      // foreign owner of a claim row as a `UniquenessError` — so without the
+      // translation at the claim seam this leg would hand the caller a
+      // uniqueness violation naming a constraint the graph never declared.
+      const store = await context.createStore(errorGraph);
+      await store.nodes.FenceGhost.create(
+        { email: "boo@identity.example" },
+        { id: "disjoint-identity" },
+      );
+
+      // Leg 1: the disjointness probe reads the incumbent's node row.
+      const fromProbe = await captureRefusal(
+        () =>
+          store.nodes.FenceSpirit.create(
+            { email: "casper@identity.example" },
+            { id: "disjoint-identity" },
+          ),
+        disjointRefusalShape,
+      );
+
+      // Leg 2: the probe cannot see the partner kind, so the write reaches its
+      // claim and the claim's own verdict is what the caller sees.
+      const blindStore = createStore(
+        errorGraph,
+        backendWithoutDisjointnessProbe(store.backend, "FenceGhost"),
+      );
+      const fromFence = await captureRefusal(
+        () =>
+          blindStore.nodes.FenceSpirit.create(
+            { email: "casper@identity.example" },
+            { id: "disjoint-identity" },
+          ),
+        disjointRefusalShape,
+      );
+
+      expect(fromFence).toEqual(fromProbe);
+      expect(fromProbe).toMatchObject({
+        isDisjointError: true,
+        details: {
+          nodeId: "disjoint-identity",
+          attemptedKind: "FenceSpirit",
+          conflictingKind: "FenceGhost",
+        },
       });
     });
   });

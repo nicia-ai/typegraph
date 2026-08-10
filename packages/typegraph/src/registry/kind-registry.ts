@@ -24,6 +24,33 @@ import { type NamedOntologyRelation } from "../ontology/validation";
 import { requireDefined } from "../utils/presence";
 
 /**
+ * The character joining the two kinds of a stored disjoint-pair label. Named
+ * once so the label's two directions — build and parse — cannot disagree.
+ */
+const DISJOINT_PAIR_SEPARATOR = "|";
+
+/**
+ * Builds the canonical label of an unordered pair of kinds: the two names in
+ * code-point order, separator-joined.
+ *
+ * Order-independence is the whole point — `A⊥B` and `B⊥A` are one fact, so
+ * they must be one string. {@link KindRegistry.disjointPairLabel} exposes it,
+ * {@link computeDisjointPairs} writes the set with it, and the disjointness
+ * claim axis folds it.
+ */
+function disjointPairLabel(a: string, b: string): string {
+  return a < b ?
+      `${a}${DISJOINT_PAIR_SEPARATOR}${b}`
+    : `${b}${DISJOINT_PAIR_SEPARATOR}${a}`;
+}
+
+/** The inverse of {@link disjointPairLabel}, so only one place knows the form. */
+function disjointPairMembers(label: string): readonly [string, string] {
+  const parts = label.split(DISJOINT_PAIR_SEPARATOR);
+  return [requireDefined(parts[0]), requireDefined(parts[1])];
+}
+
+/**
  * KindRegistry holds precomputed closures for ontological reasoning.
  *
  * Computed at store initialization and cached for fast query-time lookups.
@@ -202,11 +229,25 @@ export class KindRegistry {
   // === Constraint Methods ===
 
   /**
+   * THE canonical label of an unordered pair of kinds — the form
+   * {@link disjointPairs} stores, and the form a disjointness CLAIM AXIS is
+   * folded from.
+   *
+   * Exposed on the registry because the claim axis needs it: a fence keyed on
+   * a second spelling of this normalization would put the two kinds of one
+   * disjoint pair on two rows that can never collide, which is exactly the
+   * failure the fence exists to prevent. One expression, called by the
+   * membership test, by the pair computation, and by the axis.
+   */
+  disjointPairLabel(a: string, b: string): string {
+    return disjointPairLabel(a, b);
+  }
+
+  /**
    * Checks if two kinds are disjoint.
    */
   areDisjoint(a: string, b: string): boolean {
-    const normalizedPair = a < b ? `${a}|${b}` : `${b}|${a}`;
-    return this.disjointPairs.has(normalizedPair);
+    return this.disjointPairs.has(disjointPairLabel(a, b));
   }
 
   /**
@@ -215,9 +256,7 @@ export class KindRegistry {
   getDisjointKinds(kind: string): readonly string[] {
     const result: string[] = [];
     for (const pair of this.disjointPairs) {
-      const parts = pair.split("|");
-      const firstKind = requireDefined(parts[0]);
-      const secondKind = requireDefined(parts[1]);
+      const [firstKind, secondKind] = disjointPairMembers(pair);
       if (firstKind === kind) result.push(secondKind);
       else if (secondKind === kind) result.push(firstKind);
     }
@@ -826,9 +865,7 @@ function computeDisjointPairs(
     for (const left of leftKinds) {
       for (const right of rightKinds) {
         if (left === right) continue;
-        const normalized =
-          left < right ? `${left}|${right}` : `${right}|${left}`;
-        result.add(normalized);
+        result.add(disjointPairLabel(left, right));
       }
     }
   }

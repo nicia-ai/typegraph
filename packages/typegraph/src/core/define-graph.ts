@@ -7,6 +7,7 @@ import {
 } from "../indexes/auto-derive";
 import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
+import { assertClaimAxisSafe } from "../store/claims/axis";
 import { createDataKeyedBag } from "../utils/object";
 import {
   type AnyEdgeType,
@@ -385,6 +386,7 @@ function defineGraphUnchecked<
 
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
+  assertClaimNamesAreSafe(config.nodes);
   assertUniqueConstraintsAreDeclared(config.nodes);
   // Vector indexes are auto-derived from `embedding()` brands on node
   // schemas (see `autoDeriveVectorIndexes`). Explicit declarations
@@ -458,6 +460,29 @@ const EMPTY_DEPRECATED_KINDS: ReadonlySet<string> = Object.freeze(
 // ============================================================
 // Unique Constraint Validation
 // ============================================================
+
+/**
+ * Refuses any kind name or constraint name that could spell a reserved claim
+ * axis.
+ *
+ * A node kind and a unique constraint name are both written verbatim into the
+ * claim rows a write of that kind reserves, and the axes that are NOT kinds —
+ * the disjoint pair axis, and the reserved constraint name its rows carry — are
+ * built from a code point neither may contain. `defineGraph` is where that is
+ * enforced for the whole graph: `defineNode` already refuses it for kinds it
+ * builds, but the graph-extension compiler builds registrations without going
+ * through it, and constraint names never pass `defineNode` at all.
+ */
+function assertClaimNamesAreSafe(
+  nodes: Record<string, NodeRegistration>,
+): void {
+  for (const registration of Object.values(nodes)) {
+    assertClaimAxisSafe(registration.type.kind, "Node kind");
+    for (const constraint of registration.unique ?? []) {
+      assertClaimAxisSafe(constraint.name, "Unique constraint");
+    }
+  }
+}
 
 /**
  * Refuses any uniqueness constraint whose `where` clause names a field its kind

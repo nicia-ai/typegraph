@@ -141,13 +141,12 @@ const unconstrainedGraph = defineGraph({
 
 /**
  * A graph whose ONLY declared hazard is disjointness: no unique constraint on
- * either kind, and no edge at all. `graphOwesClaims` folds `nodeClaimSites`
- * (uniqueness) and `edgeWriteNeedsConstraintFence`; a disjoint pair owes
- * neither, because `nodeClaimEntries` writes no disjointness reservation yet
- * (that arm lands later, alongside import's per-row disjointness probe). This
- * graph is what isolates that from the graph fixture above, which cannot
- * distinguish the two hazards because `Worker`'s shared-scope uniqueness would
- * trip the same refusal on its own.
+ * either kind, and no edge at all. A disjoint create now owes a claim that
+ * PRECEDES its row — the nodes primary key is `(graph_id, kind, id)`, so
+ * nothing else can refuse a namesake under the partner kind — which is what
+ * makes an import into this graph refusable on a backend with no transactions.
+ * This graph is what isolates that hazard from the graph fixture above, whose
+ * `Worker` shared-scope uniqueness would trip the same refusal on its own.
  */
 const Wraith = defineNode("Wraith", { schema: z.object({ name: z.string() }) });
 const Phantom = defineNode("Phantom", {
@@ -278,6 +277,13 @@ describe("constrained writes on a backend that cannot fence them", () => {
     // in the stack would refuse it — it would write reservations with no
     // transaction to undo them. The refusal is up front, before chunk 1, so a
     // streamed import cannot commit k-1 chunks and then fail.
+    //
+    // The class named is the FIRST hazard the graph-level fold meets, and this
+    // fixture declares several: `Ghost`/`Spirit` are disjoint and precede the
+    // shared-scope kinds in the node map. Which class each kind SHAPE reports,
+    // and which claims it owes, is pinned per shape in
+    // `constraint-write-fence.test.ts`; what this case is about is that the
+    // import is refused at all, and that it wrote nothing.
     const store = createStore(graph, backend);
 
     await expect(
@@ -294,7 +300,7 @@ describe("constrained writes on a backend that cannot fence them", () => {
         },
         IMPORT_OPTIONS,
       ),
-    ).rejects.toThrow(expectFenceRefusal("nodeUniquenessScope"));
+    ).rejects.toThrow(expectFenceRefusal("nodeDisjointness"));
 
     // Nothing was written: not the unconstrained row it led with, not a claim.
     expect(
@@ -303,19 +309,13 @@ describe("constrained writes on a backend that cannot fence them", () => {
     expect(liveClaimOwners()).toEqual([]);
   });
 
-  it("imports into a graph whose only hazard is a disjoint partner, which owes no claim yet", async () => {
-    // The counterpart to T1: `graphOwesClaims` folds `nodeClaimSites`
-    // (uniqueness) and `edgeWriteNeedsConstraintFence` — it never consults
-    // `registry.getDisjointKinds`, because no claim precedes a disjoint
-    // create's row yet (`nodeClaimEntries` writes no disjointness reservation
-    // yet). `disjointOnlyGraph` has no unique constraint and no edge at all,
-    // so it isolates that from `graph`, whose `Worker` shared-scope uniqueness
-    // would refuse the import on its own and mask this case. The store's OWN
-    // create refuses a disjoint pair on this backend
-    // ("refuses a node create whose disjointness it cannot enforce", above) —
-    // it is only import's up-front graph-level fold that does not, and this
-    // pins that scope so the doc comment on `importGraph` cannot drift from it
-    // unnoticed.
+  it("refuses an import into a graph whose only hazard is a disjoint partner", async () => {
+    // T1 for the disjointness family. `disjointOnlyGraph` declares no unique
+    // constraint and no edge at all, so it isolates the hazard from `graph`,
+    // whose `Worker` shared-scope uniqueness would refuse the import on its own
+    // and mask this case: what is refused here can only be the disjointness
+    // claim, which a create must issue BEFORE its row because nothing else can
+    // refuse a namesake under the partner kind.
     const store = createStore(disjointOnlyGraph, backend);
     for (const statement of generateSqliteDDL()) {
       try {
@@ -326,24 +326,31 @@ describe("constrained writes on a backend that cannot fence them", () => {
       }
     }
 
-    const imported = await importGraph(
-      store,
-      {
-        formatVersion: FORMAT_VERSION,
-        exportedAt: new Date().toISOString(),
-        source: { type: "external", description: "fence capability" },
-        nodes: [
-          {
-            kind: "Wraith",
-            id: "disjoint-only-wraith",
-            properties: { name: "W" },
-          },
-        ],
-        edges: [],
-      },
-      IMPORT_OPTIONS,
-    );
-    expect(imported.nodes.created).toBe(1);
+    await expect(
+      importGraph(
+        store,
+        {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: new Date().toISOString(),
+          source: { type: "external", description: "fence capability" },
+          nodes: [
+            {
+              kind: "Wraith",
+              id: "disjoint-only-wraith",
+              properties: { name: "W" },
+            },
+          ],
+          edges: [],
+        },
+        IMPORT_OPTIONS,
+      ),
+    ).rejects.toThrow(expectFenceRefusal("nodeDisjointness"));
+
+    // Refused before the first row, so nothing landed and no reservation leaked.
+    expect(
+      sqlite.prepare("SELECT count(*) AS total FROM typegraph_nodes").get(),
+    ).toEqual({ total: 0 });
+    expect(liveClaimOwners()).toEqual([]);
   });
 
   it("refuses getOrCreateByEndpoints, whose convergence no key backs", async () => {

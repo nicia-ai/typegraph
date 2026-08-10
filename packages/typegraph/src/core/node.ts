@@ -1,5 +1,6 @@
 import { type z } from "zod";
 
+import { assertClaimAxisSafe } from "../store/claims/axis";
 import {
   assertSchemaKeysAreFree,
   RESERVED_NODE_KEYS,
@@ -58,6 +59,9 @@ export function defineNode<
   K extends string,
   S extends z.ZodObject<z.ZodRawShape>,
 >(name: K, options: DefineNodeOptions<S>): NodeType<K, S> {
+  // A kind name is a claim axis, so it may not contain the code point reserved
+  // for building the axes that are not kinds.
+  assertClaimAxisSafe(name, "Node kind");
   validateSchemaKeys(options.schema, name);
   if (options.annotations !== undefined) {
     assertJsonValue(options.annotations, "annotations", `Node "${name}"`);

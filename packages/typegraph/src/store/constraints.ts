@@ -94,12 +94,13 @@ export function edgeWriteNeedsConstraintFence(
  *   constraint_name, key)` row that the claim then reserves, so the uniques
  *   primary key IS the fence and the write needs no other.
  *
- * The uniqueness arm is a PROJECTION of {@link nodeClaimSites}, not a second
- * spelling of it: the site already decided whether its axis spans kinds beyond
- * the writer's own in order to decide where to write, and this reads that same
- * decision. Disjointness is scanned first so a kind qualifying on both counts
- * keeps reporting the class it reports today — which is what the refusal
- * payload names.
+ * The whole answer is a PROJECTION of {@link nodeClaimSites}, not a second
+ * spelling of it: that list already decided, per family, whether the site's
+ * axis spans kinds beyond the writer's own — in order to decide where its claim
+ * is written and when — and this reads that same decision back, reporting the
+ * first site carrying it. Disjointness sites come first in that list, so a kind
+ * qualifying on both counts keeps reporting the class it reports today, which
+ * is what the refusal payload names.
  */
 export function nodeWriteNeedsConstraintFence(
   registry: KindRegistry,
@@ -107,16 +108,9 @@ export function nodeWriteNeedsConstraintFence(
   uniqueConstraints: readonly UniqueConstraint[],
   operation: "create" | "update",
 ): ConstraintFenceReason | undefined {
-  if (operation === "create" && registry.getDisjointKinds(kind).length > 0) {
-    return "nodeDisjointness";
-  }
-  const sharedScope = nodeClaimSites(
-    registry,
-    kind,
-    uniqueConstraints,
-    operation,
-  ).some((site) => site.needsLockFence);
-  return sharedScope ? "nodeUniquenessScope" : undefined;
+  return nodeClaimSites(registry, kind, uniqueConstraints, operation).find(
+    (site) => site.needsLockFence,
+  )?.refusalReason;
 }
 
 /**

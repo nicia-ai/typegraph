@@ -1,12 +1,17 @@
 /**
  * Node claims — what a node row reserves, and how each reservation moves.
  *
- * A declared uniqueness constraint is a CLAIM on an axis (see
- * {@link file://./axis.ts}): the write reserves the row
- * `(graph_id, axis, constraint_name, key)` and is refused when that reservation
- * comes back owned by somebody else. This module decides which claims a row
- * owes, probes them, writes them, releases them, and sequences each of those
- * against the primary row write it gates.
+ * A declared constraint is a CLAIM on an axis (see {@link file://./axis.ts}):
+ * the write reserves the row `(graph_id, axis, constraint_name, key)` and is
+ * refused when that reservation comes back owned by somebody else. This module
+ * decides which claims a row owes, probes them, writes them, releases them, and
+ * sequences each of those against the primary row write it gates.
+ *
+ * Two families reserve in that one relation — a uniqueness constraint at its
+ * scope's axis, and a `disjointWith` pair at the pair's axis with the node's id
+ * as the key — so every path that already maintained uniqueness reservations
+ * maintains disjointness reservations too, by reading one list rather than by
+ * being edited twice.
  */
 import {
   type GraphBackend,
@@ -15,7 +20,11 @@ import {
 } from "../../backend/types";
 import { checkWherePredicate, computeUniqueKey } from "../../constraints";
 import { type UniqueConstraint } from "../../core/types";
-import { type ConfigurationError, UniquenessError } from "../../errors";
+import {
+  type ConfigurationError,
+  DisjointError,
+  UniquenessError,
+} from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { constraintFenceRefusal } from "../operations/write-transaction";
 import { type GraphWriteLock } from "../recorded-capture/clock";
@@ -27,7 +36,11 @@ import {
   uniquenessProbeKinds,
 } from "./axis";
 import { type ConstraintFenceReason } from "./backing";
-import { type ClaimPlacement, nodeClaimSites } from "./sites";
+import {
+  type ClaimPlacement,
+  type ClaimRefusal,
+  nodeClaimSites,
+} from "./sites";
 
 /**
  * Context for node claim operations.
@@ -68,51 +81,155 @@ export type NodeClaimEntry = Readonly<{
    * through from the site, so no consumer re-derives it.
    */
   refusalReason: ConstraintFenceReason;
-  /** The constraint this entry came from. */
-  constraint: UniqueConstraint;
+  /** Which typed error a foreign owner produces — carried through from the site. */
+  refusal: ClaimRefusal;
 }>;
+
+/**
+ * The key one site reserves for THIS row, or `undefined` when the site does not
+ * apply to it.
+ *
+ * A uniqueness site applies when its `where` predicate holds, and its key is
+ * the constraint's own composite key. A disjointness site always applies, and
+ * its key is the node's ID — which is the axis `disjointWith` declares: "no two
+ * live nodes of these two kinds share an id" is a reservation on the id, taken
+ * at the pair.
+ */
+function claimKeyFor(
+  refusal: ClaimRefusal,
+  id: string,
+  props: Record<string, unknown>,
+): string | undefined {
+  if (refusal.kind === "disjointness") return id;
+  return checkWherePredicate(refusal.constraint, props) ?
+      computeUniqueKey(
+        props,
+        refusal.constraint.fields,
+        refusal.constraint.collation,
+      )
+    : undefined;
+}
 
 /**
  * THE single owner of "what claims does THIS ROW owe, and when is each due?":
  * the kind's claim sites ({@link nodeClaimSites}, the declaration-level extent
- * for this operation) filtered by each constraint's `where` predicate and
- * completed with this row's key. `placement` and `refusalReason` are carried
- * through unchanged; this function decides neither.
+ * for this operation) filtered to the ones that apply to this row and completed
+ * with each one's key. `placement`, `refusalReason` and `refusal` are carried
+ * through unchanged; this function decides none of them.
  *
  * Every path that maintains a node's reservations — create, update diff,
  * resurrect, delete, batch, import — reads its work from this one list, so no
- * path can compute a key one way and an axis another.
+ * path can compute a key one way and an axis another, and no path that
+ * remembers one family can forget the other.
  *
  * `operation` is threaded rather than assumed because the sites function needs
- * it to place each claim: a transition claims before the row it gates for every
- * scope, while a create only does so for an axis spanning kinds beyond its own.
+ * it twice: to place each claim (a transition claims before the row it gates for
+ * every scope, while a create only does so for an axis spanning kinds beyond its
+ * own) and to decide the disjointness arm, which only a write bringing a node
+ * into existence under a kind owes.
  */
 export function nodeClaimEntries(
   registry: KindRegistry,
   kind: string,
+  id: string,
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
   operation: "create" | "update",
 ): readonly NodeClaimEntry[] {
   return nodeClaimSites(registry, kind, constraints, operation).flatMap(
-    (site) =>
-      checkWherePredicate(site.constraint, props) ?
-        [
-          {
-            axis: site.axis,
-            constraintName: site.constraintName,
-            key: computeUniqueKey(
-              props,
-              site.constraint.fields,
-              site.constraint.collation,
-            ),
-            placement: site.placement,
-            refusalReason: site.refusalReason,
-            constraint: site.constraint,
-          },
-        ]
-      : [],
+    (site) => {
+      const key = claimKeyFor(site.refusal, id, props);
+      return key === undefined ?
+          []
+        : [
+            {
+              axis: site.axis,
+              constraintName: site.constraintName,
+              key,
+              placement: site.placement,
+              refusalReason: site.refusalReason,
+              refusal: site.refusal,
+            },
+          ];
+    },
   );
+}
+
+/** An entry whose family is disjointness — the one family that needs mapping. */
+type DisjointnessClaimEntry = NodeClaimEntry &
+  Readonly<{ refusal: Extract<ClaimRefusal, { kind: "disjointness" }> }>;
+
+/**
+ * THE one place a backend claim refusal becomes the refusal its FAMILY
+ * declares.
+ *
+ * Both families reserve in the `uniques` relation, and `insertUnique` /
+ * `insertUniqueBatch` report every foreign owner the same way — as a
+ * `UniquenessError` naming the constraint, the holder's concrete kind and the
+ * two ids. That contract is deliberately unchanged (a third-party backend
+ * implementing it keeps working), so the translation happens here, once, where
+ * the entries that produced the claim are still in hand.
+ *
+ * The reserved `constraintName` alone locates the FAMILY (any entry it matches
+ * is a disjointness entry, never a declared constraint's — `assertClaimAxisSafe`
+ * makes the name unspellable by one), but not the PAIR: every `disjointWith`
+ * pair shares that one literal, so a batch carrying disjointness entries for
+ * two different pairs that happen to claim the same id (`Person "X"` disjoint
+ * with `Company`, `Vehicle "X"` disjoint with `Boat`, same batch) would match
+ * either indiscriminately on `(constraintName, key)` alone. The entry is
+ * additionally required to have written the SAME claim axis the backend
+ * reports — the row's actual primary key, and therefore unambiguous — so the
+ * one located is provably the one that lost. `error.details.axis` is optional
+ * (a third-party backend need not carry it to keep working); when a backend
+ * omits it the match falls back to `(constraintName, key)` alone, which is
+ * HEAD's behavior and no worse than today's. The payload is built from what
+ * the BACKEND reported — the holder's own concrete kind — so the fence's error
+ * is identical to the probe's, which is what makes a caller unable to tell
+ * which layer refused.
+ */
+function mapClaimRefusal(
+  error: UniquenessError,
+  entries: readonly NodeClaimEntry[],
+): never {
+  const owed = entries.find(
+    (entry): entry is DisjointnessClaimEntry =>
+      entry.refusal.kind === "disjointness" &&
+      entry.constraintName === error.details.constraintName &&
+      entry.key === error.details.newId &&
+      (error.details.axis === undefined || entry.axis === error.details.axis),
+  );
+  if (owed === undefined) throw error;
+  throw new DisjointError(
+    {
+      nodeId: error.details.newId,
+      attemptedKind: owed.refusal.ownKind,
+      conflictingKind: error.details.kind,
+    },
+    { cause: error },
+  );
+}
+
+/**
+ * Runs a claim statement, re-raising a foreign owner as the declared refusal of
+ * whichever family owed the claim.
+ *
+ * One wrapper around every claim write of the CREATE seam, rather than a
+ * translation at each of them: a claim statement that skipped it would report a
+ * `disjointWith` violation as a uniqueness violation on a constraint name no
+ * caller ever declared. The transition seam ({@link withNodeClaimTransition})
+ * needs no wrapper — the disjointness site arm is create-only, so an update's
+ * plan carries uniqueness entries and nothing else to translate.
+ */
+async function issuingClaims(
+  entries: readonly NodeClaimEntry[],
+  issue: () => Promise<void>,
+): Promise<void> {
+  try {
+    await issue();
+  } catch (error) {
+    if (error instanceof UniquenessError) mapClaimRefusal(error, entries);
+    throw error;
+  }
 }
 
 /**
@@ -146,6 +263,24 @@ function claimFenceRefusal(
   return constraintFenceRefusal(ctx, backend, gating.refusalReason);
 }
 
+/** An entry whose family is uniqueness — the only family this probe reads. */
+type UniquenessClaimEntry = NodeClaimEntry &
+  Readonly<{ refusal: Extract<ClaimRefusal, { kind: "uniqueness" }> }>;
+
+/**
+ * Narrows an entry to the uniqueness family.
+ *
+ * Disjointness entries have their own probe (`checkDisjointnessConstraint`,
+ * which reads the NODE rows the constraint is declared over) and deliberately
+ * do not get a second one here: a claim-row read would be a second spelling of
+ * that verdict, and the two would drift.
+ */
+function isUniquenessClaimEntry(
+  entry: NodeClaimEntry,
+): entry is UniquenessClaimEntry {
+  return entry.refusal.kind === "uniqueness";
+}
+
 /**
  * Probes ONE entry's key across every kind its scope covers, the axis first.
  *
@@ -173,7 +308,7 @@ async function probeUniqueKey(
   ctx: UniquenessContext,
   kind: string,
   id: string,
-  entry: NodeClaimEntry,
+  entry: UniquenessClaimEntry,
 ): Promise<boolean> {
   const mine: ClaimOwner = { concreteKind: kind, nodeId: id };
 
@@ -182,7 +317,7 @@ async function probeUniqueKey(
   let heldByThisNode = false;
   for (const kindToCheck of uniquenessProbeKinds(
     kind,
-    entry.constraint.scope,
+    entry.refusal.constraint.scope,
     ctx.registry,
   )) {
     const existing = await ctx.backend.checkUnique({
@@ -204,7 +339,7 @@ async function probeUniqueKey(
         kind: existing.concrete_kind,
         existingId: existing.node_id,
         newId: id,
-        fields: entry.constraint.fields,
+        fields: entry.refusal.constraint.fields,
       });
     }
     if (kindToCheck === entry.axis) heldByThisNode = true;
@@ -226,15 +361,19 @@ export async function checkUniquenessConstraints(
 ): Promise<void> {
   // The create extent, which is the wider of the two: a probe wants every claim
   // this row could owe, and placement — the only thing the operation decides
-  // for a uniqueness site — says nothing about what is read.
+  // for a uniqueness site — says nothing about what is read. The disjointness
+  // entries the create extent also carries belong to the other probe, which
+  // reads node rows rather than claim rows.
   for (const entry of nodeClaimEntries(
     ctx.registry,
     kind,
+    id,
     props,
     constraints,
     "create",
   )) {
-    await probeUniqueKey(ctx, kind, id, entry);
+    if (isUniquenessClaimEntry(entry))
+      await probeUniqueKey(ctx, kind, id, entry);
   }
 }
 
@@ -312,7 +451,9 @@ async function issueClaimsIndividually(
   onIssued?: (issued: readonly PlacedClaim[]) => void,
 ): Promise<void> {
   for (const claim of claims) {
-    await ctx.backend.insertUnique(claimInsertParams(ctx.graphId, claim));
+    await issuingClaims([claim.entry], () =>
+      ctx.backend.insertUnique(claimInsertParams(ctx.graphId, claim)),
+    );
     onIssued?.([claim]);
   }
 }
@@ -334,7 +475,12 @@ async function issueClaimsBatched(
     await issueClaimsIndividually(ctx, claims, onIssued);
     return;
   }
-  await batch(claims.map((claim) => claimInsertParams(ctx.graphId, claim)));
+  await issuingClaims(
+    claims.map((claim) => claim.entry),
+    async () => {
+      await batch(claims.map((claim) => claimInsertParams(ctx.graphId, claim)));
+    },
+  );
   onIssued?.(claims);
 }
 
@@ -415,6 +561,7 @@ async function withNodeCreateClaimsIssuedBy<T>(
     nodeClaimEntries(
       ctx.registry,
       item.kind,
+      item.id,
       item.props,
       item.constraints,
       "create",
@@ -518,7 +665,7 @@ export async function deleteUniquenessEntries(
     ctx,
     kind,
     id,
-    nodeClaimEntries(ctx.registry, kind, props, constraints, "create"),
+    nodeClaimEntries(ctx.registry, kind, id, props, constraints, "create"),
   );
 }
 
@@ -582,14 +729,21 @@ export async function planNodeClaimUpdate(
   // Both sides of the diff are read from the one entries function, so the key
   // a release names is computed exactly the way the key a claim names is.
   const oldKeys = new Map(
-    nodeClaimEntries(ctx.registry, kind, oldProps, constraints, "update").map(
-      (entry) => [entry.constraintName, entry.key],
-    ),
+    nodeClaimEntries(
+      ctx.registry,
+      kind,
+      id,
+      oldProps,
+      constraints,
+      "update",
+    ).map((entry) => [entry.constraintName, entry.key]),
   );
   const newEntries = new Map(
-    nodeClaimEntries(ctx.registry, kind, newProps, constraints, "update").map(
-      (entry) => [entry.constraintName, entry],
-    ),
+    nodeClaimEntries(ctx.registry, kind, id, newProps, constraints, "update")
+      .filter((entry): entry is UniquenessClaimEntry =>
+        isUniquenessClaimEntry(entry),
+      )
+      .map((entry) => [entry.constraintName, entry]),
   );
 
   const pending: PendingUniqueMutation[] = [];
@@ -645,9 +799,12 @@ export async function planNodeClaimReinsert(
   for (const entry of nodeClaimEntries(
     ctx.registry,
     kind,
+    id,
     props,
     constraints,
     "update",
+  ).filter((entry): entry is UniquenessClaimEntry =>
+    isUniquenessClaimEntry(entry),
   )) {
     const alreadyHeld = await probeUniqueKey(ctx, kind, id, entry);
 

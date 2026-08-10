@@ -556,6 +556,20 @@ export type UniquenessErrorDetails = Readonly<{
   existingId: string;
   newId: string;
   fields: readonly string[];
+  /**
+   * The claim row's `node_kind` — the axis this violation was found at.
+   * Optional so a third-party backend implementing the documented "throws
+   * `UniquenessError`" contract keeps working unchanged; when a throw site
+   * omits it, a caller loses only the disambiguation this field exists for,
+   * never correctness of the refusal itself.
+   *
+   * `constraintName` alone cannot tell two disjoint pairs apart — every
+   * `disjointWith` pair shares the single reserved `DISJOINT_CONSTRAINT_NAME`
+   * — so `mapClaimRefusal` (`store/claims/node-claims.ts`) matches on this
+   * field together with `constraintName` and the key, which is exactly the
+   * claim row's primary key and therefore unambiguous.
+   */
+  axis?: string;
 }>;
 
 /**

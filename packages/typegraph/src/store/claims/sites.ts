@@ -14,7 +14,11 @@
  */
 import { type UniqueConstraint } from "../../core/types";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { uniquenessClaimTarget } from "./axis";
+import {
+  DISJOINT_CONSTRAINT_NAME,
+  disjointnessClaimAxis,
+  uniquenessClaimTarget,
+} from "./axis";
 import { type ConstraintFenceReason } from "./backing";
 
 /**
@@ -28,6 +32,19 @@ import { type ConstraintFenceReason } from "./backing";
  * their own primary key already makes sufficient.
  */
 export type ClaimPlacement = "pre-insert" | "post-insert";
+
+/**
+ * WHICH declared refusal a foreign owner of this claim produces, and the
+ * payload that refusal needs.
+ *
+ * Two constraint families share one claim relation, so the row alone cannot say
+ * what refusing it means. Carrying the answer on the site — decided where the
+ * site is decided — is what lets the claim seam re-raise the family's own error
+ * without re-deriving which family it was from the axis string.
+ */
+export type ClaimRefusal =
+  | Readonly<{ kind: "uniqueness"; constraint: UniqueConstraint }>
+  | Readonly<{ kind: "disjointness"; ownKind: string; otherKind: string }>;
 
 /** One claim a node of this kind owes, before its props are known. */
 export type NodeClaimSite = Readonly<{
@@ -57,21 +74,58 @@ export type NodeClaimSite = Readonly<{
    * than about the scope it does not have.
    */
   refusalReason: ConstraintFenceReason;
-  /** The constraint this site came from. */
-  constraint: UniqueConstraint;
+  /** Which typed error a foreign owner of this claim produces. */
+  refusal: ClaimRefusal;
 }>;
+
+/**
+ * The disjointness sites a create of this kind owes: one per declared partner.
+ *
+ * CREATE only, matching the one place the disjointness probe runs — the create
+ * preparation. An in-place update cannot change a node's kind, so it re-derives
+ * no cross-kind verdict and owes no claim for one.
+ *
+ * Pairwise rather than per component, because the registry's disjoint pairs are
+ * literal unordered pairs: a node disjoint from two partners owes two claims,
+ * on two axes, and the two partners are not thereby disjoint from each other.
+ *
+ * Every one of them is `pre-insert` and `needsLockFence`: the nodes primary key
+ * is `(graph_id, kind, id)`, so a disjoint namesake's row does not collide with
+ * this node's own insert — the claim is the ONLY fence for the axis, and a
+ * fence issued after the write it fences is not a fence.
+ */
+function disjointnessSites(
+  registry: KindRegistry,
+  kind: string,
+): readonly NodeClaimSite[] {
+  return registry.getDisjointKinds(kind).map((otherKind) => ({
+    axis: disjointnessClaimAxis(kind, otherKind, registry),
+    constraintName: DISJOINT_CONSTRAINT_NAME,
+    needsLockFence: true,
+    placement: "pre-insert" as const,
+    refusalReason: "nodeDisjointness" as const,
+    refusal: { kind: "disjointness" as const, ownKind: kind, otherKind },
+  }));
+}
 
 /**
  * THE owner of "what claims does a node of this kind owe, and when is each
  * due?".
  *
- * Every field but `constraintName` is derived from ONE computation — the
- * {@link uniquenessClaimTarget} of this kind and scope — so the four readers of
- * this list (the entries, the claim seam's partition, the non-transactional
+ * Two families, one list. Disjointness sites come first, so a kind qualifying
+ * on both counts reports the class the lock path already reports for it, and so
+ * the two families cannot be maintained by two different sets of write paths: a
+ * path that remembers uniqueness cannot forget disjointness when both arrive
+ * through the same list.
+ *
+ * Every uniqueness field but `constraintName` is derived from ONE computation —
+ * the {@link uniquenessClaimTarget} of this kind and scope — so the four readers
+ * of this list (the entries, the claim seam's partition, the non-transactional
  * refusal, and the lock projection in `../constraints.ts`) read one
  * classification rather than four predicates that agree until one is edited.
  * The fact all of them turn on is the same one: does this claim's axis span
- * kinds beyond the writer's own?
+ * kinds beyond the writer's own? Disjointness always does; a uniqueness scope
+ * does exactly when it covers more than the node's own kind.
  *
  * - `needsLockFence` reads it as "the probe reads state the uniques primary key
  *   does not fence", which is what the per-graph lock is taken for;
@@ -93,7 +147,7 @@ export function nodeClaimSites(
   uniqueConstraints: readonly UniqueConstraint[],
   operation: "create" | "update",
 ): readonly NodeClaimSite[] {
-  return uniqueConstraints.map((constraint) => {
+  const uniqueness = uniqueConstraints.map((constraint) => {
     const target = uniquenessClaimTarget(kind, constraint.scope, registry);
     return {
       axis: target.axis,
@@ -102,10 +156,16 @@ export function nodeClaimSites(
       placement:
         operation === "update" || target.crossKind ?
           "pre-insert"
-        : "post-insert",
+        : ("post-insert" as const),
       refusalReason:
-        target.crossKind ? "nodeUniquenessScope" : "nodeUniquenessClaim",
-      constraint,
-    };
+        target.crossKind ?
+          ("nodeUniquenessScope" as const)
+        : ("nodeUniquenessClaim" as const),
+      refusal: { kind: "uniqueness" as const, constraint },
+    } satisfies NodeClaimSite;
   });
+
+  return operation === "create" ?
+      [...disjointnessSites(registry, kind), ...uniqueness]
+    : uniqueness;
 }
