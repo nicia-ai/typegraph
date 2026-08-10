@@ -1049,6 +1049,7 @@ export const ExportStreamOptionsSchema: z.ZodObject<{
         archival: "archival";
     }>>;
     signal: z.ZodOptional<z.ZodCustom<AbortSignal, AbortSignal>>;
+    idleTimeoutMs: z.ZodOptional<z.ZodNumber>;
     batchSize: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 

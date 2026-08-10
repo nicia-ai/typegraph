@@ -1873,6 +1873,11 @@ export class ExportStreamCancelledError extends TypeGraphError {
 }
 
 // @public
+export class ExportStreamIdleTimeoutError extends TypeGraphError {
+    constructor(graphId: string, idleTimeoutMs: number, transactional: boolean);
+}
+
+// @public
 type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
 
 // @public

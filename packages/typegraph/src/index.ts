@@ -375,6 +375,7 @@ export {
   EndpointNotFoundError,
   ENTITY_ALREADY_EXISTS_CODE,
   ExportStreamCancelledError,
+  ExportStreamIdleTimeoutError,
   // Error utility functions
   getErrorSuggestion,
   GraphAlgorithmConvergenceError,

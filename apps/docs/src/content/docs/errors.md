@@ -796,6 +796,20 @@ says which.
 the export before any transaction is opened. See
 [Cancelling an export](/interchange#cancelling-an-export).
 
+#### `ExportStreamIdleTimeoutError`
+
+An `exportGraphStream` configured with `idleTimeoutMs` settles with
+`ExportStreamIdleTimeoutError` (`code: "INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT"`)
+when its consumer does not request another chunk within that bound. The timeout
+measures only the interval after a chunk is yielded; time spent waiting for the
+backend to produce the next chunk does not count. `details.graphId` identifies
+the graph and
+`details.idleTimeoutMs` carries the configured bound. As with explicit
+cancellation, a transactional export rolls its snapshot back and releases its
+stream lease before the error is delivered; a non-transactional export held
+neither and abandons its remaining reads. See
+[Cancelling an export](/interchange#cancelling-an-export).
+
 #### Recorded-capture guard codes
 
 `ConfigurationError` is intentionally open-shaped, but the guards that fire on a
@@ -1105,3 +1119,4 @@ try {
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported |
 | `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation |
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
+| `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |

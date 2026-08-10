@@ -1515,6 +1515,36 @@ export class ExportStreamCancelledError extends TypeGraphError {
 }
 
 /**
+ * Thrown when an export stream's consumer leaves a delivered chunk
+ * unacknowledged for longer than its configured idle timeout.
+ *
+ * The timeout measures consumer idleness only: it starts when a chunk is
+ * yielded and stops when the consumer asks for the next one. Receiving this
+ * error means the timed-out export has settled its snapshot transaction and
+ * released any serialized connection lease it held. `details.idleTimeoutMs`
+ * carries the configured bound.
+ */
+export class ExportStreamIdleTimeoutError extends TypeGraphError {
+  constructor(graphId: string, idleTimeoutMs: number, transactional: boolean) {
+    super(
+      transactional ?
+        `The graph export stream consumer did not request its next chunk within ${idleTimeoutMs}ms: its repeatable-read snapshot has been rolled back and the connection it held released.`
+      : `The graph export stream consumer did not request its next chunk within ${idleTimeoutMs}ms: its remaining reads were abandoned. This backend does not support transactions, so the export held no snapshot and no connection.`,
+      "INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT",
+      {
+        details: { graphId, idleTimeoutMs },
+        category: "user",
+        suggestion:
+          transactional ?
+            "Start a new export and consume each chunk within the configured idle timeout, increase idleTimeoutMs, or cancel explicitly with an AbortSignal."
+          : "Start a new export and consume each chunk within the configured idle timeout, increase idleTimeoutMs, or cancel explicitly with an AbortSignal; discard the partial export unless mutually-inconsistent chunks are acceptable.",
+      },
+    );
+    this.name = "ExportStreamIdleTimeoutError";
+  }
+}
+
+/**
  * The stable `details.code` values raised by the recorded-capture guards on a
  * history- or revision-tracked store. These are the sanctioned branch points
  * for a portable caller that must pick a transaction strategy without
