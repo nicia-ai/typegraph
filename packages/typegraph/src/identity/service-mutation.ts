@@ -687,7 +687,7 @@ export async function createIdentityWindowValidator(
   };
 }
 
-export async function validateRelationThroughoutIdentityWindow(
+async function validateRelationThroughoutIdentityWindow(
   ctx: Pick<
     IdentityServiceContext<GraphDef>,
     "graphId" | "registry" | "sameIdAcrossKinds" | "schema"

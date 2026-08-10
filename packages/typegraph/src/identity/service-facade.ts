@@ -491,7 +491,7 @@ async function retractCurrentAssertions(
   return ended;
 }
 
-export async function retractByIds(
+async function retractByIds(
   ctx: IdentityServiceContext<GraphDef>,
   target: Backend,
   ids: readonly string[],
