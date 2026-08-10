@@ -511,7 +511,7 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
     }
   });
 
-  it("declares a backing for every fence class, with both node families backed by the uniques key", () => {
+  it("declares a backing for every fence class, with each family naming its own relation", () => {
     for (const reason of CONSTRAINT_FENCE_REASONS) {
       expect(CONSTRAINT_FENCE_BACKING[reason]).toBeDefined();
     }
@@ -521,6 +521,15 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
     // per-graph lock alone, and the table has to say so or a reader infers the
     // opposite from the one place this is written down.
     expect(CONSTRAINT_FENCE_BACKING.nodeDisjointness).toBe("uniques");
+    // Edge cardinality reserves in its OWN relation, keyed on
+    // `(<cardinality>:<edgeKind>, endpoint identity)` — the axis the
+    // declaration spans and the one the edges primary key cannot fence. Left at
+    // `lockOnly` a reader would conclude from the one place this is written
+    // down that a lock-free import writes constrained edges unfenced.
+    expect(CONSTRAINT_FENCE_BACKING.edgeCardinality).toBe("edgeClaims");
+    // The convergence key can include `matchOn` prop values, so no relation can
+    // key it: still the lock alone, and stated as such.
+    expect(CONSTRAINT_FENCE_BACKING.edgeMatchKeyConvergence).toBe("lockOnly");
   });
 
   it("takes no lock for a kind-scoped node UPDATE either, not just its create", async () => {

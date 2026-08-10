@@ -173,15 +173,38 @@ export function uniquenessProbeKinds(
   return [axis, ...rest];
 }
 
+/**
+ * THE axis an edge cardinality claim is written at: the declared cardinality
+ * and the edge kind, which together name the population the constraint counts.
+ *
+ * `one` and `oneActive` on one kind are DIFFERENT axes on purpose — they count
+ * different populations (every live edge from a source vs every active one) —
+ * so a kind whose declaration changed cannot inherit rows the old declaration
+ * wrote. The cardinality tokens contain no `:`, so the pair is injective over
+ * arbitrary edge kind names.
+ */
+export function edgeCardinalityAxis(
+  cardinality: string,
+  edgeKind: string,
+): string {
+  return `${cardinality}:${edgeKind}`;
+}
+
 /** The relation a claim row lives in. */
-type ClaimRelation = "uniques";
+type ClaimRelation = "uniques" | "edgeClaims";
 
 /** A claim row named in full — the row a statement is about to lock. */
 export type ClaimTarget = Readonly<{
   relation: ClaimRelation;
   graphId: string;
   axis: string;
-  constraintName: string;
+  /**
+   * `uniques.constraint_name`. The edge claim relation keys on
+   * `(graph_id, axis, key)` and has no such column, so its targets omit it and
+   * sort as the empty string. Absent means "this relation does not key on a
+   * constraint name", never "not known yet".
+   */
+  constraintName?: string;
   key: string;
 }>;
 
@@ -209,7 +232,7 @@ export function compareClaimTargets(
     compareStrings(left.relation, right.relation) ||
     compareStrings(left.graphId, right.graphId) ||
     compareStrings(left.axis, right.axis) ||
-    compareStrings(left.constraintName, right.constraintName) ||
+    compareStrings(left.constraintName ?? "", right.constraintName ?? "") ||
     compareStrings(left.key, right.key)
   );
 }

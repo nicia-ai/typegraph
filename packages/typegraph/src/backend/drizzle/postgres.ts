@@ -525,6 +525,7 @@ export function createPostgresBackend(
     identitySeparation: getTableName(tables.identitySeparation),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
+    edgeClaims: getTableName(tables.edgeClaims),
   };
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
   // ANALYZE statements on every call. The recorded and identity relations

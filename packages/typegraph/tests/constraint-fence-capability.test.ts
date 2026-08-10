@@ -596,3 +596,176 @@ describe("a transactional backend fences the same writes instead", () => {
     }
   });
 });
+
+/**
+ * `constraintClaims: false` is a DECLARED GAP, not a refusal.
+ *
+ * A backend that ships without the claim relations keeps every fence it has
+ * today — the per-graph write lock around the probe — and its constrained
+ * writes keep working. Converting the absent capability into a refusal would
+ * turn a working store into a failing one, which is the regression class this
+ * workstream exists to close rather than to cause.
+ *
+ * The other direction is a defect and IS refused: an object whose declaration
+ * and whose surface disagree yields a verdict about a fence it may not have, so
+ * `claimSupport` names the mismatch instead of guessing which half is right.
+ */
+/** The claim members an object either carries in full or not at all. */
+type ClaimMembers = Readonly<{
+  claimEdgeCardinality?: unknown;
+  claimEdgeCardinalityBatch?: unknown;
+  purgeEdgeClaims?: unknown;
+  hardDeleteUniquesByConcreteKind?: unknown;
+}>;
+
+/** Removes the claim members from one object, leaving everything else alone. */
+function stripClaimMembers<T extends object>(target: T): T {
+  const {
+    claimEdgeCardinality: _claim,
+    claimEdgeCardinalityBatch: _claimBatch,
+    purgeEdgeClaims: _purge,
+    hardDeleteUniquesByConcreteKind: _reap,
+    ...rest
+  } = target as T & ClaimMembers;
+  return rest as T;
+}
+
+/**
+ * A real transactional SQLite backend with the edge-claim surface removed and
+ * the capability withdrawn — both halves, because either alone is the mismatch
+ * below. Stripped inside `transaction` too: the claim is issued against the
+ * transaction backend, not the outer one.
+ */
+function withoutClaimSupport(backend: GraphBackend): GraphBackend {
+  return {
+    ...stripClaimMembers(backend),
+    capabilities: { ...backend.capabilities, constraintClaims: false },
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) =>
+          run({
+            ...stripClaimMembers(target),
+            capabilities: {
+              ...target.capabilities,
+              constraintClaims: false,
+            },
+          }),
+        options,
+      ),
+  };
+}
+
+describe("a backend that declares no claim support", () => {
+  it("keeps enforcing cardinality through the probe, and writes no claim", async () => {
+    const sqlite = new Database(":memory:");
+    try {
+      const db = drizzle(sqlite);
+      for (const statement of generateSqliteDDL()) sqlite.exec(statement);
+      const store = createStore(
+        graph,
+        withoutClaimSupport(createSqliteBackend(db)),
+      );
+
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const carol = await store.nodes.Person.create({ name: "Carol" });
+
+      await store.edges.reportsTo.create(alice, bob, {});
+      // The fence it still has: the probe, serialized by the per-graph lock.
+      await expect(
+        store.edges.reportsTo.create(alice, carol, {}),
+      ).rejects.toThrow(/[Cc]ardinality/u);
+
+      expect(
+        sqlite
+          .prepare("SELECT count(*) AS total FROM typegraph_edge_claims")
+          .get(),
+      ).toEqual({ total: 0 });
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it("refuses an object carrying the members without declaring them", async () => {
+    // The other direction of the same defect, and the reason the DECLARATION is
+    // what `claimSupport` reads: a backend inferring support from the members
+    // it happens to expose would claim here, against a relation the object says
+    // it does not maintain.
+    const sqlite = new Database(":memory:");
+    try {
+      const db = drizzle(sqlite);
+      for (const statement of generateSqliteDDL()) sqlite.exec(statement);
+      const real = createSqliteBackend(db);
+      const undeclared: GraphBackend = {
+        ...real,
+        capabilities: { ...real.capabilities, constraintClaims: false },
+        transaction: (run, options) =>
+          real.transaction(
+            (target) =>
+              run({
+                ...target,
+                capabilities: {
+                  ...target.capabilities,
+                  constraintClaims: false,
+                },
+              }),
+            options,
+          ),
+      };
+      const store = createStore(graph, undeclared);
+
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      await expect(
+        store.edges.reportsTo.create(alice, bob, {}),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          name: "ConfigurationError",
+          details: matchingObject({
+            code: "CONSTRAINT_CLAIM_SURFACE_MISMATCH",
+          }),
+        }),
+      );
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it("refuses an object whose declaration and surface disagree", async () => {
+    const sqlite = new Database(":memory:");
+    try {
+      const db = drizzle(sqlite);
+      for (const statement of generateSqliteDDL()) sqlite.exec(statement);
+      const real = createSqliteBackend(db);
+      // Declares support, ships without one member: a projection that dropped
+      // an allowlist entry looks exactly like this, and reading only the
+      // capability would report a fence this object cannot hold.
+      const mismatched: GraphBackend = {
+        ...real,
+        transaction: (run, options) =>
+          real.transaction((target) => {
+            const { claimEdgeCardinality: _dropped, ...rest } = target;
+            return run(rest);
+          }, options),
+      };
+      const store = createStore(graph, mismatched);
+
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      await expect(
+        store.edges.reportsTo.create(alice, bob, {}),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          name: "ConfigurationError",
+          details: matchingObject({
+            code: "CONSTRAINT_CLAIM_SURFACE_MISMATCH",
+          }),
+        }),
+      );
+    } finally {
+      sqlite.close();
+    }
+  });
+});

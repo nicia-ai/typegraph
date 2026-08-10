@@ -9,6 +9,7 @@
  * deferrable. Candidates run sequentially because they share one graph lock.
  */
 import { type RawBackend } from "../backend/branded";
+import { buildHardDeleteEdgeClaimsByEdgeKind } from "../backend/drizzle/operations/edge-claims";
 import { buildHardDeleteUniquesByConcreteKind } from "../backend/drizzle/operations/uniques";
 import {
   type GraphBackend,
@@ -146,6 +147,7 @@ type MaterializeOneContext = Readonly<{
   edgesTable: string;
   fulltextTable: string;
   uniquesTable: string;
+  edgeClaimsTable: string;
   captureRecordedRemovals: boolean;
   // Resolved once per removal pass (not per kind) and threaded into each
   // recorded-interval close. Undefined when recorded capture is off.
@@ -262,6 +264,7 @@ export async function materializeRemovals(
   const edgesTable = tableNames?.edges ?? "typegraph_edges";
   const fulltextTable = tableNames?.fulltext ?? "typegraph_node_fulltext";
   const uniquesTable = tableNames?.uniques ?? "typegraph_node_uniques";
+  const edgeClaimsTable = tableNames?.edgeClaims ?? "typegraph_edge_claims";
 
   const captureRecordedRemovals = context.captureRecordedRemovals === true;
   const ctx = {
@@ -271,6 +274,7 @@ export async function materializeRemovals(
     edgesTable,
     fulltextTable,
     uniquesTable,
+    edgeClaimsTable,
     captureRecordedRemovals,
     recordedSchema:
       captureRecordedRemovals ?
@@ -550,7 +554,16 @@ async function closeRecordedAndDeleteLiveRows(
   row: KindRemovalRow,
   target: SchemaWriteTransactionBackend,
 ): Promise<void> {
-  const deleteStatements = buildRemovedKindLiveDeleteStatements(ctx, row);
+  // Same tolerance `clearGraph` gives the relation: a database bootstrapped
+  // before edge claims existed has no such table, and reaping a removed kind's
+  // housekeeping rows must not be the operation that fails on it.
+  const reapsEdgeClaims =
+    row.entity === "edge" && (await target.tableExists(ctx.edgeClaimsTable));
+  const deleteStatements = buildRemovedKindLiveDeleteStatements(
+    ctx,
+    row,
+    reapsEdgeClaims,
+  );
   if (!ctx.captureRecordedRemovals || ctx.recordedSchema === undefined) {
     await executeDeleteStatements(target, deleteStatements);
     return;
@@ -583,6 +596,8 @@ async function closeRecordedAndDeleteLiveRows(
 /**
  * The live rows a removed kind leaves behind, as statements.
  *
+ * Neither claim family is spelled here — the edge claims come from
+ * `buildHardDeleteEdgeClaimsByEdgeKind` for the same reason as the node ones.
  * The uniqueness claims are NOT spelled here: which claims a kind owns is one
  * predicate with one owner, `buildHardDeleteUniquesByConcreteKind`, and this is
  * its second consumer. Filtering on `node_kind` — the claim AXIS — instead would
@@ -593,6 +608,7 @@ async function closeRecordedAndDeleteLiveRows(
 function buildRemovedKindLiveDeleteStatements(
   ctx: MaterializeOneContext,
   row: KindRemovalRow,
+  reapsEdgeClaims: boolean,
 ): readonly SqlFragment[] {
   const graphLit = literal(ctx.graphId);
   const kindLit = literal(row.kindName);
@@ -617,6 +633,18 @@ function buildRemovedKindLiveDeleteStatements(
     sql.raw(
       `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
     ),
+    // Housekeeping, on the same one-owner terms as the uniqueness reap: the
+    // rows this kind's edges held are takeable the moment those edges are gone,
+    // but nothing would ever reap them, so the relation would grow by one row
+    // per removed constrained kind forever.
+    ...(reapsEdgeClaims ?
+      [
+        buildHardDeleteEdgeClaimsByEdgeKind(ctx.edgeClaimsTable, {
+          graphId: ctx.graphId,
+          edgeKind: row.kindName,
+        }),
+      ]
+    : []),
   ];
 }
 

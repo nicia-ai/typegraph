@@ -17,7 +17,9 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  CardinalityError,
   createStore,
+  defineEdge,
   defineGraph,
   defineNode,
   DisjointError,
@@ -59,6 +61,15 @@ const FenceSpirit = defineNode("FenceSpirit", {
   schema: z.object({ email: z.string() }),
 });
 
+/**
+ * The cardinality family's fixture: `cardinality: "one"` declares no unique
+ * constraint and no disjoint pair, so the second refuser for this edge kind
+ * can only be the edge-claim relation (`edge-claims.ts`).
+ */
+const fenceHaunts = defineEdge("fenceHaunts", {
+  schema: z.object({}),
+});
+
 const errorGraph = defineGraph({
   id: "constraint_fence_errors",
   nodes: {
@@ -68,7 +79,14 @@ const errorGraph = defineGraph({
     FenceGhost: { type: FenceGhost },
     FenceSpirit: { type: FenceSpirit },
   },
-  edges: {},
+  edges: {
+    fenceHaunts: {
+      type: fenceHaunts,
+      from: [FenceGhost],
+      to: [FenceSpirit],
+      cardinality: "one",
+    },
+  },
   ontology: [
     subClassOf(Employee, Worker),
     subClassOf(Contractor, Worker),
@@ -146,6 +164,49 @@ function backendWithoutDisjointnessProbe(
           }),
         options,
       ),
+  };
+}
+
+/**
+ * The same backend with the CARDINALITY probe blinded: `countEdgesFrom`
+ * reports zero regardless of what already exists, so the create reaches its
+ * claim and the claim is what refuses. Only `countEdgesFrom` is hidden — the
+ * `unique` cardinality's probe (`edgeExistsBetween`) is untouched, so this
+ * fixture's `one` edge kind is the only one this blinds anything for.
+ */
+const countEdgesFromZero: GraphBackend["countEdgesFrom"] = () =>
+  Promise.resolve(0);
+
+function backendWithoutCardinalityProbe(backend: GraphBackend): GraphBackend {
+  return {
+    ...backend,
+    countEdgesFrom: countEdgesFromZero,
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) =>
+          run({
+            ...target,
+            countEdgesFrom: countEdgesFromZero,
+          }),
+        options,
+      ),
+  };
+}
+
+/** The cardinality twin of {@link refusalShape}. */
+function cardinalityRefusalShape(error: unknown): unknown {
+  const cardinality = error as CardinalityError;
+  return {
+    name: cardinality.name,
+    code: cardinality.code,
+    isCardinalityError: cardinality instanceof CardinalityError,
+    details: {
+      edgeKind: cardinality.details.edgeKind,
+      fromKind: cardinality.details.fromKind,
+      fromId: cardinality.details.fromId,
+      cardinality: cardinality.details.cardinality,
+      existingCount: cardinality.details.existingCount,
+    },
   };
 }
 
@@ -287,6 +348,56 @@ export function registerConstraintFenceErrorIntegrationTests(
           nodeId: "disjoint-identity",
           attemptedKind: "FenceSpirit",
           conflictingKind: "FenceGhost",
+        },
+      });
+    });
+
+    it("reports the same cardinality refusal from the probe and from the claim", async () => {
+      // The edge-cardinality family's own refuser is `edgeClaimRefusal`
+      // (`edge-claims.ts`), and it shares its owners (`checkCardinality`,
+      // `checkUniqueEdge`) with the probe (`checkCardinalityConstraint`) — the
+      // same "one predicate, one owner" shape the uniqueness and disjointness
+      // cases above pin. This case pins it for cardinality too.
+      const store = await context.createStore(errorGraph);
+      const source = await store.nodes.FenceGhost.create({
+        email: "reaper@identity.example",
+      });
+      const incumbentTarget = await store.nodes.FenceSpirit.create({
+        email: "wisp@identity.example",
+      });
+      const challengerTarget = await store.nodes.FenceSpirit.create({
+        email: "specter@identity.example",
+      });
+      await store.edges.fenceHaunts.create(source, incumbentTarget, {});
+
+      // Leg 1: the probe refuses, because it reads the incumbent edge's count
+      // before the write. A refused create leaves the incumbent's claim row
+      // exactly as it was, so leg 2 runs against the same state.
+      const fromProbe = await captureRefusal(
+        () => store.edges.fenceHaunts.create(source, challengerTarget, {}),
+        cardinalityRefusalShape,
+      );
+
+      // Leg 2: the probe is blinded, so the write reaches the claim and the
+      // claim's own verdict is what the caller sees.
+      const blindStore = createStore(
+        errorGraph,
+        backendWithoutCardinalityProbe(store.backend),
+      );
+      const fromFence = await captureRefusal(
+        () => blindStore.edges.fenceHaunts.create(source, challengerTarget, {}),
+        cardinalityRefusalShape,
+      );
+
+      expect(fromFence).toEqual(fromProbe);
+      expect(fromProbe).toMatchObject({
+        isCardinalityError: true,
+        details: {
+          edgeKind: "fenceHaunts",
+          fromKind: "FenceGhost",
+          fromId: source.id,
+          cardinality: "one",
+          existingCount: 1,
         },
       });
     });

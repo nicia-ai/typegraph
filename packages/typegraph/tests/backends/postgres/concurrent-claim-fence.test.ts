@@ -46,6 +46,7 @@ import { z } from "zod";
 
 import {
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   disjointWith,
@@ -172,6 +173,44 @@ const disjointGraph = defineGraph({
   ontology: [disjointWith(ClaimPerson, ClaimCompany)],
 });
 
+/**
+ * A fourth graph for the EDGE cardinality cases (C3–C6, C8): one kind per
+ * declared cardinality, so each case races on the axis its own declaration
+ * spans and nothing else can refuse either leg. The edges relation is unique on
+ * `(graph_id, id)` alone, so without the claim both writers commit.
+ */
+const ClaimEndpoint = defineNode("ClaimEndpoint", {
+  schema: z.object({ name: z.string() }),
+});
+const claimReportsTo = defineEdge("claimReportsTo", { schema: z.object({}) });
+const claimPairs = defineEdge("claimPairs", { schema: z.object({}) });
+const claimHolds = defineEdge("claimHolds", { schema: z.object({}) });
+
+const edgeGraph = defineGraph({
+  id: "concurrent-claim-edges",
+  nodes: { ClaimEndpoint: { type: ClaimEndpoint } },
+  edges: {
+    claimReportsTo: {
+      type: claimReportsTo,
+      from: [ClaimEndpoint],
+      to: [ClaimEndpoint],
+      cardinality: "one",
+    },
+    claimPairs: {
+      type: claimPairs,
+      from: [ClaimEndpoint],
+      to: [ClaimEndpoint],
+      cardinality: "unique",
+    },
+    claimHolds: {
+      type: claimHolds,
+      from: [ClaimEndpoint],
+      to: [ClaimEndpoint],
+      cardinality: "oneActive",
+    },
+  },
+});
+
 const IMPORT_OPTIONS: ImportOptions = {
   onConflict: "update",
   onUnknownProperty: "error",
@@ -187,6 +226,51 @@ function importPayload(nodes: GraphData["nodes"]): GraphData {
     source: { type: "external", description: "concurrent claim fence" },
     nodes,
     edges: [],
+  };
+}
+
+function edgeImportPayload(edges: GraphData["edges"]): GraphData {
+  return {
+    formatVersion: FORMAT_VERSION,
+    exportedAt: new Date().toISOString(),
+    source: { type: "external", description: "concurrent edge claim fence" },
+    nodes: [],
+    edges,
+  };
+}
+
+/**
+ * The endpoint nodes an edge case races on, committed BEFORE either leg starts:
+ * the import payload carries only edges, so both legs see the same endpoints
+ * and nothing but the cardinality axis is contended.
+ */
+async function seedEndpoints(
+  store: Store<typeof edgeGraph>,
+  ids: readonly string[],
+): Promise<void> {
+  for (const id of ids) {
+    await store.nodes.ClaimEndpoint.create({ name: id }, { id });
+  }
+}
+
+/** An endpoint reference by id, for the edge cases' `from` / `to` arguments. */
+function endpoint(id: string): { kind: "ClaimEndpoint"; id: string } {
+  return { kind: "ClaimEndpoint", id };
+}
+
+/** One interchange edge document, for the edge cases' payloads. */
+function edgeDocument(
+  kind: string,
+  id: string,
+  fromId: string,
+  toId: string,
+): GraphData["edges"][number] {
+  return {
+    kind,
+    id,
+    from: { kind: "ClaimEndpoint", id: fromId },
+    to: { kind: "ClaimEndpoint", id: toId },
+    properties: {},
   };
 }
 
@@ -242,6 +326,18 @@ async function createOrderStore(
 ) {
   const [store] = await createStoreWithSchema(
     orderGraph,
+    decorate(createPostgresBackend(database)),
+  );
+  return store;
+}
+
+/** The same, for the EDGE cardinality graph. */
+async function createEdgeStore(
+  database: NodePgDatabase,
+  decorate: (backend: GraphBackend) => GraphBackend = (backend) => backend,
+) {
+  const [store] = await createStoreWithSchema(
+    edgeGraph,
     decorate(createPostgresBackend(database)),
   );
   return store;
@@ -317,7 +413,7 @@ afterAll(async () => {
 beforeEach(async () => {
   if (storePool === undefined) return;
   await storePool.query(
-    "TRUNCATE typegraph_node_uniques, typegraph_edges, typegraph_nodes",
+    "TRUNCATE typegraph_node_uniques, typegraph_edge_claims, typegraph_edges, typegraph_nodes",
   );
 });
 
@@ -428,6 +524,46 @@ function backendPausingBeforeClaim(
 }
 
 /**
+ * The import leg's backend, parked at the moment its EDGE claim is about to be
+ * issued — after every cardinality probe it makes, before the axis is reserved.
+ * The node twin above parks on `insertUnique`; this one parks on the edge
+ * relation's members, which are the only fence a lock-free edge writer has.
+ */
+function backendPausingBeforeEdgeClaim(
+  backend: GraphBackend,
+  gate: ClaimGate,
+): GraphBackend {
+  const pause = async (): Promise<void> => {
+    await gate.arrive();
+  };
+  return {
+    ...backend,
+    transaction: (run, options) =>
+      backend.transaction(async (target) => {
+        const claimOne = requireDefined(
+          target.claimEdgeCardinality,
+          "claimEdgeCardinality",
+        );
+        const claimBatch = requireDefined(
+          target.claimEdgeCardinalityBatch,
+          "claimEdgeCardinalityBatch",
+        );
+        return run({
+          ...target,
+          claimEdgeCardinality: async (params) => {
+            await pause();
+            return claimOne(params);
+          },
+          claimEdgeCardinalityBatch: async (entries) => {
+            await pause();
+            return claimBatch(entries);
+          },
+        });
+      }, options),
+  };
+}
+
+/**
  * A rejection's whole cause chain, including each link's SQL state.
  *
  * A driver-level failure — a deadlock victim, most importantly — reaches the
@@ -474,11 +610,15 @@ async function raceStoreAgainstParkedImport<G extends GraphDef>(
   createStoreFor: StoreFactory<G>,
   payload: GraphData,
   storeWrite: (store: Store<G>) => Promise<unknown>,
+  parkImportAt: (
+    backend: GraphBackend,
+    gate: ClaimGate,
+  ) => GraphBackend = backendPausingBeforeClaim,
 ): Promise<Readonly<{ importRefusal: string }>> {
   const live = requirePostgres();
   const gate = createClaimGate();
   const importStore = await createStoreFor(live.importDb, (backend) =>
-    backendPausingBeforeClaim(backend, gate),
+    parkImportAt(backend, gate),
   );
   const store = await createStoreFor(live.storeDb);
 
@@ -730,6 +870,208 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const reader = await createOrderStore(live.storeDb);
         expect(await reader.nodes.OrderAliasFirst.find()).toHaveLength(1);
         expect(await reader.nodes.OrderEmailFirst.find()).toHaveLength(0);
+      },
+    );
+
+    it(
+      "refuses an import edge whose cardinality-one axis a store create took inside its claim window",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        // C3. Both legs probe `countEdgesFrom` and both read zero, because
+        // neither row is committed yet; the edges primary key is
+        // `(graph_id, id)` and the two ids differ, so nothing at the database
+        // level collides. The claim row is the entire fence.
+        const live = requirePostgres();
+        const seed = await createEdgeStore(live.storeDb);
+        await seedEndpoints(seed, ["c3-src", "c3-dst-a", "c3-dst-b"]);
+
+        const { importRefusal } = await raceStoreAgainstParkedImport(
+          createEdgeStore,
+          edgeImportPayload([
+            edgeDocument("claimReportsTo", "c3-import", "c3-src", "c3-dst-a"),
+          ]),
+          (store) =>
+            store.edges.claimReportsTo.create(
+              endpoint("c3-src"),
+              endpoint("c3-dst-b"),
+              {},
+              { id: "c3-store" },
+            ),
+          backendPausingBeforeEdgeClaim,
+        );
+
+        const reader = await createEdgeStore(live.storeDb);
+        const edges = await reader.edges.claimReportsTo.find();
+        expect(edges.map((edge) => edge.id)).toEqual(["c3-store"]);
+        expect(importRefusal).toContain("Cardinality");
+        expect(importRefusal).toContain("claimReportsTo");
+      },
+    );
+
+    it(
+      "refuses an import edge whose unique PAIR a store create took inside its claim window",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        // C4. The axis here covers BOTH endpoints, so the losing leg must be
+        // the one naming the same ordered pair — and a third edge on a
+        // DIFFERENT pair must stay unaffected, which is what makes a key shape
+        // widened to "from" alone visible.
+        const live = requirePostgres();
+        const seed = await createEdgeStore(live.storeDb);
+        await seedEndpoints(seed, ["c4-src", "c4-dst", "c4-other"]);
+
+        const { importRefusal } = await raceStoreAgainstParkedImport(
+          createEdgeStore,
+          edgeImportPayload([
+            edgeDocument("claimPairs", "c4-import", "c4-src", "c4-dst"),
+          ]),
+          (store) =>
+            store.edges.claimPairs.create(
+              endpoint("c4-src"),
+              endpoint("c4-dst"),
+              {},
+              { id: "c4-store" },
+            ),
+          backendPausingBeforeEdgeClaim,
+        );
+
+        const reader = await createEdgeStore(live.storeDb);
+        const pairs = await reader.edges.claimPairs.find();
+        expect(pairs.map((edge) => edge.id)).toEqual(["c4-store"]);
+        expect(importRefusal).toContain("Cardinality");
+
+        // A different ordered pair is a different axis and is still writable.
+        await reader.edges.claimPairs.create(
+          endpoint("c4-src"),
+          endpoint("c4-other"),
+          {},
+          { id: "c4-other-pair" },
+        );
+        expect(await reader.edges.claimPairs.find()).toHaveLength(2);
+      },
+    );
+
+    it(
+      "refuses an import edge whose oneActive axis a store create took inside its claim window",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        // C5. The axis counts ACTIVE edges, so the fence's liveness predicate
+        // carries a `valid_to IS NULL` term the `one` axis does not.
+        const live = requirePostgres();
+        const seed = await createEdgeStore(live.storeDb);
+        await seedEndpoints(seed, ["c5-src", "c5-dst-a", "c5-dst-b"]);
+
+        const { importRefusal } = await raceStoreAgainstParkedImport(
+          createEdgeStore,
+          edgeImportPayload([
+            edgeDocument("claimHolds", "c5-import", "c5-src", "c5-dst-a"),
+          ]),
+          (store) =>
+            store.edges.claimHolds.create(
+              endpoint("c5-src"),
+              endpoint("c5-dst-b"),
+              {},
+              { id: "c5-store" },
+            ),
+          backendPausingBeforeEdgeClaim,
+        );
+
+        // Read past the store: the ACTIVE population is what `oneActive`
+        // constrains, and the store's edge shape does not surface the bound.
+        const active = await requireDefined(storePool).query(
+          "SELECT id FROM typegraph_edges WHERE kind = $1 AND deleted_at IS NULL AND valid_to IS NULL ORDER BY id",
+          ["claimHolds"],
+        );
+        expect(active.rows).toEqual([{ id: "c5-store" }]);
+        expect(importRefusal).toContain("Cardinality");
+      },
+    );
+
+    it(
+      "lets a oneActive create take an axis whose incumbent was ENDED first",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        // C6, and it is sequenced rather than raced on purpose: the end has to
+        // COMMIT first, or the create's own probe refuses it before any claim
+        // is issued. What is under test is that the fence agrees with the probe
+        // once it has — the incumbent still HOLDS the claim row (nothing
+        // releases it), so the create's takeover has to succeed on the
+        // `valid_to IS NULL` term alone. Without that term the ended incumbent
+        // reads as a live holder and this create is refused forever.
+        const live = requirePostgres();
+        const store = await createEdgeStore(live.storeDb);
+        await seedEndpoints(store, ["c6-src", "c6-dst-a", "c6-dst-b"]);
+
+        const incumbent = await store.edges.claimHolds.create(
+          endpoint("c6-src"),
+          endpoint("c6-dst-a"),
+          {},
+          { id: "c6-incumbent" },
+        );
+        await store.edges.claimHolds.update(
+          incumbent.id,
+          {},
+          { validTo: new Date().toISOString() },
+        );
+
+        const replacement = await store.edges.claimHolds.create(
+          endpoint("c6-src"),
+          endpoint("c6-dst-b"),
+          {},
+          { id: "c6-replacement" },
+        );
+        expect(replacement.id).toBe("c6-replacement");
+
+        // The claim row's owner moved to the new edge, which is what makes the
+        // axis fenced against the NEXT writer rather than merely unblocked.
+        const claims = await requireDefined(storePool).query(
+          "SELECT edge_id FROM typegraph_edge_claims WHERE axis = $1",
+          ["oneActive:claimHolds"],
+        );
+        expect(claims.rows).toEqual([{ edge_id: "c6-replacement" }]);
+      },
+    );
+
+    it(
+      "refuses an import edge whose axis a store RESURRECT took inside its claim window",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        // C8, edge half. A resurrect re-admits its edge to the population, so
+        // it claims exactly as a create does — and the import, whose probe read
+        // a graph in which the tombstone did not count, has only the claim to
+        // tell it otherwise.
+        const live = requirePostgres();
+        const seed = await createEdgeStore(live.storeDb);
+        await seedEndpoints(seed, ["c8-src", "c8-dst-a", "c8-dst-b"]);
+        const tombstoned = await seed.edges.claimReportsTo.create(
+          endpoint("c8-src"),
+          endpoint("c8-dst-a"),
+          {},
+          { id: "c8-tombstone" },
+        );
+        await seed.edges.claimReportsTo.delete(tombstoned.id);
+
+        const { importRefusal } = await raceStoreAgainstParkedImport(
+          createEdgeStore,
+          edgeImportPayload([
+            edgeDocument("claimReportsTo", "c8-import", "c8-src", "c8-dst-b"),
+          ]),
+          async (store) => {
+            const revived =
+              await store.edges.claimReportsTo.getOrCreateByEndpoints(
+                endpoint("c8-src"),
+                endpoint("c8-dst-a"),
+                {},
+              );
+            expect(revived.action).toBe("resurrected");
+          },
+          backendPausingBeforeEdgeClaim,
+        );
+
+        const reader = await createEdgeStore(live.storeDb);
+        const edges = await reader.edges.claimReportsTo.find();
+        expect(edges.map((edge) => edge.id)).toEqual(["c8-tombstone"]);
+        expect(importRefusal).toContain("Cardinality");
       },
     );
   },

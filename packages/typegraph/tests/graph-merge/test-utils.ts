@@ -163,6 +163,7 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     identityClosure: `${prefix}_identity_closure`,
     identitySeparation: `${prefix}_identity_separation`,
     uniques: `${prefix}_uniques`,
+    edgeClaims: `${prefix}_edge_claims`,
     schemaVersions: `${prefix}_schema_versions`,
     fulltext: `${prefix}_fulltext`,
     indexMaterializations: `${prefix}_index_materializations`,

@@ -17,6 +17,12 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "capabilities",
   "checkUnique",
   "checkUniqueBatch",
+  // The edge cardinality fence. Both members write only the claim relation —
+  // a reservation whose holder is a graph row, never a graph row itself — so
+  // neither can bypass a capture flush, and a history-enabled store that could
+  // not reach them would write constrained edges unfenced.
+  "claimEdgeCardinality",
+  "claimEdgeCardinalityBatch",
   "claimIndexMaterialization",
   "close",
   "commitSchemaVersion",
@@ -94,6 +100,9 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "insertUnique",
   "insertUniqueBatch",
   "probeContributions",
+  // Housekeeping for the relation above: drops claim rows whose holders are
+  // already gone. Writes no graph row.
+  "purgeEdgeClaims",
   "recordContributionMaterialization",
   "recordIndexMaterialization",
   "recordKindRemoval",

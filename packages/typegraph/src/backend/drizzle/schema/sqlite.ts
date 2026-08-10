@@ -52,6 +52,7 @@ export type SqliteTableNames = Readonly<{
   identityClosure: string;
   identitySeparation: string;
   uniques: string;
+  edgeClaims: string;
   schemaVersions: string;
   fulltext: string;
   indexMaterializations: string;
@@ -90,6 +91,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   identityClosure: "typegraph_identity_closure",
   identitySeparation: "typegraph_identity_separation",
   uniques: "typegraph_node_uniques",
+  edgeClaims: "typegraph_edge_claims",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
@@ -393,6 +395,24 @@ export function createSqliteTables(
     ],
   );
 
+  // The edge cardinality claim relation — same shape and same role as the
+  // PostgreSQL table, with a text timestamp, mirroring `uniques`. See
+  // `store/claims/edge-claims.ts` for why it needs no release path.
+  const edgeClaims = sqliteTable(
+    n.edgeClaims,
+    {
+      graphId: text("graph_id").notNull(),
+      axis: text("axis").notNull(),
+      key: text("key").notNull(),
+      edgeId: text("edge_id").notNull(),
+      updatedAt: text("updated_at").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.axis, t.key] }),
+      index(`${n.edgeClaims}_edge_idx`).on(t.graphId, t.edgeId),
+    ],
+  );
+
   const schemaVersions = sqliteTable(
     n.schemaVersions,
     {
@@ -531,6 +551,7 @@ export function createSqliteTables(
     identityClosure,
     identitySeparation,
     uniques,
+    edgeClaims,
     schemaVersions,
     indexMaterializations,
     contributionMaterializations,
@@ -560,6 +581,7 @@ export const {
   recordedEdges,
   recordedClock,
   uniques,
+  edgeClaims,
   schemaVersions,
 } = tables;
 

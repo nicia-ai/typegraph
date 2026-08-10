@@ -21,6 +21,7 @@ import { z } from "zod";
 import {
   createStore,
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   DisjointError,
@@ -194,6 +195,47 @@ function backendWithHiddenKind(
           }),
         options,
       ),
+  };
+}
+
+const ImportNode = defineNode("ImportNode", {
+  schema: z.object({ name: z.string() }),
+});
+const importReportsTo = defineEdge("importReportsTo", {
+  schema: z.object({}),
+});
+
+/**
+ * One `cardinality: "one"` edge kind and nothing else: no unique constraint and
+ * no disjointness anywhere, so the only thing that can refuse a row here is the
+ * edge cardinality family.
+ */
+function buildImportCardinalityGraph(graphId: string) {
+  return defineGraph({
+    id: graphId,
+    nodes: { ImportNode: { type: ImportNode } },
+    edges: {
+      importReportsTo: {
+        type: importReportsTo,
+        from: [ImportNode],
+        to: [ImportNode],
+        cardinality: "one",
+      },
+    },
+  });
+}
+
+/** A payload carrying both nodes and edges, for the cardinality cases. */
+function edgePayload(
+  nodes: GraphData["nodes"],
+  edges: GraphData["edges"],
+): GraphData {
+  return {
+    formatVersion: FORMAT_VERSION,
+    exportedAt: new Date().toISOString(),
+    source: { type: "external", description: "import cardinality parity" },
+    nodes,
+    edges,
   };
 }
 
@@ -604,6 +646,124 @@ export function registerImportUniquenessIntegrationTests(
       ).toEqual([true, true]);
       expect(await store.nodes.ImportOrg.find()).toHaveLength(0);
       expect(await store.nodes.ImportHuman.find()).toHaveLength(1);
+    });
+
+    it("refuses only the second of two cardinality-one edges from one source in one slice", async () => {
+      // Newly enforced: at HEAD an import ran no cardinality probe at all, so
+      // BOTH edges committed and the graph carried two edges where the schema
+      // declares at most one. The refusal has to be per ROW — first edge
+      // committed, second reported, import resolving — and it is per row only
+      // because the probe runs against the shared in-batch cardinality state.
+      // Without that state both edges read `countEdgesFrom` = 0 (neither row is
+      // written yet), both pass, and the refusal arrives from the ONE batch
+      // claim, which runs outside every per-row recovery and rejects the import.
+      graphIdCounter += 1;
+      const graph = buildImportCardinalityGraph(
+        `import_cardinality_slice_${graphIdCounter}`,
+      );
+      const [store] = await createStoreWithSchema(
+        graph,
+        context.getStore().backend,
+      );
+
+      const result = await importGraph(
+        store,
+        edgePayload(
+          [
+            { kind: "ImportNode", id: "src", properties: { name: "S" } },
+            { kind: "ImportNode", id: "dst-1", properties: { name: "D1" } },
+            { kind: "ImportNode", id: "dst-2", properties: { name: "D2" } },
+          ],
+          [
+            {
+              kind: "importReportsTo",
+              id: "edge-1",
+              from: { kind: "ImportNode", id: "src" },
+              to: { kind: "ImportNode", id: "dst-1" },
+              properties: {},
+            },
+            {
+              kind: "importReportsTo",
+              id: "edge-2",
+              from: { kind: "ImportNode", id: "src" },
+              to: { kind: "ImportNode", id: "dst-2" },
+              properties: {},
+            },
+          ],
+        ),
+        // One slice: the batched path, not the per-row fallback.
+        options(100),
+      );
+
+      expect(result.edges.created).toBe(1);
+      expect(
+        result.errors.map((entry) => ({
+          id: entry.id,
+          isCardinalityRefusal: entry.error.includes("Cardinality"),
+        })),
+      ).toEqual([{ id: "edge-2", isCardinalityRefusal: true }]);
+
+      const edges = await store.edges.importReportsTo.find();
+      expect(edges.map((edge) => edge.id)).toEqual(["edge-1"]);
+    });
+
+    it("refuses a cardinality-one edge on the per-row path after the slice flush", async () => {
+      // The per-row fallback, reached by repeating an id inside the slice: that
+      // row is deferred past the flush and probed against the REAL backend
+      // rather than the overlay, exactly as the node fallback is. Both rows must
+      // be per-row errors and the import must RESOLVE — if the probe were
+      // missing there, the claim behind it would refuse instead, and a claim
+      // refusal on this path propagates out of every per-row recovery and
+      // rejects the whole import.
+      graphIdCounter += 1;
+      const graph = buildImportCardinalityGraph(
+        `import_cardinality_serial_${graphIdCounter}`,
+      );
+      const [store] = await createStoreWithSchema(
+        graph,
+        context.getStore().backend,
+      );
+
+      await importGraph(
+        store,
+        edgePayload(
+          [
+            { kind: "ImportNode", id: "src", properties: { name: "S" } },
+            { kind: "ImportNode", id: "dst-1", properties: { name: "D1" } },
+            { kind: "ImportNode", id: "dst-2", properties: { name: "D2" } },
+          ],
+          [
+            {
+              kind: "importReportsTo",
+              id: "edge-1",
+              from: { kind: "ImportNode", id: "src" },
+              to: { kind: "ImportNode", id: "dst-1" },
+              properties: {},
+            },
+          ],
+        ),
+        options(100),
+      );
+
+      const conflicting = {
+        kind: "importReportsTo",
+        id: "edge-2",
+        from: { kind: "ImportNode", id: "src" },
+        to: { kind: "ImportNode", id: "dst-2" },
+        properties: {},
+      } as const;
+      const result = await importGraph(
+        store,
+        edgePayload([], [conflicting, conflicting]),
+        options(100),
+      );
+
+      expect(result.edges.created).toBe(0);
+      expect(
+        result.errors.map((entry) => entry.error.includes("Cardinality")),
+      ).toEqual([true, true]);
+      const edges = await store.edges.importReportsTo.find();
+      expect(edges.map((edge) => edge.id)).toEqual(["edge-1"]);
     });
   });
 }

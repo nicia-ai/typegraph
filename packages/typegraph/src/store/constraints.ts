@@ -44,6 +44,7 @@ import { type GraphDef } from "../core/define-graph";
 import { type Cardinality, type UniqueConstraint } from "../core/types";
 import { type KindRegistry } from "../registry/kind-registry";
 import { type ConstraintFenceReason } from "./claims/backing";
+import { EDGE_CARDINALITY_SPECS } from "./claims/edge-claims";
 import { nodeClaimSites } from "./claims/sites";
 
 export { type ConstraintFenceReason } from "./claims/backing";
@@ -189,90 +190,68 @@ export async function checkDisjointnessConstraint(
 /**
  * Checks cardinality constraints for an edge.
  *
+ * Reads {@link EDGE_CARDINALITY_SPECS} rather than re-spelling each
+ * cardinality's rules: which endpoints the axis covers (`keyShape`), whether an
+ * edge born already ended joins the population at all (`claimsWhenBornEnded`)
+ * and whether the population is the live one or the active one
+ * (`holderLiveness`) are the same three facts the claim's SQL reads. A probe
+ * that spelled its own copy would be the drift that accepts a write the fence
+ * then refuses (or the reverse).
+ *
  * @throws CardinalityError if cardinality constraint is violated
  */
 export async function checkCardinalityConstraint(
   ctx: ConstraintContext,
   edgeKind: string,
-  cardinality: "many" | "one" | "unique" | "oneActive",
+  cardinality: Cardinality,
   fromKind: string,
   fromId: string,
   toKind: string,
   toId: string,
   validTo: string | undefined,
 ): Promise<void> {
-  switch (cardinality) {
-    case "many": {
-      // No constraint - allow any number of edges
-      return;
-    }
+  if (cardinality === "many") return;
+  const spec = EDGE_CARDINALITY_SPECS[cardinality];
 
-    case "one": {
-      // At most one edge of this kind from this source
-      const count = await ctx.backend.countEdgesFrom({
-        graphId: ctx.graphId,
-        edgeKind,
-        fromKind,
-        fromId,
-      });
-      const error = checkCardinality(
-        edgeKind,
-        fromKind,
-        fromId,
-        "one",
-        count,
-        false,
-      );
-      if (error) throw error;
-      return;
-    }
+  // An edge born ended never joins an active-only population, so it has
+  // nothing to check and nothing to claim.
+  if (!spec.claimsWhenBornEnded && validTo !== undefined) return;
 
-    case "unique": {
-      // At most one edge between this specific source-target pair
-      const exists = await ctx.backend.edgeExistsBetween({
-        graphId: ctx.graphId,
-        edgeKind,
-        fromKind,
-        fromId,
-        toKind,
-        toId,
-      });
-      const error = checkUniqueEdge(
-        edgeKind,
-        fromKind,
-        fromId,
-        toKind,
-        toId,
-        exists ? 1 : 0,
-      );
-      if (error) throw error;
-      return;
-    }
-
-    case "oneActive": {
-      // At most one active edge (valid_to IS NULL) from this source
-      // Only check if the new edge will be active (validTo is not set)
-      if (validTo !== undefined) {
-        // New edge is already ended, no active constraint to check
-        return;
-      }
-      const count = await ctx.backend.countEdgesFrom({
-        graphId: ctx.graphId,
-        edgeKind,
-        fromKind,
-        fromId,
-        activeOnly: true,
-      });
-      const error = checkCardinality(
-        edgeKind,
-        fromKind,
-        fromId,
-        "oneActive",
-        count,
-        count > 0,
-      );
-      if (error) throw error;
-      return;
-    }
+  if (spec.keyShape === "fromAndTo") {
+    const exists = await ctx.backend.edgeExistsBetween({
+      graphId: ctx.graphId,
+      edgeKind,
+      fromKind,
+      fromId,
+      toKind,
+      toId,
+    });
+    const error = checkUniqueEdge(
+      edgeKind,
+      fromKind,
+      fromId,
+      toKind,
+      toId,
+      exists ? 1 : 0,
+    );
+    if (error) throw error;
+    return;
   }
+
+  const count = await ctx.backend.countEdgesFrom({
+    graphId: ctx.graphId,
+    edgeKind,
+    fromKind,
+    fromId,
+    activeOnly: spec.holderLiveness === "liveAndActive",
+  });
+  const error = checkCardinality(
+    edgeKind,
+    fromKind,
+    fromId,
+    cardinality,
+    count,
+    count > 0,
+  );
+  if (error) throw error;
 }

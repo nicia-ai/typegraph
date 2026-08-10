@@ -75,7 +75,6 @@
  *    bound between them.
  */
 import {
-  createBackendOverlay,
   type EdgeRow as BackendEdgeRow,
   type GraphBackend,
   type GraphReadBackend,
@@ -112,6 +111,12 @@ import { generateId } from "../../utils/id";
 import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import {
+  claimEdgeCardinality,
+  claimEdgeCardinalityBatch,
+  edgeCardinalityClaim,
+  purgeEdgeClaims,
+} from "../claims/edge-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateEdgeInput } from "../collections/edge-collection";
 import {
@@ -135,6 +140,7 @@ import {
   type OperationHookContext,
 } from "../types";
 import { withAlreadyExistsTranslation } from "./already-exists";
+import { createEdgeBatchValidationBackend } from "./edge-batch-validation";
 import {
   assertEdgeIdentityMatches,
   type EdgeIdentityExpectation,
@@ -193,47 +199,6 @@ type EdgeCreatePrepared = Readonly<{
   cardinality: Cardinality;
 }>;
 
-function buildEdgeEndpointCacheKey(
-  graphId: string,
-  kind: string,
-  id: string,
-): string {
-  return encodeTupleKey([graphId, kind, id]);
-}
-
-function buildEdgeFromCacheKey(
-  graphId: string,
-  edgeKind: string,
-  fromKind: string,
-  fromId: string,
-): string {
-  return encodeTupleKey([graphId, edgeKind, fromKind, fromId]);
-}
-
-function buildEdgeBetweenCacheKey(
-  graphId: string,
-  edgeKind: string,
-  fromKind: string,
-  fromId: string,
-  toKind: string,
-  toId: string,
-): string {
-  return encodeTupleKey([graphId, edgeKind, fromKind, fromId, toKind, toId]);
-}
-
-function buildCountEdgesFromCacheKey(
-  params: Parameters<GraphBackend["countEdgesFrom"]>[0],
-): string {
-  const activeOnly = params.activeOnly === true ? "1" : "0";
-  return encodeTupleKey([
-    params.graphId,
-    params.edgeKind,
-    params.fromKind,
-    params.fromId,
-    activeOnly,
-  ]);
-}
-
 function buildInsertEdgeParams(
   graphId: string,
   id: string,
@@ -270,157 +235,6 @@ function buildInsertEdgeParams(
   if (validFrom !== undefined) insertParams.validFrom = validFrom;
   if (validTo !== undefined) insertParams.validTo = validTo;
   return insertParams;
-}
-
-function incrementPendingCount(counts: Map<string, number>, key: string): void {
-  const previous = counts.get(key) ?? 0;
-  counts.set(key, previous + 1);
-}
-
-function createEdgeBatchValidationBackend(
-  backend: GraphBackend | TransactionBackend,
-): Readonly<{
-  backend: GraphBackend | TransactionBackend;
-  registerPendingEdgeForCardinality: (
-    insertParams: InsertEdgeParams,
-    cardinality: Cardinality,
-  ) => void;
-  seedEndpointRow: (
-    graphId: string,
-    kind: string,
-    id: string,
-    row: Awaited<ReturnType<GraphBackend["getNode"]>>,
-  ) => void;
-}> {
-  const endpointCache = new Map<
-    string,
-    Awaited<ReturnType<GraphBackend["getNode"]>>
-  >();
-  const countEdgesFromCache = new Map<string, number>();
-  const edgeExistsCache = new Map<string, boolean>();
-  const pendingOneCounts = new Map<string, number>();
-  const pendingOneActiveCounts = new Map<string, number>();
-  const pendingUniquePairs = new Set<string>();
-
-  async function getNodeCached(
-    graphId: string,
-    kind: string,
-    id: string,
-  ): Promise<Awaited<ReturnType<GraphBackend["getNode"]>>> {
-    const cacheKey = buildEdgeEndpointCacheKey(graphId, kind, id);
-    if (endpointCache.has(cacheKey)) {
-      return endpointCache.get(cacheKey);
-    }
-    const node = await backend.getNode(graphId, kind, id);
-    endpointCache.set(cacheKey, node);
-    return node;
-  }
-
-  // Lets batch preparation prime the endpoint cache from one getNodes
-  // round trip per (kind) instead of a per-edge getNode probe for each
-  // from/to endpoint — mirrors seedNodeRow in createNodeBatchValidationBackend.
-  // Seeding an absent result (`undefined`) is meaningful — it marks the key
-  // as known-missing so the per-edge check skips the backend read. An
-  // earlier lookup or seed always wins; seeding never overwrites.
-  function seedEndpointRow(
-    graphId: string,
-    kind: string,
-    id: string,
-    row: Awaited<ReturnType<GraphBackend["getNode"]>>,
-  ): void {
-    const cacheKey = buildEdgeEndpointCacheKey(graphId, kind, id);
-    if (endpointCache.has(cacheKey)) return;
-    endpointCache.set(cacheKey, row);
-  }
-
-  async function countEdgesFromCached(
-    params: Parameters<GraphBackend["countEdgesFrom"]>[0],
-  ): Promise<number> {
-    const cacheKey = buildCountEdgesFromCacheKey(params);
-    let baseCount = countEdgesFromCache.get(cacheKey);
-    if (baseCount === undefined) {
-      baseCount = await backend.countEdgesFrom(params);
-      countEdgesFromCache.set(cacheKey, baseCount);
-    }
-    const pendingKey = buildEdgeFromCacheKey(
-      params.graphId,
-      params.edgeKind,
-      params.fromKind,
-      params.fromId,
-    );
-    const pendingCount =
-      params.activeOnly === true ?
-        (pendingOneActiveCounts.get(pendingKey) ?? 0)
-      : (pendingOneCounts.get(pendingKey) ?? 0);
-    return baseCount + pendingCount;
-  }
-
-  async function edgeExistsBetweenCached(
-    params: Parameters<GraphBackend["edgeExistsBetween"]>[0],
-  ): Promise<boolean> {
-    const cacheKey = buildEdgeBetweenCacheKey(
-      params.graphId,
-      params.edgeKind,
-      params.fromKind,
-      params.fromId,
-      params.toKind,
-      params.toId,
-    );
-    if (pendingUniquePairs.has(cacheKey)) {
-      return true;
-    }
-    if (edgeExistsCache.has(cacheKey)) {
-      return edgeExistsCache.get(cacheKey) ?? false;
-    }
-    const exists = await backend.edgeExistsBetween(params);
-    edgeExistsCache.set(cacheKey, exists);
-    return exists;
-  }
-
-  function registerPendingEdgeForCardinality(
-    insertParams: InsertEdgeParams,
-    cardinality: Cardinality,
-  ): void {
-    const fromCacheKey = buildEdgeFromCacheKey(
-      insertParams.graphId,
-      insertParams.kind,
-      insertParams.fromKind,
-      insertParams.fromId,
-    );
-    if (cardinality === "one") {
-      incrementPendingCount(pendingOneCounts, fromCacheKey);
-      return;
-    }
-    if (cardinality === "oneActive") {
-      if (insertParams.validTo === undefined) {
-        incrementPendingCount(pendingOneActiveCounts, fromCacheKey);
-      }
-      return;
-    }
-    if (cardinality === "unique") {
-      const uniqueCacheKey = buildEdgeBetweenCacheKey(
-        insertParams.graphId,
-        insertParams.kind,
-        insertParams.fromKind,
-        insertParams.fromId,
-        insertParams.toKind,
-        insertParams.toId,
-      );
-      pendingUniquePairs.add(uniqueCacheKey);
-    }
-  }
-
-  const validationBackend = createBackendOverlay(backend, {
-    getNode: getNodeCached,
-    countEdgesFrom: countEdgesFromCached,
-    edgeExistsBetween: edgeExistsBetweenCached,
-  } satisfies Partial<GraphBackend | TransactionBackend>);
-
-  return {
-    backend: validationBackend,
-    registerPendingEdgeForCardinality,
-    seedEndpointRow,
-  };
 }
 
 async function validateAndPrepareEdgeCreate<G extends GraphDef>(
@@ -639,6 +453,16 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         target,
       );
 
+      // The claim, against the object the row write goes to and BEFORE it: the
+      // probe above read a population no key fences, so the claim row is what
+      // stops a concurrent writer that read the same population from also
+      // committing. A refusal here has written no edge row.
+      const claim = edgeCardinalityClaim(
+        prepared.cardinality,
+        prepared.insertParams,
+      );
+      if (claim !== undefined) await claimEdgeCardinality(target, claim);
+
       // An edge create has no existence probe at all — its id is either
       // caller-supplied or freshly generated — so the engine's refusal is the ONLY
       // report that the id is taken. Translated here, that report is the same
@@ -776,6 +600,22 @@ async function prepareEdgeBatchCreates<G extends GraphDef>(
       prepared.cardinality,
     );
   }
+
+  // ONE sorted claim statement for the whole batch, against the REAL backend
+  // this function was handed rather than the validation wrapper, and after the
+  // preparation loop rather than inside it: a per-input claim would take its
+  // row locks in input order instead of `compareClaimTargets` order, and would
+  // claim for rows the loop may still refuse.
+  await claimEdgeCardinalityBatch(
+    backend,
+    preparedCreates.flatMap((prepared) => {
+      const claim = edgeCardinalityClaim(
+        prepared.cardinality,
+        prepared.insertParams,
+      );
+      return claim === undefined ? [] : [claim];
+    }),
+  );
 
   const batchInsertParams = preparedCreates.map(
     (prepared) => prepared.insertParams,
@@ -1300,6 +1140,22 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
           resurrectCardinality.toId,
           resurrectCardinality.effectiveValidTo,
         );
+        // Reviving a tombstone re-admits the edge to the population its
+        // cardinality constrains, so it claims the axis exactly as a create
+        // does — before the write that re-admits it.
+        const claim = edgeCardinalityClaim(resurrectCardinality.cardinality, {
+          graphId: ctx.graphId,
+          id: input.id,
+          kind: input.identity.kind,
+          fromKind: resurrectCardinality.fromKind,
+          fromId: resurrectCardinality.fromId,
+          toKind: resurrectCardinality.toKind,
+          toId: resurrectCardinality.toId,
+          ...(resurrectCardinality.effectiveValidTo === undefined ?
+            {}
+          : { validTo: resurrectCardinality.effectiveValidTo }),
+        });
+        if (claim !== undefined) await claimEdgeCardinality(target, claim);
       }
       return performEdgeUpdateConverging(ctx, input, target, options);
     },
@@ -1433,6 +1289,14 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
       id,
       kind: expectedKind,
     });
+    // Housekeeping, not a fence: this edge's claim is already takeable — its
+    // liveness predicate reads a row that no longer exists — so dropping the
+    // row only keeps the relation from growing by one row per hard-deleted
+    // constrained edge. An unconstrained kind holds no claim and pays no
+    // statement for one, the same rule its create follows.
+    if (edgeCardinality(ctx, expectedKind) !== "many") {
+      await purgeEdgeClaims(target, ctx.graphId, [id]);
+    }
   });
 }
 

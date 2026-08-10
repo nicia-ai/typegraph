@@ -807,6 +807,7 @@ function secondaryRowTableNames(
       tables.identitySeparation,
       tables.fulltext,
       tables.uniques,
+      tables.edgeClaims,
     ]),
   ];
 }

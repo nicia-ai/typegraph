@@ -13,6 +13,7 @@ export { registerConstraintFenceTransactionHealthTests } from "./constraint-fenc
 export { registerContributionDiagnosticIntegrationTests } from "./contribution-diagnostics";
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerEdgeCaseIntegrationTests } from "./edge-cases";
+export { registerEdgeClaimSelfHealIntegrationTests } from "./edge-claim-self-heal";
 export { registerEdgeOperationIntegrationTests } from "./edge-operations";
 export { registerEdgePropertyIntegrationTests } from "./edge-properties";
 export { registerAdvancedEdgePropertyIntegrationTests } from "./edge-properties-advanced";

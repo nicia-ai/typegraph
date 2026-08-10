@@ -1314,6 +1314,7 @@ export function createSqliteBackend(
     identitySeparation: getTableName(tables.identitySeparation),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
+    edgeClaims: getTableName(tables.edgeClaims),
   };
   // refreshStatistics() scopes ANALYZE to these — matching the Postgres
   // backend, which never touches unrelated tables sharing the database.

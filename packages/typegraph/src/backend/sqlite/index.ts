@@ -42,6 +42,7 @@ export type {
 // Schema: table definitions and factory options
 export {
   type CreateSqliteTablesOptions,
+  edgeClaims,
   edges,
   nodes,
   recordedClock,

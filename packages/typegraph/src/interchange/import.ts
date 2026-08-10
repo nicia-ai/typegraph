@@ -54,6 +54,7 @@ import {
 } from "../backend/transaction-resource";
 import {
   type GraphBackend,
+  type InsertEdgeParams,
   isLiveNodeRow,
   type LiveNodeRow,
   rowPropsToObject,
@@ -88,14 +89,21 @@ import {
 } from "../identity/service";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
+  claimEdgeCardinality,
+  claimEdgeCardinalityBatch,
+  edgeCardinalityClaim,
+} from "../store/claims/edge-claims";
+import {
   checkUniquenessConstraints,
   withNodeCreateClaims,
   withNodeCreateClaimsBatch,
 } from "../store/claims/node-claims";
 import {
+  checkCardinalityConstraint,
   checkDisjointnessConstraint,
   graphOwesClaims,
 } from "../store/constraints";
+import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
 import {
   createNodeBatchValidationBackend,
   type NodeCreateDraft,
@@ -2149,6 +2157,32 @@ type EdgeImportCandidate = Readonly<{
 }>;
 
 /**
+ * THE insert params one accepted edge candidate carries, built once and read by
+ * three consumers: the in-slice cardinality registration, the claim, and the
+ * flush. The candidate loop needs them before the flush does — that is what
+ * lets an in-slice collision refuse the ROW — so they cannot be materialized
+ * only at the flush the way the pre-fence path did.
+ */
+function edgeInsertParamsOf(
+  graphId: string,
+  candidate: EdgeImportCandidate,
+): InsertEdgeParams {
+  const { edge, props } = candidate;
+  return {
+    graphId,
+    id: edge.id,
+    kind: edge.kind,
+    fromKind: edge.from.kind,
+    fromId: edge.from.id,
+    toKind: edge.to.kind,
+    toId: edge.to.id,
+    props,
+    ...(edge.validFrom !== undefined && { validFrom: edge.validFrom }),
+    ...(edge.validTo !== undefined && { validTo: edge.validTo }),
+  };
+}
+
+/**
  * Processes one batchSize slice of edges with batched round trips: one
  * `getNodes` per endpoint kind for reference liveness, one `getEdges` for
  * existence, and one multi-row insert for the accepted creates. Per-row
@@ -2170,6 +2204,17 @@ async function processEdgeSlice(
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
   };
+
+  // The store's own in-batch cardinality accounting, constructed once per
+  // slice against the REAL backend — the same wrapper `prepareEdgeBatchCreates`
+  // uses, not a second implementation. Per slice rather than per import is
+  // correct because each slice flushes its accepted inserts before the next one
+  // runs, so slice k+1's probe reads slice k's rows from the backend; the
+  // pending state only has to cover rows decided but not yet written.
+  const {
+    backend: cardinalityValidationBackend,
+    registerPendingEdgeForCardinality,
+  } = createEdgeBatchValidationBackend(backend);
 
   // Pass 1 (synchronous): kind, endpoint-kind, endpoint-assignability,
   // property, and validity validation, plus in-slice duplicate deferral.
@@ -2370,22 +2415,54 @@ async function processEdgeSlice(
       continue;
     }
 
+    // The cardinality probe, per row and against the pending-aware overlay, so
+    // two `cardinality: "one"` edges from one source IN ONE SLICE refuse the
+    // second row instead of both passing and colliding at the batch claim —
+    // which runs once for the whole slice, outside every per-row recovery.
+    const insertParams = edgeInsertParamsOf(graphId, candidate);
+    const cardinality =
+      edgeSchemas.get(edge.kind)?.registration.cardinality ?? "many";
+    const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
+      checkCardinalityConstraint(
+        { graphId, registry, backend: cardinalityValidationBackend },
+        edge.kind,
+        cardinality,
+        edge.from.kind,
+        edge.from.id,
+        edge.to.kind,
+        edge.to.id,
+        edge.validTo,
+      ),
+    );
+    if (!cardinalityResult.ok) {
+      record(edge, { status: "error", error: cardinalityResult.error });
+      continue;
+    }
+    registerPendingEdgeForCardinality(insertParams, cardinality);
+
     accepted.push(candidate);
   }
 
   if (accepted.length > 0) {
-    const insertParamsList = accepted.map(({ edge, props }) => ({
-      graphId,
-      id: edge.id,
-      kind: edge.kind,
-      fromKind: edge.from.kind,
-      fromId: edge.from.id,
-      toKind: edge.to.kind,
-      toId: edge.to.id,
-      props,
-      ...(edge.validFrom !== undefined && { validFrom: edge.validFrom }),
-      ...(edge.validTo !== undefined && { validTo: edge.validTo }),
-    }));
+    const insertParamsList = accepted.map((candidate) =>
+      edgeInsertParamsOf(graphId, candidate),
+    );
+    // ONE sorted claim for the slice, before any row is written. This import
+    // takes no per-graph lock, so the claim is the ONLY thing that can refuse a
+    // concurrent writer of the same axis; a refusal here aborts the import,
+    // which is the honest outcome when the graph changed under a bulk load and
+    // is why the per-row probe above exists for everything that is not
+    // concurrent.
+    await claimEdgeCardinalityBatch(
+      backend,
+      insertParamsList.flatMap((params) => {
+        const claim = edgeCardinalityClaim(
+          edgeSchemas.get(params.kind)?.registration.cardinality ?? "many",
+          params,
+        );
+        return claim === undefined ? [] : [claim];
+      }),
+    );
     if (backend.insertEdgesBatch === undefined) {
       for (const params of insertParamsList) {
         await backend.insertEdge(params);
@@ -2555,19 +2632,34 @@ async function processEdge(
     }
   }
 
-  // Create new edge
-  await backend.insertEdge({
-    graphId,
-    id: edge.id,
-    kind: edge.kind,
-    fromKind: edge.from.kind,
-    fromId: edge.from.id,
-    toKind: edge.to.kind,
-    toId: edge.to.id,
+  // Create new edge. Probe first (for the error text), then claim (for the
+  // fence), then write — the same order the collection create uses. No pending
+  // state is needed: this path writes each edge as it goes, so the next row's
+  // `countEdgesFrom` reads the previous one from the same transaction.
+  const insertParams = edgeInsertParamsOf(graphId, {
+    edge,
     props: propsResult.data,
-    ...(edge.validFrom !== undefined && { validFrom: edge.validFrom }),
-    ...(edge.validTo !== undefined && { validTo: edge.validTo }),
   });
+  const cardinality = schemaEntry.registration.cardinality ?? "many";
+  const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
+    checkCardinalityConstraint(
+      { graphId, registry, backend },
+      edge.kind,
+      cardinality,
+      edge.from.kind,
+      edge.from.id,
+      edge.to.kind,
+      edge.to.id,
+      edge.validTo,
+    ),
+  );
+  if (!cardinalityResult.ok) {
+    return { status: "error", error: cardinalityResult.error };
+  }
+  const claim = edgeCardinalityClaim(cardinality, insertParams);
+  if (claim !== undefined) await claimEdgeCardinality(backend, claim);
+
+  await backend.insertEdge(insertParams);
 
   return { status: "created" };
 }

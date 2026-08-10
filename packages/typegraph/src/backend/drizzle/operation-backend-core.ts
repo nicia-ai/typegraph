@@ -17,6 +17,7 @@ import type {
 } from "../../query/sql-intent";
 import { asCompiledStatementSql } from "../../query/sql-intent";
 import { type ClaimOwner, isSameClaimOwner } from "../../store/claims/axis";
+import { edgeCardinalityClaimTarget } from "../../store/claims/edge-claims";
 import { chunk as chunkArray } from "../../utils/array";
 import {
   isDuplicatePrimaryKeyError,
@@ -30,6 +31,7 @@ import { nowIso as defaultNowIso } from "../row-mappers";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
+  ClaimEdgeCardinalityParams,
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
   CountEdgesByKindParams,
@@ -39,6 +41,7 @@ import type {
   DeleteEdgesBatchParams,
   DeleteNodeParams,
   DeleteUniqueParams,
+  EdgeClaimOutcome,
   EdgeExistsBetweenParams,
   EdgeRow,
   FindEdgesByEndpointSetParams,
@@ -55,6 +58,7 @@ import type {
   InsertUniqueParams,
   NodeRow,
   PopulatedSchemaKind,
+  PurgeEdgeClaimsParams,
   SchemaKindEmptinessProbe,
   SchemaVersionRow,
   SetActiveVersionParams,
@@ -116,6 +120,8 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteEdge"
   | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
+  | "claimEdgeCardinality"
+  | "claimEdgeCardinalityBatch"
   | "hardDeleteUniquesByConcreteKind"
   | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
@@ -128,6 +134,7 @@ export type CommonOperationBackend = Pick<
   | "insertNodesBatchReturning"
   | "insertUnique"
   | "insertUniqueBatch"
+  | "purgeEdgeClaims"
   | "updateEdge"
   | "updateNode"
   | "updateNodeSet"
@@ -399,6 +406,82 @@ export function createCommonOperationBackend(
       return;
     }
     await execution.execRun(statement.query);
+  }
+
+  /**
+   * THE edge-claim driver, shared by the single and batch members: lock every
+   * entry's row in one statement, then run the conditional takeover for the
+   * entries a DIFFERENT edge holds.
+   *
+   * The two statements exist because one cannot do the job: deciding inside the
+   * upsert reads the pre-lock snapshot of the edges relation under READ
+   * COMMITTED, so two concurrent writers would both see "the incumbent is not
+   * live yet" and both commit. Statement 1 is therefore decision-free — it only
+   * makes the row exist, takes its lock and reports the COMMITTED holder — and
+   * statement 2 re-evaluates liveness after that lock is held.
+   *
+   * Duplicate conflict targets are refused rather than collapsed: a multi-row
+   * upsert cannot affect one row twice, so two entries claiming one axis would
+   * silently leave one of them unfenced. The application layer's pending
+   * cardinality state refuses in-batch collisions first, which makes this a
+   * defensive invariant rather than a semantic path.
+   */
+  async function claimEdgeCardinalityEntries(
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ): Promise<readonly EdgeClaimOutcome[]> {
+    if (entries.length === 0) return [];
+
+    const targetKey = (entry: ClaimEdgeCardinalityParams): string => {
+      const target = edgeCardinalityClaimTarget(entry);
+      return `${target.axis}\u0000${target.key}`;
+    };
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const key = targetKey(entry);
+      if (seen.has(key)) {
+        throw new DatabaseOperationError(
+          "Two edge claims in one batch name the same cardinality axis and key; " +
+            "a multi-row upsert cannot affect one row twice.",
+          { operation: "insert", entity: "edge" },
+        );
+      }
+      seen.add(key);
+    }
+
+    const outcomes = new Map<string, EdgeClaimOutcome>();
+    // One claim row per inserted edge, so the edge-insert budget is the right
+    // ceiling for the multi-row lock statement.
+    for (const chunk of chunkArray(entries, batchConfig.edgeInsertBatchSize)) {
+      const lockQuery = operationStrategy.buildLockEdgeClaims(chunk, nowIso());
+      const rows = await execution.execAll<{
+        axis: string;
+        key: string;
+        holder_edge_id: string;
+      }>(lockQuery);
+      const holderByTarget = new Map(
+        rows.map((row) => [`${row.axis}\u0000${row.key}`, row.holder_edge_id]),
+      );
+      for (const entry of chunk) {
+        const key = targetKey(entry);
+        const holder = holderByTarget.get(key);
+        if (holder === undefined || holder === entry.edgeId) {
+          outcomes.set(key, { status: "claimed" });
+          continue;
+        }
+        const takeOver = await execution.execAll<{ holder_edge_id: string }>(
+          operationStrategy.buildTakeOverEdgeClaim(entry, nowIso()),
+        );
+        outcomes.set(
+          key,
+          takeOver.length > 0 ?
+            { status: "claimed" }
+          : { status: "refused", holderEdgeId: holder },
+        );
+      }
+    }
+    return entries.map(
+      (entry) => outcomes.get(targetKey(entry)) ?? { status: "claimed" },
+    );
   }
 
   // Returns 0 when no row is currently active — that's the sentinel
@@ -996,6 +1079,32 @@ export function createCommonOperationBackend(
       const query =
         operationStrategy.buildHardDeleteUniquesByConcreteKind(params);
       await execution.execRun(query);
+    },
+
+    async claimEdgeCardinality(
+      params: ClaimEdgeCardinalityParams,
+    ): Promise<EdgeClaimOutcome> {
+      const [outcome] = await claimEdgeCardinalityEntries([params]);
+      return outcome ?? { status: "claimed" };
+    },
+
+    claimEdgeCardinalityBatch(
+      entries: readonly ClaimEdgeCardinalityParams[],
+    ): Promise<readonly EdgeClaimOutcome[]> {
+      return claimEdgeCardinalityEntries(entries);
+    },
+
+    async purgeEdgeClaims(params: PurgeEdgeClaimsParams): Promise<void> {
+      const edgeIds = [...new Set(params.edgeIds)];
+      // One claim row per edge at most, so the edge-read chunk budget is the
+      // right ceiling for a list of edge ids.
+      for (const chunk of chunkArray(edgeIds, batchConfig.getEdgesChunkSize)) {
+        const query = operationStrategy.buildPurgeEdgeClaims({
+          ...params,
+          edgeIds: chunk,
+        });
+        await execution.execRun(query);
+      }
     },
 
     async checkUnique(

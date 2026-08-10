@@ -8,6 +8,7 @@ import { nowIso } from "../../row-mappers";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
+  ClaimEdgeCardinalityParams,
   ContributionMaterializationIdentity,
   CountEdgesByKindParams,
   CountEdgesFromParams,
@@ -34,6 +35,7 @@ import type {
   InsertNodeParams,
   InsertSchemaParams,
   InsertUniqueParams,
+  PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
   SqlDialect,
   UpdateEdgeParams,
@@ -54,6 +56,11 @@ import {
   buildFindEdgesByKind,
   buildFindNodesByKind,
 } from "./collections";
+import {
+  buildLockEdgeClaims,
+  buildPurgeEdgeClaims,
+  buildTakeOverEdgeClaim,
+} from "./edge-claims";
 import {
   buildCountEdgesFrom,
   buildDeleteEdge,
@@ -245,6 +252,21 @@ export type CommonOperationStrategy = Readonly<{
   ) => SqlFragment;
   buildCheckUnique: (params: CheckUniqueParams) => SQL;
   buildCheckUniqueBatch: (params: CheckUniqueBatchParams) => SQL;
+  /**
+   * The two edge-claim statements, in the order the driver issues them: the
+   * decision-free lock that reports the committed holder, then — only for a
+   * foreign holder — the conditional takeover. Members of this interface rather
+   * than dialect helpers, so the type checker forces both dialects to have them.
+   */
+  buildLockEdgeClaims: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    timestamp: string,
+  ) => SQL;
+  buildTakeOverEdgeClaim: (
+    params: ClaimEdgeCardinalityParams,
+    timestamp: string,
+  ) => SQL;
+  buildPurgeEdgeClaims: (params: PurgeEdgeClaimsParams) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
   buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
   buildGetSchemaVersion: (graphId: string, version: number) => SQL;
@@ -554,6 +576,21 @@ function createCommonOperationStrategy(
         getTableName(tables.uniques),
         params,
       );
+    },
+    buildLockEdgeClaims(
+      entries: readonly ClaimEdgeCardinalityParams[],
+      timestamp: string,
+    ): SQL {
+      return buildLockEdgeClaims(tables, entries, timestamp);
+    },
+    buildTakeOverEdgeClaim(
+      params: ClaimEdgeCardinalityParams,
+      timestamp: string,
+    ): SQL {
+      return buildTakeOverEdgeClaim(tables, params, timestamp);
+    },
+    buildPurgeEdgeClaims(params: PurgeEdgeClaimsParams): SQL {
+      return buildPurgeEdgeClaims(tables, params);
     },
     buildGetActiveSchema(graphId: string): SQL {
       return buildGetActiveSchema(tables, graphId, dialect);

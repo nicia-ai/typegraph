@@ -39,6 +39,7 @@ import {
   registerCrossBackendConsistencyTests,
   registerCurrentIdentityTraversalTests,
   registerEdgeCaseIntegrationTests,
+  registerEdgeClaimSelfHealIntegrationTests,
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerFulltextIntegrationTests,
@@ -221,6 +222,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerCurrentIdentityTraversalTests(context);
     registerIdentitySeparationIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
+    registerEdgeClaimSelfHealIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
     registerTrustedImportIntegrationTests(context);
   });
