@@ -6,9 +6,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  createVectorParallelWorkerResetTracker,
   runSerialVectorIndexBuild,
-  runVectorIndexBuildWithPendingResetRepair,
+  runVectorIndexBuildWithSerialFallback,
 } from "../src/backend/drizzle/postgres";
 import { sql } from "../src/query/sql-fragment";
 
@@ -41,6 +40,12 @@ function executionStub(
     Promise.resolve().then(() => {
       run(statementText(statement));
     });
+}
+
+function insufficientResourcesError(message: string): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string };
+  error.code = "53100";
+  return error;
 }
 
 describe("Postgres vector-index parallel worker cleanup", () => {
@@ -132,47 +137,75 @@ describe("Postgres vector-index parallel worker cleanup", () => {
     );
   });
 
-  it("repairs a pending RESET before an IF NOT EXISTS retry can report success", async () => {
-    const tracker = createVectorParallelWorkerResetTracker();
+  it("repairs a pending RESET after backend recreation before IF NOT EXISTS can report success", async () => {
     const firstResetError = new Error("parallel_workers reset failed");
-    let resetAttempts = 0;
+    let createAttempts = 0;
     const firstExecute = vi.fn(
       executionStub((text) => {
+        if (text.includes("CREATE INDEX")) {
+          createAttempts += 1;
+          if (createAttempts === 1) {
+            throw insufficientResourcesError("parallel build exhausted memory");
+          }
+        }
         if (text.includes("RESET")) {
-          resetAttempts += 1;
-          throw firstResetError;
+          const cleanupAfterSerialBuild = createAttempts === 2;
+          if (cleanupAfterSerialBuild) throw firstResetError;
         }
       }),
     );
 
     await expect(
-      runSerialVectorIndexBuild(
+      runVectorIndexBuildWithSerialFallback(
         firstExecute,
         "typegraph_vector_slot",
         sql`CREATE INDEX IF NOT EXISTS vector_index`,
-        () => {
-          tracker.markPending("typegraph_vector_slot");
-        },
+        sql`DROP INDEX IF EXISTS vector_index`,
       ),
     ).rejects.toMatchObject({ cause: firstResetError });
 
+    // A fresh execution seam represents a recreated backend/process: no
+    // in-memory marker survives from the failed attempt above.
     const retryStatements: string[] = [];
     const retryExecute = vi.fn(
       executionStub((text) => {
         retryStatements.push(text);
       }),
     );
-    await runVectorIndexBuildWithPendingResetRepair(
-      tracker,
+    await runVectorIndexBuildWithSerialFallback(
       retryExecute,
       "typegraph_vector_slot",
       sql`CREATE INDEX IF NOT EXISTS vector_index`,
+      sql`DROP INDEX IF EXISTS vector_index`,
     );
 
-    expect(resetAttempts).toBe(1);
     expect(retryStatements).toEqual([
       expect.stringContaining("RESET (parallel_workers)"),
       expect.stringContaining("CREATE INDEX IF NOT EXISTS"),
+    ]);
+  });
+
+  it("does not classify a 53100 cleanup failure as a rebuildable index failure", async () => {
+    const cleanupError = insufficientResourcesError("cleanup out of memory");
+    const submitted: string[] = [];
+    const execute = vi.fn(
+      executionStub((text) => {
+        submitted.push(text);
+        if (text.includes("RESET")) throw cleanupError;
+      }),
+    );
+
+    await expect(
+      runVectorIndexBuildWithSerialFallback(
+        execute,
+        "typegraph_vector_slot",
+        sql`CREATE INDEX IF NOT EXISTS vector_index`,
+        sql`DROP INDEX IF EXISTS vector_index`,
+      ),
+    ).rejects.toMatchObject({ cause: cleanupError });
+
+    expect(submitted).toEqual([
+      expect.stringContaining("RESET (parallel_workers)"),
     ]);
   });
 
