@@ -166,6 +166,7 @@ export type EdgeOperations = Readonly<{
       }>;
       props: Partial<Record<string, unknown>>;
       validTo?: string;
+      clearValidTo?: true;
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
@@ -210,6 +211,7 @@ export type EdgeOperations = Readonly<{
       ifExists?: IfExistsMode;
       validFrom?: string;
       validTo?: string;
+      clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
     }>,
   ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>>;
@@ -223,6 +225,7 @@ export type EdgeOperations = Readonly<{
       props: Record<string, unknown>;
       validFrom?: string;
       validTo?: string;
+      clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
     backend: GraphBackend | TransactionBackend,

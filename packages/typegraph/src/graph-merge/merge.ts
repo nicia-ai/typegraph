@@ -188,6 +188,7 @@ import type {
   TransactionBackend,
   TransactionOptions,
   UniqueIntrospection,
+  ValidityEndMutation,
 } from "./typegraph-internal";
 import {
   advanceRevisionClock,
@@ -223,6 +224,7 @@ import type {
   TypeReconciliation,
   ValidityEndResolution,
 } from "./types";
+import type { ValidToChange } from "./valid-window";
 import { resolveValidWindows } from "./valid-window";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
@@ -685,7 +687,7 @@ function indexNewNodesById(
 function buildStagedEdges(
   staging: StagingSet,
   modifiedEdges: readonly StagedModifiedEdge[],
-  edgeValidityEnds: ReadonlyMap<MergeKey, string>,
+  edgeValidityEnds: ReadonlyMap<MergeKey, ValidToChange>,
   edgeDeletions: ReadonlyMap<MergeKey, string>,
 ): Readonly<{
   edges: readonly StagedEdge[];
@@ -702,7 +704,7 @@ function buildStagedEdges(
   for (const item of modifiedEdges) {
     const identity = mergeKeyOf(item.edge);
     stagedIdentities.add(identity);
-    const validTo = edgeValidityEnds.get(identity);
+    const validToChange = edgeValidityEnds.get(identity);
     staged.push({
       id: item.edge.id,
       kind: item.edge.kind,
@@ -714,7 +716,9 @@ function buildStagedEdges(
       props: item.edge.forkProps as Readonly<Record<string, JsonValue>>,
       baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
       branchId: item.branchId,
-      ...(validTo === undefined ? {} : { validTo }),
+      ...(validToChange?.kind === "set" ? { validTo: validToChange.validTo }
+      : validToChange?.kind === "clear" ? { clearValidTo: true as const }
+      : {}),
     });
   }
   // An inherited edge whose ONLY change is its end-of-validity is in neither the
@@ -732,9 +736,9 @@ function buildStagedEdges(
   // is credited from the resolution rather than from whoever carried the row.
   for (const item of staging.windowedEdges) {
     const identity = mergeKeyOf(item.edge);
-    const validTo = edgeValidityEnds.get(identity);
+    const validToChange = edgeValidityEnds.get(identity);
     if (
-      validTo === undefined ||
+      validToChange === undefined ||
       stagedIdentities.has(identity) ||
       edgeDeletions.has(identity)
     ) {
@@ -753,7 +757,9 @@ function buildStagedEdges(
       props: item.edge.props as Readonly<Record<string, JsonValue>>,
       baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
       branchId: item.branchId,
-      validTo,
+      ...(validToChange.kind === "set" ?
+        { validTo: validToChange.validTo }
+      : { clearValidTo: true as const }),
     });
   }
   return { edges: staged, windowOnlyCarried };
@@ -881,9 +887,9 @@ export type MergePlan<G extends GraphDef> = Readonly<{
    * the base value re-asserted, and never the target's own value written back at
    * itself, which is what lets an unchanged window coalesce.
    */
-  nodeValidityEnds: ReadonlyMap<MergeKey, string>;
+  nodeValidityEnds: ReadonlyMap<MergeKey, ValidToChange>;
   /** The edge half of {@link nodeValidityEnds}, consumed by the repoint phase. */
-  edgeValidityEnds: ReadonlyMap<MergeKey, string>;
+  edgeValidityEnds: ReadonlyMap<MergeKey, ValidToChange>;
   validityEnds: readonly ValidityEndResolution[];
   resolutions: readonly EntityResolution[];
   propertyConflicts: readonly PropertyConflict<G>[];
@@ -1696,8 +1702,8 @@ type PlannedNodeWrite = Readonly<{
    * coalesce.
    */
   validFrom?: string;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 /**
  * THE node-write enumeration: every node row a resolved plan writes, in commit
@@ -1738,13 +1744,15 @@ function plannedNodeWrites<G extends GraphDef>(
       continue;
     }
     written.add(identity);
-    const validTo = plan.nodeValidityEnds.get(identity);
+    const validToChange = plan.nodeValidityEnds.get(identity);
     writes.push({
       identity,
       kind: modification.node.kind,
       id: modification.node.id,
       modification: modification.node,
-      ...(validTo === undefined ? {} : { validTo }),
+      ...(validToChange?.kind === "set" ? { validTo: validToChange.validTo }
+      : validToChange?.kind === "clear" ? { clearValidTo: true as const }
+      : {}),
     });
   }
   for (const entity of plan.canonicalEntities) {
@@ -1761,7 +1769,7 @@ function plannedNodeWrites<G extends GraphDef>(
     // including the committed-target precedence that module applies — so it
     // takes priority. The reconciled inherited end fills in only where the
     // survivor claims no end of its own.
-    const validTo = entity.validTo ?? plan.nodeValidityEnds.get(sourceIdentity);
+    const validToChange = plan.nodeValidityEnds.get(sourceIdentity);
     writes.push({
       identity: mergeKey(kind, entity.canonicalId),
       kind,
@@ -1771,7 +1779,10 @@ function plannedNodeWrites<G extends GraphDef>(
       ...(entity.validFrom === undefined ?
         {}
       : { validFrom: entity.validFrom }),
-      ...(validTo === undefined ? {} : { validTo }),
+      ...(typeof entity.validTo === "string" ? { validTo: entity.validTo }
+      : validToChange?.kind === "set" ? { validTo: validToChange.validTo }
+      : validToChange?.kind === "clear" ? { clearValidTo: true as const }
+      : {}),
     });
   }
   // An inherited row whose ONLY change is its end-of-validity has neither a
@@ -1786,11 +1797,14 @@ function plannedNodeWrites<G extends GraphDef>(
       continue;
     }
     const kind = plan.retypeMap.get(identity) ?? kindOf(identity);
+    const validToChange = requireDefined(plan.nodeValidityEnds.get(identity));
     writes.push({
       identity: mergeKey(kind, idOf(identity)),
       kind,
       id: idOf(identity),
-      validTo: requireDefined(plan.nodeValidityEnds.get(identity)),
+      ...(validToChange.kind === "set" ?
+        { validTo: validToChange.validTo }
+      : { clearValidTo: true as const }),
     });
   }
   return writes;
@@ -1819,13 +1833,31 @@ function nodeWriteProps(
   };
 }
 
+type NodeWriteWindowOptions = Readonly<{ validFrom?: string }> &
+  ValidityEndMutation;
+
+/** Converts the plan's explicit set/clear state into the collection option union. */
+function nodeWriteWindowOptions(
+  write: NodeWriteWindowOptions,
+): NodeWriteWindowOptions {
+  const validFrom =
+    write.validFrom === undefined ? {} : { validFrom: write.validFrom };
+  if (write.clearValidTo === true) {
+    return { ...validFrom, clearValidTo: true };
+  }
+  return {
+    ...validFrom,
+    ...(write.validTo === undefined ? {} : { validTo: write.validTo }),
+  };
+}
+
 type MechanicalNodeWrite = Readonly<{
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
   validFrom?: string;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 type MechanicalEdgeWrite = Readonly<{
   kind: string;
@@ -1845,12 +1877,7 @@ async function applyNodeRows(
     await nodeCollection(nodesApi, upsert.kind).upsertByIdFromRecord(
       upsert.id,
       upsert.props,
-      {
-        ...(upsert.validFrom === undefined ?
-          {}
-        : { validFrom: upsert.validFrom }),
-        ...(upsert.validTo === undefined ? {} : { validTo: upsert.validTo }),
-      },
+      nodeWriteWindowOptions(upsert),
     );
     committed.add(mergeKey(upsert.kind, upsert.id));
   }
@@ -1922,7 +1949,9 @@ async function applyInternalMergePlan<G extends GraphDef>(
       commitModificationProps(modification.baseProps, modification.forkProps),
     ),
     ...(write.validFrom === undefined ? {} : { validFrom: write.validFrom }),
-    ...(write.validTo === undefined ? {} : { validTo: write.validTo }),
+    ...(write.clearValidTo === true ? { clearValidTo: true as const }
+    : write.validTo === undefined ? {}
+    : { validTo: write.validTo }),
   }));
   const committedNodes = await applyNodeRows(
     nodesApi,
@@ -1958,7 +1987,9 @@ async function applyInternalMergePlan<G extends GraphDef>(
         to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
         props,
         ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
-        ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
+        ...(edge.clearValidTo === true ? { clearValidTo: true as const }
+        : edge.validTo === undefined ? {}
+        : { validTo: edge.validTo }),
       },
     });
   }
@@ -2184,7 +2215,7 @@ type NodeCollectionLike = Readonly<{
   upsertByIdFromRecord: (
     id: string,
     data: Record<string, unknown>,
-    options?: Readonly<{ validFrom?: string; validTo?: string }>,
+    options?: Readonly<{ validFrom?: string }> & ValidityEndMutation,
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
 }>;
@@ -2196,14 +2227,14 @@ type EdgeCollectionLike = Readonly<{
     options?: Readonly<{ temporalMode?: "includeTombstones" }>,
   ) => Promise<readonly (Edge | undefined)[]>;
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: string;
       from: Readonly<{ kind: string; id: string }>;
       to: Readonly<{ kind: string; id: string }>;
       props?: Record<string, unknown>;
       validFrom?: string;
-      validTo?: string;
-    }>[],
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
 }>;

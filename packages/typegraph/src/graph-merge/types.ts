@@ -462,9 +462,9 @@ export type DroppedItem =
 export const VALIDITY_END_TARGET_PRECEDENCE = "target" as const;
 
 /**
- * One inherited row whose end-of-validity the merge RESOLVED: the instant that
- * stands and every branch that claimed an end for the row (including the ones whose
- * claim lost the least-claim tie-break).
+ * One inherited row whose end-of-validity the merge RESOLVED: the explicit set or
+ * clear that stands and every branch that claimed a change for the row (including
+ * the ones whose claim lost arbitration).
  *
  * `id` is bare because `entity` + `kind` already disambiguate it — a node and an
  * edge, or two kinds, that share an id string are distinct entries.
@@ -473,26 +473,32 @@ export type ValidityEndResolution = Readonly<{
   entity: "node" | "edge";
   kind: string;
   id: string;
-  /**
-   * The row's end-of-validity as a canonical UTC ISO 8601 string: the instant the
-   * commit WROTE, or — under {@link VALIDITY_END_TARGET_PRECEDENCE} — the instant
-   * the target already held and the merge left alone.
-   */
-  validTo: string;
-  /** Every branch that claimed an end, sorted; length > 1 means arbitration. */
+  /** Every branch that claimed a change, sorted; length > 1 means arbitration. */
   claimedBy: readonly BranchId[];
   /**
    * Present only as {@link VALIDITY_END_TARGET_PRECEDENCE}, marking an entry the
-   * merge did NOT decide: the incremental target had already moved this end, so
-   * `validTo` is the target's own committed instant, every claim in `claimedBy` was
-   * discarded, and nothing was written or credited for the row.
+   * merge did NOT decide: the incremental target had already changed this end, so
+   * the set/clear fields describe the target's own committed state, every claim in
+   * `claimedBy` was discarded, and nothing was written or credited for the row.
    *
-   * ABSENT means the merge decided the end — `validTo` is the instant it wrote and
-   * `claimedBy` names the claims it arbitrated between. A consumer that ignores the
-   * field therefore keeps reading the entries it always read.
+   * ABSENT means the merge decided the change — `validTo` or `clearValidTo` names
+   * what it wrote and `claimedBy` names the claims it arbitrated between. A consumer
+   * that ignores the field therefore keeps reading the entries it always read.
    */
   precedence?: typeof VALIDITY_END_TARGET_PRECEDENCE;
-}>;
+}> &
+  (
+    | Readonly<{
+        /** The canonical instant the merge set, or the target already held. */
+        validTo: string;
+        clearValidTo?: never;
+      }>
+    | Readonly<{
+        /** Marks a resolution that reopened the row by clearing its upper bound. */
+        clearValidTo: true;
+        validTo?: never;
+      }>
+  );
 
 /**
  * A `(kind, id)` node identity as surfaced in the merge report. Node identity is the
@@ -583,8 +589,9 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
   typeReconciliations: readonly TypeReconciliation[];
   dropped: readonly DroppedItem[];
   /**
-   * Every inherited row whose END-OF-VALIDITY the merge resolved, with the instant
-   * that stands and the branches that claimed an end.
+   * Every inherited row whose END-OF-VALIDITY the merge resolved, with the end
+   * update that stands and the branches that claimed it. A set carries `validTo`;
+   * a reopening carries `clearValidTo: true`.
    *
    * Reported because the resolution is silent by design: two branches ending the
    * same row at different instants are not in conflict (an ending is a monotone

@@ -43,4 +43,5 @@ export type { IntegrationTestContext } from "./test-context";
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
+export { registerValidityEndClearingIntegrationTests } from "./validity-end-clearing";
 export { registerValidityLowerBoundIntegrationTests } from "./validity-lower-bound";

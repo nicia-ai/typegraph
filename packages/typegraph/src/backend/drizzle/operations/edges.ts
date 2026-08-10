@@ -230,6 +230,8 @@ export function buildUpdateEdge(
       sql`${quotedColumn(edges.validFrom)} = ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}`,
       sql`${quotedColumn(edges.validTo)} = ${sqlNull(params.validTo)}`,
     );
+  } else if (params.clearValidTo === true) {
+    setParts.push(sql`${quotedColumn(edges.validTo)} = NULL`);
   } else if (params.validTo !== undefined) {
     setParts.push(sql`${quotedColumn(edges.validTo)} = ${params.validTo}`);
   }
@@ -248,13 +250,17 @@ export function buildUpdateEdge(
     edges.validFrom,
     params.expectedValidFrom,
   );
+  const expectedValidTo = expectedValidFromPredicate(
+    edges.validTo,
+    params.expectedValidTo,
+  );
 
   if (params.clearDeleted) {
     return sql`
       UPDATE ${edges}
       SET ${setClause}
       WHERE ${edges.graphId} = ${params.graphId}
-        AND ${edges.id} = ${params.id}${expectedIdentity}${expectedValidFrom}
+        AND ${edges.id} = ${params.id}${expectedIdentity}${expectedValidFrom}${expectedValidTo}
       RETURNING *
     `;
   }
@@ -263,7 +269,7 @@ export function buildUpdateEdge(
     UPDATE ${edges}
     SET ${setClause}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} = ${params.id}${expectedIdentity}${expectedValidFrom}
+      AND ${edges.id} = ${params.id}${expectedIdentity}${expectedValidFrom}${expectedValidTo}
       AND ${edges.deletedAt} IS NULL
     RETURNING *
   `;

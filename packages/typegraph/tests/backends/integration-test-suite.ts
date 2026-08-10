@@ -64,6 +64,7 @@ import {
   registerTransactionReceiptIntegrationTests,
   registerTraversalIntegrationTests,
   registerTrustedImportIntegrationTests,
+  registerValidityEndClearingIntegrationTests,
   registerValidityLowerBoundIntegrationTests,
 } from "./integration";
 import type { InspectableHistoryStore } from "./integration/test-context";
@@ -198,6 +199,7 @@ export function createIntegrationTestSuite<
     registerBulkUpsertRepeatedIdIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);
+    registerValidityEndClearingIntegrationTests(context);
     registerContributionDiagnosticIntegrationTests(context);
     registerPredicateIntegrationTests(context);
     registerProvenanceIntegrationTests(context);

@@ -4,6 +4,7 @@
 import { type z } from "zod";
 
 import {
+  type BackendValidityEndMutation,
   type EdgeRow,
   type NodeRow,
   type TransactionBackend,
@@ -29,6 +30,13 @@ import {
 } from "../core/types";
 import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
+
+/**
+ * An explicit validity-end mutation. Omission preserves the stored end,
+ * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
+ * two write actions mutually exclusive without exposing public `null`.
+ */
+export type ValidityEndMutation = BackendValidityEndMutation;
 import type {
   DynamicEdgeAccessor,
   DynamicNodeAccessor,
@@ -133,8 +141,8 @@ export type UpdateNodeInput<N extends NodeType = NodeType> = Readonly<{
   kind: N["kind"];
   id: NodeId<N>;
   props: Partial<z.infer<N["schema"]>>;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 // ============================================================
 // Edge Instance Types
@@ -189,8 +197,8 @@ export type CreateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
 export type UpdateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
   id: EdgeId<E>;
   props: Partial<z.infer<E["schema"]>>;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 // ============================================================
 // Query Options
@@ -392,9 +400,9 @@ export type BaseStoreOptions = Readonly<{
    */
   autoRefreshStatistics?: false | number;
   /**
-   * Skip the write for an `upsertById` (or `bulkUpsertById` item) whose
-   * validated props are value-identical to the existing live row. Default
-   * off.
+   * Skip the write for an `upsertById`, `bulkUpsertById` item, or endpoint
+   * get-or-create update whose validated props are value-identical to the
+   * existing live row. Default off.
    *
    * Enable this for at-least-once / replay materializers. An event log that
    * re-delivers a byte-identical change would otherwise rewrite the row anyway:
@@ -415,7 +423,12 @@ export type BaseStoreOptions = Readonly<{
    * **no write at all**: no `updateNode`, no recorded-time capture, no history
    * row, no revision-anchor advance, and no `update` operation hooks (nothing
    * happened, so nothing is reported). It resolves with the **existing** node,
-   * preserving its original `validFrom` / `updatedAt` / `version`.
+   * preserving its original `validFrom` / `updatedAt` / `version`. An endpoint
+   * get-or-create reports action `"found"` when its requested update is
+   * coalesced; `"updated"` always means an UPDATE actually ran.
+   * Node `getOrCreateByConstraint` updates are outside this option's scope and
+   * still write on every `ifExists: "update"` match; replay projectors that
+   * need coalescing should use `upsertById` for nodes.
    *
    * Receipt shape is unchanged and needs no new signal: a coalesced upsert
    * still counts as one write intent (`writes.total` includes it), but
@@ -431,9 +444,8 @@ export type BaseStoreOptions = Readonly<{
    *      batch already queued (a create or an update).
    *   2. That row is not soft-deleted (a deleted row resurrects — a real
    *      change — and is never coalesced).
-   *   3. The caller passed no explicit `validFrom` / `validTo` (an explicit
-   *      temporal override is a deliberate request and is never coalesced;
-   *      applied per item in the bulk path).
+   *   3. Any requested `validFrom` / `validTo` names the window already stored;
+   *      a changed or inapplicable temporal request reaches the write path.
    *   4. The new props, merged over the stored props and run through the
    *      kind's Zod schema (defaults applied, values normalized), are deeply
    *      value-identical to the stored props (key order aside).
@@ -760,12 +772,15 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
      */
     onImmutableLowerBound?: "preserve" | "refuse";
     /**
-     * Valid-time end for a created, updated, or resurrected edge. Ignored when
-     * the operation returns an existing edge without writing. May not precede
-     * the row's effective start; see `INVERTED_VALIDITY_WINDOW_CODE`.
+     * Valid-time end for a created, updated, or resurrected edge. `validTo` is
+     * ignored when the operation returns an existing edge without writing;
+     * `clearValidTo` instead requires `ifExists: "update"` on a live match and
+     * is refused with `CLEAR_VALID_TO_REQUIRES_UPDATE` under return mode. May
+     * not precede the row's effective start; see
+     * `INVERTED_VALIDITY_WINDOW_CODE`.
      */
-    validTo?: string;
-  }>;
+  }> &
+    ValidityEndMutation;
 
 // ============================================================
 // Collection Interfaces
@@ -802,11 +817,14 @@ export type NodeCollection<
     options?: QueryOptions,
   ) => Promise<readonly (Node<N> | undefined)[]>;
 
-  /** Update a node */
+  /**
+   * Update a node's properties and optionally set or clear its validity end.
+   * Omitting both end options preserves the stored window.
+   */
   update: (
     id: NodeId<N>,
     props: Partial<z.input<N["schema"]>>,
-    options?: Readonly<{ validTo?: string }>,
+    options?: ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -902,9 +920,9 @@ export type NodeCollection<
     props: z.input<N["schema"]>,
     options?: Readonly<{
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>,
+    }> &
+      ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -928,9 +946,9 @@ export type NodeCollection<
     data: Record<string, unknown>,
     options?: Readonly<{
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>,
+    }> &
+      ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -986,13 +1004,13 @@ export type NodeCollection<
    * claim) or to apply those items as sequential `upsertById` calls.
    */
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: string;
       props: z.input<N["schema"]>;
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>[],
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<Node<N>[]>;
 
   /**
@@ -1195,11 +1213,14 @@ export type EdgeCollection<
     options?: QueryOptions,
   ) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
 
-  /** Update an edge's properties */
+  /**
+   * Update an edge's properties and optionally set or clear its validity end.
+   * Reopening a `oneActive` edge rechecks cardinality before the write.
+   */
   update: (
     id: EdgeId<E>,
     props: Partial<z.input<E["schema"]>>,
-    options?: Readonly<{ validTo?: string }>,
+    options?: ValidityEndMutation,
   ) => Promise<Edge<E, From, To>>;
 
   /**
@@ -1399,14 +1420,14 @@ export type EdgeCollection<
    * (free the slot, then claim it) or to apply those items individually.
    */
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: EdgeId<E>;
       from: NodeRef<From>;
       to: NodeRef<To>;
       props?: z.input<E["schema"]>;
       validFrom?: string;
-      validTo?: string;
-    }>[],
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<Edge<E, From, To>[]>;
 
   /**
@@ -1502,14 +1523,14 @@ export type EdgeCollection<
    * Atomic when the backend supports transactions.
    */
   bulkGetOrCreateByEndpoints: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       from: NodeRef<From>;
       to: NodeRef<To>;
       props: z.input<E["schema"]>;
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>[],
+    }> &
+      ValidityEndMutation)[],
     options?: Pick<
       EdgeGetOrCreateByEndpointsOptions<E>,
       "matchOn" | "ifExists"
