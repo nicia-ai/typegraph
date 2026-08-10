@@ -392,6 +392,20 @@ const TRIGRAM_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
 
 type ExecutePostgresStatement = (statement: ExecutableSql) => Promise<void>;
 
+function parallelWorkerResetSql(tableName: string): string {
+  return `ALTER TABLE "${tableName.replaceAll('"', '""')}" RESET (parallel_workers);`;
+}
+
+function parallelWorkerResetError(
+  tableName: string,
+  resetError: unknown,
+): Error {
+  return new Error(
+    `PostgreSQL did not restore the durable parallel_workers setting on vector table ${JSON.stringify(tableName)}. Run ${parallelWorkerResetSql(tableName)} before retrying index materialization.`,
+    { cause: resetError },
+  );
+}
+
 function reportParallelWorkerResetFailure(
   tableName: string,
   resetError: unknown,
@@ -400,13 +414,56 @@ function reportParallelWorkerResetFailure(
     if (typeof console === "undefined" || typeof console.error !== "function") {
       return;
     }
-    console.error(
-      `[typegraph] The serial vector index rebuild failed and PostgreSQL also failed to restore the durable parallel_workers setting on table ${JSON.stringify(tableName)}. Run ALTER TABLE <table> RESET (parallel_workers) after resolving the database error.`,
+    const reported = (console.error as (...data: readonly unknown[]) => unknown)(
+      `[typegraph] The serial vector index rebuild failed and cleanup also failed. ${parallelWorkerResetError(tableName, resetError).message}`,
       resetError,
     );
+    void Promise.resolve(reported).catch(() => {
+      // Reporting must not displace the index-build failure.
+    });
   } catch {
     // A hostile or replaced logger cannot displace the index-build failure.
   }
+}
+
+export type VectorParallelWorkerResetTracker = Readonly<{
+  markPending: (tableName: string) => void;
+  repairPending: (
+    execute: ExecutePostgresStatement,
+    tableName: string,
+  ) => Promise<void>;
+}>;
+
+/** @internal */
+export function createVectorParallelWorkerResetTracker(): VectorParallelWorkerResetTracker {
+  const pendingTables = new Set<string>();
+  return {
+    markPending(tableName): void {
+      pendingTables.add(tableName);
+    },
+    async repairPending(execute, tableName): Promise<void> {
+      if (!pendingTables.has(tableName)) return;
+      try {
+        await execute(
+          portableSql`ALTER TABLE ${portableSql.identifier(tableName)} RESET (parallel_workers)`,
+        );
+        pendingTables.delete(tableName);
+      } catch (resetError) {
+        throw parallelWorkerResetError(tableName, resetError);
+      }
+    },
+  };
+}
+
+/** @internal */
+export async function runVectorIndexBuildWithPendingResetRepair(
+  tracker: VectorParallelWorkerResetTracker,
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+): Promise<void> {
+  await tracker.repairPending(execute, tableName);
+  await execute(indexStatement);
 }
 
 /** @internal */
@@ -414,6 +471,7 @@ export async function runSerialVectorIndexBuild(
   execute: ExecutePostgresStatement,
   tableName: string,
   indexStatement: ExecutableSql,
+  onResetFailure?: () => void,
 ): Promise<void> {
   const table = portableSql.identifier(tableName);
   await execute(portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`);
@@ -428,7 +486,10 @@ export async function runSerialVectorIndexBuild(
   try {
     await execute(portableSql`ALTER TABLE ${table} RESET (parallel_workers)`);
   } catch (resetError) {
-    if (buildFailure === undefined) throw resetError;
+    onResetFailure?.();
+    if (buildFailure === undefined) {
+      throw parallelWorkerResetError(tableName, resetError);
+    }
     reportParallelWorkerResetFailure(tableName, resetError);
   }
 
@@ -1827,6 +1888,8 @@ function createPostgresOperationBackend(
     schemaVersionsTable,
     transactionScoped,
   } = options;
+  const vectorParallelWorkerResetTracker =
+    createVectorParallelWorkerResetTracker();
 
   // Route through the execution adapter so driver-specific result shapes
   // (`{rows}` for node-postgres / neon-serverless; bare array for
@@ -2419,8 +2482,18 @@ function createPostgresOperationBackend(
         concurrent: params.concurrent === true,
       });
       if (indexStatement !== undefined) {
+        const strategyTableName = vectorStrategy.tableName(
+          slot.graphId,
+          slot.nodeKind,
+          slot.fieldPath,
+        );
         try {
-          await execRun(indexStatement);
+          await runVectorIndexBuildWithPendingResetRepair(
+            vectorParallelWorkerResetTracker,
+            execRun,
+            strategyTableName,
+            indexStatement,
+          );
         } catch (error) {
           if (!isInsufficientResourcesError(error)) throw error;
           // Parallel HNSW/IVFFlat builds stage the build graph in dynamic
@@ -2437,15 +2510,13 @@ function createPostgresOperationBackend(
           if (dropStatement !== undefined) {
             await execRun(dropStatement);
           }
-          const strategyTableName = vectorStrategy.tableName(
-            slot.graphId,
-            slot.nodeKind,
-            slot.fieldPath,
-          );
           await runSerialVectorIndexBuild(
             execRun,
             strategyTableName,
             indexStatement,
+            () => {
+              vectorParallelWorkerResetTracker.markPending(strategyTableName);
+            },
           );
         }
       }

@@ -4,10 +4,17 @@
  * extension install on one transaction-bound connection without a live server.
  */
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { type AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-execution";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
+import { type GraphBackend } from "../src/backend/types";
+import { defineGraph } from "../src/core/define-graph";
+import { defineNode } from "../src/core/node";
+import { defineNodeIndex } from "../src/indexes";
+import { createStore, createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
+import { createTestBackend } from "./test-utils";
 
 function statementText(statement: unknown): string {
   const chunks =
@@ -48,6 +55,37 @@ function duplicateKeyError(): Error {
   });
 }
 
+const Document = defineNode("Document", {
+  schema: z.object({ title: z.string() }),
+});
+
+function trigramGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: { Document: { type: Document } },
+    edges: {},
+    indexes: [
+      defineNodeIndex(Document, { fields: ["title"], method: "trigram" }),
+    ],
+  });
+}
+
+async function initializedCustomPostgresBackend(
+  graph: ReturnType<typeof trigramGraph>,
+  overlay: Partial<GraphBackend>,
+): Promise<GraphBackend> {
+  const baseBackend = createTestBackend();
+  await createStoreWithSchema(graph, baseBackend);
+  return {
+    ...baseBackend,
+    ...overlay,
+    dialect: "postgres",
+    execute<T>(): Promise<readonly T[]> {
+      return Promise.resolve([]);
+    },
+  };
+}
+
 describe("Postgres pg_trgm extension prerequisite", () => {
   it("takes a constant transaction advisory lock before installing the extension", async () => {
     const { db, statements } = stubTransactionalDatabase();
@@ -84,5 +122,63 @@ describe("Postgres pg_trgm extension prerequisite", () => {
     expect(new Set(statements)).toEqual(
       new Set(["CREATE EXTENSION IF NOT EXISTS pg_trgm;"]),
     );
+  });
+
+  it("materializes through a custom prerequisite hook before index DDL", async () => {
+    const graph = trigramGraph("trigram_custom_hook");
+    const events: string[] = [];
+    const backend = await initializedCustomPostgresBackend(graph, {
+      ensureTrigramExtension(): Promise<void> {
+        events.push("ensure pg_trgm");
+        return Promise.resolve();
+      },
+      executeDdl(statement): Promise<void> {
+        events.push(statement);
+        return Promise.resolve();
+      },
+    });
+    const store = createStore(graph, backend);
+
+    const result = await store.materializeIndexes({
+      refreshStatistics: false,
+    });
+
+    expect(result.results).toEqual([
+      expect.objectContaining({ status: "created" }),
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toBe("ensure pg_trgm");
+    expect(events[1]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS");
+  });
+
+  it("retries a custom backend's extension 23505 before materializing its index", async () => {
+    const graph = trigramGraph("trigram_custom_retry");
+    const events: string[] = [];
+    let extensionAttempts = 0;
+    const backend = await initializedCustomPostgresBackend(graph, {
+      executeDdl(statement): Promise<void> {
+        events.push(statement);
+        if (statement.includes("CREATE EXTENSION")) {
+          extensionAttempts += 1;
+          if (extensionAttempts === 1) {
+            return Promise.reject(duplicateKeyError());
+          }
+        }
+        return Promise.resolve();
+      },
+    });
+    const store = createStore(graph, backend);
+
+    const result = await store.materializeIndexes({
+      refreshStatistics: false,
+    });
+
+    expect(result.results).toEqual([
+      expect.objectContaining({ status: "created" }),
+    ]);
+    expect(events).toHaveLength(3);
+    expect(events[0]).toBe("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
+    expect(events[1]).toBe("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
+    expect(events[2]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS");
   });
 });

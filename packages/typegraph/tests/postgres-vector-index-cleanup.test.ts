@@ -5,7 +5,11 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { runSerialVectorIndexBuild } from "../src/backend/drizzle/postgres";
+import {
+  createVectorParallelWorkerResetTracker,
+  runSerialVectorIndexBuild,
+  runVectorIndexBuildWithPendingResetRepair,
+} from "../src/backend/drizzle/postgres";
 import { sql } from "../src/query/sql-fragment";
 
 afterEach(() => {
@@ -30,16 +34,28 @@ function statementText(statement: unknown): string {
     .join("");
 }
 
+function executionStub(
+  run: (statementText: string) => void,
+): (statement: unknown) => Promise<void> {
+  return (statement) =>
+    Promise.resolve().then(() => {
+      run(statementText(statement));
+    });
+}
+
 describe("Postgres vector-index parallel worker cleanup", () => {
   it("preserves the build failure when RESET also fails and reports repair guidance", async () => {
     const buildError = new Error("serial index build failed");
     const resetError = new Error("parallel_workers reset failed");
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const execute = vi.fn(async (statement: unknown) => {
-      const text = statementText(statement);
-      if (text.includes("CREATE INDEX")) throw buildError;
-      if (text.includes("RESET")) throw resetError;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      // Observe the report without writing test output.
     });
+    const execute = vi.fn(
+      executionStub((text) => {
+        if (text.includes("CREATE INDEX")) throw buildError;
+        if (text.includes("RESET")) throw resetError;
+      }),
+    );
 
     const caught = await runSerialVectorIndexBuild(
       execute,
@@ -59,11 +75,12 @@ describe("Postgres vector-index parallel worker cleanup", () => {
     vi.spyOn(console, "error").mockImplementation(() => {
       throw new Error("logger failed");
     });
-    const execute = vi.fn(async (statement: unknown) => {
-      const text = statementText(statement);
-      if (text.includes("CREATE INDEX")) throw buildError;
-      if (text.includes("RESET")) throw new Error("reset failed");
-    });
+    const execute = vi.fn(
+      executionStub((text) => {
+        if (text.includes("CREATE INDEX")) throw buildError;
+        if (text.includes("RESET")) throw new Error("reset failed");
+      }),
+    );
 
     await expect(
       runSerialVectorIndexBuild(
@@ -74,11 +91,16 @@ describe("Postgres vector-index parallel worker cleanup", () => {
     ).rejects.toBe(buildError);
   });
 
-  it("surfaces RESET when the build succeeded", async () => {
-    const resetError = new Error("parallel_workers reset failed");
-    const execute = vi.fn(async (statement: unknown) => {
-      if (statementText(statement).includes("RESET")) throw resetError;
-    });
+  it("absorbs a rejected thenable returned by a hostile error reporter", async () => {
+    const buildError = new Error("serial index build failed");
+    vi.spyOn(console, "error").mockImplementation((() =>
+      Promise.reject(new Error("async logger failed"))) as () => never);
+    const execute = vi.fn(
+      executionStub((text) => {
+        if (text.includes("CREATE INDEX")) throw buildError;
+        if (text.includes("RESET")) throw new Error("reset failed");
+      }),
+    );
 
     await expect(
       runSerialVectorIndexBuild(
@@ -86,17 +108,83 @@ describe("Postgres vector-index parallel worker cleanup", () => {
         "typegraph_vector_slot",
         sql`CREATE INDEX vector_index`,
       ),
-    ).rejects.toBe(resetError);
+    ).rejects.toBe(buildError);
+  });
+
+  it("surfaces exact manual repair guidance when RESET fails after a successful build", async () => {
+    const resetError = new Error("parallel_workers reset failed");
+    const execute = vi.fn(
+      executionStub((text) => {
+        if (text.includes("RESET")) throw resetError;
+      }),
+    );
+
+    const caught = await runSerialVectorIndexBuild(
+      execute,
+      'typegraph_"vector_slot',
+      sql`CREATE INDEX vector_index`,
+    ).catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).cause).toBe(resetError);
+    expect((caught as Error).message).toContain(
+      'ALTER TABLE "typegraph_""vector_slot" RESET (parallel_workers);',
+    );
+  });
+
+  it("repairs a pending RESET before an IF NOT EXISTS retry can report success", async () => {
+    const tracker = createVectorParallelWorkerResetTracker();
+    const firstResetError = new Error("parallel_workers reset failed");
+    let resetAttempts = 0;
+    const firstExecute = vi.fn(
+      executionStub((text) => {
+        if (text.includes("RESET")) {
+          resetAttempts += 1;
+          throw firstResetError;
+        }
+      }),
+    );
+
+    await expect(
+      runSerialVectorIndexBuild(
+        firstExecute,
+        "typegraph_vector_slot",
+        sql`CREATE INDEX IF NOT EXISTS vector_index`,
+        () => {
+          tracker.markPending("typegraph_vector_slot");
+        },
+      ),
+    ).rejects.toMatchObject({ cause: firstResetError });
+
+    const retryStatements: string[] = [];
+    const retryExecute = vi.fn(
+      executionStub((text) => {
+        retryStatements.push(text);
+      }),
+    );
+    await runVectorIndexBuildWithPendingResetRepair(
+      tracker,
+      retryExecute,
+      "typegraph_vector_slot",
+      sql`CREATE INDEX IF NOT EXISTS vector_index`,
+    );
+
+    expect(resetAttempts).toBe(1);
+    expect(retryStatements).toEqual([
+      expect.stringContaining("RESET (parallel_workers)"),
+      expect.stringContaining("CREATE INDEX IF NOT EXISTS"),
+    ]);
   });
 
   it("restores the setting before rethrowing a build failure", async () => {
     const buildError = new Error("serial index build failed");
     const submitted: string[] = [];
-    const execute = vi.fn(async (statement: unknown) => {
-      const text = statementText(statement);
-      submitted.push(text);
-      if (text.includes("CREATE INDEX")) throw buildError;
-    });
+    const execute = vi.fn(
+      executionStub((text) => {
+        submitted.push(text);
+        if (text.includes("CREATE INDEX")) throw buildError;
+      }),
+    );
 
     await expect(
       runSerialVectorIndexBuild(
