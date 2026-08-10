@@ -4,12 +4,22 @@
  * seam forces each build/reset outcome directly.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import {
+  runPostgresVectorIndexBuild,
   runSerialVectorIndexBuild,
   runVectorIndexBuildWithSerialFallback,
 } from "../src/backend/drizzle/postgres";
+import { type GraphBackend } from "../src/backend/types";
+import { defineGraph } from "../src/core/define-graph";
+import { embedding } from "../src/core/embedding";
+import { defineNode } from "../src/core/node";
+import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
+import { type VectorStrategy } from "../src/query/dialect/vector-strategy";
 import { sql } from "../src/query/sql-fragment";
+import { createStore, createStoreWithSchema } from "../src/store/store";
+import { createTestBackend } from "./test-utils";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -207,6 +217,65 @@ describe("Postgres vector-index parallel worker cleanup", () => {
     expect(submitted).toEqual([
       expect.stringContaining("RESET (parallel_workers)"),
     ]);
+  });
+
+  it("materializes a custom strategy without pgvector ALTER, DROP, or serial fallback", async () => {
+    const customStrategy = {
+      ...pgvectorStrategy,
+      name: "custom-postgres-vector",
+    } satisfies VectorStrategy;
+    const Document = defineNode("Document", {
+      schema: z.object({ embedding: embedding(3) }),
+    });
+    const graph = defineGraph({
+      id: "custom_vector_ownership",
+      nodes: { Document: { type: Document } },
+      edges: {},
+    });
+    const baseBackend = createTestBackend();
+    await createStoreWithSchema(graph, baseBackend);
+    const buildError = insufficientResourcesError(
+      "custom build exhausted memory",
+    );
+    const submitted: string[] = [];
+    const execute = vi.fn(
+      executionStub((text) => {
+        submitted.push(text);
+        throw buildError;
+      }),
+    );
+    const backend = {
+      ...baseBackend,
+      dialect: "postgres",
+      capabilities: {
+        ...baseBackend.capabilities,
+        vector: customStrategy.capabilities,
+      },
+      vectorStrategy: customStrategy,
+      execute<T>(): Promise<readonly T[]> {
+        return Promise.resolve([]);
+      },
+      createVectorIndex(): Promise<void> {
+        return runPostgresVectorIndexBuild(
+          customStrategy,
+          execute,
+          "custom_owned_vector_slot",
+          sql`CREATE INDEX custom_vector_index`,
+          sql`DROP INDEX custom_vector_index`,
+        );
+      },
+    } satisfies GraphBackend;
+    const store = createStore(graph, backend);
+
+    const result = await store.materializeIndexes({
+      refreshStatistics: false,
+    });
+
+    expect(result.results).toEqual([
+      expect.objectContaining({ status: "failed", error: buildError }),
+    ]);
+    expect(submitted).toEqual(["CREATE INDEX custom_vector_index"]);
+    await baseBackend.close();
   });
 
   it("restores the setting before rethrowing a build failure", async () => {

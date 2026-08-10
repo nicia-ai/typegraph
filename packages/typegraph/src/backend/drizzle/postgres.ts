@@ -462,6 +462,26 @@ export async function runVectorIndexBuildWithSerialFallback(
 }
 
 /** @internal */
+export async function runPostgresVectorIndexBuild(
+  vectorStrategy: VectorStrategy,
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  dropStatement?: ExecutableSql,
+): Promise<void> {
+  if (vectorStrategy !== pgvectorStrategy) {
+    await execute(indexStatement);
+    return;
+  }
+  await runVectorIndexBuildWithSerialFallback(
+    execute,
+    tableName,
+    indexStatement,
+    dropStatement,
+  );
+}
+
+/** @internal */
 export async function runSerialVectorIndexBuild(
   execute: ExecutePostgresStatement,
   tableName: string,
@@ -2477,7 +2497,7 @@ function createPostgresOperationBackend(
           slot.nodeKind,
           slot.fieldPath,
         );
-        // Parallel HNSW/IVFFlat builds stage the build graph in dynamic
+        // Built-in pgvector HNSW/IVFFlat builds stage the build graph in dynamic
         // shared memory, and resource-constrained hosts reject the
         // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
         // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
@@ -2487,7 +2507,8 @@ function createPostgresOperationBackend(
         // strategy table to parallel_workers = 0 (maintenance builds
         // take min(storage parameter, max_parallel_maintenance_workers)),
         // rebuild in local memory, and restore the setting.
-        await runVectorIndexBuildWithSerialFallback(
+        await runPostgresVectorIndexBuild(
+          vectorStrategy,
           execRun,
           strategyTableName,
           indexStatement,
