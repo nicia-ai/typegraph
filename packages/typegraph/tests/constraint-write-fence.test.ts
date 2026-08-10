@@ -38,6 +38,7 @@ import {
   CONSTRAINT_FENCE_BACKING,
   CONSTRAINT_FENCE_REASONS,
 } from "../src/store/claims/backing";
+import { nodeClaimSites } from "../src/store/claims/sites";
 import { nodeWriteNeedsConstraintFence } from "../src/store/constraints";
 import {
   createRecordedPostgresStore,
@@ -142,6 +143,20 @@ function graphWriteLockCount(statements: readonly LoggedStatement[]): number {
       statement.query.includes("pg_advisory_xact_lock") &&
       statement.params[0] === GRAPH_WRITE_NAMESPACE,
   ).length;
+}
+
+function claimIndexes(statements: readonly LoggedStatement[]): number[] {
+  return statements.flatMap((statement, index) =>
+    /insert into "typegraph_node_uniques"/iu.test(statement.query) ?
+      [index]
+    : [],
+  );
+}
+
+function nodeInsertIndex(statements: readonly LoggedStatement[]): number {
+  return statements.findIndex((statement) =>
+    /insert into "typegraph_nodes"/iu.test(statement.query),
+  );
 }
 
 function firstIndexMatching(
@@ -388,24 +403,39 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
   const shapeRegistry = buildKindRegistry(shapeGraph);
 
   const SHAPES = [
-    { kind: "Plain", unique: [], create: undefined, update: undefined },
+    {
+      kind: "Plain",
+      unique: [],
+      create: undefined,
+      update: undefined,
+      createPlacements: [],
+      updatePlacements: [],
+    },
     {
       kind: "Solo",
       unique: [OWN_EMAIL_UNIQUE],
       create: undefined,
       update: undefined,
+      // The pair the non-transactional refusal turns on: its create claim
+      // follows the row, its update claim precedes one.
+      createPlacements: ["post-insert"],
+      updatePlacements: ["pre-insert"],
     },
     {
       kind: "Partner",
       unique: [],
       create: "nodeDisjointness",
       update: undefined,
+      createPlacements: [],
+      updatePlacements: [],
     },
     {
       kind: "Crew",
       unique: [SHARED_SCOPE_UNIQUE],
       create: "nodeUniquenessScope",
       update: "nodeUniquenessScope",
+      createPlacements: ["pre-insert"],
+      updatePlacements: ["pre-insert"],
     },
     // Disjointness is scanned FIRST, so a kind qualifying on both counts keeps
     // naming the class the refusal payload names today.
@@ -414,6 +444,8 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
       unique: [SHARED_SCOPE_UNIQUE],
       create: "nodeDisjointness",
       update: "nodeUniquenessScope",
+      createPlacements: ["pre-insert"],
+      updatePlacements: ["pre-insert"],
     },
   ] as const;
 
@@ -429,20 +461,45 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
     );
   }
 
+  function placementsFor(
+    shape: (typeof SHAPES)[number],
+    operation: "create" | "update",
+  ) {
+    return nodeClaimSites(
+      shapeRegistry,
+      shape.kind,
+      shape.unique,
+      operation,
+    ).map((site) => site.placement);
+  }
+
   for (const shape of SHAPES) {
     it(`reports ${shape.create ?? "no"} fence for a ${shape.kind} create and ${shape.update ?? "no"} fence for its update`, () => {
       expect(reasonFor(shape, "create")).toBe(shape.create);
       expect(reasonFor(shape, "update")).toBe(shape.update);
     });
+
+    // The two readings of the one cross-kind fact, pinned side by side: a
+    // change to either is visible in one diff, and a future family that breaks
+    // their coincidence has to say which one it moved.
+    it(`places a ${shape.kind} create's claims ${shape.createPlacements.join(", ") || "nowhere"} and its update's ${shape.updatePlacements.join(", ") || "nowhere"}`, () => {
+      expect(placementsFor(shape, "create")).toEqual(shape.createPlacements);
+      expect(placementsFor(shape, "update")).toEqual(shape.updatePlacements);
+    });
   }
 
-  it("only ever names a fence class the backing table knows", () => {
+  it("only ever names a fence class the backing table knows, and never the claim-only one", () => {
     for (const shape of SHAPES) {
       for (const operation of ["create", "update"] as const) {
         const reason = reasonFor(shape, operation);
         if (reason === undefined) continue;
         expect(CONSTRAINT_FENCE_REASONS).toContain(reason);
         expect(CONSTRAINT_FENCE_BACKING[reason]).toBeDefined();
+        // The ratchet on the split: `nodeUniquenessClaim` exists for the
+        // non-transactional refusal only. Returning it here would silently
+        // widen the set of writes that take the per-graph lock, which is the
+        // one thing this workstream promises not to move.
+        expect(reason).not.toBe("nodeUniquenessClaim");
       }
     }
   });
@@ -466,5 +523,209 @@ describe("the lock reason survives its re-derivation from the claim sites", () =
     });
 
     expect(graphWriteLockCount(statements)).toBe(0);
+  });
+});
+
+/**
+ * WHERE each claim statement sits relative to the row it gates, recorded rather
+ * than assumed.
+ *
+ * Placement is the one fact that decides three things at once — the emitted
+ * statement order, whether a non-transactional backend refuses the write, and
+ * how much of another workstream's statement-order oracle moves — so it is
+ * pinned where it is observable: in the statements the engine is actually asked
+ * to run.
+ *
+ * The three shapes are the whole extent of the decision for uniqueness claims:
+ * an axis that is the writer's own kind (the uniques primary key is already the
+ * complete fence, so the claim stays where it has always been, AFTER the row),
+ * an axis spanning sibling kinds (the claim is the only fence for that axis, so
+ * it must precede the row it gates), and both at once.
+ */
+describe("a create issues each claim on the side of the row its placement names", () => {
+  const OWN_HANDLE_UNIQUE = {
+    name: "placement_handle",
+    fields: ["handle"],
+    scope: "kind",
+    collation: "binary",
+  } as const;
+
+  const SHARED_EMAIL_UNIQUE = {
+    name: "placement_email",
+    fields: ["email"],
+    scope: "kindWithSubClasses",
+    collation: "binary",
+  } as const;
+
+  /**
+   * A second shared-scope constraint whose name sorts BEFORE the first one's,
+   * declared after it: the canonical claim order is a sort, not the order the
+   * schema happens to list.
+   */
+  const SHARED_ALIAS_UNIQUE = {
+    name: "placement_alias",
+    fields: ["alias"],
+    scope: "kindWithSubClasses",
+    collation: "binary",
+  } as const;
+
+  /** Only an own-kind claim: HEAD's order, and the row this design must not move. */
+  const OwnOnly = defineNode("OwnOnly", {
+    schema: z.object({ handle: z.string() }),
+  });
+  const SharedRoot = defineNode("SharedRoot", {
+    schema: z.object({
+      email: z.string(),
+      alias: z.string(),
+      handle: z.string(),
+    }),
+  });
+  /** Only cross-kind claims — and two of them, in reverse sorted order. */
+  const SharedLeaf = defineNode("SharedLeaf", {
+    schema: z.object({
+      email: z.string(),
+      alias: z.string(),
+      handle: z.string(),
+    }),
+  });
+  /** One claim in each group: the shape that emits TWO claim statements. */
+  const BothLeaf = defineNode("BothLeaf", {
+    schema: z.object({
+      email: z.string(),
+      alias: z.string(),
+      handle: z.string(),
+    }),
+  });
+
+  const placementGraph = defineGraph({
+    id: "constraint_claim_placement",
+    nodes: {
+      OwnOnly: { type: OwnOnly, unique: [OWN_HANDLE_UNIQUE] },
+      SharedRoot: {
+        type: SharedRoot,
+        unique: [SHARED_EMAIL_UNIQUE, SHARED_ALIAS_UNIQUE],
+      },
+      SharedLeaf: {
+        type: SharedLeaf,
+        unique: [SHARED_EMAIL_UNIQUE, SHARED_ALIAS_UNIQUE],
+      },
+      BothLeaf: {
+        type: BothLeaf,
+        unique: [SHARED_EMAIL_UNIQUE, OWN_HANDLE_UNIQUE],
+      },
+    },
+    edges: {},
+    ontology: [
+      subClassOf(SharedLeaf, SharedRoot),
+      subClassOf(BothLeaf, SharedRoot),
+    ],
+  });
+
+  it("keeps an own-kind claim AFTER the row, which is the order it ships in", async () => {
+    const { store, statements, reset } =
+      await createRecordedPostgresStore(placementGraph);
+
+    reset();
+    await store.nodes.OwnOnly.create({ handle: "own-1" });
+
+    const claims = claimIndexes(statements);
+    expect(claims).toHaveLength(1);
+    expect(nodeInsertIndex(statements)).toBeLessThan(claims[0] ?? -1);
+  });
+
+  it("issues a cross-kind claim BEFORE the row it gates", async () => {
+    const { store, statements, reset } =
+      await createRecordedPostgresStore(placementGraph);
+
+    reset();
+    await store.nodes.SharedLeaf.create({
+      email: "leaf@example.com",
+      alias: "leaf",
+      handle: "leaf-1",
+    });
+
+    // Both claims are cross-kind, so both precede the row — and they are issued
+    // in canonical order (by constraint name, the axis being equal), not in the
+    // order the schema lists them.
+    const claims = claimIndexes(statements);
+    expect(claims).toHaveLength(2);
+    expect(claims[1] ?? -1).toBeLessThan(nodeInsertIndex(statements));
+    expect(claims.map((index) => statements[index]?.params[2])).toEqual([
+      "placement_alias",
+      "placement_email",
+    ]);
+  });
+
+  it("splits a kind owing both into two statements, one on each side of the row", async () => {
+    const { store, statements, reset } =
+      await createRecordedPostgresStore(placementGraph);
+
+    reset();
+    await store.nodes.BothLeaf.create({
+      email: "both@example.com",
+      alias: "both",
+      handle: "both-1",
+    });
+
+    const claims = claimIndexes(statements);
+    const insertIndex = nodeInsertIndex(statements);
+    expect(claims).toHaveLength(2);
+    expect(claims[0] ?? -1).toBeLessThan(insertIndex);
+    expect(insertIndex).toBeLessThan(claims[1] ?? -1);
+
+    expect(statements[claims[0] ?? 0]?.params[2]).toBe("placement_email");
+    expect(statements[claims[1] ?? 0]?.params[2]).toBe("placement_handle");
+  });
+
+  it("sorts one batch statement's claims canonically, whatever order the rows arrive in", async () => {
+    const { store, statements, reset } =
+      await createRecordedPostgresStore(placementGraph);
+
+    reset();
+    await store.nodes.SharedLeaf.bulkCreate([
+      { props: { email: "z@example.com", alias: "z", handle: "z-1" } },
+      { props: { email: "a@example.com", alias: "a", handle: "a-1" } },
+    ]);
+
+    // One statement for the whole pre-insert group — which is what makes it
+    // deadlock-free against itself — with its rows in `compareClaimTargets`
+    // order: two writers taking these rows in opposite orders would otherwise
+    // deadlock, and PostgreSQL resolves that by aborting one.
+    const claims = claimIndexes(statements);
+    expect(claims).toHaveLength(1);
+    expect(claims[0] ?? -1).toBeLessThan(nodeInsertIndex(statements));
+
+    const claimParams = statements[claims[0] ?? 0]?.params ?? [];
+    const keys = claimParams.filter(
+      (parameter): parameter is string =>
+        typeof parameter === "string" &&
+        (parameter === "a" ||
+          parameter === "z" ||
+          parameter.includes("@example.com")),
+    );
+    // Constraint name outranks key in the canonical order, so both `alias`
+    // claims precede both `email` claims and each pair is ordered by key —
+    // whatever order the rows arrived in.
+    expect(keys).toEqual(["a", "z", "a@example.com", "z@example.com"]);
+  });
+
+  it("claims before the row on an UPDATE too, for a kind whose axis is its own", async () => {
+    // The update half of the placement table, measured in the same place as the
+    // create half. A transition is claim-first for EVERY scope, which is why
+    // this kind's update is refused on a backend with no transactions while its
+    // create is not — a fact that would otherwise rest on prose alone.
+    const { store, statements, reset } =
+      await createRecordedPostgresStore(placementGraph);
+    const created = await store.nodes.OwnOnly.create({ handle: "update-1" });
+
+    reset();
+    await store.nodes.OwnOnly.update(created.id, { handle: "update-2" });
+
+    const claims = claimIndexes(statements);
+    const updateIndex = statements.findIndex((statement) =>
+      /update "typegraph_nodes"/iu.test(statement.query),
+    );
+    expect(claims).toHaveLength(1);
+    expect(claims[0] ?? -1).toBeLessThan(updateIndex);
   });
 });

@@ -98,6 +98,47 @@ export function uniquenessProbeKinds(
   return [axis, ...rest];
 }
 
+/** The relation a claim row lives in. */
+type ClaimRelation = "uniques";
+
+/** A claim row named in full — the row a statement is about to lock. */
+export type ClaimTarget = Readonly<{
+  relation: ClaimRelation;
+  graphId: string;
+  axis: string;
+  constraintName: string;
+  key: string;
+}>;
+
+/**
+ * THE canonical order claims are acquired in: code-point compare on
+ * `(relation, graphId, axis, constraintName, key)`.
+ *
+ * Two writers that take the same two claim rows in opposite orders deadlock,
+ * and PostgreSQL resolves that by aborting one with `40P01` — which would turn
+ * an import's per-row recovery into a whole-batch abort. Sorting every claim
+ * statement's entries by one comparator removes the commonest cycle, exactly as
+ * multi-graph lock acquisition already does (see `recorded-capture.ts`, whose
+ * comment states the same rule: every process must acquire in the same order).
+ *
+ * The order it establishes is per claim SET and per statement, not per
+ * transaction: rows and batches inside one import claim in input order, so two
+ * concurrent lock-free imports into one graph can still deadlock. That residual
+ * is declared out of contract rather than fenced here.
+ */
+export function compareClaimTargets(
+  left: ClaimTarget,
+  right: ClaimTarget,
+): number {
+  return (
+    compareStrings(left.relation, right.relation) ||
+    compareStrings(left.graphId, right.graphId) ||
+    compareStrings(left.axis, right.axis) ||
+    compareStrings(left.constraintName, right.constraintName) ||
+    compareStrings(left.key, right.key)
+  );
+}
+
 /**
  * WHO holds a claim. A node, not an id: ids are unique only per kind, so
  * `(concrete_kind, node_id)` is the smallest thing that identifies a claimant.

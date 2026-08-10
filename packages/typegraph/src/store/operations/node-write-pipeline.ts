@@ -31,8 +31,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import {
   createUniquenessContext,
   deleteUniquenessEntries,
-  insertUniquenessEntries,
-  insertUniquenessEntriesBatch,
+  type NodeClaimContext,
   planNodeClaimReinsert,
   planNodeClaimUpdate,
   type UniquenessUpdatePlan,
@@ -58,12 +57,13 @@ type Backend = GraphBackend | TransactionBackend;
  * row work (see {@link GraphWriteLock}): the pipeline performs no locking of
  * its own, so requiring the token here makes "sidecar write before lock" a
  * type error at the call site instead of a lock-order inversion in review.
+ *
+ * It is the claim seam's context by definition rather than by coincidence: a
+ * write path hands the same value to {@link withNodeCreateClaims} and to the
+ * sync fans, so the two halves of one insert cannot be given different graphs,
+ * registries, or lock evidence.
  */
-export type NodeWriteContext = Readonly<{
-  graphId: string;
-  registry: KindRegistry;
-  lock: GraphWriteLock;
-}>;
+export type NodeWriteContext = NodeClaimContext;
 
 /** Builds a {@link NodeWriteContext} — the one constructor every call site shares. */
 export function createNodeWriteContext(
@@ -175,29 +175,30 @@ async function enforceNodeDeleteBehavior(
   }
 }
 
+/** One inserted row, as the post-insert sync fans read it. */
+export type NodeInsertSyncItem = Readonly<{
+  kind: string;
+  id: string;
+  schema: z.ZodType;
+  props: Record<string, unknown>;
+  uniqueConstraints: readonly UniqueConstraint[];
+}>;
+
 /**
- * Applies the side effects that follow a node insert: uniqueness entries, then
- * embedding and fulltext sync. Uniqueness has already been *checked* during
- * create preparation; this writes the entries.
+ * The sync fans that follow a node insert: embedding and fulltext.
+ *
+ * The claims this row owes are NOT here. They are issued by
+ * {@link withNodeCreateClaims}, on the two sides of the insert their placement
+ * names — a claim that is the only fence for its axis has to precede the row it
+ * gates, and a function that runs entirely after the insert cannot issue one.
+ * The fans have no such constraint: they are derived data, they fence nothing,
+ * and they stay where they have always been.
  */
-export async function applyNodeInsertSideEffects(
+export async function applyNodeInsertSyncFans(
   ctx: NodeWriteContext,
-  args: Readonly<{
-    kind: string;
-    id: string;
-    schema: z.ZodType;
-    props: Record<string, unknown>;
-    uniqueConstraints: readonly UniqueConstraint[];
-  }>,
+  args: NodeInsertSyncItem,
   backend: Backend,
 ): Promise<void> {
-  await insertUniquenessEntries(
-    uniquenessContext(ctx, backend),
-    args.kind,
-    args.id,
-    args.props,
-    args.uniqueConstraints,
-  );
   await Promise.all([
     syncEmbeddings(
       nodeSyncContext(ctx, args.kind, args.id, backend),
@@ -213,34 +214,16 @@ export async function applyNodeInsertSideEffects(
 }
 
 /**
- * Batched {@link applyNodeInsertSideEffects}: one uniqueness batch across
- * every item, then one embedding batch per (kind, field) and one fulltext
- * batch per kind — instead of the per-row statement fan the single-op path
- * issues. Ordering matches the single-op path (uniqueness first, then the
- * sync fans).
+ * Batched {@link applyNodeInsertSyncFans}: one embedding batch per (kind,
+ * field) and one fulltext batch per kind, instead of the per-row statement fan
+ * the single-op path issues.
  */
-export async function applyNodeInsertSideEffectsBatch(
+export async function applyNodeInsertSyncFansBatch(
   ctx: NodeWriteContext,
-  items: readonly Readonly<{
-    kind: string;
-    id: string;
-    schema: z.ZodType;
-    props: Record<string, unknown>;
-    uniqueConstraints: readonly UniqueConstraint[];
-  }>[],
+  items: readonly NodeInsertSyncItem[],
   backend: Backend,
 ): Promise<void> {
   if (items.length === 0) return;
-
-  await insertUniquenessEntriesBatch(
-    uniquenessContext(ctx, backend),
-    items.map((item) => ({
-      kind: item.kind,
-      id: item.id,
-      props: item.props,
-      constraints: item.uniqueConstraints,
-    })),
-  );
 
   interface KindGroup {
     schema: z.ZodType;

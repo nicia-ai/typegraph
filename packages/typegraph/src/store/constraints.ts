@@ -40,6 +40,7 @@ import {
   checkDisjointness,
   checkUniqueEdge,
 } from "../constraints";
+import { type GraphDef } from "../core/define-graph";
 import { type Cardinality, type UniqueConstraint } from "../core/types";
 import { type KindRegistry } from "../registry/kind-registry";
 import { type ConstraintFenceReason } from "./claims/backing";
@@ -109,10 +110,61 @@ export function nodeWriteNeedsConstraintFence(
   if (operation === "create" && registry.getDisjointKinds(kind).length > 0) {
     return "nodeDisjointness";
   }
-  const sharedScope = nodeClaimSites(registry, kind, uniqueConstraints).some(
-    (site) => site.needsLockFence,
-  );
+  const sharedScope = nodeClaimSites(
+    registry,
+    kind,
+    uniqueConstraints,
+    operation,
+  ).some((site) => site.needsLockFence);
   return sharedScope ? "nodeUniquenessScope" : undefined;
+}
+
+/**
+ * THE graph-level answer to "does writing into this graph owe a claim that must
+ * precede the row it gates?", folded over the SAME per-kind functions the write
+ * paths consult — a node kind any of whose claim sites is `pre-insert` under
+ * either operation, or an edge kind whose cardinality is not `many`.
+ *
+ * It exists for `importGraph`, which takes no per-graph lock and therefore
+ * cannot declare `fencesConstraintProbe`: that option carries a second decision
+ * — take the lock — and holding a per-graph mutex for a whole bulk load is a
+ * different change with a different owner. The CONSUMPTION is split; the
+ * definition is not.
+ *
+ * BOTH operations are folded because an import performs both, and the answer is
+ * needed before the payload is inspected. That makes the fold coarser than the
+ * per-row seam on purpose: a payload whose every row fails its constraints'
+ * `where` predicates owes nothing, yet the import is refused. That is the price
+ * of answering up front — and answering up front is what makes the refusal
+ * deterministic across a chunked stream, which imports per chunk and would
+ * otherwise fail on chunk k with k-1 chunks already committed.
+ *
+ * It lives here rather than beside {@link nodeClaimSites} because it also folds
+ * {@link edgeWriteNeedsConstraintFence}, and this module is the one that already
+ * sees both per-kind predicates.
+ */
+export function graphOwesClaims(
+  graph: GraphDef,
+  registry: KindRegistry,
+): ConstraintFenceReason | undefined {
+  for (const [kind, registration] of Object.entries(graph.nodes)) {
+    for (const operation of ["create", "update"] as const) {
+      const gating = nodeClaimSites(
+        registry,
+        kind,
+        registration.unique ?? [],
+        operation,
+      ).find((site) => site.placement === "pre-insert");
+      if (gating !== undefined) return gating.refusalReason;
+    }
+  }
+  for (const registration of Object.values(graph.edges)) {
+    const reason = edgeWriteNeedsConstraintFence(
+      registration.cardinality ?? "many",
+    );
+    if (reason !== undefined) return reason;
+  }
+  return undefined;
 }
 
 /**

@@ -19,6 +19,7 @@ export const CONSTRAINT_FENCE_REASONS = [
   "edgeCardinality",
   "edgeMatchKeyConvergence",
   "nodeDisjointness",
+  "nodeUniquenessClaim",
   "nodeUniquenessScope",
 ] as const;
 
@@ -43,13 +44,17 @@ type ConstraintFenceBacking = "uniques" | "lockOnly";
  *
  * `nodeUniquenessScope` is `"uniques"` because a shared-scope claim is now
  * written at the scope's axis, so two writers of two kinds in one hierarchy
- * contend for one row. The classes still marked `lockOnly` are fenced by the
- * per-graph write lock alone, which is why they are also the classes a
- * non-transactional backend refuses.
+ * contend for one row. `nodeUniquenessClaim` is the same relation seen from the
+ * other side: the claim row is the fence, and the class exists because a write
+ * that must issue it BEFORE the row it gates needs a transaction to undo the
+ * pair together — which is what its refusal names. The classes still marked
+ * `lockOnly` are fenced by the per-graph write lock alone, which is why they
+ * are also the classes a non-transactional backend refuses.
  */
 export const CONSTRAINT_FENCE_BACKING = {
   edgeCardinality: "lockOnly",
   edgeMatchKeyConvergence: "lockOnly",
   nodeDisjointness: "lockOnly",
+  nodeUniquenessClaim: "uniques",
   nodeUniquenessScope: "uniques",
 } as const satisfies Record<ConstraintFenceReason, ConstraintFenceBacking>;

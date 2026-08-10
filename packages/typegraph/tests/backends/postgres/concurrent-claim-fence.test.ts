@@ -95,6 +95,55 @@ const graph = defineGraph({
   ontology: [subClassOf(Employee, Worker), subClassOf(Contractor, Worker)],
 });
 
+/**
+ * A second graph for the ORDER case (C9b): two constraints folding onto one
+ * axis, declared in OPPOSITE order by the two kinds the two writers use.
+ *
+ * That opposition is the point. Claims are issued in canonical order rather
+ * than in the order a schema happens to list them, so both writers take
+ * `order_alias` before `order_email` and one simply waits for the other. Issued
+ * in declaration order they would form a cycle — each holding the row the other
+ * needs — and PostgreSQL would break it by aborting one leg with `40P01`, which
+ * for an import means a whole-batch abort where the design promises a per-row
+ * refusal.
+ */
+const ORDER_ALIAS_UNIQUE = {
+  name: "order_alias",
+  fields: ["alias"],
+  scope: "kindWithSubClasses",
+  collation: "binary",
+} as const;
+
+const ORDER_EMAIL_UNIQUE = {
+  name: "order_email",
+  fields: ["email"],
+  scope: "kindWithSubClasses",
+  collation: "binary",
+} as const;
+
+const OrderAliasFirst = defineNode("OrderAliasFirst", {
+  schema: z.object({ alias: z.string(), email: z.string() }),
+});
+const OrderEmailFirst = defineNode("OrderEmailFirst", {
+  schema: z.object({ alias: z.string(), email: z.string() }),
+});
+
+const orderGraph = defineGraph({
+  id: "concurrent-claim-order",
+  nodes: {
+    OrderAliasFirst: {
+      type: OrderAliasFirst,
+      unique: [ORDER_ALIAS_UNIQUE, ORDER_EMAIL_UNIQUE],
+    },
+    OrderEmailFirst: {
+      type: OrderEmailFirst,
+      unique: [ORDER_EMAIL_UNIQUE, ORDER_ALIAS_UNIQUE],
+    },
+  },
+  edges: {},
+  ontology: [subClassOf(OrderEmailFirst, OrderAliasFirst)],
+});
+
 const IMPORT_OPTIONS: ImportOptions = {
   onConflict: "update",
   onUnknownProperty: "error",
@@ -153,6 +202,18 @@ async function createGraphStore(
 ) {
   const [store] = await createStoreWithSchema(
     graph,
+    decorate(createPostgresBackend(database)),
+  );
+  return store;
+}
+
+/** The same, for the claim-ORDER graph. */
+async function createOrderStore(
+  database: NodePgDatabase,
+  decorate: (backend: GraphBackend) => GraphBackend = (backend) => backend,
+) {
+  const [store] = await createStoreWithSchema(
+    orderGraph,
     decorate(createPostgresBackend(database)),
   );
   return store;
@@ -259,6 +320,37 @@ function createClaimGate(): ClaimGate {
 }
 
 /**
+ * The store leg's backend, parked once it HOLDS its first claim row and before
+ * it asks for its second — the only interleaving in which a claim-order cycle
+ * is constructible at all. The lock it holds is a real row lock in a real
+ * transaction, so the other leg genuinely waits on it.
+ */
+function backendPausingAfterFirstClaim(
+  backend: GraphBackend,
+  gate: ClaimGate,
+): GraphBackend {
+  return {
+    ...backend,
+    transaction: (run, options) =>
+      backend.transaction(async (target) => {
+        // `let` earns its place: "have I already paused?" is per-transaction
+        // state the wrapper has nowhere else to keep.
+        let claimsIssued = 0;
+        return run({
+          ...target,
+          insertUnique: async (params) => {
+            await target.insertUnique(params);
+            claimsIssued += 1;
+            if (claimsIssued === 1) {
+              await gate.arrive();
+            }
+          },
+        });
+      }, options),
+  };
+}
+
+/**
  * The import leg's backend, parked at the moment its claim is about to be
  * issued — after every probe it makes, before the row it gates is reserved.
  * That is the window under test: the store leg gets to take and commit the key
@@ -293,6 +385,30 @@ function backendPausingBeforeClaim(
         });
       }, options),
   };
+}
+
+/**
+ * A rejection's whole cause chain, including each link's SQL state.
+ *
+ * A driver-level failure — a deadlock victim, most importantly — reaches the
+ * caller wrapped in the query error that raised it, so its `code` lives on a
+ * `cause` several links down. A case asserting the ABSENCE of such a failure
+ * has to read all of them or it certifies nothing.
+ */
+function failureChainText(outcome: PromiseSettledResult<unknown>): string {
+  if (outcome.status !== "rejected") return refusalText(outcome);
+  const parts: string[] = [];
+  // `let` earns its place: walking a cause chain is a cursor, and the chain has
+  // no array form to iterate.
+  let link: unknown = outcome.reason;
+  while (link instanceof Error && parts.length < 10) {
+    const code = (link as Readonly<{ code?: string }>).code;
+    parts.push(
+      `${link.name}: ${link.message}${code === undefined ? "" : ` [${code}]`}`,
+    );
+    link = link.cause;
+  }
+  return parts.length === 0 ? String(outcome.reason) : parts.join(" <- ");
 }
 
 /** Every message the losing leg could have produced, however it surfaced. */
@@ -435,6 +551,86 @@ describe.runIf(process.env["POSTGRES_URL"])(
           { concrete_kind: "Contractor", node_id: "c11-shared" },
         ]);
         expect(importRefusal).toContain(STAFF_EMAIL_CONSTRAINT);
+      },
+    );
+
+    it(
+      "resolves two writers contending for the SAME two claim rows without a deadlock",
+      { timeout: CONTENTION_TIMEOUT_MS },
+      async () => {
+        // C9b. The two kinds declare their constraints in opposite order, so
+        // issuing claims in declaration order would have each writer holding
+        // the row the other needs. Canonical order removes the cycle: both take
+        // `order_alias` first, and the second writer simply waits for the first
+        // to commit and is then refused on the merits.
+        //
+        // Under a cycle PostgreSQL aborts one leg with `40P01`, which is a
+        // different and much worse outcome than a refusal: it destroys the
+        // transaction, so an import's per-row recovery becomes a whole-batch
+        // abort. Asserting on the ABSENCE of that code is the point of the case.
+        const live = requirePostgres();
+        const gate = createClaimGate();
+        const storeStore = await createOrderStore(live.storeDb, (backend) =>
+          backendPausingAfterFirstClaim(backend, gate),
+        );
+        const importStore = await createOrderStore(live.importDb);
+
+        const storeRun = storeStore.nodes.OrderAliasFirst.create(
+          { alias: "c9b-alias", email: "c9b@example.com" },
+          { id: "c9b-store" },
+        );
+        // The store leg now HOLDS its first claim row inside an open
+        // transaction.
+        await gate.reached;
+
+        const importRun = importGraph(
+          importStore,
+          {
+            formatVersion: FORMAT_VERSION,
+            exportedAt: new Date().toISOString(),
+            source: { type: "external", description: "claim order" },
+            nodes: [
+              {
+                kind: "OrderEmailFirst",
+                id: "c9b-import",
+                properties: {
+                  alias: "c9b-alias",
+                  email: "c9b@example.com",
+                },
+              },
+            ],
+            edges: [],
+          },
+          IMPORT_OPTIONS,
+        );
+        // Long enough for the import leg to reach its own first claim and block
+        // there; the outcome is the same if it has not, so this cannot make the
+        // case pass for the wrong reason — it can only make it less pointed.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        gate.release();
+
+        const [storeOutcome, importOutcome] = await Promise.allSettled([
+          storeRun,
+          importRun,
+        ]);
+        // The whole cause chain, because a driver's `40P01` reaches the caller
+        // wrapped: reading only the top message would let a genuine deadlock
+        // pass this case as an ordinary query failure.
+        const messages = [
+          failureChainText(requireDefined(storeOutcome)),
+          failureChainText(requireDefined(importOutcome)),
+        ].join(" | ");
+        expect(messages).not.toContain("40P01");
+        expect(messages.toLowerCase()).not.toContain("deadlock");
+        // And the loser lost on the MERITS: a typed refusal naming the
+        // constraint, not a statement the engine killed.
+        expect(messages).toContain("UniquenessError");
+        expect(messages).toContain(ORDER_ALIAS_UNIQUE.name);
+
+        // Exactly one winner, and it is the leg that committed.
+        const reader = await createOrderStore(live.storeDb);
+        expect(await reader.nodes.OrderAliasFirst.find()).toHaveLength(1);
+        expect(await reader.nodes.OrderEmailFirst.find()).toHaveLength(0);
       },
     );
   },

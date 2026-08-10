@@ -108,9 +108,13 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
 import {
+  alreadyAppliedRowWrite,
   checkUniquenessConstraints,
   createUniquenessContext,
   nodeClaimEntries,
+  type NodeClaimItem,
+  withNodeCreateClaims,
+  withNodeCreateClaimsBatch,
 } from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateNodeInput } from "../collections/node-collection";
@@ -147,11 +151,12 @@ import {
 } from "./already-exists";
 import {
   applyNodeHardDelete,
-  applyNodeInsertSideEffects,
-  applyNodeInsertSideEffectsBatch,
+  applyNodeInsertSyncFans,
+  applyNodeInsertSyncFansBatch,
   applyNodeSoftDelete,
   applyNodeUpdate,
   createNodeWriteContext,
+  type NodeInsertSyncItem,
 } from "./node-write-pipeline";
 import {
   runHookedWriteOperation,
@@ -488,7 +493,13 @@ export function createNodeBatchValidationBackend(
     props: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ): void {
-    for (const entry of nodeClaimEntries(registry, kind, props, constraints)) {
+    for (const entry of nodeClaimEntries(
+      registry,
+      kind,
+      props,
+      constraints,
+      "create",
+    )) {
       pendingUniqueOwners.set(
         buildUniqueCacheKey(
           graphId,
@@ -524,16 +535,14 @@ export function createNodeBatchValidationBackend(
   ): void {
     const owner: ClaimOwner = { concreteKind: kind, nodeId: id };
     const oldEntries = new Map(
-      nodeClaimEntries(registry, kind, oldProps, constraints).map((entry) => [
-        entry.constraintName,
-        entry,
-      ]),
+      nodeClaimEntries(registry, kind, oldProps, constraints, "update").map(
+        (entry) => [entry.constraintName, entry],
+      ),
     );
     const newEntries = new Map(
-      nodeClaimEntries(registry, kind, newProps, constraints).map((entry) => [
-        entry.constraintName,
-        entry,
-      ]),
+      nodeClaimEntries(registry, kind, newProps, constraints, "update").map(
+        (entry) => [entry.constraintName, entry],
+      ),
     );
 
     for (const constraint of constraints) {
@@ -771,10 +780,33 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
   );
 }
 
+/** What a prepared create hands the claim seam and the sync fans. */
+function nodeCreateSideEffectItem(
+  prepared: NodeCreatePrepared,
+): NodeInsertSyncItem {
+  return {
+    kind: prepared.kind,
+    id: prepared.id,
+    schema: prepared.nodeKind.schema,
+    props: prepared.validatedProps,
+    uniqueConstraints: prepared.uniqueConstraints,
+  };
+}
+
+function nodeCreateClaimItem(prepared: NodeCreatePrepared): NodeClaimItem {
+  return {
+    kind: prepared.kind,
+    id: prepared.id,
+    props: prepared.validatedProps,
+    constraints: prepared.uniqueConstraints,
+  };
+}
+
 /**
- * Batched {@link finalizeNodeCreate}: applies every prepared create's
- * side effects through the batch pipeline (one uniqueness batch, one
- * fulltext/embedding batch per kind) instead of a per-row statement fan.
+ * Batched {@link finalizeNodeCreate}: applies every prepared create's sync fans
+ * through the batch pipeline (one fulltext/embedding batch per kind) instead of
+ * a per-row statement fan. The claims are not here — see
+ * {@link withNodeCreateClaimsBatch}, which wraps the insert itself.
  */
 async function finalizeNodeCreateBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -782,15 +814,9 @@ async function finalizeNodeCreateBatch<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   lock: GraphWriteLock,
 ): Promise<void> {
-  await applyNodeInsertSideEffectsBatch(
+  await applyNodeInsertSyncFansBatch(
     createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-    preparedCreates.map((prepared) => ({
-      kind: prepared.kind,
-      id: prepared.id,
-      schema: prepared.nodeKind.schema,
-      props: prepared.validatedProps,
-      uniqueConstraints: prepared.uniqueConstraints,
-    })),
+    preparedCreates.map((prepared) => nodeCreateSideEffectItem(prepared)),
     backend,
   );
 }
@@ -817,15 +843,9 @@ async function finalizeNodeCreate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   lock: GraphWriteLock,
 ): Promise<void> {
-  await applyNodeInsertSideEffects(
+  await applyNodeInsertSyncFans(
     createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-    {
-      kind: prepared.kind,
-      id: prepared.id,
-      schema: prepared.nodeKind.schema,
-      props: prepared.validatedProps,
-      uniqueConstraints: prepared.uniqueConstraints,
-    },
+    nodeCreateSideEffectItem(prepared),
     backend,
   );
 }
@@ -1181,6 +1201,7 @@ export async function primeBatchValidationCaches(
         draft.kind,
         draft.validatedProps,
         draft.uniqueConstraints,
+        "create",
       )) {
         const constraint = entry.constraint;
         const key = entry.key;
@@ -1528,14 +1549,26 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       // not serialize the two writers, a concurrent create of the same new id
       // can commit between the probe and this INSERT, and only the engine's
       // refusal reports it. Both routes to that conclusion raise the same error.
-      const row = await withAlreadyExistsTranslation("node", async () => {
-        if (shouldReturnRow) return target.insertNode(prepared.insertParams);
-        await runInsertNoReturn(
-          nodeInsertDispatch(target),
-          prepared.insertParams,
-        );
-        return;
-      });
+      //
+      // The insert is the claim seam's gated write: claims whose axis spans
+      // kinds beyond this one are the only fence for that axis, so they precede
+      // it and are compensated away if it does not land; the rest follow it,
+      // where their own primary key already fences them.
+      const row = await withNodeCreateClaims(
+        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+        nodeCreateClaimItem(prepared),
+        target,
+        () =>
+          withAlreadyExistsTranslation("node", async () => {
+            if (shouldReturnRow)
+              return target.insertNode(prepared.insertParams);
+            await runInsertNoReturn(
+              nodeInsertDispatch(target),
+              prepared.insertParams,
+            );
+            return;
+          }),
+      );
 
       await finalizeNodeCreate(ctx, prepared, target, lock);
       if (identity !== undefined) {
@@ -1600,11 +1633,17 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
 
       const partition = partitionCreates(preparedCreates);
-      await withAlreadyExistsTranslation("node", () =>
-        runInsertBatch(
-          nodeInsertDispatch(target),
-          partition.inserts.map((prepared) => prepared.insertParams),
-        ),
+      await withNodeCreateClaimsBatch(
+        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+        partition.inserts.map((prepared) => nodeCreateClaimItem(prepared)),
+        target,
+        () =>
+          withAlreadyExistsTranslation("node", () =>
+            runInsertBatch(
+              nodeInsertDispatch(target),
+              partition.inserts.map((prepared) => prepared.insertParams),
+            ),
+          ),
       );
       for (const prepared of partition.resurrections) {
         await resurrectPreparedNode(ctx, target, lock, prepared);
@@ -1655,11 +1694,17 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       );
 
       const partition = partitionCreates(preparedCreates);
-      const inserted = await withAlreadyExistsTranslation("node", () =>
-        runInsertBatchReturning(
-          nodeInsertDispatch(target),
-          partition.inserts.map((prepared) => prepared.insertParams),
-        ),
+      const inserted = await withNodeCreateClaimsBatch(
+        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+        partition.inserts.map((prepared) => nodeCreateClaimItem(prepared)),
+        target,
+        () =>
+          withAlreadyExistsTranslation("node", () =>
+            runInsertBatchReturning(
+              nodeInsertDispatch(target),
+              partition.inserts.map((prepared) => prepared.insertParams),
+            ),
+          ),
       );
       const resurrected: BackendNodeRow[] = [];
       for (const prepared of partition.resurrections) {
@@ -2024,11 +2069,33 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
             nodeIds: result.rows.map((row) => row.id),
           });
         }
-        await applyNodeInsertSideEffectsBatch(
-          createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-          sidecarItems,
-          target,
+        // The same claim seam every create-shaped writer uses, with an
+        // ALREADY-APPLIED update as its gate: the rows were written above and
+        // the old claims hard-deleted, so what is left is a re-claim, and there
+        // is no row write left for a claim to precede. Inverting it would mean
+        // reserving keys the update has not written, which is a different and
+        // wrong sequence. What covers this site on a backend that cannot fence
+        // is stated per kind shape: a kind whose scope spans siblings declares
+        // `fencesConstraintProbe` below and is refused before this body runs; a
+        // kind-scoped one is not refused, before or after — its
+        // delete-then-rebuild window is unchanged in shape and extent here.
+        const writeContext = createNodeWriteContext(
+          ctx.graphId,
+          ctx.registry,
+          lock,
         );
+        await withNodeCreateClaimsBatch(
+          writeContext,
+          sidecarItems.map((item) => ({
+            kind: item.kind,
+            id: item.id,
+            props: item.props,
+            constraints: item.uniqueConstraints,
+          })),
+          target,
+          alreadyAppliedRowWrite,
+        );
+        await applyNodeInsertSyncFansBatch(writeContext, sidecarItems, target);
         return { affectedCount: result.affectedCount };
       },
       {

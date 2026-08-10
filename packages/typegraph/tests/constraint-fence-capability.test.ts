@@ -42,6 +42,11 @@ import {
 } from "../src";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
+import {
+  FORMAT_VERSION,
+  importGraph,
+  type ImportOptions,
+} from "../src/interchange";
 import { matchingObject } from "./test-utils";
 
 const FENCE_CODE = "CONSTRAINT_WRITE_FENCE_UNSUPPORTED";
@@ -122,6 +127,45 @@ const graph = defineGraph({
   ],
 });
 
+/** A graph declaring nothing: no unique, no disjointness, no cardinality. */
+const Drifter = defineNode("Drifter", {
+  schema: z.object({ name: z.string() }),
+});
+const wanders = defineEdge("wanders", { schema: z.object({}) });
+
+const unconstrainedGraph = defineGraph({
+  id: "constraint_fence_capability_unconstrained",
+  nodes: { Drifter: { type: Drifter } },
+  edges: { wanders: { type: wanders, from: [Drifter], to: [Drifter] } },
+});
+
+/**
+ * A graph whose ONLY declared hazard is disjointness: no unique constraint on
+ * either kind, and no edge at all. `graphOwesClaims` folds `nodeClaimSites`
+ * (uniqueness) and `edgeWriteNeedsConstraintFence`; a disjoint pair owes
+ * neither, because `nodeClaimEntries` writes no disjointness reservation yet
+ * (that arm lands later, alongside import's per-row disjointness probe). This
+ * graph is what isolates that from the graph fixture above, which cannot
+ * distinguish the two hazards because `Worker`'s shared-scope uniqueness would
+ * trip the same refusal on its own.
+ */
+const Wraith = defineNode("Wraith", { schema: z.object({ name: z.string() }) });
+const Phantom = defineNode("Phantom", {
+  schema: z.object({ name: z.string() }),
+});
+
+const disjointOnlyGraph = defineGraph({
+  id: "constraint_fence_capability_disjoint_only",
+  nodes: { Wraith: { type: Wraith }, Phantom: { type: Phantom } },
+  edges: {},
+  ontology: [disjointWith(Wraith, Phantom)],
+});
+
+const IMPORT_OPTIONS: ImportOptions = {
+  onConflict: "error",
+  refreshStatistics: false,
+};
+
 /** Asserts the typed refusal, including WHICH constraint class needed a fence. */
 function expectFenceRefusal(constraint: string): unknown {
   return expect.objectContaining({
@@ -146,6 +190,15 @@ describe("constrained writes on a backend that cannot fence them", () => {
   afterEach(() => {
     sqlite.close();
   });
+
+  /** Every live claim row's owner, read past the store so nothing is inferred. */
+  function liveClaimOwners(): readonly unknown[] {
+    return sqlite
+      .prepare(
+        "SELECT concrete_kind, node_id FROM typegraph_node_uniques WHERE deleted_at IS NULL ORDER BY node_id",
+      )
+      .all();
+  }
 
   it("refuses an edge create whose cardinality it cannot enforce", async () => {
     const store = createStore(graph, backend);
@@ -183,6 +236,114 @@ describe("constrained writes on a backend that cannot fence them", () => {
         email: "e2@example.com",
       }),
     ).rejects.toThrow(expectFenceRefusal("nodeUniquenessScope"));
+  });
+
+  it("refuses an UPDATE whose own-kind claim precedes the row it gates", async () => {
+    // T2, the other half of the pair T4 opens. Same kind, same backend, same
+    // single `scope: "kind"` constraint — and the opposite verdict, decided
+    // only by the claim's PLACEMENT. A transition claims the new key BEFORE the
+    // gated row write for every scope (that is the only sequence in which a
+    // refused write leaves zero net effect), so an update reserves a row with
+    // nothing to undo it here: no transaction, no rollback, and no repair path
+    // for a reservation that outlives a write that never landed. The reason is
+    // `nodeUniquenessClaim` rather than `nodeUniquenessScope` because the scope
+    // is not the problem — the reservation row is.
+    const store = createStore(graph, backend);
+    // The create is accepted (T4), which is what makes this update reachable.
+    const account = await store.nodes.Account.create({
+      email: "t2-before@example.com",
+    });
+
+    await expect(
+      store.nodes.Account.update(account.id, { email: "t2-after@example.com" }),
+    ).rejects.toThrow(expectFenceRefusal("nodeUniquenessClaim"));
+
+    // Refused BEFORE its first claim statement: the new key holds no
+    // reservation, and the old one is untouched.
+    expect(liveClaimOwners()).toEqual([
+      { concrete_kind: "Account", node_id: account.id },
+    ]);
+    expect(
+      sqlite
+        .prepare(
+          "SELECT count(*) AS total FROM typegraph_node_uniques WHERE key LIKE '%t2-after%'",
+        )
+        .get(),
+    ).toEqual({ total: 0 });
+  });
+
+  it("refuses an import into a graph whose kinds owe a claim before their row", async () => {
+    // T1. An import writes claims like every other writer, but it takes no
+    // per-graph lock and declares no `fencesConstraintProbe`, so nothing else
+    // in the stack would refuse it — it would write reservations with no
+    // transaction to undo them. The refusal is up front, before chunk 1, so a
+    // streamed import cannot commit k-1 chunks and then fail.
+    const store = createStore(graph, backend);
+
+    await expect(
+      importGraph(
+        store,
+        {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: new Date().toISOString(),
+          source: { type: "external", description: "fence capability" },
+          nodes: [
+            { kind: "Person", id: "t1-person", properties: { name: "P" } },
+          ],
+          edges: [],
+        },
+        IMPORT_OPTIONS,
+      ),
+    ).rejects.toThrow(expectFenceRefusal("nodeUniquenessScope"));
+
+    // Nothing was written: not the unconstrained row it led with, not a claim.
+    expect(
+      sqlite.prepare("SELECT count(*) AS total FROM typegraph_nodes").get(),
+    ).toEqual({ total: 0 });
+    expect(liveClaimOwners()).toEqual([]);
+  });
+
+  it("imports into a graph whose only hazard is a disjoint partner, which owes no claim yet", async () => {
+    // The counterpart to T1: `graphOwesClaims` folds `nodeClaimSites`
+    // (uniqueness) and `edgeWriteNeedsConstraintFence` — it never consults
+    // `registry.getDisjointKinds`, because no claim precedes a disjoint
+    // create's row yet (`nodeClaimEntries` writes no disjointness reservation
+    // yet). `disjointOnlyGraph` has no unique constraint and no edge at all,
+    // so it isolates that from `graph`, whose `Worker` shared-scope uniqueness
+    // would refuse the import on its own and mask this case. The store's OWN
+    // create refuses a disjoint pair on this backend
+    // ("refuses a node create whose disjointness it cannot enforce", above) —
+    // it is only import's up-front graph-level fold that does not, and this
+    // pins that scope so the doc comment on `importGraph` cannot drift from it
+    // unnoticed.
+    const store = createStore(disjointOnlyGraph, backend);
+    for (const statement of generateSqliteDDL()) {
+      try {
+        sqlite.exec(statement);
+      } catch {
+        // The tables already exist from the shared fixture; the graph id is
+        // what separates the two graphs' rows.
+      }
+    }
+
+    const imported = await importGraph(
+      store,
+      {
+        formatVersion: FORMAT_VERSION,
+        exportedAt: new Date().toISOString(),
+        source: { type: "external", description: "fence capability" },
+        nodes: [
+          {
+            kind: "Wraith",
+            id: "disjoint-only-wraith",
+            properties: { name: "W" },
+          },
+        ],
+        edges: [],
+      },
+      IMPORT_OPTIONS,
+    );
+    expect(imported.nodes.created).toBe(1);
   });
 
   it("refuses getOrCreateByEndpoints, whose convergence no key backs", async () => {
@@ -294,13 +455,61 @@ describe("constrained writes on a backend that cannot fence them", () => {
     });
 
     it("creates a node whose unique is scoped to its own kind", async () => {
-      // The uniques primary key IS the fence for a `kind` scope, so nothing
-      // here depends on serialization and nothing is refused.
+      // T4, the guard against OVER-refusing. Two reasons this create is
+      // accepted, and the second is the one that keeps it accepted now that
+      // claims can precede their rows: the uniques primary key IS the fence for
+      // a `kind` scope, so nothing here depends on serialization; and that
+      // claim's PLACEMENT is post-insert, so this write opens no window in
+      // which a live reservation could outlive a row that never landed. The
+      // refusal is keyed on the pre-insert group precisely so this case stays
+      // green — its sibling below (the same kind's UPDATE, whose claim precedes
+      // its row) is refused, and only the placement separates them.
       const store = createStore(graph, backend);
       const created = await store.nodes.Account.create({
         email: "own@example.com",
       });
       expect(created.email).toBe("own@example.com");
+
+      // The reservation landed: the create was fenced by its own key, not
+      // silently unfenced.
+      expect(liveClaimOwners()).toEqual([
+        { concrete_kind: "Account", node_id: created.id },
+      ]);
+    });
+
+    it("creates into, and imports into, a graph that owes no claim at all", async () => {
+      // T3, the guard that the refusal is about what a write OWES and not about
+      // the operation. Nothing in this graph declares a unique constraint, a
+      // disjoint partner or a non-`many` cardinality, so no claim precedes any
+      // row and both the store write and the import keep working — which is
+      // what "unconstrained writes are untouched" has to mean for import too.
+      const store = createStore(unconstrainedGraph, backend);
+      for (const statement of generateSqliteDDL()) {
+        try {
+          sqlite.exec(statement);
+        } catch {
+          // The tables already exist from the shared fixture; the graph id is
+          // what separates the two graphs' rows.
+        }
+      }
+
+      const created = await store.nodes.Drifter.create({ name: "D" });
+      expect(created.name).toBe("D");
+
+      const imported = await importGraph(
+        store,
+        {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: new Date().toISOString(),
+          source: { type: "external", description: "fence capability" },
+          nodes: [
+            { kind: "Drifter", id: "t3-drifter", properties: { name: "T" } },
+          ],
+          edges: [],
+        },
+        IMPORT_OPTIONS,
+      );
+      expect(imported.nodes.created).toBe(1);
     });
 
     it("creates, updates and deletes a cardinality-many edge", async () => {

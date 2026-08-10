@@ -85,19 +85,27 @@ import {
   IDENTITY_IMPORT_PROGRESS,
 } from "../identity/service";
 import { type KindRegistry } from "../registry/kind-registry";
-import { checkUniquenessConstraints } from "../store/claims/node-claims";
+import {
+  checkUniquenessConstraints,
+  withNodeCreateClaims,
+  withNodeCreateClaimsBatch,
+} from "../store/claims/node-claims";
+import { graphOwesClaims } from "../store/constraints";
 import {
   createNodeBatchValidationBackend,
   type NodeCreateDraft,
   primeBatchValidationCaches,
 } from "../store/operations/node-operations";
 import {
-  applyNodeInsertSideEffects,
-  applyNodeInsertSideEffectsBatch,
+  applyNodeInsertSyncFans,
+  applyNodeInsertSyncFansBatch,
   applyNodeUpdate,
   type NodeWriteContext,
 } from "../store/operations/node-write-pipeline";
-import { runInWriteTransaction } from "../store/operations/write-transaction";
+import {
+  constraintFenceRefusal,
+  runInWriteTransaction,
+} from "../store/operations/write-transaction";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
@@ -144,6 +152,18 @@ import {
  * exportGraphStream(source)) await importGraph(target, ...)` on one such
  * connection is therefore refused on the first chunk instead of nesting a write
  * transaction inside the export's open snapshot.
+ *
+ * Also refused, with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, when the backend
+ * reports `transactions: false` AND the graph owes a claim that must be written
+ * before the row it gates — any unique constraint of any scope, or any edge
+ * kind whose cardinality is not `many`. An import writes those reservations
+ * like every other writer and takes no per-graph lock, so without a
+ * transaction a failure between a reservation and its row would leave a key
+ * blocked with no repair path. The verdict is per GRAPH rather than per
+ * payload, and it is reached before the first row: a streamed import cannot
+ * commit part of itself and only then discover it could not be fenced.
+ * Disjointness owes no claim yet, so a disjoint-only graph is not refused
+ * here — {@link graphOwesClaims} names the sites it folds.
  *
  * @param store - The graph store to import into
  * @param data - Graph data in interchange format
@@ -233,6 +253,22 @@ async function importGraphData<G extends GraphDef>(
   const backend = storeBackend(store);
   const runtime = storeRuntime(store);
   const registry = store.registry;
+
+  // Fenced or refused, before any write. An import writes claim rows like every
+  // other writer, but it takes no per-graph lock and it is not covered by
+  // `runInWriteTransaction`'s refusal, because it declares no
+  // `fencesConstraintProbe` (that option also decides the lock, and a per-graph
+  // mutex held for a whole bulk load is a different decision — see
+  // `graphOwesClaims`). So it asks the same question directly. The subject is
+  // the graph rather than the payload deliberately: `importGraphStream` imports
+  // per chunk and cannot see the whole payload, and refusing on chunk k with
+  // k-1 chunks committed is a worse answer than refusing up front.
+  const owedClaimReason = graphOwesClaims(graph, registry);
+  const claimRefusal =
+    owedClaimReason === undefined ? undefined : (
+      constraintFenceRefusal({ graphId }, backend, owedClaimReason)
+    );
+  if (claimRefusal !== undefined) throw claimRefusal;
 
   // Build lookup maps for schema validation
   const nodeSchemas = buildNodeSchemaMap(graph);
@@ -1349,30 +1385,43 @@ async function processNodeSlice(
     accepted.push(candidate);
   }
 
-  // Flush the accepted creates: one multi-row insert, then the batched
-  // side effects (uniqueness entries, fulltext, embeddings).
+  // Flush the accepted creates: the claim seam wrapped around one multi-row
+  // insert, then the batched sync fans (fulltext, embeddings). The seam is what
+  // makes an import fenced at all — this writer takes no per-graph lock, so a
+  // claim whose axis spans kinds is the only thing that can refuse a peer, and
+  // it has to be issued BEFORE the rows it gates or a refused batch would leave
+  // the violating rows behind for a caller that recovers per row.
   if (accepted.length > 0) {
-    const insertParamsList = accepted.map((candidate) =>
-      buildImportInsertParams(graphId, candidate),
-    );
-    if (backend.insertNodesBatch === undefined) {
-      for (const params of insertParamsList) {
-        await backend.insertNode(params);
-      }
-    } else {
-      await backend.insertNodesBatch(insertParamsList);
-    }
-    await applyNodeInsertSideEffectsBatch(
+    const sideEffectItems = accepted.map((candidate) => ({
+      kind: candidate.node.kind,
+      id: candidate.node.id,
+      schema: candidate.schemaEntry.registration.type.schema,
+      props: candidate.props,
+      uniqueConstraints: candidate.schemaEntry.registration.unique ?? [],
+    }));
+    await withNodeCreateClaimsBatch(
       writeContext,
-      accepted.map((candidate) => ({
-        kind: candidate.node.kind,
-        id: candidate.node.id,
-        schema: candidate.schemaEntry.registration.type.schema,
-        props: candidate.props,
-        uniqueConstraints: candidate.schemaEntry.registration.unique ?? [],
+      sideEffectItems.map((item) => ({
+        kind: item.kind,
+        id: item.id,
+        props: item.props,
+        constraints: item.uniqueConstraints,
       })),
       backend,
+      async () => {
+        const insertParamsList = accepted.map((candidate) =>
+          buildImportInsertParams(graphId, candidate),
+        );
+        if (backend.insertNodesBatch === undefined) {
+          for (const params of insertParamsList) {
+            await backend.insertNode(params);
+          }
+        } else {
+          await backend.insertNodesBatch(insertParamsList);
+        }
+      },
     );
+    await applyNodeInsertSyncFansBatch(writeContext, sideEffectItems, backend);
     for (const candidate of accepted) {
       record(candidate.node, { status: "created" });
     }
@@ -1953,15 +2002,26 @@ async function processNode(
     return { status: "error", error: uniquenessResult.error };
   }
 
-  await backend.insertNode({
-    graphId,
-    kind: node.kind,
-    id: node.id,
-    props: propsResult.data,
-    ...(node.validFrom !== undefined && { validFrom: node.validFrom }),
-    ...(node.validTo !== undefined && { validTo: node.validTo }),
-  });
-  await applyNodeInsertSideEffects(
+  await withNodeCreateClaims(
+    writeContext,
+    {
+      kind: node.kind,
+      id: node.id,
+      props: propsResult.data,
+      constraints: uniqueConstraints,
+    },
+    backend,
+    () =>
+      backend.insertNode({
+        graphId,
+        kind: node.kind,
+        id: node.id,
+        props: propsResult.data,
+        ...(node.validFrom !== undefined && { validFrom: node.validFrom }),
+        ...(node.validTo !== undefined && { validTo: node.validTo }),
+      }),
+  );
+  await applyNodeInsertSyncFans(
     writeContext,
     {
       kind: node.kind,

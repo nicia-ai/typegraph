@@ -15,14 +15,19 @@ import {
 } from "../../backend/types";
 import { checkWherePredicate, computeUniqueKey } from "../../constraints";
 import { type UniqueConstraint } from "../../core/types";
-import { UniquenessError } from "../../errors";
+import { type ConfigurationError, UniquenessError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { constraintFenceRefusal } from "../operations/write-transaction";
+import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   type ClaimOwner,
+  type ClaimTarget,
+  compareClaimTargets,
   isSameClaimOwner,
   uniquenessProbeKinds,
 } from "./axis";
-import { nodeClaimSites } from "./sites";
+import { type ConstraintFenceReason } from "./backing";
+import { type ClaimPlacement, nodeClaimSites } from "./sites";
 
 /**
  * Context for node claim operations.
@@ -50,41 +55,95 @@ export type NodeClaimEntry = Readonly<{
   constraintName: string;
   /** `uniques.key`. */
   key: string;
+  /**
+   * WHEN this claim is issued relative to the row write it gates — carried
+   * through from the entry's {@link NodeClaimSite}, which is the one owner of
+   * the decision. The claim seam issues the two groups on either side of its
+   * gated write, and {@link claimFenceRefusal} is keyed on the pre-insert group
+   * alone.
+   */
+  placement: ClaimPlacement;
+  /**
+   * The class a refusal names when this claim cannot be rolled back — carried
+   * through from the site, so no consumer re-derives it.
+   */
+  refusalReason: ConstraintFenceReason;
   /** The constraint this entry came from. */
   constraint: UniqueConstraint;
 }>;
 
 /**
- * THE single owner of "what claims does THIS ROW owe?": the kind's claim sites
- * ({@link nodeClaimSites}, the declaration-level extent) filtered by each
- * constraint's `where` predicate and completed with this row's key.
+ * THE single owner of "what claims does THIS ROW owe, and when is each due?":
+ * the kind's claim sites ({@link nodeClaimSites}, the declaration-level extent
+ * for this operation) filtered by each constraint's `where` predicate and
+ * completed with this row's key. `placement` and `refusalReason` are carried
+ * through unchanged; this function decides neither.
  *
  * Every path that maintains a node's reservations — create, update diff,
  * resurrect, delete, batch, import — reads its work from this one list, so no
  * path can compute a key one way and an axis another.
+ *
+ * `operation` is threaded rather than assumed because the sites function needs
+ * it to place each claim: a transition claims before the row it gates for every
+ * scope, while a create only does so for an axis spanning kinds beyond its own.
  */
 export function nodeClaimEntries(
   registry: KindRegistry,
   kind: string,
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
+  operation: "create" | "update",
 ): readonly NodeClaimEntry[] {
-  return nodeClaimSites(registry, kind, constraints).flatMap((site) =>
-    checkWherePredicate(site.constraint, props) ?
-      [
-        {
-          axis: site.axis,
-          constraintName: site.constraintName,
-          key: computeUniqueKey(
-            props,
-            site.constraint.fields,
-            site.constraint.collation,
-          ),
-          constraint: site.constraint,
-        },
-      ]
-    : [],
+  return nodeClaimSites(registry, kind, constraints, operation).flatMap(
+    (site) =>
+      checkWherePredicate(site.constraint, props) ?
+        [
+          {
+            axis: site.axis,
+            constraintName: site.constraintName,
+            key: computeUniqueKey(
+              props,
+              site.constraint.fields,
+              site.constraint.collation,
+            ),
+            placement: site.placement,
+            refusalReason: site.refusalReason,
+            constraint: site.constraint,
+          },
+        ]
+      : [],
   );
+}
+
+/**
+ * THE refusal for "this write owes a claim it must issue BEFORE the row that
+ * claim gates, and this backend cannot roll that pair back together".
+ *
+ * A claim row that outlives the write it was taken for is invisible to every
+ * read path and blocks its key forever, with no repair path: `deleteUnique` is
+ * reached only by a node whose row exists. So a write that would open that
+ * window on a backend with no transactions is refused, exactly as a write whose
+ * fence is the per-graph lock has been since the lock became the fence. A
+ * claim that follows its row opens no such window — a leaked ENTITY row is
+ * visible, deletable, and is what that backend already does today — which is
+ * why the subject is the pre-insert group and not the claim set.
+ *
+ * Takes the ENTRIES this write is about to issue rather than the kind's sites:
+ * a row whose `where` predicates all fail writes no claim and must not be
+ * refused. For a batch, any member's non-empty pre-insert group makes the batch
+ * constrained — the same "any member" shape the batch lock probe uses.
+ *
+ * Delegates the error itself to {@link constraintFenceRefusal}, so there is one
+ * refusal body, one code and one advice map.
+ */
+function claimFenceRefusal(
+  ctx: Readonly<{ graphId: string }>,
+  backend: GraphBackend | TransactionBackend,
+  entries: readonly NodeClaimEntry[],
+): ConfigurationError | undefined {
+  const gating = entries.find((entry) => entry.placement === "pre-insert");
+  if (gating === undefined) return undefined;
+  return constraintFenceRefusal(ctx, backend, gating.refusalReason);
 }
 
 /**
@@ -165,86 +224,280 @@ export async function checkUniquenessConstraints(
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
 ): Promise<void> {
+  // The create extent, which is the wider of the two: a probe wants every claim
+  // this row could owe, and placement — the only thing the operation decides
+  // for a uniqueness site — says nothing about what is read.
   for (const entry of nodeClaimEntries(
     ctx.registry,
     kind,
     props,
     constraints,
+    "create",
   )) {
     await probeUniqueKey(ctx, kind, id, entry);
   }
 }
 
 /**
- * Inserts the claim rows a newly created node owes.
+ * What the create claim seam needs from its caller.
+ *
+ * `lock` is compile-time evidence that the per-graph write-lock discipline was
+ * satisfied BEFORE any row work (see {@link GraphWriteLock}); the seam performs
+ * no locking of its own, so requiring the token here makes "claim before lock"
+ * a type error at the call site instead of a lock-order inversion in review.
  */
-export async function insertUniquenessEntries(
+export type NodeClaimContext = Readonly<{
+  graphId: string;
+  registry: KindRegistry;
+  lock: GraphWriteLock;
+}>;
+
+/** One row whose claims a create-shaped write is about to issue. */
+export type NodeClaimItem = Readonly<{
+  kind: string;
+  id: string;
+  props: Record<string, unknown>;
+  constraints: readonly UniqueConstraint[];
+}>;
+
+/** One row's claim, with the owner it will be written under. */
+type PlacedClaim = Readonly<{
+  item: NodeClaimItem;
+  entry: NodeClaimEntry;
+  target: ClaimTarget;
+}>;
+
+/**
+ * How one placement group.s statements are issued.
+ *
+ * `onIssued` reports which claims actually landed, and it is optional because
+ * only the pre-insert group has a use for the answer: that group is compensated
+ * when its gated write fails, while a post-insert claim belongs to a row that is
+ * already written and has nothing to undo.
+ */
+type ClaimIssuer = (
   ctx: UniquenessContext,
-  kind: string,
-  id: string,
-  props: Record<string, unknown>,
-  constraints: readonly UniqueConstraint[],
+  claims: readonly PlacedClaim[],
+  onIssued?: (issued: readonly PlacedClaim[]) => void,
+) => Promise<void>;
+
+function claimTarget(graphId: string, entry: NodeClaimEntry): ClaimTarget {
+  return {
+    relation: "uniques",
+    graphId,
+    axis: entry.axis,
+    constraintName: entry.constraintName,
+    key: entry.key,
+  };
+}
+
+function claimInsertParams(
+  graphId: string,
+  claim: PlacedClaim,
+): InsertUniqueParams {
+  return {
+    graphId,
+    nodeKind: claim.entry.axis,
+    constraintName: claim.entry.constraintName,
+    key: claim.entry.key,
+    nodeId: claim.item.id,
+    concreteKind: claim.item.kind,
+  };
+}
+
+/** One statement per claim — the shape the single-row create path ships. */
+async function issueClaimsIndividually(
+  ctx: UniquenessContext,
+  claims: readonly PlacedClaim[],
+  onIssued?: (issued: readonly PlacedClaim[]) => void,
 ): Promise<void> {
-  for (const entry of nodeClaimEntries(
-    ctx.registry,
-    kind,
-    props,
-    constraints,
-  )) {
-    await ctx.backend.insertUnique({
-      graphId: ctx.graphId,
-      nodeKind: entry.axis,
-      constraintName: entry.constraintName,
-      key: entry.key,
-      nodeId: id,
-      concreteKind: kind,
-    });
+  for (const claim of claims) {
+    await ctx.backend.insertUnique(claimInsertParams(ctx.graphId, claim));
+    onIssued?.([claim]);
   }
 }
 
 /**
- * Inserts the claim rows a batch of newly created nodes owes through one
- * `insertUniqueBatch` call (falling back to per-entry `insertUnique` when
- * the backend lacks the batch primitive). Same conflict semantics as the
- * per-node path: the first entry whose key a different live node holds
- * throws `UniquenessError`.
+ * ONE statement for the whole group, which is also what makes it deadlock-free
+ * against itself: a single multi-row statement takes its row locks in a fixed
+ * order. Falls back to the per-claim shape on a backend with no batch
+ * primitive.
  */
-export async function insertUniquenessEntriesBatch(
+async function issueClaimsBatched(
   ctx: UniquenessContext,
-  items: readonly Readonly<{
-    kind: string;
-    id: string;
-    props: Record<string, unknown>;
-    constraints: readonly UniqueConstraint[];
-  }>[],
+  claims: readonly PlacedClaim[],
+  onIssued?: (issued: readonly PlacedClaim[]) => void,
 ): Promise<void> {
-  const entries: InsertUniqueParams[] = [];
-  for (const item of items) {
-    for (const entry of nodeClaimEntries(
+  if (claims.length === 0) return;
+  const batch = ctx.backend.insertUniqueBatch;
+  if (batch === undefined) {
+    await issueClaimsIndividually(ctx, claims, onIssued);
+    return;
+  }
+  await batch(claims.map((claim) => claimInsertParams(ctx.graphId, claim)));
+  onIssued?.(claims);
+}
+
+/**
+ * Reserves the gating group, runs the row write it gates, and gives those
+ * reservations back if the write does not land.
+ *
+ * Compensate, not swallow — the same give-back {@link withNodeClaimTransition}
+ * makes, for the same reason: the reservations this write took are returned and
+ * the original failure is rethrown, so the caller sees the error it would have
+ * seen with no reservation attempted at all. Only rows that actually landed are
+ * given back, and each is named in full (owner pair and claim axis), so nothing
+ * a namesake under another kind or an older axis holds is touched.
+ */
+async function claimGroupThenWrite<T>(
+  ctx: UniquenessContext,
+  issue: ClaimIssuer,
+  gating: readonly PlacedClaim[],
+  gatedWrite: () => Promise<T>,
+): Promise<T> {
+  const issued: PlacedClaim[] = [];
+  try {
+    await issue(ctx, gating, (landed) => {
+      issued.push(...landed);
+    });
+    return await gatedWrite();
+  } catch (error) {
+    for (const claim of issued.toReversed()) {
+      await releaseClaimedUniqueKeys(ctx, claim.item.kind, claim.item.id, [
+        {
+          axis: claim.entry.axis,
+          constraintName: claim.entry.constraintName,
+          key: claim.entry.key,
+        },
+      ]);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Issues a create's claims on the two sides of the row write they gate, and
+ * compensates the PRE-INSERT ones away if that write does not land.
+ *
+ * The entries are partitioned by their {@link ClaimPlacement} and the two
+ * groups are issued around `gatedInsert`:
+ *
+ *  1. the `pre-insert` group — the create path's twin of
+ *     {@link withNodeClaimTransition}, with the same claim → gated write →
+ *     compensate sequence and the same reasoning: the claim is the only fence
+ *     for that axis, and a fence issued after the write it fences is not a
+ *     fence. A refusal here therefore happens with zero rows written, and a
+ *     refusal from the write compensates the reservations away;
+ *  2. `gatedInsert()`;
+ *  3. the `post-insert` group — the position those entries ship in, unchanged,
+ *     and with that position's failure behavior: a throw propagates and nothing
+ *     compensates it, because the row it belongs to is already written and
+ *     visible.
+ *
+ * Each group is sorted by {@link compareClaimTargets} and the pre-insert group
+ * is always issued first, so every writer of a given row computes the same
+ * acquisition order. A row owing claims in both groups therefore emits two
+ * claim statements where one placement alone emits one.
+ */
+async function withNodeCreateClaimsIssuedBy<T>(
+  ctx: NodeClaimContext,
+  items: readonly NodeClaimItem[],
+  backend: GraphBackend | TransactionBackend,
+  issue: ClaimIssuer,
+  gatedInsert: () => Promise<T>,
+): Promise<T> {
+  const claimContext = createUniquenessContext(
+    ctx.graphId,
+    ctx.registry,
+    backend,
+  );
+  const claims = items.flatMap((item) =>
+    nodeClaimEntries(
       ctx.registry,
       item.kind,
       item.props,
       item.constraints,
-    )) {
-      entries.push({
-        graphId: ctx.graphId,
-        nodeKind: entry.axis,
-        constraintName: entry.constraintName,
-        key: entry.key,
-        nodeId: item.id,
-        concreteKind: item.kind,
-      });
-    }
-  }
-  if (entries.length === 0) return;
+      "create",
+    ).map((entry) => ({
+      item,
+      entry,
+      target: claimTarget(ctx.graphId, entry),
+    })),
+  );
 
-  if (ctx.backend.insertUniqueBatch !== undefined) {
-    await ctx.backend.insertUniqueBatch(entries);
-    return;
-  }
-  for (const entry of entries) {
-    await ctx.backend.insertUnique(entry);
-  }
+  const refusal = claimFenceRefusal(
+    ctx,
+    backend,
+    claims.map((claim) => claim.entry),
+  );
+  if (refusal !== undefined) throw refusal;
+
+  const inPlacement = (placement: ClaimPlacement): readonly PlacedClaim[] =>
+    claims
+      .filter((claim) => claim.entry.placement === placement)
+      .toSorted((left, right) =>
+        compareClaimTargets(left.target, right.target),
+      );
+
+  const result = await claimGroupThenWrite(
+    claimContext,
+    issue,
+    inPlacement("pre-insert"),
+    gatedInsert,
+  );
+  await issue(claimContext, inPlacement("post-insert"));
+  return result;
+}
+
+/**
+ * The create claim seam for ONE row: one statement per claim, matching the
+ * statement shape the single-row create path ships.
+ */
+export function withNodeCreateClaims<T>(
+  ctx: NodeClaimContext,
+  item: NodeClaimItem,
+  backend: GraphBackend | TransactionBackend,
+  gatedInsert: () => Promise<T>,
+): Promise<T> {
+  return withNodeCreateClaimsIssuedBy(
+    ctx,
+    [item],
+    backend,
+    issueClaimsIndividually,
+    gatedInsert,
+  );
+}
+
+/**
+ * The create claim seam for a BATCH: one statement per placement group across
+ * every row, instead of the per-row statement fan.
+ */
+export function withNodeCreateClaimsBatch<T>(
+  ctx: NodeClaimContext,
+  items: readonly NodeClaimItem[],
+  backend: GraphBackend | TransactionBackend,
+  gatedInsert: () => Promise<T>,
+): Promise<T> {
+  return withNodeCreateClaimsIssuedBy(
+    ctx,
+    items,
+    backend,
+    issueClaimsBatched,
+    gatedInsert,
+  );
+}
+
+/**
+ * The gate for a claim set whose row write has ALREADY been applied — a
+ * re-claim after a set update, or a test seeding a reservation.
+ *
+ * Such a write reaches the seam with nothing left to gate, which is exactly why
+ * it owes no pre-insert claim: there is no row write left for a claim to
+ * precede. Naming it makes that reading explicit at the call site instead of
+ * leaving an inline no-op for a reader to interpret.
+ */
+export function alreadyAppliedRowWrite(): Promise<undefined> {
+  return Promise.resolve(undefined);
 }
 
 /**
@@ -259,16 +512,15 @@ export async function deleteUniquenessEntries(
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
 ): Promise<void> {
+  // The create extent: a delete gives back everything a create wrote, so the
+  // release must be read from the wider of the two lists.
   await releaseOwnedUniqueKeys(
     ctx,
     kind,
     id,
-    nodeClaimEntries(ctx.registry, kind, props, constraints),
+    nodeClaimEntries(ctx.registry, kind, props, constraints, "create"),
   );
 }
-
-/** The row a write is about to reserve, named in full. */
-type ClaimTarget = Readonly<{ axis: string; key: string }>;
 
 /**
  * A single constraint's sidecar transition, decided by a plan builder and
@@ -284,13 +536,14 @@ type PendingUniqueMutation = Readonly<{
   /** The key to give up once the primary write lands; undefined = none. */
   release: string | undefined;
   /**
-   * The row to reserve before the primary write; undefined = none, either
+   * The entry to reserve before the primary write; undefined = none, either
    * because the constraint stopped applying or because {@link probeUniqueKey}
-   * found this node already holding it live. It carries the axis it will be
-   * written at, so the compensation names the row this transition wrote instead
-   * of re-deriving which axis that was.
+   * found this node already holding it live. It is the whole entry rather than
+   * a bare key so the compensation names the row this transition wrote instead
+   * of re-deriving which axis that was, and so the refusal reads the placement
+   * and class the entry's site decided.
    */
-  claim: ClaimTarget | undefined;
+  claim: NodeClaimEntry | undefined;
 }>;
 
 /**
@@ -329,16 +582,14 @@ export async function planNodeClaimUpdate(
   // Both sides of the diff are read from the one entries function, so the key
   // a release names is computed exactly the way the key a claim names is.
   const oldKeys = new Map(
-    nodeClaimEntries(ctx.registry, kind, oldProps, constraints).map((entry) => [
-      entry.constraintName,
-      entry.key,
-    ]),
+    nodeClaimEntries(ctx.registry, kind, oldProps, constraints, "update").map(
+      (entry) => [entry.constraintName, entry.key],
+    ),
   );
   const newEntries = new Map(
-    nodeClaimEntries(ctx.registry, kind, newProps, constraints).map((entry) => [
-      entry.constraintName,
-      entry,
-    ]),
+    nodeClaimEntries(ctx.registry, kind, newProps, constraints, "update").map(
+      (entry) => [entry.constraintName, entry],
+    ),
   );
 
   const pending: PendingUniqueMutation[] = [];
@@ -363,10 +614,7 @@ export async function planNodeClaimUpdate(
     pending.push({
       constraintName: constraint.name,
       release: oldKey,
-      claim:
-        newEntry === undefined || alreadyHeld ?
-          undefined
-        : { axis: newEntry.axis, key: newEntry.key },
+      claim: newEntry === undefined || alreadyHeld ? undefined : newEntry,
     });
   }
 
@@ -399,13 +647,14 @@ export async function planNodeClaimReinsert(
     kind,
     props,
     constraints,
+    "update",
   )) {
     const alreadyHeld = await probeUniqueKey(ctx, kind, id, entry);
 
     pending.push({
       constraintName: entry.constraintName,
       release: undefined,
-      claim: alreadyHeld ? undefined : { axis: entry.axis, key: entry.key },
+      claim: alreadyHeld ? undefined : entry,
     });
   }
   return pending;
@@ -569,6 +818,12 @@ async function claimUniqueKeysThen<T>(
  * `UniquenessError` then reported `updated: 0` for a row whose props HAD
  * changed, whose old reservation was gone, and whose new one belonged to someone
  * else.
+ *
+ * Because that sequence is claim-first for EVERY scope, every claim this seam
+ * issues is `pre-insert`, and a backend that cannot roll the pair back together
+ * is refused before the first of them — see {@link claimFenceRefusal}. The
+ * subject is the plan's claims rather than the kind's constraints: an update
+ * that does not move a key issues no reservation and must not be refused.
  */
 export async function withNodeClaimTransition<T>(
   ctx: UniquenessContext,
@@ -577,6 +832,15 @@ export async function withNodeClaimTransition<T>(
   plan: UniquenessUpdatePlan,
   gatedWrite: () => Promise<T>,
 ): Promise<T> {
+  const refusal = claimFenceRefusal(
+    ctx,
+    ctx.backend,
+    plan.flatMap((mutation) =>
+      mutation.claim === undefined ? [] : [mutation.claim],
+    ),
+  );
+  if (refusal !== undefined) throw refusal;
+
   const result = await claimUniqueKeysThen(ctx, kind, id, plan, gatedWrite);
   await releaseOwnedUniqueKeys(
     ctx,

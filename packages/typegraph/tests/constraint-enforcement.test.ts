@@ -19,10 +19,12 @@ import {
 import { buildKindRegistry } from "../src/registry";
 import { createStore } from "../src/store";
 import {
+  alreadyAppliedRowWrite,
   checkUniquenessConstraints,
   createUniquenessContext,
-  insertUniquenessEntries,
+  withNodeCreateClaims,
 } from "../src/store/claims/node-claims";
+import { uncapturedGraphWriteLock } from "../src/store/recorded-capture/clock";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -933,6 +935,32 @@ describe("Uniqueness sidecar for a field named after a prototype member", () => 
     return createUniquenessContext(graph.id, buildKindRegistry(graph), backend);
   }
 
+  /**
+   * Seeds the incumbent's reservation through the one seam that writes node
+   * claims: no path may reach `insertUnique` around it, including a test.
+   */
+  function seedClaim(
+    graph: typeof binaryProtoGraph,
+    id: string,
+    props: Record<string, unknown>,
+  ): Promise<undefined> {
+    return withNodeCreateClaims(
+      {
+        graphId: graph.id,
+        registry: buildKindRegistry(graph),
+        lock: uncapturedGraphWriteLock(),
+      },
+      {
+        kind: "Entry",
+        id,
+        props,
+        constraints: protoNamedConstraints(graph),
+      },
+      backend,
+      alreadyAppliedRowWrite,
+    );
+  }
+
   for (const graph of [binaryProtoGraph, insensitiveProtoGraph]) {
     const collation = protoNamedConstraints(graph)[0].collation;
 
@@ -940,13 +968,7 @@ describe("Uniqueness sidecar for a field named after a prototype member", () => 
       const ctx = contextFor(graph);
       const constraints = protoNamedConstraints(graph);
 
-      await insertUniquenessEntries(
-        ctx,
-        "Entry",
-        "entry-1",
-        { label: "first" },
-        constraints,
-      );
+      await seedClaim(graph, "entry-1", { label: "first" });
 
       await expect(
         checkUniquenessConstraints(
@@ -963,13 +985,7 @@ describe("Uniqueness sidecar for a field named after a prototype member", () => 
       const ctx = contextFor(graph);
       const constraints = protoNamedConstraints(graph);
 
-      await insertUniquenessEntries(
-        ctx,
-        "Entry",
-        "entry-1",
-        { label: "first" },
-        constraints,
-      );
+      await seedClaim(graph, "entry-1", { label: "first" });
 
       await expect(
         checkUniquenessConstraints(
