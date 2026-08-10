@@ -19,6 +19,7 @@ import {
   defineNode,
   MigrationError,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import type { GraphBackend } from "../src/backend/types";
 import type { MigrationHookContext } from "../src/schema";
@@ -666,13 +667,12 @@ describe("Auto-Bootstrap Tables", () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { isSync: true },
     });
-    const managed: GraphBackend = {
-      ...backend,
+    const managed: GraphBackend = deriveBackend(backend, {
       close() {
         sqlite.close();
         return Promise.resolve();
       },
-    };
+    });
     backendsToClose.push(managed);
     return { backend: managed, sqlite };
   }

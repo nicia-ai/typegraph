@@ -1,6 +1,5 @@
-import { createGraphBackendProjection } from "../backend/graph-backend-projection";
+import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
-  createBackendOverlay,
   type DeleteEdgesBatchParams,
   type EdgeRow,
   type GraphBackend,
@@ -410,7 +409,7 @@ function createRecordedTransactionBackend(
     }
   }
 
-  const overlay = createBackendOverlay(target, {
+  const overlay = deriveBackend(target, {
     ...rawWriteGuards(target, "tx.backend"),
 
     async insertNode(params) {
@@ -693,8 +692,8 @@ export function createRecordedBackend(
     fn: (target: TransactionBackend) => Promise<T>,
   ): Promise<T> => runCapturedAutocommit(backend, schema, fn);
 
-  const projectedBackend = createGraphBackendProjection(backend);
-  return createBackendOverlay(projectedBackend, {
+  const projectedBackend = projectGraphBackend(backend);
+  return deriveBackend(projectedBackend, {
     ...rawWriteGuards(backend, "backend"),
 
     async insertNode(params) {

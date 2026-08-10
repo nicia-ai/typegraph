@@ -44,10 +44,13 @@ import {
   defineNode,
   repairInvertedValidityWindows,
 } from "../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { createSqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { invertedValidityWindowPredicate } from "../src/backend/repair-validity-windows";
 import {
-  createBackendOverlay,
   type GraphBackend,
   type TransactionBackend,
   type TransactionOptions,
@@ -301,8 +304,7 @@ describe("repairInvertedValidityWindows", () => {
       // that is what the docs promise operators when they say a `report` may be
       // pointed at a live store without quiescing it. The PostgreSQL suite
       // asserts the engine's own verdict (`SHOW transaction_read_only`).
-      const observed: GraphBackend = {
-        ...backend,
+      const observed: GraphBackend = deriveBackend(backend, {
         transaction: async <T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -310,7 +312,7 @@ describe("repairInvertedValidityWindows", () => {
           accessModes.push(options?.accessMode);
           return backend.transaction((tx) => fn(tx), options);
         },
-      };
+      });
 
       await repairInvertedValidityWindows({
         backend: observed,
@@ -549,8 +551,7 @@ describe("repairInvertedValidityWindows", () => {
       const custom = await seedCustomTables();
       // A backend that names no tables resolves the built-in defaults, which do
       // not exist here — the shape a repair that ignored `tableNames` would hit.
-      const { tableNames, ...unnamed } = custom;
-      const defaulted = unnamed as GraphBackend;
+      const defaulted = projectBackendWithout(custom, ["tableNames"]);
 
       await expect(
         repairInvertedValidityWindows({
@@ -590,8 +591,7 @@ describe("repairInvertedValidityWindows", () => {
 
     it("reports on a backend without executeStatement and refuses to apply", async () => {
       await seedGraph(backend);
-      const { executeStatement, ...rest } = backend;
-      const readOnly = rest as GraphBackend;
+      const readOnly = projectBackendWithout(backend, ["executeStatement"]);
 
       const report = await repairInvertedValidityWindows({
         backend: readOnly,
@@ -718,10 +718,9 @@ describe("repairInvertedValidityWindows", () => {
   describe("T7d — a backend without transactions", () => {
     it("runs both modes and says the call was not atomic", async () => {
       await seedGraph(backend);
-      const nonTransactional: GraphBackend = {
-        ...backend,
+      const nonTransactional: GraphBackend = deriveBackend(backend, {
         capabilities: { ...backend.capabilities, transactions: false },
-      };
+      });
 
       const report = await repairInvertedValidityWindows({
         backend: nonTransactional,
@@ -761,7 +760,7 @@ describe("repairInvertedValidityWindows", () => {
       ): Promise<T> {
         return fn(sameIdentityBackend);
       }
-      const sameIdentityBackend: GraphBackend = createBackendOverlay(backend, {
+      const sameIdentityBackend: GraphBackend = deriveBackend(backend, {
         // A custom backend may expose the same object as its transaction
         // context. The helper must report that it invoked the transaction seam
         // without trying to infer that fact from callback-target identity.

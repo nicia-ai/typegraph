@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import type { GraphBackend } from "../src/backend/types";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { type CompiledRowsSql } from "../src/query/sql-intent";
@@ -16,8 +17,7 @@ function dropTableSql(tableName: string): string {
 }
 
 function withSerializablePostgresProbe(base: GraphBackend): GraphBackend {
-  return {
-    ...base,
+  return deriveBackend(base, {
     dialect: "postgres",
     async transaction(fn, options) {
       return base.transaction(
@@ -34,7 +34,7 @@ function withSerializablePostgresProbe(base: GraphBackend): GraphBackend {
         options,
       );
     },
-  };
+  });
 }
 
 // ============================================================

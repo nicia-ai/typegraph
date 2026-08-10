@@ -6,12 +6,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
   runPostgresVectorIndexBuild,
   runSerialVectorIndexBuild,
   runVectorIndexBuildWithSerialFallback,
 } from "../src/backend/drizzle/postgres";
-import { type GraphBackend } from "../src/backend/types";
 import { defineGraph } from "../src/core/define-graph";
 import { embedding } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
@@ -292,8 +292,7 @@ describe("Postgres vector-index parallel worker cleanup", () => {
         throw buildError;
       }),
     );
-    const backend = {
-      ...baseBackend,
+    const backend = deriveBackend(baseBackend, {
       dialect: "postgres",
       capabilities: {
         ...baseBackend.capabilities,
@@ -312,7 +311,7 @@ describe("Postgres vector-index parallel worker cleanup", () => {
           sql`DROP INDEX custom_vector_index`,
         );
       },
-    } satisfies GraphBackend;
+    });
     const store = createStore(graph, backend);
 
     const result = await store.materializeIndexes({

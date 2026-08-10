@@ -1,4 +1,4 @@
-import { projectBackendMembers } from "../backend/graph-backend-projection";
+import { projectBackend } from "../backend/derive-backend";
 import { type GraphBackend } from "../backend/types";
 
 /**
@@ -137,7 +137,5 @@ export type HistoryStoreBackend =
 export function createHistoryStoreBackendProjection(
   backend: GraphBackend,
 ): HistoryStoreBackend {
-  return Object.freeze(
-    projectBackendMembers(backend, HISTORY_STORE_BACKEND_KEYS),
-  );
+  return Object.freeze(projectBackend(backend, HISTORY_STORE_BACKEND_KEYS));
 }

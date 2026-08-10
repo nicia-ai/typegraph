@@ -59,6 +59,7 @@ import {
   UniquenessError,
   ValidationError,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createGate, type Gate } from "../../concurrency-utils";
@@ -184,8 +185,7 @@ const GATED_INSERT_METHODS = new Set([
  * `runInWriteTransaction` yields, not against the outer object.
  */
 function gatedAtFirstInsert(base: GraphBackend, gate: Gate): GraphBackend {
-  return {
-    ...base,
+  return deriveBackend(base, {
     transaction: (fn, options) =>
       base.transaction((transactionTarget) => {
         let held = false;
@@ -211,7 +211,7 @@ function gatedAtFirstInsert(base: GraphBackend, gate: Gate): GraphBackend {
         }) as TransactionBackend;
         return fn(gatedTarget);
       }, options),
-  } satisfies GraphBackend;
+  });
 }
 
 /**

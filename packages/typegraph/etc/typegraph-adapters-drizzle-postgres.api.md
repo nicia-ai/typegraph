@@ -4479,6 +4479,7 @@ export type PostgresBackendOptions = Readonly<{
     capabilities?: Partial<BackendCapabilities>;
     prepareStatements?: boolean;
     preparedStatementCacheMax?: number;
+    serializedResource?: SerializedResourceDeclaration;
 }>;
 
 // @public
@@ -5465,6 +5466,16 @@ type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
+}>;
+
+// @public
+export type SerializedResourceDeclaration = Readonly<{
+    mode: "detect";
+}> | Readonly<{
+    mode: "shared";
+    resource: object;
+}> | Readonly<{
+    mode: "independent";
 }>;
 
 // @public

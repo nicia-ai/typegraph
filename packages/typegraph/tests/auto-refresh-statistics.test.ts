@@ -21,6 +21,7 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
 
@@ -46,13 +47,12 @@ function withRefreshSpy(backend: GraphBackend): {
   refreshCount: () => number;
 } {
   let count = 0;
-  const spied: GraphBackend = {
-    ...backend,
+  const spied: GraphBackend = deriveBackend(backend, {
     refreshStatistics: async () => {
       count += 1;
       await backend.refreshStatistics();
     },
-  };
+  });
   return { backend: spied, refreshCount: () => count };
 }
 
@@ -218,10 +218,9 @@ describe("auto-refresh statistics after bulk writes", () => {
   it("a refresh failure does not fail the bulk write", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
-      const failing: GraphBackend = {
-        ...rawBackend,
+      const failing: GraphBackend = deriveBackend(rawBackend, {
         refreshStatistics: () => Promise.reject(new Error("refresh exploded")),
-      };
+      });
       const [store] = await createStoreWithSchema(
         buildGraph("stats_failure"),
         failing,

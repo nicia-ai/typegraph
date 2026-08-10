@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { deriveBackend } from "../src/backend/derive-backend";
 import { type AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-execution";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { type GraphBackend } from "../src/backend/types";
@@ -76,14 +77,12 @@ async function initializedCustomPostgresBackend(
 ): Promise<GraphBackend> {
   const baseBackend = createTestBackend();
   await createStoreWithSchema(graph, baseBackend);
-  return {
-    ...baseBackend,
-    ...overlay,
+  return deriveBackend(deriveBackend(baseBackend, overlay), {
     dialect: "postgres",
     execute<T>(): Promise<readonly T[]> {
       return Promise.resolve([]);
     },
-  };
+  });
 }
 
 describe("Postgres pg_trgm extension prerequisite", () => {

@@ -1,13 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  deriveBackend,
+  wrapWithManagedClose,
+} from "../src/backend/derive-backend";
+import {
   type GatableFulltextBackend,
   gateFulltext,
   gateFulltextMethods,
 } from "../src/backend/drizzle/contribution-materializations";
 import {
   closeAfterFailure,
-  createBackendOverlay,
   type EdgeRow,
   type GraphBackend,
   type HardDeleteNodeParams,
@@ -15,7 +18,6 @@ import {
   type InsertNodeParams,
   type NodeRow,
   type TransactionBackend,
-  wrapWithManagedClose,
 } from "../src/backend/types";
 import { asRecordedInstant } from "../src/core/temporal";
 import { ConfigurationError } from "../src/errors";
@@ -441,7 +443,7 @@ describe("recorded read dispatch", () => {
 describe("backend overlay wrappers", () => {
   it("delegates receiver-free methods through generic overlays", async () => {
     const backend = new ClosureGraphBackend();
-    const overlay = createBackendOverlay(backend as unknown as GraphBackend, {
+    const overlay = deriveBackend(backend as unknown as GraphBackend, {
       executeStatement(_query: CompiledStatementSql): Promise<void> {
         backend.calls.push("overlay:executeStatement");
         return Promise.resolve();
@@ -484,7 +486,7 @@ describe("backend overlay wrappers", () => {
     let backendCloseAttempts = 0;
     let teardownAttempts = 0;
     const closeError = new Error("backend close failed");
-    const failingCloseBackend = createBackendOverlay(
+    const failingCloseBackend = deriveBackend(
       backend as unknown as GraphBackend,
       {
         close(): Promise<void> {

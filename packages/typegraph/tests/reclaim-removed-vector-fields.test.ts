@@ -18,8 +18,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { defineGraph } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
+import { type GraphBackend } from "../src/backend/types";
 import { defineGraphExtension } from "../src/graph-extension";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
@@ -160,7 +161,7 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
       await callback?.();
     }
 
-    backend = createBackendOverlay(baseBackend, {
+    backend = deriveBackend(baseBackend, {
       async executeDdl(statement) {
         await runBeforeCleanup();
         await requireDefined(baseBackend.executeDdl)(statement);
@@ -238,7 +239,7 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
   it("rolls vector storage and its marker back together when cleanup fails", async () => {
     const baseBackend = backend;
     let injectFailure = true;
-    backend = createBackendOverlay(baseBackend, {
+    backend = deriveBackend(baseBackend, {
       async schemaWriteTransaction(graphId, fn) {
         return requireDefined(baseBackend.schemaWriteTransaction)(
           graphId,
@@ -331,7 +332,7 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
 
   it("memoizes the reclaim history walk per active version (#12)", async () => {
     let calls = 0;
-    const observedBackend = createBackendOverlay(backend, {
+    const observedBackend = deriveBackend(backend, {
       getSchemaVersion(graphId, version) {
         calls += 1;
         return backend.getSchemaVersion(graphId, version);

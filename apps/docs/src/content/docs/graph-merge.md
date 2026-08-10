@@ -282,13 +282,16 @@ assertions, so every chunk belongs to one committed snapshot. A snapshot stream
 cannot be piped directly into a target that writes through the same serialized
 connection: the same SQLite backend, distinct wrappers sharing one better-sqlite3
 handle or one local (`file:`/`:memory:`) libSQL client, a bare `pg`/neon
-`Client` (a checked-out `PoolClient` included), a `Pool` explicitly configured
-with `max: 1`, a postgres-js client built with `{ max: 1 }`, distinct PGlite
-backend wrappers sharing one in-process connection, or Cloudflare Durable Object
-storage, whose transaction frame is ambient on the storage object — materialize
-it first or import it into an independent backend. Pooled connections, HTTP
-drivers, remote libSQL, and separate handles on one database are deliberately
-not treated as serialized: each statement gets an independent connection there,
+`Client` (a checked-out `PoolClient` included), a `pg` `Pool` capped at one
+connection (`{ max: 1 }`, and equally the uncoerced string forms `{ max: "1" }`
+and the legacy `{ poolSize: "1" }` that `max: process.env.PG_MAX` produces), a
+postgres-js client capped at one connection (`{ max: 1 }`, `?max=1` in the URL,
+or `PGMAX=1`), distinct PGlite backend wrappers sharing one in-process
+connection, or Cloudflare Durable Object storage, whose transaction frame is
+ambient on the storage object — materialize it first or import it into an
+independent backend. Pooled connections, HTTP drivers, remote libSQL, and
+separate handles on one database are deliberately not treated as serialized:
+each statement gets an independent connection there,
 so refusing would refuse work that succeeds. The exclusion is one **exclusive** lease
 per serialized connection, not a one-time check and not a cross-kind-only rule:
 at most one long-lived interchange stream of any kind holds a given connection,

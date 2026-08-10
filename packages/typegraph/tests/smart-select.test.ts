@@ -14,6 +14,7 @@ import {
   defineNode,
   type Store,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { type GraphBackend } from "../src/backend/types";
 import { type QueryBuilderState } from "../src/query/builder/types";
 import {
@@ -122,8 +123,7 @@ function createRecordingBackend(): Readonly<{
   const backend = createTestBackend();
   let lastQuery: SqlFragment | string | undefined;
 
-  const recordingBackend: GraphBackend = {
-    ...backend,
+  const recordingBackend: GraphBackend = deriveBackend(backend, {
     execute: async <T>(query: CompiledRowsSql) => {
       lastQuery = query;
       return backend.execute<T>(query);
@@ -135,7 +135,7 @@ function createRecordingBackend(): Readonly<{
       lastQuery = sqlText;
       return requireDefined(backend.executeRaw)<T>(sqlText, params);
     },
-  };
+  });
 
   return {
     backend: recordingBackend,

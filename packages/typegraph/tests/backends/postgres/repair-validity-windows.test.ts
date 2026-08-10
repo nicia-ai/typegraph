@@ -24,6 +24,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { repairInvertedValidityWindows } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type {
@@ -187,8 +188,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       // because PostgreSQL would refuse to let it, which is a stronger claim
       // than "no UPDATE was compiled" — and it is the reason the docs let an
       // operator diagnose against a live store without quiescing writers.
-      const backend: GraphBackend = {
-        ...raw,
+      const backend: GraphBackend = deriveBackend(raw, {
         transaction: async <T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -200,7 +200,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
             engineVerdicts.push(rows[0]?.transaction_read_only as string);
             return fn(tx);
           }, options),
-      };
+      });
 
       await repairInvertedValidityWindows({
         backend,

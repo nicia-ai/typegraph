@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineEdge, defineGraph, defineNode } from "../../../src";
-import { createBackendOverlay } from "../../../src/backend/types";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
@@ -288,7 +288,7 @@ export function registerValidityEndClearingIntegrationTests(
 
     it("refuses a custom backend that does not promise to apply clearing", async () => {
       const base = context.getBackend();
-      const backend = createBackendOverlay(base, {
+      const backend = deriveBackend(base, {
         capabilities: { ...base.capabilities, clearValidTo: false },
       });
       const store = createStore(integrationTestGraph, backend, {

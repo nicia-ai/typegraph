@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineEdge, defineGraph, defineNode } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
 
@@ -37,14 +38,13 @@ describe("subgraph fetches inline the SQLite CTE membership form", () => {
     const { backend: raw } = createLocalSqliteBackend();
     try {
       const captured: string[] = [];
-      const backend: GraphBackend = {
-        ...raw,
+      const backend: GraphBackend = deriveBackend(raw, {
         async execute(query) {
           const compiled = raw.compileSql?.(query);
           if (compiled) captured.push(compiled.sql);
           return raw.execute(query);
         },
-      };
+      });
       const store = createStore(graph, backend);
 
       const alice = await store.nodes.Person.create({ name: "alice" });

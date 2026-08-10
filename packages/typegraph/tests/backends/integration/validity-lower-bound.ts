@@ -19,7 +19,7 @@ import {
   type NodeId,
   type Store,
 } from "../../../src";
-import { createBackendOverlay } from "../../../src/backend/types";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import {
   FORMAT_VERSION,
   type GraphData,
@@ -721,10 +721,10 @@ export function registerValidityLowerBoundIntegrationTests(
       const id = "vlb-born-ended-fenced";
       let interceptions = 0;
 
-      const racingBackend = createBackendOverlay(backend, {
+      const racingBackend = deriveBackend(backend, {
         transaction: (fn, options) =>
           backend.transaction((transactionTarget) => {
-            const racingTarget = createBackendOverlay(transactionTarget, {
+            const racingTarget = deriveBackend(transactionTarget, {
               updateNode: async (params) => {
                 if (
                   params.id === id &&

@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type CompiledRowsSql,
+  type CompiledStatementSql,
   defineEdge,
   defineGraph,
   defineNode,
   type GraphBackend,
   type TransactionBackend,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { IdentityContradictionError } from "../src/errors";
 import { type IdentityTransferAssertion } from "../src/identity/service";
 import {
@@ -32,6 +35,7 @@ import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,
   createTestBackend,
+  expectAuditedBackend,
   matchingArray,
   matchingObject,
 } from "./test-utils";
@@ -1349,11 +1353,12 @@ function closureCountingBackend(): Readonly<{
     if (text.includes("DELETE FROM")) counts.closureDeletes += 1;
   }
 
-  // A Proxy rather than a spread: transaction targets carry methods on a
-  // prototype that spreading would drop.
-  function countStatements<T extends GraphBackend | TransactionBackend>(
-    target: T,
-  ): T {
+  // A Proxy rather than a spread for TRANSACTION targets: their methods live on
+  // a prototype that spreading would drop, and a transaction-scoped backend is
+  // unaudited by construction, so a fresh object loses nothing.
+  function countTransactionStatements(
+    target: TransactionBackend,
+  ): TransactionBackend {
     return new Proxy(target, {
       get(source, property, receiver) {
         const value: unknown = Reflect.get(source, property, receiver);
@@ -1370,11 +1375,23 @@ function closureCountingBackend(): Readonly<{
     });
   }
 
-  const backend: GraphBackend = countStatements({
-    ...base,
+  // The ROOT backend goes through the seam instead of a second Proxy. A
+  // hand-rolled Proxy is a distinct object and the serialized-resource audit is
+  // WeakMap-keyed, so wrapping a derived backend in one discards the verdict
+  // `deriveBackend` just carried — exactly the loss the spread had.
+  const baseExecuteStatement = requireDefined(base.executeStatement);
+  const backend: GraphBackend = deriveBackend(base, {
+    execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+      count(query);
+      return base.execute<T>(query);
+    },
+    executeStatement: (query: CompiledStatementSql): Promise<void> => {
+      count(query);
+      return baseExecuteStatement(query);
+    },
     transaction: (fn, options) =>
-      base.transaction((tx) => fn(countStatements(tx)), options),
-  } satisfies GraphBackend);
+      base.transaction((tx) => fn(countTransactionStatements(tx)), options),
+  });
 
   return {
     backend,
@@ -1385,6 +1402,19 @@ function closureCountingBackend(): Readonly<{
     },
   };
 }
+
+describe("the closure-counting double itself", () => {
+  it("stays on the base's serialized resource", () => {
+    // The double is what the cases below run against, so if it reads as unowned
+    // the suite exercises an import guard that has lost its subject. Neither
+    // the `tests/**` lint block nor the type-aware scanner can see the shape
+    // that loses it — a hand-rolled Proxy over the derived backend is a
+    // distinct object and the audit is WeakMap-keyed — so the verdict is
+    // asserted at runtime here.
+    const { backend } = closureCountingBackend();
+    expect(expectAuditedBackend(backend)).toBe("serialized");
+  });
+});
 
 describe("deleting a node without identity", () => {
   it("skips the closure repair and leaves identity state untouched", async () => {

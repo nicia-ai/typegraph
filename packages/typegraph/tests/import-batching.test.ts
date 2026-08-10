@@ -22,6 +22,10 @@ import {
   defineNode,
   searchable,
 } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+} from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import {
@@ -135,24 +139,29 @@ function withCallCounts(backend: GraphBackend): {
   function wrapMethods<T extends GraphBackend | TransactionBackend>(
     target: T,
   ): T {
-    const wrapped = { ...target } as Record<string, unknown>;
+    // Built from a name list rather than written as a literal, so the overlay
+    // carries an assertion: `ExactBackendOverlay<T, Partial<T>>` reduces to
+    // `Partial<T>` only once `T` is resolved, and the checker cannot verify
+    // that against an unresolved type parameter.
+    const overrides: Record<string, unknown> = {};
     for (const name of COUNTED_METHODS) {
       const original = (target as Record<string, unknown>)[name];
       if (typeof original !== "function") continue;
-      wrapped[name] = (...args: unknown[]) => {
+      overrides[name] = (...args: unknown[]) => {
         counts[name] = (counts[name] ?? 0) + 1;
         return (original as (...a: unknown[]) => unknown).apply(target, args);
       };
     }
-    return wrapped as T;
+    return deriveBackend<T, Partial<T>>(
+      target,
+      overrides as ExactBackendOverlay<T, Partial<T>>,
+    );
   }
 
-  const outer = wrapMethods(backend);
-  const counted: GraphBackend = {
-    ...outer,
+  const counted: GraphBackend = deriveBackend(wrapMethods(backend), {
     transaction: (fn, options) =>
       backend.transaction((target) => fn(wrapMethods(target)), options),
-  };
+  });
   return { backend: counted, counts };
 }
 

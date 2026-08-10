@@ -14,6 +14,7 @@ import {
   rebuildIdentityClosure,
   type TransactionBackend,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
   type RecordedInstant,
   recordedInstantRevision,
@@ -26,8 +27,11 @@ import {
 import { exportGraph, importGraph } from "../src/interchange";
 import { disjointWith } from "../src/ontology";
 import { createSqlSchema } from "../src/query/compiler/schema";
-import { sql, type SqlFragment } from "../src/query/sql-fragment";
-import { asCompiledRowsSql } from "../src/query/sql-intent";
+import { sql } from "../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  type CompiledRowsSql,
+} from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,
@@ -98,32 +102,31 @@ describe("temporal identity validation scope", () => {
   it("does not reconstruct at unrelated assertion boundaries", async () => {
     const base = createTestBackend();
     let recursiveQueries = 0;
-    function wrap<T extends GraphBackend | TransactionBackend>(target: T): T {
-      return new Proxy(target, {
-        get(source, property, receiver) {
-          const value: unknown = Reflect.get(source, property, receiver);
-          if (property !== "execute" || typeof value !== "function")
-            return value;
-          const execute = value as (statement: SqlFragment) => unknown;
-          return (statement: SqlFragment): unknown => {
-            const text = statement.chunks
-              .map((chunk) =>
-                chunk.kind === "text" || chunk.kind === "identifier" ?
-                  chunk.value
-                : "",
-              )
-              .join(" ");
-            if (text.includes("WITH RECURSIVE")) recursiveQueries += 1;
-            return execute.call(source, statement);
-          };
+    function wrap(target: GraphBackend): GraphBackend;
+    function wrap(target: TransactionBackend): TransactionBackend;
+    function wrap(
+      target: GraphBackend | TransactionBackend,
+    ): GraphBackend | TransactionBackend {
+      return deriveBackend(target, {
+        execute<T>(statement: CompiledRowsSql): Promise<readonly T[]> {
+          const text = statement.chunks
+            .map((chunk) =>
+              chunk.kind === "text" || chunk.kind === "identifier" ?
+                chunk.value
+              : "",
+            )
+            .join(" ");
+          if (text.includes("WITH RECURSIVE")) recursiveQueries += 1;
+          return target.execute<T>(statement);
         },
       });
     }
-    const backend = wrap({
-      ...base,
-      transaction: (fn, options) =>
-        base.transaction((transaction) => fn(wrap(transaction)), options),
-    } satisfies GraphBackend);
+    const backend = wrap(
+      deriveBackend(base, {
+        transaction: (fn, options) =>
+          base.transaction((transaction) => fn(wrap(transaction)), options),
+      }),
+    );
     const store = await createInitializedStore(graph, backend);
     const endpointStart = "2000-01-01T00:00:00.000Z";
     for (let index = 0; index < 8; index += 1) {
@@ -278,8 +281,7 @@ describe("Operational Identity", () => {
     const getNodes = requireDefined(baseBackend.getNodes);
     let singleReads = 0;
     let batchReads = 0;
-    const backend: GraphBackend = {
-      ...baseBackend,
+    const backend: GraphBackend = deriveBackend(baseBackend, {
       getNode: async (graphId, kind, id) => {
         singleReads += 1;
         return baseBackend.getNode(graphId, kind, id);
@@ -288,7 +290,7 @@ describe("Operational Identity", () => {
         batchReads += 1;
         return getNodes(graphId, kind, ids);
       },
-    };
+    });
     const store = await createInitializedStore(graph, backend);
     const person = await store.nodes.Person.create({ name: "Alice" });
     const alias = await store.nodes.Person.create({ name: "Alias" });
@@ -364,8 +366,7 @@ describe("Operational Identity", () => {
     const base = createTestBackend();
     let executeCalls = 0;
     let statementCalls = 0;
-    const backend: GraphBackend = {
-      ...base,
+    const backend: GraphBackend = deriveBackend(base, {
       execute(query) {
         executeCalls += 1;
         return base.execute(query);
@@ -374,7 +375,7 @@ describe("Operational Identity", () => {
         statementCalls += 1;
         await base.executeStatement?.(query);
       },
-    };
+    });
     const store = createStore(disabledGraph, backend);
 
     await store.nodes.Person.create({ name: "Alice" }, { id: "alice" });

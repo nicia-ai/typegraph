@@ -13,15 +13,18 @@
  * - Batch-hook contract: batch methods remain deliberately hookless, including
  *   when their transaction rolls back at COMMIT.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { createClient } from "@libsql/client";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePostgres } from "drizzle-orm/node-postgres";
 import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
-import { Client, Pool } from "pg";
+import { Client, defaults as pgDefaults, Pool } from "pg";
+import postgres from "postgres";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -35,6 +38,10 @@ import {
   searchable,
 } from "../src";
 import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../src/backend/derive-backend";
+import {
   type AnySqliteDatabase,
   isBetterSqlite3Client,
   isBunSqliteClient,
@@ -46,26 +53,25 @@ import {
 } from "../src/backend/drizzle/postgres";
 import {
   createSqliteBackend,
+  isLocalLibsqlClient,
   isSerializedSqliteClient,
 } from "../src/backend/drizzle/sqlite";
-import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
 import {
   acquireSerializedStreamLease,
-  markSerializedTransactionResource,
+  auditBackendResource,
   type SerializedStreamKind,
   type SerializedStreamLease,
   sharesSerializedTransactionResource,
   snapshotExportContention,
 } from "../src/backend/transaction-resource";
 import {
-  createBackendOverlay,
   type GraphBackend,
   type TransactionBackend,
   type TransactionOptions,
 } from "../src/backend/types";
 import { requireDefined } from "../src/utils/presence";
 import { dumpObservableState } from "./state-snapshot";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, makeUnauditedBackend } from "./test-utils";
 import {
   createCommitFailingBackend,
   createTracingBackend,
@@ -107,11 +113,11 @@ const graph = defineGraph({
 
 describe("serialized transaction resource ownership", () => {
   it("recognizes distinct backend wrappers sharing one serialized connection", () => {
-    const root = createTestBackend();
+    const root = makeUnauditedBackend();
     const resource = {};
-    markSerializedTransactionResource(root, resource);
-    const first = createBackendOverlay(root, {});
-    const second = createBackendOverlay(root, {});
+    auditBackendResource(root, { kind: "serialized", resource });
+    const first = deriveBackend(root, {});
+    const second = deriveBackend(root, {});
 
     expect(first).not.toBe(second);
     expect(sharesSerializedTransactionResource(first, second)).toBe(true);
@@ -123,12 +129,12 @@ describe("serialized transaction resource ownership", () => {
     // backend. A projection that dropped the mark left the import guard and
     // the branch cloner unable to see that the store still writes through the
     // source's one connection.
-    const root = createTestBackend();
+    const root = makeUnauditedBackend();
     const resource = {};
-    markSerializedTransactionResource(root, resource);
+    auditBackendResource(root, { kind: "serialized", resource });
 
-    const projected = createGraphBackendProjection(root);
-    const overlaid = createBackendOverlay(projected, {});
+    const projected = projectGraphBackend(root);
+    const overlaid = deriveBackend(projected, {});
 
     expect(projected).not.toBe(root);
     expect(sharesSerializedTransactionResource(projected, root)).toBe(true);
@@ -137,9 +143,9 @@ describe("serialized transaction resource ownership", () => {
 
   it("does not conflate projections of independent backends", () => {
     const root = createTestBackend();
-    const projectedRoot = createGraphBackendProjection(root);
+    const projectedRoot = projectGraphBackend(root);
     const other = createTestBackend();
-    const projectedOther = createGraphBackendProjection(other);
+    const projectedOther = projectGraphBackend(other);
 
     expect(sharesSerializedTransactionResource(projectedRoot, root)).toBe(true);
     expect(
@@ -168,11 +174,11 @@ describe("serialized stream lease", () => {
   // registered against the RESOURCE, so the second stream sees the first even
   // though the two hold different backend objects.
   it("publishes a stream against the resource, not the wrapper", () => {
-    const root = createTestBackend();
+    const root = makeUnauditedBackend();
     const resource = {};
-    markSerializedTransactionResource(root, resource);
-    const importing = createBackendOverlay(root, {});
-    const exporting = createBackendOverlay(root, {});
+    auditBackendResource(root, { kind: "serialized", resource });
+    const importing = deriveBackend(root, {});
+    const exporting = deriveBackend(root, {});
 
     const release = acquiredLease(
       acquireSerializedStreamLease(importing, "import-stream"),
@@ -202,10 +208,10 @@ describe("serialized stream lease", () => {
     SerializedStreamKind,
     SerializedStreamKind,
   ])[])("refuses a %s the connection a %s already holds", (second, holder) => {
-    const root = createTestBackend();
-    markSerializedTransactionResource(root, {});
-    const first = createBackendOverlay(root, {});
-    const other = createBackendOverlay(root, {});
+    const root = makeUnauditedBackend();
+    auditBackendResource(root, { kind: "serialized", resource: {} });
+    const first = deriveBackend(root, {});
+    const other = deriveBackend(root, {});
 
     const release = acquiredLease(acquireSerializedStreamLease(first, holder));
 
@@ -221,8 +227,8 @@ describe("serialized stream lease", () => {
   });
 
   it("releases only its own claim, however often it is called", () => {
-    const root = createTestBackend();
-    markSerializedTransactionResource(root, {});
+    const root = makeUnauditedBackend();
+    auditBackendResource(root, { kind: "serialized", resource: {} });
 
     const finished = acquiredLease(
       acquireSerializedStreamLease(root, "import-stream"),
@@ -244,10 +250,10 @@ describe("serialized stream lease", () => {
   });
 
   it("does not conflate independent resources", () => {
-    const first = createTestBackend();
-    const second = createTestBackend();
-    markSerializedTransactionResource(first, {});
-    markSerializedTransactionResource(second, {});
+    const first = makeUnauditedBackend();
+    const second = makeUnauditedBackend();
+    auditBackendResource(first, { kind: "serialized", resource: {} });
+    auditBackendResource(second, { kind: "serialized", resource: {} });
 
     const release = acquiredLease(
       acquireSerializedStreamLease(first, "import-stream"),
@@ -434,12 +440,16 @@ function createCallableClient(
 /**
  * A postgres-js-shaped client: callable, with the `unsafe` raw executor and the
  * `begin` transaction starter the driver detection reads, plus the resolved
- * `options` postgres-js exposes on the callable (postgres@3.x). Hand-built
- * because postgres-js is not a dependency of this package — the shape under test
- * is the shape the predicate reads.
+ * `options` postgres-js exposes on the callable (postgres@3.x).
+ *
+ * Hand-built for the ABSTENTION cases, whose point is a shape the real driver
+ * would not hand us: a cap it never resolves, or a callable that is not
+ * postgres-js at all. The cases that assert a MARK use the real `postgres`
+ * package below, so the resolved cap under test is the driver's own resolution
+ * rather than this file's idea of it.
  */
 function createPostgresJsClient(
-  options: Readonly<{ max?: number }> | undefined,
+  options: Readonly<{ max?: number | string }> | undefined,
 ): unknown {
   return createCallableClient({
     unsafe: resolveNoRows,
@@ -448,12 +458,93 @@ function createPostgresJsClient(
   });
 }
 
+/**
+ * A real `pg` Pool built with a cap spelled the way deployments spell it.
+ * `@types/pg` declares `max` as a number and does not declare the legacy
+ * `poolSize` at all, but pg-pool keeps whatever it is handed:
+ * `max: process.env.PG_MAX` is a STRING at runtime whatever the types say, and
+ * that configuration — not the one the types describe — is what the detector
+ * meets. Building it from an untyped config keeps that deliberate departure from
+ * `PoolConfig` in one place, with its reason.
+ */
+function openPoolWithRawCap(config: Readonly<Record<string, unknown>>): Pool {
+  return new Pool(config);
+}
+
+/** The cap a `pg` Pool resolved, read without `@types/pg`'s number claim. */
+function resolvedPoolCap(pool: Pool): unknown {
+  return (pool as unknown as Readonly<{ options: Record<string, unknown> }>)
+    .options["max"];
+}
+
+/**
+ * The cap a postgres-js client resolved. Its public `Sql` type declares no
+ * `options` member, so the property is read the same way the detector reads it.
+ */
+function resolvedPostgresJsCap(client: unknown): unknown {
+  const options = (client as Readonly<Record<string, unknown>>)["options"];
+  return (options as Readonly<Record<string, unknown>>)["max"];
+}
+
+/**
+ * Runs `build` with `PGMAX` set, then restores the environment. postgres-js
+ * reads the variable when the client is constructed, so the window only has to
+ * cover construction.
+ */
+function withPgMax<T>(value: string, build: () => T): T {
+  const previous = process.env["PGMAX"];
+  process.env["PGMAX"] = value;
+  try {
+    return build();
+  } finally {
+    if (previous === undefined) delete process.env["PGMAX"];
+    else process.env["PGMAX"] = previous;
+  }
+}
+
+/**
+ * drizzle-orm's own `exports` map. The package's `exports` field does not
+ * expose `./package.json`, so the manifest is read from the resolved entry
+ * point's directory rather than imported.
+ */
+const drizzlePackage = JSON.parse(
+  await readFile(
+    path.join(
+      path.dirname(createRequire(import.meta.url).resolve("drizzle-orm")),
+      "package.json",
+    ),
+    "utf8",
+  ),
+) as Readonly<{ exports: Readonly<Record<string, unknown>> }>;
+const drizzleExports = drizzlePackage.exports;
+
 describe("serialized Postgres client detection", () => {
   // The marking predicate decides whether two backends over one client are
-  // treated as a single serialized connection. It runs against real `pg`
-  // objects here: a connection is never opened, so no server is required, but
-  // the shapes are the driver's own rather than a hand-written stand-in.
+  // treated as a single serialized connection. It runs against real `pg` and
+  // real `postgres` objects here: a connection is never opened, so no server is
+  // required, but the shapes — and the resolved caps — are the drivers' own
+  // rather than a hand-written stand-in's.
   const CONNECTION_STRING = "postgres://user@127.0.0.1:1/typegraph_probe";
+  const openPostgresJsClients: ReturnType<typeof postgres>[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      openPostgresJsClients
+        .splice(0)
+        .map(async (client) => client.end({ timeout: 0 })),
+    );
+  });
+
+  /** A real postgres-js client, closed after the test. It dials nothing here. */
+  function openPostgresJsClient(
+    url: string,
+    options?: Readonly<{ max: number }>,
+  ): ReturnType<typeof postgres> {
+    const client =
+      options === undefined ? postgres(url) : postgres(url, options);
+    openPostgresJsClients.push(client);
+    return client;
+  }
 
   it("marks a bare pg Client", () => {
     const client = new Client({ connectionString: CONNECTION_STRING });
@@ -541,6 +632,159 @@ describe("serialized Postgres client detection", () => {
 
     expect(isSerializedPostgresClient(unknownCallable)).toBe(false);
     expect(isSerializedPostgresClient(neonHttpShaped)).toBe(false);
+    // Same abstention for the string spelling the widened cap predicates read:
+    // it is the DRIVER IDENTITY that is missing here, and no spelling of a cap
+    // substitutes for it.
+    expect(
+      isSerializedPostgresClient(
+        createCallableClient({ options: { max: "1" } }),
+      ),
+    ).toBe(false);
+  });
+
+  it("marks a pg Pool capped at one connection through an uncoerced string", () => {
+    // `new Pool({ max: process.env.PG_MAX })` is the shape in the wild.
+    // pg-pool resolves `options.max = options.max || options.poolSize || 10`
+    // without coercing, so the cap stays the string "1" — and its own
+    // `this._clients.length >= this.options.max` check then coerces, making the
+    // pool genuinely one connection. The legacy `poolSize` spelling lands in the
+    // same resolved `max`, so it is the same pool and gets the same mark.
+    const stringMax = openPoolWithRawCap({
+      connectionString: CONNECTION_STRING,
+      max: "1",
+    });
+    const legacyPoolSize = openPoolWithRawCap({
+      connectionString: CONNECTION_STRING,
+      poolSize: "1",
+    });
+
+    try {
+      expect(resolvedPoolCap(stringMax)).toBe("1");
+      expect(resolvedPoolCap(legacyPoolSize)).toBe("1");
+      expect(isSerializedPostgresClient(stringMax)).toBe(true);
+      expect(isSerializedPostgresClient(legacyPoolSize)).toBe(true);
+    } finally {
+      void stringMax.end();
+      void legacyPoolSize.end();
+    }
+  });
+
+  it("does not mark a pg Pool whose string cap is not one, because pg-pool really opens that many", () => {
+    // The counterpart to the row above, and the reason pg-pool gets its own cap
+    // predicate: `1 >= "5"` is false, so a pool told `max: "5"` opens five
+    // connections and marking it would refuse concurrent work that succeeds.
+    const five = openPoolWithRawCap({
+      connectionString: CONNECTION_STRING,
+      max: "5",
+    });
+    const two = openPoolWithRawCap({
+      connectionString: CONNECTION_STRING,
+      max: "2",
+    });
+
+    try {
+      expect(resolvedPoolCap(five)).toBe("5");
+      expect(isSerializedPostgresClient(five)).toBe(false);
+      expect(isSerializedPostgresClient(two)).toBe(false);
+    } finally {
+      void five.end();
+      void two.end();
+    }
+  });
+
+  it("marks a real postgres-js client capped at one connection through its URL or PGMAX", () => {
+    // Both channels are the driver's OWN resolution, run here against the real
+    // `postgres` package: it takes `max` from the query string and from the
+    // environment, and coerces neither (`max` is absent from its `ints` list),
+    // so each resolves to the string "1" — one connection, and the same
+    // serialized resource as the numeric `{ max: 1 }` form.
+    const fromUrl = openPostgresJsClient(`${CONNECTION_STRING}?max=1`);
+    const fromEnvironment = withPgMax("1", () =>
+      openPostgresJsClient(CONNECTION_STRING),
+    );
+    const numeric = openPostgresJsClient(CONNECTION_STRING, { max: 1 });
+
+    expect(resolvedPostgresJsCap(fromUrl)).toBe("1");
+    expect(resolvedPostgresJsCap(fromEnvironment)).toBe("1");
+    expect(resolvedPostgresJsCap(numeric)).toBe(1);
+    expect(isSerializedPostgresClient(fromUrl)).toBe(true);
+    expect(isSerializedPostgresClient(fromEnvironment)).toBe(true);
+    expect(isSerializedPostgresClient(numeric)).toBe(true);
+  });
+
+  it("does not mark a postgres-js client whose string cap is not one, despite postgres-js really opening one there", () => {
+    // A KNOWN, DELIBERATE gap, and the second half of why the two drivers have
+    // two cap predicates: `[...Array("5")]` has length 1, so this client really
+    // does open a single connection today and really can wedge a stream pair.
+    // Marking it would be marking on an upstream bug — the day postgres-js
+    // coerces `max`, the same configuration becomes a five-connection pool whose
+    // concurrent work we would then refuse.
+    const client = openPostgresJsClient(`${CONNECTION_STRING}?max=5`);
+
+    expect(resolvedPostgresJsCap(client)).toBe("5");
+    expect(isSerializedPostgresClient(client)).toBe(false);
+  });
+
+  it("does not mark a real postgres-js client at its default size", () => {
+    const client = openPostgresJsClient(CONNECTION_STRING);
+
+    expect(resolvedPostgresJsCap(client)).toBe(10);
+    expect(isSerializedPostgresClient(client)).toBe(false);
+  });
+});
+
+/**
+ * Two claims this package's abstentions REST ON, converted from prose into
+ * checked propositions: a doc comment that says "we do not detect X because the
+ * driver does not honor X" is a guess until the driver is asked. Each fails the
+ * day its upstream changes — at which point the documented abstention has become
+ * a gap, and that is the news these tests exist to deliver.
+ */
+describe("upstream driver assumptions the detector rests on", () => {
+  const CONNECTION_STRING = "postgres://user@127.0.0.1:1/typegraph_probe";
+  // `@types/pg` types `defaults` without a `max` (it still declares the legacy
+  // `poolSize`), while the runtime object carries one — and it is the runtime
+  // object a user setting a global cap reaches for.
+  const runtimePgDefaults = pgDefaults as unknown as Record<string, unknown>;
+  const defaultPoolMax = runtimePgDefaults["max"];
+
+  afterEach(() => {
+    runtimePgDefaults["max"] = defaultPoolMax;
+  });
+
+  it("pins that pg honors neither a global default nor a connection-string cap", () => {
+    // Both are named in `getSerializedPostgresClient`'s doc as caps we do not
+    // detect. The reason we need not detect them is that pg does not apply
+    // them: the resolved cap stays the default 10, so neither pool is capped at
+    // one connection in the first place.
+    runtimePgDefaults["max"] = 1;
+    const globalDefault = new Pool({ connectionString: CONNECTION_STRING });
+    const connectionStringCap = new Pool({
+      connectionString: `${CONNECTION_STRING}?max=1`,
+    });
+
+    try {
+      expect(resolvedPoolCap(globalDefault)).toBe(10);
+      expect(resolvedPoolCap(connectionStringCap)).toBe(10);
+      expect(isSerializedPostgresClient(globalDefault)).toBe(false);
+      expect(isSerializedPostgresClient(connectionStringCap)).toBe(false);
+    } finally {
+      void globalDefault.end();
+      void connectionStringCap.end();
+    }
+  });
+
+  it("pins that drizzle-orm still ships no node-sqlite entrypoint", () => {
+    // `transaction-resource.ts` records `node:sqlite` `DatabaseSync` as
+    // UNREACHABLE rather than as a gap, on the grounds that no
+    // `createSqliteBackend` call can be handed one. That holds only while
+    // Drizzle has no such entrypoint; `./bun-sqlite` is asserted alongside it so
+    // a moved or restructured exports map fails loudly instead of silently
+    // satisfying the negative.
+    const exportKeys = Object.keys(drizzleExports);
+
+    expect(exportKeys).not.toContain("./node-sqlite");
+    expect(exportKeys).toContain("./bun-sqlite");
   });
 });
 
@@ -732,10 +976,8 @@ describe("serialized SQLite client detection", () => {
   it("carries the bun:sqlite mark through the wrappers a history store adds", () => {
     const client = createBunSqliteClient();
     const source = createSqliteBackend(createClientDatabase(client));
-    const target = createBackendOverlay(
-      createGraphBackendProjection(
-        createSqliteBackend(createClientDatabase(client)),
-      ),
+    const target = deriveBackend(
+      projectGraphBackend(createSqliteBackend(createClientDatabase(client))),
       {},
     );
 
@@ -807,6 +1049,50 @@ describe("serialized SQLite client detection", () => {
     expect(isBetterSqlite3Client(createSqlJsClient())).toBe(false);
     expect(isBunSqliteClient(createSqlJsClient())).toBe(false);
   });
+
+  it("marks an embedded-replica libsql client, whose statements still route through the one local handle", () => {
+    // #434's open verification flag. An embedded replica is `protocol: "file"`
+    // WITH a `syncUrl`, and the syncUrl names only where the replica pulls FROM
+    // — every statement the client executes still runs on the one local handle,
+    // so an open export snapshot on one wrapper holds the connection another
+    // wrapper's import needs, exactly as for any other local client. Treating
+    // the syncUrl as a disqualifier would unmark a genuinely serialized client.
+    //
+    // A real embedded replica cannot be constructed here: `createClient` with a
+    // `syncUrl` performs its first sync eagerly and fails offline (measured:
+    // "sync error: ... Connection refused"). So the fixture is the REAL local
+    // client's own surface — its prototype, its `protocol`, its methods — with
+    // the embedded-replica markers added, which is precisely the difference
+    // between the two configurations.
+    const local = createClient({ url: "file::memory:" });
+
+    try {
+      const embeddedReplica: object = Object.assign(
+        Object.create(local) as object,
+        {
+          syncUrl: "http://127.0.0.1:9",
+          sync: (): Promise<void> => Promise.resolve(),
+        },
+      );
+
+      // The baseline the fixture is derived from, so a change in the driver's
+      // own shape cannot leave this test asserting against a stale stand-in.
+      expect(isLocalLibsqlClient(local)).toBe(true);
+      expect(isLocalLibsqlClient(embeddedReplica)).toBe(true);
+      expect(isSerializedSqliteClient(embeddedReplica)).toBe(true);
+
+      // The consequence of the mark: two wrappers over that one client are one
+      // serialized resource, so an export/import pair is refused rather than
+      // reaching BEGIN IMMEDIATE.
+      const first = createSqliteBackend(createClientDatabase(embeddedReplica));
+      const second = createSqliteBackend(createClientDatabase(embeddedReplica));
+
+      expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+      expect(snapshotExportContention(first, second)).toBe("shared-resource");
+    } finally {
+      local.close();
+    }
+  });
 });
 
 /**
@@ -860,8 +1146,8 @@ describe("Durable Object storage serialized-resource detection", () => {
   it("carries the mark through the wrappers a history store adds", () => {
     const storage = createStorageClient();
     const source = createSqliteBackend(createDurableObjectDatabase(storage));
-    const target = createBackendOverlay(
-      createGraphBackendProjection(
+    const target = deriveBackend(
+      projectGraphBackend(
         createSqliteBackend(createDurableObjectDatabase(storage)),
       ),
       {},
@@ -1460,13 +1746,13 @@ describe("query hook contract: each submitted statement is observable", () => {
 
   it("reports statement failures through onError without firing onQueryEnd", async () => {
     const backend = createTestBackend();
-    const projected = createGraphBackendProjection(backend);
+    const projected = projectGraphBackend(backend);
     const executeRaw = projected.executeRaw;
     if (executeRaw === undefined)
       throw new Error("SQLite must expose executeRaw");
     const injectedFailure = new Error("injected query failure");
     let failQueries = false;
-    const failingBackend: GraphBackend = createBackendOverlay(projected, {
+    const failingBackend: GraphBackend = deriveBackend(projected, {
       executeRaw: <T>(sqlText: string, params: readonly unknown[]) =>
         failQueries ?
           Promise.reject(injectedFailure)

@@ -5707,6 +5707,7 @@ export interface StoreRef<in out T> {
 // @internal
 type StoreRuntime<G extends GraphDef> = Readonly<{
     backend: GraphBackend;
+    queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
     recordedNodeGetById: <N extends NodeType>(kind: string, id: NodeId<N>, coordinate: ReadCoordinate) => Promise<Node<N> | undefined>;
     recordedNodeGetByIds: <N extends NodeType>(kind: string, ids: readonly NodeId<N>[], coordinate: ReadCoordinate) => Promise<readonly (Node<N> | undefined)[]>;

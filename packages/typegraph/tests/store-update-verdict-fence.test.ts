@@ -37,6 +37,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { asNodeId, defineEdge, defineGraph, defineNode } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { type GraphBackend, rowPropsToObject } from "../src/backend/types";
@@ -417,8 +418,7 @@ describe("store update verdict fence", () => {
 
     // The peer: an UPDATE that matches nothing, exactly as the tombstone
     // predicate answers once someone else has revived the row.
-    const losingBackend: GraphBackend = {
-      ...backend,
+    const losingBackend: GraphBackend = deriveBackend(backend, {
       updateNode: () => {
         throw new DatabaseOperationError(
           "Update node failed: no row returned",
@@ -429,7 +429,7 @@ describe("store update verdict fence", () => {
           },
         );
       },
-    };
+    });
 
     await expect(
       applyNodeResurrect(

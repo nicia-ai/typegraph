@@ -11,6 +11,7 @@ import {
   type GraphBackend,
   type TransactionBackend,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { IdentityContradictionError, ValidationError } from "../src/errors";
 import { asIdentityAssertionId } from "../src/identity";
@@ -69,17 +70,15 @@ function captureIdentityWindowLedgerReads(
     if (compiled?.sql.includes("selected_assertions")) reads.count += 1;
   }
   function captureTarget(target: TransactionBackend): TransactionBackend {
-    return {
-      ...target,
+    return deriveBackend(target, {
       execute(query) {
         const compiled = target.compileSql?.(query);
         if (compiled?.sql.includes("selected_assertions")) reads.count += 1;
         return target.execute(query);
       },
-    };
+    });
   }
-  return {
-    ...backend,
+  return deriveBackend(backend, {
     execute(query) {
       capture(query);
       return backend.execute(query);
@@ -90,7 +89,7 @@ function captureIdentityWindowLedgerReads(
         options,
       );
     },
-  };
+  });
 }
 
 function orderPair(left: Ref, right: Ref): readonly [Ref, Ref] {
