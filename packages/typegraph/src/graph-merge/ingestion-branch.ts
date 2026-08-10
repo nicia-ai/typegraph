@@ -74,7 +74,7 @@ export async function ingestionBranch<G extends GraphDef>(
 }
 
 /** Resolves an opaque ingestion handle to its private planner-facing branch. */
-export function unwrapMergeBranch<G extends GraphDef>(
+function unwrapMergeBranch<G extends GraphDef>(
   input: MergeBranch<G>,
 ): GraphBranch<G> {
   const privateBranch = PRIVATE_BRANCHES.get(input);

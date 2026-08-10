@@ -251,7 +251,7 @@ export async function validateResolvedNodeUniqueness(
  * node's old sidecars are batch-cleared so later per-node upserts can claim the
  * validated final keys in any order (including swaps and handoffs).
  */
-export async function prepareResolvedNodeUniqueness(
+async function prepareResolvedNodeUniqueness(
   ctx: UniquenessContext,
   upserts: readonly ResolvedNodeUniquenessUpsert[],
   releases: readonly ResolvedNodeUniquenessRelease[],

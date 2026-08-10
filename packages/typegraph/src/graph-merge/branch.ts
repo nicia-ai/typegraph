@@ -95,7 +95,7 @@ export async function branch<G extends GraphDef>(
  * `getActiveSchema` rejects would leak the engine the strategy just opened. A
  * close failure must not mask the original error.
  */
-export async function captureBranchSchemaAnchor<G extends GraphDef>(
+async function captureBranchSchemaAnchor<G extends GraphDef>(
   store: GraphBranch<G>["store"],
 ): Promise<Readonly<{ version: number; hash: string }> | undefined> {
   try {
