@@ -50,6 +50,8 @@ import {
 import { embedding } from "../src/core/embedding";
 import { searchable } from "../src/core/searchable";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { sql } from "../src/query/sql-fragment";
+import { asCompiledSelectSql } from "../src/query/sql-intent";
 import { buildKindRegistry } from "../src/registry";
 import {
   runWritePlan,
@@ -101,6 +103,7 @@ const WATCHED_MEMBERS = [
   "insertUnique",
   "insertUniqueBatch",
   "deleteUnique",
+  "hardDeleteUniquesByNodeIds",
   "upsertFulltext",
   "upsertFulltextBatch",
   "deleteFulltext",
@@ -116,6 +119,7 @@ const WATCHED_MEMBERS = [
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "updateNode",
+  "updateNodeSet",
   "deleteNode",
   "hardDeleteNode",
 ] as const;
@@ -362,6 +366,42 @@ const CASES: Record<keyof WriteSession, Case> = {
     },
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "updateNode",
+  },
+  reviseNodeSet: {
+    run: async (raw) => {
+      await seed(raw, "k");
+      const candidates = asCompiledSelectSql(sql`
+        SELECT id AS n_id
+        FROM ${createSqlSchema(raw.tableNames).nodesTable}
+        WHERE graph_id = ${GRAPH_ID} AND kind = 'Doc' AND id = 'k'
+      `);
+      return (session) =>
+        session.reviseNodeSet(
+          {
+            kind: "Doc",
+            schema,
+            uniqueConstraints,
+            // A CHANGED unique key, for the same reason as `reviseNode`: the
+            // set update drops every affected node's entries key-blind and
+            // rebuilds them from the after-images.
+            patch: {
+              title: "set-revised",
+              email: "k-revised@example.com",
+            },
+            unsetProperties: [],
+            candidateIds: candidates,
+            candidateIdColumn: "n_id",
+          },
+          { validityLowerBound: {} },
+        );
+    },
+    sidecars: [
+      "hardDeleteUniquesByNodeIds",
+      "insertUniqueBatch",
+      "upsertFulltextBatch",
+      "upsertEmbeddingBatch",
+    ],
+    row: "updateNodeSet",
   },
 };
 

@@ -18,11 +18,11 @@
  *
  * ## The type grows per batch, and that is load-bearing
  *
- * A method exists only once the step module it delegates to exists. B0 ships
+ * A method exists only once the step module it delegates to exists. B0 shipped
  * the eight node methods whose delegates (`node-write-pipeline.ts`'s four
- * steps, `insert-dispatch.ts`'s four insert shapes) are already here;
- * `reviseNodeSet` arrives with `applyNodeSetUpdate`, and the edge methods with
- * `edge-write-pipeline.ts`. That schedule is what lets this module spell NO
+ * steps, `insert-dispatch.ts`'s four insert shapes) were already here; B1b
+ * added `reviseNodeSet` in the same commit as `applyNodeSetUpdate`, and the
+ * edge methods arrive with `edge-write-pipeline.ts`. That schedule is what lets this module spell NO
  * banned member call at any commit — which is why it needs no lint exemption
  * on the day it lands or on any day after.
  *
@@ -69,16 +69,21 @@ import {
   applyNodeInsertSideEffects,
   applyNodeInsertSideEffectsBatch,
   applyNodeResurrect,
+  applyNodeSetUpdate,
   applyNodeSoftDelete,
   applyNodeUpdate,
   createNodeWriteContext,
   type NodeDeletePolicy,
+  type NodeSetUpdateResult,
+  type NodeSetUpdateWork,
   type NodeUpdateTarget,
 } from "./node-write-pipeline";
 import {
   applyWriteFences,
   createWriteParamsDraft,
+  NODE_SET_UPDATE_FENCE_APPLIERS,
   NODE_UPDATE_FENCE_APPLIERS,
+  type NodeSetUpdateFences,
   type NodeUpdateFences,
 } from "./write-fences";
 import { type WriteMemberKey } from "./write-members";
@@ -207,6 +212,12 @@ export type WriteSession = Readonly<{
   ) => Promise<void>;
   purgeNode: (work: NodeHardDeleteWork) => Promise<void>;
   reviveNode: (work: NodeResurrectWork) => Promise<NodeRow>;
+
+  // ---- B1b: delegates to node-write-pipeline.ts's applyNodeSetUpdate
+  reviseNodeSet: (
+    work: NodeSetUpdateWork,
+    fences: NodeSetUpdateFences,
+  ) => Promise<NodeSetUpdateResult>;
 }>;
 
 // No session method may collide with a banned backend member name: the lint
@@ -283,5 +294,19 @@ export function createWriteSession(
     purgeNode: (work) => applyNodeHardDelete(writeContext, work, target),
 
     reviveNode: (work) => applyNodeResurrect(writeContext, work, target),
+
+    reviseNodeSet: (work, fences) => {
+      // The fences are applied for their REFUSAL, not for their contribution:
+      // this kind's one applier throws for a stated bound and writes nothing
+      // for an empty one, so a draft that survives the call is provably empty
+      // and there is no predicate to thread into the statement. Skipping the
+      // call would be this layer re-deciding what the applier decides.
+      applyWriteFences(
+        NODE_SET_UPDATE_FENCE_APPLIERS,
+        fences,
+        createWriteParamsDraft(),
+      );
+      return applyNodeSetUpdate(writeContext, work, target);
+    },
   };
 }

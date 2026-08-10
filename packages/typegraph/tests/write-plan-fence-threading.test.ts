@@ -353,4 +353,15 @@ describe("a fenced session method cannot be called without its fence", () => {
     const fences: Parameters<WriteSession["reviseNode"]>[1] = {};
     expect(fences).toEqual({});
   });
+
+  it("rejects an omitted fence record on the SET update too", () => {
+    // The same check for `reviseNodeSet`, landing with the method it
+    // constrains (B1b). The set UPDATE cannot HONOR this fence — it has no
+    // field for it — but the caller must still STATE that it asserts nothing:
+    // "the statement cannot carry it" and "nobody passed it" must not look
+    // the same at the call site.
+    // @ts-expect-error -- an empty fence record omits the required key
+    const fences: Parameters<WriteSession["reviseNodeSet"]>[1] = {};
+    expect(fences).toEqual({});
+  });
 });

@@ -141,10 +141,6 @@ import {
   withAlreadyExistsTranslation,
 } from "./already-exists";
 import {
-  applyNodeInsertSideEffectsBatch,
-  createNodeWriteContext,
-} from "./node-write-pipeline";
-import {
   type HookedWritePlanContext,
   runHookedWritePlan,
   runWritePlan,
@@ -161,7 +157,6 @@ import {
   type WriteSession,
   type WriteTarget,
 } from "./write-session";
-import { runInWriteTransaction } from "./write-transaction";
 
 // ============================================================
 // Types
@@ -1842,171 +1837,33 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
 
   const hookContext = ctx.createBulkOperationContext("updateWhere", kind);
   return ctx.withBulkOperationHooks(hookContext, () =>
-    runInWriteTransaction(
-      ctx,
+    runWritePlan(
+      nodeWritePlanContext(ctx),
+      // The set update re-checks every changed unique key across the
+      // constraint's scope before rebuilding the sidecars, so a shared-scope
+      // constraint makes it a constrained write like any other update.
+      // Identity does not participate: a set update rewrites props, and no
+      // patch can change a node's kind.
+      nodeWritePlan(nodeFencesConstraintProbe(ctx, kind, "update"), undefined),
       backend,
-      async (target, lock) => {
-        const updateNodeSet = target.updateNodeSet;
-        if (updateNodeSet === undefined) {
-          throw new ConfigurationError(
-            "The transaction backend does not support set-based node updates",
-            { code: "SET_UPDATE_UNSUPPORTED", kind },
-          );
-        }
-        const hardDeleteUniquesByNodeIds = target.hardDeleteUniquesByNodeIds;
-        if (
-          uniqueConstraints.length > 0 &&
-          (hardDeleteUniquesByNodeIds === undefined ||
-            target.insertUniqueBatch === undefined ||
-            target.checkUniqueBatch === undefined)
-        ) {
-          throw new ConfigurationError(
-            "The transaction backend lacks batched uniqueness operations",
-            { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
-          );
-        }
-        if (
-          getSearchableFields(schema).length > 0 &&
-          (target.upsertFulltext === undefined ||
-            target.deleteFulltext === undefined ||
-            target.upsertFulltextBatch === undefined ||
-            target.deleteFulltextBatch === undefined)
-        ) {
-          throw new ConfigurationError(
-            "The transaction backend lacks batched fulltext operations",
-            { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
-          );
-        }
-        if (
-          getEmbeddingFields(schema).length > 0 &&
-          (target.upsertEmbedding === undefined ||
-            target.deleteEmbedding === undefined ||
-            target.upsertEmbeddingBatch === undefined ||
-            target.deleteEmbeddingBatch === undefined)
-        ) {
-          throw new ConfigurationError(
-            "The transaction backend lacks batched vector operations",
-            { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
-          );
-        }
-        const result = await updateNodeSet({
-          graphId: ctx.graphId,
-          kind,
-          patch,
-          unsetProperties,
-          candidateIds,
-          candidateIdColumn,
-        });
-        if (result.affectedCount === 0) return { affectedCount: 0 };
-
-        const sidecarItems = result.rows.map((row) => {
-          const props = rowPropsToObject(row.props);
-          const validatedProps = validateNodeProps(schema, props, {
+      (session) =>
+        session.reviseNodeSet(
+          {
             kind,
-            operation: "update",
-            id: row.id,
-          });
-          if (!canonicalEqual(validatedProps, props)) {
-            throw new ValidationError(
-              `Set update would persist a non-canonical ${kind} row`,
-              {
-                entityType: "node",
-                kind,
-                operation: "update",
-                id: row.id,
-                issues: [
-                  {
-                    path: "props",
-                    message: "The complete row requires schema normalization",
-                  },
-                ],
-              },
-            );
-          }
-          return {
-            kind,
-            id: row.id,
             schema,
-            props: validatedProps,
             uniqueConstraints,
-          };
-        });
-
-        if (uniqueConstraints.length > 0) {
-          const affectedIds = new Set(result.rows.map((row) => row.id));
-          for (const constraint of uniqueConstraints) {
-            const keyToId = new Map<string, string>();
-            for (const item of sidecarItems) {
-              if (!checkWherePredicate(constraint, item.props)) continue;
-              const key = computeUniqueKey(
-                item.props,
-                constraint.fields,
-                constraint.collation,
-              );
-              const priorId = keyToId.get(key);
-              if (priorId !== undefined && priorId !== item.id) {
-                throw new UniquenessError({
-                  constraintName: constraint.name,
-                  kind,
-                  existingId: priorId,
-                  newId: item.id,
-                  fields: constraint.fields,
-                });
-              }
-              keyToId.set(key, item.id);
-            }
-            const keys = [...keyToId.keys()];
-            if (keys.length === 0) continue;
-            for (const kindToCheck of getKindsForUniquenessCheck(
-              kind,
-              constraint.scope,
-              ctx.registry,
-            )) {
-              const existingRows = await requireDefined(
-                target.checkUniqueBatch,
-              )({
-                graphId: ctx.graphId,
-                nodeKind: kindToCheck,
-                constraintName: constraint.name,
-                keys,
-              });
-              for (const existing of existingRows) {
-                if (
-                  existing.concrete_kind === kind &&
-                  affectedIds.has(existing.node_id)
-                ) {
-                  continue;
-                }
-                throw new UniquenessError({
-                  constraintName: constraint.name,
-                  kind: kindToCheck,
-                  existingId: existing.node_id,
-                  newId: requireDefined(keyToId.get(existing.key)),
-                  fields: constraint.fields,
-                });
-              }
-            }
-          }
-          await requireDefined(hardDeleteUniquesByNodeIds)({
-            graphId: ctx.graphId,
-            concreteKind: kind,
-            nodeIds: result.rows.map((row) => row.id),
-          });
-        }
-        await applyNodeInsertSideEffectsBatch(
-          createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-          sidecarItems,
-          target,
-        );
-        return { affectedCount: result.affectedCount };
-      },
-      {
-        didWrite: (result) => result.affectedCount > 0,
-        // The set update re-checks every changed unique key across the
-        // constraint's scope before rebuilding the sidecars, so a shared-scope
-        // constraint makes it a constrained write like any other update.
-        fencesConstraintProbe: nodeFencesConstraintProbe(ctx, kind, "update"),
-      },
+            patch,
+            unsetProperties,
+            candidateIds,
+            candidateIdColumn,
+          },
+          // This path states no window — it patches properties — so the write
+          // asserts no stored lower bound. The set UPDATE has no field to
+          // carry one, so a future windowed set update is refused here rather
+          // than run unfenced.
+          { validityLowerBound: {} },
+        ),
+      { didWrite: (result) => result.affectedCount > 0 },
     ),
   );
 }

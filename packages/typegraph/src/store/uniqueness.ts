@@ -16,6 +16,7 @@ import {
 import { type UniqueConstraint } from "../core/types";
 import { UniquenessError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
+import { requireDefined } from "../utils/presence";
 
 /**
  * Context for uniqueness operations.
@@ -221,6 +222,32 @@ export async function deleteUniquenessEntries(
       key,
     });
   }
+}
+
+/**
+ * Drops EVERY uniqueness entry a set of nodes holds under one concrete kind,
+ * key-blind, so the rebuild that follows can reinsert from the after-images.
+ *
+ * The key-blind drop is what a set update needs and the per-key
+ * {@link deleteUniquenessEntries} cannot give it: the statement rewrote whole
+ * rows without reading their before-images, so nobody knows which keys those
+ * rows used to hold.
+ *
+ * Requiring the member rather than probing it: the only caller
+ * ({@link applyNodeSetUpdate}) refuses the write up front when a constrained
+ * kind's backend lacks it, with a code that names the operation. A second
+ * fallback here would be a quieter answer to a question already asked.
+ */
+export async function hardDeleteUniquenessEntriesByNodeIds(
+  ctx: UniquenessContext,
+  concreteKind: string,
+  nodeIds: readonly string[],
+): Promise<void> {
+  await requireDefined(ctx.backend.hardDeleteUniquesByNodeIds)({
+    graphId: ctx.graphId,
+    concreteKind,
+    nodeIds,
+  });
 }
 
 /**

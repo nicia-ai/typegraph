@@ -25,17 +25,37 @@ import {
   type TombstonedNodeRow,
   type TransactionBackend,
 } from "../../backend/types";
-import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
-import { RestrictedDeleteError } from "../../errors";
+import {
+  checkWherePredicate,
+  computeUniqueKey,
+  getKindsForUniquenessCheck,
+} from "../../constraints";
+import {
+  type DeleteBehavior,
+  type JsonValue,
+  type UniqueConstraint,
+} from "../../core/types";
+import {
+  ConfigurationError,
+  RestrictedDeleteError,
+  UniquenessError,
+  ValidationError,
+} from "../../errors";
+import { validateNodeProps } from "../../errors/validation";
+import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { canonicalEqual } from "../../schema/canonical";
 import { assertsStoredLowerBound } from "../../utils/date";
+import { requireDefined } from "../../utils/presence";
 import {
   deleteNodeEmbeddings,
+  getEmbeddingFields,
   syncEmbeddings,
   syncEmbeddingsBatchForKind,
 } from "../embedding-sync";
 import {
   deleteNodeFulltext,
+  getSearchableFields,
   syncFulltext,
   syncFulltextBatchForKind,
 } from "../fulltext-sync";
@@ -43,6 +63,7 @@ import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   createUniquenessContext,
   deleteUniquenessEntries,
+  hardDeleteUniquenessEntriesByNodeIds,
   insertUniquenessEntries,
   insertUniquenessEntriesBatch,
   planUniquenessReinsert,
@@ -552,4 +573,204 @@ export async function applyNodeResurrect(
     syncFulltext(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
   ]);
   return row;
+}
+
+/**
+ * The inputs of one set-based node update: the patch the statement applies and
+ * the candidate query that selects the rows it applies to.
+ *
+ * There is no fence field. `UpdateNodeSetParams` has no `expectedValidFrom`,
+ * so a validity lower bound cannot be carried here — it is refused by
+ * `NODE_SET_UPDATE_FENCE_APPLIERS` before this step is reached, rather than
+ * accepted into a record that would quietly drop it.
+ */
+export type NodeSetUpdateWork = Readonly<{
+  kind: string;
+  schema: z.ZodType<Record<string, unknown>>;
+  uniqueConstraints: readonly UniqueConstraint[];
+  patch: Readonly<Record<string, JsonValue>>;
+  unsetProperties: readonly string[];
+  candidateIds: CompiledSelectSql;
+  candidateIdColumn: string;
+}>;
+
+/** What a set update reports: how many live rows it rewrote. */
+export type NodeSetUpdateResult = Readonly<{ affectedCount: number }>;
+
+/**
+ * Applies a set-based node update: one UPDATE over every candidate row, then a
+ * full rebuild of the sidecars those after-images oblige.
+ *
+ * ## Why the capability refusals are HERE and not at the entry point
+ *
+ * The caller probes the backend it was handed before opening the transaction;
+ * these four probe the transaction target, which is a different object — a
+ * backend may hand out a transaction handle that implements less than the
+ * top-level one. They keep the entry point's error codes, so a caller that
+ * refuses before the transaction and one that refuses inside it report the
+ * same class.
+ *
+ * ## Why the order is row -> probe -> drop -> reinsert
+ *
+ * Unlike every other node write, the uniqueness claim happens AFTER the row
+ * write: the statement rewrites whole rows without reading their before-images,
+ * so the keys to release are not knowable until the after-images come back.
+ * The cross-kind re-check below is what makes that safe — it re-probes every
+ * changed key across the constraint's scope and refuses the whole transaction
+ * before a single entry is dropped. The per-graph write fence (which a
+ * shared-scope constraint forces this write to take) is what keeps a concurrent
+ * claim from landing between the probe and the reinsert.
+ */
+export async function applyNodeSetUpdate(
+  ctx: NodeWriteContext,
+  args: NodeSetUpdateWork,
+  backend: Backend,
+): Promise<NodeSetUpdateResult> {
+  const { kind, schema, uniqueConstraints } = args;
+  const updateNodeSet = backend.updateNodeSet;
+  if (updateNodeSet === undefined) {
+    throw new ConfigurationError(
+      "The transaction backend does not support set-based node updates",
+      { code: "SET_UPDATE_UNSUPPORTED", kind },
+    );
+  }
+  if (
+    uniqueConstraints.length > 0 &&
+    (backend.hardDeleteUniquesByNodeIds === undefined ||
+      backend.insertUniqueBatch === undefined ||
+      backend.checkUniqueBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "The transaction backend lacks batched uniqueness operations",
+      { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
+    );
+  }
+  if (
+    getSearchableFields(schema).length > 0 &&
+    (backend.upsertFulltext === undefined ||
+      backend.deleteFulltext === undefined ||
+      backend.upsertFulltextBatch === undefined ||
+      backend.deleteFulltextBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "The transaction backend lacks batched fulltext operations",
+      { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
+    );
+  }
+  if (
+    getEmbeddingFields(schema).length > 0 &&
+    (backend.upsertEmbedding === undefined ||
+      backend.deleteEmbedding === undefined ||
+      backend.upsertEmbeddingBatch === undefined ||
+      backend.deleteEmbeddingBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "The transaction backend lacks batched vector operations",
+      { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
+    );
+  }
+  const result = await updateNodeSet({
+    graphId: ctx.graphId,
+    kind,
+    patch: args.patch,
+    unsetProperties: args.unsetProperties,
+    candidateIds: args.candidateIds,
+    candidateIdColumn: args.candidateIdColumn,
+  });
+  if (result.affectedCount === 0) return { affectedCount: 0 };
+
+  const sidecarItems = result.rows.map((row) => {
+    const props = rowPropsToObject(row.props);
+    const validatedProps = validateNodeProps(schema, props, {
+      kind,
+      operation: "update",
+      id: row.id,
+    });
+    if (!canonicalEqual(validatedProps, props)) {
+      throw new ValidationError(
+        `Set update would persist a non-canonical ${kind} row`,
+        {
+          entityType: "node",
+          kind,
+          operation: "update",
+          id: row.id,
+          issues: [
+            {
+              path: "props",
+              message: "The complete row requires schema normalization",
+            },
+          ],
+        },
+      );
+    }
+    return {
+      kind,
+      id: row.id,
+      schema,
+      props: validatedProps,
+      uniqueConstraints,
+    };
+  });
+
+  if (uniqueConstraints.length > 0) {
+    const affectedIds = new Set(result.rows.map((row) => row.id));
+    for (const constraint of uniqueConstraints) {
+      const keyToId = new Map<string, string>();
+      for (const item of sidecarItems) {
+        if (!checkWherePredicate(constraint, item.props)) continue;
+        const key = computeUniqueKey(
+          item.props,
+          constraint.fields,
+          constraint.collation,
+        );
+        const priorId = keyToId.get(key);
+        if (priorId !== undefined && priorId !== item.id) {
+          throw new UniquenessError({
+            constraintName: constraint.name,
+            kind,
+            existingId: priorId,
+            newId: item.id,
+            fields: constraint.fields,
+          });
+        }
+        keyToId.set(key, item.id);
+      }
+      const keys = [...keyToId.keys()];
+      if (keys.length === 0) continue;
+      for (const kindToCheck of getKindsForUniquenessCheck(
+        kind,
+        constraint.scope,
+        ctx.registry,
+      )) {
+        const existingRows = await requireDefined(backend.checkUniqueBatch)({
+          graphId: ctx.graphId,
+          nodeKind: kindToCheck,
+          constraintName: constraint.name,
+          keys,
+        });
+        for (const existing of existingRows) {
+          if (
+            existing.concrete_kind === kind &&
+            affectedIds.has(existing.node_id)
+          ) {
+            continue;
+          }
+          throw new UniquenessError({
+            constraintName: constraint.name,
+            kind: kindToCheck,
+            existingId: existing.node_id,
+            newId: requireDefined(keyToId.get(existing.key)),
+            fields: constraint.fields,
+          });
+        }
+      }
+    }
+    await hardDeleteUniquenessEntriesByNodeIds(
+      uniquenessContext(ctx, backend),
+      kind,
+      result.rows.map((row) => row.id),
+    );
+  }
+  await applyNodeInsertSideEffectsBatch(ctx, sidecarItems, backend);
+  return { affectedCount: result.affectedCount };
 }

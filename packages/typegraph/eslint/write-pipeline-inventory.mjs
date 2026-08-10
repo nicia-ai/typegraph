@@ -170,12 +170,6 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     permanent: true,
   },
   {
-    path: "src/store/operations/node-operations.ts",
-    reason:
-      "The set update's two hoists (updateNodeSet, hardDeleteUniquesByNodeIds) and their requireDefined calls; they move into applyNodeSetUpdate in B1b. Every other write in this module is already on the session.",
-    permanent: false,
-  },
-  {
     path: "src/store/operations/edge-operations.ts",
     reason:
       "Migrates in B2, when the raw edge row writes move into edge-write-pipeline.ts.",
