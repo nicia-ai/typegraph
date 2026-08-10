@@ -359,9 +359,10 @@ const archive = await exportGraph(store, {
 });
 ```
 
-Archival mode defaults `includeTemporal` to `true`, because importing bounded
-identity truth must prove that both endpoints existed throughout each window.
-Explicitly setting `includeTemporal: false` with archival mode is refused.
+Identity-enabled exports default `includeTemporal` to `true`, because importing
+identity truth must prove that both endpoints existed throughout each assertion
+window. Explicitly setting `includeTemporal: false` on an identity-enabled graph
+is refused.
 
 Archival mode also includes ended assertions. Those rows are restored after
 shape validation and do not affect current closure. An ending a node deletion

@@ -66,3 +66,17 @@ export function resolveIdentityValidityWindow(
     effective,
   };
 }
+
+/** Half-open overlap for canonical identity assertion windows. */
+export function identityValidityWindowsOverlap(
+  left: Readonly<{ validFrom: string; validTo?: string | undefined }>,
+  right: Readonly<{ validFrom: string; validTo?: string | undefined }>,
+): boolean {
+  if (left.validFrom === left.validTo || right.validFrom === right.validTo) {
+    return false;
+  }
+  return (
+    (right.validTo === undefined || left.validFrom < right.validTo) &&
+    (left.validTo === undefined || right.validFrom < left.validTo)
+  );
+}

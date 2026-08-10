@@ -2099,7 +2099,7 @@ describe("Identity interchange streaming", () => {
     expect(document.identity?.assertions).toEqual([]);
   });
 
-  it("refuses archival identity export when temporal fields are explicitly disabled", async () => {
+  it("refuses identity export when temporal fields are explicitly disabled", async () => {
     const source = await createInitializedStore(
       identityGraph,
       createTestBackend(),
@@ -2112,7 +2112,7 @@ describe("Identity interchange streaming", () => {
     ).rejects.toMatchObject({
       name: "ConfigurationError",
       details: {
-        code: "IDENTITY_ARCHIVAL_EXPORT_REQUIRES_TEMPORAL_FIELDS",
+        code: "IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS",
       },
     });
   });

@@ -178,29 +178,28 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
   options?: ExportStreamOptionsInput,
 ): AsyncIterable<GraphInterchangeChunk> {
   const parsed = ExportStreamOptionsSchema.parse(options ?? {});
-  // Archival identity rows carry their effective-time windows unconditionally.
-  // Their endpoint rows must therefore carry temporal bounds too, or the
-  // store's own export could not prove on re-import that each endpoint existed
-  // throughout an ended assertion's window.
+  // Identity rows carry their effective-time windows unconditionally. Their
+  // endpoint rows must therefore carry temporal bounds too, or the store's own
+  // export could not prove on re-import that each endpoint existed throughout
+  // an assertion's window.
+  const exportsIdentity = store.graph.identity !== undefined;
   const explicitlyDisabledTemporalFields = options?.includeTemporal === false;
-  if (parsed.identityMode === "archival" && explicitlyDisabledTemporalFields) {
+  if (exportsIdentity && explicitlyDisabledTemporalFields) {
     throw new ConfigurationError(
-      "Archival identity export requires temporal endpoint fields.",
+      "Identity export requires temporal endpoint fields.",
       {
-        code: "IDENTITY_ARCHIVAL_EXPORT_REQUIRES_TEMPORAL_FIELDS",
+        code: "IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS",
         identityMode: parsed.identityMode,
         includeTemporal: false,
       },
       {
         suggestion:
-          "Remove includeTemporal or set it to true when identityMode is archival.",
+          "Remove includeTemporal or set it to true when exporting an identity-enabled graph.",
       },
     );
   }
   const resolved =
-    parsed.identityMode === "archival" ?
-      { ...parsed, includeTemporal: true }
-    : parsed;
+    exportsIdentity ? { ...parsed, includeTemporal: true } : parsed;
   const signal = resolved.signal;
   const idleTimeoutMs = resolved.idleTimeoutMs;
   const channel = createRendezvousChannel<GraphInterchangeChunk>();

@@ -364,6 +364,25 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
             skipped += 1;
             continue;
           }
+          await requireEndpointsCoverIdentityWindow(
+            rawTarget,
+            ctx.graphId,
+            [a, b],
+            window,
+          );
+          await validateRelationThroughoutIdentityWindow(
+            ctx,
+            rawTarget,
+            assertion.relation,
+            "import",
+            a,
+            b,
+            window,
+            operationInstant,
+          );
+          // The temporal check owns historical correctness. The current check
+          // also exercises the materialized separation backstop/readiness guard
+          // before this row changes current derived state.
           await validateCurrentRelation(
             ctx,
             rawTarget,

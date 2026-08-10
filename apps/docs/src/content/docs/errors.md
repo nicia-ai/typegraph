@@ -691,7 +691,7 @@ Operational Identity lifecycle failures use stable `details.code` values on
 | `IDENTITY_SCHEMA_CONTRADICTION` | Existing nodes or assertions contradict the proposed identity profile or ontology, or the materialized closure disagrees with the assertions it was derived from. Run `rebuildIdentityClosure(store)` to recover from a closure mismatch. |
 | `IDENTITY_IMPORT_REQUIRES_PROFILE` | An interchange document carries an `identity` section but the target graph does not have the profile enabled. |
 | `IDENTITY_MERGE_REQUIRES_PROFILE` | A branch carries identity changes but the merge target graph does not have the profile enabled. |
-| `IDENTITY_ARCHIVAL_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An archival identity export explicitly disabled temporal fields. Remove `includeTemporal` or set it to `true`; endpoint bounds are required to validate bounded assertions on import. |
+| `IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An identity-enabled export explicitly disabled temporal fields. Remove `includeTemporal` or set it to `true`; endpoint bounds are required to validate assertion windows on import. |
 | `IDENTITY_IMPORT_ID_CONFLICT` | An imported assertion id already exists in the target ledger identifying different truth (relation, endpoints, or validity window). |
 | `RECORDED_IDENTITY_SCHEMA_MISSING` | A `history: true` open of an identity-enabled graph could not find the recorded identity relation. Bundled backends provision it, so this is rare there and more likely on a custom backend. |
 

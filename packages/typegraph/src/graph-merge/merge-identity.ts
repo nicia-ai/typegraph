@@ -42,6 +42,7 @@ import {
   identityReferenceKey,
   normalizeIdentityPair,
 } from "../identity/reference";
+import { identityValidityWindowsOverlap } from "../identity/validity-window";
 import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
 import type { CanonicalEntity } from "./canonicalize";
@@ -115,6 +116,12 @@ function identitySemanticKey(assertion: IdentityTransferAssertion): string {
   );
 }
 
+function identityDedupeKey(assertion: IdentityTransferAssertion): string {
+  const semantic = identitySemanticKey(assertion);
+  if (assertion.validTo === undefined) return semantic;
+  return encodeTupleKey([semantic, assertion.validFrom, assertion.validTo]);
+}
+
 function compareIdentitySurvivors(
   left: IdentityTransferAssertion,
   right: IdentityTransferAssertion,
@@ -146,15 +153,14 @@ function droppedIdentityAssertion(
 }
 
 /**
- * Keeps ONE assertion per semantic pair and reports every loser as a
- * {@link DroppedItem}, so a duplicate assertion silently discarded from a
- * losing branch is still enumerable in the merge report. Survivors come back
- * in semantic-key order.
+ * Keeps one CURRENT assertion per semantic pair, while retaining every
+ * distinct bounded window. Exact bounded duplicates still choose one survivor
+ * and report the loser. Survivors come back in window-aware key order.
  *
  * An id in `committedIds` (already committed on the target with the exact
  * staged truth) ALWAYS wins over an uncommitted challenger, regardless of the
  * {@link compareIdentitySurvivors} order: the applier is idempotent per
- * semantic pair, so the challenger would never be written — picking it would
+ * dedupe key, so the challenger would never be written — picking it would
  * report an id as applied that never lands while listing the target's own row
  * as dropped. Between two ids of equal committed status the comparator
  * decides.
@@ -169,7 +175,7 @@ function dedupeIdentityAssertions(
   const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
   const dropped: DroppedItem[] = [];
   for (const assertion of assertions) {
-    const key = identitySemanticKey(assertion);
+    const key = identityDedupeKey(assertion);
     const previous = survivorBySemantic.get(key);
     if (previous === undefined) {
       survivorBySemantic.set(key, assertion);
@@ -202,7 +208,7 @@ function dedupeIdentityAssertions(
   }
   return {
     survivors: [...survivorBySemantic.values()].toSorted((left, right) =>
-      compareCodePoints(identitySemanticKey(left), identitySemanticKey(right)),
+      compareCodePoints(identityDedupeKey(left), identityDedupeKey(right)),
     ),
     dropped,
   };
@@ -219,13 +225,28 @@ function assertNoOpposingIdentityRelations(
     byEndpoint.set(key, group);
   }
   for (const [endpoint, group] of byEndpoint) {
-    if (new Set(group.map((assertion) => assertion.relation)).size < 2) {
-      continue;
-    }
-    throw new IdentityMergeConflictError(
-      "Branches asserted opposing identity relations for one endpoint pair.",
-      { details: { endpoint, assertions: group } },
+    const same = group.filter((assertion) => assertion.relation === "same");
+    const different = group.filter(
+      (assertion) => assertion.relation === "different",
     );
+    for (const sameAssertion of same) {
+      for (const differentAssertion of different) {
+        if (
+          !identityValidityWindowsOverlap(sameAssertion, differentAssertion)
+        ) {
+          continue;
+        }
+        throw new IdentityMergeConflictError(
+          "Branches asserted opposing identity relations for one endpoint pair.",
+          {
+            details: {
+              endpoint,
+              assertions: [sameAssertion, differentAssertion],
+            },
+          },
+        );
+      }
+    }
   }
 }
 

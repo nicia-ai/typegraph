@@ -124,6 +124,50 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     return { store, first, second, assertion };
   }
 
+  it("plans and applies adjacent historical identity relations", async () => {
+    const [store] = await createStoreWithSchema(graph, await makeBackend());
+    const first = await store.nodes.Person.create(
+      { name: "Historical first" },
+      { id: "historical-first", validFrom: "2019-01-01T00:00:00.000Z" },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Historical second" },
+      { id: "historical-second", validFrom: "2019-01-01T00:00:00.000Z" },
+    );
+    const sameBranch = unwrap(
+      await branch(store, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const differentBranch = unwrap(
+      await branch(store, () => makeBackend(), { id: BRANCH_B }),
+    );
+    await sameBranch.store.identity.assertSame(first, second, {
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    });
+    await differentBranch.store.identity.assertDifferent(first, second, {
+      validFrom: "2022-01-01T00:00:00.000Z",
+      validTo: "2023-01-01T00:00:00.000Z",
+    });
+
+    const result = await merge(store, [sameBranch, differentBranch], {
+      branchOrder: [BRANCH_A, BRANCH_B],
+    });
+    if (isErr(result)) throw result.error;
+
+    expect(
+      await store
+        .asOf("2021-01-01T00:00:00.000Z")
+        .identity.areSame(first, second),
+    ).toBe(true);
+    expect(
+      await store
+        .asOf("2022-06-01T00:00:00.000Z")
+        .identity.areDifferent(first, second),
+    ).toBe(true);
+    expect(await store.identity.areSame(first, second)).toBe(false);
+    expect(await store.identity.areDifferent(first, second)).toBe(false);
+  });
+
   /**
    * A four-node base already holding `same(second, third)` — the inherited link
    * the closure checks must fold in, since no branch restates it.
@@ -942,9 +986,44 @@ describe("plan-time derived identity contradictions", () => {
       );
 
     expect(() => check([same, different])).toThrow(IdentityMergeConflictError);
+    const adjacent = {
+      ...different,
+      validFrom: requireDefined(same.validTo),
+    };
+    expect(() => check([same, adjacent])).not.toThrow();
+
     expect(() =>
-      check([same, { ...different, validFrom: requireDefined(same.validTo) }]),
-    ).not.toThrow();
+      planIdentityChanges(
+        stagingWithIdentityChanges([
+          { branchId: BRANCH_A, assertion: same },
+          { branchId: BRANCH_B, assertion: different },
+        ]),
+        new Map(),
+      ),
+    ).toThrow(IdentityMergeConflictError);
+    const planned = planIdentityChanges(
+      stagingWithIdentityChanges([
+        { branchId: BRANCH_A, assertion: same },
+        { branchId: BRANCH_B, assertion: adjacent },
+        {
+          branchId: BRANCH_B,
+          assertion: {
+            ...same,
+            id: "later-historical-same",
+            validFrom: requireDefined(adjacent.validTo),
+            validTo: "2024-01-01T00:00:00.000Z",
+          },
+        },
+      ]),
+      new Map(),
+    );
+    expect(
+      planned.assertions.map((assertion) => assertion.id).toSorted(),
+    ).toEqual([
+      "historical-different",
+      "historical-same",
+      "later-historical-same",
+    ]);
   });
 });
 

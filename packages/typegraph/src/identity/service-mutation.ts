@@ -312,11 +312,81 @@ export async function requireEndpointsCoverIdentityWindow(
 }
 
 type RawIdentityBoundaryRow = Readonly<{
+  rel?: unknown;
+  a_kind?: unknown;
+  a_id?: unknown;
+  b_kind?: unknown;
+  b_id?: unknown;
+  kind?: unknown;
+  id?: unknown;
   valid_from?: unknown;
   valid_to?: unknown;
   created_at?: unknown;
   deleted_at?: unknown;
 }>;
+
+function rawBoundaryReference(
+  kind: unknown,
+  id: unknown,
+): PlainNodeRef | undefined {
+  return typeof kind === "string" && typeof id === "string" ?
+      { kind, id }
+    : undefined;
+}
+
+function identityComponentBoundaryRows(
+  assertionRows: readonly RawIdentityBoundaryRow[],
+  nodeRows: readonly RawIdentityBoundaryRow[],
+  references: readonly PlainNodeRef[],
+  sameIdAcrossKinds: "fold" | "ignore",
+): readonly RawIdentityBoundaryRow[] {
+  const component = new Set(references.map((reference) => refKey(reference)));
+  const componentIds = new Set(references.map((reference) => reference.id));
+  const addReference = (reference: PlainNodeRef): boolean => {
+    const key = refKey(reference);
+    if (component.has(key)) return false;
+    component.add(key);
+    componentIds.add(reference.id);
+    return true;
+  };
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    if (sameIdAcrossKinds === "fold") {
+      for (const row of nodeRows) {
+        const reference = rawBoundaryReference(row.kind, row.id);
+        if (reference === undefined || !componentIds.has(reference.id))
+          continue;
+        expanded = addReference(reference) || expanded;
+      }
+    }
+    for (const row of assertionRows) {
+      if (row.rel !== "same") continue;
+      const a = rawBoundaryReference(row.a_kind, row.a_id);
+      const b = rawBoundaryReference(row.b_kind, row.b_id);
+      if (a === undefined || b === undefined) continue;
+      const aKey = refKey(a);
+      const bKey = refKey(b);
+      if (!component.has(aKey) && !component.has(bKey)) continue;
+      expanded = addReference(a) || expanded;
+      expanded = addReference(b) || expanded;
+    }
+  }
+  return [
+    ...assertionRows.filter((row) => {
+      const a = rawBoundaryReference(row.a_kind, row.a_id);
+      const b = rawBoundaryReference(row.b_kind, row.b_id);
+      return (
+        (a !== undefined && component.has(refKey(a))) ||
+        (b !== undefined && component.has(refKey(b)))
+      );
+    }),
+    ...nodeRows.filter((row) => {
+      const reference = rawBoundaryReference(row.kind, row.id);
+      return reference !== undefined && component.has(refKey(reference));
+    }),
+  ];
+}
 
 async function identityWindowCheckpoints(
   target: Backend,
@@ -324,39 +394,41 @@ async function identityWindowCheckpoints(
   graphId: string,
   window: ResolvedIdentityValidityWindow,
   operationInstant: string,
+  references: readonly PlainNodeRef[],
+  sameIdAcrossKinds: "fold" | "ignore",
 ): Promise<readonly string[]> {
   if (window.effective === "empty") return [];
   const upperBoundary = window.validTo ?? operationInstant;
   const [assertionRows, nodeRows] = await Promise.all([
     target.execute<RawIdentityBoundaryRow>(
       asCompiledRowsSql(sql`
-        SELECT valid_from, valid_to
+        SELECT rel, a_kind, a_id, b_kind, b_id, valid_from, valid_to
         FROM ${schema.identityAssertionsTable}
         WHERE graph_id = ${graphId}
           AND deleted_at IS NULL
-          AND (
-            (valid_from >= ${window.validFrom} AND valid_from < ${upperBoundary})
-            OR (valid_to >= ${window.validFrom} AND valid_to < ${upperBoundary})
-          )
+          AND valid_from < ${upperBoundary}
+          AND (valid_to IS NULL OR valid_to > ${window.validFrom})
       `),
     ),
     target.execute<RawIdentityBoundaryRow>(
       asCompiledRowsSql(sql`
-        SELECT valid_from, valid_to, created_at, deleted_at
+        SELECT kind, id, created_at, deleted_at
         FROM ${schema.nodesTable}
         WHERE graph_id = ${graphId}
-          AND (
-            (valid_from >= ${window.validFrom} AND valid_from < ${upperBoundary})
-            OR (valid_to >= ${window.validFrom} AND valid_to < ${upperBoundary})
-            OR (created_at >= ${window.validFrom} AND created_at < ${upperBoundary})
-            OR (deleted_at >= ${window.validFrom} AND deleted_at < ${upperBoundary})
-          )
+          AND created_at < ${upperBoundary}
+          AND (deleted_at IS NULL OR deleted_at > ${window.validFrom})
       `),
     ),
   ]);
   const checkpoints = new Set([window.validFrom]);
   if (window.validTo === undefined) checkpoints.add(operationInstant);
-  for (const row of [...assertionRows, ...nodeRows]) {
+  const boundaryRows = identityComponentBoundaryRows(
+    assertionRows,
+    nodeRows,
+    references,
+    sameIdAcrossKinds,
+  );
+  for (const row of boundaryRows) {
     for (const value of [
       row.valid_from,
       row.valid_to,
@@ -392,6 +464,8 @@ export async function validateRelationThroughoutIdentityWindow(
     ctx.graphId,
     window,
     operationInstant,
+    [a, b],
+    ctx.sameIdAcrossKinds,
   );
   for (const instant of checkpoints) {
     const coordinate = {

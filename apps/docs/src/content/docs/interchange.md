@@ -208,6 +208,11 @@ from import time forward. Pass `includeTemporal: true` on export when the
 clone needs to match the source's `asOf` behavior exactly (this is what
 `branch()` does internally).
 
+Identity-enabled graphs are the exception: their exports default temporal
+fields on, because assertion windows cannot be validated against endpoints
+without the endpoint bounds. Explicit `includeTemporal: false` is refused for
+those graphs.
+
 **`includeTemporal: true` with `onConflict: "update"`:** an update leg sends the
 document's `validTo` and never its `validFrom`, because a live row's lower bound
 is history. A document whose `validFrom` names a different instant than the

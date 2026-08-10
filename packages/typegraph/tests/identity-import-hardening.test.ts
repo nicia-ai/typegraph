@@ -8,6 +8,7 @@ import {
   type GraphBackend,
   type TransactionBackend,
 } from "../src";
+import { IdentityContradictionError } from "../src/errors";
 import { type IdentityTransferAssertion } from "../src/identity/service";
 import {
   exportGraph,
@@ -288,6 +289,65 @@ describe("archival identity import window bounds", () => {
     });
   });
 
+  it("validates a newly imported open window across endpoint and historical truth", async () => {
+    const lateStore = await createInitializedStore(graph, createTestBackend());
+    const latePerson = await lateStore.nodes.Person.create(
+      { name: "Late" },
+      { id: "late", validFrom: "2021-01-01T00:00:00.000Z" },
+    );
+    const earlyAuthor = await lateStore.nodes.Author.create(
+      { penName: "Early" },
+      { id: "early", validFrom: "2019-01-01T00:00:00.000Z" },
+    );
+    await expect(
+      storeRuntime(lateStore).importIdentityAssertionsAtTarget(
+        lateStore.backend,
+        [
+          transfer(
+            "late-open",
+            { kind: "Person", id: latePerson.id },
+            { kind: "Author", id: earlyAuthor.id },
+            "2020-01-01T00:00:00.000Z",
+          ),
+        ],
+        "archival",
+      ),
+    ).rejects.toMatchObject({ code: "IDENTITY_ENDPOINT_VALIDITY" });
+
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { personRef, authorRef } = await seedPair(store);
+    await storeRuntime(store).importIdentityAssertionsAtTarget(
+      store.backend,
+      [
+        {
+          ...transfer(
+            "past-different",
+            personRef,
+            authorRef,
+            isoAt(-3 * HOUR_MS),
+            isoAt(-HOUR_MS),
+          ),
+          relation: "different",
+        },
+      ],
+      "archival",
+    );
+    await expect(
+      storeRuntime(store).importIdentityAssertionsAtTarget(
+        store.backend,
+        [
+          transfer(
+            "overlapping-open",
+            personRef,
+            authorRef,
+            isoAt(-2 * HOUR_MS),
+          ),
+        ],
+        "archival",
+      ),
+    ).rejects.toBeInstanceOf(IdentityContradictionError);
+  });
+
   it("round-trips the store's own archival export, retraction window included", async () => {
     const source = await createInitializedStore(graph, createTestBackend());
     const alice = await source.nodes.Person.create(
@@ -387,8 +447,18 @@ function documentWithAssertion(
     exportedAt: CANONICAL_TIMESTAMP,
     source: { type: "external" },
     nodes: [
-      { kind: "Person", id: a.id, properties: { name: "A" } },
-      { kind: "Person", id: b.id, properties: { name: "B" } },
+      {
+        kind: "Person",
+        id: a.id,
+        properties: { name: "A" },
+        validFrom: assertion.validFrom,
+      },
+      {
+        kind: "Person",
+        id: b.id,
+        properties: { name: "B" },
+        validFrom: assertion.validFrom,
+      },
     ],
     edges: [],
     identity: {
@@ -502,11 +572,11 @@ describe("importGraph identity failure reporting", () => {
     const store = await createInitializedStore(graph, createTestBackend());
     const person = await store.nodes.Person.create(
       { name: "Alice" },
-      { id: "alice" },
+      { id: "alice", validFrom: CANONICAL_TIMESTAMP },
     );
     const company = await store.nodes.Company.create(
       { name: "Acme" },
-      { id: "acme" },
+      { id: "acme", validFrom: CANONICAL_TIMESTAMP },
     );
     const [a, b] = orderPair(
       { kind: "Person", id: person.id },
@@ -882,6 +952,7 @@ describe("importGraph identity failure reporting", () => {
         kind: ref.kind,
         id: ref.id,
         properties: { name: ref.id },
+        validFrom: CANONICAL_TIMESTAMP,
       })),
       edges: [],
       identity: {
@@ -943,7 +1014,7 @@ describe("importGraph identity failure reporting", () => {
       relation: "different",
       a: existing.a,
       b: existing.b,
-      validFrom: CANONICAL_TIMESTAMP,
+      validFrom: existing.validFrom,
     };
     const document: GraphData = {
       formatVersion: "2.0",
@@ -990,7 +1061,10 @@ describe("importGraph identity failure reporting", () => {
     const [forbiddenA, forbiddenB] = orderPair(aaron, rival);
 
     for (const ref of [aaron, alice, rival]) {
-      await store.nodes.Person.create({ name: ref.id }, { id: ref.id });
+      await store.nodes.Person.create(
+        { name: ref.id },
+        { id: ref.id, validFrom: CANONICAL_TIMESTAMP },
+      );
     }
 
     await expect(

@@ -605,7 +605,7 @@ describe("identity review fixes", () => {
           "same",
           { kind: "Person", id: person.id },
           { kind: "Author", id: author.id },
-          "2024-01-01T00:00:00.000Z",
+          new Date().toISOString(),
         ),
       ],
     );
