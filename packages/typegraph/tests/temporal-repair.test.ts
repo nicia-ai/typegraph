@@ -756,16 +756,16 @@ describe("repairInvertedValidityWindows", () => {
 
     it("reports the transaction seam rather than inferring from object identity", async () => {
       await seedGraph(backend);
-      let sameIdentityBackend: GraphBackend;
-      sameIdentityBackend = createBackendOverlay(backend, {
-        transaction: <T>(
-          fn: (tx: TransactionBackend) => Promise<T>,
-          options?: TransactionOptions,
-        ): Promise<T> =>
-          backend.transaction(
-            () => fn(sameIdentityBackend as TransactionBackend),
-            options,
-          ),
+      function sameIdentityTransaction<T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+      ): Promise<T> {
+        return fn(sameIdentityBackend);
+      }
+      const sameIdentityBackend: GraphBackend = createBackendOverlay(backend, {
+        // A custom backend may expose the same object as its transaction
+        // context. The helper must report that it invoked the transaction seam
+        // without trying to infer that fact from callback-target identity.
+        transaction: sameIdentityTransaction,
       });
 
       const report = await repairInvertedValidityWindows({

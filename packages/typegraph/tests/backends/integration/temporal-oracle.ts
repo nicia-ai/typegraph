@@ -82,6 +82,7 @@ import {
 import { mergeKey } from "../../../src/graph-merge/node-key";
 import { asBranchId, type BranchId } from "../../../src/graph-merge/types";
 import {
+  type EndClaim,
   resolveEndClaims,
   resolveValidWindows,
   WINDOW_NOT_APPLICABLE_DROP_REASON,
@@ -1551,7 +1552,13 @@ export function registerTemporalOracleIntegrationTests(
             fc.array(
               fc.record({
                 branchId: fc.constantFrom("a", "b", "c"),
-                validTo: fc.constantFrom(...ANCHORS),
+                change: fc.oneof(
+                  fc.record({
+                    kind: fc.constant("set"),
+                    validTo: fc.constantFrom(...ANCHORS),
+                  }),
+                  fc.constant({ kind: "clear" } as const),
+                ),
               }),
               { minLength: 1, maxLength: 6 },
             ),
@@ -1559,15 +1566,15 @@ export function registerTemporalOracleIntegrationTests(
             (rawClaims, rawPreferred) => {
               const claims = rawClaims.map((claim) => ({
                 branchId: asBranchId(claim.branchId),
-                validTo: claim.validTo,
-              }));
+                change: claim.change,
+              })) satisfies readonly EndClaim[];
               const preferred: BranchId | undefined =
                 rawPreferred === undefined ? undefined : (
                   asBranchId(rawPreferred)
                 );
-              expect(resolveEndClaims(claims.toReversed(), preferred)).toBe(
-                resolveEndClaims(claims, preferred),
-              );
+              expect(
+                resolveEndClaims(claims.toReversed(), preferred),
+              ).toStrictEqual(resolveEndClaims(claims, preferred));
             },
           ),
           { numRuns: 100 },
