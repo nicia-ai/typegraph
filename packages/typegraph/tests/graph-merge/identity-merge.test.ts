@@ -1032,6 +1032,173 @@ describe("plan-time derived identity contradictions", () => {
       "later-historical-same",
     ]);
   });
+
+  it("removes expired same links before checking later negative truth", () => {
+    const bridge: IdentityTransferAssertion = {
+      id: "expired-bridge",
+      relation: "same",
+      a: { kind: "Person", id: "a" },
+      b: { kind: "Person", id: "b" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const remainingLink: IdentityTransferAssertion = {
+      id: "remaining-link",
+      relation: "same",
+      a: bridge.b,
+      b: { kind: "Person", id: "c" },
+      validFrom: "2021-01-01T00:00:00.000Z",
+      validTo: "2024-01-01T00:00:00.000Z",
+    };
+    const laterDifferent: IdentityTransferAssertion = {
+      id: "later-different",
+      relation: "different",
+      a: bridge.a,
+      b: remainingLink.b,
+      validFrom: requireDefined(bridge.validTo),
+      validTo: "2023-01-01T00:00:00.000Z",
+    };
+    const check = (assertions: readonly IdentityTransferAssertion[]): void =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        noDisjoint,
+        [],
+      );
+
+    expect(() => check([bridge, remainingLink, laterDifferent])).not.toThrow();
+    expect(() =>
+      check([
+        bridge,
+        remainingLink,
+        {
+          ...laterDifferent,
+          validFrom: "2021-06-01T00:00:00.000Z",
+        },
+      ]),
+    ).toThrow(IdentityMergeConflictError);
+  });
+
+  it("detects contradictions regardless of which relation spans the window", () => {
+    const same: IdentityTransferAssertion = {
+      id: "spanning-same",
+      relation: "same",
+      a: { kind: "Person", id: "a" },
+      b: { kind: "Person", id: "b" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2024-01-01T00:00:00.000Z",
+    };
+    const different: IdentityTransferAssertion = {
+      ...same,
+      id: "nested-different",
+      relation: "different",
+      validFrom: "2021-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const check = (assertions: readonly IdentityTransferAssertion[]): void =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        noDisjoint,
+        [],
+      );
+
+    expect(() => check([same, different])).toThrow(IdentityMergeConflictError);
+    expect(() =>
+      check([
+        { ...same, validFrom: different.validFrom, validTo: different.validTo },
+        { ...different, validFrom: same.validFrom, validTo: same.validTo },
+      ]),
+    ).toThrow(IdentityMergeConflictError);
+  });
+
+  it("folds same-id references only while their assertion windows overlap", () => {
+    const companyReference: IdentityTransferAssertion = {
+      id: "company-reference",
+      relation: "same",
+      a: { kind: "Company", id: "shared" },
+      b: { kind: "Company", id: "company-peer" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const personReference: IdentityTransferAssertion = {
+      id: "person-reference",
+      relation: "same",
+      a: { kind: "Person", id: "shared" },
+      b: { kind: "Person", id: "person-peer" },
+      validFrom: requireDefined(companyReference.validTo),
+      validTo: "2024-01-01T00:00:00.000Z",
+    };
+    const check = (assertions: readonly IdentityTransferAssertion[]): void =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        {
+          sameIdAcrossKinds: "fold",
+          areDisjoint: (left, right) =>
+            new Set([left, right, "Company", "Person"]).size === 2,
+        },
+        [],
+      );
+
+    expect(() => check([companyReference, personReference])).not.toThrow();
+    expect(() =>
+      check([
+        companyReference,
+        {
+          ...personReference,
+          validFrom: "2021-01-01T00:00:00.000Z",
+        },
+      ]),
+    ).toThrow(IdentityMergeConflictError);
+  });
+
+  it("does not repeat ontology work for every temporal boundary", () => {
+    let disjointChecks = 0;
+    const assertions = Array.from(
+      { length: 600 },
+      (_unused, index): IdentityTransferAssertion => ({
+        id: `window-${index}`,
+        relation: "same",
+        a: { kind: "Company", id: `company-${index}` },
+        b: { kind: "Person", id: `person-${index}` },
+        validFrom: new Date(index * 2000).toISOString(),
+        validTo: new Date(index * 2000 + 1000).toISOString(),
+      }),
+    );
+
+    expect(() =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        {
+          sameIdAcrossKinds: "ignore",
+          areDisjoint: () => {
+            disjointChecks += 1;
+            return false;
+          },
+        },
+        [],
+      ),
+    ).not.toThrow();
+    expect(disjointChecks).toBeLessThan(10);
+  });
 });
 
 describe("remapIdentityAssertionEndpoints committed precedence", () => {

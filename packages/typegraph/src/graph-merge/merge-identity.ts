@@ -43,7 +43,6 @@ import {
   normalizeIdentityPair,
 } from "../identity/reference";
 import { identityValidityWindowsOverlap } from "../identity/validity-window";
-import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
 import type { CanonicalEntity } from "./canonicalize";
 import {
@@ -62,6 +61,7 @@ import {
   mergeKeyOf,
 } from "./node-key";
 import type { StagedIdentityAssertion, StagingSet } from "./staging";
+import { assertTemporalIdentityClosureConsistent } from "./temporal-identity-closure";
 import {
   compareCodePoints,
   type GraphBackend,
@@ -76,7 +76,6 @@ import {
   TypeGraphError,
 } from "./typegraph-internal";
 import type { DroppedItem } from "./types";
-import { UnionFind } from "./union-find";
 
 /**
  * The identity-relevant slice of a resolved merge plan: a STRUCTURAL subset of
@@ -716,42 +715,6 @@ export function assertNoContradictoryIdentityClosure(
   identityContext: PlanIdentityContext,
   nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
 ): void {
-  const boundaries = new Set<string>();
-  for (const assertion of [...plannedAssertions, ...baseAssertions]) {
-    boundaries.add(assertion.validFrom);
-    if (assertion.validTo !== undefined) boundaries.add(assertion.validTo);
-  }
-  const coordinates = boundaries.size === 0 ? [""] : [...boundaries].toSorted();
-  const visibleAt = (
-    assertion: IdentityTransferAssertion,
-    coordinate: string,
-  ): boolean =>
-    assertion.validFrom <= coordinate &&
-    (assertion.validTo === undefined || coordinate < assertion.validTo);
-  for (const coordinate of coordinates) {
-    assertNoContradictoryIdentityClosureAtCoordinate(
-      plannedAssertions.filter((assertion) => visibleAt(assertion, coordinate)),
-      retractions,
-      baseAssertions.filter((assertion) => visibleAt(assertion, coordinate)),
-      deletedNodes,
-      canonicalOf,
-      retypeMap,
-      identityContext,
-      nodeUniverse,
-    );
-  }
-}
-
-function assertNoContradictoryIdentityClosureAtCoordinate(
-  plannedAssertions: readonly IdentityTransferAssertion[],
-  retractions: readonly string[],
-  baseAssertions: readonly IdentityTransferAssertion[],
-  deletedNodes: ReadonlySet<MergeKey>,
-  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
-  retypeMap: ReadonlyMap<MergeKey, string>,
-  identityContext: PlanIdentityContext,
-  nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
-): void {
   const retracted = new Set(retractions);
   // Deleting a node ends its assertions, so a base assertion touching a
   // plan-deleted endpoint must not conduct in the simulated post-merge
@@ -767,7 +730,7 @@ function assertNoContradictoryIdentityClosureAtCoordinate(
   ): boolean =>
     !deletedNodes.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
     !deletedNodes.has(mergeKey(assertion.b.kind, assertion.b.id));
-  const mergedLedger = [
+  const mergedLedger: readonly IdentityTransferAssertion[] = [
     ...plannedAssertions,
     ...baseAssertions
       .filter(
@@ -780,115 +743,11 @@ function assertNoContradictoryIdentityClosureAtCoordinate(
         b: resolveIdentityEndpoint(assertion.b, canonicalOf, retypeMap),
       })),
   ];
-
-  const sameClasses = new UnionFind<MergeKey>((left, right) =>
-    compareMergeKeys(left, right),
+  assertTemporalIdentityClosureConsistent(
+    mergedLedger,
+    identityContext,
+    nodeUniverse,
   );
-  // Assertion-free nodes participate too: a new or retyped canonical node —
-  // or a live target peer sharing its id — can fold into a class without any
-  // ledger edge naming it, so the simulation seeds the full node universe as
-  // singletons before the explicit assertions union anything.
-  for (const node of nodeUniverse) {
-    sameClasses.add(mergeKey(node.kind, node.id));
-  }
-  for (const assertion of mergedLedger) {
-    if (assertion.relation === "same") {
-      sameClasses.union(mergeKeyOf(assertion.a), mergeKeyOf(assertion.b));
-    }
-  }
-  // The class a root identifies, as sorted public `(kind, id)` refs — the shape
-  // both contradiction reports carry in their details.
-  const membersOfClass = (
-    root: MergeKey,
-  ): readonly Readonly<{ kind: string; id: string }>[] =>
-    sameClasses
-      .members()
-      .filter((member) => sameClasses.find(member) === root)
-      .map((member) => ({ kind: kindOf(member), id: idOf(member) }))
-      .toSorted((left, right) =>
-        compareMergeKeys(mergeKeyOf(left), mergeKeyOf(right)),
-      );
-  // The first ontology-disjoint pair among `kinds`, or `undefined` when every
-  // pair may coexist. Each caller raises its own error for the pair it finds.
-  const firstDisjointPair = (
-    kinds: readonly string[],
-  ): readonly [string, string] | undefined => {
-    for (const [index, left] of kinds.entries()) {
-      for (const right of kinds.slice(index + 1)) {
-        if (identityContext.areDisjoint(left, right)) return [left, right];
-      }
-    }
-    return undefined;
-  };
-
-  const refsById = new Map<string, MergeKey[]>();
-  const addRef = (kind: string, id: string): void => {
-    const keys = refsById.get(id) ?? [];
-    keys.push(mergeKey(kind, id));
-    refsById.set(id, keys);
-  };
-  for (const node of nodeUniverse) addRef(node.kind, node.id);
-  for (const assertion of mergedLedger) {
-    addRef(assertion.a.kind, assertion.a.id);
-    addRef(assertion.b.kind, assertion.b.id);
-  }
-  // Sharing an id across DISJOINT kinds is a create-time constraint under
-  // BOTH profiles — under "ignore" the rows do not fold, but the id is still
-  // refused. Scan every same-id group regardless of profile.
-  for (const keys of refsById.values()) {
-    const disjointKinds = firstDisjointPair([
-      ...new Set(keys.map((key) => kindOf(key))),
-    ]);
-    if (disjointKinds === undefined) continue;
-    throw new IdentityMergeConflictError(
-      "The merged graph would give one id to two ontology-disjoint kinds.",
-      {
-        details: {
-          disjointKinds,
-          sharedId: idOf(requireDefined(keys[0])),
-        },
-      },
-    );
-  }
-  if (identityContext.sameIdAcrossKinds === "fold") {
-    for (const keys of refsById.values()) {
-      const [first, ...rest] = keys;
-      if (first === undefined) continue;
-      for (const other of rest) sameClasses.union(first, other);
-    }
-  }
-  for (const assertion of mergedLedger) {
-    if (assertion.relation !== "different") {
-      continue;
-    }
-    const root = sameClasses.find(mergeKeyOf(assertion.a));
-    if (root !== sameClasses.find(mergeKeyOf(assertion.b))) {
-      continue;
-    }
-    throw new IdentityMergeConflictError(
-      "The merged identity ledger would assert one pair of nodes is both the same and different.",
-      { details: { assertion, sameClass: membersOfClass(root) } },
-    );
-  }
-
-  // A class whose member kinds the ontology declares disjoint is the same
-  // contradiction in another coat: retyping (or a fold) pulled two mutually
-  // exclusive kinds into one identity class.
-  const kindsByRoot = new Map<MergeKey, Set<string>>();
-  for (const member of sameClasses.members()) {
-    const root = sameClasses.find(member);
-    const kinds = kindsByRoot.get(root) ?? new Set<string>();
-    kinds.add(kindOf(member));
-    kindsByRoot.set(root, kinds);
-  }
-  for (const [root, kinds] of kindsByRoot) {
-    const disjointKinds = firstDisjointPair([...kinds]);
-    if (disjointKinds === undefined) continue;
-    throw new IdentityMergeConflictError(
-      "The merged identity ledger would join two ontology-disjoint kinds into one class.",
-      { details: { disjointKinds, sameClass: membersOfClass(root) } },
-    );
-  }
 }
 
 /**
