@@ -13,7 +13,7 @@ import {
 } from "../store/types";
 
 /**
- * The loose *input* form every identity facade method accepts: a whole node or
+ * The accepted *input* form for every identity facade method: a whole node or
  * a `{ kind, id }` pair for any compile-time graph kind, plus a proof-bearing
  * node or reference produced through the runtime collection lane. Runtime
  * values stay nominal so accepting them does not make an arbitrary

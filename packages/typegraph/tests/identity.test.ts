@@ -409,6 +409,10 @@ describe("Operational Identity", () => {
       label: "author",
     });
     await evolved.identity.assertSame(person, tag);
+    expect(await evolved.identity.membersOf(person)).toEqual([
+      { kind: "Person", id: person.id },
+      { kind: "Tag", id: tag.id },
+    ]);
     const beforeRemoval = requireRecordedInstant(
       await evolved.recordedNow(),
       "expected a recorded instant before kind removal",

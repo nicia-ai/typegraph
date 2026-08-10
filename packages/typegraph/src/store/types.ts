@@ -40,6 +40,7 @@ export type ValidityEndMutation = BackendValidityEndMutation;
 import type {
   DynamicEdgeAccessor,
   DynamicNodeAccessor,
+  DynamicNodeKind,
   DynamicNodeType,
 } from "../query/builder";
 import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
@@ -2004,7 +2005,7 @@ declare const DYNAMIC_NODE_REFERENCE_BRAND: unique symbol;
 
 /** A nominal lightweight reference returned by runtime-aware identity reads. */
 export type DynamicNodeReference<K extends string = string> = Readonly<{
-  kind: K;
+  kind: DynamicNodeKind<K>;
   id: NodeId<DynamicNodeType<K>>;
   [DYNAMIC_NODE_REFERENCE_BRAND]: true;
 }>;

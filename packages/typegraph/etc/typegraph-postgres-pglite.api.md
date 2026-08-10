@@ -661,14 +661,19 @@ type DynamicNodeAccessor = Readonly<{
 type DynamicNodeCollection<K extends string = string> = WidenBrandedIds<NodeCollection<DynamicNodeType<K>, string>>;
 
 // @public
+type DynamicNodeKind<K extends string = string> = K & Readonly<{
+    [DYNAMIC_NODE_BRAND]: true;
+}>;
+
+// @public
 type DynamicNodeReference<K extends string = string> = Readonly<{
-    kind: K;
+    kind: DynamicNodeKind<K>;
     id: NodeId<DynamicNodeType<K>>;
     [DYNAMIC_NODE_REFERENCE_BRAND]: true;
 }>;
 
 // @public (undocumented)
-type DynamicNodeType<K extends string = string> = NodeType<K> & Readonly<{
+type DynamicNodeType<K extends string = string> = NodeType<DynamicNodeKind<K>> & Readonly<{
     [DYNAMIC_NODE_BRAND]: true;
 }>;
 

@@ -23,6 +23,7 @@ import {
   type DynamicEdgeCollection,
   type DynamicNode,
   type DynamicNodeCollection,
+  type DynamicNodeKind,
   type DynamicNodeReference,
   type Edge,
   type EdgeId,
@@ -232,6 +233,9 @@ declare const dynamicIdentityNode: Awaited<
 declare const dynamicIdentityReference: DynamicNodeReference<"RuntimeTag">;
 declare const recordedInstant: RecordedInstant;
 
+expectType<DynamicNodeCollection<"RuntimeTag">>(dynamicIdentityCollection);
+expectType<DynamicNodeKind<"RuntimeTag">>(dynamicIdentityNode.kind);
+expectAssignable<"RuntimeTag">(dynamicIdentityNode.kind);
 expectAssignable<DynamicNode>(dynamicIdentityNode);
 expectAssignable<DynamicNodeReference>(dynamicIdentityReference);
 expectAssignable<IdentityNodeRefInput<typeof identityGraph>>(
@@ -250,6 +254,18 @@ expectError(
   identityStore.identity.assertSame(identityPerson, {
     kind: "RuntimeTypo",
     id: dynamicIdentityNode.id,
+  }),
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    ...dynamicIdentityNode,
+    kind: "RuntimeTypo",
+  }),
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    ...dynamicIdentityReference,
+    kind: "RuntimeTypo",
   }),
 );
 expectError(identityStore.identity.membersOf({ id: "missing-kind" }));
@@ -312,6 +328,18 @@ expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
   identityStore.transaction((tx) =>
     tx.identity.representativeOf(dynamicIdentityNode),
   ),
+);
+expectType<DynamicNodeCollection<"RuntimeTag"> | undefined>(
+  identityStore.getNodeCollection("RuntimeTag"),
+);
+expectType<Promise<void>>(
+  identityStore.transaction(async (tx) => {
+    const collection = tx.getNodeCollection("RuntimeTag");
+    expectType<DynamicNodeCollection<"RuntimeTag"> | undefined>(collection);
+    if (collection === undefined) return;
+    const node = await collection.create({ label: "transactional" });
+    await tx.identity.assertSame(identityPerson, node);
+  }),
 );
 expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
   identityStore.transaction((tx) =>

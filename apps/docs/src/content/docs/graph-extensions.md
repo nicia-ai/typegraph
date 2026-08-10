@@ -375,9 +375,10 @@ the call site rather than crashing later on `papers!.create(...)`.
 etc. — but with `DynamicNode` element types since the specific Zod schema isn't
 visible to TypeScript at the call site.
 
-Nodes returned by a dynamic collection are nominally marked as `DynamicNode`.
-That proof lets runtime kinds participate directly in Operational Identity
-without weakening compile-time references to arbitrary string kinds:
+In TypeScript, nodes returned by a dynamic collection carry the nominal
+`DynamicNode<K>` type, preserving the requested kind literal. That proof lets
+runtime kinds participate directly in Operational Identity without weakening
+compile-time references to arbitrary string kinds:
 
 ```ts
 const paper = await evolved

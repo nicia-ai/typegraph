@@ -293,17 +293,19 @@ import type { DynamicNodeCollection } from "@nicia-ai/typegraph";
 // Derived from NodeCollection<DynamicNodeType, string> with ID parameters widened to string
 ```
 
-### `DynamicNode` and `DynamicNodeReference`
+### `DynamicNodeKind`, `DynamicNode`, and `DynamicNodeReference`
 
-`DynamicNode` is the nominal node value returned by a
-`DynamicNodeCollection`. `DynamicNodeReference` is the nominal lightweight
-`{ kind, id }` form returned by runtime-aware identity reads. The marker lets
-those results flow back into identity operations without making arbitrary
-string kinds valid compile-time inputs.
+`DynamicNodeKind<K>` preserves and nominally marks the requested collection
+key. `DynamicNode` is the node value returned by a `DynamicNodeCollection`, and
+`DynamicNodeReference` is the nominal lightweight `{ kind, id }` form returned
+by runtime-aware identity reads. The markers let those results flow back into
+identity operations without making arbitrary string kinds valid compile-time
+inputs.
 
 ```typescript
 import type {
   DynamicNode,
+  DynamicNodeKind,
   DynamicNodeReference,
 } from "@nicia-ai/typegraph";
 ```
