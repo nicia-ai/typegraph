@@ -91,7 +91,11 @@ import {
   nowIso,
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
-import { auditBackendResource } from "../transaction-resource";
+import {
+  auditBackendResource,
+  resolveDeclaredBackendResource,
+  type SerializedResourceDeclaration,
+} from "../transaction-resource";
 import {
   type AdapterBackend,
   type BackendCapabilities,
@@ -296,6 +300,19 @@ export type PostgresBackendOptions = Readonly<{
    * `prepareStatements` is `false`.
    */
   preparedStatementCacheMax?: number;
+  /**
+   * Declare the connection this backend serializes every statement onto, when
+   * TypeGraph's driver predicates cannot see it (Bun `SQL` at `{ max: 1 }`,
+   * `pg-proxy`, a postgres-js client capped through a non-numeric string the
+   * driver does not coerce) — or declare that it serializes on nothing, when
+   * detection is wrong for your topology.
+   *
+   * Defaults to `{ mode: "detect" }`. See
+   * {@link SerializedResourceDeclaration} for what each mode means and for the
+   * one refusal it cannot lift (`same-sqlite-backend`, which is SQLite-only and
+   * therefore never reached from here).
+   */
+  serializedResource?: SerializedResourceDeclaration;
 }>;
 
 const NODE_INSERT_PARAM_COUNT = 9;
@@ -593,7 +610,12 @@ export function createPostgresBackend(
 ): AdapterBackend<AnyPgTransaction> {
   // Resolved before the backend exists so marking it below is a lookup, never
   // work that could fail after a wrapper already observed an unmarked backend.
-  const serializedClient = getSerializedPostgresClient(db);
+  // A `serializedResource` declaration that contradicts detection is refused
+  // here too, before any object a caller could hold has been built.
+  const resourceAudit = resolveDeclaredBackendResource(
+    getSerializedPostgresClient(db),
+    options.serializedResource,
+  );
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
   // pgvector is compiled into a standalone Postgres server, so it is wired
@@ -1673,12 +1695,7 @@ export function createPostgresBackend(
   // transaction-resource.ts. Unconditional: an abstention recorded as
   // "independent" is a verdict the guards can tell apart from a backend nobody
   // looked at.
-  auditBackendResource(
-    backend,
-    serializedClient === undefined ?
-      { kind: "independent" }
-    : { kind: "serialized", resource: serializedClient },
-  );
+  auditBackendResource(backend, resourceAudit);
   return backend;
 }
 

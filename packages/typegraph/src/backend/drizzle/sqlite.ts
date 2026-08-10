@@ -138,7 +138,11 @@ import {
   nowIso,
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
-import { auditBackendResource } from "../transaction-resource";
+import {
+  auditBackendResource,
+  resolveDeclaredBackendResource,
+  type SerializedResourceDeclaration,
+} from "../transaction-resource";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -236,6 +240,18 @@ export type SqliteBackendOptions = Readonly<{
    * may lower, but cannot raise, a hosted platform's hard parameter ceiling.
    */
   capabilities?: Partial<BackendCapabilities>;
+  /**
+   * Declare the connection this backend serializes every statement onto, when
+   * TypeGraph's driver predicates cannot see it (`expo-sqlite`, `op-sqlite`,
+   * `sqlite-proxy`, a bespoke adapter) — or declare that it serializes on
+   * nothing, when detection is wrong for your topology.
+   *
+   * Defaults to `{ mode: "detect" }`. See
+   * {@link SerializedResourceDeclaration} for what each mode means and for the
+   * one refusal it cannot lift (`same-sqlite-backend`: one backend object
+   * exporting into itself).
+   */
+  serializedResource?: SerializedResourceDeclaration;
 }>;
 
 const NODE_INSERT_PARAM_COUNT = 9;
@@ -1260,7 +1276,12 @@ export function createSqliteBackend(
 ): AdapterBackend<AnySqliteDatabase> {
   // Resolved before the backend exists so marking below is a lookup, never
   // work that could fail after wrappers already observed an unmarked backend.
-  const serializedConnection = getSerializedSqliteConnection(db);
+  // A `serializedResource` declaration that contradicts detection is refused
+  // here too, before any object a caller could hold has been built.
+  const resourceAudit = resolveDeclaredBackendResource(
+    getSerializedSqliteConnection(db),
+    options.serializedResource,
+  );
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? fts5Strategy;
   const profileHints = options.executionProfile ?? {};
@@ -2294,12 +2315,7 @@ export function createSqliteBackend(
   // transaction-resource.ts. Unconditional: an abstention recorded as
   // "independent" is a verdict the guards can tell apart from a backend nobody
   // looked at.
-  auditBackendResource(
-    backend,
-    serializedConnection === undefined ?
-      { kind: "independent" }
-    : { kind: "serialized", resource: serializedConnection },
-  );
+  auditBackendResource(backend, resourceAudit);
 
   return backend;
 }

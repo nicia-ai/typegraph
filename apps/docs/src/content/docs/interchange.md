@@ -721,6 +721,20 @@ transaction opens rather than when the iterable is constructed. The codes (`INTE
 `details.heldBy` pairing they carry are documented in
 [Interchange serialized-connection guard codes](/errors#interchange-serialized-connection-guard-codes).
 
+Which connections count as serialized is read off the driver, so a driver
+TypeGraph cannot identify is left unmarked and a stream pair on it can still
+wedge. `createSqliteBackend` and `createPostgresBackend` take a
+`serializedResource` declaration for both directions of that gap —
+`{ mode: "shared", resource: client }` marks a connection TypeGraph cannot see,
+`{ mode: "independent" }` escapes a detection that is wrong for your topology.
+The escape hatch lifts the shared-resource refusal between two distinct backends
+only: one SQLite backend exporting into **itself** stays refused with
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`, because that is one handle holding
+the one snapshot transaction its own import needs. That surviving refusal is
+SQLite-only, so on PostgreSQL a backend declared independent may export into
+itself. See
+[Serialized connections](/backend-setup#serialized-connections).
+
 ## Best Practices
 
 ### Validate Before Import

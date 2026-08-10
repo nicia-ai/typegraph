@@ -33,3 +33,22 @@ bug, and would refuse legitimate concurrent work the day the driver fixes it.
 A `pg` pool given `max: "5"` genuinely opens five connections and is likewise
 unmarked. Existing correctly-detected backends see no change: same marks, same
 refusal codes, same messages.
+
+Shipping in the same release, so nobody surprised by a new refusal is stuck:
+`createSqliteBackend` and `createPostgresBackend` gain an optional
+`serializedResource` declaration. `{ mode: "shared", resource: client }` marks a
+connection TypeGraph cannot detect — the `?max=5` shape above, Bun `SQL`,
+`expo-sqlite`, `op-sqlite`, `sqlite-proxy`, `pg-proxy` — and two backends naming
+the same object are one serialized resource. `{ mode: "independent" }` escapes a
+detection that is wrong for your topology. A `"shared"` declaration naming a
+different object than the one detected is refused with a `ConfigurationError`
+carrying `details.reason: "serialized-resource-conflict"` and a constructor-name
+description of each side (`details.declaredKind` / `details.detectedKind`, never
+the handles themselves — `details` is what `toLogString()` serializes, and a
+driver handle there would log the credentials that driver stores) rather than
+silently preferred. `"independent"` lifts the shared-resource refusal between
+two distinct backends — one SQLite backend exporting into itself still reports
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`, which is a fact about one handle
+rather than a claim about connection topology. That surviving refusal is
+SQLite-only, so on PostgreSQL a backend declared independent may export into
+itself.

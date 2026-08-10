@@ -36,10 +36,12 @@
  *    | export snapshot | export snapshot  | nested BEGIN                       |
  *
  *    So the lease is EXCLUSIVE, not refcounted: at most one stream of any kind
- *    holds a given serialized resource, and the second one is refused with the
- *    holder's kind named (see {@link acquireSerializedStreamLease}). Refcounting
- *    admitted the two same-kind rows above, which then failed on the driver
- *    after chunks had already committed.
+ *    holds a given serialized resource, and at most one holds a transactional
+ *    SQLite backend object even when its resource is declared independent. The
+ *    second stream is refused with the holder's kind named (see
+ *    {@link acquireSerializedStreamLease}). Refcounting admitted the two
+ *    same-kind rows above, which then failed on the driver after chunks had
+ *    already committed.
  *
  *    `"import-stream"` is the kind of EVERY long-lived import, not only the
  *    chunk-streaming one: an in-memory `importGraph` and a `trustedImport`
@@ -163,7 +165,12 @@
  * KNOWN GAPS — serialized in fact, unmarked, so they keep only the
  * identity-based pre-flight in `importGraphStream` (which a `history: true`
  * store's overlay already defeats). Each is a coverage extension needing
- * positive evidence of the client shape, never a silent no-op:
+ * positive evidence of the client shape, never a silent no-op. Every one of
+ * them has the SAME sanctioned workaround until its shape is recognized: the
+ * caller declares the connection with
+ * `{ serializedResource: { mode: "shared", resource: client } }` (see
+ * {@link SerializedResourceDeclaration}), which is a claim the caller can make
+ * and this package cannot.
  *
  * - React Native / Expo SQLite drivers — `expo-sqlite` and `op-sqlite`. One
  *   connection each, and both are genuinely serialized, but neither exposes a
@@ -194,6 +201,7 @@
  *   adapter): whether the far side serializes is unknowable from here, so they
  *   fall under the residual gap above.
  */
+import { ConfigurationError } from "../errors";
 import { type GraphBackend } from "./types";
 
 /**
@@ -205,7 +213,47 @@ import { type GraphBackend } from "./types";
  */
 export type BackendResourceAudit =
   | Readonly<{ kind: "serialized"; resource: object }>
-  | Readonly<{ kind: "independent" }>;
+  | Readonly<{
+      kind: "independent";
+      /** Stable key for the SQLite identity arm of an explicit declaration. */
+      identityLeaseResource?: object;
+    }>;
+
+/**
+ * Declare the connection this backend serializes on, when TypeGraph cannot
+ * detect it (Bun `SQL`, `expo-sqlite`, `op-sqlite`, `sqlite-proxy`, `pg-proxy`,
+ * a postgres-js pool capped through a string the driver does not coerce — the
+ * KNOWN GAPS in this module's inventory). Two wrappers that pass the same
+ * object are treated as one serialized resource, exactly as two wrappers over a
+ * detected client are.
+ *
+ * - `"detect"` (the default, and the same behavior as omitting the option):
+ *   whatever the factory's driver predicates find, and nothing else.
+ * - `"shared"`: the given object IS the serialized resource. Refused with a
+ *   {@link ConfigurationError} when the factory detected a DIFFERENT resource —
+ *   silently overriding would let two wrappers over one handle be given two
+ *   different sentinels and quietly de-serialize a pair that really does share.
+ * - `"independent"`: statements can run on independent connections. The
+ *   documented escape hatch for a mis-detection, so a user surprised by a
+ *   refusal is never stuck.
+ *
+ * SCOPE — read this before using `"independent"`: this option controls the
+ * SHARED-RESOURCE arm of {@link snapshotExportContention} only. It cannot lift
+ * the object-identity arm, under which ONE SQLite backend object exporting into
+ * ITSELF is refused with `same-sqlite-backend`. That arm is a driver fact (one
+ * handle, one open snapshot transaction), not a claim about connection
+ * topology, so no declaration can make it false.
+ *
+ * That surviving arm is SQLITE-ONLY, deliberately: it is gated on
+ * `dialect === "sqlite"`, so on Postgres a backend declared `"independent"`
+ * exporting into ITSELF is not refused either — a Postgres client that hands
+ * out independent connections is exactly what the declaration claims, and the
+ * snapshot and the writes it contends with land on different ones.
+ */
+export type SerializedResourceDeclaration =
+  | Readonly<{ mode: "detect" }>
+  | Readonly<{ mode: "shared"; resource: object }>
+  | Readonly<{ mode: "independent" }>;
 
 const BACKEND_RESOURCE_AUDITS = new WeakMap<object, BackendResourceAudit>();
 
@@ -247,12 +295,145 @@ function auditsAgree(
   if (left.kind === "serialized") {
     return right.kind === "serialized" && left.resource === right.resource;
   }
-  return right.kind === "independent";
+  return (
+    right.kind === "independent" &&
+    left.identityLeaseResource === right.identityLeaseResource
+  );
 }
 
 /** Names a verdict for the write-once refusal below. */
 function formatAudit(audit: BackendResourceAudit): string {
   return audit.kind === "serialized" ? "serialized" : "independent";
+}
+
+/**
+ * The two objects a refused `"shared"` declaration could not reconcile: the one
+ * the caller named and the one this package detected.
+ */
+export type SerializedResourceConflict = Readonly<{
+  declared: object;
+  detected: object;
+}>;
+
+/**
+ * The handles behind each refusal, held OFF the error object on purpose.
+ *
+ * `TypeGraphError.toLogString()` `JSON.stringify`s `details`, and the
+ * documented handler pattern is `console.error(error.toLogString())` — so a
+ * driver handle in `details` writes whatever that driver stores into the
+ * caller's logs, and a `pg.Pool` stores its `connectionString`, password
+ * included. The refusal therefore carries only a DESCRIPTION of each side
+ * (`declaredKind` / `detectedKind`), while the identities live here, reachable
+ * by asking for them and by nothing that walks an error's own properties.
+ */
+const SERIALIZED_RESOURCE_CONFLICTS = new WeakMap<
+  Error,
+  SerializedResourceConflict
+>();
+
+/**
+ * The two objects a serialized-resource refusal could not reconcile, or
+ * `undefined` for any other error.
+ *
+ * @internal
+ */
+export function serializedResourceConflict(
+  error: unknown,
+): SerializedResourceConflict | undefined {
+  return error instanceof ConfigurationError ?
+      SERIALIZED_RESOURCE_CONFLICTS.get(error)
+    : undefined;
+}
+
+/**
+ * How a refusal names one side of a conflict without publishing the handle:
+ * the constructor name (`"Database"`, `"BoundPool"`, `"Object"`), which says
+ * what KIND of thing each side is and carries no connection string.
+ */
+function describeSerializedResource(resource: object): string {
+  const constructorName = (
+    resource as Readonly<{ constructor?: Readonly<{ name?: unknown }> }>
+  ).constructor?.name;
+  return typeof constructorName === "string" && constructorName !== "" ?
+      constructorName
+    : "Object";
+}
+
+/**
+ * The verdict a backend factory records, from what its driver predicates
+ * detected and what the caller declared.
+ *
+ * The single owner of "what a {@link SerializedResourceDeclaration} means":
+ * both drizzle factories call it, so the two cannot drift about whether a
+ * declaration wins, loses, or is refused.
+ *
+ * Applied or refused, never ignored:
+ *
+ * - `"shared"` naming the resource detection already found, or naming one on a
+ *   backend detection could not classify → recorded as that resource.
+ * - `"shared"` naming a DIFFERENT resource than detection found → refused, so
+ *   two wrappers over one handle cannot be handed two different sentinels and
+ *   silently de-serialized.
+ * - `"independent"` → recorded, whatever detection found. This is the escape
+ *   hatch, not a conflict: detection is a duck-type over driver internals and
+ *   the caller knows their topology.
+ * - `"detect"` or absent → exactly what detection found.
+ *
+ * Called INSIDE the factory body before the backend object exists, so a
+ * refusal happens before any object is published (CTA-3) and a caller can never
+ * hold a backend whose declaration was rejected.
+ *
+ * @throws {ConfigurationError} `details.reason: "serialized-resource-conflict"`
+ * when a `"shared"` declaration names a resource detection disagrees with. Its
+ * `details` describe the two sides (`declaredKind` / `detectedKind`) rather
+ * than carrying them, because `details` is logged verbatim; the handles
+ * themselves come from {@link serializedResourceConflict}.
+ * @internal
+ */
+export function resolveDeclaredBackendResource(
+  detected: object | undefined,
+  declaration: SerializedResourceDeclaration | undefined,
+): BackendResourceAudit {
+  switch (declaration?.mode) {
+    case "shared": {
+      if (detected !== undefined && detected !== declaration.resource) {
+        const refusal = new ConfigurationError(
+          `serializedResource declared { mode: "shared" } naming an object ` +
+            `that is not the connection this backend was detected to run on. ` +
+            `Two wrappers over one connection must name the SAME object, or ` +
+            `the guards that refuse a concurrent export/import pair on it stop ` +
+            `seeing them as one resource.`,
+          {
+            reason: "serialized-resource-conflict",
+            declaredKind: describeSerializedResource(declaration.resource),
+            detectedKind: describeSerializedResource(detected),
+          },
+          {
+            suggestion:
+              `Declare the client TypeGraph already detected (or drop the ` +
+              `declaration and let detection stand). Use ` +
+              `{ mode: "independent" } if the detection is wrong and this ` +
+              `backend really does run on its own connection.`,
+          },
+        );
+        SERIALIZED_RESOURCE_CONFLICTS.set(refusal, {
+          declared: declaration.resource,
+          detected,
+        });
+        throw refusal;
+      }
+      return { kind: "serialized", resource: declaration.resource };
+    }
+    case "independent": {
+      return { kind: "independent", identityLeaseResource: {} };
+    }
+    case "detect":
+    case undefined: {
+      return detected === undefined ?
+          { kind: "independent" }
+        : { kind: "serialized", resource: detected };
+    }
+  }
 }
 
 /**
@@ -420,10 +601,11 @@ export function snapshotExportContention(
  * when this one claimed it" true for the whole stream, in whichever order two
  * streams start — the second one always finds the first's registration.
  *
- * Serialized backends only: without a known serialized resource there is no
- * shared connection for anyone to be refused against, so a backend audited
- * `independent` — and one nobody audited — always acquires and registers
- * nothing (see the residual gap in the module doc).
+ * A known serialized resource is the normal lease key. A transactional SQLite
+ * backend audited `independent` instead uses its own identity: the declaration
+ * can separate distinct wrappers, but cannot make two streams on ONE backend
+ * object use different handles. An unaudited backend, and an independent
+ * Postgres backend, registers nothing (see the residual gap in the module doc).
  *
  * The acquired arm reports the resource it registered under, so a caller reads
  * the decision instead of re-deriving it from the backend; `undefined` is the
@@ -431,12 +613,26 @@ export function snapshotExportContention(
  * registration, so an already-released stream can never evict the next
  * stream's lease.
  */
+function streamLeaseResource(backend: GraphBackend): object | undefined {
+  const audit = resolveBackendAudit(backend);
+  if (audit?.kind === "serialized") return audit.resource;
+  if (
+    audit?.kind === "independent" &&
+    audit.identityLeaseResource !== undefined &&
+    backend.dialect === "sqlite" &&
+    backend.capabilities.transactions
+  ) {
+    return audit.identityLeaseResource;
+  }
+  return undefined;
+}
+
 export function acquireSerializedStreamLease(
   backend: GraphBackend,
   kind: SerializedStreamKind,
 ): SerializedStreamLease {
-  const audit = resolveBackendAudit(backend);
-  if (audit?.kind !== "serialized") {
+  const resource = streamLeaseResource(backend);
+  if (resource === undefined) {
     return {
       acquired: true,
       resource: undefined,
@@ -446,7 +642,6 @@ export function acquireSerializedStreamLease(
       },
     };
   }
-  const resource = audit.resource;
   const holder = ACTIVE_SERIALIZED_STREAMS.get(resource);
   if (holder !== undefined) return { acquired: false, heldBy: holder };
   ACTIVE_SERIALIZED_STREAMS.set(resource, kind);

@@ -5504,6 +5504,16 @@ type SerializedOntologyRelation = Readonly<{
 }>;
 
 // @public
+export type SerializedResourceDeclaration = Readonly<{
+    mode: "detect";
+}> | Readonly<{
+    mode: "shared";
+    resource: object;
+}> | Readonly<{
+    mode: "independent";
+}>;
+
+// @public
 type SerializedSchema = Readonly<{
     graphId: string;
     version: number;
@@ -5575,6 +5585,7 @@ export type SqliteBackendOptions = Readonly<{
     fulltext?: FulltextStrategy;
     vector?: VectorStrategy;
     capabilities?: Partial<BackendCapabilities>;
+    serializedResource?: SerializedResourceDeclaration;
 }>;
 
 // @public (undocumented)

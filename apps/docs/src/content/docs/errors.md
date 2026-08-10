@@ -819,6 +819,44 @@ independent. See
 [Scaling branches and interchange](/graph-merge#scaling-branches-and-interchange)
 for which drivers are recognized as serialized.
 
+##### Declaring a connection the driver hides
+
+Recognition is a duck-type over the client object, so a serialized driver
+TypeGraph cannot identify (`expo-sqlite`, `op-sqlite`, `sqlite-proxy`,
+`pg-proxy`, Bun `SQL`, a postgres-js client capped through a string it does not
+coerce) is left unmarked and its stream pairs are not refused.
+`createSqliteBackend` and `createPostgresBackend` accept a `serializedResource`
+declaration for that gap — `{ mode: "shared", resource: client }` — and for the
+reverse case, `{ mode: "independent" }`, when the detection is wrong for your
+topology. See [Serialized connections](/backend-setup#serialized-connections).
+
+The declaration is applied or refused, never quietly ignored:
+
+| Declaration | Outcome |
+| --- | --- |
+| `{ mode: "shared", resource }` on a connection TypeGraph did not detect, or naming the client it did detect | The named object is the serialized resource; two backends naming the same object are one connection |
+| `{ mode: "shared", resource }` naming a **different** object than the one detected | `ConfigurationError` (`code: "CONFIGURATION_ERROR"`) from the factory, with `details.reason: "serialized-resource-conflict"` and `details.declaredKind` / `details.detectedKind` naming what each side was |
+| `{ mode: "independent" }` | Honored, whatever was detected — the documented escape hatch |
+
+The conflict is refused rather than resolved because two wrappers over one
+connection given two different sentinels would stop being seen as a pair, which
+is precisely the refusal this guard exists to make.
+
+The two `*Kind` details are constructor names (`"Database"`, `"BoundPool"`), not
+the handles themselves: `details` is what `toLogString()` serializes, and a
+driver handle there would print whatever that driver stores — a `pg.Pool` keeps
+its `connectionString`, password included — into your logs.
+
+`{ mode: "independent" }` lifts the shared-resource arm between two distinct
+backend objects. It does **not** lift
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`: one SQLite backend exporting into
+itself holds the one snapshot transaction its own import writes through, which
+is a fact about a single handle rather than a claim about connection topology.
+Pass a second backend for that case. That surviving refusal is SQLite-only, so
+on PostgreSQL a backend declared independent exporting into itself is not
+refused either — a client that hands out independent connections is exactly
+what the declaration claims.
+
 #### `ExportStreamCancelledError`
 
 An export stream whose `signal` fires settles with `ExportStreamCancelledError`
