@@ -101,6 +101,7 @@ import {
 } from "./errors";
 import type { CandidateDiagnostic, CandidateDiagnostics } from "./evidence";
 import { compareMatchEvidence } from "./evidence";
+import { unwrapMergeBranches } from "./ingestion-branch";
 import {
   assertIdentityEndpointsNotDeleted,
   assertIdentityPeersStable,
@@ -214,6 +215,7 @@ import type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  MergeBranch,
   MergedCounts,
   MergeIncrementalArgs as MergeIncrementalArguments,
   MergeOptions,
@@ -1891,24 +1893,75 @@ type MechanicalEdgeWrite = Readonly<{
   item: EdgeUpsert;
 }>;
 
-async function applyNodeRows(
+async function applyNodeRows<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
   nodesApi: TxNodes,
   deletions: readonly MergePlanEntityRef[],
   upserts: readonly MechanicalNodeWrite[],
 ): Promise<number> {
-  for (const deletion of deletions) {
-    await nodeCollection(nodesApi, deletion.kind).delete(deletion.id);
-  }
-  const committed = new Set<MergeKey>();
+  const afterImages = new Map<MergeKey, Readonly<Record<string, unknown>>>();
+  const upsertsByKind = new Map<string, MechanicalNodeWrite[]>();
   for (const upsert of upserts) {
-    await nodeCollection(nodesApi, upsert.kind).upsertByIdFromRecord(
-      upsert.id,
-      upsert.props,
-      nodeWriteWindowOptions(upsert),
-    );
-    committed.add(mergeKey(upsert.kind, upsert.id));
+    const items = upsertsByKind.get(upsert.kind);
+    if (items === undefined) upsertsByKind.set(upsert.kind, [upsert]);
+    else items.push(upsert);
   }
-  return committed.size;
+  for (const [kind, items] of upsertsByKind) {
+    const currentRows = await nodeCollection(nodesApi, kind).getByIds(
+      items.map((item) => item.id),
+      INCLUDE_TOMBSTONES,
+    );
+    const currentById = new Map<string, Readonly<Record<string, unknown>>>();
+    for (const node of currentRows) {
+      if (node !== undefined) currentById.set(node.id, nodeProps(node));
+    }
+    for (const item of items) {
+      const props = createDataKeyedBag<unknown>();
+      const unset = new Set(
+        Object.entries(item.props)
+          .filter(([, value]) => value === undefined)
+          .map(([key]) => key),
+      );
+      for (const [key, value] of Object.entries(
+        currentById.get(item.id) ?? {},
+      )) {
+        if (!unset.has(key)) props[key] = value;
+      }
+      for (const [key, value] of Object.entries(item.props)) {
+        if (value !== undefined) props[key] = value;
+      }
+      afterImages.set(mergeKey(kind, item.id), props);
+    }
+  }
+  return storeRuntime(target).applyResolvedNodeUniqueness(
+    txBackend,
+    {
+      upserts: upserts.map((upsert) => ({
+        kind: upsert.kind,
+        id: upsert.id,
+        props: requireDefined(
+          afterImages.get(mergeKey(upsert.kind, upsert.id)),
+        ),
+      })),
+      releases: deletions,
+    },
+    async () => {
+      for (const deletion of deletions) {
+        await nodeCollection(nodesApi, deletion.kind).delete(deletion.id);
+      }
+      const committed = new Set<MergeKey>();
+      for (const upsert of upserts) {
+        await nodeCollection(nodesApi, upsert.kind).upsertByIdFromRecord(
+          upsert.id,
+          upsert.props,
+          nodeWriteWindowOptions(upsert),
+        );
+        committed.add(mergeKey(upsert.kind, upsert.id));
+      }
+      return committed.size;
+    },
+  );
 }
 
 async function applyEdgeRows(
@@ -1998,7 +2051,13 @@ async function applyInternalMergePlan<G extends GraphDef>(
   );
   let committedNodes: number;
   try {
-    committedNodes = await applyNodeRows(nodesApi, nodeDeletions, nodeUpserts);
+    committedNodes = await applyNodeRows(
+      target,
+      txBackend,
+      nodesApi,
+      nodeDeletions,
+      nodeUpserts,
+    );
   } catch (error) {
     throw error instanceof IdentityEndpointValidityError ?
         translateIdentityCommitError(error)
@@ -3075,9 +3134,10 @@ function incrementalSchemaError(): MergeError {
 /** Builds a durable, reviewable snapshot merge plan without mutating the target. */
 export async function planMerge<G extends GraphDef>(
   store: Store<G>,
-  branches: readonly GraphBranch<G>[],
+  branchInputs: readonly MergeBranch<G>[],
   optionsInput: MergeOptions<G> = {},
 ): Promise<Result<MergePlanArtifact, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
   const normalized = tryNormalize(optionsInput);
   if (isErr(normalized)) return err(normalized.error);
   const options = normalized.data;
@@ -3126,7 +3186,8 @@ export async function planMerge<G extends GraphDef>(
 export async function planMergeIncremental<G extends GraphDef>(
   args: MergeIncrementalArguments<G>,
 ): Promise<Result<MergePlanArtifact, MergeError>> {
-  const { forkPoint, target, branches } = args;
+  const { forkPoint, target } = args;
+  const branches = unwrapMergeBranches(args.branches);
   const normalized = tryNormalize(args.options ?? {}, ["target"]);
   if (isErr(normalized)) return err(normalized.error);
   const options = normalized.data;
@@ -3644,6 +3705,8 @@ async function applyWireMergeWrites<G extends GraphDef>(
   artifact: MergePlanArtifactV1,
 ): Promise<MergedCounts> {
   const committedNodes = await applyNodeRows(
+    target,
+    txBackend,
     nodesApi,
     artifact.writes.nodeDeletes,
     artifact.writes.nodeUpserts.map((upsert) => ({
@@ -3884,9 +3947,10 @@ export async function applyMergePlan<G extends GraphDef>(
  */
 export async function merge<G extends GraphDef>(
   store: Store<G>,
-  branches: readonly GraphBranch<G>[],
+  branchInputs: readonly MergeBranch<G>[],
   optionsInput: MergeOptions<G> = {},
 ): Promise<Result<MergeReport<G>, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
   const normalized = tryNormalize(optionsInput);
   if (isErr(normalized)) {
     return err(normalized.error);
@@ -3931,9 +3995,10 @@ export async function merge<G extends GraphDef>(
  */
 export async function mergeAgainstBase<G extends GraphDef>(
   store: Store<G>,
-  branches: readonly GraphBranch<G>[],
+  branchInputs: readonly MergeBranch<G>[],
   optionsInput: MergeOptions<G> = {},
 ): Promise<Result<MergeReport<G>, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
   const normalized = tryNormalize(optionsInput);
   if (isErr(normalized)) {
     return err(normalized.error);
@@ -4860,7 +4925,8 @@ async function commitIncrementalPlan<G extends GraphDef>(
 export async function mergeIncremental<G extends GraphDef>(
   args: MergeIncrementalArguments<G>,
 ): Promise<Result<MergeReport<G>, MergeError>> {
-  const { forkPoint, target, branches } = args;
+  const { forkPoint, target } = args;
+  const branches = unwrapMergeBranches(args.branches);
 
   const normalized = tryNormalize(args.options ?? {}, ["target"]);
   if (isErr(normalized)) {

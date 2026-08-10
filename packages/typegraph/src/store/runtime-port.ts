@@ -86,6 +86,23 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   rebuildIdentityClosure: () => Promise<void>;
   validateIdentity: () => Promise<void>;
   /**
+   * Validates one final resolved node write set, then clears the affected
+   * uniqueness sidecars so its upserts may claim their approved keys in any
+   * order. The caller must supply a transaction-bound backend.
+   */
+  applyResolvedNodeUniqueness: <Output>(
+    target: TransactionBackend,
+    writes: Readonly<{
+      upserts: readonly Readonly<{
+        kind: string;
+        id: string;
+        props: Readonly<Record<string, unknown>>;
+      }>[];
+      releases: readonly Readonly<{ kind: string; id: string }>[];
+    }>,
+    apply: () => Promise<Output>,
+  ) => Promise<Output>;
+  /**
    * @internal Reads the graph's identity assertions in transfer shape, honoring
    * this store's SQL binding. Used by interchange export, base-version
    * fingerprinting, and merge staging/diff.

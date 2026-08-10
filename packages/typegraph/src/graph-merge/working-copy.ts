@@ -123,12 +123,38 @@ export type MakeBackend = () => Promise<GraphBackend>;
 export function cloneWorkingCopyStrategy<G extends GraphDef>(
   makeBackend: MakeBackend,
 ): WorkingCopyStrategy<G> {
+  return cloneWorkingCopyWithGraphStrategy(
+    makeBackend,
+    (baseStore) => baseStore.graph,
+  );
+}
+
+/**
+ * Working-copy strategy used by {@link ingestionBranch}. The clone is backed by
+ * a mechanically-derived graph that omits node uniqueness declarations while
+ * preserving every other graph contract, including lookup indexes.
+ *
+ * This strategy is deliberately not part of the public barrel. The opaque
+ * ingestion handle is the only supported owner of a relaxed working copy.
+ */
+export function cloneIngestionWorkingCopyStrategy<G extends GraphDef>(
+  makeBackend: MakeBackend,
+): WorkingCopyStrategy<G> {
+  return cloneWorkingCopyWithGraphStrategy(makeBackend, (baseStore) =>
+    graphWithoutNodeUniqueness(baseStore.graph),
+  );
+}
+
+function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
+  makeBackend: MakeBackend,
+  graphForClone: (baseStore: Store<G>) => G,
+): WorkingCopyStrategy<G> {
   return {
     create: async (baseStore: Store<G>): Promise<Store<G>> => {
       const backend = await makeBackend();
       try {
         const [freshStore] = await createStoreWithSchema(
-          baseStore.graph,
+          graphForClone(baseStore),
           backend,
           {
             // Keep descendants branchable with the same O(1) anchor contract,
@@ -189,4 +215,46 @@ export function cloneWorkingCopyStrategy<G extends GraphDef>(
       }
     },
   };
+}
+
+/**
+ * Derives the honest persisted schema for an ingestion working copy.
+ *
+ * The graph's node and edge types are unchanged, so retaining `G` is sound for
+ * collection inputs and outputs. Only the registrations' node uniqueness slice
+ * is removed. Extension documents are rewritten too: they are the durable
+ * source used to reconstruct extension kinds on reload, so leaving their
+ * declarations intact would silently restore uniqueness after a restart.
+ */
+function graphWithoutNodeUniqueness<G extends GraphDef>(graph: G): G {
+  const nodes = Object.fromEntries(
+    Object.entries(graph.nodes).map(([name, registration]) => {
+      const { unique: _omitted, ...withoutUnique } = registration;
+      return [name, Object.freeze(withoutUnique)] as const;
+    }),
+  );
+  const extension =
+    graph.extension?.nodes === undefined ?
+      graph.extension
+    : Object.freeze({
+        ...graph.extension,
+        nodes: Object.freeze(
+          Object.fromEntries(
+            Object.entries(graph.extension.nodes).map(([name, node]) => {
+              const { unique: _omitted, ...withoutUnique } = node;
+              return [name, Object.freeze(withoutUnique)] as const;
+            }),
+          ),
+        ),
+      });
+
+  // `G`'s data types are unchanged. Its registration-level constraint-name
+  // phantom is intentionally retained so branch nodes remain assignable to the
+  // canonical graph's merge types; the ingestion handle omits constraint lookup
+  // methods whose declarations no longer exist physically.
+  return Object.freeze({
+    ...graph,
+    nodes: Object.freeze(nodes),
+    extension,
+  });
 }

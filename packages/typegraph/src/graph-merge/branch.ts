@@ -63,10 +63,10 @@ export async function branch<G extends GraphDef>(
     // closes it only on its own failures, and "only the success path hands the
     // backend to the caller, who then owns its lifecycle" (see
     // `cloneWorkingCopyStrategy`). Everything after this line therefore runs
-    // inside `readSchemaAnchor`, which closes it before failing — a `branch()`
-    // that returned `err(...)` from here would drop the only handle to a live
+    // inside `captureBranchSchemaAnchor`, which closes it before failing — a
+    // `branch()` that returned `err(...)` from here would drop the only handle to a live
     // engine (a PGlite instance, a file handle, a connection pool).
-    const schemaAnchor = await readSchemaAnchor(store);
+    const schemaAnchor = await captureBranchSchemaAnchor(store);
     return ok({
       id,
       base,
@@ -95,7 +95,7 @@ export async function branch<G extends GraphDef>(
  * `getActiveSchema` rejects would leak the engine the strategy just opened. A
  * close failure must not mask the original error.
  */
-async function readSchemaAnchor<G extends GraphDef>(
+export async function captureBranchSchemaAnchor<G extends GraphDef>(
   store: GraphBranch<G>["store"],
 ): Promise<Readonly<{ version: number; hash: string }> | undefined> {
   try {

@@ -17,11 +17,13 @@
 
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
+  asNodeId,
   CardinalityError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
+  UniquenessError,
 } from "@nicia-ai/typegraph";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -59,7 +61,17 @@ const primaryEncounter = defineEdge("primaryEncounter", {
 const rollbackGraph = defineGraph({
   id: "merge-rollback-graph",
   nodes: {
-    Patient: { type: Patient },
+    Patient: {
+      type: Patient,
+      unique: [
+        {
+          name: "patient_name_unique",
+          fields: ["name"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
     Encounter: { type: Encounter },
   },
   edges: {
@@ -149,6 +161,9 @@ describe.each(backendMatrix())(
 
       const branchA = await makeBranch(baseStore, BRANCH_A);
       const branchB = await makeBranch(baseStore, BRANCH_B);
+      await branchA.store.nodes.Patient.update(asNodeId("pat-1"), {
+        name: "Robert Updated",
+      });
 
       // Each branch adds ONE primary encounter for pat-1 — valid per branch
       // (cardinality "oneActive" holds inside each fork), violated by their union.
@@ -198,6 +213,15 @@ describe.each(backendMatrix())(
       expect(await liveNodeIds(baseStore, "Patient")).toEqual(["pat-1"]);
       expect(await liveNodeIds(baseStore, "Encounter")).toEqual([]);
       expect(await liveEdgeIds(baseStore, "primaryEncounter")).toEqual([]);
+      await expect(
+        baseStore.nodes.Patient.create({ name: "Robert Smith" }),
+      ).rejects.toThrow(UniquenessError);
+      await expect(
+        baseStore.nodes.Patient.create(
+          { name: "Robert Updated" },
+          { id: "pat-2" },
+        ),
+      ).resolves.toMatchObject({ id: "pat-2" });
       expect(
         await readProvenance(await openProvenanceStore(baseStore)),
       ).toEqual([]);

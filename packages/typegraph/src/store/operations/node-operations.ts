@@ -142,6 +142,7 @@ import {
 import {
   checkUniquenessConstraints,
   createUniquenessContext,
+  validateResolvedNodeUniqueness,
 } from "../uniqueness";
 import {
   assertClearValidToSupported,
@@ -1942,60 +1943,15 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
         });
 
         if (uniqueConstraints.length > 0) {
-          const affectedIds = new Set(result.rows.map((row) => row.id));
-          for (const constraint of uniqueConstraints) {
-            const keyToId = new Map<string, string>();
-            for (const item of sidecarItems) {
-              if (!checkWherePredicate(constraint, item.props)) continue;
-              const key = computeUniqueKey(
-                item.props,
-                constraint.fields,
-                constraint.collation,
-              );
-              const priorId = keyToId.get(key);
-              if (priorId !== undefined && priorId !== item.id) {
-                throw new UniquenessError({
-                  constraintName: constraint.name,
-                  kind,
-                  existingId: priorId,
-                  newId: item.id,
-                  fields: constraint.fields,
-                });
-              }
-              keyToId.set(key, item.id);
-            }
-            const keys = [...keyToId.keys()];
-            if (keys.length === 0) continue;
-            for (const kindToCheck of getKindsForUniquenessCheck(
-              kind,
-              constraint.scope,
-              ctx.registry,
-            )) {
-              const existingRows = await requireDefined(
-                target.checkUniqueBatch,
-              )({
-                graphId: ctx.graphId,
-                nodeKind: kindToCheck,
-                constraintName: constraint.name,
-                keys,
-              });
-              for (const existing of existingRows) {
-                if (
-                  existing.concrete_kind === kind &&
-                  affectedIds.has(existing.node_id)
-                ) {
-                  continue;
-                }
-                throw new UniquenessError({
-                  constraintName: constraint.name,
-                  kind: kindToCheck,
-                  existingId: existing.node_id,
-                  newId: requireDefined(keyToId.get(existing.key)),
-                  fields: constraint.fields,
-                });
-              }
-            }
-          }
+          await validateResolvedNodeUniqueness(
+            createUniquenessContext(ctx.graphId, ctx.registry, target),
+            sidecarItems.map((item) => ({
+              kind: item.kind,
+              id: item.id,
+              props: item.props,
+              constraints: item.uniqueConstraints,
+            })),
+          );
           await requireDefined(hardDeleteUniquesByNodeIds)({
             graphId: ctx.graphId,
             concreteKind: kind,

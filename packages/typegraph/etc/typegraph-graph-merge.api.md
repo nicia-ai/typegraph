@@ -2200,6 +2200,27 @@ type IndexWhereOperand = Readonly<{
 // @public
 type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
+// @public (undocumented)
+const INGESTION_BRANCH_BRAND: unique symbol;
+
+// @public
+export type IngestionBranch<G extends GraphDef> = Readonly<{
+    [INGESTION_BRANCH_BRAND]: true;
+    id: BranchId;
+    base: BaseVersion;
+    nodes: IngestionNodeCollections<G>;
+    edges: Store<G>["edges"];
+    close: () => Promise<void>;
+}>;
+
+// @public
+export function ingestionBranch<G extends GraphDef>(baseStore: GraphBranch<G>["store"], makeBackend: MakeBackend, options?: BranchOptions): Promise<Result<IngestionBranch<G>, BranchError>>;
+
+// @public
+export type IngestionNodeCollections<G extends GraphDef> = Readonly<{
+    [K in keyof Store<G>["nodes"]]-?: Pick<Store<G>["nodes"][K], "create" | "getById" | "getByIds" | "update" | "updateWhere" | "delete" | "hardDelete" | "find" | "count" | "createFromRecord" | "upsertById" | "upsertByIdFromRecord" | "bulkCreate" | "bulkUpsertById" | "bulkInsert" | "bulkDelete" | "bulkFindByIndex">;
+}>;
+
 // @public
 type InitialQueryBuilder<G extends GraphDef, CoordinateState extends QueryCoordinateState = "open"> = QueryBuilder<G, EmptyAliasMap, EmptyEdgeAliasMap, EmptyRecursiveAliasMap, CoordinateState>;
 
@@ -2674,7 +2695,7 @@ type MeasurableTransactionContext<G extends GraphDef> = TransactionContext<G> & 
 }>;
 
 // @public
-export function merge<G extends GraphDef>(store: Store<G>, branches: readonly GraphBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergeReport<G>, MergeError>>;
+export function merge<G extends GraphDef>(store: Store<G>, branchInputs: readonly MergeBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergeReport<G>, MergeError>>;
 
 // @public
 export const MERGE_ERROR_CODES: {
@@ -2715,6 +2736,9 @@ export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
 
 // @public (undocumented)
 export const MERGE_PLAN_FORMAT_VERSION: 1;
+
+// @public
+export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G>;
 
 // @public
 export class MergeConflictError extends MergeError {
@@ -2777,7 +2801,7 @@ export function mergeIncremental<G extends GraphDef>(args: MergeIncrementalArgs<
 export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
     forkPoint: Store<G>;
     target: Store<G>;
-    branches: readonly GraphBranch<G>[];
+    branches: readonly MergeBranch<G>[];
     options?: Omit<MergeOptions<G>, "target">;
 }>;
 
@@ -3590,7 +3614,7 @@ class Placeholder {
 }
 
 // @public
-export function planMerge<G extends GraphDef>(store: Store<G>, branches: readonly GraphBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergePlanArtifact, MergeError>>;
+export function planMerge<G extends GraphDef>(store: Store<G>, branchInputs: readonly MergeBranch<G>[], optionsInput?: MergeOptions<G>): Promise<Result<MergePlanArtifact, MergeError>>;
 
 // @public
 export function planMergeIncremental<G extends GraphDef>(args: MergeIncrementalArgs<G>): Promise<Result<MergePlanArtifact, MergeError>>;
@@ -4696,6 +4720,17 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     identityAtCoordinate: (coordinate: ReadCoordinate) => IdentityReadFacade<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
+    applyResolvedNodeUniqueness: <Output>(target: TransactionBackend, writes: Readonly<{
+        upserts: readonly Readonly<{
+            kind: string;
+            id: string;
+            props: Readonly<Record<string, unknown>>;
+        }>[];
+        releases: readonly Readonly<{
+            kind: string;
+            id: string;
+        }>[];
+    }>, apply: () => Promise<Output>) => Promise<Output>;
     readCurrentIdentityAssertions: (mode: "state" | "archival", options?: Readonly<{
         nodeKinds?: readonly string[];
         includeDeleted?: boolean;

@@ -79,6 +79,57 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
   schemaAnchor?: Readonly<{ version: number; hash: string }> | undefined;
 }>;
 
+declare const INGESTION_BRANCH_BRAND: unique symbol;
+
+/**
+ * Node collections exposed by an {@link IngestionBranch}. They retain normal
+ * validation, reads, and staging writes, but omit APIs that claim a declared
+ * uniqueness constraint exists on the relaxed physical working copy.
+ */
+export type IngestionNodeCollections<G extends GraphDef> = Readonly<{
+  [K in keyof Store<G>["nodes"]]-?: Pick<
+    Store<G>["nodes"][K],
+    | "create"
+    | "getById"
+    | "getByIds"
+    | "update"
+    | "updateWhere"
+    | "delete"
+    | "hardDelete"
+    | "find"
+    | "count"
+    | "createFromRecord"
+    | "upsertById"
+    | "upsertByIdFromRecord"
+    | "bulkCreate"
+    | "bulkUpsertById"
+    | "bulkInsert"
+    | "bulkDelete"
+    | "bulkFindByIndex"
+  >;
+}>;
+
+/**
+ * Opaque handle for an untrusted ingestion working copy.
+ *
+ * The ordinary {@link Store} is intentionally absent: callers may stage and
+ * inspect graph data through the typed collections, then pass this handle to
+ * merge planning, but cannot access schema evolution, transactions, or runtime
+ * internals. `close()` releases the private working-copy backend.
+ */
+export type IngestionBranch<G extends GraphDef> = Readonly<{
+  [INGESTION_BRANCH_BRAND]: true;
+  id: BranchId;
+  base: BaseVersion;
+  nodes: IngestionNodeCollections<G>;
+  edges: Store<G>["edges"];
+  close: () => Promise<void>;
+}>;
+
+/** A normal branch or an opaque ingestion branch accepted by merge entrypoints. */
+export type MergeBranch<G extends GraphDef> =
+  GraphBranch<G> | IngestionBranch<G>;
+
 /**
  * Options for {@link GraphBranch} creation. `id` is optional — when omitted a
  * fresh id is generated.
@@ -374,7 +425,7 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
 export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
   forkPoint: Store<G>;
   target: Store<G>;
-  branches: readonly GraphBranch<G>[];
+  branches: readonly MergeBranch<G>[];
   options?: Omit<MergeOptions<G>, "target">;
 }>;
 
