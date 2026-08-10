@@ -74,10 +74,36 @@ export type WritePlanOptions<T> = Omit<
   "fencesConstraintProbe"
 >;
 
+/**
+ * Mints a second session for THIS write frame over a READ OVERLAY of its
+ * target: a backend that answers some reads from a pending-aware cache and
+ * delegates everything else, which is what
+ * `createNodeBatchValidationBackend` builds.
+ *
+ * It exists because a fused step reads and writes through ONE handle.
+ * Interchange import's batched slice has to route the uniqueness pre-check
+ * inside `reviseNode` through the overlay — so a key an unflushed create
+ * earlier in the same slice already reserved degrades to a per-row error
+ * instead of colliding at flush — while the write itself lands on the real
+ * backend, which is precisely what that overlay does. Handing the leg the
+ * frame's session over the raw target would silently drop the pending state,
+ * and re-checking uniqueness outside the step would be a second spelling of a
+ * decision the step owns.
+ *
+ * What this hands out is the CAPABILITY, not the evidence: the frame's
+ * {@link GraphWriteLock} stays inside the executor, so row work still cannot
+ * reach a step module directly. All it can obtain is another fused session,
+ * whose methods apply the same sidecars and the same fences as the first.
+ */
+export type OverlaidSessionMint = (
+  overlay: GraphBackend | TransactionBackend,
+) => WriteSession;
+
 /** Row work: the only place a plan-driven write may read or write rows. */
 export type WriteRowWork<T> = (
   session: WriteSession,
   target: WriteTarget,
+  overlaidSession: OverlaidSessionMint,
 ) => Promise<T>;
 
 /**
@@ -105,11 +131,16 @@ function planFrame<T>(
       );
       await acquireIdentityLock(target);
     }
+    // ONE spelling of "mint a session for this frame", used for the frame's own
+    // session and for any overlaid one, so the two cannot be built from
+    // different context or a different lock.
+    const mintSession: OverlaidSessionMint = (sessionTarget) =>
+      createWriteSession(ctx, sessionTarget, lock);
     // The two handles are the SAME object: the session closes over the raw
     // target (its step modules probe optional members on it), while row work
     // sees it through the type-only `WriteTarget` projection. One value, two
     // static views.
-    return rowWork(createWriteSession(ctx, target, lock), target);
+    return rowWork(mintSession(target), target, mintSession);
   };
 }
 

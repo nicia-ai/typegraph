@@ -62,15 +62,19 @@ const SCAN_EXCLUDED_DIRECTORY = path.join(SOURCE_ROOT, "backend");
  * one lowers it in the same commit that changes what it counts.
  */
 const RATCHET = {
-  /** Exemption entries that are migration debt rather than reasoned carve-outs. */
-  nonPermanentExemptions: 1,
+  /**
+   * Exemption entries that are migration debt rather than reasoned carve-outs.
+   * ZERO from the batch that moved interchange import onto the executor: every
+   * remaining entry states why it cannot route through a write plan.
+   */
+  nonPermanentExemptions: 0,
   /**
    * `runInWriteTransaction` / `runHookedWriteOperation` call sites outside
-   * their owner module. Two of them (`identity/service-facade.ts`,
+   * their owner module. The two that remain (`identity/service-facade.ts`,
    * `store.ts`) are the permanent floor: they gain no session, no fences and
    * no sidecars from a plan.
    */
-  managedWriteEntryPoints: 3,
+  managedWriteEntryPoints: 2,
   /**
    * `unfencedTarget()` escapes — the typed hole that hands row work the full
    * backend union back. Its ceiling is the number of union-typed signatures

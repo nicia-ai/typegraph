@@ -106,9 +106,14 @@ export const WRITE_PIPELINE_RESTRICTIONS = [
  *
  * This list is asserted EQUAL to the set of violating files by
  * `write-pipeline-ratchet.test.ts` — both directions, so an entry that stops
- * violating fails just as loudly as a violator that is not listed. The
- * non-permanent entries are the migration's remaining work and their count
- * only ever decreases.
+ * violating fails just as loudly as a violator that is not listed.
+ *
+ * Every entry is now PERMANENT: the migration's debt reached zero when
+ * interchange import moved onto the executor. What remains is the seam itself
+ * (the step and sidecar modules the session composes) plus the reasoned
+ * carve-outs — a backend overlay, a bulk ingestion session, index maintenance,
+ * store lifecycle and a pre-schema-commit marker — each of which states why it
+ * cannot route through a write plan.
  */
 export const WRITE_PIPELINE_EXEMPTIONS = [
   {
@@ -174,12 +179,6 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     reason:
       "The edge step bodies themselves (updateEdge, deleteEdge, hardDeleteEdge), reachable only through the session.",
     permanent: true,
-  },
-  {
-    path: "src/interchange/import.ts",
-    reason:
-      "Migrates in B3, when import's hand-built write context is replaced by the executor.",
-    permanent: false,
   },
 ];
 

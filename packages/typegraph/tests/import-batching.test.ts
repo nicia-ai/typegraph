@@ -561,6 +561,75 @@ describe("importGraph batching semantics (must not drift)", () => {
     expect(batched).toEqual(sequential);
   });
 
+  it("in-slice create reserving a unique value makes a later update to it a per-row error, not an import abort", async () => {
+    // p-c (new) claims "target@example.com" earlier in the slice than
+    // p-a's (existing) update onto that same value. The sequential
+    // (one-record-per-slice) path commits p-c's reservation before p-a's
+    // update runs, so the update collides with an already-persisted row and
+    // reports a per-row uniqueness error. The batched slice must see that
+    // same in-slice reservation — an unflushed create has no row yet — or
+    // the update's uniqueness check reads the real backend, wrongly
+    // succeeds, and then the deferred create flush collides with it at
+    // `insertUniqueBatch`, throwing and rolling back the whole import.
+    const outcomes = new Map<number, unknown>();
+    for (const batchSize of [1, 100]) {
+      const outcome = await withCountedStore(async (store) => {
+        await importGraph(
+          store,
+          payload([
+            {
+              kind: "Person",
+              id: "p-a",
+              properties: { name: "a", email: "a-orig@example.com" },
+            },
+          ]),
+          importOptions(),
+        );
+        const result = await importGraph(
+          store,
+          payload([
+            {
+              kind: "Person",
+              id: "p-c",
+              properties: { name: "c", email: "target@example.com" },
+            },
+            {
+              kind: "Person",
+              id: "p-a",
+              properties: { name: "a2", email: "target@example.com" },
+            },
+          ]),
+          importOptions({ onConflict: "update", batchSize }),
+        );
+        const personA = await store.nodes.Person.getById("p-a" as never);
+        const personC = await store.nodes.Person.getById("p-c" as never);
+        return {
+          created: result.nodes.created,
+          updated: result.nodes.updated,
+          errors: result.errors.map((entry) => ({
+            id: entry.id,
+            matchesConstraint: entry.error.includes("person_email"),
+          })),
+          emailA: personA?.email,
+          emailC: personC?.email,
+        };
+      });
+      outcomes.set(batchSize, outcome);
+    }
+
+    const sequential = outcomes.get(1);
+    const batched = outcomes.get(100);
+
+    expect(sequential).toEqual({
+      created: 1,
+      updated: 0,
+      errors: [{ id: "p-a", matchesConstraint: true }],
+      emailA: "a-orig@example.com",
+      emailC: "target@example.com",
+    });
+    expect(batched).toEqual(sequential);
+  });
+
   it("skips tombstoned rows under onConflict: update without resurrecting", async () => {
     await withCountedStore(async (store) => {
       const node = await store.nodes.Person.create({

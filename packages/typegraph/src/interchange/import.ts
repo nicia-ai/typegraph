@@ -91,13 +91,17 @@ import {
   primeBatchValidationCaches,
 } from "../store/operations/node-operations";
 import {
-  applyNodeInsertSideEffects,
-  applyNodeInsertSideEffectsBatch,
-  applyNodeUpdate,
-  type NodeWriteContext,
-} from "../store/operations/node-write-pipeline";
-import { runInWriteTransaction } from "../store/operations/write-transaction";
-import { type GraphWriteLock } from "../store/recorded-capture/clock";
+  type OverlaidSessionMint,
+  runWritePlan,
+} from "../store/operations/write-executor";
+import { nodeWritePlan } from "../store/operations/write-plan";
+import {
+  type EdgeInsertWork,
+  type NodeInsertWork,
+  unfencedTarget,
+  type WriteSession,
+  type WriteTarget,
+} from "../store/operations/write-session";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { checkUniquenessConstraints } from "../store/uniqueness";
@@ -214,6 +218,29 @@ export async function withImportStreamLease<G extends GraphDef, T>(
   }
 }
 
+/**
+ * The one write frame every import leg works inside, replacing the raw backend
+ * and the `GraphWriteLock` token the legs used to be threaded separately.
+ *
+ * `session` is the only surface that mutates graph state — a node create here
+ * carries its uniqueness, fulltext and embedding rows because the session
+ * fuses them, not because this module remembered to call the sidecars after
+ * the insert. `target` is the read projection the same frame hands out, and
+ * `unfencedTarget` widens it back for the preparation helpers that still take
+ * the raw backend union — each such widening counted by the ratchet, so the
+ * prose here deliberately does not spell it as a call.
+ *
+ * `overlaidSession` is needed by exactly one leg — the batched node slice,
+ * whose in-slice update must plan its uniqueness against the pending-aware
+ * overlay — and rides on the frame rather than being threaded to that leg
+ * alone, because it is a property of the frame, not of the leg.
+ */
+type ImportWriteFrame = Readonly<{
+  session: WriteSession;
+  target: WriteTarget;
+  overlaidSession: OverlaidSessionMint;
+}>;
+
 async function importGraphData<G extends GraphDef>(
   store: Store<G>,
   data: GraphData,
@@ -242,22 +269,33 @@ async function importGraphData<G extends GraphDef>(
   const importedNodeIds = new Set<string>();
 
   // One transaction on a transactional backend; runs directly otherwise, with
-  // the per-graph write lock taken before any row work — see
-  // runInWriteTransaction for the shared lock-before-rows contract every
-  // writer follows.
-  await runInWriteTransaction(
+  // the per-graph write lock taken before any row work — see runWritePlan and
+  // the runInWriteTransaction contract underneath it, the shared
+  // lock-before-rows discipline every writer follows.
+  await runWritePlan(
     {
       graphId,
+      registry,
       schemaVersion: store.introspect().schemaVersion,
       historyEnabled: store.historyEnabled,
       revisionTrackingEnabled: store.revisionTrackingEnabled,
       revisionSchema: store.revisionSchema,
+      // HOW this caller takes position 3. `lockIdentityImportTarget` is
+      // `lockIdentityGraph` on an identity graph and a no-op otherwise, so the
+      // participation below is unconditional and the acquirer owns the
+      // "identity is configured" test, exactly as before the migration.
+      identityLock: (target) => runtime.lockIdentityImportTarget(target),
     },
+    // An import writes node rows AND edge rows in one frame. The family is
+    // stated as `node` because that is the one whose row work obliges
+    // sidecars — an edge write obliges none — and because import declares no
+    // constraint probe, the only other thing a plan carries.
+    nodeWritePlan(undefined, "import"),
     backend,
-    async (target, lock) => {
-      await runtime.lockIdentityImportTarget(target);
+    async (session, target, overlaidSession) => {
+      const frame: ImportWriteFrame = { session, target, overlaidSession };
       await processNodes(
-        target,
+        frame,
         graphId,
         registry,
         data.nodes,
@@ -266,10 +304,9 @@ async function importGraphData<G extends GraphDef>(
         result,
         errors,
         importedNodeIds,
-        lock,
       );
       await runtime.foldImportedIdentityNodes(
-        target,
+        unfencedTarget(target),
         data.nodes
           .filter((node) =>
             importedNodeIds.has(makeNodeKey(node.kind, node.id)),
@@ -277,7 +314,7 @@ async function importGraphData<G extends GraphDef>(
           .map((node) => ({ kind: node.kind, id: node.id })),
       );
       await processEdges(
-        target,
+        frame,
         graphId,
         registry,
         data.edges,
@@ -291,7 +328,7 @@ async function importGraphData<G extends GraphDef>(
       if (data.identity !== undefined) {
         await importIdentitySection(
           runtime,
-          target,
+          unfencedTarget(target),
           graphId,
           data.identity,
           result,
@@ -1068,7 +1105,7 @@ function buildEdgeSchemaMap(
 // ============================================================
 
 async function processNodes(
-  backend: GraphBackend | TransactionBackend,
+  frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
   nodes: readonly InterchangeNode[],
@@ -1077,14 +1114,13 @@ async function processNodes(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  lock: GraphWriteLock,
 ): Promise<void> {
   const batchSize = options.batchSize;
 
   for (let index = 0; index < nodes.length; index += batchSize) {
     const batch = nodes.slice(index, index + batchSize);
     await processNodeSlice(
-      backend,
+      frame,
       graphId,
       registry,
       batch,
@@ -1093,7 +1129,6 @@ async function processNodes(
       result,
       errors,
       importedNodeIds,
-      lock,
     );
   }
 }
@@ -1148,15 +1183,16 @@ type NodeImportCandidate = Readonly<{
  * Processes one batchSize slice of nodes with batched round trips:
  * one `getNodes` per kind for existence, one `checkUniqueBatch` per
  * (constraint, kind) for uniqueness pre-checks (both priming the shared
- * batch validation caches), then one multi-row insert and one batched
- * side-effect pass for the accepted creates. Per-row semantics are
- * unchanged — conflicts route by `onConflict`, a uniqueness conflict is a
- * per-row error entry, and rows repeating an id already seen in the slice
- * defer to the per-row path after the flush (so they observe the first
- * occurrence's row exactly as the sequential implementation did).
+ * batch validation caches), then one fused batch create for the accepted
+ * rows — the multi-row insert and its batched side effects, in that order,
+ * as one session call. Per-row semantics are unchanged — conflicts route by
+ * `onConflict`, a uniqueness conflict is a per-row error entry, and rows
+ * repeating an id already seen in the slice defer to the per-row path after
+ * the flush (so they observe the first occurrence's row exactly as the
+ * sequential implementation did).
  */
 async function processNodeSlice(
-  backend: GraphBackend | TransactionBackend,
+  frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
   batch: readonly InterchangeNode[],
@@ -1165,7 +1201,6 @@ async function processNodeSlice(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
-  lock: GraphWriteLock,
 ): Promise<void> {
   const record = (node: InterchangeNode, outcome: ProcessResult): void => {
     recordNodeOutcome(node, outcome, result, errors, importedNodeIds);
@@ -1230,6 +1265,7 @@ async function processNodeSlice(
 
   // Prime the validation caches with batched reads, then route each row
   // against memory in input order.
+  const rawTarget = unfencedTarget(frame.target);
   const {
     backend: validationBackend,
     registerPendingNode,
@@ -1237,15 +1273,23 @@ async function processNodeSlice(
     registerAppliedNodeUpdate,
     seedNodeRow,
     seedUniqueRow,
-  } = createNodeBatchValidationBackend(graphId, registry, backend);
+  } = createNodeBatchValidationBackend(graphId, registry, rawTarget);
   await primeBatchValidationCaches(
     { graphId, registry },
     candidates.map((candidate) => candidate.draft),
-    backend,
+    rawTarget,
     { seedNodeRow, seedUniqueRow },
   );
 
-  const writeContext = { graphId, registry, lock };
+  // The in-slice update leg runs on a session over the pending-aware overlay,
+  // not on the frame's own: `reviseNode` plans its uniqueness through the same
+  // handle it writes with, and that plan must see a value an unflushed create
+  // EARLIER in this slice already reserved — so the row degrades to a per-row
+  // error exactly as the sequential path does, rather than claiming the key on
+  // the real backend and colliding with that create at flush (which would
+  // throw and roll back the whole import). The overlay overrides reads only;
+  // every write it is handed still lands on the real backend.
+  const overlaidSession = frame.overlaidSession(validationBackend);
   const accepted: NodeImportCandidate[] = [];
   for (const candidate of candidates) {
     const { node, schemaEntry, props } = candidate;
@@ -1286,25 +1330,13 @@ async function processNodeSlice(
             record(node, { status: "error", error: updateWindow.error });
             break;
           }
-          const updateError = await updateImportedNode(
-            writeContext,
-            // The pending-aware overlay, not the raw backend: the update's
-            // uniqueness pre-check must see a unique value already reserved by
-            // an unflushed create EARLIER in this slice, so it degrades to a
-            // per-row error exactly as the sequential path does — rather than
-            // claiming the key on the real backend and colliding with that
-            // create at flush (which would throw and roll back the whole
-            // import). Writes still delegate to the real backend.
-            validationBackend,
-            node,
-            {
-              existing,
-              schema: schemaEntry.registration.type.schema,
-              validatedProps: props,
-              uniqueConstraints,
-              windowFence: updateWindow.value,
-            },
-          );
+          const updateError = await updateImportedNode(overlaidSession, node, {
+            existing,
+            schema: schemaEntry.registration.type.schema,
+            validatedProps: props,
+            uniqueConstraints,
+            windowFence: updateWindow.value,
+          });
           if (updateError === undefined) {
             // The update mutated the real backend's uniqueness rows directly;
             // reconcile the shared prime caches so a later create in this
@@ -1344,34 +1376,26 @@ async function processNodeSlice(
       continue;
     }
 
-    registerPendingNode(buildImportInsertParams(graphId, candidate));
+    registerPendingNode(buildImportInsertParams(graphId, node, props));
     registerPendingUniqueEntries(node.kind, node.id, props, uniqueConstraints);
     accepted.push(candidate);
   }
 
-  // Flush the accepted creates: one multi-row insert, then the batched
-  // side effects (uniqueness entries, fulltext, embeddings).
+  // Flush the accepted creates as ONE fused unit: the multi-row insert and
+  // then the batched side effects (uniqueness entries, fulltext, embeddings),
+  // which is the order this path already used — the session simply makes the
+  // pair unbreakable. The NO-RETURN batch shape, because import discards the
+  // rows and the returning shape would emit a different statement.
   if (accepted.length > 0) {
-    const insertParamsList = accepted.map((candidate) =>
-      buildImportInsertParams(graphId, candidate),
-    );
-    if (backend.insertNodesBatch === undefined) {
-      for (const params of insertParamsList) {
-        await backend.insertNode(params);
-      }
-    } else {
-      await backend.insertNodesBatch(insertParamsList);
-    }
-    await applyNodeInsertSideEffectsBatch(
-      writeContext,
-      accepted.map((candidate) => ({
-        kind: candidate.node.kind,
-        id: candidate.node.id,
-        schema: candidate.schemaEntry.registration.type.schema,
-        props: candidate.props,
-        uniqueConstraints: candidate.schemaEntry.registration.unique ?? [],
-      })),
-      backend,
+    await frame.session.createNodesNoReturn(
+      accepted.map((candidate) =>
+        importNodeInsertWork(
+          graphId,
+          candidate.node,
+          candidate.schemaEntry.registration,
+          candidate.props,
+        ),
+      ),
     );
     for (const candidate of accepted) {
       record(candidate.node, { status: "created" });
@@ -1383,24 +1407,16 @@ async function processNodeSlice(
   for (const node of deferred) {
     record(
       node,
-      await processNode(
-        backend,
-        graphId,
-        registry,
-        node,
-        schemas,
-        options,
-        lock,
-      ),
+      await processNode(frame, graphId, registry, node, schemas, options),
     );
   }
 }
 
 function buildImportInsertParams(
   graphId: string,
-  candidate: NodeImportCandidate,
+  node: InterchangeNode,
+  props: Record<string, unknown>,
 ): Parameters<GraphBackend["insertNode"]>[0] {
-  const { node, props } = candidate;
   return {
     graphId,
     kind: node.kind,
@@ -1408,6 +1424,33 @@ function buildImportInsertParams(
     props,
     ...(node.validFrom !== undefined && { validFrom: node.validFrom }),
     ...(node.validTo !== undefined && { validTo: node.validTo }),
+  };
+}
+
+/**
+ * The fused create unit for one imported node: the row params and the derived
+ * data that row obliges, built together.
+ *
+ * ONE owner for both halves, shared by the batched slice and the per-row
+ * fallback. Before the migration each path spelled its own insert params and
+ * its own side-effect record, which is the shape in which the two drift — and
+ * the shape in which a path forgets the second half entirely.
+ */
+function importNodeInsertWork(
+  graphId: string,
+  node: InterchangeNode,
+  registration: NodeRegistration,
+  props: Record<string, unknown>,
+): NodeInsertWork {
+  return {
+    params: buildImportInsertParams(graphId, node, props),
+    sideEffects: {
+      kind: node.kind,
+      id: node.id,
+      schema: registration.type.schema,
+      props,
+      uniqueConstraints: registration.unique ?? [],
+    },
   };
 }
 
@@ -1493,8 +1536,7 @@ const NODE_UPDATE_TARGET_CHANGED_CODE =
  * `deleted_at IS NULL` fence of the live-row update still applies.
  */
 async function updateImportedNode(
-  writeContext: NodeWriteContext,
-  backend: GraphBackend | TransactionBackend,
+  session: WriteSession,
   node: InterchangeNode,
   args: Readonly<{
     existing: LiveNodeRow;
@@ -1506,17 +1548,19 @@ async function updateImportedNode(
 ): Promise<string | undefined> {
   try {
     const result = await catchUniquenessError(() =>
-      applyNodeUpdate(
-        writeContext,
+      // The fence is an ARGUMENT the method requires, not a spread the call
+      // site may forget: the guard's verdict travels to the statement that
+      // honors it, and an empty fence (`{}`) is the stated decision to assert
+      // nothing rather than an omission.
+      session.reviseNode(
         {
           existing: args.existing,
           schema: args.schema,
           validatedProps: args.validatedProps,
           uniqueConstraints: args.uniqueConstraints,
-          ...args.windowFence,
           ...(node.validTo !== undefined && { validTo: node.validTo }),
         },
-        backend,
+        { validityLowerBound: args.windowFence },
       ),
     );
     return result.ok ? undefined : result.error;
@@ -1669,25 +1713,34 @@ function edgeIdentityConflict(
  * abort an import whose earlier rows are already written.
  */
 async function updateImportedEdge(
-  backend: GraphBackend | TransactionBackend,
-  graphId: string,
+  session: WriteSession,
   edge: InterchangeEdge,
   props: Readonly<Record<string, unknown>>,
   windowFence: ValidityLowerBoundFence,
 ): Promise<string | undefined> {
   try {
-    await backend.updateEdge({
-      graphId,
-      id: edge.id,
-      kind: edge.kind,
-      fromKind: edge.from.kind,
-      fromId: edge.from.id,
-      toKind: edge.to.kind,
-      toId: edge.to.id,
-      props,
-      ...windowFence,
-      ...(edge.validTo !== undefined && { validTo: edge.validTo }),
-    });
+    // Both halves of the predicate are stated as FENCES — required keys of the
+    // method's fence record, applied into the statement's own `WHERE` by their
+    // appliers — rather than assembled into the params here. The five identity
+    // components because they are immutable and this import checked them; the
+    // stored lower bound because the window guard read it.
+    await session.reviseEdge(
+      {
+        id: edge.id,
+        props,
+        ...(edge.validTo !== undefined && { validTo: edge.validTo }),
+      },
+      {
+        validityLowerBound: windowFence,
+        edgeIdentity: {
+          kind: edge.kind,
+          fromKind: edge.from.kind,
+          fromId: edge.from.id,
+          toKind: edge.to.kind,
+          toId: edge.to.id,
+        },
+      },
+    );
     return undefined;
   } catch (error) {
     if (
@@ -1845,13 +1898,12 @@ function validateUpdateValidityWindow(
 }
 
 async function processNode(
-  backend: GraphBackend | TransactionBackend,
+  frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
   node: InterchangeNode,
   schemas: ReadonlyMap<string, NodeSchemaEntry>,
   options: ResolvedImportOptions,
-  lock: GraphWriteLock,
 ): Promise<ProcessResult> {
   // Validate kind exists
   const schemaEntry = schemas.get(node.kind);
@@ -1877,10 +1929,9 @@ async function processNode(
 
   const { registration } = schemaEntry;
   const uniqueConstraints = registration.unique ?? [];
-  const writeContext = { graphId, registry, lock };
 
   // Check if node already exists
-  const existing = await backend.getNode(graphId, node.kind, node.id);
+  const existing = await frame.target.getNode(graphId, node.kind, node.id);
 
   if (existing) {
     switch (options.onConflict) {
@@ -1909,26 +1960,21 @@ async function processNode(
         if (!updateWindow.ok) {
           return { status: "error", error: updateWindow.error };
         }
-        // Route through the shared write step so the update maintains
-        // uniqueness entries, embeddings, and fulltext — the collection API's
-        // integrity, which a raw backend.updateNode would skip. Both per-row
-        // recoveries below are safe to catch and commit past because every
-        // `UniquenessError` `applyNodeUpdate` can raise comes from its plan or
-        // its claim, both of which precede the row write (and the claim
-        // compensates itself), and a write that landed on nothing wrote nothing
-        // by definition.
-        const updateError = await updateImportedNode(
-          writeContext,
-          backend,
-          node,
-          {
-            existing,
-            schema: registration.type.schema,
-            validatedProps: propsResult.data,
-            uniqueConstraints,
-            windowFence: updateWindow.value,
-          },
-        );
+        // Route through the write session so the update maintains uniqueness
+        // entries, embeddings, and fulltext — the collection API's integrity,
+        // which a raw backend.updateNode would skip. Both per-row recoveries
+        // below are safe to catch and commit past because every
+        // `UniquenessError` `reviseNode` can raise comes from its plan or its
+        // claim, both of which precede the row write (and the claim compensates
+        // itself), and a write that landed on nothing wrote nothing by
+        // definition.
+        const updateError = await updateImportedNode(frame.session, node, {
+          existing,
+          schema: registration.type.schema,
+          validatedProps: propsResult.data,
+          uniqueConstraints,
+          windowFence: updateWindow.value,
+        });
         if (updateError !== undefined) {
           return { status: "error", error: updateError };
         }
@@ -1938,11 +1984,12 @@ async function processNode(
   }
 
   // Create new node. Pre-check uniqueness (as the collection create does) so a
-  // conflict is a per-row error rather than an orphaned node row, then apply the
-  // integrity side effects the raw backend.insertNode would otherwise bypass.
+  // conflict is a per-row error rather than an orphaned node row, then create
+  // through the session, which applies the integrity side effects a raw
+  // insert would bypass.
   const uniquenessResult = await catchUniquenessError(() =>
     checkUniquenessConstraints(
-      { graphId, registry, backend },
+      { graphId, registry, backend: unfencedTarget(frame.target) },
       node.kind,
       node.id,
       propsResult.data,
@@ -1953,24 +2000,10 @@ async function processNode(
     return { status: "error", error: uniquenessResult.error };
   }
 
-  await backend.insertNode({
-    graphId,
-    kind: node.kind,
-    id: node.id,
-    props: propsResult.data,
-    ...(node.validFrom !== undefined && { validFrom: node.validFrom }),
-    ...(node.validTo !== undefined && { validTo: node.validTo }),
-  });
-  await applyNodeInsertSideEffects(
-    writeContext,
-    {
-      kind: node.kind,
-      id: node.id,
-      schema: registration.type.schema,
-      props: propsResult.data,
-      uniqueConstraints,
-    },
-    backend,
+  // The RETURNING single-insert shape, whose row this path discards, because
+  // that is the statement this leg emitted before the migration.
+  await frame.session.createNode(
+    importNodeInsertWork(graphId, node, registration, propsResult.data),
   );
 
   return { status: "created" };
@@ -1981,7 +2014,7 @@ async function processNode(
 // ============================================================
 
 async function processEdges(
-  backend: GraphBackend | TransactionBackend,
+  frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
   edges: readonly InterchangeEdge[],
@@ -1997,7 +2030,7 @@ async function processEdges(
   for (let index = 0; index < edges.length; index += batchSize) {
     const batch = edges.slice(index, index + batchSize);
     await processEdgeSlice(
-      backend,
+      frame,
       graphId,
       registry,
       batch,
@@ -2055,7 +2088,7 @@ type EdgeImportCandidate = Readonly<{
  * per-row path after the flush.
  */
 async function processEdgeSlice(
-  backend: GraphBackend | TransactionBackend,
+  frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
   batch: readonly InterchangeEdge[],
@@ -2136,7 +2169,7 @@ async function processEdgeSlice(
   // getNode inside the routing loop when the backend lacks getNodes.
   const liveEndpointKeys = new Set<string>();
   const checkedEndpointKeys = new Set<string>();
-  if (options.validateReferences && backend.getNodes !== undefined) {
+  if (options.validateReferences && frame.target.getNodes !== undefined) {
     const idsByKind = new Map<string, Set<string>>();
     for (const { edge } of candidates) {
       for (const endpoint of [edge.from, edge.to]) {
@@ -2149,7 +2182,7 @@ async function processEdgeSlice(
       }
     }
     for (const [kind, ids] of idsByKind) {
-      const rows = await backend.getNodes(graphId, kind, [...ids]);
+      const rows = await frame.target.getNodes(graphId, kind, [...ids]);
       for (const row of rows) {
         if (isLiveNodeRow(row)) {
           liveEndpointKeys.add(makeNodeKey(kind, row.id));
@@ -2165,7 +2198,7 @@ async function processEdgeSlice(
     const key = makeNodeKey(endpoint.kind, endpoint.id);
     if (importedNodeIds.has(key)) return true;
     if (checkedEndpointKeys.has(key)) return liveEndpointKeys.has(key);
-    const row = await backend.getNode(graphId, endpoint.kind, endpoint.id);
+    const row = await frame.target.getNode(graphId, endpoint.kind, endpoint.id);
     return row !== undefined && isLiveNodeRow(row);
   };
 
@@ -2175,8 +2208,8 @@ async function processEdgeSlice(
     string,
     Awaited<ReturnType<GraphBackend["getEdge"]>>
   >();
-  if (candidates.length > 0 && backend.getEdges !== undefined) {
-    const rows = await backend.getEdges(
+  if (candidates.length > 0 && frame.target.getEdges !== undefined) {
+    const rows = await frame.target.getEdges(
       graphId,
       candidates.map((candidate) => candidate.edge.id),
     );
@@ -2212,7 +2245,7 @@ async function processEdgeSlice(
     const existing =
       existingById.has(edge.id) ?
         existingById.get(edge.id)
-      : await backend.getEdge(graphId, edge.id);
+      : await frame.target.getEdge(graphId, edge.id);
 
     if (existing) {
       // Prior to every strategy: a row occupying this id under a different
@@ -2252,8 +2285,7 @@ async function processEdgeSlice(
             break;
           }
           const updateError = await updateImportedEdge(
-            backend,
-            graphId,
+            frame.session,
             edge,
             props,
             updateWindow.value,
@@ -2273,25 +2305,14 @@ async function processEdgeSlice(
   }
 
   if (accepted.length > 0) {
-    const insertParamsList = accepted.map(({ edge, props }) => ({
-      graphId,
-      id: edge.id,
-      kind: edge.kind,
-      fromKind: edge.from.kind,
-      fromId: edge.from.id,
-      toKind: edge.to.kind,
-      toId: edge.to.id,
-      props,
-      ...(edge.validFrom !== undefined && { validFrom: edge.validFrom }),
-      ...(edge.validTo !== undefined && { validTo: edge.validTo }),
-    }));
-    if (backend.insertEdgesBatch === undefined) {
-      for (const params of insertParamsList) {
-        await backend.insertEdge(params);
-      }
-    } else {
-      await backend.insertEdgesBatch(insertParamsList);
-    }
+    // The NO-RETURN batch shape. `insert-dispatch.ts` — reached through the
+    // session — owns "does this backend have the batch member, and what does it
+    // fall back to", which is the predicate this leg used to spell for itself.
+    await frame.session.createEdgesNoReturn(
+      accepted.map(({ edge, props }) =>
+        buildImportEdgeInsertParams(graphId, edge, props),
+      ),
+    );
     for (const candidate of accepted) {
       record(candidate.edge, { status: "created" });
     }
@@ -2301,7 +2322,7 @@ async function processEdgeSlice(
     record(
       edge,
       await processEdge(
-        backend,
+        frame,
         graphId,
         registry,
         edge,
@@ -2315,7 +2336,7 @@ async function processEdgeSlice(
 }
 
 async function processEdge(
-  backend: GraphBackend | TransactionBackend,
+  frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
   edge: InterchangeEdge,
@@ -2367,7 +2388,7 @@ async function processEdge(
     // soft-deleted would bypass the endpoint-liveness invariant the
     // collection API enforces.
     if (!importedNodeIds.has(fromKey)) {
-      const fromExists = await backend.getNode(
+      const fromExists = await frame.target.getNode(
         graphId,
         edge.from.kind,
         edge.from.id,
@@ -2381,7 +2402,11 @@ async function processEdge(
     }
 
     if (!importedNodeIds.has(toKey)) {
-      const toExists = await backend.getNode(graphId, edge.to.kind, edge.to.id);
+      const toExists = await frame.target.getNode(
+        graphId,
+        edge.to.kind,
+        edge.to.id,
+      );
       if (toExists === undefined || !isLiveNodeRow(toExists)) {
         return {
           status: "error",
@@ -2408,7 +2433,7 @@ async function processEdge(
   }
 
   // Check if edge already exists
-  const existing = await backend.getEdge(graphId, edge.id);
+  const existing = await frame.target.getEdge(graphId, edge.id);
 
   if (existing) {
     // Same prior question as the batched path, answered by the same owner.
@@ -2440,8 +2465,7 @@ async function processEdge(
           return { status: "error", error: updateWindow.error };
         }
         const updateError = await updateImportedEdge(
-          backend,
-          graphId,
+          frame.session,
           edge,
           propsResult.data,
           updateWindow.value,
@@ -2454,8 +2478,29 @@ async function processEdge(
     }
   }
 
-  // Create new edge
-  await backend.insertEdge({
+  // Create new edge, through the RETURNING single-insert shape this leg
+  // emitted before the migration; the row it returns is discarded.
+  await frame.session.createEdge(
+    buildImportEdgeInsertParams(graphId, edge, propsResult.data),
+  );
+
+  return { status: "created" };
+}
+
+/**
+ * The insert params for one imported edge.
+ *
+ * ONE owner, shared by the batched slice and the per-row fallback, for the
+ * same reason {@link importNodeInsertWork} is one: two spellings of the same
+ * row are two spellings that can drift. There is no side-effect half here
+ * because an edge write obliges no derived data.
+ */
+function buildImportEdgeInsertParams(
+  graphId: string,
+  edge: InterchangeEdge,
+  props: Record<string, unknown>,
+): EdgeInsertWork {
+  return {
     graphId,
     id: edge.id,
     kind: edge.kind,
@@ -2463,12 +2508,10 @@ async function processEdge(
     fromId: edge.from.id,
     toKind: edge.to.kind,
     toId: edge.to.id,
-    props: propsResult.data,
+    props,
     ...(edge.validFrom !== undefined && { validFrom: edge.validFrom }),
     ...(edge.validTo !== undefined && { validTo: edge.validTo }),
-  });
-
-  return { status: "created" };
+  };
 }
 
 // ============================================================
