@@ -2426,6 +2426,7 @@ export type GraphBackend = Readonly<{
     deleteFulltextBatch?: (this: void, params: DeleteFulltextBatchParams) => Promise<void>;
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
+    ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -6439,7 +6440,7 @@ type UniqueRow = Readonly<{
 }>;
 
 // @public (undocumented)
-type UnsafeHistoryStoreBackendMember = "clearGraph" | "commitSchemaVersionWithPreflight" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "identityTableDdl" | "rebuildContribution" | "repairContributions" | "schemaWriteTransaction" | "transaction" | "trustedImport";
+type UnsafeHistoryStoreBackendMember = "clearGraph" | "commitSchemaVersionWithPreflight" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "ensureTrigramExtension" | "identityTableDdl" | "rebuildContribution" | "repairContributions" | "schemaWriteTransaction" | "transaction" | "trustedImport";
 
 // @public
 export class UnsupportedBackendCapabilityError extends TypeGraphError {

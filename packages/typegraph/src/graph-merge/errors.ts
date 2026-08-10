@@ -160,6 +160,7 @@ export type MergeConstraintConflictErrorDetails = Readonly<{
 export class MergeConstraintConflictError extends MergeError {
   protected static override readonly errorCategory = "constraint";
   override readonly code = MERGE_ERROR_CODES.constraintConflict;
+  declare readonly category: "constraint";
   declare readonly cause: TypeGraphError;
   declare readonly details: MergeConstraintConflictErrorDetails;
 
