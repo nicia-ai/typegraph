@@ -43,6 +43,7 @@ export type {
   MatchSource,
   MatchStrategy,
 } from "./evidence";
+export { ingestionBranch } from "./ingestion-branch";
 export {
   applyMergePlan,
   merge,
@@ -121,6 +122,9 @@ export type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IngestionBranch,
+  IngestionNodeCollections,
+  MergeBranch,
   MergedCounts,
   MergeIncrementalArgs,
   MergeOptions,

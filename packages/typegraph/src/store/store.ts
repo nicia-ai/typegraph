@@ -318,6 +318,10 @@ import {
   type TransactionOutcome,
   type UnboundLiveStoreOptions,
 } from "./types";
+import {
+  applyResolvedNodeUniqueness,
+  createUniquenessContext,
+} from "./uniqueness";
 
 type StoreSchemaMetadata = Readonly<{
   schemaVersion: number | undefined;
@@ -1009,6 +1013,52 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.identityAtCoordinate(coordinate),
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
+      applyResolvedNodeUniqueness: async (target, writes, apply) => {
+        const upserts = writes.upserts.map((upsert) => {
+          if (!hasOwnKey(this.#graph.nodes, upsert.kind)) {
+            throw new KindNotFoundError(upsert.kind, "node", {
+              graphId: this.graphId,
+            });
+          }
+          const registration = this.#graph.nodes[upsert.kind];
+          if (registration === undefined) {
+            throw new KindNotFoundError(upsert.kind, "node", {
+              graphId: this.graphId,
+            });
+          }
+          return {
+            ...upsert,
+            constraints: registration.unique ?? [],
+          };
+        });
+        const constrainedKinds = new Set(
+          Object.entries(this.#graph.nodes)
+            .filter(
+              ([, registration]) => (registration.unique ?? []).length > 0,
+            )
+            .map(([kind]) => kind),
+        );
+        const releases = writes.releases.filter((release) => {
+          if (!Object.hasOwn(this.#graph.nodes, release.kind)) {
+            throw new KindNotFoundError(release.kind, "node", {
+              graphId: this.graphId,
+            });
+          }
+          return constrainedKinds.has(release.kind);
+        });
+        if (
+          upserts.every((upsert) => upsert.constraints.length === 0) &&
+          releases.length === 0
+        ) {
+          return apply();
+        }
+        return applyResolvedNodeUniqueness(
+          createUniquenessContext(this.graphId, this.#registry, target),
+          upserts,
+          releases,
+          apply,
+        );
+      },
       liveNodesSharingIds: async (ids, target) => {
         const backend = target ?? this.#baseBackend;
         const liveKindsById = await liveNodeKindsSharingIds(

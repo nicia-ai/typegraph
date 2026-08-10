@@ -14,8 +14,9 @@ import {
   getKindsForUniquenessCheck,
 } from "../constraints";
 import { type UniqueConstraint } from "../core/types";
-import { UniquenessError } from "../errors";
+import { ConfigurationError, UniquenessError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
+import { encodeTupleKey } from "../utils/tuple-key";
 
 /**
  * Context for uniqueness operations.
@@ -33,6 +34,276 @@ export function createUniquenessContext(
   backend: GraphBackend | TransactionBackend,
 ): UniquenessContext {
   return { graphId, registry, backend };
+}
+
+/** A complete node after-image whose uniqueness claims belong to one resolved write set. */
+export type ResolvedNodeUniquenessUpsert = Readonly<{
+  kind: string;
+  id: string;
+  props: Readonly<Record<string, unknown>>;
+  constraints: readonly UniqueConstraint[];
+}>;
+
+/** A node whose current uniqueness claims the resolved write set releases. */
+export type ResolvedNodeUniquenessRelease = Readonly<{
+  kind: string;
+  id: string;
+}>;
+
+type ProposedUniqueClaim = Readonly<{
+  kind: string;
+  id: string;
+  constraint: UniqueConstraint;
+  key: string;
+  kindsToCheck: readonly string[];
+}>;
+
+function nodeIdentityKey(reference: ResolvedNodeUniquenessRelease): string {
+  return encodeTupleKey([reference.kind, reference.id]);
+}
+
+function proposedUniqueClaims(
+  ctx: UniquenessContext,
+  upserts: readonly ResolvedNodeUniquenessUpsert[],
+): readonly ProposedUniqueClaim[] {
+  const claims: ProposedUniqueClaim[] = [];
+  const claimsByCheckedKind = new Map<string, ProposedUniqueClaim[]>();
+  const claimsByOwnKind = new Map<string, ProposedUniqueClaim[]>();
+  const orderedConstraints: UniqueConstraint[] = [];
+  const seenConstraints = new Set<UniqueConstraint>();
+  for (const upsert of upserts) {
+    for (const constraint of upsert.constraints) {
+      if (seenConstraints.has(constraint)) continue;
+      seenConstraints.add(constraint);
+      orderedConstraints.push(constraint);
+    }
+  }
+  for (const constraint of orderedConstraints) {
+    for (const upsert of upserts) {
+      if (!upsert.constraints.includes(constraint)) continue;
+      if (!checkWherePredicate(constraint, upsert.props)) continue;
+      const claim = {
+        kind: upsert.kind,
+        id: upsert.id,
+        constraint,
+        key: computeUniqueKey(
+          upsert.props,
+          constraint.fields,
+          constraint.collation,
+        ),
+        kindsToCheck: getKindsForUniquenessCheck(
+          upsert.kind,
+          constraint.scope,
+          ctx.registry,
+        ),
+      } satisfies ProposedUniqueClaim;
+      const identity = nodeIdentityKey(claim);
+      const candidateGroups = [
+        claimsByCheckedKind.get(
+          encodeTupleKey([constraint.name, claim.key, claim.kind]),
+        ) ?? [],
+        ...claim.kindsToCheck.map(
+          (kind) =>
+            claimsByOwnKind.get(
+              encodeTupleKey([constraint.name, claim.key, kind]),
+            ) ?? [],
+        ),
+      ];
+      const collision = candidateGroups
+        .flat()
+        .find((existing) => nodeIdentityKey(existing) !== identity);
+      if (collision !== undefined) {
+        throw new UniquenessError({
+          constraintName: constraint.name,
+          kind: collision.kind,
+          existingId: collision.id,
+          newId: upsert.id,
+          fields: constraint.fields,
+        });
+      }
+      claims.push(claim);
+      const ownKindKey = encodeTupleKey([
+        constraint.name,
+        claim.key,
+        claim.kind,
+      ]);
+      const sameKindClaims = claimsByOwnKind.get(ownKindKey);
+      if (sameKindClaims === undefined) {
+        claimsByOwnKind.set(ownKindKey, [claim]);
+      } else {
+        sameKindClaims.push(claim);
+      }
+      for (const kind of claim.kindsToCheck) {
+        const checkedKindKey = encodeTupleKey([
+          constraint.name,
+          claim.key,
+          kind,
+        ]);
+        const sameDomainClaims = claimsByCheckedKind.get(checkedKindKey);
+        if (sameDomainClaims === undefined) {
+          claimsByCheckedKind.set(checkedKindKey, [claim]);
+        } else {
+          sameDomainClaims.push(claim);
+        }
+      }
+    }
+  }
+  return claims;
+}
+
+type UniqueProbeGroup = Readonly<{
+  nodeKind: string;
+  constraintName: string;
+  claimsByKey: ReadonlyMap<string, ProposedUniqueClaim>;
+}>;
+
+function groupUniqueClaimsForBatchProbe(
+  claims: readonly ProposedUniqueClaim[],
+): readonly UniqueProbeGroup[] {
+  const groups = new Map<
+    string,
+    {
+      nodeKind: string;
+      constraintName: string;
+      claimsByKey: Map<string, ProposedUniqueClaim>;
+    }
+  >();
+  for (const claim of claims) {
+    for (const nodeKind of claim.kindsToCheck) {
+      const groupKey = encodeTupleKey([nodeKind, claim.constraint.name]);
+      const existing = groups.get(groupKey);
+      if (existing === undefined) {
+        groups.set(groupKey, {
+          nodeKind,
+          constraintName: claim.constraint.name,
+          claimsByKey: new Map([[claim.key, claim]]),
+        });
+        continue;
+      }
+      existing.claimsByKey.set(claim.key, claim);
+    }
+  }
+  return [...groups.values()];
+}
+
+/**
+ * Validates node uniqueness against the FINAL state of a resolved write set.
+ *
+ * All proposed after-images are compared together before persisted sidecars
+ * are consulted. Persisted owners released or replaced by this same set are
+ * ignored, which permits atomic swaps and handoffs while still refusing every
+ * owner outside the set. The backend probe is batch-only by contract: callers
+ * that need this set semantic must not quietly degrade to sequential checks.
+ */
+export async function validateResolvedNodeUniqueness(
+  ctx: UniquenessContext,
+  upserts: readonly ResolvedNodeUniquenessUpsert[],
+  releases: readonly ResolvedNodeUniquenessRelease[] = [],
+): Promise<void> {
+  const checkUniqueBatch = ctx.backend.checkUniqueBatch;
+  if (checkUniqueBatch === undefined) {
+    throw new ConfigurationError(
+      "Resolved node writes require batched uniqueness probes",
+      { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
+    );
+  }
+  const claims = proposedUniqueClaims(ctx, upserts);
+  if (claims.length === 0) return;
+
+  const affectedOwners = new Set(
+    [...upserts, ...releases].map((reference) => nodeIdentityKey(reference)),
+  );
+  for (const group of groupUniqueClaimsForBatchProbe(claims)) {
+    const existingRows = await checkUniqueBatch({
+      graphId: ctx.graphId,
+      nodeKind: group.nodeKind,
+      constraintName: group.constraintName,
+      keys: [...group.claimsByKey.keys()],
+    });
+    for (const existing of existingRows) {
+      if (
+        affectedOwners.has(
+          nodeIdentityKey({
+            kind: existing.concrete_kind,
+            id: existing.node_id,
+          }),
+        )
+      ) {
+        continue;
+      }
+      const claim = group.claimsByKey.get(existing.key);
+      if (claim === undefined) continue;
+      throw new UniquenessError({
+        constraintName: group.constraintName,
+        kind: group.nodeKind,
+        existingId: existing.node_id,
+        newId: claim.id,
+        fields: claim.constraint.fields,
+      });
+    }
+  }
+}
+
+/**
+ * Prepares a transaction to apply a resolved node write set sequentially.
+ *
+ * Validation happens before any mutation. Once it succeeds, every affected
+ * node's old sidecars are batch-cleared so later per-node upserts can claim the
+ * validated final keys in any order (including swaps and handoffs).
+ */
+async function prepareResolvedNodeUniqueness(
+  ctx: UniquenessContext,
+  upserts: readonly ResolvedNodeUniquenessUpsert[],
+  releases: readonly ResolvedNodeUniquenessRelease[],
+): Promise<void> {
+  const hardDeleteUniquesByNodeIds = ctx.backend.hardDeleteUniquesByNodeIds;
+  if (
+    ctx.backend.checkUniqueBatch === undefined ||
+    ctx.backend.insertUniqueBatch === undefined ||
+    hardDeleteUniquesByNodeIds === undefined
+  ) {
+    throw new ConfigurationError(
+      "Resolved node writes require batched uniqueness operations",
+      { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
+    );
+  }
+  await validateResolvedNodeUniqueness(ctx, upserts, releases);
+
+  const idsByKind = new Map<string, Set<string>>();
+  for (const reference of [...upserts, ...releases]) {
+    const ids = idsByKind.get(reference.kind) ?? new Set<string>();
+    ids.add(reference.id);
+    idsByKind.set(reference.kind, ids);
+  }
+  for (const [concreteKind, nodeIds] of idsByKind) {
+    await hardDeleteUniquesByNodeIds({
+      graphId: ctx.graphId,
+      concreteKind,
+      nodeIds: [...nodeIds],
+    });
+  }
+}
+
+/**
+ * Applies writes between the resolved-set preflight and one final batch
+ * sidecar rebuild.
+ *
+ * The rebuild is required even though ordinary upserts claim their own keys:
+ * an unchanged upsert may be coalesced and skip all of its normal side effects
+ * after preparation cleared the old reservation. Re-inserting every approved
+ * claim is idempotent and makes the resolved-set transition independent of
+ * whether individual writes were coalesced.
+ */
+export async function applyResolvedNodeUniqueness<Output>(
+  ctx: UniquenessContext,
+  upserts: readonly ResolvedNodeUniquenessUpsert[],
+  releases: readonly ResolvedNodeUniquenessRelease[],
+  apply: () => Promise<Output>,
+): Promise<Output> {
+  await prepareResolvedNodeUniqueness(ctx, upserts, releases);
+  const result = await apply();
+  await insertUniquenessEntriesBatch(ctx, upserts);
+  return result;
 }
 
 /**
