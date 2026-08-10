@@ -648,6 +648,42 @@ export function assertNoContradictoryIdentityClosure(
   identityContext: PlanIdentityContext,
   nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
 ): void {
+  const boundaries = new Set<string>();
+  for (const assertion of [...plannedAssertions, ...baseAssertions]) {
+    boundaries.add(assertion.validFrom);
+    if (assertion.validTo !== undefined) boundaries.add(assertion.validTo);
+  }
+  const coordinates = boundaries.size === 0 ? [""] : [...boundaries].toSorted();
+  const visibleAt = (
+    assertion: IdentityTransferAssertion,
+    coordinate: string,
+  ): boolean =>
+    assertion.validFrom <= coordinate &&
+    (assertion.validTo === undefined || coordinate < assertion.validTo);
+  for (const coordinate of coordinates) {
+    assertNoContradictoryIdentityClosureAtCoordinate(
+      plannedAssertions.filter((assertion) => visibleAt(assertion, coordinate)),
+      retractions,
+      baseAssertions.filter((assertion) => visibleAt(assertion, coordinate)),
+      deletedNodes,
+      canonicalOf,
+      retypeMap,
+      identityContext,
+      nodeUniverse,
+    );
+  }
+}
+
+function assertNoContradictoryIdentityClosureAtCoordinate(
+  plannedAssertions: readonly IdentityTransferAssertion[],
+  retractions: readonly string[],
+  baseAssertions: readonly IdentityTransferAssertion[],
+  deletedNodes: ReadonlySet<MergeKey>,
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+  retypeMap: ReadonlyMap<MergeKey, string>,
+  identityContext: PlanIdentityContext,
+  nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
+): void {
   const retracted = new Set(retractions);
   // Deleting a node ends its assertions, so a base assertion touching a
   // plan-deleted endpoint must not conduct in the simulated post-merge
@@ -1070,7 +1106,7 @@ export function assertionTruthKey(assertion: LedgerAssertion): string {
  * timestamp while the target's current row carries none, which makes the
  * complete {@link assertionTruthKey} unusable for that question.
  */
-function assertionIdentityKey(assertion: LedgerAssertion): string {
+export function assertionIdentityKey(assertion: LedgerAssertion): string {
   return JSON.stringify([
     assertion.relation,
     ...endpointTuple(assertion),

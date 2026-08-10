@@ -687,6 +687,73 @@ export class IdentityContradictionError extends TypeGraphError {
   }
 }
 
+export type IdentityValidityWindowErrorDetails = Readonly<{
+  reason:
+    | "future-valid-from"
+    | "future-valid-to"
+    | "inverted"
+    | "overlapping-open-window";
+  validFrom: string;
+  validTo?: string;
+  operationInstant: string;
+}>;
+
+/** Thrown when an identity assertion validity window cannot be applied. */
+export class IdentityValidityWindowError extends TypeGraphError {
+  declare readonly details: IdentityValidityWindowErrorDetails;
+
+  constructor(details: IdentityValidityWindowErrorDetails) {
+    const code =
+      details.reason === "future-valid-from" ? "IDENTITY_VALIDITY_FUTURE_START"
+      : details.reason === "future-valid-to" ? "IDENTITY_VALIDITY_FUTURE_END"
+      : details.reason === "inverted" ? "IDENTITY_VALIDITY_INVERTED"
+      : "IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT";
+    super(
+      `Identity assertion validity window cannot be applied: ${details.reason}.`,
+      code,
+      {
+        details,
+        category: "user",
+        suggestion:
+          details.reason === "inverted" ? "Pass validFrom at or before validTo."
+          : details.reason === "overlapping-open-window" ?
+            "Retract the existing open assertion before creating a different open validity window for the same relation and pair."
+          : "Use a boundary at or before the current operation clock; future-scheduled identity transitions are not supported.",
+      },
+    );
+    this.name = "IdentityValidityWindowError";
+  }
+}
+
+export type IdentityEndpointValidityErrorDetails = Readonly<{
+  endpoint: Readonly<{ kind: string; id: string }>;
+  assertionWindow: Readonly<{ validFrom: string; validTo?: string }>;
+  endpointWindow: Readonly<{
+    validFrom?: string;
+    validTo?: string;
+    deletedAt?: string;
+  }>;
+}>;
+
+/** Thrown when an identity endpoint does not exist throughout the assertion window. */
+export class IdentityEndpointValidityError extends TypeGraphError {
+  declare readonly details: IdentityEndpointValidityErrorDetails;
+
+  constructor(details: IdentityEndpointValidityErrorDetails) {
+    super(
+      `Identity endpoint ${details.endpoint.kind}/${details.endpoint.id} does not exist throughout the requested assertion validity window.`,
+      "IDENTITY_ENDPOINT_VALIDITY",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Choose an assertion window contained by both endpoint validity windows.",
+      },
+    );
+    this.name = "IdentityEndpointValidityError";
+  }
+}
+
 export type IdentitySeparationViolationErrorDetails = Readonly<{
   graphId: string;
   /**

@@ -10,6 +10,7 @@ export type {
   IdentityPair,
   IdentityReadFacade,
   IdentityRelation,
+  IdentityValidityWindow,
   IdentityWriteSummary,
 } from "./types";
 export { asIdentityAssertionId } from "./types";

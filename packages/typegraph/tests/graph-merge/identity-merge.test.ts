@@ -911,6 +911,41 @@ describe("plan-time derived identity contradictions", () => {
       ),
     ).not.toThrow();
   });
+
+  it("rejects overlapping historical truth and accepts adjacent windows", () => {
+    const same: IdentityTransferAssertion = {
+      id: "historical-same",
+      relation: "same",
+      a: { kind: "Person", id: "a" },
+      b: { kind: "Person", id: "b" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const different: IdentityTransferAssertion = {
+      id: "historical-different",
+      relation: "different",
+      a: same.a,
+      b: same.b,
+      validFrom: "2021-01-01T00:00:00.000Z",
+      validTo: "2023-01-01T00:00:00.000Z",
+    };
+    const check = (assertions: readonly IdentityTransferAssertion[]): void =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        noDisjoint,
+        [],
+      );
+
+    expect(() => check([same, different])).toThrow(IdentityMergeConflictError);
+    expect(() =>
+      check([same, { ...different, validFrom: requireDefined(same.validTo) }]),
+    ).not.toThrow();
+  });
 });
 
 describe("remapIdentityAssertionEndpoints committed precedence", () => {

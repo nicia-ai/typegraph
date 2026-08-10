@@ -30,7 +30,7 @@ import {
   edgeStateSignature,
   parseRowProps,
 } from "./canonical-props";
-import { assertionTruthKey } from "./merge-identity";
+import { assertionIdentityKey, assertionTruthKey } from "./merge-identity";
 import { compareStrings, type MergeKey, mergeKey } from "./node-key";
 import type {
   EdgeId,
@@ -692,8 +692,8 @@ export async function diffAgainstBase<G extends GraphDef>(
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
   const [baseIdentity, forkIdentity] = await Promise.all([
-    storeRuntime(baseStore).readCurrentIdentityAssertions("state"),
-    storeRuntime(forkStore).readCurrentIdentityAssertions("state"),
+    storeRuntime(baseStore).readCurrentIdentityAssertions("archival"),
+    storeRuntime(forkStore).readCurrentIdentityAssertions("archival"),
   ]);
   const baseIdentityById = new Map(
     baseIdentity.map((assertion) => [assertion.id, assertion]),
@@ -840,7 +840,8 @@ export async function diffAgainstBase<G extends GraphDef>(
           const base = baseIdentityById.get(assertion.id);
           return (
             base === undefined ||
-            assertionTruthKey(base) !== assertionTruthKey(assertion)
+            (assertionIdentityKey(base) !== assertionIdentityKey(assertion) &&
+              assertionTruthKey(base) !== assertionTruthKey(assertion))
           );
         })
         .toSorted((left, right) => compareStrings(left.id, right.id)),

@@ -104,11 +104,18 @@ export type IdentityAssertionResult<G extends GraphDef> = Readonly<{
   action: "created" | "existing";
 }>;
 
+/** The half-open effective-time window of an identity assertion. */
+export type IdentityValidityWindow = Readonly<{
+  validFrom?: string;
+  validTo?: string;
+}>;
+
 /** One ordered node pair handed to `bulkAssertSame` / `bulkAssertDifferent`. */
 export type IdentityPair<G extends GraphDef> = Readonly<{
   a: IdentityNodeRefInput<G>;
   b: IdentityNodeRefInput<G>;
-}>;
+}> &
+  IdentityValidityWindow;
 
 /**
  * The read half of the identity surface: equivalence-set membership,
@@ -155,10 +162,12 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
     assertSame: (
       a: IdentityNodeRefInput<G>,
       b: IdentityNodeRefInput<G>,
+      window?: IdentityValidityWindow,
     ) => Promise<IdentityAssertionResult<G>>;
     assertDifferent: (
       a: IdentityNodeRefInput<G>,
       b: IdentityNodeRefInput<G>,
+      window?: IdentityValidityWindow,
     ) => Promise<IdentityAssertionResult<G>>;
     bulkAssertSame: (
       pairs: readonly IdentityPair<G>[],

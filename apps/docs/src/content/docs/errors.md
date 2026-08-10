@@ -299,6 +299,18 @@ try {
 }
 ```
 
+### Identity validity errors
+
+`IdentityValidityWindowError` refuses a future start, future end, inverted
+window, or a second non-identical open window for one current semantic pair.
+Its code identifies the reason: `IDENTITY_VALIDITY_FUTURE_START`,
+`IDENTITY_VALIDITY_FUTURE_END`, `IDENTITY_VALIDITY_INVERTED`, or
+`IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT`.
+
+`IdentityEndpointValidityError` (`IDENTITY_ENDPOINT_VALIDITY`) means an
+explicit assertion window extends outside an endpoint node's own validity or
+deletion bounds. Both errors are constraint-category package-root exports.
+
 ### `IdentityMergeConflictError`
 
 Detected at merge **plan time** when the branches being merged carry opposing
@@ -679,6 +691,7 @@ Operational Identity lifecycle failures use stable `details.code` values on
 | `IDENTITY_SCHEMA_CONTRADICTION` | Existing nodes or assertions contradict the proposed identity profile or ontology, or the materialized closure disagrees with the assertions it was derived from. Run `rebuildIdentityClosure(store)` to recover from a closure mismatch. |
 | `IDENTITY_IMPORT_REQUIRES_PROFILE` | An interchange document carries an `identity` section but the target graph does not have the profile enabled. |
 | `IDENTITY_MERGE_REQUIRES_PROFILE` | A branch carries identity changes but the merge target graph does not have the profile enabled. |
+| `IDENTITY_ARCHIVAL_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An archival identity export explicitly disabled temporal fields. Remove `includeTemporal` or set it to `true`; endpoint bounds are required to validate bounded assertions on import. |
 | `IDENTITY_IMPORT_ID_CONFLICT` | An imported assertion id already exists in the target ledger identifying different truth (relation, endpoints, or validity window). |
 | `RECORDED_IDENTITY_SCHEMA_MISSING` | A `history: true` open of an identity-enabled graph could not find the recorded identity relation. Bundled backends provision it, so this is rare there and more likely on a custom backend. |
 
@@ -1072,6 +1085,11 @@ try {
 | `VALIDATION_ERROR` | `ValidationError` | user | Schema validation failed |
 | `DISJOINT_ERROR` | `DisjointError` | constraint | Disjointness constraint violated |
 | `IDENTITY_CONTRADICTION` | `IdentityContradictionError` | constraint | Identity mutation would make the assertion ledger contradictory |
+| `IDENTITY_VALIDITY_FUTURE_START` | `IdentityValidityWindowError` | constraint | Identity assertion starts after the operation clock |
+| `IDENTITY_VALIDITY_FUTURE_END` | `IdentityValidityWindowError` | constraint | Identity assertion ends after the operation clock |
+| `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | constraint | Identity assertion ends before it starts |
+| `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
+| `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
 | `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |

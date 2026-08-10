@@ -480,4 +480,50 @@ describe.each(backendMatrix())("cascade retraction [$name]", (entry) => {
     expect(row.validTo).toBeDefined();
     expect(row.endedBy).toBeUndefined();
   });
+
+  it("carries a branch-authored retrospective identity window through merge", async () => {
+    const [forkPoint] = await createStoreWithSchema(
+      anchoredGraph,
+      await makeBackend(),
+    );
+    for (const id of ["historical-a", "historical-b"]) {
+      await forkPoint.nodes.Anchor.create(
+        { name: id },
+        { id, validFrom: "2019-01-01T00:00:00.000Z" },
+      );
+    }
+    const source = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const assertion = await source.store.identity.assertSame(
+      { kind: "Anchor", id: "historical-a" as never },
+      { kind: "Anchor", id: "historical-b" as never },
+      {
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2022-01-01T00:00:00.000Z",
+      },
+    );
+
+    const diff = await diffAgainstBase(forkPoint, source.store);
+    expect(diff.identity.new).toEqual([assertion.assertion]);
+
+    const result = await merge(forkPoint, [source], {
+      branchOrder: [BRANCH_A],
+    });
+    if (isErr(result)) throw result.error;
+    expect(
+      await forkPoint
+        .asOf("2021-01-01T00:00:00.000Z")
+        .identity.areSame(
+          { kind: "Anchor", id: "historical-a" as never },
+          { kind: "Anchor", id: "historical-b" as never },
+        ),
+    ).toBe(true);
+    expect(
+      await forkPoint.identity.areSame(
+        { kind: "Anchor", id: "historical-a" as never },
+        { kind: "Anchor", id: "historical-b" as never },
+      ),
+    ).toBe(false);
+  });
 });

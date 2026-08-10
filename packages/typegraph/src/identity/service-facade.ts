@@ -71,7 +71,15 @@ import {
   type IdentityNodeRefInput,
   type IdentityReadFacade,
   type IdentityRelation,
+  type IdentityValidityWindow,
 } from "./types";
+import { hasExplicitIdentityValidityWindow } from "./validity-window";
+
+type WindowedIdentityPair<G extends GraphDef> = Readonly<{
+  a: IdentityNodeRefInput<G>;
+  b: IdentityNodeRefInput<G>;
+}> &
+  IdentityValidityWindow;
 
 function assertionSemanticKey(
   relation: IdentityRelation,
@@ -281,6 +289,33 @@ async function bulkAssertPairs<G extends GraphDef>(
         { kind: row.a_kind, id: row.a_id },
         { kind: row.b_kind, id: row.b_id },
       ]),
+    );
+  }
+  return results;
+}
+
+async function bulkAssertWindowedPairs<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  target: Backend,
+  relation: IdentityRelation,
+  pairs: readonly WindowedIdentityPair<G>[],
+  touch: IdentityTouch,
+  operationInstant: string,
+): Promise<readonly IdentityAssertionResult<G>[]> {
+  const results: IdentityAssertionResult<G>[] = [];
+  for (const pair of pairs) {
+    const window = hasExplicitIdentityValidityWindow(pair) ? pair : undefined;
+    results.push(
+      await assertPair(
+        ctx,
+        target,
+        relation,
+        pair.a,
+        pair.b,
+        touch,
+        window,
+        operationInstant,
+      ),
     );
   }
   return results;
@@ -641,28 +676,68 @@ export function createIdentityFacade<G extends GraphDef>(
   return {
     ...createIdentityReadFacade(ctx),
 
-    assertSame(a, b) {
-      return runIdentityMutation(ctx, (target, touch) =>
-        assertPair(ctx, target, "same", a, b, touch),
-      );
+    assertSame(a, b, window) {
+      return runIdentityMutation(ctx, (target, touch) => {
+        const operationInstant = nowIso();
+        return assertPair(
+          ctx,
+          target,
+          "same",
+          a,
+          b,
+          touch,
+          hasExplicitIdentityValidityWindow(window) ? window : undefined,
+          operationInstant,
+        );
+      });
     },
 
-    assertDifferent(a, b) {
-      return runIdentityMutation(ctx, (target, touch) =>
-        assertPair(ctx, target, "different", a, b, touch),
-      );
+    assertDifferent(a, b, window) {
+      return runIdentityMutation(ctx, (target, touch) => {
+        const operationInstant = nowIso();
+        return assertPair(
+          ctx,
+          target,
+          "different",
+          a,
+          b,
+          touch,
+          hasExplicitIdentityValidityWindow(window) ? window : undefined,
+          operationInstant,
+        );
+      });
     },
 
     bulkAssertSame(pairs) {
-      return runIdentityMutation(ctx, (target, touch) =>
-        bulkAssertPairs(ctx, target, "same", pairs, touch),
-      );
+      return runIdentityMutation(ctx, (target, touch) => {
+        if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
+          return bulkAssertPairs(ctx, target, "same", pairs, touch);
+        }
+        return bulkAssertWindowedPairs(
+          ctx,
+          target,
+          "same",
+          pairs,
+          touch,
+          nowIso(),
+        );
+      });
     },
 
     bulkAssertDifferent(pairs) {
-      return runIdentityMutation(ctx, (target, touch) =>
-        bulkAssertPairs(ctx, target, "different", pairs, touch),
-      );
+      return runIdentityMutation(ctx, (target, touch) => {
+        if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
+          return bulkAssertPairs(ctx, target, "different", pairs, touch);
+        }
+        return bulkAssertWindowedPairs(
+          ctx,
+          target,
+          "different",
+          pairs,
+          touch,
+          nowIso(),
+        );
+      });
     },
 
     retractAssertion(id) {

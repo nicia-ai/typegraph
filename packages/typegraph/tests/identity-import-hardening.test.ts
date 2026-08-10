@@ -124,13 +124,14 @@ async function seedPair<TNativeTransaction>(
     ReturnType<typeof createInitializedStore<typeof graph, TNativeTransaction>>
   >,
 ) {
+  const validFrom = isoAt(-4 * HOUR_MS);
   const person = await store.nodes.Person.create(
     { name: "Alice" },
-    { id: "alice" },
+    { id: "alice", validFrom },
   );
   const author = await store.nodes.Author.create(
     { penName: "A." },
-    { id: "author" },
+    { id: "author", validFrom },
   );
   return {
     person,
@@ -249,6 +250,42 @@ describe("archival identity import window bounds", () => {
     await expect(
       storeRuntime(store).validateIdentity(),
     ).resolves.toBeUndefined();
+  });
+
+  it("reports a duplicate bounded assertion id as an import id conflict", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { personRef, authorRef } = await seedPair(store);
+    const firstStart = isoAt(-3 * HOUR_MS);
+    const boundary = isoAt(-2 * HOUR_MS);
+    const secondEnd = isoAt(-HOUR_MS);
+
+    await expect(
+      storeRuntime(store).importIdentityAssertionsAtTarget(
+        store.backend,
+        [
+          transfer(
+            "duplicate-window",
+            personRef,
+            authorRef,
+            firstStart,
+            boundary,
+          ),
+          transfer(
+            "duplicate-window",
+            personRef,
+            authorRef,
+            boundary,
+            secondEnd,
+          ),
+        ],
+        "archival",
+      ),
+    ).rejects.toMatchObject({
+      details: {
+        code: "IDENTITY_IMPORT_ID_CONFLICT",
+        assertionId: "duplicate-window",
+      },
+    });
   });
 
   it("round-trips the store's own archival export, retraction window included", async () => {
@@ -787,8 +824,15 @@ describe("importGraph identity failure reporting", () => {
     // carries ended assertions whose endpoints were later soft-deleted (the
     // rows still exist), so those must import.
     const store = await createInitializedStore(graph, createTestBackend());
-    await store.nodes.Person.create({ name: "Gone" }, { id: "gone" });
-    await store.nodes.Person.create({ name: "Stays" }, { id: "stays" });
+    const validFrom = isoAt(-3 * HOUR_MS);
+    await store.nodes.Person.create(
+      { name: "Gone" },
+      { id: "gone", validFrom },
+    );
+    await store.nodes.Person.create(
+      { name: "Stays" },
+      { id: "stays", validFrom },
+    );
     await store.nodes.Person.delete("gone" as never);
 
     const [left, right] = orderPair(

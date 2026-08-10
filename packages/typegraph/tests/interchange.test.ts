@@ -2099,6 +2099,24 @@ describe("Identity interchange streaming", () => {
     expect(document.identity?.assertions).toEqual([]);
   });
 
+  it("refuses archival identity export when temporal fields are explicitly disabled", async () => {
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    await expect(
+      exportGraph(source, {
+        identityMode: "archival",
+        includeTemporal: false,
+      }),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "IDENTITY_ARCHIVAL_EXPORT_REQUIRES_TEMPORAL_FIELDS",
+      },
+    });
+  });
+
   it("round-trips header, nodes, edges, and identity through the stream", async () => {
     const source = await createInitializedStore(
       identityGraph,

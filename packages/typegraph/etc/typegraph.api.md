@@ -2864,9 +2864,33 @@ export type IdentityContradictionErrorDetails = Readonly<{
 }>;
 
 // @public
+export class IdentityEndpointValidityError extends TypeGraphError {
+    constructor(details: IdentityEndpointValidityErrorDetails);
+    // (undocumented)
+    readonly details: IdentityEndpointValidityErrorDetails;
+}
+
+// @public (undocumented)
+export type IdentityEndpointValidityErrorDetails = Readonly<{
+    endpoint: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    assertionWindow: Readonly<{
+        validFrom: string;
+        validTo?: string;
+    }>;
+    endpointWindow: Readonly<{
+        validFrom?: string;
+        validTo?: string;
+        deletedAt?: string;
+    }>;
+}>;
+
+// @public
 export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
-    assertSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertionResult<G>>;
-    assertDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertionResult<G>>;
+    assertSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
+    assertDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
     bulkAssertSame: (pairs: readonly IdentityPair<G>[]) => Promise<readonly IdentityAssertionResult<G>[]>;
     bulkAssertDifferent: (pairs: readonly IdentityPair<G>[]) => Promise<readonly IdentityAssertionResult<G>[]>;
     retractAssertion: (id: IdentityAssertionId) => Promise<IdentityAssertion<G> | undefined>;
@@ -2890,7 +2914,7 @@ export type IdentityNodeRefInput<G extends GraphDef> = NodeRef<AllNodeTypes<G>> 
 export type IdentityPair<G extends GraphDef> = Readonly<{
     a: IdentityNodeRefInput<G>;
     b: IdentityNodeRefInput<G>;
-}>;
+}> & IdentityValidityWindow;
 
 // @public
 export type IdentityReadFacade<G extends GraphDef> = Readonly<{
@@ -2943,6 +2967,27 @@ export type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends 
     includeIdentityMembers?: boolean;
 }> : Readonly<{
     includeIdentityMembers?: never;
+}>;
+
+// @public
+export type IdentityValidityWindow = Readonly<{
+    validFrom?: string;
+    validTo?: string;
+}>;
+
+// @public
+export class IdentityValidityWindowError extends TypeGraphError {
+    constructor(details: IdentityValidityWindowErrorDetails);
+    // (undocumented)
+    readonly details: IdentityValidityWindowErrorDetails;
+}
+
+// @public (undocumented)
+export type IdentityValidityWindowErrorDetails = Readonly<{
+    reason: "future-valid-from" | "future-valid-to" | "inverted" | "overlapping-open-window";
+    validFrom: string;
+    validTo?: string;
+    operationInstant: string;
 }>;
 
 // @public
