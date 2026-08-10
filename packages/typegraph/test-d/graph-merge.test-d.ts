@@ -18,6 +18,8 @@ import {
   type MatchEvidence,
   type MergePlanArtifact,
   type MergeOptions,
+  MergeConstraintConflictError,
+  type MergeConstraintConflictErrorDetails,
   MergeError,
   type MergeReport,
   type ReconcileTypesMode,
@@ -143,3 +145,10 @@ if (isErr(mergeResult)) {
   expectAssignable<MergeError>(mergeResult.error);
 }
 expectAssignable<MergeReport<typeof graph>>(unwrap(mergeResult));
+
+declare const constraintConflict: MergeConstraintConflictError;
+expectAssignable<MergeError>(constraintConflict);
+expectType<"GRAPH_MERGE_CONSTRAINT_CONFLICT">(constraintConflict.code);
+expectType<"constraint">(constraintConflict.category);
+expectType<MergeConstraintConflictErrorDetails>(constraintConflict.details);
+expectType<string>(constraintConflict.details.constraintCode);

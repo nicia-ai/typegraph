@@ -341,6 +341,40 @@ if (isErr(result)) {
 }
 ```
 
+### `MergeConstraintConflictError`
+
+Returned when `merge()`, `mergeIncremental()`, or `applyMergePlan()` resolves a
+plan whose final graph violates a deterministic store constraint. The store
+remains the owner of constraint enforcement: the merge translates its typed
+refusal only at the commit boundary, after the transaction has rolled back.
+
+```typescript
+import {
+  isErr,
+  merge,
+  MergeConstraintConflictError,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, branches);
+if (isErr(result) && result.error instanceof MergeConstraintConflictError) {
+  console.log(result.error.code); // "GRAPH_MERGE_CONSTRAINT_CONFLICT"
+  console.log(result.error.category); // "constraint"
+  console.log(result.error.details.constraintCode); // e.g. "CARDINALITY_ERROR"
+  console.log(result.error.details.edgeKind); // copied from the store error
+  console.log(result.error.cause); // the original CardinalityError, etc.
+}
+```
+
+Cardinality, uniqueness, endpoint, disjointness, and restricted-delete
+refusals share this surface when they arise from node or edge application.
+The planner normally co-buckets nodes with the same declared unique key, but a
+late store-owned uniqueness refusal uses the same completeness boundary rather
+than falling back to a system error.
+Identity truth conflicts retain `IdentityMergeConflictError`; backend,
+environment, and stale-plan failures retain their existing system errors.
+Constraint failure is atomic: neither graph writes nor merge provenance records
+survive.
+
 ### Merge plan and evidence errors
 
 The reviewable merge lifecycle also returns errors in its `Result` arm. It does
@@ -1105,6 +1139,7 @@ try {
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
+| `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |

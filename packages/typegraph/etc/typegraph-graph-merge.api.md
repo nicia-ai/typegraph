@@ -2680,6 +2680,7 @@ export const MERGE_ERROR_CODES: {
     readonly branch: "GRAPH_MERGE_BRANCH_ERROR";
     readonly similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE";
     readonly conflict: "GRAPH_MERGE_CONFLICT";
+    readonly constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
     readonly identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT";
     readonly baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH";
     readonly planCapability: "GRAPH_MERGE_PLAN_CAPABILITY";
@@ -2718,6 +2719,27 @@ export class MergeConflictError extends MergeError {
     // (undocumented)
     readonly code: "GRAPH_MERGE_CONFLICT";
 }
+
+// @public
+export class MergeConstraintConflictError extends MergeError {
+    constructor(cause: TypeGraphError);
+    // (undocumented)
+    readonly cause: TypeGraphError;
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
+    // (undocumented)
+    readonly details: MergeConstraintConflictErrorDetails;
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
+}
+
+// @public
+export type MergeConstraintConflictErrorDetails = Readonly<{
+    constraintCode: string;
+    constraintErrorName: string;
+    constraintDetails: Readonly<Record<string, unknown>>;
+    [key: string]: unknown;
+}>;
 
 // @public
 export type MergedCounts = Readonly<{
