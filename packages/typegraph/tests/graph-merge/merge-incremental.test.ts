@@ -1191,7 +1191,11 @@ describe.each(backendMatrix())(
         { kind: "Patient", id: "base-ana" },
         { kind: "Encounter", id: "enc-ended" },
         { on: "2025-06-01" },
-        { id: "ended", validTo: "2026-01-01T00:00:00.000Z" },
+        {
+          id: "ended",
+          validFrom: "2025-01-01T00:00:00.000Z",
+          validTo: "2026-01-01T00:00:00.000Z",
+        },
       );
       const provider = await forkOf(forkPoint);
       const target = (await forkOf(forkPoint)).store;
@@ -1224,7 +1228,11 @@ describe.each(backendMatrix())(
         cardinality: "oneActive",
       });
       expect(
-        (await target.edges.activeEncounter.getById(ended.id))?.meta.validTo,
+        (
+          await target
+            .asOf("2025-06-01T00:00:00.000Z")
+            .edges.activeEncounter.getById(ended.id)
+        )?.meta.validTo,
       ).toBeDefined();
       expect(
         (await target.edges.activeEncounter.find()).map((edge) => edge.id),
