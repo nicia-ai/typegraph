@@ -503,9 +503,11 @@ export function remapIdentityAssertionEndpoints(
 ): Readonly<{
   assertions: readonly IdentityTransferAssertion[];
   dropped: readonly DroppedItem[];
+  warnings: readonly string[];
 }> {
   const remapped: IdentityTransferAssertion[] = [];
   const dropped: DroppedItem[] = [];
+  const narrowingWarningById = new Map<string, string>();
   for (const assertion of assertions) {
     const remappedA = resolveIdentityEndpoint(
       assertion.a,
@@ -566,6 +568,14 @@ export function remapIdentityAssertionEndpoints(
       );
       continue;
     }
+    if (validFrom !== assertion.validFrom || validTo !== assertion.validTo) {
+      const originalUpper = assertion.validTo ?? "open";
+      const remappedUpper = validTo ?? "open";
+      narrowingWarningById.set(
+        assertion.id,
+        `Identity assertion ${JSON.stringify(assertion.id)} was narrowed from [${assertion.validFrom}, ${originalUpper}) to [${validFrom}, ${remappedUpper}) to fit its remapped endpoint windows.`,
+      );
+    }
     const result = {
       ...assertion,
       a,
@@ -621,6 +631,10 @@ export function remapIdentityAssertionEndpoints(
   return {
     assertions: deduped.survivors,
     dropped: [...dropped, ...deduped.dropped],
+    warnings: deduped.survivors.flatMap((assertion) => {
+      const warning = narrowingWarningById.get(assertion.id);
+      return warning === undefined ? [] : [warning];
+    }),
   };
 }
 

@@ -1306,6 +1306,9 @@ describe("remapIdentityAssertionEndpoints validity", () => {
       },
     ]);
     expect(result.dropped).toEqual([]);
+    expect(result.warnings).toEqual([
+      'Identity assertion "branch-assertion" was narrowed from [2020-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to [2022-01-01T00:00:00.000Z, 2024-01-01T00:00:00.000Z) to fit its remapped endpoint windows.',
+    ]);
   });
 
   it("drops a remapped assertion with no shared validity window", () => {
@@ -1330,6 +1333,7 @@ describe("remapIdentityAssertionEndpoints validity", () => {
         reason: EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON,
       },
     ]);
+    expect(result.warnings).toEqual([]);
   });
 
   it("honors a survivor window with only an upper bound", () => {

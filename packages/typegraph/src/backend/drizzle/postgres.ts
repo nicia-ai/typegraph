@@ -406,6 +406,22 @@ function parallelWorkerResetError(
   );
 }
 
+function vectorSerialFallbackPreparationError(
+  step: "drop-index" | "disable-parallel-workers",
+  parallelBuildError: unknown,
+  preparationError: unknown,
+): AggregateError {
+  const action =
+    step === "drop-index" ?
+      "drop the partial vector index"
+    : "disable parallel workers for the serial retry";
+  return new AggregateError(
+    [preparationError],
+    `PostgreSQL could not ${action} after the parallel vector index build exhausted resources.`,
+    { cause: parallelBuildError },
+  );
+}
+
 function reportParallelWorkerResetFailure(
   tableName: string,
   resetError: unknown,
@@ -456,8 +472,23 @@ export async function runVectorIndexBuildWithSerialFallback(
     await execute(indexStatement);
   } catch (error) {
     if (!isInsufficientResourcesError(error)) throw error;
-    if (dropStatement !== undefined) await execute(dropStatement);
-    await runSerialVectorIndexBuild(execute, tableName, indexStatement);
+    if (dropStatement !== undefined) {
+      try {
+        await execute(dropStatement);
+      } catch (dropError) {
+        throw vectorSerialFallbackPreparationError(
+          "drop-index",
+          error,
+          dropError,
+        );
+      }
+    }
+    await runSerialVectorIndexBuild(
+      execute,
+      tableName,
+      indexStatement,
+      error,
+    );
   }
 }
 
@@ -486,9 +517,19 @@ export async function runSerialVectorIndexBuild(
   execute: ExecutePostgresStatement,
   tableName: string,
   indexStatement: ExecutableSql,
+  parallelBuildError?: unknown,
 ): Promise<void> {
   const table = portableSql.identifier(tableName);
-  await execute(portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`);
+  try {
+    await execute(portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`);
+  } catch (setError) {
+    if (parallelBuildError === undefined) throw setError;
+    throw vectorSerialFallbackPreparationError(
+      "disable-parallel-workers",
+      parallelBuildError,
+      setError,
+    );
+  }
 
   let buildFailure: Readonly<{ error: unknown }> | undefined;
   try {

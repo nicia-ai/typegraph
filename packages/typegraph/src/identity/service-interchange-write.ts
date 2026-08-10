@@ -248,7 +248,11 @@ function reconcileReplacementWindows(
   return assertions.map((assertion) => {
     if (assertion.validTo !== undefined) return assertion;
     const retractionEnd = retractionEndByReplacement.get(
-      identityAssertionSemanticKey(assertion.relation, assertion.a, assertion.b),
+      identityAssertionSemanticKey(
+        assertion.relation,
+        assertion.a,
+        assertion.b,
+      ),
     );
     if (retractionEnd === undefined || assertion.validFrom >= retractionEnd) {
       return assertion;

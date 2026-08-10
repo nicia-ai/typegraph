@@ -1593,7 +1593,7 @@ function buildInternalMergePlan<G extends GraphDef>(
       ),
     ),
     provenanceRecords,
-    warnings: candidateWarnings,
+    warnings: [...candidateWarnings, ...identityRemap.warnings],
     ...(options.candidateDiagnostics === undefined ?
       {}
     : {

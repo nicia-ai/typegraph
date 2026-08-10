@@ -219,6 +219,54 @@ describe("Postgres vector-index parallel worker cleanup", () => {
     ]);
   });
 
+  it("preserves the resource failure when dropping the partial index fails", async () => {
+    const resourceError = insufficientResourcesError(
+      "parallel build exhausted memory",
+    );
+    const dropError = new Error("could not drop partial index");
+    const execute = vi.fn(
+      executionStub((text) => {
+        if (text.includes("CREATE INDEX")) throw resourceError;
+        if (text.includes("DROP INDEX")) throw dropError;
+      }),
+    );
+
+    const caught = await runVectorIndexBuildWithSerialFallback(
+      execute,
+      "typegraph_vector_slot",
+      sql`CREATE INDEX vector_index`,
+      sql`DROP INDEX vector_index`,
+    ).catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).cause).toBe(resourceError);
+    expect((caught as AggregateError).errors).toEqual([dropError]);
+  });
+
+  it("preserves the resource failure when the serial worker setting fails", async () => {
+    const resourceError = insufficientResourcesError(
+      "parallel build exhausted memory",
+    );
+    const setError = new Error("could not disable parallel workers");
+    const execute = vi.fn(
+      executionStub((text) => {
+        if (text.includes("CREATE INDEX")) throw resourceError;
+        if (text.includes("SET (parallel_workers = 0)")) throw setError;
+      }),
+    );
+
+    const caught = await runVectorIndexBuildWithSerialFallback(
+      execute,
+      "typegraph_vector_slot",
+      sql`CREATE INDEX vector_index`,
+      sql`DROP INDEX vector_index`,
+    ).catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).cause).toBe(resourceError);
+    expect((caught as AggregateError).errors).toEqual([setError]);
+  });
+
   it("materializes a custom strategy without pgvector ALTER, DROP, or serial fallback", async () => {
     const customStrategy = {
       ...pgvectorStrategy,
