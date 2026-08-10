@@ -844,6 +844,7 @@ import {
   planMergeIncremental,
   unwrap,
 } from "@nicia-ai/typegraph/graph-merge";
+import { importGraph } from "@nicia-ai/typegraph/interchange";
 
 const incoming = unwrap(
   await ingestionBranch(base, makeBackend, {
@@ -851,10 +852,11 @@ const incoming = unwrap(
   }),
 );
 
-await incoming.nodes.Patient.create(
-  { name: "Ana Rivera", cohort: "C1", mrn: "MRN-123" },
-  { id: "incoming-patient" },
-);
+const imported = await importGraph(incoming, providerDocument, {
+  onConflict: "error",
+  onUnknownProperty: "error",
+});
+if (!imported.success) throw new Error("Provider import was rejected");
 
 const plan = unwrap(
   await planMergeIncremental({
@@ -877,11 +879,15 @@ const applied = unwrap(await applyMergePlan(base, plan));
 await incoming.close();
 ```
 
-The returned handle exposes ingestion collections, not the branch's underlying
-`Store`, so callers cannot bypass the deferred-constraint contract or run schema
-operations on the derived working copy. The original graph definition remains
-the merge contract: `applyMergePlan()` validates node uniqueness against the
-entire resolved write set in the target transaction. Valid key handoffs and
+Both `importGraph()` and `importGraphStream()` accept the returned handle, so an
+interchange document can be staged without a hand-written collection copy loop.
+Import remains the single owner of node-first ordering, validity windows, edge
+endpoint order and reference validation. The handle also exposes ingestion
+collections, but not the branch's underlying `Store`, so callers cannot bypass
+the deferred-constraint contract or run schema operations on the derived working
+copy. The original graph definition remains the merge contract:
+`applyMergePlan()` validates node uniqueness against the entire resolved write
+set in the target transaction. Valid key handoffs and
 swaps are accepted as one set. If reviewed resolution leaves two live owners of
 the same unique key, the merge returns `MergeConstraintConflictError` and
 commits no graph or provenance writes.

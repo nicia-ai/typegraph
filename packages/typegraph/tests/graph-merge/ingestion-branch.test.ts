@@ -35,6 +35,12 @@ import type {
   IngestionBranch,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import {
+  type GraphData,
+  type GraphInterchangeChunk,
+  importGraph,
+  importGraphStream,
+} from "../../src/interchange";
 import { parseSerializedSchema } from "../../src/schema";
 import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, createSqliteMergeBackend } from "./test-utils";
@@ -143,6 +149,15 @@ type IngestionGraph = typeof ingestionGraph;
 type IngestionStore = Store<IngestionGraph>;
 
 const INCOMING = asBranchId("incoming");
+
+async function* interchangeChunks(
+  chunks: readonly GraphInterchangeChunk[],
+): AsyncIterable<GraphInterchangeChunk> {
+  for (const chunk of chunks) {
+    await Promise.resolve();
+    yield chunk;
+  }
+}
 
 const RESOLVED_BATCH_METHODS = new Set<PropertyKey>([
   "checkUniqueBatch",
@@ -302,6 +317,118 @@ describe.each(backendMatrix())(
       );
       expect(edge.fromId).toBe("patient-canonical");
       expect(edge.toId).toBe("facility-1");
+    });
+
+    it("accepts a complete interchange document as an ingestion target", async () => {
+      cleanups = [];
+      const base = await makeStore();
+      await seedCanonical(base);
+      const incoming = await makeIngestion(base);
+      const validFrom = "2025-01-01T00:00:00.000Z";
+      const validTo = "2030-01-01T00:00:00.000Z";
+      const document = {
+        formatVersion: "2.0",
+        exportedAt: "2026-01-01T00:00:00.000Z",
+        source: { type: "external", description: "provider-a" },
+        nodes: [
+          {
+            kind: "Patient",
+            id: "patient-imported",
+            properties: { name: "Anna Rivera", mrn: "MRN-123" },
+            validFrom,
+            validTo,
+          },
+        ],
+        edges: [
+          {
+            kind: "primaryFacility",
+            id: "edge-imported",
+            from: { kind: "Patient", id: "patient-imported" },
+            to: { kind: "Facility", id: "facility-1" },
+            properties: { source: "provider-a" },
+            validFrom,
+            validTo,
+          },
+        ],
+      } satisfies GraphData;
+
+      const result = await importGraph(incoming, document, {
+        onConflict: "error",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.nodes.created).toBe(1);
+      expect(result.edges.created).toBe(1);
+      expect(
+        await incoming.nodes.Patient.getById(asNodeId("patient-imported"), {
+          temporalMode: "includeEnded",
+        }),
+      ).toMatchObject({
+        id: "patient-imported",
+        meta: { validFrom, validTo },
+      });
+      expect(
+        await incoming.edges.primaryFacility.getById(
+          asEdgeId<typeof primaryFacility>("edge-imported"),
+          { temporalMode: "includeEnded" },
+        ),
+      ).toMatchObject({
+        fromId: "patient-imported",
+        toId: "facility-1",
+        meta: { validFrom, validTo },
+      });
+    });
+
+    it("accepts an interchange stream as an ingestion target", async () => {
+      cleanups = [];
+      const base = await makeStore();
+      await seedCanonical(base);
+      const incoming = await makeIngestion(base);
+      const header = {
+        formatVersion: "2.0",
+        exportedAt: "2026-01-01T00:00:00.000Z",
+        source: { type: "external", description: "provider-b" },
+      } as const;
+
+      const result = await importGraphStream(
+        incoming,
+        interchangeChunks([
+          { type: "header", header },
+          {
+            type: "nodes",
+            nodes: [
+              {
+                kind: "Patient",
+                id: "patient-streamed",
+                properties: { name: "Ana R.", mrn: "MRN-123" },
+              },
+            ],
+          },
+          {
+            type: "edges",
+            edges: [
+              {
+                kind: "primaryFacility",
+                id: "edge-streamed",
+                from: { kind: "Patient", id: "patient-streamed" },
+                to: { kind: "Facility", id: "facility-1" },
+                properties: { source: "provider-b" },
+              },
+            ],
+          },
+        ]),
+        { onConflict: "error" },
+      );
+
+      expect(result.success).toBe(true);
+      expect(
+        await incoming.edges.primaryFacility.getById(
+          asEdgeId<typeof primaryFacility>("edge-streamed"),
+        ),
+      ).toMatchObject({
+        fromId: "patient-streamed",
+        toId: "facility-1",
+      });
     });
 
     it("keeps ordinary branch uniqueness immediate", async () => {
@@ -697,6 +824,24 @@ describe.each(backendMatrix())(
     });
   },
 );
+
+it("refuses an unregistered ingestion import capability at the boundary", async () => {
+  const forgedTarget = {} as unknown as IngestionBranch<IngestionGraph>;
+  const emptyDocument = {
+    formatVersion: "2.0",
+    exportedAt: "2026-01-01T00:00:00.000Z",
+    source: { type: "external", description: "forged-target" },
+    nodes: [],
+    edges: [],
+  } satisfies GraphData;
+
+  await expect(
+    importGraph(forgedTarget, emptyDocument, { onConflict: "error" }),
+  ).rejects.toMatchObject({
+    name: "ConfigurationError",
+    details: { target: "unregistered-ingestion-target" },
+  });
+});
 
 describe("resolved ingestion uniqueness properties", () => {
   it("preserves unique-key swaps for arbitrary distinct keys and either staging order", async () => {

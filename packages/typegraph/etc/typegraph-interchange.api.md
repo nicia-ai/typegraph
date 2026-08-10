@@ -2106,10 +2106,10 @@ export const ImportErrorSchema: z.ZodObject<{
 }, z.core.$strip>;
 
 // @public
-export function importGraph<G extends GraphDef>(store: Store<G>, data: GraphData, rawOptions: ImportOptions): Promise<ImportResult>;
+export function importGraph<G extends GraphDef>(target: ImportTarget<G>, data: GraphData, rawOptions: ImportOptions): Promise<ImportResult>;
 
 // @public
-export function importGraphStream<G extends GraphDef>(store: Store<G>, chunks: AsyncIterable<GraphInterchangeChunk>, rawOptions: ImportOptions): Promise<ImportResult>;
+export function importGraphStream<G extends GraphDef>(target: ImportTarget<G>, chunks: AsyncIterable<GraphInterchangeChunk>, rawOptions: ImportOptions): Promise<ImportResult>;
 
 // @public
 export type ImportOptions = z.input<typeof ImportOptionsSchema>;
@@ -2166,6 +2166,9 @@ export const ImportResultSchema: z.ZodObject<{
         error: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+
+// @public
+export type ImportTarget<G extends GraphDef> = Store<G> | IngestionImportTarget<G>;
 
 // @public
 type IndexChange = Readonly<{
@@ -2279,6 +2282,14 @@ type IndexWhereOperand = Readonly<{
 
 // @public
 type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
+
+// @public
+const INGESTION_IMPORT_TARGET_BRAND: unique symbol;
+
+// @public
+export type IngestionImportTarget<G extends GraphDef> = Readonly<{
+    [INGESTION_IMPORT_TARGET_BRAND]: G;
+}>;
 
 // @public
 type InitialQueryBuilder<G extends GraphDef, CoordinateState extends QueryCoordinateState = "open"> = QueryBuilder<G, EmptyAliasMap, EmptyEdgeAliasMap, EmptyRecursiveAliasMap, CoordinateState>;

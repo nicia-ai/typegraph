@@ -79,7 +79,12 @@ export {
 // ============================================================
 
 export { exportGraph, exportGraphStream } from "./export";
-export { importGraph, importGraphStream } from "./import";
+export {
+  importGraph,
+  importGraphStream,
+  type ImportTarget,
+} from "./import";
+export type { IngestionImportTarget } from "./ingestion-import-target";
 export {
   trustedImportGraph,
   trustedImportGraphStream,

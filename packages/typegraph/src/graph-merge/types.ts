@@ -13,6 +13,7 @@
  */
 
 import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
+import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 import type {
   EdgeId,
   GetNodeType,
@@ -117,14 +118,15 @@ export type IngestionNodeCollections<G extends GraphDef> = Readonly<{
  * merge planning, but cannot access schema evolution, transactions, or runtime
  * internals. `close()` releases the private working-copy backend.
  */
-export type IngestionBranch<G extends GraphDef> = Readonly<{
-  [INGESTION_BRANCH_BRAND]: true;
-  id: BranchId;
-  base: BaseVersion;
-  nodes: IngestionNodeCollections<G>;
-  edges: Store<G>["edges"];
-  close: () => Promise<void>;
-}>;
+export type IngestionBranch<G extends GraphDef> = IngestionImportTarget<G> &
+  Readonly<{
+    [INGESTION_BRANCH_BRAND]: true;
+    id: BranchId;
+    base: BaseVersion;
+    nodes: IngestionNodeCollections<G>;
+    edges: Store<G>["edges"];
+    close: () => Promise<void>;
+  }>;
 
 /** A normal branch or an opaque ingestion branch accepted by merge entrypoints. */
 export type MergeBranch<G extends GraphDef> =
