@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker/master/packages/core/schema/stryker-schema.json",
+  "packageManager": "pnpm",
+  "testRunner": "vitest",
+  "plugins": ["@stryker-mutator/vitest-runner"],
+  "ignorePatterns": ["dist", "node_modules"],
+  "reporters": ["clear-text", "json", "progress"],
+  "jsonReporter": {
+    "fileName": "reports/mutation-diff/mutation.json"
+  },
+  "thresholds": {
+    "high": 90,
+    "low": 80,
+    "break": null
+  },
+  "timeoutMS": 60000,
+  "dryRunTimeoutMinutes": 45,
+  "concurrency": 4,
+  "coverageAnalysis": "perTest",
+  "ignoreStatic": true,
+  "incremental": true,
+  "incrementalFile": ".stryker-cache/incremental-diff.json"
+}
