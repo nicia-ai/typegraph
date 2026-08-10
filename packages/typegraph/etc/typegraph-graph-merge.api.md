@@ -156,6 +156,8 @@ type BaseMember = Readonly<{
     kind: string;
     props: Readonly<Record<string, JsonValue>>;
     origin: "base";
+    validFrom?: string;
+    validTo?: string;
 }>;
 
 // @public
@@ -1719,6 +1721,7 @@ type GraphBackend = Readonly<{
     deleteFulltextBatch?: (this: void, params: DeleteFulltextBatchParams) => Promise<void>;
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
+    ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -2005,8 +2008,8 @@ type IdentityChange = Readonly<{
 
 // @public
 type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> & Readonly<{
-    assertSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertionResult<G>>;
-    assertDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>) => Promise<IdentityAssertionResult<G>>;
+    assertSame: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
+    assertDifferent: (a: IdentityNodeRefInput<G>, b: IdentityNodeRefInput<G>, window?: IdentityValidityWindow) => Promise<IdentityAssertionResult<G>>;
     bulkAssertSame: (pairs: readonly IdentityPair<G>[]) => Promise<readonly IdentityAssertionResult<G>[]>;
     bulkAssertDifferent: (pairs: readonly IdentityPair<G>[]) => Promise<readonly IdentityAssertionResult<G>[]>;
     retractAssertion: (id: IdentityAssertionId) => Promise<IdentityAssertion<G> | undefined>;
@@ -2037,7 +2040,7 @@ type IdentityNodeRefInput<G extends GraphDef> = NodeRef<AllNodeTypes<G>> | Dynam
 type IdentityPair<G extends GraphDef> = Readonly<{
     a: IdentityNodeRefInput<G>;
     b: IdentityNodeRefInput<G>;
-}>;
+}> & IdentityValidityWindow;
 
 // @public
 type IdentityReadFacade<G extends GraphDef> = Readonly<{
@@ -2065,6 +2068,12 @@ type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphId
     includeIdentityMembers?: boolean;
 }> : Readonly<{
     includeIdentityMembers?: never;
+}>;
+
+// @public
+type IdentityValidityWindow = Readonly<{
+    validFrom?: string;
+    validTo?: string;
 }>;
 
 // @public
@@ -2674,6 +2683,7 @@ export const MERGE_ERROR_CODES: {
     readonly branch: "GRAPH_MERGE_BRANCH_ERROR";
     readonly similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE";
     readonly conflict: "GRAPH_MERGE_CONFLICT";
+    readonly constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
     readonly identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT";
     readonly baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH";
     readonly planCapability: "GRAPH_MERGE_PLAN_CAPABILITY";
@@ -2712,6 +2722,29 @@ export class MergeConflictError extends MergeError {
     // (undocumented)
     readonly code: "GRAPH_MERGE_CONFLICT";
 }
+
+// @public
+export class MergeConstraintConflictError extends MergeError {
+    constructor(cause: TypeGraphError);
+    // (undocumented)
+    readonly category: "constraint";
+    // (undocumented)
+    readonly cause: TypeGraphError;
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_CONSTRAINT_CONFLICT";
+    // (undocumented)
+    readonly details: MergeConstraintConflictErrorDetails;
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
+}
+
+// @public
+export type MergeConstraintConflictErrorDetails = Readonly<{
+    constraintCode: string;
+    constraintErrorName: string;
+    constraintDetails: Readonly<Record<string, unknown>>;
+    [key: string]: unknown;
+}>;
 
 // @public
 export type MergedCounts = Readonly<{
@@ -4784,7 +4817,24 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         created: number;
         skipped: number;
     }>>;
-    applyIdentityMergeAtTarget: (target: GraphBackend | TransactionBackend, retractionIds: readonly string[], assertions: readonly Readonly<{
+    applyIdentityMergeAtTarget: (target: GraphBackend | TransactionBackend, retractions: readonly Readonly<{
+        id: string;
+        relation: "same" | "different";
+        a: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        b: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        validFrom: string;
+        validTo?: string | undefined;
+        endedBy?: Readonly<{
+            kind: string;
+            id: string;
+        }> | undefined;
+    }>[], assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{

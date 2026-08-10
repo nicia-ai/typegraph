@@ -299,6 +299,20 @@ try {
 }
 ```
 
+### Identity validity errors
+
+`IdentityValidityWindowError` refuses a future start, future end, inverted
+window, or a second non-identical open window for one current semantic pair.
+Its code identifies the reason: `IDENTITY_VALIDITY_FUTURE_START`,
+`IDENTITY_VALIDITY_FUTURE_END`, `IDENTITY_VALIDITY_INVERTED`, or
+`IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT`.
+
+`IdentityEndpointValidityError` (`IDENTITY_ENDPOINT_VALIDITY`) means an
+explicit assertion window extends outside an endpoint node's own validity or
+deletion bounds. Future or inverted identity windows are user-category input
+errors. A second non-identical open window and an endpoint-window conflict are
+constraint-category errors. Both classes are package-root exports.
+
 ### `IdentityMergeConflictError`
 
 Detected at merge **plan time** when the branches being merged carry opposing
@@ -328,6 +342,40 @@ if (isErr(result)) {
   throw result.error;
 }
 ```
+
+### `MergeConstraintConflictError`
+
+Returned when `merge()`, `mergeIncremental()`, or `applyMergePlan()` resolves a
+plan whose final graph violates a deterministic store constraint. The store
+remains the owner of constraint enforcement: the merge translates its typed
+refusal only at the commit boundary, after the transaction has rolled back.
+
+```typescript
+import {
+  isErr,
+  merge,
+  MergeConstraintConflictError,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, branches);
+if (isErr(result) && result.error instanceof MergeConstraintConflictError) {
+  console.log(result.error.code); // "GRAPH_MERGE_CONSTRAINT_CONFLICT"
+  console.log(result.error.category); // "constraint"
+  console.log(result.error.details.constraintCode); // e.g. "CARDINALITY_ERROR"
+  console.log(result.error.details.edgeKind); // copied from the store error
+  console.log(result.error.cause); // the original CardinalityError, etc.
+}
+```
+
+Cardinality, uniqueness, endpoint, disjointness, and restricted-delete
+refusals share this surface when they arise from node or edge application.
+The planner normally co-buckets nodes with the same declared unique key, but a
+late store-owned uniqueness refusal uses the same completeness boundary rather
+than falling back to a system error.
+Identity truth conflicts retain `IdentityMergeConflictError`; backend,
+environment, and stale-plan failures retain their existing system errors.
+Constraint failure is atomic: neither graph writes nor merge provenance records
+survive.
 
 ### Merge plan and evidence errors
 
@@ -679,6 +727,7 @@ Operational Identity lifecycle failures use stable `details.code` values on
 | `IDENTITY_SCHEMA_CONTRADICTION` | Existing nodes or assertions contradict the proposed identity profile or ontology, or the materialized closure disagrees with the assertions it was derived from. Run `rebuildIdentityClosure(store)` to recover from a closure mismatch. |
 | `IDENTITY_IMPORT_REQUIRES_PROFILE` | An interchange document carries an `identity` section but the target graph does not have the profile enabled. |
 | `IDENTITY_MERGE_REQUIRES_PROFILE` | A branch carries identity changes but the merge target graph does not have the profile enabled. |
+| `IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An identity-enabled export explicitly disabled temporal fields. Remove `includeTemporal` or set it to `true`; endpoint bounds are required to validate assertion windows on import. |
 | `IDENTITY_IMPORT_ID_CONFLICT` | An imported assertion id already exists in the target ledger identifying different truth (relation, endpoints, or validity window). |
 | `RECORDED_IDENTITY_SCHEMA_MISSING` | A `history: true` open of an identity-enabled graph could not find the recorded identity relation. Bundled backends provision it, so this is rare there and more likely on a custom backend. |
 
@@ -781,6 +830,20 @@ says which.
 `details.graphId` names the exported graph and `cause` carries the signal's own
 `reason` when the caller supplied one. A signal that is already aborted refuses
 the export before any transaction is opened. See
+[Cancelling an export](/interchange#cancelling-an-export).
+
+#### `ExportStreamIdleTimeoutError`
+
+An `exportGraphStream` configured with `idleTimeoutMs` settles with
+`ExportStreamIdleTimeoutError` (`code: "INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT"`)
+when its consumer does not request another chunk within that bound. The timeout
+measures only the interval after a chunk is yielded; time spent waiting for the
+backend to produce the next chunk does not count. `details.graphId` identifies
+the graph and
+`details.idleTimeoutMs` carries the configured bound. As with explicit
+cancellation, a transactional export rolls its snapshot back and releases its
+stream lease before the error is delivered; a non-transactional export held
+neither and abandons its remaining reads. See
 [Cancelling an export](/interchange#cancelling-an-export).
 
 #### Recorded-capture guard codes
@@ -1072,7 +1135,13 @@ try {
 | `VALIDATION_ERROR` | `ValidationError` | user | Schema validation failed |
 | `DISJOINT_ERROR` | `DisjointError` | constraint | Disjointness constraint violated |
 | `IDENTITY_CONTRADICTION` | `IdentityContradictionError` | constraint | Identity mutation would make the assertion ledger contradictory |
+| `IDENTITY_VALIDITY_FUTURE_START` | `IdentityValidityWindowError` | user | Identity assertion starts after the operation clock |
+| `IDENTITY_VALIDITY_FUTURE_END` | `IdentityValidityWindowError` | user | Identity assertion ends after the operation clock |
+| `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | user | Identity assertion ends before it starts |
+| `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
+| `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
+| `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
@@ -1087,3 +1156,4 @@ try {
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported |
 | `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation |
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
+| `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |

@@ -387,6 +387,169 @@ const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
   "identitySeparation",
 ]);
 
+const TRIGRAM_EXTENSION_DDL_LOCK_KEY = "typegraph:pg-trgm-ddl";
+const TRIGRAM_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
+
+type ExecutePostgresStatement = (statement: ExecutableSql) => Promise<void>;
+
+function parallelWorkerResetSql(tableName: string): string {
+  return `ALTER TABLE "${tableName.replaceAll('"', '""')}" RESET (parallel_workers);`;
+}
+
+function parallelWorkerResetError(
+  tableName: string,
+  resetError: unknown,
+): Error {
+  return new Error(
+    `PostgreSQL did not restore the durable parallel_workers setting on vector table ${JSON.stringify(tableName)}. Run ${parallelWorkerResetSql(tableName)} before retrying index materialization.`,
+    { cause: resetError },
+  );
+}
+
+function vectorSerialFallbackPreparationError(
+  step: "drop-index" | "disable-parallel-workers",
+  parallelBuildError: unknown,
+  preparationError: unknown,
+): AggregateError {
+  const action =
+    step === "drop-index" ?
+      "drop the partial vector index"
+    : "disable parallel workers for the serial retry";
+  return new AggregateError(
+    [preparationError],
+    `PostgreSQL could not ${action} after the parallel vector index build exhausted resources.`,
+    { cause: parallelBuildError },
+  );
+}
+
+function reportParallelWorkerResetFailure(
+  tableName: string,
+  resetError: unknown,
+): void {
+  try {
+    if (typeof console === "undefined" || typeof console.error !== "function") {
+      return;
+    }
+    const reported = (console.error as (...data: readonly unknown[]) => unknown)(
+      `[typegraph] The serial vector index rebuild failed and cleanup also failed. ${parallelWorkerResetError(tableName, resetError).message}`,
+      resetError,
+    );
+    void Promise.resolve(reported).catch(() => {
+      // Reporting must not displace the index-build failure.
+    });
+  } catch {
+    // A hostile or replaced logger cannot displace the index-build failure.
+  }
+}
+
+async function resetVectorParallelWorkers(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+): Promise<void> {
+  try {
+    await execute(
+      portableSql`ALTER TABLE ${portableSql.identifier(tableName)} RESET (parallel_workers)`,
+    );
+  } catch (resetError) {
+    throw parallelWorkerResetError(tableName, resetError);
+  }
+}
+
+/** @internal */
+export async function runVectorIndexBuildWithSerialFallback(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  dropStatement?: ExecutableSql,
+): Promise<void> {
+  // The strategy table is TypeGraph-owned, and parallel_workers is only set
+  // temporarily by the fallback below. Reset it before every materialization
+  // attempt so cleanup survives backend and process recreation. Keep this
+  // outside the resource-failure catch: a cleanup error must never be
+  // mistaken for a failed parallel build whose valid index should be dropped.
+  await resetVectorParallelWorkers(execute, tableName);
+  try {
+    await execute(indexStatement);
+  } catch (error) {
+    if (!isInsufficientResourcesError(error)) throw error;
+    if (dropStatement !== undefined) {
+      try {
+        await execute(dropStatement);
+      } catch (dropError) {
+        throw vectorSerialFallbackPreparationError(
+          "drop-index",
+          error,
+          dropError,
+        );
+      }
+    }
+    await runSerialVectorIndexBuild(
+      execute,
+      tableName,
+      indexStatement,
+      error,
+    );
+  }
+}
+
+/** @internal */
+export async function runPostgresVectorIndexBuild(
+  vectorStrategy: VectorStrategy,
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  dropStatement?: ExecutableSql,
+): Promise<void> {
+  if (vectorStrategy !== pgvectorStrategy) {
+    await execute(indexStatement);
+    return;
+  }
+  await runVectorIndexBuildWithSerialFallback(
+    execute,
+    tableName,
+    indexStatement,
+    dropStatement,
+  );
+}
+
+/** @internal */
+export async function runSerialVectorIndexBuild(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  parallelBuildError?: unknown,
+): Promise<void> {
+  const table = portableSql.identifier(tableName);
+  try {
+    await execute(portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`);
+  } catch (setError) {
+    if (parallelBuildError === undefined) throw setError;
+    throw vectorSerialFallbackPreparationError(
+      "disable-parallel-workers",
+      parallelBuildError,
+      setError,
+    );
+  }
+
+  let buildFailure: Readonly<{ error: unknown }> | undefined;
+  try {
+    await execute(indexStatement);
+  } catch (error) {
+    buildFailure = { error };
+  }
+
+  try {
+    await execute(portableSql`ALTER TABLE ${table} RESET (parallel_workers)`);
+  } catch (resetError) {
+    if (buildFailure === undefined) {
+      throw parallelWorkerResetError(tableName, resetError);
+    }
+    reportParallelWorkerResetFailure(tableName, resetError);
+  }
+
+  if (buildFailure !== undefined) throw buildFailure.error;
+}
+
 // ============================================================
 // Utilities
 // ============================================================
@@ -1033,6 +1196,19 @@ export function createPostgresBackend(
       await executeConcurrentCreateDdl(
         `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
       );
+    },
+
+    async ensureTrigramExtension(): Promise<void> {
+      if (!capabilities.transactions) {
+        await executeConcurrentCreateDdl(TRIGRAM_EXTENSION_DDL);
+        return;
+      }
+      await db.transaction(async (tx) => {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${TRIGRAM_EXTENSION_DDL_LOCK_KEY}), 0)`,
+        );
+        await tx.execute(sql.raw(TRIGRAM_EXTENSION_DDL));
+      });
     },
 
     async claimIndexMaterialization(
@@ -1766,7 +1942,6 @@ function createPostgresOperationBackend(
     schemaVersionsTable,
     transactionScoped,
   } = options;
-
   // Route through the execution adapter so driver-specific result shapes
   // (`{rows}` for node-postgres / neon-serverless; bare array for
   // postgres-js) are normalized in one place.
@@ -2358,42 +2533,28 @@ function createPostgresOperationBackend(
         concurrent: params.concurrent === true,
       });
       if (indexStatement !== undefined) {
-        try {
-          await execRun(indexStatement);
-        } catch (error) {
-          if (!isInsufficientResourcesError(error)) throw error;
-          // Parallel HNSW/IVFFlat builds stage the build graph in dynamic
-          // shared memory, and resource-constrained hosts reject the
-          // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
-          // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
-          // from dsm_impl_posix). Retry serially: drop the INVALID
-          // leftover the failed CONCURRENTLY build leaves behind (its
-          // IF NOT EXISTS would otherwise mask the retry), pin the
-          // strategy table to parallel_workers = 0 (maintenance builds
-          // take min(storage parameter, max_parallel_maintenance_workers)),
-          // rebuild in local memory, and restore the setting.
-          const dropStatement = vectorStrategy.buildDropIndex?.(slot);
-          if (dropStatement !== undefined) {
-            await execRun(dropStatement);
-          }
-          const table = portableSql.identifier(
-            vectorStrategy.tableName(
-              slot.graphId,
-              slot.nodeKind,
-              slot.fieldPath,
-            ),
-          );
-          await execRun(
-            portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`,
-          );
-          try {
-            await execRun(indexStatement);
-          } finally {
-            await execRun(
-              portableSql`ALTER TABLE ${table} RESET (parallel_workers)`,
-            );
-          }
-        }
+        const strategyTableName = vectorStrategy.tableName(
+          slot.graphId,
+          slot.nodeKind,
+          slot.fieldPath,
+        );
+        // Built-in pgvector HNSW/IVFFlat builds stage the build graph in dynamic
+        // shared memory, and resource-constrained hosts reject the
+        // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
+        // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
+        // from dsm_impl_posix). Retry serially: drop the INVALID
+        // leftover the failed CONCURRENTLY build leaves behind (its
+        // IF NOT EXISTS would otherwise mask the retry), pin the
+        // strategy table to parallel_workers = 0 (maintenance builds
+        // take min(storage parameter, max_parallel_maintenance_workers)),
+        // rebuild in local memory, and restore the setting.
+        await runPostgresVectorIndexBuild(
+          vectorStrategy,
+          execRun,
+          strategyTableName,
+          indexStatement,
+          vectorStrategy.buildDropIndex?.(slot),
+        );
       }
     },
 

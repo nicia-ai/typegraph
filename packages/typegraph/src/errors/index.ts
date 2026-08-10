@@ -687,6 +687,74 @@ export class IdentityContradictionError extends TypeGraphError {
   }
 }
 
+export type IdentityValidityWindowErrorDetails = Readonly<{
+  reason:
+    | "future-valid-from"
+    | "future-valid-to"
+    | "inverted"
+    | "overlapping-open-window";
+  validFrom: string;
+  validTo?: string;
+  operationInstant: string;
+}>;
+
+/** Thrown when an identity assertion validity window cannot be applied. */
+export class IdentityValidityWindowError extends TypeGraphError {
+  declare readonly details: IdentityValidityWindowErrorDetails;
+
+  constructor(details: IdentityValidityWindowErrorDetails) {
+    const code =
+      details.reason === "future-valid-from" ? "IDENTITY_VALIDITY_FUTURE_START"
+      : details.reason === "future-valid-to" ? "IDENTITY_VALIDITY_FUTURE_END"
+      : details.reason === "inverted" ? "IDENTITY_VALIDITY_INVERTED"
+      : "IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT";
+    super(
+      `Identity assertion validity window cannot be applied: ${details.reason}.`,
+      code,
+      {
+        details,
+        category:
+          details.reason === "overlapping-open-window" ? "constraint" : "user",
+        suggestion:
+          details.reason === "inverted" ? "Pass validFrom at or before validTo."
+          : details.reason === "overlapping-open-window" ?
+            "Retract the existing open assertion before creating a different open validity window for the same relation and pair."
+          : "Use a boundary at or before the current operation clock; future-scheduled identity transitions are not supported.",
+      },
+    );
+    this.name = "IdentityValidityWindowError";
+  }
+}
+
+export type IdentityEndpointValidityErrorDetails = Readonly<{
+  endpoint: Readonly<{ kind: string; id: string }>;
+  assertionWindow: Readonly<{ validFrom: string; validTo?: string }>;
+  endpointWindow: Readonly<{
+    validFrom?: string;
+    validTo?: string;
+    deletedAt?: string;
+  }>;
+}>;
+
+/** Thrown when an identity endpoint does not exist throughout the assertion window. */
+export class IdentityEndpointValidityError extends TypeGraphError {
+  declare readonly details: IdentityEndpointValidityErrorDetails;
+
+  constructor(details: IdentityEndpointValidityErrorDetails) {
+    super(
+      `Identity endpoint ${details.endpoint.kind}/${details.endpoint.id} does not exist throughout the requested assertion validity window.`,
+      "IDENTITY_ENDPOINT_VALIDITY",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Choose an assertion window contained by both endpoint validity windows.",
+      },
+    );
+    this.name = "IdentityEndpointValidityError";
+  }
+}
+
 export type IdentitySeparationViolationErrorDetails = Readonly<{
   graphId: string;
   /**
@@ -1444,6 +1512,36 @@ export class ExportStreamCancelledError extends TypeGraphError {
       cause: options?.cause,
     });
     this.name = "ExportStreamCancelledError";
+  }
+}
+
+/**
+ * Thrown when an export stream's consumer leaves a delivered chunk
+ * unacknowledged for longer than its configured idle timeout.
+ *
+ * The timeout measures consumer idleness only: it starts when a chunk is
+ * yielded and stops when the consumer asks for the next one. Receiving this
+ * error means the timed-out export has settled its snapshot transaction and
+ * released any serialized connection lease it held. `details.idleTimeoutMs`
+ * carries the configured bound.
+ */
+export class ExportStreamIdleTimeoutError extends TypeGraphError {
+  constructor(graphId: string, idleTimeoutMs: number, transactional: boolean) {
+    super(
+      transactional ?
+        `The graph export stream consumer did not request its next chunk within ${idleTimeoutMs}ms: its repeatable-read snapshot has been rolled back and the connection it held released.`
+      : `The graph export stream consumer did not request its next chunk within ${idleTimeoutMs}ms: its remaining reads were abandoned. This backend does not support transactions, so the export held no snapshot and no connection.`,
+      "INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT",
+      {
+        details: { graphId, idleTimeoutMs },
+        category: "user",
+        suggestion:
+          transactional ?
+            "Start a new export and consume each chunk within the configured idle timeout, increase idleTimeoutMs, or cancel explicitly with an AbortSignal."
+          : "Start a new export and consume each chunk within the configured idle timeout, increase idleTimeoutMs, or cancel explicitly with an AbortSignal; discard the partial export unless mutually-inconsistent chunks are acceptable.",
+      },
+    );
+    this.name = "ExportStreamIdleTimeoutError";
   }
 }
 

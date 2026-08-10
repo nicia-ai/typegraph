@@ -219,6 +219,7 @@ describe("portable runtime capability boundaries", () => {
       "executeDdl",
       "executeRaw",
       "executeStatement",
+      "ensureTrigramExtension",
       "repairContributions",
       "schemaWriteTransaction",
       "transaction",

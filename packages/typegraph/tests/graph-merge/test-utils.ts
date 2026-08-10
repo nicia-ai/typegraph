@@ -320,7 +320,7 @@ export function identityAssertionDocument(
   id: string,
   a: string,
   b: string,
-  validFrom = "2024-01-01T00:00:00.000Z",
+  validFrom = new Date().toISOString(),
 ): Parameters<typeof importGraph>[1] {
   const refA = { kind, id: a };
   const refB = { kind, id: b };

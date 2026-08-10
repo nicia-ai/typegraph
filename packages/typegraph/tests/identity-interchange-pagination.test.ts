@@ -33,8 +33,6 @@ const graph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
-const CANONICAL_TIMESTAMP = "2024-01-01T00:00:00.000Z";
-
 type Ref = Readonly<{ kind: "Person" | "Company" | "Project"; id: string }>;
 
 function assertion(id: string, a: Ref, b: Ref): IdentityTransferAssertion {
@@ -43,7 +41,7 @@ function assertion(id: string, a: Ref, b: Ref): IdentityTransferAssertion {
     relation: "same",
     a,
     b,
-    validFrom: CANONICAL_TIMESTAMP,
+    validFrom: new Date().toISOString(),
   };
 }
 

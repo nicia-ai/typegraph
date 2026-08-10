@@ -12,6 +12,7 @@ export type {
 } from "../backend/types";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
+export type { MergeConstraintConflictErrorDetails } from "./errors";
 export {
   BaseVersionMismatchError,
   BranchError,
@@ -22,6 +23,7 @@ export {
   MatchEvidenceError,
   MERGE_ERROR_CODES,
   MergeConflictError,
+  MergeConstraintConflictError,
   MergeError,
   MergePlanCapabilityError,
   MergePlanDigestMismatchError,

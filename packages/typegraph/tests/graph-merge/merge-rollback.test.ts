@@ -8,7 +8,7 @@
  * nodes committed, their edges missing) is the failure mode the
  * transaction-capability requirement exists to prevent.
  *
- * The forcing scenario: `primaryEncounter` carries cardinality "one". Each
+ * The forcing scenario: `primaryEncounter` carries cardinality "oneActive". Each
  * branch adds one primary encounter for the SAME inherited patient — valid in
  * isolation, a cardinality violation in union. The commit writes the branch
  * encounters first and only then the edge batch, so the constraint fires after
@@ -17,6 +17,7 @@
 
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
+  CardinalityError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -26,8 +27,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
-import { MergeError } from "../../src/graph-merge/errors";
-import { merge } from "../../src/graph-merge/merge";
+import { MergeConstraintConflictError } from "../../src/graph-merge/errors";
+import { applyMergePlan, merge, planMerge } from "../../src/graph-merge/merge";
+import {
+  openProvenanceStore,
+  readProvenance,
+} from "../../src/graph-merge/provenance-store";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import {
   enumerateAllEdges,
@@ -62,7 +67,7 @@ const rollbackGraph = defineGraph({
       type: primaryEncounter,
       from: [Patient],
       to: [Encounter],
-      cardinality: "one",
+      cardinality: "oneActive",
     },
   },
 });
@@ -146,7 +151,7 @@ describe.each(backendMatrix())(
       const branchB = await makeBranch(baseStore, BRANCH_B);
 
       // Each branch adds ONE primary encounter for pat-1 — valid per branch
-      // (cardinality "one" holds inside each fork), violated by their union.
+      // (cardinality "oneActive" holds inside each fork), violated by their union.
       await branchA.store.nodes.Encounter.bulkCreate([
         { id: "enc-a", props: { reason: "branch a" } },
       ]);
@@ -172,12 +177,20 @@ describe.each(backendMatrix())(
 
       const result = await merge<RollbackGraph>(baseStore, [branchA, branchB], {
         branchOrder: [BRANCH_A, BRANCH_B],
+        persistProvenance: true,
       });
 
       expect(isErr(result)).toBe(true);
       if (isErr(result)) {
-        expect(result.error).toBeInstanceOf(MergeError);
-        expect(result.error.message).toMatch(/cardinality/i);
+        expect(result.error).toBeInstanceOf(MergeConstraintConflictError);
+        expect(result.error.category).toBe("constraint");
+        expect(result.error.cause).toBeInstanceOf(CardinalityError);
+        expect(result.error.details).toMatchObject({
+          constraintCode: "CARDINALITY_ERROR",
+          edgeKind: "primaryEncounter",
+          fromId: "pat-1",
+          cardinality: "oneActive",
+        });
       }
 
       // The commit had already upserted the branch encounters before the edge
@@ -185,6 +198,60 @@ describe.each(backendMatrix())(
       expect(await liveNodeIds(baseStore, "Patient")).toEqual(["pat-1"]);
       expect(await liveNodeIds(baseStore, "Encounter")).toEqual([]);
       expect(await liveEdgeIds(baseStore, "primaryEncounter")).toEqual([]);
+      expect(
+        await readProvenance(await openProvenanceStore(baseStore)),
+      ).toEqual([]);
+    });
+
+    it("applyMergePlan returns the same typed conflict without partial writes", async () => {
+      const [baseStore] = await createStoreWithSchema(
+        rollbackGraph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      await baseStore.nodes.Patient.create(
+        { name: "Robert Smith" },
+        { id: "pat-1" },
+      );
+      const branchA = await makeBranch(baseStore, BRANCH_A);
+      const branchB = await makeBranch(baseStore, BRANCH_B);
+      await branchA.store.nodes.Encounter.create(
+        { reason: "branch a" },
+        { id: "enc-a" },
+      );
+      await branchA.store.edges.primaryEncounter.create(
+        { kind: "Patient", id: "pat-1" },
+        { kind: "Encounter", id: "enc-a" },
+        { on: "2026-06-01" },
+        { id: "pe-a" },
+      );
+      await branchB.store.nodes.Encounter.create(
+        { reason: "branch b" },
+        { id: "enc-b" },
+      );
+      await branchB.store.edges.primaryEncounter.create(
+        { kind: "Patient", id: "pat-1" },
+        { kind: "Encounter", id: "enc-b" },
+        { on: "2026-06-02" },
+        { id: "pe-b" },
+      );
+      const artifact = unwrap(
+        await planMerge(baseStore, [branchA, branchB], {
+          persistProvenance: true,
+        }),
+      );
+
+      const result = await applyMergePlan(baseStore, artifact);
+
+      expect(isErr(result)).toBe(true);
+      if (!isErr(result)) return;
+      expect(result.error).toBeInstanceOf(MergeConstraintConflictError);
+      expect(result.error.cause).toBeInstanceOf(CardinalityError);
+      expect(await liveNodeIds(baseStore, "Encounter")).toEqual([]);
+      expect(await liveEdgeIds(baseStore, "primaryEncounter")).toEqual([]);
+      expect(
+        await readProvenance(await openProvenanceStore(baseStore)),
+      ).toEqual([]);
     });
   },
 );

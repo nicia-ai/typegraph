@@ -21,10 +21,16 @@ import {
   IdentityMergeConflictError,
   MERGE_ERROR_CODES,
 } from "../../src/graph-merge/errors";
-import { merge } from "../../src/graph-merge/merge";
+import {
+  applyMergePlan,
+  merge,
+  mergeIncremental,
+  planMerge,
+} from "../../src/graph-merge/merge";
 import {
   assertNoContradictoryIdentityClosure,
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+  EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON,
   planIdentityChanges,
   REDUNDANT_IDENTITY_ASSERTION_DROP_REASON,
   remapIdentityAssertionEndpoints,
@@ -38,6 +44,7 @@ import { enumerateAllNodes } from "../../src/graph-merge/state-diff";
 import type { IdentityTransferAssertion } from "../../src/graph-merge/typegraph-internal";
 import type { BranchId } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { storeRuntime } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, getStoreBackend } from "./test-utils";
 
@@ -89,6 +96,9 @@ const employeeGraph = defineGraph({
 const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
 const IDENTITY_CONFLICT_CODE = MERGE_ERROR_CODES.identityConflict;
+function narrowedAssertionWarning(assertionId: string): string {
+  return `Identity assertion ${JSON.stringify(assertionId)} was narrowed from [2020-01-01T00:00:00.000Z, open) to [2022-01-01T00:00:00.000Z, open) to fit its remapped endpoint windows.`;
+}
 
 describe.each(backendMatrix())("identity merge [$name]", (entry) => {
   let cleanups: (() => Promise<void>)[];
@@ -123,6 +133,100 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       : undefined;
     return { store, first, second, assertion };
   }
+
+  async function createPatientRemapScenario() {
+    const backend = await makeBackend();
+    const [baseStore] = await createStoreWithSchema(patientGraph, backend, {
+      revisionTracking: true,
+    });
+    const anchor = await baseStore.nodes.Patient.create(
+      { name: "Anchor Person", birthDate: "1990-01-01" },
+      { id: "anchor", validFrom: "2019-01-01T00:00:00.000Z" },
+    );
+    const branchA = unwrap(
+      await branch(baseStore, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const branchB = unwrap(
+      await branch(baseStore, () => makeBackend(), { id: BRANCH_B }),
+    );
+    const anna = await branchA.store.nodes.Patient.create(
+      { name: "Anna Rivera", birthDate: "1974-03-09" },
+      {
+        id: "p-anna",
+        validFrom: "2020-01-01T00:00:00.000Z",
+      },
+    );
+    const { assertion } = await branchA.store.identity.assertSame(
+      anna,
+      anchor,
+      {
+        validFrom: "2020-01-01T00:00:00.000Z",
+      },
+    );
+    await branchB.store.nodes.Patient.create(
+      { name: "Ana Rivera", birthDate: "1974-03-09" },
+      {
+        id: "p-ana",
+        validFrom: "2022-01-01T00:00:00.000Z",
+      },
+    );
+    return { backend, baseStore, anchor, branchA, branchB, assertion };
+  }
+
+  const patientRemapOptions = {
+    resolve: {
+      Patient: {
+        block: (node: unknown) => (node as { birthDate?: string }).birthDate,
+        similarity: { kind: "fulltext", fields: ["name"] },
+        threshold: 0.85,
+      },
+    },
+    branchOrder: [BRANCH_A, BRANCH_B],
+  } as const;
+
+  it("plans and applies adjacent historical identity relations", async () => {
+    const [store] = await createStoreWithSchema(graph, await makeBackend());
+    const first = await store.nodes.Person.create(
+      { name: "Historical first" },
+      { id: "historical-first", validFrom: "2019-01-01T00:00:00.000Z" },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Historical second" },
+      { id: "historical-second", validFrom: "2019-01-01T00:00:00.000Z" },
+    );
+    const sameBranch = unwrap(
+      await branch(store, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const differentBranch = unwrap(
+      await branch(store, () => makeBackend(), { id: BRANCH_B }),
+    );
+    await sameBranch.store.identity.assertSame(first, second, {
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    });
+    await differentBranch.store.identity.assertDifferent(first, second, {
+      validFrom: "2022-01-01T00:00:00.000Z",
+      validTo: "2023-01-01T00:00:00.000Z",
+    });
+
+    const result = await merge(store, [sameBranch, differentBranch], {
+      branchOrder: [BRANCH_A, BRANCH_B],
+    });
+    if (isErr(result)) throw result.error;
+
+    expect(
+      await store
+        .asOf("2021-01-01T00:00:00.000Z")
+        .identity.areSame(first, second),
+    ).toBe(true);
+    expect(
+      await store
+        .asOf("2022-06-01T00:00:00.000Z")
+        .identity.areDifferent(first, second),
+    ).toBe(true);
+    expect(await store.identity.areSame(first, second)).toBe(false);
+    expect(await store.identity.areDifferent(first, second)).toBe(false);
+  });
 
   /**
    * A four-node base already holding `same(second, third)` — the inherited link
@@ -218,6 +322,166 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(current.map((entry) => entry.id)).toEqual([reasserted.assertion.id]);
     expect(await store.identity.areSame(first, second)).toBe(true);
   });
+
+  it("applies the exact reviewed windows for multiple and unrelated retractions", async () => {
+    const [store] = await createStoreWithSchema(graph, await makeBackend(), {
+      history: true,
+      revisionTracking: true,
+    });
+    const nodes = await store.nodes.Person.bulkCreate(
+      [
+        "same-a",
+        "same-b",
+        "different-a",
+        "different-b",
+        "only-a",
+        "only-b",
+      ].map((id) => ({
+        id: `plan-window-${id}`,
+        props: { name: id },
+        validFrom: "2019-01-01T00:00:00.000Z",
+      })),
+    );
+    const sameA = requireDefined(nodes[0]);
+    const sameB = requireDefined(nodes[1]);
+    const differentA = requireDefined(nodes[2]);
+    const differentB = requireDefined(nodes[3]);
+    const onlyA = requireDefined(nodes[4]);
+    const onlyB = requireDefined(nodes[5]);
+    const baseSame = await store.identity.assertSame(sameA, sameB);
+    const baseDifferent = await store.identity.assertDifferent(
+      differentA,
+      differentB,
+    );
+    const baseOnly = await store.identity.assertSame(onlyA, onlyB);
+    const source = unwrap(
+      await branch(store, () => makeBackend(), { id: BRANCH_A }),
+    );
+    const retractedSame = requireDefined(
+      await source.store.identity.retractAssertion(baseSame.assertion.id),
+    );
+    const replacementDifferent = await source.store.identity.assertDifferent(
+      sameA,
+      sameB,
+    );
+    const retractedDifferent = requireDefined(
+      await source.store.identity.retractAssertion(baseDifferent.assertion.id),
+    );
+    const replacementSame = await source.store.identity.assertSame(
+      differentA,
+      differentB,
+    );
+    const retractedOnly = requireDefined(
+      await source.store.identity.retractAssertion(baseOnly.assertion.id),
+    );
+
+    const artifact = unwrap(await planMerge(store, [source]));
+    const applied = unwrap(await applyMergePlan(store, artifact));
+    expect(applied.merged.identity).toEqual({ asserted: 2, retracted: 3 });
+
+    const archival = await storeRuntime(store).identityAssertionsAtTarget(
+      storeRuntime(store).backend,
+      "archival",
+    );
+    const committedById = new Map(
+      archival.map((assertion) => [assertion.id, assertion]),
+    );
+    for (const retraction of artifact.writes.identityRetractions) {
+      expect(committedById.get(retraction.id)?.validTo).toBe(
+        retraction.validTo,
+      );
+    }
+    for (const assertion of artifact.writes.identityAssertions) {
+      expect(committedById.get(assertion.id)).toEqual(assertion);
+    }
+    expect(committedById.get(baseSame.assertion.id)?.validTo).toBe(
+      retractedSame.validTo,
+    );
+    expect(committedById.get(baseDifferent.assertion.id)?.validTo).toBe(
+      retractedDifferent.validTo,
+    );
+    expect(committedById.get(baseOnly.assertion.id)?.validTo).toBe(
+      retractedOnly.validTo,
+    );
+    expect(
+      committedById.get(replacementDifferent.assertion.id)?.validFrom,
+    ).toBe(replacementDifferent.assertion.validFrom);
+    expect(committedById.get(replacementSame.assertion.id)?.validFrom).toBe(
+      replacementSame.assertion.validFrom,
+    );
+  });
+
+  it.each([
+    ["same", "different"],
+    ["different", "same"],
+  ] as const)(
+    "keeps an incremental %s-to-%s replacement idempotent",
+    async (initialRelation, replacementRelation) => {
+      const [forkPoint] = await createStoreWithSchema(
+        graph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      const first = await forkPoint.nodes.Person.create(
+        { name: "Replay first" },
+        { id: `replay-${initialRelation}-first` },
+      );
+      const second = await forkPoint.nodes.Person.create(
+        { name: "Replay second" },
+        { id: `replay-${initialRelation}-second` },
+      );
+      const initial =
+        initialRelation === "same" ?
+          await forkPoint.identity.assertSame(first, second)
+        : await forkPoint.identity.assertDifferent(first, second);
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), {
+          id: asBranchId(`target-${initialRelation}`),
+        }),
+      ).store;
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), {
+          id: asBranchId(`source-${initialRelation}`),
+        }),
+      );
+      const retraction = requireDefined(
+        await source.store.identity.retractAssertion(initial.assertion.id),
+      );
+      const replacement =
+        replacementRelation === "same" ?
+          await source.store.identity.assertSame(first, second)
+        : await source.store.identity.assertDifferent(first, second);
+      const args = {
+        forkPoint,
+        target,
+        branches: [source],
+        options: { branchOrder: [source.id] },
+      } as const;
+
+      const firstMerge = unwrap(await mergeIncremental(args));
+      expect(firstMerge.merged.identity).toEqual({
+        asserted: 1,
+        retracted: 1,
+      });
+      const secondMerge = unwrap(await mergeIncremental(args));
+      expect(secondMerge.merged.identity).toEqual({
+        asserted: 0,
+        retracted: 0,
+      });
+
+      const archival = await storeRuntime(target).identityAssertionsAtTarget(
+        storeRuntime(target).backend,
+        "archival",
+      );
+      expect(
+        archival.find((assertion) => assertion.id === initial.assertion.id)
+          ?.validTo,
+      ).toBe(retraction.validTo);
+      expect(
+        archival.find((assertion) => assertion.id === replacement.assertion.id),
+      ).toEqual(replacement.assertion);
+    },
+  );
 
   it("rejects assertion-free same-id nodes of disjoint kinds at plan time", async () => {
     // Neither branch writes any assertion: the contradiction is entirely
@@ -445,46 +709,17 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
   });
 
   it("remaps a folded assertion endpoint onto the cluster survivor (#2)", async () => {
-    const backend = await makeBackend();
-    const [baseStore] = await createStoreWithSchema(patientGraph, backend);
-    const anchor = await baseStore.nodes.Patient.create(
-      { name: "Anchor Person", birthDate: "1990-01-01" },
-      { id: "anchor" },
+    const { backend, baseStore, anchor, branchA, branchB, assertion } =
+      await createPatientRemapScenario();
+    const result = await merge(
+      baseStore,
+      [branchA, branchB],
+      patientRemapOptions,
     );
-
-    const branchA = unwrap(
-      await branch(baseStore, () => makeBackend(), { id: BRANCH_A }),
-    );
-    const branchB = unwrap(
-      await branch(baseStore, () => makeBackend(), { id: BRANCH_B }),
-    );
-
-    // Branch A's Patient has the LARGER id ("p-anna" > "p-ana"), so it is the
-    // NON-survivor. Its identity assertion endpoint must be remapped onto branch
-    // B's surviving node, or the commit-time endpoint guard rejects the dangling id.
-    const anna = await branchA.store.nodes.Patient.create(
-      { name: "Anna Rivera", birthDate: "1974-03-09" },
-      { id: "p-anna" },
-    );
-    await branchA.store.identity.assertSame(anna, anchor);
-
-    await branchB.store.nodes.Patient.create(
-      { name: "Ana Rivera", birthDate: "1974-03-09" },
-      { id: "p-ana" },
-    );
-
-    const result = await merge(baseStore, [branchA, branchB], {
-      resolve: {
-        Patient: {
-          block: (node) =>
-            (node as unknown as { birthDate?: string }).birthDate,
-          similarity: { kind: "fulltext", fields: ["name"] },
-          threshold: 0.85,
-        },
-      },
-      branchOrder: [BRANCH_A, BRANCH_B],
-    });
     expect(isOk(result)).toBe(true);
+    expect(unwrap(result).warnings).toEqual([
+      narrowedAssertionWarning(assertion.id),
+    ]);
 
     // The two duplicate patients collapsed to one survivor ("p-ana").
     const rows = await enumerateAllNodes(backend, baseStore.graphId, "Patient");
@@ -503,6 +738,26 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       requireDefined(appliedAssertion).b.id,
     ].sort();
     expect(endpointIds).toEqual(["anchor", "p-ana"]);
+    const survivorRow = requireDefined(
+      rows.find((row) => row.id === "p-ana" && row.deleted_at === undefined),
+    );
+    expect(requireDefined(appliedAssertion).validFrom).toBe(
+      survivorRow.valid_from,
+    );
+  });
+
+  it("round-trips a narrowing warning through a portable plan", async () => {
+    const { baseStore, branchA, branchB, assertion } =
+      await createPatientRemapScenario();
+    const artifact = unwrap(
+      await planMerge(baseStore, [branchA, branchB], patientRemapOptions),
+    );
+    const expectedWarnings = [narrowedAssertionWarning(assertion.id)];
+    expect(artifact.review.warnings).toEqual(expectedWarnings);
+
+    const parsed = JSON.parse(JSON.stringify(artifact)) as typeof artifact;
+    const report = unwrap(await applyMergePlan(baseStore, parsed));
+    expect(report.warnings).toEqual(expectedWarnings);
   });
 
   it("rejects opposing relations created by endpoint reconciliation", async () => {
@@ -911,6 +1166,291 @@ describe("plan-time derived identity contradictions", () => {
       ),
     ).not.toThrow();
   });
+
+  it("preserves insertion order in ontology-conflict details after rollback", () => {
+    const earlierClass: IdentityTransferAssertion = {
+      id: "earlier-class",
+      relation: "same",
+      a: { kind: "Gamma", id: "z" },
+      b: { kind: "Alpha", id: "m" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const laterConflict: IdentityTransferAssertion = {
+      id: "later-conflict",
+      relation: "same",
+      a: earlierClass.a,
+      b: { kind: "Zed", id: "a" },
+      validFrom: requireDefined(earlierClass.validTo),
+    };
+    let thrown: unknown;
+
+    try {
+      assertNoContradictoryIdentityClosure(
+        [earlierClass, laterConflict],
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        {
+          sameIdAcrossKinds: undefined,
+          areDisjoint: (left, right) =>
+            new Set([left, right, "Gamma", "Zed"]).size === 2,
+        },
+        [],
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(IdentityMergeConflictError);
+    if (!(thrown instanceof IdentityMergeConflictError)) throw thrown;
+    expect(thrown.details).toEqual({
+      disjointKinds: ["Gamma", "Zed"],
+      sameClass: [
+        { kind: "Zed", id: "a" },
+        { kind: "Gamma", id: "z" },
+      ],
+    });
+  });
+
+  it("rejects overlapping historical truth and accepts adjacent windows", () => {
+    const same: IdentityTransferAssertion = {
+      id: "historical-same",
+      relation: "same",
+      a: { kind: "Person", id: "a" },
+      b: { kind: "Person", id: "b" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const different: IdentityTransferAssertion = {
+      id: "historical-different",
+      relation: "different",
+      a: same.a,
+      b: same.b,
+      validFrom: "2021-01-01T00:00:00.000Z",
+      validTo: "2023-01-01T00:00:00.000Z",
+    };
+    const check = (assertions: readonly IdentityTransferAssertion[]): void =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        noDisjoint,
+        [],
+      );
+
+    expect(() => check([same, different])).toThrow(IdentityMergeConflictError);
+    const adjacent = {
+      ...different,
+      validFrom: requireDefined(same.validTo),
+    };
+    expect(() => check([same, adjacent])).not.toThrow();
+
+    expect(() =>
+      planIdentityChanges(
+        stagingWithIdentityChanges([
+          { branchId: BRANCH_A, assertion: same },
+          { branchId: BRANCH_B, assertion: different },
+        ]),
+        new Map(),
+      ),
+    ).toThrow(IdentityMergeConflictError);
+    const planned = planIdentityChanges(
+      stagingWithIdentityChanges([
+        { branchId: BRANCH_A, assertion: same },
+        { branchId: BRANCH_B, assertion: adjacent },
+        {
+          branchId: BRANCH_B,
+          assertion: {
+            ...same,
+            id: "later-historical-same",
+            validFrom: requireDefined(adjacent.validTo),
+            validTo: "2024-01-01T00:00:00.000Z",
+          },
+        },
+      ]),
+      new Map(),
+    );
+    expect(
+      planned.assertions.map((assertion) => assertion.id).toSorted(),
+    ).toEqual([
+      "historical-different",
+      "historical-same",
+      "later-historical-same",
+    ]);
+  });
+
+  it("removes expired same links before checking later negative truth", () => {
+    const bridge: IdentityTransferAssertion = {
+      id: "expired-bridge",
+      relation: "same",
+      a: { kind: "Person", id: "a" },
+      b: { kind: "Person", id: "b" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const remainingLink: IdentityTransferAssertion = {
+      id: "remaining-link",
+      relation: "same",
+      a: bridge.b,
+      b: { kind: "Person", id: "c" },
+      validFrom: "2021-01-01T00:00:00.000Z",
+      validTo: "2024-01-01T00:00:00.000Z",
+    };
+    const laterDifferent: IdentityTransferAssertion = {
+      id: "later-different",
+      relation: "different",
+      a: bridge.a,
+      b: remainingLink.b,
+      validFrom: requireDefined(bridge.validTo),
+      validTo: "2023-01-01T00:00:00.000Z",
+    };
+    const check = (assertions: readonly IdentityTransferAssertion[]): void =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        noDisjoint,
+        [],
+      );
+
+    expect(() => check([bridge, remainingLink, laterDifferent])).not.toThrow();
+    expect(() =>
+      check([
+        bridge,
+        remainingLink,
+        {
+          ...laterDifferent,
+          validFrom: "2021-06-01T00:00:00.000Z",
+        },
+      ]),
+    ).toThrow(IdentityMergeConflictError);
+  });
+
+  it("detects contradictions regardless of which relation spans the window", () => {
+    const same: IdentityTransferAssertion = {
+      id: "spanning-same",
+      relation: "same",
+      a: { kind: "Person", id: "a" },
+      b: { kind: "Person", id: "b" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2024-01-01T00:00:00.000Z",
+    };
+    const different: IdentityTransferAssertion = {
+      ...same,
+      id: "nested-different",
+      relation: "different",
+      validFrom: "2021-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const check = (assertions: readonly IdentityTransferAssertion[]): void =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        noDisjoint,
+        [],
+      );
+
+    expect(() => check([same, different])).toThrow(IdentityMergeConflictError);
+    expect(() =>
+      check([
+        { ...same, validFrom: different.validFrom, validTo: different.validTo },
+        { ...different, validFrom: same.validFrom, validTo: same.validTo },
+      ]),
+    ).toThrow(IdentityMergeConflictError);
+  });
+
+  it("folds same-id references only while their assertion windows overlap", () => {
+    const companyReference: IdentityTransferAssertion = {
+      id: "company-reference",
+      relation: "same",
+      a: { kind: "Company", id: "shared" },
+      b: { kind: "Company", id: "company-peer" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+    };
+    const personReference: IdentityTransferAssertion = {
+      id: "person-reference",
+      relation: "same",
+      a: { kind: "Person", id: "shared" },
+      b: { kind: "Person", id: "person-peer" },
+      validFrom: requireDefined(companyReference.validTo),
+      validTo: "2024-01-01T00:00:00.000Z",
+    };
+    const check = (assertions: readonly IdentityTransferAssertion[]): void =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        {
+          sameIdAcrossKinds: "fold",
+          areDisjoint: (left, right) =>
+            new Set([left, right, "Company", "Person"]).size === 2,
+        },
+        [],
+      );
+
+    expect(() => check([companyReference, personReference])).not.toThrow();
+    expect(() =>
+      check([
+        companyReference,
+        {
+          ...personReference,
+          validFrom: "2021-01-01T00:00:00.000Z",
+        },
+      ]),
+    ).toThrow(IdentityMergeConflictError);
+  });
+
+  it("does not repeat ontology work for every temporal boundary", () => {
+    let disjointChecks = 0;
+    const assertions = Array.from(
+      { length: 600 },
+      (_unused, index): IdentityTransferAssertion => ({
+        id: `window-${index}`,
+        relation: "same",
+        a: { kind: "Company", id: `company-${index}` },
+        b: { kind: "Person", id: `person-${index}` },
+        validFrom: new Date(index * 2000).toISOString(),
+        validTo: new Date(index * 2000 + 1000).toISOString(),
+      }),
+    );
+
+    expect(() =>
+      assertNoContradictoryIdentityClosure(
+        assertions,
+        [],
+        [],
+        new Set<MergeKey>(),
+        EMPTY_MAP,
+        EMPTY_MAP,
+        {
+          sameIdAcrossKinds: "ignore",
+          areDisjoint: () => {
+            disjointChecks += 1;
+            return false;
+          },
+        },
+        [],
+      ),
+    ).not.toThrow();
+    expect(disjointChecks).toBeLessThan(10);
+  });
 });
 
 describe("remapIdentityAssertionEndpoints committed precedence", () => {
@@ -975,6 +1515,173 @@ describe("remapIdentityAssertionEndpoints committed endpoints", () => {
         new Map([["z-target", committed]]),
       ),
     ).toThrow(IdentityMergeConflictError);
+  });
+});
+
+describe("remapIdentityAssertionEndpoints validity", () => {
+  const assertion: IdentityTransferAssertion = {
+    id: "branch-assertion",
+    relation: "same",
+    a: { kind: "Person", id: "folded" },
+    b: { kind: "Person", id: "anchor" },
+    validFrom: "2020-01-01T00:00:00.000Z",
+    validTo: "2025-01-01T00:00:00.000Z",
+  };
+  const canonicalOf = new Map([
+    [mergeKey("Person", "folded"), mergeKey("Person", "survivor")],
+  ]);
+
+  it("intersects a remapped assertion with the survivor window", () => {
+    const result = remapIdentityAssertionEndpoints(
+      [assertion],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          {
+            validFrom: "2022-01-01T00:00:00.000Z",
+            validTo: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+      ]),
+    );
+
+    expect(result.assertions).toEqual([
+      {
+        ...assertion,
+        a: { kind: "Person", id: "anchor" },
+        b: { kind: "Person", id: "survivor" },
+        validFrom: "2022-01-01T00:00:00.000Z",
+        validTo: "2024-01-01T00:00:00.000Z",
+      },
+    ]);
+    expect(result.dropped).toEqual([]);
+    expect(result.warnings).toEqual([
+      'Identity assertion "branch-assertion" was narrowed from [2020-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to [2022-01-01T00:00:00.000Z, 2024-01-01T00:00:00.000Z) to fit its remapped endpoint windows.',
+    ]);
+  });
+
+  it("drops a remapped assertion with no shared validity window", () => {
+    const result = remapIdentityAssertionEndpoints(
+      [assertion],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          { validFrom: "2025-01-01T00:00:00.000Z" },
+        ],
+      ]),
+    );
+
+    expect(result.assertions).toEqual([]);
+    expect(result.dropped).toEqual([
+      {
+        kind: "identity",
+        id: assertion.id,
+        reason: EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON,
+      },
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("honors a survivor window with only an upper bound", () => {
+    const result = remapIdentityAssertionEndpoints(
+      [assertion],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          { validTo: "2023-01-01T00:00:00.000Z" },
+        ],
+      ]),
+    );
+
+    expect(result.assertions).toEqual([
+      {
+        ...assertion,
+        a: { kind: "Person", id: "anchor" },
+        b: { kind: "Person", id: "survivor" },
+        validTo: "2023-01-01T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("does not warn for a narrowed assertion removed by dedupe", () => {
+    const survivor: IdentityTransferAssertion = {
+      ...assertion,
+      id: "a-survivor",
+      a: { kind: "Person", id: "survivor" },
+      validFrom: "2022-01-01T00:00:00.000Z",
+      validTo: "2024-01-01T00:00:00.000Z",
+    };
+    const narrowedLoser = { ...assertion, id: "z-narrowed-loser" };
+    const result = remapIdentityAssertionEndpoints(
+      [narrowedLoser, survivor],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          {
+            validFrom: "2022-01-01T00:00:00.000Z",
+            validTo: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+      ]),
+    );
+
+    expect(result.assertions.map((entry) => entry.id)).toEqual([survivor.id]);
+    expect(result.dropped).toContainEqual({
+      kind: "identity",
+      id: narrowedLoser.id,
+      reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+    });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("orders warnings by the surviving assertions' semantic keys", () => {
+    const laterSemanticKey: IdentityTransferAssertion = {
+      id: "a-warning",
+      relation: "same",
+      a: { kind: "Person", id: "z-first" },
+      b: { kind: "Person", id: "z-second" },
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2025-01-01T00:00:00.000Z",
+    };
+    const earlierSemanticKey: IdentityTransferAssertion = {
+      ...laterSemanticKey,
+      id: "z-warning",
+      a: { kind: "Person", id: "a-first" },
+      b: { kind: "Person", id: "a-second" },
+    };
+    const result = remapIdentityAssertionEndpoints(
+      [laterSemanticKey, earlierSemanticKey],
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map([
+        [
+          mergeKey("Person", "z-first"),
+          { validFrom: "2023-01-01T00:00:00.000Z" },
+        ],
+        [
+          mergeKey("Person", "a-first"),
+          { validFrom: "2022-01-01T00:00:00.000Z" },
+        ],
+      ]),
+    );
+
+    expect(result.warnings).toEqual([
+      'Identity assertion "z-warning" was narrowed from [2020-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to [2022-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to fit its remapped endpoint windows.',
+      'Identity assertion "a-warning" was narrowed from [2020-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to [2023-01-01T00:00:00.000Z, 2025-01-01T00:00:00.000Z) to fit its remapped endpoint windows.',
+    ]);
   });
 });
 

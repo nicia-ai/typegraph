@@ -360,6 +360,9 @@ export type ImportResult = z.infer<typeof ImportResultSchema>;
 // Export Options
 // ============================================================
 
+/** Largest delay JavaScript timers represent without truncation or overflow. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /**
  * Options for exporting graph data.
  */
@@ -413,6 +416,20 @@ export type ExportOptionsInput = z.input<typeof ExportOptionsSchema>;
  * of node or edge entities retained for one yielded chunk.
  */
 export const ExportStreamOptionsSchema = ExportOptionsSchema.extend({
+  /**
+   * Maximum time the consumer may leave a delivered chunk unacknowledged
+   * before the export settles itself. The clock starts when a chunk is yielded
+   * and is cleared when the consumer asks for the next chunk, so time spent
+   * waiting for the backend to produce a chunk does not count as consumer
+   * idleness. On expiry, the consumer is rejected with
+   * `ExportStreamIdleTimeoutError` and any snapshot transaction and serialized
+   * connection lease are released.
+   *
+   * Omit this only when the caller guarantees a cooperative exit (`break`,
+   * `throw`, or `iterator.return()`) or supplies a signal it will abort. An
+   * abandoned async iterator is not closed by garbage collection.
+   */
+  idleTimeoutMs: z.number().int().positive().max(MAX_TIMER_DELAY_MS).optional(),
   batchSize: z.number().int().positive().default(1000),
 });
 

@@ -42,7 +42,7 @@ import {
   identityReferenceKey,
   normalizeIdentityPair,
 } from "../identity/reference";
-import { requireDefined } from "../utils/presence";
+import { identityValidityWindowsOverlap } from "../identity/validity-window";
 import { encodeTupleKey } from "../utils/tuple-key";
 import type { CanonicalEntity } from "./canonicalize";
 import {
@@ -61,6 +61,7 @@ import {
   mergeKeyOf,
 } from "./node-key";
 import type { StagedIdentityAssertion, StagingSet } from "./staging";
+import { assertTemporalIdentityClosureConsistent } from "./temporal-identity-closure";
 import {
   compareCodePoints,
   type GraphBackend,
@@ -75,7 +76,6 @@ import {
   TypeGraphError,
 } from "./typegraph-internal";
 import type { DroppedItem } from "./types";
-import { UnionFind } from "./union-find";
 
 /**
  * The identity-relevant slice of a resolved merge plan: a STRUCTURAL subset of
@@ -115,6 +115,12 @@ function identitySemanticKey(assertion: IdentityTransferAssertion): string {
   );
 }
 
+function identityDedupeKey(assertion: IdentityTransferAssertion): string {
+  const semantic = identitySemanticKey(assertion);
+  if (assertion.validTo === undefined) return semantic;
+  return encodeTupleKey([semantic, assertion.validFrom, assertion.validTo]);
+}
+
 function compareIdentitySurvivors(
   left: IdentityTransferAssertion,
   right: IdentityTransferAssertion,
@@ -137,6 +143,10 @@ export const DUPLICATE_IDENTITY_ASSERTION_DROP_REASON =
 export const REDUNDANT_IDENTITY_ASSERTION_DROP_REASON =
   "identity:endpoints-collapsed";
 
+/** Reason recorded when endpoint remapping leaves no shared validity window. */
+export const EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON =
+  "identity:empty-remapped-window";
+
 /** The report entry for an identity assertion the merge did not apply. */
 function droppedIdentityAssertion(
   assertion: IdentityTransferAssertion,
@@ -146,15 +156,14 @@ function droppedIdentityAssertion(
 }
 
 /**
- * Keeps ONE assertion per semantic pair and reports every loser as a
- * {@link DroppedItem}, so a duplicate assertion silently discarded from a
- * losing branch is still enumerable in the merge report. Survivors come back
- * in semantic-key order.
+ * Keeps one CURRENT assertion per semantic pair, while retaining every
+ * distinct bounded window. Exact bounded duplicates still choose one survivor
+ * and report the loser. Survivors come back in window-aware key order.
  *
  * An id in `committedIds` (already committed on the target with the exact
  * staged truth) ALWAYS wins over an uncommitted challenger, regardless of the
  * {@link compareIdentitySurvivors} order: the applier is idempotent per
- * semantic pair, so the challenger would never be written — picking it would
+ * dedupe key, so the challenger would never be written — picking it would
  * report an id as applied that never lands while listing the target's own row
  * as dropped. Between two ids of equal committed status the comparator
  * decides.
@@ -169,7 +178,7 @@ function dedupeIdentityAssertions(
   const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
   const dropped: DroppedItem[] = [];
   for (const assertion of assertions) {
-    const key = identitySemanticKey(assertion);
+    const key = identityDedupeKey(assertion);
     const previous = survivorBySemantic.get(key);
     if (previous === undefined) {
       survivorBySemantic.set(key, assertion);
@@ -202,7 +211,7 @@ function dedupeIdentityAssertions(
   }
   return {
     survivors: [...survivorBySemantic.values()].toSorted((left, right) =>
-      compareCodePoints(identitySemanticKey(left), identitySemanticKey(right)),
+      compareCodePoints(identityDedupeKey(left), identityDedupeKey(right)),
     ),
     dropped,
   };
@@ -219,13 +228,28 @@ function assertNoOpposingIdentityRelations(
     byEndpoint.set(key, group);
   }
   for (const [endpoint, group] of byEndpoint) {
-    if (new Set(group.map((assertion) => assertion.relation)).size < 2) {
-      continue;
-    }
-    throw new IdentityMergeConflictError(
-      "Branches asserted opposing identity relations for one endpoint pair.",
-      { details: { endpoint, assertions: group } },
+    const same = group.filter((assertion) => assertion.relation === "same");
+    const different = group.filter(
+      (assertion) => assertion.relation === "different",
     );
+    for (const sameAssertion of same) {
+      for (const differentAssertion of different) {
+        if (
+          !identityValidityWindowsOverlap(sameAssertion, differentAssertion)
+        ) {
+          continue;
+        }
+        throw new IdentityMergeConflictError(
+          "Branches asserted opposing identity relations for one endpoint pair.",
+          {
+            details: {
+              endpoint,
+              assertions: [sameAssertion, differentAssertion],
+            },
+          },
+        );
+      }
+    }
   }
 }
 
@@ -472,12 +496,18 @@ export function remapIdentityAssertionEndpoints(
   canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
   retypeMap: ReadonlyMap<MergeKey, string>,
   storedRowsById: ReadonlyMap<string, LedgerAssertion>,
+  endpointWindows: ReadonlyMap<
+    MergeKey,
+    Readonly<{ validFrom?: string; validTo?: string }>
+  > = new Map(),
 ): Readonly<{
   assertions: readonly IdentityTransferAssertion[];
   dropped: readonly DroppedItem[];
+  warnings: readonly string[];
 }> {
   const remapped: IdentityTransferAssertion[] = [];
   const dropped: DroppedItem[] = [];
+  const narrowingWarningById = new Map<string, string>();
   for (const assertion of assertions) {
     const remappedA = resolveIdentityEndpoint(
       assertion.a,
@@ -505,7 +535,54 @@ export function remapIdentityAssertionEndpoints(
       continue;
     }
     const [a, b] = normalizeIdentityPair(remappedA, remappedB);
-    const result = { ...assertion, a, b };
+    const endpointWindowA = endpointWindows.get(mergeKeyOf(a));
+    const endpointWindowB = endpointWindows.get(mergeKeyOf(b));
+    const validFrom = [
+      assertion.validFrom,
+      endpointWindowA?.validFrom,
+      endpointWindowB?.validFrom,
+    ]
+      .filter((bound): bound is string => bound !== undefined)
+      .reduce((latest, bound) =>
+        compareCodePoints(latest, bound) < 0 ? bound : latest,
+      );
+    const validTo = [
+      assertion.validTo,
+      endpointWindowA?.validTo,
+      endpointWindowB?.validTo,
+    ]
+      .filter((bound): bound is string => bound !== undefined)
+      .reduce<string | undefined>(
+        (earliest, bound) =>
+          earliest === undefined || compareCodePoints(bound, earliest) < 0 ?
+            bound
+          : earliest,
+        undefined,
+      );
+    if (validTo !== undefined && compareCodePoints(validFrom, validTo) >= 0) {
+      dropped.push(
+        droppedIdentityAssertion(
+          assertion,
+          EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON,
+        ),
+      );
+      continue;
+    }
+    if (validFrom !== assertion.validFrom || validTo !== assertion.validTo) {
+      const originalUpper = assertion.validTo ?? "open";
+      const remappedUpper = validTo ?? "open";
+      narrowingWarningById.set(
+        assertion.id,
+        `Identity assertion ${JSON.stringify(assertion.id)} was narrowed from [${assertion.validFrom}, ${originalUpper}) to [${validFrom}, ${remappedUpper}) to fit its remapped endpoint windows.`,
+      );
+    }
+    const result = {
+      ...assertion,
+      a,
+      b,
+      validFrom,
+      ...(validTo === undefined ? {} : { validTo }),
+    };
     // A COMMITTED row's endpoints must never be canonicalized away: the
     // applier cannot rewrite a stored row, so a plan carrying its id with
     // moved endpoints could only end as a false one-truth refusal or —
@@ -554,6 +631,10 @@ export function remapIdentityAssertionEndpoints(
   return {
     assertions: deduped.survivors,
     dropped: [...dropped, ...deduped.dropped],
+    warnings: deduped.survivors.flatMap((assertion) => {
+      const warning = narrowingWarningById.get(assertion.id);
+      return warning === undefined ? [] : [warning];
+    }),
   };
 }
 
@@ -663,7 +744,7 @@ export function assertNoContradictoryIdentityClosure(
   ): boolean =>
     !deletedNodes.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
     !deletedNodes.has(mergeKey(assertion.b.kind, assertion.b.id));
-  const mergedLedger = [
+  const mergedLedger: readonly IdentityTransferAssertion[] = [
     ...plannedAssertions,
     ...baseAssertions
       .filter(
@@ -676,115 +757,11 @@ export function assertNoContradictoryIdentityClosure(
         b: resolveIdentityEndpoint(assertion.b, canonicalOf, retypeMap),
       })),
   ];
-
-  const sameClasses = new UnionFind<MergeKey>((left, right) =>
-    compareMergeKeys(left, right),
+  assertTemporalIdentityClosureConsistent(
+    mergedLedger,
+    identityContext,
+    nodeUniverse,
   );
-  // Assertion-free nodes participate too: a new or retyped canonical node —
-  // or a live target peer sharing its id — can fold into a class without any
-  // ledger edge naming it, so the simulation seeds the full node universe as
-  // singletons before the explicit assertions union anything.
-  for (const node of nodeUniverse) {
-    sameClasses.add(mergeKey(node.kind, node.id));
-  }
-  for (const assertion of mergedLedger) {
-    if (assertion.relation === "same") {
-      sameClasses.union(mergeKeyOf(assertion.a), mergeKeyOf(assertion.b));
-    }
-  }
-  // The class a root identifies, as sorted public `(kind, id)` refs — the shape
-  // both contradiction reports carry in their details.
-  const membersOfClass = (
-    root: MergeKey,
-  ): readonly Readonly<{ kind: string; id: string }>[] =>
-    sameClasses
-      .members()
-      .filter((member) => sameClasses.find(member) === root)
-      .map((member) => ({ kind: kindOf(member), id: idOf(member) }))
-      .toSorted((left, right) =>
-        compareMergeKeys(mergeKeyOf(left), mergeKeyOf(right)),
-      );
-  // The first ontology-disjoint pair among `kinds`, or `undefined` when every
-  // pair may coexist. Each caller raises its own error for the pair it finds.
-  const firstDisjointPair = (
-    kinds: readonly string[],
-  ): readonly [string, string] | undefined => {
-    for (const [index, left] of kinds.entries()) {
-      for (const right of kinds.slice(index + 1)) {
-        if (identityContext.areDisjoint(left, right)) return [left, right];
-      }
-    }
-    return undefined;
-  };
-
-  const refsById = new Map<string, MergeKey[]>();
-  const addRef = (kind: string, id: string): void => {
-    const keys = refsById.get(id) ?? [];
-    keys.push(mergeKey(kind, id));
-    refsById.set(id, keys);
-  };
-  for (const node of nodeUniverse) addRef(node.kind, node.id);
-  for (const assertion of mergedLedger) {
-    addRef(assertion.a.kind, assertion.a.id);
-    addRef(assertion.b.kind, assertion.b.id);
-  }
-  // Sharing an id across DISJOINT kinds is a create-time constraint under
-  // BOTH profiles — under "ignore" the rows do not fold, but the id is still
-  // refused. Scan every same-id group regardless of profile.
-  for (const keys of refsById.values()) {
-    const disjointKinds = firstDisjointPair([
-      ...new Set(keys.map((key) => kindOf(key))),
-    ]);
-    if (disjointKinds === undefined) continue;
-    throw new IdentityMergeConflictError(
-      "The merged graph would give one id to two ontology-disjoint kinds.",
-      {
-        details: {
-          disjointKinds,
-          sharedId: idOf(requireDefined(keys[0])),
-        },
-      },
-    );
-  }
-  if (identityContext.sameIdAcrossKinds === "fold") {
-    for (const keys of refsById.values()) {
-      const [first, ...rest] = keys;
-      if (first === undefined) continue;
-      for (const other of rest) sameClasses.union(first, other);
-    }
-  }
-  for (const assertion of mergedLedger) {
-    if (assertion.relation !== "different") {
-      continue;
-    }
-    const root = sameClasses.find(mergeKeyOf(assertion.a));
-    if (root !== sameClasses.find(mergeKeyOf(assertion.b))) {
-      continue;
-    }
-    throw new IdentityMergeConflictError(
-      "The merged identity ledger would assert one pair of nodes is both the same and different.",
-      { details: { assertion, sameClass: membersOfClass(root) } },
-    );
-  }
-
-  // A class whose member kinds the ontology declares disjoint is the same
-  // contradiction in another coat: retyping (or a fold) pulled two mutually
-  // exclusive kinds into one identity class.
-  const kindsByRoot = new Map<MergeKey, Set<string>>();
-  for (const member of sameClasses.members()) {
-    const root = sameClasses.find(member);
-    const kinds = kindsByRoot.get(root) ?? new Set<string>();
-    kinds.add(kindOf(member));
-    kindsByRoot.set(root, kinds);
-  }
-  for (const [root, kinds] of kindsByRoot) {
-    const disjointKinds = firstDisjointPair([...kinds]);
-    if (disjointKinds === undefined) continue;
-    throw new IdentityMergeConflictError(
-      "The merged identity ledger would join two ontology-disjoint kinds into one class.",
-      { details: { disjointKinds, sameClass: membersOfClass(root) } },
-    );
-  }
 }
 
 /**
@@ -1070,7 +1047,7 @@ export function assertionTruthKey(assertion: LedgerAssertion): string {
  * timestamp while the target's current row carries none, which makes the
  * complete {@link assertionTruthKey} unusable for that question.
  */
-function assertionIdentityKey(assertion: LedgerAssertion): string {
+export function assertionIdentityKey(assertion: LedgerAssertion): string {
   return JSON.stringify([
     assertion.relation,
     ...endpointTuple(assertion),
@@ -1307,16 +1284,17 @@ function identityRefusalCode(error: TypeGraphError): string | undefined {
  * SIMULATES the identity applier's rules to refuse illegal plans early and
  * typed — but a simulation can lag the applier, and an invariant it does not
  * (yet) mirror would surface as the generic merge wrapper around the applier's
- * refusal. Translating every refusal that escapes the IDENTITY-APPLIER
- * boundary (the `applyIdentityMergeAtTarget` call inside the commit) into the
- * typed conflict error (cause preserved) gives NEW applier invariants a typed
- * surface by construction instead of by hand-built plan-time twins.
+ * refusal. Translating every refusal that escapes an identity-owned commit
+ * boundary (the identity applier, plus the node-window guard that protects
+ * open assertions) into the typed conflict error (cause preserved) gives NEW
+ * invariants a typed surface by construction instead of by hand-built
+ * plan-time twins.
  *
- * Because this wraps ONLY the identity apply, a {@link NodeNotFoundError}
- * here can mean just one thing — an assertion endpoint the plan validated
- * vanished — so it translates too; the same error from a node or edge write
- * never reaches this function. Typed {@link MergeError}s (the guards' own
- * refusals) and non-identity failures pass through unchanged.
+ * A {@link NodeNotFoundError} is translated only at the identity-applier call,
+ * where it can mean just one thing — an assertion endpoint the plan validated
+ * vanished. Node writes invoke this translator only for their explicit
+ * identity-window refusal. Typed {@link MergeError}s (the guards' own refusals)
+ * and non-identity failures pass through unchanged.
  *
  * @internal Exported for isolated verification of the translation contract.
  */

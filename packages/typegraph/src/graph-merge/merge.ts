@@ -1,4 +1,5 @@
 import { validateEdgeEndpoints } from "../constraints";
+import { IdentityEndpointValidityError } from "../errors";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
@@ -95,6 +96,7 @@ import {
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   StaleMergePlanError,
+  translateMergeCommitError,
   UnsupportedMergePlanVersionError,
 } from "./errors";
 import type { CandidateDiagnostic, CandidateDiagnostics } from "./evidence";
@@ -626,6 +628,8 @@ function clusterMembersFor(
         kind: base.kind,
         branchId: BASE_PROVENANCE_BRANCH,
         props: base.props,
+        ...(base.validFrom === undefined ? {} : { validFrom: base.validFrom }),
+        ...(base.validTo === undefined ? {} : { validTo: base.validTo }),
       });
     }
   }
@@ -1388,6 +1392,28 @@ function buildInternalMergePlan<G extends GraphDef>(
   const canonicalOf = buildCanonicalMap(clusters, (cluster) =>
     pickClusterCanonical(cluster, entityByIdentity),
   );
+  const canonicalEndpointWindows = new Map<
+    MergeKey,
+    Readonly<{ validFrom?: string; validTo?: string }>
+  >();
+  for (const entity of canonicalEntities) {
+    if (
+      entity.endpointValidFrom === undefined &&
+      entity.endpointValidTo === undefined
+    ) {
+      continue;
+    }
+    const sourceKey = mergeKey(entity.kind, entity.canonicalId);
+    const finalKind = reconciliation.retypeMap.get(sourceKey) ?? entity.kind;
+    canonicalEndpointWindows.set(mergeKey(finalKind, entity.canonicalId), {
+      ...(entity.endpointValidFrom === undefined ?
+        {}
+      : { validFrom: entity.endpointValidFrom }),
+      ...(entity.endpointValidTo === undefined ?
+        {}
+      : { validTo: entity.endpointValidTo }),
+    });
+  }
   // Repoint identity-assertion endpoints through the same canonical + retype maps
   // the edges use, so an assertion naming a folded or retyped branch node
   // references its survivor instead of a dangling `(kind, id)` the commit-time
@@ -1398,6 +1424,7 @@ function buildInternalMergePlan<G extends GraphDef>(
     canonicalOf,
     reconciliation.retypeMap,
     storedIdentityRowsById,
+    canonicalEndpointWindows,
   );
   assertIdentityEndpointsNotDeleted(
     identityRemap.assertions,
@@ -1566,7 +1593,7 @@ function buildInternalMergePlan<G extends GraphDef>(
       ),
     ),
     provenanceRecords,
-    warnings: candidateWarnings,
+    warnings: [...candidateWarnings, ...identityRemap.warnings],
     ...(options.candidateDiagnostics === undefined ?
       {}
     : {
@@ -1911,15 +1938,15 @@ async function applyIdentityRows<G extends GraphDef>(
   txBackend: TransactionBackend,
   assertions: readonly IdentityTransferAssertion[],
   retractions: readonly IdentityTransferAssertion[],
-  assertConsistent: () => Promise<void>,
+  assertConsistent?: () => Promise<void>,
 ): Promise<Readonly<{ asserted: number; retracted: number }>> {
   try {
     const applied = await storeRuntime(target).applyIdentityMergeAtTarget(
       txBackend,
-      retractions.map((retraction) => retraction.id),
+      retractions,
       assertions,
     );
-    await assertConsistent();
+    if (assertConsistent !== undefined) await assertConsistent();
     return { asserted: applied.created, retracted: applied.retracted };
   } catch (error) {
     throw translateIdentityCommitError(error);
@@ -1953,11 +1980,30 @@ async function applyInternalMergePlan<G extends GraphDef>(
     : write.validTo === undefined ? {}
     : { validTo: write.validTo }),
   }));
-  const committedNodes = await applyNodeRows(
-    nodesApi,
-    nodeDeletions,
-    nodeUpserts,
+  const validityEndedNodes = new Set(
+    nodeUpserts
+      .filter((write) => "validTo" in write)
+      .map((write) => mergeKey(write.kind, write.id)),
   );
+  const earlyIdentityRetractions = plan.identityRetractions.filter(
+    (retraction) =>
+      validityEndedNodes.has(mergeKeyOf(retraction.a)) ||
+      validityEndedNodes.has(mergeKeyOf(retraction.b)),
+  );
+  const earlyIdentity = await applyIdentityRows(
+    target,
+    txBackend,
+    [],
+    earlyIdentityRetractions,
+  );
+  let committedNodes: number;
+  try {
+    committedNodes = await applyNodeRows(nodesApi, nodeDeletions, nodeUpserts);
+  } catch (error) {
+    throw error instanceof IdentityEndpointValidityError ?
+        translateIdentityCommitError(error)
+      : error;
+  }
 
   const edgeDeletions = [...plan.edgeDeletions].map(([identity, kind]) => ({
     kind,
@@ -2029,7 +2075,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
     // partial commit.
     identity: {
       asserted: appliedIdentity.asserted,
-      retracted: appliedIdentity.retracted,
+      retracted: earlyIdentity.retracted + appliedIdentity.retracted,
     },
   };
 }
@@ -2069,35 +2115,52 @@ export async function commitPlan<G extends GraphDef>(
       { details: { capability: "transactions" } },
     );
   }
-  return withTxConflictRetry(() =>
-    target.transaction(async (tx) => {
-      // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
-      // transaction, so the target may have been written between the base@V
-      // precondition and this commit. Revision-anchored stores check their
-      // durable clock under the graph write lock; legacy stores re-derive the
-      // content fingerprint through this transaction's snapshot. Either proof
-      // ensures the plan still describes the live target before committing.
-      if (expectedBaseVersion !== undefined) {
-        await assertTargetUnchanged(
-          transactionBackend(tx),
+  return runMergeCommit(() =>
+    withTxConflictRetry(() =>
+      target.transaction(async (tx) => {
+        // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
+        // transaction, so the target may have been written between the base@V
+        // precondition and this commit. Revision-anchored stores check their
+        // durable clock under the graph write lock; legacy stores re-derive the
+        // content fingerprint through this transaction's snapshot. Either proof
+        // ensures the plan still describes the live target before committing.
+        if (expectedBaseVersion !== undefined) {
+          await assertTargetUnchanged(
+            transactionBackend(tx),
+            target,
+            expectedBaseVersion,
+          );
+        }
+        // Identity ids are re-validated EXPLICITLY even under a base@V match:
+        // the legacy fingerprint ranges over CURRENT assertions only, so a row
+        // that claimed a planned id in the window and was then ended would pass
+        // the token check and fail generically inside the applier.
+        await assertPlannedIdentityIdsFresh(
           target,
-          expectedBaseVersion,
+          transactionBackend(tx),
+          plan,
         );
-      }
-      // Identity ids are re-validated EXPLICITLY even under a base@V match:
-      // the legacy fingerprint ranges over CURRENT assertions only, so a row
-      // that claimed a planned id in the window and was then ended would pass
-      // the token check and fail generically inside the applier.
-      await assertPlannedIdentityIdsFresh(target, transactionBackend(tx), plan);
-      return applyInternalMergePlan(
-        plan,
-        tx.nodes as unknown as TxNodes,
-        tx.edges as unknown as TxEdges,
-        target,
-        transactionBackend(tx),
-      );
-    }, mergeCommitTransactionOptions(target)),
+        return applyInternalMergePlan(
+          plan,
+          tx.nodes as unknown as TxNodes,
+          tx.edges as unknown as TxEdges,
+          target,
+          transactionBackend(tx),
+        );
+      }, mergeCommitTransactionOptions(target)),
+    ),
   );
+}
+
+/** Runs one atomic commit while preserving the merge boundary's error taxonomy. */
+async function runMergeCommit<Output>(
+  commit: () => Promise<Output>,
+): Promise<Output> {
+  try {
+    return await commit();
+  } catch (error) {
+    throw translateMergeCommitError(error);
+  }
 }
 
 /**
@@ -3781,11 +3844,15 @@ export async function applyMergePlan<G extends GraphDef>(
       reportFromArtifact(artifact, merged, warnings, provenancePersisted),
     );
   } catch (error) {
+    const translated = translateMergeCommitError(error);
     return err(
-      error instanceof MergeError ? error : (
-        new MergeError(`Merge plan apply failed: ${describeCause(error)}`, {
-          cause: error,
-        })
+      translated instanceof MergeError ? translated : (
+        new MergeError(
+          `Merge plan apply failed: ${describeCause(translated)}`,
+          {
+            cause: translated,
+          },
+        )
       ),
     );
   }
@@ -4710,50 +4777,59 @@ async function commitIncrementalPlan<G extends GraphDef>(
   // PostgreSQL read committed each subsequent statement sees committed work that
   // landed before the lock was acquired, while the lock excludes later tracked
   // writes until this plan commits.
-  return withTxConflictRetry(() =>
-    target.transaction(async (tx) => {
-      if (target.revisionTrackingEnabled) {
-        await lockRecordedGraphWrite(transactionBackend(tx), target.graphId);
-      }
-      // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
-      // against is re-read here, so a write to it in the plan→commit window
-      // refuses the merge instead of committing diffs against a fork point
-      // that has moved. Runs first: it is the premise every later guard's
-      // baseline was derived under, and on a revision-anchored fork point it
-      // is an O(1) read.
-      await assertForkPointUnchanged(guard.forkPoint);
-      const nodesApi = tx.nodes as unknown as TxNodes;
-      const edgesApi = tx.edges as unknown as TxEdges;
-      // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
-      // this transaction, so re-derive them here (tx snapshot) and refuse the
-      // plan if a matching committed row appeared in the window. `tx` exposes
-      // the same `.nodes` collection record a `BaseLookupStore` needs.
-      await assertBaseResolutionStable(tx as unknown as BaseLookupStore, guard);
-      // Identity window guards: the by-id freshness check runs DIRECTLY (not
-      // via the probe guard, whose early return must never be able to skip
-      // it), then the probe-based layers revalidate peers, classes, the
-      // negative ledger, and finally re-run the full identity simulation on
-      // the tx snapshot.
-      await assertPlannedIdentityIdsFresh(target, transactionBackend(tx), plan);
-      await assertIdentityPeersStable(
-        target,
-        transactionBackend(tx),
-        guard.identityPeerProbe,
-        plan,
-      );
-      // Inherited-row TOCTOU guard: refuse if a committed node OR edge the plan
-      // writes or deletes changed since it was observed at plan time (lost update).
-      await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);
-      await validateIncrementalNodeWrites(target, nodesApi, plan);
-      await validateIncrementalEdgeWrites(target, edgesApi, plan);
-      return applyInternalMergePlan(
-        plan,
-        nodesApi,
-        edgesApi,
-        target,
-        transactionBackend(tx),
-      );
-    }, mergeCommitTransactionOptions(target)),
+  return runMergeCommit(() =>
+    withTxConflictRetry(() =>
+      target.transaction(async (tx) => {
+        if (target.revisionTrackingEnabled) {
+          await lockRecordedGraphWrite(transactionBackend(tx), target.graphId);
+        }
+        // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
+        // against is re-read here, so a write to it in the plan→commit window
+        // refuses the merge instead of committing diffs against a fork point
+        // that has moved. Runs first: it is the premise every later guard's
+        // baseline was derived under, and on a revision-anchored fork point it
+        // is an O(1) read.
+        await assertForkPointUnchanged(guard.forkPoint);
+        const nodesApi = tx.nodes as unknown as TxNodes;
+        const edgesApi = tx.edges as unknown as TxEdges;
+        // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
+        // this transaction, so re-derive them here (tx snapshot) and refuse the
+        // plan if a matching committed row appeared in the window. `tx` exposes
+        // the same `.nodes` collection record a `BaseLookupStore` needs.
+        await assertBaseResolutionStable(
+          tx as unknown as BaseLookupStore,
+          guard,
+        );
+        // Identity window guards: the by-id freshness check runs DIRECTLY (not
+        // via the probe guard, whose early return must never be able to skip
+        // it), then the probe-based layers revalidate peers, classes, the
+        // negative ledger, and finally re-run the full identity simulation on
+        // the tx snapshot.
+        await assertPlannedIdentityIdsFresh(
+          target,
+          transactionBackend(tx),
+          plan,
+        );
+        await assertIdentityPeersStable(
+          target,
+          transactionBackend(tx),
+          guard.identityPeerProbe,
+          plan,
+        );
+        // Inherited-row TOCTOU guard: refuse if a committed node OR edge the plan
+        // writes or deletes changed since it was observed at plan time (lost update).
+        await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);
+        await validateIncrementalNodeWrites(target, nodesApi, plan);
+        await validateIncrementalEdgeWrites(target, edgesApi, plan);
+        return applyInternalMergePlan(
+          plan,
+          nodesApi,
+          edgesApi,
+          target,
+          transactionBackend(tx),
+        );
+      }, mergeCommitTransactionOptions(target)),
+    ),
   );
 }
 

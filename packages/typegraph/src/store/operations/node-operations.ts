@@ -206,6 +206,11 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
       ref: Readonly<{ kind: string; id: string }>,
       mode: "soft" | "hard",
     ) => Promise<void>;
+    requireValidityEndCompatible: (
+      target: GraphBackend | TransactionBackend,
+      ref: Readonly<{ kind: string; id: string }>,
+      validTo: string,
+    ) => Promise<void>;
   }>;
 }>;
 
@@ -1680,9 +1685,23 @@ export async function executeNodeUpdate<G extends GraphDef>(
       if (input.clearValidTo === true) {
         assertClearValidToSupported(backend, "node");
       }
+      const validTo = validateOptionalCanonicalIsoDate(
+        input.validTo,
+        "validTo",
+      );
       const identity = ctx.identity;
-      if (options?.clearDeleted && identity !== undefined) {
+      if (
+        identity !== undefined &&
+        (options?.clearDeleted === true || input.validTo !== undefined)
+      ) {
         await identity.lock(target);
+      }
+      if (identity !== undefined && validTo !== undefined) {
+        await identity.requireValidityEndCompatible(
+          target,
+          { kind: input.kind, id: input.id },
+          validTo,
+        );
       }
       const node = await performNodeUpdateWithResurrectionRecovery(
         ctx,
@@ -2018,9 +2037,23 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
     ctx,
     backend,
     async (target, lock) => {
+      const validTo = validateOptionalCanonicalIsoDate(
+        input.validTo,
+        "validTo",
+      );
       const identity = ctx.identity;
-      if (options?.clearDeleted && identity !== undefined) {
+      if (
+        identity !== undefined &&
+        (options?.clearDeleted === true || input.validTo !== undefined)
+      ) {
         await identity.lock(target);
+      }
+      if (identity !== undefined && validTo !== undefined) {
+        await identity.requireValidityEndCompatible(
+          target,
+          { kind: input.kind, id: input.id },
+          validTo,
+        );
       }
       const node = await performNodeUpdateWithResurrectionRecovery(
         ctx,

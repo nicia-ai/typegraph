@@ -96,6 +96,27 @@ When you hold a plain assertion-ID string that came from persistence or an
 interchange document, re-enter the branded type with the `asIdentityAssertionId(value)`
 caster rather than a `as` assertion.
 
+Assertions may state an explicit half-open validity window. Scalar methods take
+the window as their third argument; bulk methods carry one window per pair:
+
+```typescript
+await store.identity.assertSame(alice, legacyAlice, {
+  validFrom: "2020-01-01T00:00:00.000Z",
+  validTo: "2022-01-01T00:00:00.000Z",
+});
+await store.identity.bulkAssertDifferent([
+  { a: alice, b: bob, validFrom: "2023-01-01T00:00:00.000Z" },
+  { a: alice, b: carol }, // ordinary current assertion semantics
+]);
+```
+
+A past-ended window affects historical reads only. An open window beginning in
+the past affects both historical and current reads. Repeating the exact
+relation, pair, and window is idempotent. A second open window for an already
+current semantic pair is refused rather than silently collapsed onto a
+different `validFrom`. Empty objects retain the ordinary unwindowed semantics,
+including inside a mixed bulk call.
+
 Runtime-evolved nodes carry a nominal dynamic-node type, so they flow through
 the same identity surface without a cast:
 
@@ -128,7 +149,15 @@ code-point-smallest `(kind, id)` visible member wins.
 
 ## Integrity and lifecycle
 
-Assertions require live endpoints. `assertSame` fails when a current
+Ordinary unwindowed assertions require live endpoints. Explicit windows require
+both endpoint rows to cover the assertion's whole half-open interval; an ended
+or late-starting endpoint raises `IdentityEndpointValidityError`. Future bounds
+and inverted windows raise `IdentityValidityWindowError`. Zero-width windows
+are accepted as empty history. Contradictions are checked throughout every
+overlapping segment, including transitive `same` paths; adjacent half-open
+windows do not overlap.
+
+`assertSame` fails when a current
 `different` assertion spans the two classes or when any member kinds are
 ontology-disjoint. `assertDifferent` fails when both endpoints are already in
 one class. These checks, folding, node deletion, import, schema-transition
@@ -195,6 +224,13 @@ both explicit `same` assertions and same-ID folding edges. A structurally
 existing but coordinate-invisible bridge can conduct identity without being
 returned as a member. Recorded assertions are captured in the same commit as
 the truth-bearing write.
+
+The assertion's validity window and the commit that recorded it are independent
+coordinates. A retrospective assertion is therefore invisible before its
+recorded-time commit even when its valid-time window reaches farther into the
+past. Archival export includes the endpoint temporal bounds needed to validate
+those windows on import, and graph merge carries branch-authored bounded
+assertions without turning them into current truth.
 
 Identity profile and ontology rules are schema-level interpretation, not a
 third temporal dimension. Historical views apply the Store's pinned
@@ -322,6 +358,11 @@ const archive = await exportGraph(store, {
   includeDeleted: true,
 });
 ```
+
+Identity-enabled exports default `includeTemporal` to `true`, because importing
+identity truth must prove that both endpoints existed throughout each assertion
+window. Explicitly setting `includeTemporal: false` on an identity-enabled graph
+is refused.
 
 Archival mode also includes ended assertions. Those rows are restored after
 shape validation and do not affect current closure. An ending a node deletion

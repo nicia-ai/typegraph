@@ -38,9 +38,12 @@ import {
   type HistoryStoreBackend,
   type IdentityAssertion,
   type IdentityAssertionResult,
+  IdentityEndpointValidityError,
   type IdentityNode,
   type IdentityNodeRefInput,
   type IdentityNodeReference,
+  type IdentityValidityWindow,
+  IdentityValidityWindowError,
   type LiveStoreOptions,
   type MeasurableAdapterHistoryTransactionContext,
   type MeasurableTransactionContext,
@@ -301,10 +304,39 @@ expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
 expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
   identityStore.identity.assertDifferent(identityPerson, dynamicIdentityNode),
 );
+expectAssignable<IdentityValidityWindow>({
+  validFrom: "2020-01-01T00:00:00.000Z",
+  validTo: "2021-01-01T00:00:00.000Z",
+});
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.identity.assertSame(identityPerson, dynamicIdentityNode, {
+    validFrom: "2020-01-01T00:00:00.000Z",
+  }),
+);
 expectType<Promise<readonly IdentityAssertionResult<typeof identityGraph>[]>>(
   identityStore.identity.bulkAssertSame([
-    { a: identityPerson, b: dynamicIdentityNode },
+    {
+      a: identityPerson,
+      b: dynamicIdentityNode,
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2021-01-01T00:00:00.000Z",
+    },
   ]),
+);
+expectAssignable<Error>(
+  new IdentityValidityWindowError({
+    reason: "inverted",
+    validFrom: "2021-01-01T00:00:00.000Z",
+    validTo: "2020-01-01T00:00:00.000Z",
+    operationInstant: "2022-01-01T00:00:00.000Z",
+  }),
+);
+expectAssignable<Error>(
+  new IdentityEndpointValidityError({
+    endpoint: { kind: "Person", id: "person" },
+    assertionWindow: { validFrom: "2020-01-01T00:00:00.000Z" },
+    endpointWindow: { validFrom: "2021-01-01T00:00:00.000Z" },
+  }),
 );
 expectType<Promise<readonly IdentityAssertionResult<typeof identityGraph>[]>>(
   identityStore.identity.bulkAssertDifferent([

@@ -223,8 +223,18 @@ function sameOnlyImport(run: string, count: number): GraphData {
     exportedAt: now,
     source: { type: "external", description: "guard cost" },
     nodes: ids.flatMap((id) => [
-      { kind: "Person", id: `a-${id}`, properties: { name: id } },
-      { kind: "Person", id: `b-${id}`, properties: { name: id } },
+      {
+        kind: "Person",
+        id: `a-${id}`,
+        properties: { name: id },
+        validFrom: now,
+      },
+      {
+        kind: "Person",
+        id: `b-${id}`,
+        properties: { name: id },
+        validFrom: now,
+      },
     ]),
     edges: [],
     identity: {

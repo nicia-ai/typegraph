@@ -108,11 +108,11 @@ async function seedAssertions(
   for (const [index, id] of ASSERTION_IDS.entries()) {
     const person = await store.nodes.Person.create(
       { name: `Person ${index}` },
-      { id: `person-${index}` },
+      { id: `person-${index}`, validFrom: CANONICAL_TIMESTAMP },
     );
     const company = await store.nodes.Company.create(
       { name: `Company ${index}` },
-      { id: `company-${index}` },
+      { id: `company-${index}`, validFrom: CANONICAL_TIMESTAMP },
     );
     assertions.push({
       id,

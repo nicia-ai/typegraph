@@ -20,6 +20,7 @@ export const MERGE_ERROR_CODES = {
   branch: "GRAPH_MERGE_BRANCH_ERROR",
   similarityUnavailable: "GRAPH_MERGE_SIMILARITY_UNAVAILABLE",
   conflict: "GRAPH_MERGE_CONFLICT",
+  constraintConflict: "GRAPH_MERGE_CONSTRAINT_CONFLICT",
   identityConflict: "GRAPH_MERGE_IDENTITY_CONFLICT",
   baseVersionMismatch: "GRAPH_MERGE_BASE_VERSION_MISMATCH",
   planCapability: "GRAPH_MERGE_PLAN_CAPABILITY",
@@ -142,6 +143,58 @@ export class MergeConflictError extends MergeError {
     super(message, options);
     this.name = "MergeConflictError";
   }
+}
+
+/** Details copied from the deterministic store constraint that refused commit. */
+export type MergeConstraintConflictErrorDetails = Readonly<{
+  /** Stable code of the underlying store constraint error. */
+  constraintCode: string;
+  /** Class name of the underlying store constraint error. */
+  constraintErrorName: string;
+  /** Constraint-specific fields, also copied onto this details object. */
+  constraintDetails: Readonly<Record<string, unknown>>;
+  [key: string]: unknown;
+}>;
+
+/** Raised when a resolved merge would commit a graph that violates a constraint. */
+export class MergeConstraintConflictError extends MergeError {
+  protected static override readonly errorCategory = "constraint";
+  override readonly code = MERGE_ERROR_CODES.constraintConflict;
+  declare readonly category: "constraint";
+  declare readonly cause: TypeGraphError;
+  declare readonly details: MergeConstraintConflictErrorDetails;
+
+  constructor(cause: TypeGraphError) {
+    super(`The resolved merge would violate ${cause.name}: ${cause.message}`, {
+      cause,
+      details: {
+        ...cause.details,
+        constraintCode: cause.code,
+        constraintErrorName: cause.name,
+        constraintDetails: cause.details,
+      },
+      suggestion:
+        cause.suggestion ??
+        "Change the branch data or target state so the resolved graph satisfies its constraints, then retry the merge.",
+    });
+    this.name = "MergeConstraintConflictError";
+  }
+}
+
+/**
+ * Translates only deterministic store-constraint refusals at a merge commit
+ * boundary. Identity conflicts have their own established merge error surface;
+ * infrastructure and stale-plan failures are not category `constraint`.
+ *
+ * @internal
+ */
+export function translateMergeCommitError(error: unknown): unknown {
+  if (error instanceof MergeError) return error;
+  if (!(error instanceof TypeGraphError)) return error;
+  if (error.category !== "constraint" || error.code.startsWith("IDENTITY_")) {
+    return error;
+  }
+  return new MergeConstraintConflictError(error);
 }
 
 /** Raised when identity branches contain opposing or retract/reassert truth. */

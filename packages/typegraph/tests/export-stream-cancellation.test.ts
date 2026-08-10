@@ -182,6 +182,93 @@ describe("Export stream cancellation", () => {
     expect(reexported.nodes).toHaveLength(4);
   });
 
+  it("times out an abandoned stream and releases its transaction and lease", async () => {
+    const { sourceBackend, source, target } = await seedSource(4);
+    const controller = new AbortController();
+    const unsubscribe = vi.spyOn(controller.signal, "removeEventListener");
+    const iterator = exportGraphStream(source, {
+      batchSize: 1,
+      idleTimeoutMs: 25,
+      signal: controller.signal,
+    })[Symbol.asyncIterator]();
+
+    await withinBudget(iterator.next(), "the header pull");
+    await withinBudget(iterator.next(), "the first node pull");
+    expect(streamLeaseIsFree(sourceBackend)).toBe(false);
+
+    // Walk away without return() and without aborting the supplied signal. The
+    // idle timer is the only actor that can unwind this producer while the
+    // generator is parked at its yield.
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 75);
+    });
+
+    expect(streamLeaseIsFree(sourceBackend)).toBe(true);
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    // The first terminal reason owns the outcome. A signal that outlives this
+    // timed-out stream is detached and cannot replace the timeout report.
+    controller.abort(new Error("late job cancellation"));
+    await expect(
+      withinBudget(iterator.next(), "the pull after the idle timeout"),
+    ).rejects.toMatchObject({
+      name: "ExportStreamIdleTimeoutError",
+      code: "INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT",
+      details: { graphId: sourceGraph.id, idleTimeoutMs: 25 },
+    });
+    await withinBudget(
+      target.nodes.Person.create(
+        { name: "After idle" },
+        { id: "after-idle-timeout" },
+      ),
+      "a write after the idle timeout",
+    );
+    const reexported = await withinBudget(
+      exportGraph(source),
+      "a fresh export after the idle timeout",
+    );
+    expect(reexported.nodes).toHaveLength(4);
+  });
+
+  it("does not count time spent waiting for the backend as consumer idleness", async () => {
+    const { sourceBackend, source } = await seedSource(2);
+    const runTransaction = sourceBackend.transaction;
+    vi.spyOn(sourceBackend, "transaction").mockImplementation((run, options) =>
+      runTransaction(
+        (target) =>
+          run({
+            ...target,
+            findNodesByKind: async (params) => {
+              await new Promise<void>((resolve) => {
+                setTimeout(resolve, 75);
+              });
+              return target.findNodesByKind(params);
+            },
+          }),
+        options,
+      ),
+    );
+    const iterator = exportGraphStream(source, {
+      batchSize: 1,
+      idleTimeoutMs: 25,
+    })[Symbol.asyncIterator]();
+
+    await withinBudget(iterator.next(), "the header pull");
+    // Asking immediately acknowledges the header and clears its idle clock.
+    // The backend then takes longer than the configured timeout to answer, but
+    // this pending pull proves the consumer is not idle.
+    const nodes = await withinBudget(
+      iterator.next(),
+      "the slow backend's node pull",
+    );
+
+    expect(nodes.value).toMatchObject({ type: "nodes" });
+    if (iterator.return === undefined) {
+      throw new Error("The export iterator has no return() method.");
+    }
+    await withinBudget(iterator.return(), "the cooperative return");
+    expect(streamLeaseIsFree(sourceBackend)).toBe(true);
+  });
+
   it("rejects the in-flight and every later next() with a typed cancellation", async () => {
     const { source } = await seedSource(4);
     const controller = new AbortController();

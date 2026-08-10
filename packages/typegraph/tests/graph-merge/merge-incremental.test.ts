@@ -16,6 +16,7 @@
  */
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
+  CardinalityError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -29,6 +30,7 @@ import { branch } from "../../src/graph-merge/branch";
 import {
   BaseVersionMismatchError,
   InvalidMergeOptionsError,
+  MergeConstraintConflictError,
 } from "../../src/graph-merge/errors";
 import { mergeIncremental } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
@@ -71,6 +73,11 @@ const primaryEncounter = defineEdge("primaryEncounter", {
   from: [Patient],
   to: [Encounter],
 });
+const activeEncounter = defineEdge("activeEncounter", {
+  schema: z.object({ on: z.string() }),
+  from: [Patient],
+  to: [Encounter],
+});
 
 const careGraph = defineGraph({
   id: "merge-incremental-care",
@@ -100,6 +107,12 @@ const careGraph = defineGraph({
       from: [Patient],
       to: [Encounter],
       cardinality: "one",
+    },
+    activeEncounter: {
+      type: activeEncounter,
+      from: [Patient],
+      to: [Encounter],
+      cardinality: "oneActive",
     },
   },
 });
@@ -1161,6 +1174,69 @@ describe.each(backendMatrix())(
       expect(
         (await target.edges.primaryEncounter.find()).map((edge) => edge.id),
       ).toEqual(["base-primary"]);
+    });
+
+    it("reports an authored oneActive reopening and rolls it back", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      await forkPoint.nodes.Patient.create(
+        { name: "Anna Rivera", mrn: "MRN-1" },
+        { id: "base-ana" },
+      );
+      await forkPoint.nodes.Encounter.bulkCreate([
+        { id: "enc-active", props: { reason: "active" } },
+        { id: "enc-ended", props: { reason: "ended" } },
+      ]);
+      const ended = await forkPoint.edges.activeEncounter.create(
+        { kind: "Patient", id: "base-ana" },
+        { kind: "Encounter", id: "enc-ended" },
+        { on: "2025-06-01" },
+        {
+          id: "ended",
+          validFrom: "2025-01-01T00:00:00.000Z",
+          validTo: "2026-01-01T00:00:00.000Z",
+        },
+      );
+      const provider = await forkOf(forkPoint);
+      const target = (await forkOf(forkPoint)).store;
+      await provider.store.edges.activeEncounter.update(
+        ended.id,
+        {},
+        { clearValidTo: true },
+      );
+      const active = await target.edges.activeEncounter.create(
+        { kind: "Patient", id: "base-ana" },
+        { kind: "Encounter", id: "enc-active" },
+        { on: "2026-06-01" },
+        { id: "active" },
+      );
+
+      const result = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+
+      expect(isErr(result)).toBe(true);
+      if (!isErr(result)) return;
+      expect(result.error).toBeInstanceOf(MergeConstraintConflictError);
+      expect(result.error.cause).toBeInstanceOf(CardinalityError);
+      expect(result.error.details).toMatchObject({
+        constraintCode: "CARDINALITY_ERROR",
+        edgeKind: "activeEncounter",
+        cardinality: "oneActive",
+      });
+      expect(
+        (
+          await target
+            .asOf("2025-06-01T00:00:00.000Z")
+            .edges.activeEncounter.getById(ended.id)
+        )?.meta.validTo,
+      ).toBeDefined();
+      expect(
+        (await target.edges.activeEncounter.find()).map((edge) => edge.id),
+      ).toEqual([active.id]);
     });
 
     it("GUARD (base update): refuses to strip heterogeneous committed props while gap-filling base fields", async () => {

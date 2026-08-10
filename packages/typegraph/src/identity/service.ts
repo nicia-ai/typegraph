@@ -31,6 +31,7 @@ export {
   purgeAssertionsWithUnregisteredKinds,
   rebuildIdentityClosureForContext,
   removeIdentityKindsForContext,
+  requireNodeValidityEndCompatible,
   validateIdentityForContext,
 } from "./service-maintenance";
 export { loadAssertionsByIds } from "./service-mutation";

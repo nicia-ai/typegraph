@@ -138,7 +138,9 @@ describe("pgvector index build serial retry", () => {
         submitted.findIndex((text) => pattern.test(text));
       const dropIndex = indexOf(/DROP INDEX IF EXISTS/i);
       const pinSerial = indexOf(/SET \(parallel_workers = 0\)/i);
-      const restore = indexOf(/RESET \(parallel_workers\)/i);
+      const restore = submitted.findLastIndex((text) =>
+        /RESET \(parallel_workers\)/i.test(text),
+      );
       expect(dropIndex).toBeGreaterThanOrEqual(0);
       expect(pinSerial).toBeGreaterThan(dropIndex);
       expect(restore).toBeGreaterThan(pinSerial);
@@ -230,9 +232,10 @@ describe("pgvector index build serial retry", () => {
         (entry) => entry.entity === "vector",
       );
       expect(vectorEntry?.status).toBe("failed");
-      expect(submitted.some((text) => /parallel_workers/i.test(text))).toBe(
-        false,
-      );
+      expect(
+        submitted.filter((text) => /parallel_workers/i.test(text)),
+      ).toEqual([expect.stringMatching(/RESET \(parallel_workers\)/i)]);
+      expect(submitted.some((text) => /DROP INDEX/i.test(text))).toBe(false);
     } finally {
       await spyPool.end();
     }
