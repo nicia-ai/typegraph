@@ -436,6 +436,116 @@ describe.each(backendMatrix())(
       ).toBe(true);
     });
 
+    it("preserves validity windows from single and bulk identity assertions", async () => {
+      cleanups = [];
+      const forkPoint = await makeStore();
+      const targetClone = await cloneStore(
+        forkPoint,
+        asBranchId("identity-validity-target"),
+      );
+      const incoming = await makeIngestion(forkPoint);
+      const created = await incoming.nodes.Patient.bulkCreate(
+        [
+          "single-same-left",
+          "single-same-right",
+          "single-different-left",
+          "single-different-right",
+          "bulk-same-left",
+          "bulk-same-right",
+          "bulk-different-left",
+          "bulk-different-right",
+        ].map((id) => ({
+          id,
+          props: { name: id, mrn: `MRN-${id}` },
+        })),
+      );
+      const singleSameLeft = requireDefined(created[0]);
+      const singleSameRight = requireDefined(created[1]);
+      const singleDifferentLeft = requireDefined(created[2]);
+      const singleDifferentRight = requireDefined(created[3]);
+      const bulkSameLeft = requireDefined(created[4]);
+      const bulkSameRight = requireDefined(created[5]);
+      const bulkDifferentLeft = requireDefined(created[6]);
+      const bulkDifferentRight = requireDefined(created[7]);
+      const singleSame = await incoming.identity.assertSame(
+        singleSameLeft,
+        singleSameRight,
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      );
+      const singleDifferent = await incoming.identity.assertDifferent(
+        singleDifferentLeft,
+        singleDifferentRight,
+        {
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: "2022-01-01T00:00:00.000Z",
+        },
+      );
+      const [bulkSame] = await incoming.identity.bulkAssertSame([
+        {
+          a: bulkSameLeft,
+          b: bulkSameRight,
+          validFrom: "2022-01-01T00:00:00.000Z",
+          validTo: "2023-01-01T00:00:00.000Z",
+        },
+      ]);
+      const [bulkDifferent] = await incoming.identity.bulkAssertDifferent([
+        {
+          a: bulkDifferentLeft,
+          b: bulkDifferentRight,
+          validFrom: "2023-01-01T00:00:00.000Z",
+          validTo: "2024-01-01T00:00:00.000Z",
+        },
+      ]);
+      const expectedAssertions = [
+        [singleSameLeft, singleSame.assertion],
+        [singleDifferentLeft, singleDifferent.assertion],
+        [bulkSameLeft, requireDefined(bulkSame).assertion],
+        [bulkDifferentLeft, requireDefined(bulkDifferent).assertion],
+      ] as const;
+
+      expect(
+        expectedAssertions.map(([, assertion]) => ({
+          validFrom: assertion.validFrom,
+          validTo: assertion.validTo,
+        })),
+      ).toEqual([
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+        {
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: "2022-01-01T00:00:00.000Z",
+        },
+        {
+          validFrom: "2022-01-01T00:00:00.000Z",
+          validTo: "2023-01-01T00:00:00.000Z",
+        },
+        {
+          validFrom: "2023-01-01T00:00:00.000Z",
+          validTo: "2024-01-01T00:00:00.000Z",
+        },
+      ]);
+      const plan = unwrap(
+        await planMergeIncremental({
+          forkPoint,
+          target: targetClone.store,
+          branches: [incoming],
+          options: { onBasePropertyConflict: "flag" },
+        }),
+      );
+      unwrap(await applyMergePlan(targetClone.store, plan));
+
+      for (const [ref, assertion] of expectedAssertions) {
+        expect(await targetClone.store.identity.assertionsOf(ref)).toEqual([
+          assertion,
+        ]);
+      }
+    });
+
     it("stages and merges a duplicate unique alias asserted as the same identity", async () => {
       cleanups = [];
       const forkPoint = await makeStore();
