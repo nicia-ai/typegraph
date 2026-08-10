@@ -10,6 +10,7 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
 export type { MergeConstraintConflictErrorDetails } from "./errors";

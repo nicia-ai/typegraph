@@ -12,8 +12,8 @@
  * runtime merge logic.
  */
 
-import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
 import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
+import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
 import type {
   EdgeId,
   GetNodeType,

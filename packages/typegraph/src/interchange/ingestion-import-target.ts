@@ -8,7 +8,7 @@
 
 import type { GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
-import { STORE_RUNTIME } from "../store/runtime-port";
+import { storeBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
 
 declare const INGESTION_IMPORT_TARGET_BRAND: unique symbol;
@@ -34,13 +34,18 @@ export function resolveIngestionImportTarget<G extends GraphDef>(
 ): Store<G> {
   const registeredStore = INGESTION_IMPORT_TARGETS.get(target);
   if (registeredStore !== undefined) return registeredStore as Store<G>;
-  if (STORE_RUNTIME in target) return target as Store<G>;
-  throw new ConfigurationError(
-    "Interchange import received an unrecognized ingestion target",
-    { target: "unregistered-ingestion-target" },
-    {
-      suggestion:
-        "Pass a Store or the exact handle returned by ingestionBranch() from this TypeGraph installation.",
-    },
-  );
+  try {
+    storeBackend(target);
+    return target as Store<G>;
+  } catch (error) {
+    throw new ConfigurationError(
+      "Interchange import received an unrecognized ingestion target",
+      { target: "unregistered-ingestion-target" },
+      {
+        cause: error,
+        suggestion:
+          "Pass a Store or the exact handle returned by ingestionBranch() from this TypeGraph installation.",
+      },
+    );
+  }
 }

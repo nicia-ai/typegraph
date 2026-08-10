@@ -2220,7 +2220,7 @@ export type IngestionBranch<G extends GraphDef> = IngestionImportTarget<G> & Rea
 export function ingestionBranch<G extends GraphDef>(baseStore: GraphBranch<G>["store"], makeBackend: MakeBackend, options?: BranchOptions): Promise<Result<IngestionBranch<G>, BranchError>>;
 
 // @public
-type IngestionImportTarget<G extends GraphDef> = Readonly<{
+export type IngestionImportTarget<G extends GraphDef> = Readonly<{
     [INGESTION_IMPORT_TARGET_BRAND]: G;
 }>;
 
