@@ -1,5 +1,65 @@
 # @nicia-ai/typegraph
 
+## 0.47.0
+
+### Minor Changes
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Add an opt-in `idleTimeoutMs` safety bound to `exportGraphStream`. The timeout
+  measures how long a delivered chunk remains unacknowledged, then rolls back the
+  snapshot transaction, releases the serialized stream lease, and reports the new
+  typed `ExportStreamIdleTimeoutError`. Time spent waiting for the backend does
+  not count as consumer idleness, and existing `AbortSignal` and cooperative
+  `break`/`return` cancellation behavior is unchanged.
+
+- [#468](https://github.com/nicia-ai/typegraph/pull/468) [`c53c006`](https://github.com/nicia-ai/typegraph/commit/c53c0067f8a349e307f4f6d05e316172bcd726c2) Thanks [@pdlug](https://github.com/pdlug)! - Add public snapshot and incremental merge planning APIs that return stable,
+  JSON-serializable `MergePlanArtifact` values. Plans bind the reviewed write set
+  to the target graph, active schema, durable revision origin and revision, carry a
+  content digest, and can be applied exactly once with `applyMergePlan`. Applying a
+  plan validates the artifact and checks its fence atomically without re-running
+  candidate generation, scoring, embeddings, canonical selection, or conflict
+  callbacks. Existing `merge` and `mergeIncremental` entry points retain their
+  one-call compatibility behavior while sharing the same resolution, validation,
+  and mechanical write owners.
+
+  Explain entity resolution with deterministic decisive edges, complete built-in
+  candidate-source attribution, and scored strategy/score/threshold evidence while
+  keeping definitional matches distinct from similarity scores. Add opt-in,
+  deterministically bounded accepted/rejected candidate diagnostics. Default
+  evidence excludes raw compared values.
+
+  Custom similarity scorers that return `NaN` or infinity now fail with
+  `MatchEvidenceError`; non-finite values cannot be represented faithfully in a
+  serialized evidence artifact. Candidate-source failures now use the more
+  specific `CandidateSourceError`; legacy `details.source` remains available
+  alongside `details.sourceId` for base-source configuration failures.
+
+- [#473](https://github.com/nicia-ai/typegraph/pull/473) [`44d1486`](https://github.com/nicia-ai/typegraph/commit/44d1486938661bbde6d171bd0c99a0b269b597c3) Thanks [@pdlug](https://github.com/pdlug)! - Allow nodes returned by runtime string-keyed collections to participate directly
+  in Operational Identity reads, assertions, bulk operations, and pair
+  retractions. Identity result types now honestly include runtime-evolved members
+  alongside compile-time graph references.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Add explicit half-open validity windows to scalar and bulk Operational Identity assertions, with bounded temporal contradiction checks, endpoint coverage validation, archival interchange support, node-window integrity guards, scalable branch-merge validation, and report-visible window reconciliation.
+
+- [#469](https://github.com/nicia-ai/typegraph/pull/469) [`8e50bdb`](https://github.com/nicia-ai/typegraph/commit/8e50bdbda614942b2848c6355b9cfb11c6468d2f) Thanks [@pdlug](https://github.com/pdlug)! - Add `clearValidTo: true` across node and edge update/upsert APIs so applications can reopen an ended valid-time window without changing entity identity. Built-in SQLite and PostgreSQL backends apply the clear, unchanged replays coalesce, `oneActive` relationships are rechecked when reopening, unsupported custom backends refuse explicitly, and graph merge carries branch-authored reopenings while rejecting delete-and-resurrect window artifacts.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Return `MergeConstraintConflictError` when a resolved graph merge would violate a deterministic store constraint, preserving the typed store error as its cause and exposing actionable constraint details.
+
+### Patch Changes
+
+- [#470](https://github.com/nicia-ai/typegraph/pull/470) [`0b0022c`](https://github.com/nicia-ai/typegraph/commit/0b0022cf2b3c13483b468536404be4f35a8dfe39) Thanks [@pdlug](https://github.com/pdlug)! - Coalesce unchanged endpoint edge get-or-create updates when `coalesceUnchangedUpserts` is enabled. A coalesced replay now returns action `"found"`; `"updated"` means an update actually ran.
+
+  The coalescing check needs the endpoint match-key convergence fence. On a backend without top-level transactions, such as Cloudflare D1 or `neon-http`, an otherwise unchanged endpoint replay now refuses with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` instead of running unfenced. The bulk endpoint form and the create leg already required this fence.
+
+  This option does not coalesce node `getOrCreateByConstraint` updates; use `upsertById` for replay projectors that need unchanged node writes to avoid history churn.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Canonicalize node and edge metadata timestamps returned by compiled queries.
+  All supported database drivers now expose the same fixed-width UTC ISO 8601
+  rendering through compiled-query projections and store collection reads.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Serialize PostgreSQL `pg_trgm` extension installation across concurrent trigram index materializers.
+
+- [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Preserve PostgreSQL vector index build failures throughout serial-fallback preparation and durable `parallel_workers` cleanup, report the exact manual repair when cleanup fails, and reset built-in pgvector tables before every materialization attempt so recovery survives backend recreation without mutating custom strategy storage.
+
 ## 0.46.2
 
 ### Patch Changes
