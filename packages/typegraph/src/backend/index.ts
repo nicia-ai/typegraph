@@ -79,6 +79,13 @@ export {
   migrateRecordedAnchor,
   type MigrateRecordedAnchorOptions,
 } from "./migrate-recorded-time";
+export {
+  repairInvertedValidityWindows,
+  type RepairInvertedWindowsOptions,
+  type RepairInvertedWindowsReport,
+  type RepairRelation,
+  type RepairRelationScope,
+} from "./repair-validity-windows";
 export type {
   StrategyTableContribution,
   TableContribution,

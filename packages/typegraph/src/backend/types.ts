@@ -3150,6 +3150,31 @@ export async function closeAfterFailure(
   throw provisioningError;
 }
 
+/** Options for {@link runOptionallyInTransaction}. */
+export type RunOptionallyInTransactionOptions = Readonly<{
+  /**
+   * Pass only when the toplevel backend method would recurse — pass the
+   * operation-level backend so the no-transaction path doesn't loop back
+   * through the same toplevel method.
+   */
+  fallback?: GraphBackend | TransactionBackend;
+  /**
+   * Options for the transaction this opens — most usefully
+   * `accessMode: "read_only"`, which lets a multi-statement READ declare itself
+   * to the engine instead of only promising it (SQLite issues `BEGIN` rather
+   * than reserving the single writer slot with `BEGIN IMMEDIATE`; PostgreSQL
+   * issues `BEGIN … READ ONLY`).
+   *
+   * Scopes the transaction and nothing else, so it is not honored on the
+   * fallthrough path: a backend reporting `transactions: false` opens no
+   * transaction to configure. That is visible to the callback rather than
+   * silent — it receives `backend` (or `fallback`) itself, not a transaction
+   * target — and callers that surface atomicity, such as
+   * `repairInvertedValidityWindows`, report it from exactly that fact.
+   */
+  transaction?: TransactionOptions;
+}>;
+
 /**
  * Runs `fn` inside a transaction when given a top-level backend that supports
  * one, falling through to a direct invocation otherwise. Lets call sites benefit
@@ -3159,20 +3184,16 @@ export async function closeAfterFailure(
  * transaction-scoped backend. The single-statement race window is already
  * implicit on any backend that reports `transactions: false`; callers that
  * cannot tolerate it must branch on the capability themselves.
- *
- * Pass `fallback` only when the toplevel backend method would recurse
- * — pass the operation-level backend so the no-tx path doesn't loop
- * back through the same toplevel method.
  */
 export async function runOptionallyInTransaction<T>(
   backend: GraphBackend | TransactionBackend,
   fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
-  fallback?: GraphBackend | TransactionBackend,
+  options?: RunOptionallyInTransactionOptions,
 ): Promise<T> {
   if ("transaction" in backend && backend.capabilities.transactions) {
-    return backend.transaction((tx) => fn(tx));
+    return backend.transaction((tx) => fn(tx), options?.transaction);
   }
-  return fn(fallback ?? backend);
+  return fn(options?.fallback ?? backend);
 }
 
 // ============================================================

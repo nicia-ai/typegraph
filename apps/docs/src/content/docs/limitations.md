@@ -349,6 +349,12 @@ Temporal queries (`asOf`, `includeEnded`) work correctly but have some constrain
   means "still valid". A record written with a `validTo` at or before its own creation instant
   is "born already ended" and stores no lower bound instead, so it reads back at every `asOf`
   before that end
+- Rows an **older library version** stored with a backwards window
+  (`valid_from > valid_to`) are readable at no coordinate, and upgrading does not rewrite
+  them. Making them observable is an explicit operator action: run
+  `repairInvertedValidityWindows({ relations: "live-and-recorded", mode: "apply" })` while
+  writers are stopped, then re-baseline any outstanding merge branches. See
+  [Repairing inverted validity windows](/schema-management#repairing-inverted-validity-windows)
 - Clock skew between application servers can affect temporal accuracy
 
 ### Recorded / system time (`history: true`)

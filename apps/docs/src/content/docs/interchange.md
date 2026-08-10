@@ -216,6 +216,13 @@ fields on, because assertion windows cannot be validated against endpoints
 without the endpoint bounds. Explicit `includeTemporal: false` is refused for
 those graphs.
 
+**Repair a legacy graph before exporting it.** A row an older library version
+stored with a backwards window (`valid_from > valid_to`) exports as it is stored
+and is then refused **per row** on re-import, because the import validates the
+stated pair — so an unrepaired graph does not round-trip. Run
+[`repairInvertedValidityWindows`](/schema-management#repairing-inverted-validity-windows)
+first; it normalizes those rows to the open-left shape import accepts.
+
 **`includeTemporal: true` with `onConflict: "update"`:** an update leg sends the
 document's `validTo` and never its `validFrom`, because a live row's lower bound
 is history. A document whose `validFrom` names a different instant than the

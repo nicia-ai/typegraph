@@ -546,6 +546,20 @@ every instant at or before its `validTo`. Two writes produce one:
   `bulkUpsertById` and `getOrCreateByEndpoints` — RETAIN the bound the row
   carries and judge the stated `validTo` against it.
 
+#### Rows written by older versions
+
+Before that rule existed, a born-already-ended write stored the write instant as
+`valid_from`, leaving a window that runs backwards — a row readable at **no**
+coordinate at all. Upgrading does not rewrite such rows; they keep their window
+and stay invisible until an operator repairs them explicitly with
+`repairInvertedValidityWindows`, which normalizes them to the open-left shape
+above. Prefer `relations: "live-and-recorded"`: repairing only the live axis
+leaves the recorded twin inverted, so `asOfRecorded` reads keep returning the
+invisible shape. See
+[Repairing inverted validity windows](/schema-management#repairing-inverted-validity-windows)
+for the operator checklist — run it with writers stopped, and re-baseline merge
+branches afterwards.
+
 ```typescript
 .select((ctx) => ({
   ...ctx.a,                     // All node properties

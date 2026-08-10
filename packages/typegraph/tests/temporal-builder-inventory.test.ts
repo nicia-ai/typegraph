@@ -19,7 +19,7 @@
  *      WITHOUT calling an owner, which is precisely how the duplicate resolver
  *      in `trusted-import.ts` survived the last two rounds of review.
  *  (c) FILE SET — the set of files under `src/backend/**` that name the column at
- *      all equals the twelve declared here, each with the role that earns it. (a)
+ *      all equals the thirteen declared here, each with the role that earns it. (a)
  *      and (b) only see three files; a NEW file that binds `valid_from` would be
  *      invisible to them, and I5 is quantified over the whole directory.
  *
@@ -123,6 +123,11 @@ const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
   "drizzle/schema/sqlite.ts": "column declaration",
   "drizzle/schema/postgres.ts": "column declaration",
   "migrate-recorded-time.ts": "copy list naming the column",
+  // Not a stamping site and never a fourteenth: the repair only CLEARS a bound
+  // that was already stored inverted (`SET valid_from = NULL`), so it chooses
+  // no instant and has nothing to route through an owner.
+  "repair-validity-windows.ts":
+    "offline repair — clears an inverted stored bound",
   "types.ts": "parameter types",
 };
 
@@ -211,6 +216,6 @@ describe("the stamping-site inventory (I5)", () => {
     for (const role of Object.values(BACKEND_COLUMN_FILES)) {
       expect(role.length).toBeGreaterThan(0);
     }
-    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(12);
+    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(13);
   });
 });
