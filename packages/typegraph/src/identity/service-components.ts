@@ -116,7 +116,10 @@ export class UnionFind {
 
 export function buildComponents(
   structuralNodes: readonly PlainNodeRef[],
-  assertions: readonly IdentityAssertionStorageRow[],
+  assertions: readonly Pick<
+    IdentityAssertionStorageRow,
+    "rel" | "a_kind" | "a_id" | "b_kind" | "b_id"
+  >[],
   sameIdAcrossKinds: "fold" | "ignore",
 ): ReadonlyMap<string, readonly PlainNodeRef[]> {
   const unionFind = new UnionFind();

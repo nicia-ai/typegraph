@@ -13,6 +13,7 @@ import { chunk } from "../utils/array";
 import { canonicalizeDatabaseTimestamp } from "../utils/date";
 import { generateId } from "../utils/id";
 import { requireDefined } from "../utils/presence";
+import { spanningDifferentAssertion } from "./different-assertion";
 import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
 import {
   normalizeIdentityAssertionRow,
@@ -48,7 +49,6 @@ import {
   containsRef,
   loadAssertionsTouching,
   loadCurrentStructuralClasses,
-  loadHistoricalClasses,
   loadSpanningDifferentAssertion,
   MAX_ASSERTION_INSERT_CHUNK_SIZE,
   MAX_CLOSURE_INSERT_CHUNK_SIZE,
@@ -311,129 +311,228 @@ export async function requireEndpointsCoverIdentityWindow(
   }
 }
 
-type RawIdentityBoundaryRow = Readonly<{
-  rel?: unknown;
-  a_kind?: unknown;
-  a_id?: unknown;
-  b_kind?: unknown;
-  b_id?: unknown;
-  kind?: unknown;
-  id?: unknown;
-  valid_from?: unknown;
-  valid_to?: unknown;
-  created_at?: unknown;
-  deleted_at?: unknown;
+type RawIdentityWindowLedgerRow = RawIdentityAssertionRow &
+  Readonly<{
+    row_type: "assertion" | "node";
+    node_kind?: unknown;
+    node_id?: unknown;
+    node_created_at?: unknown;
+    node_deleted_at?: unknown;
+  }>;
+
+type IdentityWindowNode = Readonly<{
+  ref: PlainNodeRef;
+  createdAt: string;
+  deletedAt?: string;
 }>;
 
-function rawBoundaryReference(
-  kind: unknown,
-  id: unknown,
-): PlainNodeRef | undefined {
-  return typeof kind === "string" && typeof id === "string" ?
-      { kind, id }
-    : undefined;
+export type IdentityWindowValidationRequest = Readonly<{
+  references: readonly PlainNodeRef[];
+  window: ResolvedIdentityValidityWindow;
+}>;
+
+export type IdentityWindowValidator = Readonly<{
+  validate: (
+    relation: IdentityRelation,
+    operation: IdentityContradictionErrorDetails["operation"],
+    a: PlainNodeRef,
+    b: PlainNodeRef,
+    window: ResolvedIdentityValidityWindow,
+  ) => void;
+  record: (assertion: IdentityAssertionStorageRow) => void;
+}>;
+
+function windowOverlapSql(
+  alias: string,
+  lowerBoundary: string,
+  upperBoundary: string,
+): SqlFragment {
+  const column = (name: string) =>
+    sql`${sql.identifier(alias)}.${sql.identifier(name)}`;
+  return sql`
+    ${column("deleted_at")} IS NULL
+    AND ${column("valid_from")} <= ${upperBoundary}
+    AND (${column("valid_to")} IS NULL OR ${column("valid_to")} > ${lowerBoundary})
+  `;
 }
 
-function identityComponentBoundaryRows(
-  assertionRows: readonly RawIdentityBoundaryRow[],
-  nodeRows: readonly RawIdentityBoundaryRow[],
-  references: readonly PlainNodeRef[],
-  sameIdAcrossKinds: "fold" | "ignore",
-): readonly RawIdentityBoundaryRow[] {
-  const component = new Set(references.map((reference) => refKey(reference)));
-  const componentIds = new Set(references.map((reference) => reference.id));
-  const addReference = (reference: PlainNodeRef): boolean => {
-    const key = refKey(reference);
-    if (component.has(key)) return false;
-    component.add(key);
-    componentIds.add(reference.id);
-    return true;
-  };
-  let expanded = true;
-  while (expanded) {
-    expanded = false;
-    if (sameIdAcrossKinds === "fold") {
-      for (const row of nodeRows) {
-        const reference = rawBoundaryReference(row.kind, row.id);
-        if (reference === undefined || !componentIds.has(reference.id))
-          continue;
-        expanded = addReference(reference) || expanded;
-      }
-    }
-    for (const row of assertionRows) {
-      if (row.rel !== "same") continue;
-      const a = rawBoundaryReference(row.a_kind, row.a_id);
-      const b = rawBoundaryReference(row.b_kind, row.b_id);
-      if (a === undefined || b === undefined) continue;
-      const aKey = refKey(a);
-      const bKey = refKey(b);
-      if (!component.has(aKey) && !component.has(bKey)) continue;
-      expanded = addReference(a) || expanded;
-      expanded = addReference(b) || expanded;
-    }
-  }
-  return [
-    ...assertionRows.filter((row) => {
-      const a = rawBoundaryReference(row.a_kind, row.a_id);
-      const b = rawBoundaryReference(row.b_kind, row.b_id);
-      return (
-        (a !== undefined && component.has(refKey(a))) ||
-        (b !== undefined && component.has(refKey(b)))
-      );
-    }),
-    ...nodeRows.filter((row) => {
-      const reference = rawBoundaryReference(row.kind, row.id);
-      return reference !== undefined && component.has(refKey(reference));
-    }),
-  ];
-}
-
-async function identityWindowCheckpoints(
+async function loadIdentityWindowLedger(
   target: Backend,
   schema: SqlSchema,
   graphId: string,
+  requests: readonly IdentityWindowValidationRequest[],
+  operationInstant: string,
+  sameIdAcrossKinds: "fold" | "ignore",
+): Promise<
+  Readonly<{
+    nodes: readonly IdentityWindowNode[];
+    assertions: IdentityAssertionStorageRow[];
+  }>
+> {
+  const activeRequests = requests.filter(
+    (request) => request.window.effective !== "empty",
+  );
+  if (activeRequests.length === 0) return { nodes: [], assertions: [] };
+  const referencesByKey = new Map<string, PlainNodeRef>();
+  for (const request of activeRequests) {
+    for (const reference of request.references) {
+      referencesByKey.set(refKey(reference), reference);
+    }
+  }
+  const references = [...referencesByKey.values()];
+  const lowerBoundary = requireDefined(
+    activeRequests.map((request) => request.window.validFrom).toSorted()[0],
+  );
+  const upperBoundary = requireDefined(
+    activeRequests
+      .map((request) => request.window.validTo ?? operationInstant)
+      .toSorted()
+      .at(-1),
+  );
+  const seedChunkSize = identityChunkSize(target, {
+    fixedParameters: 20,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  const rows: RawIdentityWindowLedgerRow[] = [];
+  for (const referenceChunk of chunk(references, seedChunkSize)) {
+    const seedRows = sql.join(
+      referenceChunk.map(
+        (reference) => sql`(${reference.kind}, ${reference.id})`,
+      ),
+      sql`, `,
+    );
+    const component =
+      sameIdAcrossKinds === "fold" ?
+        sql`
+          neighbor_modes(mode) AS (
+            VALUES ('assertion'), ('fold')
+          ),
+          component(kind, id) AS (
+            SELECT seed_kind, seed_id FROM seeds
+            UNION
+            SELECT CASE
+                     WHEN neighbor_modes.mode = 'fold' THEN folded.kind
+                     WHEN assertion.a_kind = component.kind AND assertion.a_id = component.id
+                       THEN assertion.b_kind
+                     ELSE assertion.a_kind
+                   END,
+                   CASE
+                     WHEN neighbor_modes.mode = 'fold' THEN folded.id
+                     WHEN assertion.a_kind = component.kind AND assertion.a_id = component.id
+                       THEN assertion.b_id
+                     ELSE assertion.a_id
+                   END
+            FROM component
+            JOIN neighbor_modes ON 1 = 1
+            LEFT JOIN ${schema.identityAssertionsTable} assertion
+              ON neighbor_modes.mode = 'assertion'
+             AND assertion.graph_id = ${graphId}
+             AND assertion.rel = 'same'
+             AND ${windowOverlapSql("assertion", lowerBoundary, upperBoundary)}
+             AND ((assertion.a_kind = component.kind AND assertion.a_id = component.id)
+               OR (assertion.b_kind = component.kind AND assertion.b_id = component.id))
+            LEFT JOIN ${schema.nodesTable} folded
+              ON neighbor_modes.mode = 'fold'
+             AND folded.graph_id = ${graphId}
+             AND folded.id = component.id
+            WHERE assertion.id IS NOT NULL OR folded.id IS NOT NULL
+          )
+        `
+      : sql`
+        component(kind, id) AS (
+          SELECT seed_kind, seed_id FROM seeds
+          UNION
+          SELECT CASE
+                   WHEN assertion.a_kind = component.kind AND assertion.a_id = component.id
+                     THEN assertion.b_kind
+                   ELSE assertion.a_kind
+                 END,
+                 CASE
+                   WHEN assertion.a_kind = component.kind AND assertion.a_id = component.id
+                     THEN assertion.b_id
+                   ELSE assertion.a_id
+                 END
+          FROM component
+          JOIN ${schema.identityAssertionsTable} assertion
+            ON assertion.graph_id = ${graphId}
+           AND assertion.rel = 'same'
+           AND ${windowOverlapSql("assertion", lowerBoundary, upperBoundary)}
+           AND ((assertion.a_kind = component.kind AND assertion.a_id = component.id)
+             OR (assertion.b_kind = component.kind AND assertion.b_id = component.id))
+        )
+      `;
+    rows.push(
+      ...(await target.execute<RawIdentityWindowLedgerRow>(
+        asCompiledRowsSql(sql`
+          WITH RECURSIVE
+          seeds(seed_kind, seed_id) AS (VALUES ${seedRows}),
+          ${component},
+          selected_assertions AS (
+            SELECT DISTINCT assertion.*
+            FROM ${schema.identityAssertionsTable} assertion
+            JOIN component
+              ON (assertion.a_kind = component.kind AND assertion.a_id = component.id)
+              OR (assertion.b_kind = component.kind AND assertion.b_id = component.id)
+            WHERE assertion.graph_id = ${graphId}
+              AND ${windowOverlapSql("assertion", lowerBoundary, upperBoundary)}
+          )
+          SELECT 'assertion' AS row_type, ${IDENTITY_ASSERTION_COLUMNS},
+                 NULL AS node_kind, NULL AS node_id,
+                 NULL AS node_created_at, NULL AS node_deleted_at
+          FROM selected_assertions
+          UNION ALL
+          SELECT 'node', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                 NULL, NULL, NULL, NULL, NULL,
+                 node.kind, node.id, node.created_at, node.deleted_at
+          FROM ${schema.nodesTable} node
+          JOIN component ON component.kind = node.kind AND component.id = node.id
+          WHERE node.graph_id = ${graphId}
+        `),
+      )),
+    );
+  }
+  const nodesByKey = new Map<string, IdentityWindowNode>();
+  const assertionsById = new Map<string, IdentityAssertionStorageRow>();
+  for (const row of rows) {
+    if (row.row_type === "assertion") {
+      const assertion = normalizeIdentityAssertionRow(row);
+      assertionsById.set(assertion.id, assertion);
+      continue;
+    }
+    if (typeof row.node_kind !== "string" || typeof row.node_id !== "string")
+      continue;
+    const createdAt = canonicalEndpointTimestamp(row.node_created_at);
+    if (createdAt === undefined) continue;
+    const deletedAt = canonicalEndpointTimestamp(row.node_deleted_at);
+    const node = {
+      ref: { kind: row.node_kind, id: row.node_id },
+      createdAt,
+      ...(deletedAt === undefined ? {} : { deletedAt }),
+    } satisfies IdentityWindowNode;
+    nodesByKey.set(refKey(node.ref), node);
+  }
+  return {
+    nodes: [...nodesByKey.values()],
+    assertions: [...assertionsById.values()],
+  };
+}
+
+function identityWindowCheckpoints(
   window: ResolvedIdentityValidityWindow,
   operationInstant: string,
-  references: readonly PlainNodeRef[],
-  sameIdAcrossKinds: "fold" | "ignore",
-): Promise<readonly string[]> {
+  nodes: readonly IdentityWindowNode[],
+  assertions: readonly IdentityAssertionStorageRow[],
+): readonly string[] {
   if (window.effective === "empty") return [];
-  const upperBoundary = window.validTo ?? operationInstant;
-  const [assertionRows, nodeRows] = await Promise.all([
-    target.execute<RawIdentityBoundaryRow>(
-      asCompiledRowsSql(sql`
-        SELECT rel, a_kind, a_id, b_kind, b_id, valid_from, valid_to
-        FROM ${schema.identityAssertionsTable}
-        WHERE graph_id = ${graphId}
-          AND deleted_at IS NULL
-          AND valid_from < ${upperBoundary}
-          AND (valid_to IS NULL OR valid_to > ${window.validFrom})
-      `),
-    ),
-    target.execute<RawIdentityBoundaryRow>(
-      asCompiledRowsSql(sql`
-        SELECT kind, id, created_at, deleted_at
-        FROM ${schema.nodesTable}
-        WHERE graph_id = ${graphId}
-          AND created_at < ${upperBoundary}
-          AND (deleted_at IS NULL OR deleted_at > ${window.validFrom})
-      `),
-    ),
-  ]);
   const checkpoints = new Set([window.validFrom]);
   if (window.validTo === undefined) checkpoints.add(operationInstant);
-  const boundaryRows = identityComponentBoundaryRows(
-    assertionRows,
-    nodeRows,
-    references,
-    sameIdAcrossKinds,
-  );
-  for (const row of boundaryRows) {
+  for (const row of [...assertions, ...nodes]) {
     for (const value of [
-      row.valid_from,
-      row.valid_to,
-      row.created_at,
-      row.deleted_at,
+      "valid_from" in row ? row.valid_from : undefined,
+      "valid_to" in row ? row.valid_to : undefined,
+      "createdAt" in row ? row.createdAt : undefined,
+      "deletedAt" in row ? row.deletedAt : undefined,
     ]) {
       const boundary = canonicalEndpointTimestamp(value);
       if (boundary === undefined || boundary < window.validFrom) continue;
@@ -445,42 +544,70 @@ async function identityWindowCheckpoints(
   return [...checkpoints].toSorted();
 }
 
-export async function validateRelationThroughoutIdentityWindow(
-  ctx: Pick<
-    IdentityServiceContext<GraphDef>,
-    "graphId" | "registry" | "sameIdAcrossKinds" | "schema"
-  >,
-  target: Backend,
+function validateRelationAgainstLedger(
+  ctx: Pick<IdentityServiceContext<GraphDef>, "registry" | "sameIdAcrossKinds">,
+  nodes: readonly IdentityWindowNode[],
+  assertions: readonly IdentityAssertionStorageRow[],
   relation: IdentityRelation,
   operation: IdentityContradictionErrorDetails["operation"],
   a: PlainNodeRef,
   b: PlainNodeRef,
   window: ResolvedIdentityValidityWindow,
   operationInstant: string,
-): Promise<void> {
-  const checkpoints = await identityWindowCheckpoints(
-    target,
-    ctx.schema,
-    ctx.graphId,
+): void {
+  const checkpoints = identityWindowCheckpoints(
     window,
     operationInstant,
-    [a, b],
-    ctx.sameIdAcrossKinds,
+    nodes,
+    assertions,
   );
   for (const instant of checkpoints) {
-    const coordinate = {
-      valid: { mode: "asOf" as const, asOf: instant },
-    };
-    const classes = await loadHistoricalClasses(
-      target,
-      ctx.schema,
-      ctx.graphId,
-      [a, b],
-      coordinate,
-      ctx.sameIdAcrossKinds,
+    const structuralNodes = nodes.map((node) => node.ref);
+    const activeAssertions = assertions.filter(
+      (assertion) =>
+        assertion.deleted_at === undefined &&
+        assertion.valid_from <= instant &&
+        (assertion.valid_to === undefined || assertion.valid_to > instant),
     );
-    const aClass = requireDefined(classes.get(refKey(a))).structural;
-    const bClass = requireDefined(classes.get(refKey(b))).structural;
+    const activeFoldReferences = nodes
+      .filter(
+        (node) =>
+          node.createdAt <= instant &&
+          (node.deletedAt === undefined || node.deletedAt > instant),
+      )
+      .map((node) => node.ref);
+    const foldAssertions: Pick<
+      IdentityAssertionStorageRow,
+      "rel" | "a_kind" | "a_id" | "b_kind" | "b_id"
+    >[] = [];
+    if (ctx.sameIdAcrossKinds === "fold") {
+      const byId = new Map<string, PlainNodeRef[]>();
+      for (const reference of activeFoldReferences) {
+        const sameId = byId.get(reference.id) ?? [];
+        sameId.push(reference);
+        byId.set(reference.id, sameId);
+      }
+      for (const sameId of byId.values()) {
+        const first = sameId[0];
+        if (first === undefined) continue;
+        for (const other of sameId.slice(1)) {
+          foldAssertions.push({
+            rel: "same",
+            a_kind: first.kind,
+            a_id: first.id,
+            b_kind: other.kind,
+            b_id: other.id,
+          });
+        }
+      }
+    }
+    const components = buildComponents(
+      structuralNodes,
+      [...activeAssertions, ...foldAssertions],
+      "ignore",
+    );
+    const aClass = components.get(refKey(a)) ?? [];
+    const bClass = components.get(refKey(b)) ?? [];
     if (relation === "different") {
       if (!containsRef(aClass, b)) continue;
       throw new IdentityContradictionError({
@@ -490,13 +617,10 @@ export async function validateRelationThroughoutIdentityWindow(
         reason: "same-class",
       });
     }
-    const different = await loadSpanningDifferentAssertion(
-      target,
-      ctx.schema,
-      ctx.graphId,
+    const different = spanningDifferentAssertion(
+      activeAssertions,
       aClass,
       bClass,
-      coordinate,
     );
     if (different !== undefined) {
       throw new IdentityContradictionError({
@@ -517,6 +641,72 @@ export async function validateRelationThroughoutIdentityWindow(
       conflictingKinds: disjointKinds,
     });
   }
+}
+
+export async function createIdentityWindowValidator(
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "registry" | "sameIdAcrossKinds" | "schema"
+  >,
+  target: Backend,
+  requests: readonly IdentityWindowValidationRequest[],
+  operationInstant: string,
+  ignoredAssertionIds: ReadonlySet<string> = new Set(),
+): Promise<IdentityWindowValidator> {
+  const ledger = await loadIdentityWindowLedger(
+    target,
+    ctx.schema,
+    ctx.graphId,
+    requests,
+    operationInstant,
+    ctx.sameIdAcrossKinds,
+  );
+  if (ignoredAssertionIds.size > 0) {
+    const retained = ledger.assertions.filter(
+      (assertion) => !ignoredAssertionIds.has(assertion.id),
+    );
+    ledger.assertions.splice(0, ledger.assertions.length, ...retained);
+  }
+  return {
+    validate(relation, operation, a, b, window) {
+      validateRelationAgainstLedger(
+        ctx,
+        ledger.nodes,
+        ledger.assertions,
+        relation,
+        operation,
+        a,
+        b,
+        window,
+        operationInstant,
+      );
+    },
+    record(assertion) {
+      ledger.assertions.push(assertion);
+    },
+  };
+}
+
+export async function validateRelationThroughoutIdentityWindow(
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "registry" | "sameIdAcrossKinds" | "schema"
+  >,
+  target: Backend,
+  relation: IdentityRelation,
+  operation: IdentityContradictionErrorDetails["operation"],
+  a: PlainNodeRef,
+  b: PlainNodeRef,
+  window: ResolvedIdentityValidityWindow,
+  operationInstant: string,
+): Promise<void> {
+  const validator = await createIdentityWindowValidator(
+    ctx,
+    target,
+    [{ references: [a, b], window }],
+    operationInstant,
+  );
+  validator.validate(relation, operation, a, b, window);
 }
 
 /**
@@ -964,6 +1154,7 @@ export async function assertPair<G extends GraphDef>(
   touch: IdentityTouch,
   windowInput: IdentityValidityWindow | undefined,
   operationInstant: string,
+  windowValidator?: IdentityWindowValidator,
 ): Promise<IdentityAssertionResult<G>> {
   const first = registeredPlainRef(ctx, firstInput);
   const second = registeredPlainRef(ctx, secondInput);
@@ -1003,6 +1194,7 @@ export async function assertPair<G extends GraphDef>(
       operationInstant,
       touch,
     );
+    windowValidator?.record(row);
     if (relation === "same") {
       await mergeCurrentClasses(target, ctx.schema, ctx.graphId, a, b);
     } else {
@@ -1050,16 +1242,21 @@ export async function assertPair<G extends GraphDef>(
     }
   }
 
-  await validateRelationThroughoutIdentityWindow(
-    ctx,
-    target,
-    relation,
-    relation === "same" ? "assertSame" : "assertDifferent",
-    a,
-    b,
-    window,
-    operationInstant,
-  );
+  const operation = relation === "same" ? "assertSame" : "assertDifferent";
+  if (windowValidator === undefined) {
+    await validateRelationThroughoutIdentityWindow(
+      ctx,
+      target,
+      relation,
+      operation,
+      a,
+      b,
+      window,
+      operationInstant,
+    );
+  } else {
+    windowValidator.validate(relation, operation, a, b, window);
+  }
   const row = await insertAssertion(
     target,
     ctx.schema,
@@ -1074,6 +1271,7 @@ export async function assertPair<G extends GraphDef>(
       ...(window.validTo === undefined ? {} : { validTo: window.validTo }),
     },
   );
+  windowValidator?.record(row);
   if (window.effective !== "current") {
     return assertionResult(publicAssertion(row), "created");
   }

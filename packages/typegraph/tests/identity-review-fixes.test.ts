@@ -8,6 +8,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type GraphBackend,
+  type TransactionBackend,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { IdentityContradictionError, ValidationError } from "../src/errors";
@@ -57,6 +59,39 @@ const graph = defineGraph({
 });
 
 type Ref = Readonly<{ kind: string; id: string }>;
+
+function captureIdentityWindowLedgerReads(
+  backend: GraphBackend,
+  reads: { count: number },
+): GraphBackend {
+  function capture(query: Parameters<GraphBackend["execute"]>[0]): void {
+    const compiled = backend.compileSql?.(query);
+    if (compiled?.sql.includes("selected_assertions")) reads.count += 1;
+  }
+  function captureTarget(target: TransactionBackend): TransactionBackend {
+    return {
+      ...target,
+      execute(query) {
+        const compiled = target.compileSql?.(query);
+        if (compiled?.sql.includes("selected_assertions")) reads.count += 1;
+        return target.execute(query);
+      },
+    };
+  }
+  return {
+    ...backend,
+    execute(query) {
+      capture(query);
+      return backend.execute(query);
+    },
+    async transaction(fn, options) {
+      return backend.transaction(
+        async (target) => fn(captureTarget(target)),
+        options,
+      );
+    },
+  };
+}
 
 function orderPair(left: Ref, right: Ref): readonly [Ref, Ref] {
   const kindOrder =
@@ -638,5 +673,176 @@ describe("identity review fixes", () => {
     const after = await store.revisionNow();
     expect(after).toBeDefined();
     expect(after).not.toEqual(before);
+  });
+});
+
+describe("windowed identity validation scaling", () => {
+  it("loads one temporal component ledger for an archival import batch", async () => {
+    const reads = { count: 0 };
+    const backend = captureIdentityWindowLedgerReads(
+      createTestBackend(),
+      reads,
+    );
+    const store = await createInitializedStore(graph, backend);
+    const unrelatedPeople = await store.nodes.Person.bulkCreate(
+      Array.from({ length: 40 }, (_, index) => ({
+        id: `unrelated-person-${index}`,
+        props: { name: `Unrelated ${index}` },
+      })),
+    );
+    const unrelatedAuthors = await store.nodes.Author.bulkCreate(
+      Array.from({ length: 40 }, (_, index) => ({
+        id: `unrelated-author-${index}`,
+        props: { penName: `Unrelated ${index}` },
+      })),
+    );
+    await store.identity.bulkAssertSame(
+      unrelatedPeople.map((person, index) => ({
+        a: person,
+        b: requireDefined(unrelatedAuthors[index]),
+      })),
+    );
+    const people = await store.nodes.Person.bulkCreate(
+      Array.from({ length: 12 }, (_, index) => ({
+        id: `import-person-${index}`,
+        props: { name: `Person ${index}` },
+        validFrom: "2020-01-01T00:00:00.000Z",
+      })),
+    );
+    const authors = await store.nodes.Author.bulkCreate(
+      Array.from({ length: 12 }, (_, index) => ({
+        id: `import-author-${index}`,
+        props: { penName: `Author ${index}` },
+        validFrom: "2020-01-01T00:00:00.000Z",
+      })),
+    );
+    reads.count = 0;
+
+    await storeRuntime(store).importIdentityAssertionsAtTarget(
+      storeRuntime(store).backend,
+      people.map((person, index) =>
+        transfer(
+          `import-window-${index}`,
+          "same",
+          { kind: "Person", id: person.id },
+          {
+            kind: "Author",
+            id: requireDefined(authors[index]).id,
+          },
+          "2021-01-01T00:00:00.000Z",
+          "2022-01-01T00:00:00.000Z",
+        ),
+      ),
+      "archival",
+    );
+
+    expect(reads.count).toBe(1);
+  });
+
+  it("chunks batch component seeds within the backend bind budget", async () => {
+    const result = createLocalSqliteBackend({
+      capabilities: { maxBindParameters: 64 },
+    });
+    try {
+      const reads = { count: 0 };
+      const backend = captureIdentityWindowLedgerReads(result.backend, reads);
+      const store = await createInitializedStore(graph, backend);
+      const people = await store.nodes.Person.bulkCreate(
+        Array.from({ length: 20 }, (_, index) => ({
+          id: `budget-person-${index}`,
+          props: { name: `Person ${index}` },
+          validFrom: "2020-01-01T00:00:00.000Z",
+        })),
+      );
+      const authors = await store.nodes.Author.bulkCreate(
+        Array.from({ length: 20 }, (_, index) => ({
+          id: `budget-author-${index}`,
+          props: { penName: `Author ${index}` },
+          validFrom: "2020-01-01T00:00:00.000Z",
+        })),
+      );
+      reads.count = 0;
+
+      await store.identity.bulkAssertSame(
+        people.map((person, index) => ({
+          a: person,
+          b: requireDefined(authors[index]),
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: "2022-01-01T00:00:00.000Z",
+        })),
+      );
+
+      expect(reads.count).toBeGreaterThan(1);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("loads one temporal component ledger for a public windowed bulk write", async () => {
+    const reads = { count: 0 };
+    const backend = captureIdentityWindowLedgerReads(
+      createTestBackend(),
+      reads,
+    );
+    const store = await createInitializedStore(graph, backend);
+    const people = await store.nodes.Person.bulkCreate(
+      Array.from({ length: 12 }, (_, index) => ({
+        id: `bulk-person-${index}`,
+        props: { name: `Person ${index}` },
+        validFrom: "2020-01-01T00:00:00.000Z",
+      })),
+    );
+    const authors = await store.nodes.Author.bulkCreate(
+      Array.from({ length: 12 }, (_, index) => ({
+        id: `bulk-author-${index}`,
+        props: { penName: `Author ${index}` },
+        validFrom: "2020-01-01T00:00:00.000Z",
+      })),
+    );
+    reads.count = 0;
+
+    await store.identity.bulkAssertSame(
+      people.map((person, index) => ({
+        a: person,
+        b: requireDefined(authors[index]),
+        validFrom: "2021-01-01T00:00:00.000Z",
+        validTo: "2022-01-01T00:00:00.000Z",
+      })),
+    );
+
+    expect(reads.count).toBe(1);
+  });
+
+  it("preloads components introduced by an earlier unwindowed bulk pair", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const [x, bridge, separated] = await store.nodes.Person.bulkCreate(
+      ["x", "bridge", "separated"].map((id) => ({
+        id: `mixed-${id}`,
+        props: { name: id },
+      })),
+    );
+    const peer = await store.nodes.Author.create(
+      { penName: "peer" },
+      { id: "mixed-peer" },
+    );
+    await store.identity.assertSame(requireDefined(x), peer);
+    await store.identity.assertDifferent(peer, requireDefined(separated));
+
+    await expect(
+      store.identity.bulkAssertSame([
+        { a: requireDefined(x), b: requireDefined(bridge) },
+        {
+          a: requireDefined(bridge),
+          b: requireDefined(separated),
+          validFrom: new Date().toISOString(),
+        },
+      ]),
+    ).rejects.toBeInstanceOf(IdentityContradictionError);
+    expect(
+      await store.identity.areSame(
+        requireDefined(bridge),
+        requireDefined(separated),
+      ),
+    ).toBe(false);
   });
 });

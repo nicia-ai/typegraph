@@ -19,6 +19,7 @@ import {
 } from "./service-facade";
 import {
   assertionForExactWindow,
+  createIdentityWindowValidator,
   currentAssertionForPair,
   insertAssertion,
   insertAssertionRows,
@@ -28,7 +29,6 @@ import {
   replaceSeparationForReferences,
   requireEndpointsCoverIdentityWindow,
   validateCurrentRelation,
-  validateRelationThroughoutIdentityWindow,
 } from "./service-mutation";
 import type { Backend } from "./service-read";
 import { normalizePair, refKey } from "./service-read";
@@ -270,6 +270,7 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
   target: Backend,
   assertions: readonly IdentityTransferAssertion[],
   mode: "state" | "archival",
+  ignoredAssertionIds: ReadonlySet<string> = new Set(),
 ): Promise<IdentityImportSummary> {
   let created = 0;
   let skipped = 0;
@@ -343,6 +344,16 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
     } catch (error) {
       attributeMissingEndpoint(error, true);
     }
+    const windowValidator = await createIdentityWindowValidator(
+      ctx,
+      rawTarget,
+      normalized.map(({ endpoints, window }) => ({
+        references: endpoints,
+        window,
+      })),
+      operationInstant,
+      ignoredAssertionIds,
+    );
 
     for (const { assertion, endpoints, window } of normalized) {
       const [a, b] = endpoints;
@@ -405,16 +416,7 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
             [a, b],
             window,
           );
-          await validateRelationThroughoutIdentityWindow(
-            ctx,
-            rawTarget,
-            assertion.relation,
-            "import",
-            a,
-            b,
-            window,
-            operationInstant,
-          );
+          windowValidator.validate(assertion.relation, "import", a, b, window);
           // The temporal check owns historical correctness. The current check
           // also exercises the materialized separation backstop/readiness guard
           // before this row changes current derived state.
@@ -438,6 +440,7 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
             { id: assertion.id, validFrom: window.validFrom },
           );
           existingById.set(inserted.id, inserted);
+          windowValidator.record(inserted);
           created += 1;
           if (assertion.relation === "same") {
             await mergeCurrentClasses(rawTarget, ctx.schema, ctx.graphId, a, b);
@@ -458,16 +461,7 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
           [a, b],
           window,
         );
-        await validateRelationThroughoutIdentityWindow(
-          ctx,
-          rawTarget,
-          assertion.relation,
-          "import",
-          a,
-          b,
-          window,
-          operationInstant,
-        );
+        windowValidator.validate(assertion.relation, "import", a, b, window);
 
         const timestamp = window.validFrom;
         const row: IdentityAssertionStorageRow = {
@@ -489,6 +483,7 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
         await insertAssertionRows(rawTarget, ctx.schema, [row]);
         touch(ctx.graphId, row.id, row);
         existingById.set(row.id, row);
+        windowValidator.record(row);
         created += 1;
       } catch (error) {
         rethrowTaggedWithAssertion(error, assertion.id, { created, skipped });
@@ -544,6 +539,7 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
       target,
       reconciledAssertions,
       "archival",
+      new Set(retracted.map((assertion) => assertion.id)),
     );
     // The import records capture touches through its OWN recorded binding, so
     // the mutation's wrapped touch never fires for created rows — an

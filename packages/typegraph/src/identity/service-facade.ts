@@ -32,6 +32,7 @@ import {
 import {
   assertPair,
   buildAssertionRow,
+  createIdentityWindowValidator,
   currentAssertionForPair,
   currentClassKey,
   insertAssertionRows,
@@ -73,7 +74,10 @@ import {
   type IdentityRelation,
   type IdentityValidityWindow,
 } from "./types";
-import { hasExplicitIdentityValidityWindow } from "./validity-window";
+import {
+  hasExplicitIdentityValidityWindow,
+  resolveIdentityValidityWindow,
+} from "./validity-window";
 
 type WindowedIdentityPair<G extends GraphDef> = Readonly<{
   a: IdentityNodeRefInput<G>;
@@ -302,6 +306,20 @@ async function bulkAssertWindowedPairs<G extends GraphDef>(
   touch: IdentityTouch,
   operationInstant: string,
 ): Promise<readonly IdentityAssertionResult<G>[]> {
+  const windowRequests = pairs.map((pair) => {
+    const first = registeredPlainRef(ctx, pair.a);
+    const second = registeredPlainRef(ctx, pair.b);
+    return {
+      references: normalizePair(first, second),
+      window: resolveIdentityValidityWindow(pair, operationInstant),
+    };
+  });
+  const windowValidator = await createIdentityWindowValidator(
+    ctx,
+    target,
+    windowRequests,
+    operationInstant,
+  );
   const results: IdentityAssertionResult<G>[] = [];
   for (const pair of pairs) {
     const window = hasExplicitIdentityValidityWindow(pair) ? pair : undefined;
@@ -315,6 +333,7 @@ async function bulkAssertWindowedPairs<G extends GraphDef>(
         touch,
         window,
         operationInstant,
+        windowValidator,
       ),
     );
   }
