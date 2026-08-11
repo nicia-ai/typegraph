@@ -31,6 +31,7 @@ import {
   MigrationError,
   rebuildIdentityClosure,
   StaleVersionError,
+  type TransactionBackend,
 } from "../src";
 import { projectBackendWithout } from "../src/backend/derive-backend";
 import {
@@ -39,7 +40,6 @@ import {
 } from "../src/backend/sqlite/local";
 import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
 import { rebuildIdentityClosureForContext } from "../src/identity/service";
-import { type IdentityTarget } from "../src/identity/sql-target";
 import { createSqlSchema, type SqlSchema } from "../src/query/compiler/schema";
 import { buildKindRegistry } from "../src/registry/builders";
 import {
@@ -161,7 +161,7 @@ function identitySchema(result: LocalSqliteBackendResult): SqlSchema {
  */
 async function rebuildSeparationFromLedger(
   result: LocalSqliteBackendResult,
-  target: IdentityTarget,
+  target: GraphBackend | TransactionBackend,
 ): Promise<void> {
   await rebuildIdentityClosureForContext<typeof enabledGraph>({
     backend: target,

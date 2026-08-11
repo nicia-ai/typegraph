@@ -25,26 +25,44 @@ import {
   type TombstonedNodeRow,
   type TransactionBackend,
 } from "../../backend/types";
-import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
-import { RestrictedDeleteError } from "../../errors";
+import {
+  type DeleteBehavior,
+  type JsonValue,
+  type UniqueConstraint,
+} from "../../core/types";
+import {
+  ConfigurationError,
+  RestrictedDeleteError,
+  ValidationError,
+} from "../../errors";
+import { validateNodeProps } from "../../errors/validation";
+import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { canonicalEqual } from "../../schema/canonical";
+import { assertsStoredLowerBound } from "../../utils/date";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
+  alreadyAppliedRowWrite,
   createUniquenessContext,
   deleteUniquenessEntries,
+  hardDeleteClaimsByNodeIds,
   type NodeClaimContext,
   planNodeClaimReinsert,
   planNodeClaimUpdate,
   type UniquenessUpdatePlan,
   withNodeClaimTransition,
+  withNodeCreateClaimsBatch,
 } from "../claims/node-claims";
+import { validateResolvedNodeClaims } from "../claims/resolved-node-claims";
 import {
   deleteNodeEmbeddings,
+  getEmbeddingFields,
   syncEmbeddings,
   syncEmbeddingsBatchForKind,
 } from "../embedding-sync";
 import {
   deleteNodeFulltext,
+  getSearchableFields,
   syncFulltext,
   syncFulltextBatchForKind,
 } from "../fulltext-sync";
@@ -379,7 +397,10 @@ export async function applyNodeUpdate(
     incrementVersion: true,
   };
   if (args.validFrom !== undefined) updateParams.validFrom = args.validFrom;
-  if (args.expectedValidFrom !== undefined) {
+  // `assertsStoredLowerBound` owns "does this fence state anything?" — the same
+  // predicate the fence appliers consult, so the step that CARRIES the fence
+  // and the seam that VALIDATES it cannot disagree about what an empty fence is.
+  if (assertsStoredLowerBound(args)) {
     updateParams.expectedValidFrom = args.expectedValidFrom;
   }
   if (args.clearDeleted) updateParams.clearDeleted = true;
@@ -546,4 +567,182 @@ export async function applyNodeResurrect(
     syncFulltext(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
   ]);
   return row;
+}
+
+/**
+ * The inputs of one set-based node update: the patch the statement applies and
+ * the candidate query that selects the rows it applies to.
+ *
+ * There is no fence field. `UpdateNodeSetParams` has no `expectedValidFrom`,
+ * so a validity lower bound cannot be carried here — it is refused by
+ * `NODE_SET_UPDATE_FENCE_APPLIERS` before this step is reached, rather than
+ * accepted into a record that would quietly drop it.
+ */
+export type NodeSetUpdateWork = Readonly<{
+  kind: string;
+  schema: z.ZodType<Record<string, unknown>>;
+  uniqueConstraints: readonly UniqueConstraint[];
+  patch: Readonly<Record<string, JsonValue>>;
+  unsetProperties: readonly string[];
+  candidateIds: CompiledSelectSql;
+  candidateIdColumn: string;
+}>;
+
+/** What a set update reports: how many live rows it rewrote. */
+export type NodeSetUpdateResult = Readonly<{ affectedCount: number }>;
+
+/**
+ * Applies a set-based node update: one UPDATE over every candidate row, then a
+ * full rebuild of the sidecars those after-images oblige.
+ *
+ * ## Why the capability refusals are HERE and not at the entry point
+ *
+ * The caller probes the backend it was handed before opening the transaction;
+ * these four probe the transaction target, which is a different object — a
+ * backend may hand out a transaction handle that implements less than the
+ * top-level one. They keep the entry point's error codes, so a caller that
+ * refuses before the transaction and one that refuses inside it report the
+ * same class.
+ *
+ * ## Why the order is row -> probe -> drop -> re-claim
+ *
+ * Unlike every other node write, the uniqueness claim happens AFTER the row
+ * write: the statement rewrites whole rows without reading their before-images,
+ * so the keys to release are not knowable until the after-images come back.
+ * The cross-kind re-check below is what makes that safe — it re-probes every
+ * changed key across the constraint's scope and refuses the whole transaction
+ * before a single entry is dropped. The per-graph write fence (which a
+ * shared-scope constraint forces this write to take) is what keeps a concurrent
+ * claim from landing between the probe and the reinsert.
+ */
+export async function applyNodeSetUpdate(
+  ctx: NodeWriteContext,
+  args: NodeSetUpdateWork,
+  backend: Backend,
+): Promise<NodeSetUpdateResult> {
+  const { kind, schema, uniqueConstraints } = args;
+  const updateNodeSet = backend.updateNodeSet;
+  if (updateNodeSet === undefined) {
+    throw new ConfigurationError(
+      "The transaction backend does not support set-based node updates",
+      { code: "SET_UPDATE_UNSUPPORTED", kind },
+    );
+  }
+  if (
+    uniqueConstraints.length > 0 &&
+    (backend.hardDeleteUniquesByNodeIds === undefined ||
+      backend.insertUniqueBatch === undefined ||
+      backend.checkUniqueBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "The transaction backend lacks batched uniqueness operations",
+      { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
+    );
+  }
+  if (
+    getSearchableFields(schema).length > 0 &&
+    (backend.upsertFulltext === undefined ||
+      backend.deleteFulltext === undefined ||
+      backend.upsertFulltextBatch === undefined ||
+      backend.deleteFulltextBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "The transaction backend lacks batched fulltext operations",
+      { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
+    );
+  }
+  if (
+    getEmbeddingFields(schema).length > 0 &&
+    (backend.upsertEmbedding === undefined ||
+      backend.deleteEmbedding === undefined ||
+      backend.upsertEmbeddingBatch === undefined ||
+      backend.deleteEmbeddingBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "The transaction backend lacks batched vector operations",
+      { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
+    );
+  }
+  const result = await updateNodeSet({
+    graphId: ctx.graphId,
+    kind,
+    patch: args.patch,
+    unsetProperties: args.unsetProperties,
+    candidateIds: args.candidateIds,
+    candidateIdColumn: args.candidateIdColumn,
+  });
+  if (result.affectedCount === 0) return { affectedCount: 0 };
+
+  const sidecarItems = result.rows.map((row) => {
+    const props = rowPropsToObject(row.props);
+    const validatedProps = validateNodeProps(schema, props, {
+      kind,
+      operation: "update",
+      id: row.id,
+    });
+    if (!canonicalEqual(validatedProps, props)) {
+      throw new ValidationError(
+        `Set update would persist a non-canonical ${kind} row`,
+        {
+          entityType: "node",
+          kind,
+          operation: "update",
+          id: row.id,
+          issues: [
+            {
+              path: "props",
+              message: "The complete row requires schema normalization",
+            },
+          ],
+        },
+      );
+    }
+    return {
+      kind,
+      id: row.id,
+      schema,
+      props: validatedProps,
+      uniqueConstraints,
+    };
+  });
+
+  const claimItems = sidecarItems.map((item) => ({
+    kind: item.kind,
+    id: item.id,
+    props: item.props,
+    constraints: item.uniqueConstraints,
+  }));
+  if (uniqueConstraints.length > 0) {
+    // The RESOLVED-SET verdict, not a row-at-a-time one: the statement rewrote
+    // every candidate at once, so a swap or a handoff of one key between two
+    // rows it touched is legal in the final state and refused by every
+    // intermediate one. One owner of that verdict, shared with the graph merge.
+    await validateResolvedNodeClaims(
+      createUniquenessContext(ctx.graphId, ctx.registry, backend),
+      claimItems,
+      [],
+    );
+    await hardDeleteClaimsByNodeIds(
+      uniquenessContext(ctx, backend),
+      kind,
+      result.rows.map((row) => row.id),
+    );
+  }
+  // The same claim seam every create-shaped writer uses, with an ALREADY-APPLIED
+  // row write as its gate: the rows landed above and the old claims were
+  // hard-deleted, so what is left is a re-claim and there is no row write left
+  // for a claim to precede. Inverting it would mean reserving keys the update has
+  // not written. What covers this site on a backend that cannot fence is stated
+  // per kind shape: a kind whose scope spans siblings declares
+  // `fencesConstraintProbe` at the entry point and is refused before this body
+  // runs; a kind-scoped one is not refused, before or after — its
+  // delete-then-rebuild window is unchanged in shape and extent here.
+  await withNodeCreateClaimsBatch(
+    ctx,
+    claimItems,
+    backend,
+    alreadyAppliedRowWrite,
+  );
+  await applyNodeInsertSyncFansBatch(ctx, sidecarItems, backend);
+  return { affectedCount: result.affectedCount };
 }

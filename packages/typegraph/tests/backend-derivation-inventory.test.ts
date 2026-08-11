@@ -130,9 +130,15 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "store/operations/node-operations.ts",
-    line: "const validationBackend = deriveBackend(backend, {",
+    line: "reader: deriveBackend(backend, reads),",
     reason:
-      "Node constraint validation reads through the caller's write target, so the reads it issues must see that target's uncommitted rows.",
+      "Node constraint validation reads through the caller's write target, so the reads it issues must see that target's uncommitted rows. The same read spec is ALSO handed to the write executor, which decorates its own frame target with it; both applications are the one overlay this seam publishes.",
+  },
+  {
+    file: "store/operations/write-executor.ts",
+    line: "mintSessionOver(deriveBackend(target, reads)) as WriteSessionFor<K>;",
+    reason:
+      "The write frame owns the ONE decoration row work may ask for: a second session over a read overlay of THIS frame's target, so a fused step's uniqueness pre-check sees the pending state its own slice created while the write still lands on the real backend.",
   },
   {
     file: "store/recorded-capture.ts",

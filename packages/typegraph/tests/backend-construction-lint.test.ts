@@ -130,6 +130,7 @@ function banColumns(modules: readonly string[]): readonly BanColumn[] {
         "src/backend/drizzle/postgres.ts",
         "src/store/operations/edge-batch-validation.ts",
         "src/store/operations/node-operations.ts",
+        "src/store/operations/write-executor.ts",
         "src/store/recorded-capture.ts",
         "src/store/recorded-read-service.ts",
         "src/store/store.ts",

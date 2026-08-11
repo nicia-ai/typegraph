@@ -4342,12 +4342,12 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         nextAfter?: string;
         done: boolean;
     }>>;
-    lockIdentityImportTarget: (target: GraphBackend | TransactionBackend) => Promise<void>;
-    foldImportedIdentityNodes: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
+    lockIdentityImportTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>) => Promise<void>;
+    foldImportedIdentityNodes: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, references: readonly Readonly<{
         kind: string;
         id: string;
     }>[]) => Promise<void>;
-    importIdentityAssertionsAtTarget: (target: GraphBackend | TransactionBackend, assertions: readonly Readonly<{
+    importIdentityAssertionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{

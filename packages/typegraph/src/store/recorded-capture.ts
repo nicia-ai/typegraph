@@ -10,6 +10,7 @@ import {
   type TransactionBackend,
 } from "../backend/types";
 import { ConfigurationError } from "../errors";
+import { type IdentityTarget } from "../identity/sql-target";
 import { type IdentityAssertionStorageRow } from "../identity/storage-types";
 import { type SqlSchema } from "../query/compiler/schema";
 import { groupBy } from "../utils/array";
@@ -354,10 +355,17 @@ function ignoreIdentityTouch(): void {
   return;
 }
 
+/**
+ * Both sides are {@link IdentityTarget}, not the backend union: what this hands
+ * `fn` is the handle identity STATEMENTS run against, and the recorded binding
+ * it may swap in is a `TransactionBackend`, which satisfies that projection.
+ * Typing it this way is what lets a write frame's row work — whose handle is
+ * the read-only `WriteTarget` — reach the identity fold at all.
+ */
 export async function withRecordedIdentityMutationTarget<T>(
-  target: GraphBackend | TransactionBackend,
+  target: IdentityTarget,
   fn: (
-    rawTarget: GraphBackend | TransactionBackend,
+    rawTarget: IdentityTarget,
     touch: (
       graphId: string,
       id: string,

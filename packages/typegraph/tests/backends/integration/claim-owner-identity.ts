@@ -35,7 +35,7 @@ import {
   isSameClaimOwner,
   uniquenessClaimAxis,
 } from "../../../src/store/claims/axis";
-import { createNodeBatchValidationBackend } from "../../../src/store/operations/node-operations";
+import { createNodeBatchValidationSeams } from "../../../src/store/operations/node-operations";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -260,7 +260,7 @@ export function registerClaimOwnerIdentityIntegrationTests(
         // statement has written yet. A pending claim is live by construction,
         // so this renderer answers the OWNERSHIP half of the cell.
         const pendingEmail = `pending-${email}`;
-        const seams = createNodeBatchValidationBackend(
+        const seams = createNodeBatchValidationSeams(
           ownerGraph.id,
           registry,
           // A fresh projection, not the store's own backend object: that one is
@@ -277,7 +277,7 @@ export function registerClaimOwnerIdentityIntegrationTests(
           [STAFF_EMAIL_UNIQUE],
         );
         const pendingRow = requireDefined(
-          await seams.backend.checkUnique({
+          await seams.reader.checkUnique({
             graphId: ownerGraph.id,
             nodeKind: AXIS,
             constraintName: STAFF_EMAIL_CONSTRAINT,

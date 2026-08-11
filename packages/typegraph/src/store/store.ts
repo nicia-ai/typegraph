@@ -112,6 +112,7 @@ import {
   toTransferAssertion,
   validateIdentityForContext,
 } from "../identity/service";
+import { type IdentityTarget } from "../identity/sql-target";
 import type {
   IdentityFacade,
   IdentityNode,
@@ -1350,9 +1351,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /** @internal Acquires the enabled graph's identity lock for an import. */
-  lockIdentityImportTarget(
-    target: GraphBackend | TransactionBackend,
-  ): Promise<void> {
+  lockIdentityImportTarget(target: IdentityTarget): Promise<void> {
     return this.#graph.identity === undefined ?
         Promise.resolve()
       : lockIdentityGraph(target, this.graphId);
@@ -1360,7 +1359,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Restores same-id folding after the ops-layer import bypass. */
   foldImportedIdentityNodes(
-    target: GraphBackend | TransactionBackend,
+    target: IdentityTarget,
     references: readonly Readonly<{ kind: string; id: string }>[],
   ): Promise<void> {
     if (this.#graph.identity === undefined || references.length === 0) {
@@ -1380,7 +1379,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Applies identity interchange rows inside an import transaction. */
   importIdentityAssertionsAtTarget(
-    target: GraphBackend | TransactionBackend,
+    target: IdentityTarget,
     assertions: readonly IdentityTransferAssertion[],
     mode: "state" | "archival",
   ): Promise<IdentityImportSummary> {
@@ -1394,7 +1393,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
     }
     return importIdentityAssertionsIntoTarget(
-      this.#identityContext(target),
+      // The slice the coordinator reads — graph, registry, schema, folding
+      // mode — none of which depend on the target. The target it writes
+      // through is the parameter beside it, which is why this method can take
+      // the narrow statement projection an import frame is able to offer.
+      this.#identityContext(this.#baseBackend),
       target,
       assertions,
       mode,
@@ -4989,10 +4992,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         {}
       : {
           identity: {
-            lock: (target: GraphBackend | TransactionBackend) =>
+            lock: (target: IdentityTarget) =>
               lockIdentityGraph(target, this.graphId),
             foldCreated: (
-              target: GraphBackend | TransactionBackend,
+              target: IdentityTarget,
               references: readonly Readonly<{ kind: string; id: string }>[],
             ) =>
               foldIdentityForCreatedNodes(
@@ -5006,7 +5009,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 references,
               ),
             detachDeleted: (
-              target: GraphBackend | TransactionBackend,
+              target: IdentityTarget,
               ref: Readonly<{ kind: string; id: string }>,
               mode: "soft" | "hard",
             ) =>
@@ -5021,7 +5024,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 mode,
               ),
             requireValidityEndCompatible: (
-              target: GraphBackend | TransactionBackend,
+              target: IdentityTarget,
               ref: Readonly<{ kind: string; id: string }>,
               validTo: string,
             ) =>

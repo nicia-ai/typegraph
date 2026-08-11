@@ -21,13 +21,10 @@
  * would be a second, unsorted, per-row claim in addition to the batch's.
  */
 import { deriveBackend } from "../../backend/derive-backend";
-import {
-  type GraphBackend,
-  type InsertEdgeParams,
-  type TransactionBackend,
-} from "../../backend/types";
+import { type GraphBackend, type InsertEdgeParams } from "../../backend/types";
 import { type Cardinality } from "../../core/types";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import { type WriteTarget } from "./write-session";
 
 function buildEdgeEndpointCacheKey(
   graphId: string,
@@ -76,9 +73,9 @@ function incrementPendingCount(counts: Map<string, number>, key: string): void {
 }
 
 export function createEdgeBatchValidationBackend(
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
 ): Readonly<{
-  backend: GraphBackend | TransactionBackend;
+  backend: WriteTarget;
   registerPendingEdgeForCardinality: (
     insertParams: InsertEdgeParams,
     cardinality: Cardinality,
@@ -212,7 +209,7 @@ export function createEdgeBatchValidationBackend(
     getNode: getNodeCached,
     countEdgesFrom: countEdgesFromCached,
     edgeExistsBetween: edgeExistsBetweenCached,
-  } satisfies Partial<GraphBackend | TransactionBackend>);
+  } satisfies Partial<WriteTarget>);
 
   return {
     backend: validationBackend,

@@ -17,6 +17,7 @@ import {
   type GraphBackend,
   type InsertUniqueParams,
   type TransactionBackend,
+  type UniqueConstraintBackend,
 } from "../../backend/types";
 import { checkWherePredicate, computeUniqueKey } from "../../constraints";
 import { type UniqueConstraint } from "../../core/types";
@@ -26,6 +27,7 @@ import {
   UniquenessError,
 } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { requireDefined } from "../../utils/presence";
 import { constraintFenceRefusal } from "../operations/write-transaction";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
@@ -52,12 +54,35 @@ export type UniquenessContext = Readonly<{
   backend: GraphBackend | TransactionBackend;
 }>;
 
-/** Builds a {@link UniquenessContext} — the one constructor every call site shares. */
-export function createUniquenessContext(
+/**
+ * Context for the claim PROBE, whose single backend member is the read.
+ *
+ * Stated separately because the probe runs on handles that cannot write: a
+ * write frame's row work holds the read-only `WriteTarget`, and pre-checking a
+ * key there is the whole point of the probe. Every {@link UniquenessContext}
+ * satisfies this one, so a writer passes its own context unchanged.
+ */
+export type UniquenessProbeContext = Readonly<{
+  graphId: string;
+  registry: KindRegistry;
+  backend: Pick<UniqueConstraintBackend, "checkUnique">;
+}>;
+
+/**
+ * Builds a claim context — the one constructor every call site shares.
+ *
+ * Generic in the handle so it yields exactly what it was given: a full backend
+ * produces a {@link UniquenessContext} that can also write the claim rows, and
+ * a read-only projection produces a {@link UniquenessProbeContext}, which is
+ * all the probe needs and all row work can offer.
+ */
+export function createUniquenessContext<
+  T extends Pick<UniqueConstraintBackend, "checkUnique">,
+>(
   graphId: string,
   registry: KindRegistry,
-  backend: GraphBackend | TransactionBackend,
-): UniquenessContext {
+  backend: T,
+): Readonly<{ graphId: string; registry: KindRegistry; backend: T }> {
   return { graphId, registry, backend };
 }
 
@@ -318,7 +343,7 @@ export function isUniquenessClaimEntry(
  *   scope.
  */
 async function probeUniqueKey(
-  ctx: UniquenessContext,
+  ctx: UniquenessProbeContext,
   kind: string,
   id: string,
   entry: UniquenessClaimEntry,
@@ -366,7 +391,7 @@ async function probeUniqueKey(
  * @throws ValidationError if any constraint is violated
  */
 export async function checkUniquenessConstraints(
-  ctx: UniquenessContext,
+  ctx: UniquenessProbeContext,
   kind: string,
   id: string,
   props: Record<string, unknown>,
@@ -680,6 +705,35 @@ export async function deleteUniquenessEntries(
     id,
     nodeClaimEntries(ctx.registry, kind, id, props, constraints, "create"),
   );
+}
+
+/**
+ * Drops EVERY claim a set of nodes holds under one concrete kind, key-blind, so
+ * the rebuild that follows can re-claim from the after-images.
+ *
+ * The key-blind drop is what a set update needs and the per-key
+ * {@link deleteUniquenessEntries} cannot give it: the statement rewrote whole
+ * rows without reading their before-images, so nobody knows which keys those
+ * rows used to hold. It drops BOTH families — every claim the owner pair holds —
+ * which is why the rebuild must go back through {@link withNodeCreateClaimsBatch}
+ * rather than a uniqueness-only reinsert.
+ *
+ * Requiring the member rather than probing it: the only caller
+ * ({@link file://../operations/node-write-pipeline.ts applyNodeSetUpdate})
+ * refuses the write up front when a constrained kind's backend lacks it, with a
+ * code that names the operation. A second fallback here would be a quieter
+ * answer to a question already asked.
+ */
+export async function hardDeleteClaimsByNodeIds(
+  ctx: UniquenessContext,
+  concreteKind: string,
+  nodeIds: readonly string[],
+): Promise<void> {
+  await requireDefined(ctx.backend.hardDeleteUniquesByNodeIds)({
+    graphId: ctx.graphId,
+    concreteKind,
+    nodeIds,
+  });
 }
 
 /**

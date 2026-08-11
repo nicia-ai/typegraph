@@ -58,9 +58,13 @@ const UPGRADEABLE_DERIVED_RELATIONS: ReadonlySet<string> = new Set([
  * whichever target the provisioning path can offer — the schema-write
  * transaction when the CREATE has to be published with the fill, the top-level
  * backend when the relation already exists and only its rows are owed.
+ *
+ * The full backend union rather than {@link IdentityTarget}: the rebuild opens
+ * its own write frame on whatever it is handed, so it needs the top-level
+ * `transaction` member to tell "open one" from "already inside one" apart.
  */
 export type RecomputeDerivedRelations = (
-  target: IdentityTarget,
+  target: GraphBackend | TransactionBackend,
 ) => Promise<void>;
 
 /**

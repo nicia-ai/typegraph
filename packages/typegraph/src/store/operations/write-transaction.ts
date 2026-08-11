@@ -205,7 +205,7 @@ export async function lockSchemaVersionForStoreWrite(
  * `many`-edge, a node whose uniques are all backed by the uniques primary key,
  * a delete. It takes no lock and pays no round trip for one.
  */
-type WriteTransactionOptions<T> = Readonly<{
+export type WriteTransactionOptions<T> = Readonly<{
   didWrite?: (result: T) => boolean;
   fencesConstraintProbe?: ConstraintFenceReason | undefined;
 }>;

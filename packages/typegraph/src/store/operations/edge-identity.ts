@@ -50,7 +50,7 @@ export function edgeIdentityFromRow(row: {
  * repetition. A row that fails the predicate here is refused before any write;
  * a row that changes afterwards makes the write match nothing, and the caller
  * hears the same refusal from
- * {@link file://./edge-operations.ts withUnmatchedEdgeUpdateRefusal}.
+ * {@link file://./edge-write-fences.ts withUnmatchedEdgeUpdateRefusal}.
  */
 export function assertEdgeIdentityMatches(
   id: string,

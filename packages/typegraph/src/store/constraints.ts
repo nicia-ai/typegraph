@@ -34,7 +34,7 @@
  * are what the write paths ask so they take that same per-graph lock whenever
  * one of these probes is in play, and only then.
  */
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import { type GraphEntityReadBackend } from "../backend/types";
 import {
   checkCardinality,
   checkDisjointness,
@@ -51,11 +51,17 @@ export { type ConstraintFenceReason } from "./claims/backing";
 
 /**
  * Context for constraint operations.
+ *
+ * The backend is the graph-entity READ facet rather than the backend union:
+ * every check in this module is an application probe that reads, decides and
+ * returns, and the CALLER does the writing. Naming the facet is what lets a
+ * probe run inside a write frame, whose row-work handle exposes reads only,
+ * and it states in the type that no check here writes.
  */
 export type ConstraintContext = Readonly<{
   graphId: string;
   registry: KindRegistry;
-  backend: GraphBackend | TransactionBackend;
+  backend: GraphEntityReadBackend;
 }>;
 
 /**

@@ -6,15 +6,50 @@
  * Extracted so the derived-relation writers (`separation.ts`) and the identity
  * service can both use them without importing each other.
  */
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import {
+  type BackendIdentity,
+  type GraphBackend,
+  type GraphEntityReadBackend,
+  type QueryExecutionBackend,
+  type RawQueryExecutionBackend,
+  type SchemaReadBackend,
+  type SqlCompilationBackend,
+} from "../backend/types";
 import { ConfigurationError } from "../errors";
 import { type SqlFragment } from "../query/sql-fragment";
 import { asCompiledStatementSql } from "../query/sql-intent";
 import { recordedBindParamBudget } from "../store/recorded-capture/relations";
 import { isSqliteStaleSnapshotError } from "../utils/sql-errors";
 
-/** A top-level backend or a transaction-scoped one; identity writes accept both. */
-export type IdentityTarget = GraphBackend | TransactionBackend;
+/**
+ * @internal
+ *
+ * What an identity statement runs against: reads, compiled execution, and the
+ * optional raw-statement port {@link executeIdentityStatement} refuses without.
+ *
+ * An EXPLICIT FACET COMPOSITION rather than `GraphBackend | TransactionBackend`,
+ * for the same reason `TransactionBackend` is one: identity writes touch the
+ * identity relations through `executeStatement`, never through a graph-entity
+ * write member, so naming the members states what identity may reach instead of
+ * inheriting every mutation port a backend happens to expose.
+ *
+ * Both backend shapes are still assignable to it, so no existing caller
+ * changes. What the composition additionally admits is the write pipeline's
+ * row-work projection (`WriteTarget`): the store's identity fold and detach run
+ * inside a write frame, whose handle exposes reads only, and `executeStatement`
+ * is optional here exactly as it is on `GraphBackend` — so a target that cannot
+ * run statements is refused by {@link executeIdentityStatement} with a named
+ * error rather than excluded by a type nobody in row work can produce.
+ */
+export type IdentityTarget = Readonly<
+  BackendIdentity &
+    GraphEntityReadBackend &
+    SchemaReadBackend &
+    QueryExecutionBackend &
+    SqlCompilationBackend &
+    RawQueryExecutionBackend &
+    Pick<GraphBackend, "executeStatement">
+>;
 
 /** A node reference stripped to the two columns identity relations store. */
 export type PlainNodeRef = Readonly<{ kind: string; id: string }>;

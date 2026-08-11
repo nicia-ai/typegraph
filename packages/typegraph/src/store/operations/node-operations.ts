@@ -75,6 +75,7 @@ import {
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
 import { refKey } from "../../identity/service";
+import { type IdentityTarget } from "../../identity/sql-target";
 import {
   compileIndexWhere,
   compileNodeIndexFieldKeys,
@@ -109,15 +110,11 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
 import {
-  alreadyAppliedRowWrite,
   checkUniquenessConstraints,
   createUniquenessContext,
   nodeClaimEntries,
   type NodeClaimItem,
-  withNodeCreateClaims,
-  withNodeCreateClaimsBatch,
 } from "../claims/node-claims";
-import { validateResolvedNodeClaims } from "../claims/resolved-node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateNodeInput } from "../collections/node-collection";
 import {
@@ -128,14 +125,7 @@ import {
 } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
-import {
-  nodeInsertDispatch,
-  runInsertBatch,
-  runInsertBatchReturning,
-  runInsertNoReturn,
-} from "../insert-dispatch";
 import { getNodeRowsByIds } from "../node-fetch";
-import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type NodeRow, rowToNode } from "../row-mappers";
 import {
   type BulkOperationHookContext,
@@ -155,19 +145,19 @@ import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
 } from "./already-exists";
+import { type NodeInsertSyncItem } from "./node-write-pipeline";
 import {
-  applyNodeHardDelete,
-  applyNodeInsertSyncFans,
-  applyNodeInsertSyncFansBatch,
-  applyNodeSoftDelete,
-  applyNodeUpdate,
-  createNodeWriteContext,
-  type NodeInsertSyncItem,
-} from "./node-write-pipeline";
+  type HookedWritePlanContext,
+  runHookedWritePlan,
+  runWritePlan,
+} from "./write-executor";
+import { type NodeUpdateFences } from "./write-fences";
+import { nodeBatchWritePlan, nodeWritePlan } from "./write-plan";
 import {
-  runHookedWriteOperation,
-  runInWriteTransaction,
-} from "./write-transaction";
+  type NodeInsertWork,
+  type NodeWriteSession,
+  type WriteTarget,
+} from "./write-session";
 
 // ============================================================
 // Types
@@ -200,19 +190,26 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     ctx: BulkOperationHookContext,
     fn: () => Promise<T>,
   ) => Promise<T>;
+  /**
+   * The identity hooks a node write participates in, on {@link IdentityTarget}
+   * — the projection identity STATEMENTS run against — so a fold or a detach
+   * can be issued from inside a write frame, whose handle is the read-only
+   * {@link WriteTarget}. Identity assertions are not node rows: they never
+   * travel through the session, and this is their seam.
+   */
   identity?: Readonly<{
-    lock: (target: GraphBackend | TransactionBackend) => Promise<void>;
+    lock: (target: IdentityTarget) => Promise<void>;
     foldCreated: (
-      target: GraphBackend | TransactionBackend,
+      target: IdentityTarget,
       references: readonly Readonly<{ kind: string; id: string }>[],
     ) => Promise<void>;
     detachDeleted: (
-      target: GraphBackend | TransactionBackend,
+      target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
       mode: "soft" | "hard",
     ) => Promise<void>;
     requireValidityEndCompatible: (
-      target: GraphBackend | TransactionBackend,
+      target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
       validTo: string,
     ) => Promise<void>;
@@ -288,20 +285,49 @@ function nodeFencesConstraintProbe<G extends GraphDef>(
 }
 
 /**
- * A batch fences when ANY item does — one transaction, so one constrained
- * member makes the whole write constrained, and the first such member names the
- * class a refusal would report.
+ * The per-item constraint probes a batch write plan folds.
+ *
+ * "A batch fences when ANY item does" is owned by {@link nodeBatchWritePlan};
+ * this only supplies the per-item classifications it folds, so the rule has one
+ * spelling instead of one here and one in the plan builder.
  */
-function nodeBatchFencesConstraintProbe<G extends GraphDef>(
+function nodeBatchConstraintProbes<G extends GraphDef>(
   ctx: Pick<NodeOperationContext<G>, "graph" | "registry">,
   inputs: readonly Readonly<{ kind: string }>[],
   operation: "create" | "update",
-): ConstraintFenceReason | undefined {
-  for (const input of inputs) {
-    const reason = nodeFencesConstraintProbe(ctx, input.kind, operation);
-    if (reason !== undefined) return reason;
-  }
-  return undefined;
+): readonly (ConstraintFenceReason | undefined)[] {
+  return inputs.map((input) =>
+    nodeFencesConstraintProbe(ctx, input.kind, operation),
+  );
+}
+
+/**
+ * The executor context this module's writes run under: the operation context
+ * plus HOW it acquires the identity lock.
+ *
+ * The plan says WHETHER identity participates; the context says how. A graph
+ * with no identity configured supplies no acquirer, and its plans declare no
+ * participation — the two are derived from the same `ctx.identity`, which is
+ * what makes "declared participation with no acquirer" an unreachable wiring
+ * bug rather than a silently skipped lock.
+ */
+function nodeWritePlanContext<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+): HookedWritePlanContext {
+  const identity = ctx.identity;
+  if (identity === undefined) return ctx;
+  return { ...ctx, identityLock: identity.lock };
+}
+
+/**
+ * The participation a write declares, or `undefined` on a graph with no
+ * identity — the one place the `if (identity !== undefined)` that used to be
+ * re-spelled at every node write site now lives.
+ */
+function nodeRequiresIdentityLock<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+): boolean {
+  return ctx.identity !== undefined;
 }
 
 function buildNodeCacheKey(graphId: string, kind: string, id: string): string {
@@ -398,12 +424,29 @@ function resolveConstraint<G extends GraphDef>(
 // in the batch can see earlier ones during validation.
 // ============================================================
 
-export function createNodeBatchValidationBackend(
+/**
+ * The reads a batch's pending-aware validation answers itself.
+ *
+ * Published as the OVERLAY SPEC alongside the reader built from it, because
+ * two different handles have to carry these answers: the caller reads through
+ * `reader`, and interchange import ALSO hands the spec to the executor, which
+ * decorates the write frame's own target with it so a session can be minted
+ * over the same pending state. A decorated backend alone could not do that —
+ * its static type would have to be the full backend union for the session mint
+ * to accept it, which is the widening this seam exists to remove — and two
+ * independently built overlays would be two spellings of one decision.
+ */
+export type NodeBatchValidationReads = Readonly<
+  Pick<WriteTarget, "getNode" | "checkUnique">
+>;
+
+export function createNodeBatchValidationSeams(
   graphId: string,
   registry: KindRegistry,
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
 ): Readonly<{
-  backend: GraphBackend | TransactionBackend;
+  reads: NodeBatchValidationReads;
+  reader: WriteTarget;
   registerPendingNode: (params: InsertNodeParams) => void;
   registerPendingUniqueEntries: (
     kind: string,
@@ -630,13 +673,14 @@ export function createNodeBatchValidationBackend(
     uniqueCache.set(cacheKey, row);
   }
 
-  const validationBackend = deriveBackend(backend, {
+  const reads: NodeBatchValidationReads = {
     getNode: getNodeCached,
     checkUnique: checkUniqueCached,
-  } satisfies Partial<GraphBackend | TransactionBackend>);
+  };
 
   return {
-    backend: validationBackend,
+    reads,
+    reader: deriveBackend(backend, reads),
     registerPendingNode,
     registerPendingUniqueEntries,
     registerAppliedNodeUpdate,
@@ -736,7 +780,7 @@ function draftNodeCreate<G extends GraphDef>(
 async function finishNodeCreatePreparation<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   draft: NodeCreateDraft,
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
 
@@ -785,7 +829,7 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
   id: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   options?: NodeCreateInternalOptions,
 ): Promise<NodeCreatePrepared> {
   return finishNodeCreatePreparation(
@@ -818,22 +862,21 @@ function nodeCreateClaimItem(prepared: NodeCreatePrepared): NodeClaimItem {
 }
 
 /**
- * Batched {@link finalizeNodeCreate}: applies every prepared create's sync fans
- * through the batch pipeline (one fulltext/embedding batch per kind) instead of
- * a per-row statement fan. The claims are not here — see
- * {@link withNodeCreateClaimsBatch}, which wraps the insert itself.
+ * One prepared create as the session's insert unit: the row params, the claims
+ * the row owes, and the sidecar inputs, as ONE value.
+ *
+ * This replaces the `finalizeNodeCreate` / `finalizeNodeCreateBatch` pair and
+ * the claim seam the create paths used to open around their own insert. Each was
+ * a HALF of a create, callable — and forgettable — on its own; the session takes
+ * the whole unit and applies all three in the pinned order (pre-insert claims,
+ * row, post-insert claims, sync fans).
  */
-async function finalizeNodeCreateBatch<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  preparedCreates: readonly NodeCreatePrepared[],
-  backend: GraphBackend | TransactionBackend,
-  lock: GraphWriteLock,
-): Promise<void> {
-  await applyNodeInsertSyncFansBatch(
-    createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-    preparedCreates.map((prepared) => nodeCreateSideEffectItem(prepared)),
-    backend,
-  );
+function nodeInsertWork(prepared: NodeCreatePrepared): NodeInsertWork {
+  return {
+    params: prepared.insertParams,
+    claim: nodeCreateClaimItem(prepared),
+    sideEffects: nodeCreateSideEffectItem(prepared),
+  };
 }
 
 /**
@@ -850,19 +893,6 @@ function foldReferences(
   return preparedCreates
     .filter((prepared) => prepared.idProvided)
     .map((prepared) => ({ kind: prepared.kind, id: prepared.id }));
-}
-
-async function finalizeNodeCreate<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  prepared: NodeCreatePrepared,
-  backend: GraphBackend | TransactionBackend,
-  lock: GraphWriteLock,
-): Promise<void> {
-  await applyNodeInsertSyncFans(
-    createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-    nodeCreateSideEffectItem(prepared),
-    backend,
-  );
 }
 
 // ============================================================
@@ -949,15 +979,15 @@ export function nodeUpsertDirtyCheck<G extends GraphDef>(
 async function performNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
-  backend: GraphBackend | TransactionBackend,
-  lock: GraphWriteLock,
+  session: NodeWriteSession,
+  target: WriteTarget,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
   const { kind, id } = input;
 
   assertValidityEndMutation(input, { entityType: "node", kind, id });
 
-  const existing = await backend.getNode(ctx.graphId, kind, id);
+  const existing = await target.getNode(ctx.graphId, kind, id);
   if (!existing) throw new NodeNotFoundError(kind, id);
 
   const { registration, validatedProps } = resolveNodeUpdateProps(
@@ -1028,24 +1058,27 @@ async function performNodeUpdate<G extends GraphDef>(
     validTo,
   );
 
-  const writeContext = createNodeWriteContext(ctx.graphId, ctx.registry, lock);
   const shared = {
     schema: nodeKind.schema,
     validatedProps,
     uniqueConstraints: registration.unique ?? [],
     ...(validTo !== undefined && { validTo }),
     ...(input.clearValidTo === true && { clearValidTo: true as const }),
-    // The bound the verdict above READ, carried into the UPDATE's own `WHERE`
-    // so the row this writes is the row that was judged. The verdict hands over
-    // the predicate rather than a flag, so both conditions that decide it — did
-    // the verdict consult the effective bound, and WAS that bound the row's
-    // stored one — are answered where they are known. A plain
-    // `update({ props })` states no window, reads no bound, and stays unfenced:
-    // the same rule `UpdateEdgeParams`'s identity components follow, for the
-    // same reason. The resurrecting leg is judged against `resurrectionInstant`
-    // and so fences on `deleted_at IS NOT NULL` alone, converging through the
-    // recovery below.
-    ...windowVerdict.storedLowerBoundFence,
+  };
+  // The bound the verdict above READ, carried into the UPDATE's own `WHERE` so
+  // the row this writes is the row that was judged. The verdict hands over the
+  // predicate rather than a flag, so both conditions that decide it — did the
+  // verdict consult the effective bound, and WAS that bound the row's stored
+  // one — are answered where they are known. A plain `update({ props })`
+  // states no window, reads no bound, and stays unfenced: the same rule
+  // `UpdateEdgeParams`'s identity components follow, for the same reason. The
+  // resurrecting leg is judged against `resurrectionInstant` and so fences on
+  // `deleted_at IS NOT NULL` alone, converging through the recovery below.
+  //
+  // It is now a REQUIRED argument rather than a spread convention: an update
+  // that forgot to carry the bound its verdict read is a compile error.
+  const fences: NodeUpdateFences = {
+    validityLowerBound: windowVerdict.storedLowerBoundFence,
   };
 
   // A resurrecting upsert (clearDeleted) may target a tombstoned row; a plain
@@ -1073,23 +1106,21 @@ async function performNodeUpdate<G extends GraphDef>(
         validFrom !== undefined && { validFrom }
         // eslint-disable-next-line unicorn/no-null -- `validFrom: null` means "store NULL"; omitting the key means "decide for me", and this path has already decided. See UpdateNodeParams.validFrom.
       : { validFrom: resurrectionBound ?? null };
-    const row = await applyNodeUpdate(
-      writeContext,
+    const row = await session.reviseNode(
       { ...shared, existing, clearDeleted: true, ...resurrectionLowerBound },
-      backend,
+      fences,
     );
     return rowToNode(row);
   }
 
   if (!isLiveNodeRow(existing)) throw new NodeNotFoundError(kind, id);
-  const row = await applyNodeUpdate(
-    writeContext,
+  const row = await session.reviseNode(
     // An in-place update must not rewrite the stored bound, so it keeps the
     // conditional spread: `buildUpdateNode` ignores `validFrom` off the
     // resurrection leg, and stating one here would claim a rewrite that no
     // statement performs.
     { ...shared, existing, ...(validFrom !== undefined && { validFrom }) },
-    backend,
+    fences,
   );
   return rowToNode(row);
 }
@@ -1140,8 +1171,8 @@ const NODE_UPDATE_ATTEMPTS = 2;
 async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
-  target: GraphBackend | TransactionBackend,
-  lock: GraphWriteLock,
+  session: NodeWriteSession,
+  target: WriteTarget,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
   for (let attempt = 1; attempt <= NODE_UPDATE_ATTEMPTS; attempt += 1) {
@@ -1151,8 +1182,8 @@ async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
       return await performNodeUpdate(
         ctx,
         input,
+        session,
         target,
-        lock,
         attempt === 1 ? options : undefined,
       );
     } catch (error) {
@@ -1213,7 +1244,7 @@ function nodeUpdateRaceError(
 export async function primeBatchValidationCaches(
   ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
   drafts: readonly NodeCreateDraft[],
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   seams: Readonly<{
     seedNodeRow: (kind: string, id: string, row: CachedNodeRow) => void;
     seedUniqueRow: (
@@ -1308,16 +1339,16 @@ export async function primeBatchValidationCaches(
 async function prepareBatchCreates<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   options?: NodeCreateInternalOptions,
 ): Promise<readonly NodeCreatePrepared[]> {
   const {
-    backend: validationBackend,
+    reader: validationBackend,
     registerPendingNode,
     registerPendingUniqueEntries,
     seedNodeRow,
     seedUniqueRow,
-  } = createNodeBatchValidationBackend(ctx.graphId, ctx.registry, backend);
+  } = createNodeBatchValidationSeams(ctx.graphId, ctx.registry, backend);
 
   // Pass 1 (synchronous): validate every input and assign ids. This
   // surfaces a later row's validation error before an earlier row's
@@ -1396,8 +1427,8 @@ function isNodeUpdateNoRowError(
 
 async function resurrectPreparedNode<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  target: GraphBackend | TransactionBackend,
-  lock: GraphWriteLock,
+  session: NodeWriteSession,
+  target: WriteTarget,
   prepared: NodeCreatePrepared,
 ): Promise<BackendNodeRow> {
   const current = await target.getNode(ctx.graphId, prepared.kind, prepared.id);
@@ -1425,8 +1456,7 @@ async function resurrectPreparedNode<G extends GraphDef>(
     resurrectionInstant,
   );
   try {
-    return await applyNodeUpdate(
-      createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+    return await session.reviseNode(
       {
         existing: current,
         clearDeleted: true,
@@ -1441,7 +1471,11 @@ async function resurrectPreparedNode<G extends GraphDef>(
           {}
         : { validTo: prepared.insertParams.validTo }),
       },
-      target,
+      // This resurrection reads no stored bound: it rewrites the whole window
+      // and is fenced by the UPDATE's own `deleted_at IS NOT NULL` predicate,
+      // so it asserts nothing about `valid_from`. `{}` is how a write states
+      // that, and it is the only way to state it.
+      { validityLowerBound: {} },
     );
   } catch (error) {
     if (!isNodeUpdateNoRowError(error)) throw error;
@@ -1495,7 +1529,7 @@ function prefersClaimRow(
 }
 
 async function findUniqueRowAcrossKinds(
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   graphId: string,
   constraintName: string,
   key: string,
@@ -1528,7 +1562,7 @@ interface UniqueMatchRow {
 }
 
 async function batchCheckUniqueAcrossKinds(
-  backend: GraphBackend | TransactionBackend,
+  backend: WriteTarget,
   graphId: string,
   constraintName: string,
   uniqueKeys: readonly string[],
@@ -1589,13 +1623,16 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const opContext = ctx.createOperationContext("create", "node", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
 
-  return runHookedWriteOperation(
-    ctx,
+  return runHookedWritePlan(
+    nodeWritePlanContext(ctx),
     opContext,
+    nodeWritePlan(
+      nodeFencesConstraintProbe(ctx, kind, "create"),
+      nodeRequiresIdentityLock(ctx),
+    ),
     backend,
-    async (target, lock) => {
+    async (session, target) => {
       const identity = ctx.identity;
-      if (identity !== undefined) await identity.lock(target);
       const prepared = await validateAndPrepareNodeCreate(
         ctx,
         input,
@@ -1608,8 +1645,8 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       if (existing !== undefined) {
         const resurrected = await resurrectPreparedNode(
           ctx,
+          session,
           target,
-          lock,
           prepared,
         );
         if (identity !== undefined) {
@@ -1623,36 +1660,28 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       // can commit between the probe and this INSERT, and only the engine's
       // refusal reports it. Both routes to that conclusion raise the same error.
       //
-      // The insert is the claim seam's gated write: claims whose axis spans
-      // kinds beyond this one are the only fence for that axis, so they precede
-      // it and are compensated away if it does not land; the rest follow it,
-      // where their own primary key already fences them.
-      const row = await withNodeCreateClaims(
-        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-        nodeCreateClaimItem(prepared),
-        target,
-        () =>
-          withAlreadyExistsTranslation("node", async () => {
-            if (shouldReturnRow)
-              return target.insertNode(prepared.insertParams);
-            await runInsertNoReturn(
-              nodeInsertDispatch(target),
-              prepared.insertParams,
-            );
-            return;
-          }),
-      );
+      // The claims are the session's, at their declared placements: the
+      // pre-insert group gates the row and is compensated away if it does not
+      // land, the post-insert group follows it. The translation spans the fused
+      // unit — claims, row AND sidecars — because the session applies them
+      // together. That widening is inert: `isDuplicateKeyInsertError` fires only
+      // on a classified node-INSERT duplicate, which no claim, fulltext or
+      // embedding write raises. The alternative — the session owning the
+      // translation — would change import's create-leg error type on a lost
+      // race, which it must not.
+      const row = await withAlreadyExistsTranslation("node", async () => {
+        const work = nodeInsertWork(prepared);
+        if (shouldReturnRow) return session.createNode(work);
+        await session.createNodeNoReturn(work);
+        return;
+      });
 
-      await finalizeNodeCreate(ctx, prepared, target, lock);
       if (identity !== undefined) {
         await identity.foldCreated(target, foldReferences([prepared]));
       }
 
       if (row === undefined) return;
       return rowToNode(row);
-    },
-    {
-      fencesConstraintProbe: nodeFencesConstraintProbe(ctx, kind, "create"),
     },
   );
 }
@@ -1697,41 +1726,42 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 ): Promise<void> {
   if (inputs.length === 0) return;
 
-  await runInWriteTransaction(
-    ctx,
+  await runWritePlan(
+    nodeWritePlanContext(ctx),
+    nodeBatchWritePlan(
+      nodeBatchConstraintProbes(ctx, inputs, "create"),
+      nodeRequiresIdentityLock(ctx),
+    ),
     backend,
-    async (target, lock) => {
+    async (session, target) => {
       const identity = ctx.identity;
-      if (identity !== undefined) await identity.lock(target);
       const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
 
       const partition = partitionCreates(preparedCreates);
-      await withNodeCreateClaimsBatch(
-        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-        partition.inserts.map((prepared) => nodeCreateClaimItem(prepared)),
-        target,
-        () =>
-          withAlreadyExistsTranslation("node", () =>
-            runInsertBatch(
-              nodeInsertDispatch(target),
-              partition.inserts.map((prepared) => prepared.insertParams),
-            ),
-          ),
+      // ## Resurrections follow the whole insert unit
+      //
+      // The batch INSERT, its claim groups and its sidecar batch are ONE session
+      // call, so the resurrection updates that used to run BETWEEN the insert and
+      // the fans now run after all of them. That is the one statement-order
+      // difference this migration makes, and it is safe because the two groups
+      // touch disjoint rows: a prepared create is either an insert or a
+      // resurrection, never both, and the embedding/fulltext rows are
+      // node-id-keyed. Their only shared resource is the claim relation — and two
+      // batch members claiming one key are already refused during preparation,
+      // which registers each row's pending claims so a later row sees an earlier
+      // one ({@link prepareBatchCreates}). So no error this batch can raise
+      // depends on which of the two groups writes first.
+      await withAlreadyExistsTranslation("node", () =>
+        session.createNodesNoReturn(
+          partition.inserts.map((prepared) => nodeInsertWork(prepared)),
+        ),
       );
       for (const prepared of partition.resurrections) {
-        await resurrectPreparedNode(ctx, target, lock, prepared);
+        await resurrectPreparedNode(ctx, session, target, prepared);
       }
-      await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
       if (identity !== undefined) {
         await identity.foldCreated(target, foldReferences(preparedCreates));
       }
-    },
-    {
-      fencesConstraintProbe: nodeBatchFencesConstraintProbe(
-        ctx,
-        inputs,
-        "create",
-      ),
     },
   );
 }
@@ -1753,12 +1783,15 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
 
-  return runInWriteTransaction(
-    ctx,
+  return runWritePlan(
+    nodeWritePlanContext(ctx),
+    nodeBatchWritePlan(
+      nodeBatchConstraintProbes(ctx, inputs, "create"),
+      nodeRequiresIdentityLock(ctx),
+    ),
     backend,
-    async (target, lock) => {
+    async (session, target) => {
       const identity = ctx.identity;
-      if (identity !== undefined) await identity.lock(target);
       const preparedCreates = await prepareBatchCreates(
         ctx,
         inputs,
@@ -1767,25 +1800,19 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       );
 
       const partition = partitionCreates(preparedCreates);
-      const inserted = await withNodeCreateClaimsBatch(
-        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-        partition.inserts.map((prepared) => nodeCreateClaimItem(prepared)),
-        target,
-        () =>
-          withAlreadyExistsTranslation("node", () =>
-            runInsertBatchReturning(
-              nodeInsertDispatch(target),
-              partition.inserts.map((prepared) => prepared.insertParams),
-            ),
-          ),
+      // One call for claims + row + sidecars, so the resurrections follow the
+      // whole unit — same reasoning as {@link executeNodeCreateNoReturnBatch}.
+      const inserted = await withAlreadyExistsTranslation("node", () =>
+        session.createNodes(
+          partition.inserts.map((prepared) => nodeInsertWork(prepared)),
+        ),
       );
       const resurrected: BackendNodeRow[] = [];
       for (const prepared of partition.resurrections) {
         resurrected.push(
-          await resurrectPreparedNode(ctx, target, lock, prepared),
+          await resurrectPreparedNode(ctx, session, target, prepared),
         );
       }
-      await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
       const byReference = new Map(
         [...inserted, ...resurrected].map((row) => [
           refKey({ kind: row.kind, id: row.id }),
@@ -1804,13 +1831,6 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 
       return rows.map((row) => rowToNode(row));
     },
-    {
-      fencesConstraintProbe: nodeBatchFencesConstraintProbe(
-        ctx,
-        inputs,
-        "create",
-      ),
-    },
   );
 }
 
@@ -1824,31 +1844,38 @@ export async function executeNodeUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
+  // The capability refusal is taken on the backend the CALLER handed in, before
+  // the frame opens: a stated `clearValidTo` a backend does not promise to apply
+  // must be refused, never accepted and dropped, and no transaction is needed to
+  // read a capability. Same placement as `executeNodeUpsertUpdate`'s.
+  if (input.clearValidTo === true) {
+    assertClearValidToSupported(backend, "node");
+  }
   const opContext = ctx.createOperationContext(
     "update",
     "node",
     input.kind,
     input.id,
   );
-  return runHookedWriteOperation(
-    ctx,
+  return runHookedWritePlan(
+    nodeWritePlanContext(ctx),
     opContext,
+    nodeWritePlan(
+      nodeFencesConstraintProbe(ctx, input.kind, "update"),
+      // Identity participates in an update when it RESURRECTS, and when it
+      // states a validity end: a live-row update cannot change a node's kind, so
+      // nothing folds, but an end reads the identity assertions that touch it.
+      options?.clearDeleted === true || input.validTo !== undefined ?
+        nodeRequiresIdentityLock(ctx)
+      : false,
+    ),
     backend,
-    async (target, lock) => {
-      if (input.clearValidTo === true) {
-        assertClearValidToSupported(backend, "node");
-      }
+    async (session, target) => {
       const validTo = validateOptionalCanonicalIsoDate(
         input.validTo,
         "validTo",
       );
       const identity = ctx.identity;
-      if (
-        identity !== undefined &&
-        (options?.clearDeleted === true || input.validTo !== undefined)
-      ) {
-        await identity.lock(target);
-      }
       if (identity !== undefined && validTo !== undefined) {
         await identity.requireValidityEndCompatible(
           target,
@@ -1859,8 +1886,8 @@ export async function executeNodeUpdate<G extends GraphDef>(
       const node = await performNodeUpdateWithResurrectionRecovery(
         ctx,
         input,
+        session,
         target,
-        lock,
         options,
       );
       if (options?.clearDeleted && identity !== undefined) {
@@ -1869,13 +1896,6 @@ export async function executeNodeUpdate<G extends GraphDef>(
         ]);
       }
       return node;
-    },
-    {
-      fencesConstraintProbe: nodeFencesConstraintProbe(
-        ctx,
-        input.kind,
-        "update",
-      ),
     },
   );
 }
@@ -2004,148 +2024,33 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
 
   const hookContext = ctx.createBulkOperationContext("updateWhere", kind);
   return ctx.withBulkOperationHooks(hookContext, () =>
-    runInWriteTransaction(
-      ctx,
+    runWritePlan(
+      nodeWritePlanContext(ctx),
+      // The set update re-checks every changed unique key across the
+      // constraint's scope before rebuilding the sidecars, so a shared-scope
+      // constraint makes it a constrained write like any other update.
+      // Identity does not participate: a set update rewrites props, and no
+      // patch can change a node's kind.
+      nodeWritePlan(nodeFencesConstraintProbe(ctx, kind, "update"), false),
       backend,
-      async (target, lock) => {
-        const updateNodeSet = target.updateNodeSet;
-        if (updateNodeSet === undefined) {
-          throw new ConfigurationError(
-            "The transaction backend does not support set-based node updates",
-            { code: "SET_UPDATE_UNSUPPORTED", kind },
-          );
-        }
-        const hardDeleteUniquesByNodeIds = target.hardDeleteUniquesByNodeIds;
-        if (
-          uniqueConstraints.length > 0 &&
-          (hardDeleteUniquesByNodeIds === undefined ||
-            target.insertUniqueBatch === undefined ||
-            target.checkUniqueBatch === undefined)
-        ) {
-          throw new ConfigurationError(
-            "The transaction backend lacks batched uniqueness operations",
-            { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
-          );
-        }
-        if (
-          getSearchableFields(schema).length > 0 &&
-          (target.upsertFulltext === undefined ||
-            target.deleteFulltext === undefined ||
-            target.upsertFulltextBatch === undefined ||
-            target.deleteFulltextBatch === undefined)
-        ) {
-          throw new ConfigurationError(
-            "The transaction backend lacks batched fulltext operations",
-            { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
-          );
-        }
-        if (
-          getEmbeddingFields(schema).length > 0 &&
-          (target.upsertEmbedding === undefined ||
-            target.deleteEmbedding === undefined ||
-            target.upsertEmbeddingBatch === undefined ||
-            target.deleteEmbeddingBatch === undefined)
-        ) {
-          throw new ConfigurationError(
-            "The transaction backend lacks batched vector operations",
-            { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
-          );
-        }
-        const result = await updateNodeSet({
-          graphId: ctx.graphId,
-          kind,
-          patch,
-          unsetProperties,
-          candidateIds,
-          candidateIdColumn,
-        });
-        if (result.affectedCount === 0) return { affectedCount: 0 };
-
-        const sidecarItems = result.rows.map((row) => {
-          const props = rowPropsToObject(row.props);
-          const validatedProps = validateNodeProps(schema, props, {
+      (session) =>
+        session.reviseNodeSet(
+          {
             kind,
-            operation: "update",
-            id: row.id,
-          });
-          if (!canonicalEqual(validatedProps, props)) {
-            throw new ValidationError(
-              `Set update would persist a non-canonical ${kind} row`,
-              {
-                entityType: "node",
-                kind,
-                operation: "update",
-                id: row.id,
-                issues: [
-                  {
-                    path: "props",
-                    message: "The complete row requires schema normalization",
-                  },
-                ],
-              },
-            );
-          }
-          return {
-            kind,
-            id: row.id,
             schema,
-            props: validatedProps,
             uniqueConstraints,
-          };
-        });
-
-        if (uniqueConstraints.length > 0) {
-          await validateResolvedNodeClaims(
-            createUniquenessContext(ctx.graphId, ctx.registry, target),
-            sidecarItems.map((item) => ({
-              kind: item.kind,
-              id: item.id,
-              props: item.props,
-              constraints: item.uniqueConstraints,
-            })),
-          );
-          await requireDefined(hardDeleteUniquesByNodeIds)({
-            graphId: ctx.graphId,
-            concreteKind: kind,
-            nodeIds: result.rows.map((row) => row.id),
-          });
-        }
-        // The same claim seam every create-shaped writer uses, with an
-        // ALREADY-APPLIED update as its gate: the rows were written above and
-        // the old claims hard-deleted, so what is left is a re-claim, and there
-        // is no row write left for a claim to precede. Inverting it would mean
-        // reserving keys the update has not written, which is a different and
-        // wrong sequence. What covers this site on a backend that cannot fence
-        // is stated per kind shape: a kind whose scope spans siblings declares
-        // `fencesConstraintProbe` below and is refused before this body runs; a
-        // kind-scoped one is not refused, before or after — its
-        // delete-then-rebuild window is unchanged in shape and extent here.
-        const writeContext = createNodeWriteContext(
-          ctx.graphId,
-          ctx.registry,
-          lock,
-        );
-        await withNodeCreateClaimsBatch(
-          writeContext,
-          sidecarItems.map((item) => ({
-            kind: item.kind,
-            id: item.id,
-            props: item.props,
-            constraints: item.uniqueConstraints,
-          })),
-          target,
-          alreadyAppliedRowWrite,
-        );
-        await applyNodeInsertSyncFansBatch(writeContext, sidecarItems, target);
-        return { affectedCount: result.affectedCount };
-      },
-      {
-        didWrite: (result) => result.affectedCount > 0,
-        // The set update re-checks every changed unique key across the
-        // constraint's scope before rebuilding the sidecars, so a shared-scope
-        // constraint makes it a constrained write like any other update.
-        fencesConstraintProbe: nodeFencesConstraintProbe(ctx, kind, "update"),
-      },
+            patch,
+            unsetProperties,
+            candidateIds,
+            candidateIdColumn,
+          },
+          // This path states no window — it patches properties — so the write
+          // asserts no stored lower bound. The set UPDATE has no field to
+          // carry one, so a future windowed set update is refused here rather
+          // than run unfenced.
+          { validityLowerBound: {} },
+        ),
+      { didWrite: (result) => result.affectedCount > 0 },
     ),
   );
 }
@@ -2163,21 +2068,24 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   if (input.clearValidTo === true) {
     assertClearValidToSupported(backend, "node");
   }
-  return runInWriteTransaction(
-    ctx,
+  return runWritePlan(
+    nodeWritePlanContext(ctx),
+    nodeWritePlan(
+      nodeFencesConstraintProbe(ctx, input.kind, "update"),
+      // Conditional for the same reason as {@link executeNodeUpdate}: a
+      // resurrecting upsert folds, and stating a validity end reads the
+      // identity's other members, so both take the lock.
+      options?.clearDeleted === true || input.validTo !== undefined ?
+        nodeRequiresIdentityLock(ctx)
+      : false,
+    ),
     backend,
-    async (target, lock) => {
+    async (session, target) => {
       const validTo = validateOptionalCanonicalIsoDate(
         input.validTo,
         "validTo",
       );
       const identity = ctx.identity;
-      if (
-        identity !== undefined &&
-        (options?.clearDeleted === true || input.validTo !== undefined)
-      ) {
-        await identity.lock(target);
-      }
       if (identity !== undefined && validTo !== undefined) {
         await identity.requireValidityEndCompatible(
           target,
@@ -2188,8 +2096,8 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
       const node = await performNodeUpdateWithResurrectionRecovery(
         ctx,
         input,
+        session,
         target,
-        lock,
         options,
       );
       if (options?.clearDeleted && identity !== undefined) {
@@ -2198,13 +2106,6 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
         ]);
       }
       return node;
-    },
-    {
-      fencesConstraintProbe: nodeFencesConstraintProbe(
-        ctx,
-        input.kind,
-        "update",
-      ),
     },
   );
 }
@@ -2229,13 +2130,13 @@ export async function executeNodeDelete<G extends GraphDef>(
 
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  return runHookedWriteOperation(
-    ctx,
+  return runHookedWritePlan(
+    nodeWritePlanContext(ctx),
     opContext,
+    nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
     backend,
-    async (target, lock) => {
+    async (session, target) => {
       const identity = ctx.identity;
-      if (identity !== undefined) await identity.lock(target);
       const registration = getNodeRegistration(ctx.graph, kind);
       // This preflight is NOT removable round-trip fat: the soft-delete
       // pipeline consumes the pre-image (uniqueness entries are keyed by
@@ -2248,16 +2149,12 @@ export async function executeNodeDelete<G extends GraphDef>(
       // not individually atomic, so it runs in one write transaction. Under
       // recorded-time capture this also collapses the cascade into a single
       // recorded commit instant instead of one instant per sub-write.
-      await applyNodeSoftDelete(
-        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-        {
-          existing: preflight,
-          schema: registration.type.schema,
-          uniqueConstraints: registration.unique ?? [],
-          onDelete: registration.onDelete,
-        },
-        target,
-      );
+      await session.retireNode({
+        existing: preflight,
+        schema: registration.type.schema,
+        uniqueConstraints: registration.unique ?? [],
+        onDelete: registration.onDelete,
+      });
       if (identity !== undefined) {
         await identity.detachDeleted(target, { kind, id }, "soft");
       }
@@ -2278,18 +2175,13 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
   ids: readonly string[],
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
-  await runInWriteTransaction(
-    ctx,
+  await runWritePlan(
+    nodeWritePlanContext(ctx),
+    nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
     backend,
-    async (target, lock) => {
+    async (session, target) => {
       const identity = ctx.identity;
-      if (identity !== undefined) await identity.lock(target);
       const registration = getNodeRegistration(ctx.graph, kind);
-      const writeContext = createNodeWriteContext(
-        ctx.graphId,
-        ctx.registry,
-        lock,
-      );
       let affectedCount = 0;
 
       for (const id of ids) {
@@ -2299,16 +2191,12 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
         const preflight = await target.getNode(ctx.graphId, kind, id);
         if (!preflight || !isLiveNodeRow(preflight)) continue;
 
-        await applyNodeSoftDelete(
-          writeContext,
-          {
-            existing: preflight,
-            schema: registration.type.schema,
-            uniqueConstraints: registration.unique ?? [],
-            onDelete: registration.onDelete,
-          },
-          target,
-        );
+        await session.retireNode({
+          existing: preflight,
+          schema: registration.type.schema,
+          uniqueConstraints: registration.unique ?? [],
+          onDelete: registration.onDelete,
+        });
         if (identity !== undefined) {
           await identity.detachDeleted(target, { kind, id }, "soft");
         }
@@ -2341,13 +2229,13 @@ export async function executeNodeHardDelete<G extends GraphDef>(
 
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  return runHookedWriteOperation(
-    ctx,
+  return runHookedWritePlan(
+    nodeWritePlanContext(ctx),
     opContext,
+    nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
     backend,
-    async (target, lock) => {
+    async (session, target) => {
       const identity = ctx.identity;
-      if (identity !== undefined) await identity.lock(target);
       const registration = getNodeRegistration(ctx.graph, kind);
       // No in-transaction preflight (unlike soft delete, whose pipeline
       // consumes the pre-image for uniqueness-key cleanup): every hard
@@ -2361,16 +2249,12 @@ export async function executeNodeHardDelete<G extends GraphDef>(
       // it runs in one write transaction. Embeddings live in strategy-owned
       // per-`(kind, field)` tables, so they are cleaned up here rather than
       // in the backend's graph-agnostic `hardDeleteNode` cascade.
-      await applyNodeHardDelete(
-        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
-        {
-          kind,
-          id,
-          schema: registration.type.schema,
-          onDelete: registration.onDelete,
-        },
-        target,
-      );
+      await session.purgeNode({
+        kind,
+        id,
+        schema: registration.type.schema,
+        onDelete: registration.onDelete,
+      });
       if (identity !== undefined) {
         await identity.detachDeleted(target, { kind, id }, "hard");
       }

@@ -22,11 +22,7 @@ import {
   type ProjectedGraphBackendKey,
 } from "./graph-backend-keys";
 import { carryBackendResourceAudit } from "./transaction-resource";
-import {
-  type AdapterBackend,
-  type GraphBackend,
-  type TransactionBackend,
-} from "./types";
+import { type AdapterBackend, type GraphBackend } from "./types";
 
 /**
  * Rejects overlay members that are not members of the decorated backend, so a
@@ -48,9 +44,16 @@ export type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
  * getters and non-enumerable members, and so the derived object carries the
  * source's serialized-resource audit. GraphBackend functions are receiver-free
  * by contract, so delegated methods are returned unchanged.
+ *
+ * `T` is bounded by `object`, not by the backend union — the same bound
+ * {@link projectBackend} carries — so a PROJECTION is decorable too: the write
+ * pipeline's read-only row-work target is what a batch's pending-aware
+ * validation overlays. `ExactBackendOverlay` still rejects any key `T` does not
+ * declare, so the looser bound cannot smuggle a member onto a surface that
+ * withholds it.
  */
 export function deriveBackend<
-  T extends GraphBackend | TransactionBackend,
+  T extends object,
   const O extends Partial<T> = Partial<T>,
 >(base: T, overrides: ExactBackendOverlay<T, O>): T {
   function hasOverlayProperty(property: PropertyKey): boolean {
