@@ -73,6 +73,7 @@ export type {
 // Schema: table definitions and factory options
 export {
   type CreatePostgresTablesOptions,
+  edgeClaims,
   edges,
   fulltext,
   nodes,

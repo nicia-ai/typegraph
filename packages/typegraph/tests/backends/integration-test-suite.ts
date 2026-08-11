@@ -36,11 +36,18 @@ import {
   registerBulkFindEndpointIntegrationTests,
   registerBulkFindHeterogeneousIntegrationTests,
   registerBulkUpsertRepeatedIdIntegrationTests,
+  registerClaimCompensationIntegrationTests,
+  registerClaimLookupPreferenceIntegrationTests,
+  registerClaimOwnerIdentityIntegrationTests,
   registerCoalesceUpsertIntegrationTests,
+  registerConstraintFenceErrorIntegrationTests,
+  registerConstraintFenceTransactionHealthTests,
+  registerConstraintFenceVerificationIntegrationTests,
   registerContributionDiagnosticIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerCurrentIdentityTraversalTests,
   registerEdgeCaseIntegrationTests,
+  registerEdgeClaimSelfHealIntegrationTests,
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerFulltextIntegrationTests,
@@ -51,6 +58,7 @@ import {
   registerIdentitySeparationIntegrationTests,
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
+  registerLegacyClaimAxisIntegrationTests,
   registerMigrateSchemaKindIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
@@ -265,6 +273,13 @@ export function createIntegrationTestSuite<
     registerReconciledSchemaIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
+    registerLegacyClaimAxisIntegrationTests(context);
+    registerClaimOwnerIdentityIntegrationTests(context);
+    registerClaimCompensationIntegrationTests(context);
+    registerClaimLookupPreferenceIntegrationTests(context);
+    registerConstraintFenceErrorIntegrationTests(context);
+    registerConstraintFenceTransactionHealthTests(context);
+    registerConstraintFenceVerificationIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
     registerSetNodeMutationIntegrationTests(context);
@@ -287,6 +302,7 @@ export function createIntegrationTestSuite<
     registerCurrentIdentityTraversalTests(context);
     registerIdentitySeparationIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
+    registerEdgeClaimSelfHealIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
     registerTrustedImportIntegrationTests(context);
   });

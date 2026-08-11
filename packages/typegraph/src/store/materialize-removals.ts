@@ -10,6 +10,11 @@
  */
 import { type RawBackend } from "../backend/branded";
 import {
+  buildHardDeleteEdgeClaimsByEdgeKind,
+  buildHardDeleteEdgeClaimsByNodeKind,
+} from "../backend/drizzle/operations/edge-claims";
+import { buildHardDeleteUniquesByConcreteKind } from "../backend/drizzle/operations/uniques";
+import {
   type GraphBackend,
   type KindRemovalRow,
   type RecordKindRemovalParams,
@@ -24,7 +29,7 @@ import type {
   VectorSlot,
   VectorStrategy,
 } from "../query/dialect/vector-strategy";
-import { sql } from "../query/sql-fragment";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledStatementSql } from "../query/sql-intent";
 import { parseSerializedSchema } from "../schema/manager";
 import type { SerializedSchema } from "../schema/types";
@@ -145,6 +150,7 @@ type MaterializeOneContext = Readonly<{
   edgesTable: string;
   fulltextTable: string;
   uniquesTable: string;
+  edgeClaimsTable: string;
   captureRecordedRemovals: boolean;
   // Resolved once per removal pass (not per kind) and threaded into each
   // recorded-interval close. Undefined when recorded capture is off.
@@ -261,6 +267,7 @@ export async function materializeRemovals(
   const edgesTable = tableNames?.edges ?? "typegraph_edges";
   const fulltextTable = tableNames?.fulltext ?? "typegraph_node_fulltext";
   const uniquesTable = tableNames?.uniques ?? "typegraph_node_uniques";
+  const edgeClaimsTable = tableNames?.edgeClaims ?? "typegraph_edge_claims";
 
   const captureRecordedRemovals = context.captureRecordedRemovals === true;
   const ctx = {
@@ -270,6 +277,7 @@ export async function materializeRemovals(
     edgesTable,
     fulltextTable,
     uniquesTable,
+    edgeClaimsTable,
     captureRecordedRemovals,
     recordedSchema:
       captureRecordedRemovals ?
@@ -549,7 +557,15 @@ async function closeRecordedAndDeleteLiveRows(
   row: KindRemovalRow,
   target: SchemaWriteTransactionBackend,
 ): Promise<void> {
-  const deleteStatements = buildRemovedKindLiveDeleteStatements(ctx, row);
+  // Same tolerance `clearGraph` gives the relation: a database bootstrapped
+  // before edge claims existed has no such table, and reaping a removed kind's
+  // housekeeping rows must not be the operation that fails on it.
+  const reapsEdgeClaims = await target.tableExists(ctx.edgeClaimsTable);
+  const deleteStatements = buildRemovedKindLiveDeleteStatements(
+    ctx,
+    row,
+    reapsEdgeClaims,
+  );
   if (!ctx.captureRecordedRemovals || ctx.recordedSchema === undefined) {
     await executeDeleteStatements(target, deleteStatements);
     return;
@@ -579,31 +595,79 @@ async function closeRecordedAndDeleteLiveRows(
   await executeDeleteStatements(target, deleteStatements);
 }
 
+/**
+ * The live rows a removed kind leaves behind, as statements.
+ *
+ * Neither claim family is spelled here — edge claims come from the two
+ * ownership builders in `operations/edge-claims`, one for edges of a removed
+ * edge kind and one for edges connected to a removed node kind.
+ * The uniqueness claims are NOT spelled here: which claims a kind owns is one
+ * predicate with one owner, `buildHardDeleteUniquesByConcreteKind`, and this is
+ * its second consumer. Filtering on `node_kind` — the claim AXIS — instead would
+ * leak a claim whose axis is a sibling kind, delete a surviving sibling's claim
+ * when the removed kind IS the axis, and never match a claim whose axis is not a
+ * kind at all.
+ */
 function buildRemovedKindLiveDeleteStatements(
   ctx: MaterializeOneContext,
   row: KindRemovalRow,
-): readonly string[] {
+  reapsEdgeClaims: boolean,
+): readonly SqlFragment[] {
   const graphLit = literal(ctx.graphId);
   const kindLit = literal(row.kindName);
   if (row.entity === "node") {
     return [
-      `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
-      `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
-      `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
-      `DELETE FROM ${quote(ctx.uniquesTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+      // Must precede the edge delete: ownership is discovered by selecting the
+      // connected edge ids, which no longer exist afterward.
+      ...(reapsEdgeClaims ?
+        [
+          buildHardDeleteEdgeClaimsByNodeKind(
+            ctx.edgeClaimsTable,
+            ctx.edgesTable,
+            { graphId: ctx.graphId, nodeKind: row.kindName },
+          ),
+        ]
+      : []),
+      sql.raw(
+        `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+      ),
+      sql.raw(
+        `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
+      ),
+      sql.raw(
+        `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+      ),
+      buildHardDeleteUniquesByConcreteKind(ctx.uniquesTable, {
+        graphId: ctx.graphId,
+        concreteKind: row.kindName,
+      }),
     ];
   }
   return [
-    `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+    sql.raw(
+      `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+    ),
+    // Housekeeping, on the same one-owner terms as the uniqueness reap: the
+    // rows this kind's edges held are takeable the moment those edges are gone,
+    // but nothing would ever reap them, so the relation would grow by one row
+    // per removed constrained kind forever.
+    ...(reapsEdgeClaims ?
+      [
+        buildHardDeleteEdgeClaimsByEdgeKind(ctx.edgeClaimsTable, {
+          graphId: ctx.graphId,
+          edgeKind: row.kindName,
+        }),
+      ]
+    : []),
   ];
 }
 
 async function executeDeleteStatements(
   target: SchemaWriteTransactionBackend,
-  statements: readonly string[],
+  statements: readonly SqlFragment[],
 ): Promise<void> {
   for (const statement of statements) {
-    await target.executeStatement(asCompiledStatementSql(sql.raw(statement)));
+    await target.executeStatement(asCompiledStatementSql(statement));
   }
 }
 

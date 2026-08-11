@@ -11,7 +11,7 @@
     "src/interchange/import.ts",
     "src/store/operations/node-write-pipeline.ts",
     "src/store/operations/write-transaction.ts",
-    "src/store/uniqueness.ts",
+    "src/store/claims/node-claims.ts",
     "src/store/recorded-capture/clock.ts",
     "src/store/history-store-backend.ts"
   ],

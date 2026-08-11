@@ -814,6 +814,8 @@ export function createAdapterTestSuite(
           nodeKind: "Person",
           constraintName: "email_unique",
           key: "alice@example.com",
+          concreteKind: "Person",
+          nodeId: "person-1",
         });
 
         // checkUnique should filter out soft-deleted entries

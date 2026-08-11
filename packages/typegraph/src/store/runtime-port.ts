@@ -103,8 +103,14 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   validateIdentity: () => Promise<void>;
   /**
    * Validates one final resolved node write set, then clears the affected
-   * uniqueness sidecars so its upserts may claim their approved keys in any
-   * order. The caller must supply a transaction-bound backend.
+   * nodes' claim rows so its upserts may take their approved keys in any order,
+   * and re-takes the complete claim set once the writes have landed. The caller
+   * must supply a transaction-bound backend.
+   *
+   * The clear is by OWNER, so it takes every claim the affected nodes hold —
+   * uniqueness and `disjointWith` alike — and the rebuild therefore goes through
+   * the same claim writer an ordinary create uses rather than a uniqueness-only
+   * insert. See `store/claims/resolved-node-claims.ts`.
    */
   applyResolvedNodeUniqueness: <Output>(
     target: TransactionBackend,

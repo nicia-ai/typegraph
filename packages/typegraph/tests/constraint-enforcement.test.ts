@@ -19,10 +19,12 @@ import {
 import { buildKindRegistry } from "../src/registry";
 import { createStore } from "../src/store";
 import {
+  alreadyAppliedRowWrite,
   checkUniquenessConstraints,
   createUniquenessContext,
-  insertUniquenessEntries,
-} from "../src/store/uniqueness";
+  withNodeCreateClaims,
+} from "../src/store/claims/node-claims";
+import { uncapturedGraphWriteLock } from "../src/store/recorded-capture/clock";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -747,6 +749,47 @@ describe("Uniqueness Scope: kindWithSubClasses", () => {
     expect(service.code).toBe("SERV-B");
   });
 
+  it("reserves one row at the scope's axis and names the holder's own kind", async () => {
+    const store = createStore(scopeGraph, backend);
+    const key = computeUniqueKey({ code: "AXIS-1" }, ["code"], "binary");
+
+    const product = await store.nodes.Product.create({
+      code: "AXIS-1",
+      name: "Product",
+      price: 10,
+    });
+
+    // The claim is written at the scope's AXIS — the code-point minimum of the
+    // subclass component — not under the writer's own kind. That is what makes
+    // a sibling's claim collide on the uniques primary key instead of landing
+    // in a row that can never conflict.
+    const axisRow = await backend.checkUnique({
+      graphId: scopeGraph.id,
+      nodeKind: "BaseEntity",
+      constraintName: "unique_code_across_subclasses",
+      key,
+    });
+    expect(axisRow?.node_id).toBe(product.id);
+    expect(axisRow?.concrete_kind).toBe("Product");
+    expect(
+      await backend.checkUnique({
+        graphId: scopeGraph.id,
+        nodeKind: "Product",
+        constraintName: "unique_code_across_subclasses",
+        key,
+      }),
+    ).toBeUndefined();
+
+    // The refusal names the HOLDER's kind, not the axis the row sits at.
+    await expect(
+      store.nodes.Service.create({
+        code: "AXIS-1",
+        name: "Service",
+        duration: 30,
+      }),
+    ).rejects.toMatchObject({ details: { kind: "Product" } });
+  });
+
   it("allows reuse of code after delete", async () => {
     const store = createStore(scopeGraph, backend);
 
@@ -892,6 +935,32 @@ describe("Uniqueness sidecar for a field named after a prototype member", () => 
     return createUniquenessContext(graph.id, buildKindRegistry(graph), backend);
   }
 
+  /**
+   * Seeds the incumbent's reservation through the one seam that writes node
+   * claims: no path may reach `insertUnique` around it, including a test.
+   */
+  function seedClaim(
+    graph: typeof binaryProtoGraph,
+    id: string,
+    props: Record<string, unknown>,
+  ): Promise<undefined> {
+    return withNodeCreateClaims(
+      {
+        graphId: graph.id,
+        registry: buildKindRegistry(graph),
+        lock: uncapturedGraphWriteLock(),
+      },
+      {
+        kind: "Entry",
+        id,
+        props,
+        constraints: protoNamedConstraints(graph),
+      },
+      backend,
+      alreadyAppliedRowWrite,
+    );
+  }
+
   for (const graph of [binaryProtoGraph, insensitiveProtoGraph]) {
     const collation = protoNamedConstraints(graph)[0].collation;
 
@@ -899,13 +968,7 @@ describe("Uniqueness sidecar for a field named after a prototype member", () => 
       const ctx = contextFor(graph);
       const constraints = protoNamedConstraints(graph);
 
-      await insertUniquenessEntries(
-        ctx,
-        "Entry",
-        "entry-1",
-        { label: "first" },
-        constraints,
-      );
+      await seedClaim(graph, "entry-1", { label: "first" });
 
       await expect(
         checkUniquenessConstraints(
@@ -922,13 +985,7 @@ describe("Uniqueness sidecar for a field named after a prototype member", () => 
       const ctx = contextFor(graph);
       const constraints = protoNamedConstraints(graph);
 
-      await insertUniquenessEntries(
-        ctx,
-        "Entry",
-        "entry-1",
-        { label: "first" },
-        constraints,
-      );
+      await seedClaim(graph, "entry-1", { label: "first" });
 
       await expect(
         checkUniquenessConstraints(
@@ -1309,5 +1366,53 @@ describe("uniqueness `where` clauses naming an undeclared field", () => {
         externalId: "ext-1",
       }),
     ).toBe(true);
+  });
+});
+
+describe("names that could spell a reserved claim axis", () => {
+  // The disjointness axis and the constraint name its rows carry are built by
+  // joining with U+001E, so a kind or constraint name containing that code
+  // point could spell a reserved axis and take a claim row assigned to
+  // something else. `defineNode` and `defineGraph` are the gates every name
+  // passes before a claim can be written for it.
+  const RESERVED = "\u001E";
+
+  it("refuses a node kind name at defineNode", () => {
+    expect(() =>
+      defineNode(`Ghost${RESERVED}disjoint`, { schema: z.object({}) }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("refuses a unique constraint name at defineGraph", () => {
+    const Account = defineNode("ReservedAccount", {
+      schema: z.object({ email: z.string() }),
+    });
+
+    expect(() =>
+      defineGraph({
+        id: "reserved_constraint_name",
+        nodes: {
+          ReservedAccount: {
+            type: Account,
+            unique: [
+              {
+                name: `${RESERVED}disjointWith`,
+                fields: ["email"],
+                scope: "kind",
+                collation: "binary",
+              },
+            ],
+          },
+        },
+        edges: {},
+        ontology: [],
+      }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("accepts every name that does not contain it", () => {
+    expect(() =>
+      defineNode("PlainGhost", { schema: z.object({}) }),
+    ).not.toThrow();
   });
 });

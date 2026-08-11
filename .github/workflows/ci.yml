@@ -13,6 +13,11 @@ concurrency:
 permissions:
   contents: read
 
+# Declaration bundling traverses the full public backend and store type graph.
+# Keep its worker above Node's default old-space ceiling as that API grows.
+env:
+  NODE_OPTIONS: --max-old-space-size=6144
+
 jobs:
   detect-release-metadata-push:
     name: Detect release metadata push

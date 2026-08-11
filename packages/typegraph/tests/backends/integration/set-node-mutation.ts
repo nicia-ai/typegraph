@@ -319,6 +319,74 @@ export function registerSetNodeMutationIntegrationTests(
       ).resolves.toBeUndefined();
     });
 
+    it("hard-deletes uniqueness sidecars for every node of a concrete kind", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      // Owned by the reaped kind at its own axis, and owned by it at an axis
+      // that is not a kind at all: the member reaps by OWNER, so both go.
+      await backend.insertUnique({
+        graphId: store.graphId,
+        nodeKind: "Person",
+        constraintName: "identity",
+        key: "kind-owner-a@example.test",
+        nodeId: "kind-owner-a",
+        concreteKind: "Person",
+      });
+      await backend.insertUnique({
+        graphId: store.graphId,
+        nodeKind: "disjoint(Company|Person)",
+        constraintName: "identity",
+        key: "kind-owner-b@example.test",
+        nodeId: "kind-owner-b",
+        concreteKind: "Person",
+      });
+      // Owned by another kind AT the reaped kind's axis: it stays.
+      await backend.insertUnique({
+        graphId: store.graphId,
+        nodeKind: "Person",
+        constraintName: "identity",
+        key: "kind-bystander@example.test",
+        nodeId: "kind-bystander",
+        concreteKind: "Company",
+      });
+
+      await requireDefined(backend.hardDeleteUniquesByConcreteKind)({
+        graphId: store.graphId,
+        concreteKind: "Person",
+      });
+
+      await expect(
+        backend.checkUnique({
+          graphId: store.graphId,
+          nodeKind: "Person",
+          constraintName: "identity",
+          key: "kind-owner-a@example.test",
+          includeDeleted: true,
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        backend.checkUnique({
+          graphId: store.graphId,
+          nodeKind: "disjoint(Company|Person)",
+          constraintName: "identity",
+          key: "kind-owner-b@example.test",
+          includeDeleted: true,
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        backend.checkUnique({
+          graphId: store.graphId,
+          nodeKind: "Person",
+          constraintName: "identity",
+          key: "kind-bystander@example.test",
+          includeDeleted: true,
+        }),
+      ).resolves.toMatchObject({
+        concrete_kind: "Company",
+        node_id: "kind-bystander",
+      });
+    });
+
     it("replaces top-level values without deleting explicit JSON null", async () => {
       const store = context.getStore();
       const backend = context.getBackend();

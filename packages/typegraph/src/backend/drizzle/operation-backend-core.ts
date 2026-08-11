@@ -16,6 +16,11 @@ import type {
   CompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
 import { asCompiledStatementSql } from "../../query/sql-intent";
+import { type ClaimOwner, isSameClaimOwner } from "../../store/claims/axis";
+import {
+  type ConstrainedCardinality,
+  edgeCardinalityClaimTarget,
+} from "../../store/claims/edge-claims";
 import { chunk as chunkArray } from "../../utils/array";
 import {
   isDuplicatePrimaryKeyError,
@@ -29,8 +34,11 @@ import { nowIso as defaultNowIso } from "../row-mappers";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
+  ClaimEdgeCardinalityParams,
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
+  ConstraintFenceViolationRows,
+  ContendedEdgeRow,
   CountEdgesByKindParams,
   CountEdgesFromParams,
   CountNodesByKindParams,
@@ -38,6 +46,8 @@ import type {
   DeleteEdgesBatchParams,
   DeleteNodeParams,
   DeleteUniqueParams,
+  DisjointOverlapRow,
+  EdgeClaimOutcome,
   EdgeExistsBetweenParams,
   EdgeRow,
   FindEdgesByEndpointSetParams,
@@ -45,14 +55,18 @@ import type {
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  GraphBackend,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
   NodeRow,
   PopulatedSchemaKind,
+  PurgeEdgeClaimsParams,
+  ReadConstraintFenceViolationsParams,
   SchemaKindEmptinessProbe,
   SchemaVersionRow,
   SetActiveVersionParams,
@@ -69,6 +83,14 @@ import {
   createCachedTableExistence,
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
+
+/**
+ * The owner a claim write proposes. Reading it off the params in one place is
+ * what keeps the accept/refuse test comparing the same pair the SQL arms do.
+ */
+function claimOwnerOf(params: InsertUniqueParams): ClaimOwner {
+  return { concreteKind: params.concreteKind, nodeId: params.nodeId };
+}
 
 /**
  * The internal operation backend — what `createCommonOperationBackend`
@@ -106,6 +128,9 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteEdge"
   | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
+  | "claimEdgeCardinality"
+  | "claimEdgeCardinalityBatch"
+  | "hardDeleteUniquesByConcreteKind"
   | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
   | "insertEdgeNoReturn"
@@ -117,11 +142,20 @@ export type CommonOperationBackend = Pick<
   | "insertNodesBatchReturning"
   | "insertUnique"
   | "insertUniqueBatch"
+  | "purgeEdgeClaims"
   | "updateEdge"
   | "updateNode"
   | "updateNodeSet"
 > &
   Readonly<{
+    /**
+     * The read-only fence audit. Not a `TransactionBackend` member — it is a
+     * diagnostic the store runs at the top-level backend, and nothing inside a
+     * write transaction reads it — so it is declared here rather than picked.
+     */
+    readConstraintFenceViolations: NonNullable<
+      GraphBackend["readConstraintFenceViolations"]
+    >;
     executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
     commitSchemaVersion: (
       params: CommitSchemaVersionParams,
@@ -388,6 +422,82 @@ export function createCommonOperationBackend(
       return;
     }
     await execution.execRun(statement.query);
+  }
+
+  /**
+   * THE edge-claim driver, shared by the single and batch members: lock every
+   * entry's row in one statement, then run the conditional takeover for the
+   * entries a DIFFERENT edge holds.
+   *
+   * The two statements exist because one cannot do the job: deciding inside the
+   * upsert reads the pre-lock snapshot of the edges relation under READ
+   * COMMITTED, so two concurrent writers would both see "the incumbent is not
+   * live yet" and both commit. Statement 1 is therefore decision-free — it only
+   * makes the row exist, takes its lock and reports the COMMITTED holder — and
+   * statement 2 re-evaluates liveness after that lock is held.
+   *
+   * Duplicate conflict targets are refused rather than collapsed: a multi-row
+   * upsert cannot affect one row twice, so two entries claiming one axis would
+   * silently leave one of them unfenced. The application layer's pending
+   * cardinality state refuses in-batch collisions first, which makes this a
+   * defensive invariant rather than a semantic path.
+   */
+  async function claimEdgeCardinalityEntries(
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ): Promise<readonly EdgeClaimOutcome[]> {
+    if (entries.length === 0) return [];
+
+    const targetKey = (entry: ClaimEdgeCardinalityParams): string => {
+      const target = edgeCardinalityClaimTarget(entry);
+      return `${target.axis}\u0000${target.key}`;
+    };
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const key = targetKey(entry);
+      if (seen.has(key)) {
+        throw new DatabaseOperationError(
+          "Two edge claims in one batch name the same cardinality axis and key; " +
+            "a multi-row upsert cannot affect one row twice.",
+          { operation: "insert", entity: "edge" },
+        );
+      }
+      seen.add(key);
+    }
+
+    const outcomes = new Map<string, EdgeClaimOutcome>();
+    // One claim row per inserted edge, so the edge-insert budget is the right
+    // ceiling for the multi-row lock statement.
+    for (const chunk of chunkArray(entries, batchConfig.edgeInsertBatchSize)) {
+      const lockQuery = operationStrategy.buildLockEdgeClaims(chunk, nowIso());
+      const rows = await execution.execAll<{
+        axis: string;
+        key: string;
+        holder_edge_id: string;
+      }>(lockQuery);
+      const holderByTarget = new Map(
+        rows.map((row) => [`${row.axis}\u0000${row.key}`, row.holder_edge_id]),
+      );
+      for (const entry of chunk) {
+        const key = targetKey(entry);
+        const holder = holderByTarget.get(key);
+        if (holder === undefined || holder === entry.edgeId) {
+          outcomes.set(key, { status: "claimed" });
+          continue;
+        }
+        const takeOver = await execution.execAll<{ holder_edge_id: string }>(
+          operationStrategy.buildTakeOverEdgeClaim(entry, nowIso()),
+        );
+        outcomes.set(
+          key,
+          takeOver.length > 0 ?
+            { status: "claimed" }
+          : { status: "refused", holderEdgeId: holder },
+        );
+      }
+    }
+    return entries.map(
+      (entry) => outcomes.get(targetKey(entry)) ?? { status: "claimed" },
+    );
   }
 
   // Returns 0 when no row is currently active — that's the sentinel
@@ -857,15 +967,31 @@ export function createCommonOperationBackend(
 
     async insertUnique(params: InsertUniqueParams): Promise<void> {
       const query = operationStrategy.buildInsertUnique(params);
-      const result = await execution.execGet<{ node_id: string }>(query);
+      const result = await execution.execGet<{
+        node_id: string;
+        concrete_kind: string;
+      }>(query);
 
-      if (result && result.node_id !== params.nodeId) {
+      if (
+        result &&
+        !isSameClaimOwner(
+          { concreteKind: result.concrete_kind, nodeId: result.node_id },
+          claimOwnerOf(params),
+        )
+      ) {
         throw new UniquenessError({
           constraintName: params.constraintName,
-          kind: params.nodeKind,
+          // The holder's own kind, never `nodeKind`: that column carries the
+          // claim AXIS, which a shared scope folds across kinds, so it need not
+          // be the holder's kind and usually is not.
+          kind: result.concrete_kind,
           existingId: result.node_id,
           newId: params.nodeId,
           fields: [],
+          // The axis THIS statement attempted — `mapClaimRefusal`'s only way to
+          // tell two disjoint pairs (or two scoped constraints) sharing a key
+          // apart, since `constraintName` alone does not.
+          axis: params.nodeKind,
         });
       }
     },
@@ -877,8 +1003,11 @@ export function createCommonOperationBackend(
 
       // A multi-row upsert cannot affect one row twice, so collapse exact
       // duplicates and reject two entries claiming the same conflict target
-      // for different nodes up front. Batch validation pre-rejects real
-      // conflicts, so this is a defensive invariant, not a semantic path.
+      // for different OWNERS up front. Comparing ids alone would dedupe a
+      // namesake under another kind into the first entry's claim and accept
+      // both — the in-statement twin of the conflict the row-level arms refuse.
+      // Batch validation pre-rejects real conflicts, so this is a defensive
+      // invariant, not a semantic path.
       const targetKey = (entry: InsertUniqueParams): string =>
         `${entry.nodeKind}\u0000${entry.constraintName}\u0000${entry.key}`;
       const byTarget = new Map<string, InsertUniqueParams>();
@@ -888,13 +1017,14 @@ export function createCommonOperationBackend(
           byTarget.set(targetKey(entry), entry);
           continue;
         }
-        if (existing.nodeId !== entry.nodeId) {
+        if (!isSameClaimOwner(claimOwnerOf(existing), claimOwnerOf(entry))) {
           throw new UniquenessError({
             constraintName: entry.constraintName,
-            kind: entry.nodeKind,
+            kind: existing.concreteKind,
             existingId: existing.nodeId,
             newId: entry.nodeId,
             fields: [],
+            axis: entry.nodeKind,
           });
         }
       }
@@ -910,22 +1040,27 @@ export function createCommonOperationBackend(
           constraint_name: string;
           key: string;
           node_id: string;
+          concrete_kind: string;
         }>(query);
-        const ownerByTarget = new Map(
+        const ownerByTarget = new Map<string, ClaimOwner>(
           rows.map((row) => [
             `${row.node_kind}\u0000${row.constraint_name}\u0000${row.key}`,
-            row.node_id,
+            { concreteKind: row.concrete_kind, nodeId: row.node_id },
           ]),
         );
         for (const entry of chunk) {
           const owner = ownerByTarget.get(targetKey(entry));
-          if (owner !== undefined && owner !== entry.nodeId) {
+          if (
+            owner !== undefined &&
+            !isSameClaimOwner(owner, claimOwnerOf(entry))
+          ) {
             throw new UniquenessError({
               constraintName: entry.constraintName,
-              kind: entry.nodeKind,
-              existingId: owner,
+              kind: owner.concreteKind,
+              existingId: owner.nodeId,
               newId: entry.nodeId,
               fields: [],
+              axis: entry.nodeKind,
             });
           }
         }
@@ -952,6 +1087,118 @@ export function createCommonOperationBackend(
         });
         await execution.execRun(query);
       }
+    },
+
+    async hardDeleteUniquesByConcreteKind(
+      params: HardDeleteUniquesByConcreteKindParams,
+    ): Promise<void> {
+      const query =
+        operationStrategy.buildHardDeleteUniquesByConcreteKind(params);
+      await execution.execRun(query);
+    },
+
+    async claimEdgeCardinality(
+      params: ClaimEdgeCardinalityParams,
+    ): Promise<EdgeClaimOutcome> {
+      const [outcome] = await claimEdgeCardinalityEntries([params]);
+      return outcome ?? { status: "claimed" };
+    },
+
+    claimEdgeCardinalityBatch(
+      entries: readonly ClaimEdgeCardinalityParams[],
+    ): Promise<readonly EdgeClaimOutcome[]> {
+      return claimEdgeCardinalityEntries(entries);
+    },
+
+    async purgeEdgeClaims(params: PurgeEdgeClaimsParams): Promise<void> {
+      const edgeIds = [...new Set(params.edgeIds)];
+      // One claim row per edge at most, so the edge-read chunk budget is the
+      // right ceiling for a list of edge ids.
+      for (const chunk of chunkArray(edgeIds, batchConfig.getEdgesChunkSize)) {
+        const query = operationStrategy.buildPurgeEdgeClaims({
+          ...params,
+          edgeIds: chunk,
+        });
+        await execution.execRun(query);
+      }
+    },
+
+    async readConstraintFenceViolations(
+      params: ReadConstraintFenceViolationsParams,
+    ): Promise<ConstraintFenceViolationRows> {
+      const uniqueRows =
+        params.uniqueConstraintNames.length === 0 ?
+          []
+        : await execution.execAll<{
+            node_kind: string;
+            constraint_name: string;
+            key: string;
+            concrete_kind: string;
+            node_id: string;
+          }>(
+            operationStrategy.buildContendedUniqueRowAudit(
+              params.graphId,
+              params.uniqueConstraintNames,
+            ),
+          );
+      const contendedUniqueRows = uniqueRows.map((row) => ({
+        nodeKind: row.node_kind,
+        constraintName: row.constraint_name,
+        key: row.key,
+        concreteKind: row.concrete_kind,
+        nodeId: row.node_id,
+      }));
+
+      // One statement per declared cardinality, because that is the
+      // granularity at which the population's key and liveness differ.
+      const edgeKindsByCardinality = new Map<
+        ConstrainedCardinality,
+        string[]
+      >();
+      for (const declaration of params.edgeCardinalities) {
+        const kinds = edgeKindsByCardinality.get(declaration.cardinality) ?? [];
+        kinds.push(declaration.edgeKind);
+        edgeKindsByCardinality.set(declaration.cardinality, kinds);
+      }
+      const contendedEdgeRows: ContendedEdgeRow[] = [];
+      for (const [cardinality, edgeKinds] of edgeKindsByCardinality) {
+        const rows = await execution.execAll<{
+          edge_id: string;
+          edge_kind: string;
+          from_kind: string;
+          from_id: string;
+          to_kind: string;
+          to_id: string;
+        }>(
+          operationStrategy.buildContendedEdgeRowAudit(
+            params.graphId,
+            cardinality,
+            edgeKinds,
+          ),
+        );
+        for (const row of rows) {
+          contendedEdgeRows.push({
+            edgeKind: row.edge_kind,
+            cardinality,
+            edgeId: row.edge_id,
+            fromKind: row.from_kind,
+            fromId: row.from_id,
+            toKind: row.to_kind,
+            toId: row.to_id,
+          });
+        }
+      }
+
+      const disjointOverlaps: DisjointOverlapRow[] = [];
+      for (const kinds of params.disjointKindPairs) {
+        const rows = await execution.execAll<{ node_id: string }>(
+          operationStrategy.buildDisjointOverlapAudit(params.graphId, kinds),
+        );
+        for (const row of rows)
+          disjointOverlaps.push({ kinds, nodeId: row.node_id });
+      }
+
+      return { contendedUniqueRows, contendedEdgeRows, disjointOverlaps };
     },
 
     async checkUnique(

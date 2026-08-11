@@ -5,6 +5,7 @@
  * SQL implementations (SQLite, PostgreSQL) behind a common interface.
  */
 import {
+  type Cardinality,
   type IndexEntity,
   type JsonValue,
   type KindEntity,
@@ -313,6 +314,20 @@ export type BackendCapabilities = Readonly<{
    * budget applies.
    */
   maxBindParameters?: number;
+  /**
+   * Whether this backend supplies the claim relations that fence declared
+   * constraints (`uniques`, re-keyed onto claim axes, plus
+   * `typegraph_edge_claims`) AND implements the claim members.
+   *
+   * Absent means `false`: the backend predates the claim relations, keeps every
+   * fence it has today, and is listed as such in the parity matrix. Never
+   * INFERRED from member presence — a projection that forwarded `capabilities`
+   * while dropping a method would otherwise yield a verdict read from a
+   * different object than the write goes to. `claimSupport`
+   * (`store/claims/backing.ts`) is the one reader, and it refuses a backend
+   * whose declaration and surface disagree in either direction.
+   */
+  readonly constraintClaims?: boolean;
   /** Vector search capabilities (undefined if not configured) */
   vector?: VectorCapabilities | undefined;
   /** Fulltext search capabilities (undefined if not configured) */
@@ -1632,6 +1647,19 @@ export type IdentityTableNames = Readonly<{
 }>;
 
 /**
+ * The database-global extensions TypeGraph installs on a caller's behalf.
+ *
+ * The extent is closed on purpose: {@link GraphBackend.ensureExtension}
+ * interpolates the name into DDL, so the allowlist — not the caller — is what
+ * decides the identifier can be trusted. `pg_trgm` backs `method: "trigram"`
+ * index materialization; `vector` backs pgvector storage.
+ */
+export const DATABASE_EXTENSION_NAMES = ["pg_trgm", "vector"] as const;
+
+/** A name {@link GraphBackend.ensureExtension} accepts. */
+export type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
+/**
  * The GraphBackend interface abstracts database operations.
  *
  * Implementations should provide:
@@ -1822,6 +1850,17 @@ export type GraphBackend = Readonly<{
     this: void,
     params: HardDeleteUniquesByNodeIdsParams,
   ) => Promise<void>;
+  /**
+   * Permanently removes every uniqueness claim owned by nodes of one concrete
+   * kind, at whatever axis each claim sits on. THE definition of "the claims
+   * this kind owns" — kind removal reaps through it so it can neither leak a
+   * claim whose axis is a sibling kind nor delete a surviving sibling's claim.
+   * Optional capability.
+   */
+  hardDeleteUniquesByConcreteKind?: (
+    this: void,
+    params: HardDeleteUniquesByConcreteKindParams,
+  ) => Promise<void>;
   checkUnique: (
     this: void,
     params: CheckUniqueParams,
@@ -1830,6 +1869,75 @@ export type GraphBackend = Readonly<{
     this: void,
     params: CheckUniqueBatchParams,
   ) => Promise<readonly UniqueRow[]>;
+
+  // === Edge Cardinality Claim Operations ===
+  /**
+   * Takes the claim on one edge cardinality axis, in two statements: a
+   * decision-free create-or-lock that reports the committed holder, and — only
+   * when that holder is a different edge — a conditional takeover that succeeds
+   * exactly when the incumbent is no longer an edge the axis and key describe.
+   *
+   * The claim is the FENCE for a declared cardinality: `(kind, from)` and
+   * `(kind, from, to)` are predicates the edges primary key `(graph_id, id)`
+   * cannot enforce, so without this relation two concurrent writers can both
+   * pass the probe and both commit. Read through the `constraintClaims`
+   * capability, never through member presence — see `claimSupport`
+   * (`store/claims/backing.ts`).
+   */
+  claimEdgeCardinality?: (
+    this: void,
+    params: ClaimEdgeCardinalityParams,
+  ) => Promise<EdgeClaimOutcome>;
+  /**
+   * Batched variant of `claimEdgeCardinality`: one multi-row create-or-lock
+   * statement, then a takeover statement only for the entries a different edge
+   * holds. Outcomes are returned positionally, one per entry.
+   *
+   * Callers must not pass two entries with the same conflict target
+   * (`axis`, `key`): a multi-row upsert cannot affect one row twice.
+   */
+  claimEdgeCardinalityBatch?: (
+    this: void,
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ) => Promise<readonly EdgeClaimOutcome[]>;
+  /**
+   * Housekeeping only: drops the claim rows named edges hold, so hard deletes,
+   * kind removal and `clearGraph` do not grow the relation without bound. The
+   * FENCE never depends on it having run — a claim whose holder is no longer
+   * live (or, for `oneActive`, no longer active) is taken over in place.
+   */
+  purgeEdgeClaims?: (
+    this: void,
+    params: PurgeEdgeClaimsParams,
+  ) => Promise<void>;
+
+  /**
+   * Read-only diagnostic: the rows that make a declared constraint currently
+   * violated, for a caller (`store.verifyConstraintFences()`) that folds them
+   * onto the claim axes they contend for.
+   *
+   * It reads the ENTITY relations for the two families whose pre-upgrade
+   * violations no claim row records — a database written before the claim
+   * relations existed holds no edge claims at all — and the `uniques` relation
+   * for uniqueness, where a pre-upgrade duplicate is exactly two live rows
+   * sitting at two different `node_kind`s. A scan of a claim relation's primary
+   * key can find neither, which is why this is not one.
+   *
+   * Returns the contending ROWS, not the verdict: the axis a `uniques` row
+   * belongs to is a fold over the graph's subclass component, and the key an
+   * edge's claim sits on is `EDGE_CARDINALITY_SPECS`' — both of which live
+   * above the backend, so a backend that decided either would be a second
+   * spelling of a decision the fence already owns.
+   *
+   * Writes nothing: no DDL, no claim writes. Safe on a replica and under a
+   * least-privilege role. Present only on backends that can run the audit;
+   * `store.verifyConstraintFences()` refuses with a typed error when absent
+   * rather than reporting an empty (and therefore reassuring) result.
+   */
+  readConstraintFenceViolations?: (
+    this: void,
+    params: ReadConstraintFenceViolationsParams,
+  ) => Promise<ConstraintFenceViolationRows>;
 
   // === Schema Operations ===
   getActiveSchema: (
@@ -2083,6 +2191,12 @@ export type GraphBackend = Readonly<{
    * Install the PostgreSQL `pg_trgm` extension under a database-global
    * concurrency fence. Relational trigram index materialization calls this
    * before emitting its index DDL; non-PostgreSQL backends omit it.
+   *
+   * @deprecated The `pg_trgm`-only spelling of {@link GraphBackend.ensureExtension},
+   *   which says the same thing for every extension the library installs. It is
+   *   retained — and still consulted, after `ensureExtension` — so a backend
+   *   written against 0.47 keeps its fence; the bundled PostgreSQL backend
+   *   implements it by delegating. Implement `ensureExtension` in new backends.
    */
   ensureTrigramExtension?: (this: void) => Promise<void>;
 
@@ -2654,6 +2768,31 @@ export type GraphBackend = Readonly<{
    */
   executeDdl?: (this: void, ddl: string) => Promise<void>;
 
+  /**
+   * Installs a database-global extension idempotently, tolerating the
+   * concurrent-install race.
+   *
+   * `CREATE EXTENSION IF NOT EXISTS` is not a concurrency primitive on
+   * PostgreSQL: the existence check cannot see another session's uncommitted
+   * `pg_extension` row, so the loser of a race waits for the winner and is
+   * then handed SQLSTATE 23505 instead of the harmless "already exists"
+   * notice (#446). A backend implementing this member owns that retry, and
+   * may additionally serialize same-extension installers behind a fence of its
+   * own (the bundled PostgreSQL backend takes a transaction advisory lock
+   * keyed on the extension, #475).
+   *
+   * This is the one member the library asks for an extension install; it
+   * supersedes {@link GraphBackend.ensureTrigramExtension}, which said the same
+   * thing for one extension.
+   *
+   * Like `executeDdl`, implementations MUST run the statement at the
+   * top-level backend, never inside `transaction(...)`: the 23505 aborts the
+   * enclosing transaction, so a retry issued inside one would only collect
+   * `25P02` on the way out. That is why this member is absent from
+   * {@link TransactionBackend}.
+   */
+  ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
+
   // === Transaction ===
   /** Runs TypeGraph operations inside a backend-owned transaction. */
   transaction: <T>(
@@ -2755,6 +2894,7 @@ export type UniqueConstraintBackend = Pick<
   | "insertUniqueBatch"
   | "deleteUnique"
   | "hardDeleteUniquesByNodeIds"
+  | "hardDeleteUniquesByConcreteKind"
   | "checkUnique"
   | "checkUniqueBatch"
 >;
@@ -2882,6 +3022,14 @@ export type TransactionBackend = Readonly<
     GraphEntityReadBackend &
     GraphEntityWriteBackend &
     UniqueConstraintBackend &
+    // The edge cardinality claim relation's surface. Inline rather than a named
+    // member type: it is a different relation from `uniques` with a different
+    // key, and naming it would add a type the public surface references but no
+    // entrypoint exports.
+    Pick<
+      GraphBackend,
+      "claimEdgeCardinality" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"
+    > &
     SchemaReadBackend &
     Pick<GraphBackend, "lockSchemaVersionForWrite"> &
     VectorOperationBackend &
@@ -3082,13 +3230,34 @@ export type InsertUniqueParams = Readonly<{
 }>;
 
 /**
- * Parameters for deleting a unique constraint entry.
+ * Parameters for releasing a unique constraint entry.
+ *
+ * Every release is scoped to the claim's OWNER — the pair
+ * `(concreteKind, nodeId)`, because a node id is unique only within its kind.
+ * The two shapes differ only in whether the claim AXIS participates:
+ *
+ *  - **Lifecycle release** (`nodeKind` absent) — "give up every claim this node
+ *    holds for this constraint and key, whatever axis it sits on". Soft delete,
+ *    an update's key-change release and the resurrect diff use it, so a claim
+ *    written under an older axis is still released by newer code.
+ *  - **Compensating release** (`nodeKind` present) — "undo exactly the row I
+ *    just claimed, at the axis I claimed it on". A failed write's rollback uses
+ *    it, so it touches neither a row that predates the write nor one another
+ *    node holds.
  */
 export type DeleteUniqueParams = Readonly<{
   graphId: string;
-  nodeKind: string;
+  /**
+   * The claim axis (`uniques.node_kind`) the release is restricted to. Absent
+   * releases the owner's claims at every axis — see the two shapes above.
+   */
+  nodeKind?: string;
   constraintName: string;
   key: string;
+  /** The claim owner's concrete kind (`uniques.concrete_kind`). */
+  concreteKind: string;
+  /** The claim owner's node id (`uniques.node_id`). */
+  nodeId: string;
 }>;
 
 /** Parameters for permanently clearing uniqueness sidecars by node identity. */
@@ -3096,6 +3265,122 @@ export type HardDeleteUniquesByNodeIdsParams = Readonly<{
   graphId: string;
   concreteKind: string;
   nodeIds: readonly string[];
+}>;
+
+/** Parameters for permanently clearing every uniqueness claim a kind owns. */
+export type HardDeleteUniquesByConcreteKindParams = Readonly<{
+  graphId: string;
+  concreteKind: string;
+}>;
+
+/**
+ * One edge cardinality claim, named by the components its axis, its key and its
+ * holder-liveness predicate are all built from.
+ *
+ * The components are passed RAW rather than pre-rendered: `EDGE_CARDINALITY_SPECS`
+ * (`store/claims/edge-claims.ts`) is the one table that decides which endpoints
+ * the key covers and what a holder must still be, and both the TypeScript probe
+ * and the SQL builder read it. A caller that rendered the axis and key itself
+ * would be a second spelling of that decision.
+ */
+export type ClaimEdgeCardinalityParams = Readonly<{
+  graphId: string;
+  /** The declared cardinality; `many` declares nothing and never claims. */
+  cardinality: Exclude<Cardinality, "many">;
+  edgeKind: string;
+  /** The edge that will hold the axis if this claim lands. */
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
+/**
+ * What a claim statement decided.
+ *
+ * `refused` carries the incumbent so the caller can say which edge holds the
+ * axis; the typed refusal itself is the store's, built from the same
+ * `checkCardinality` / `checkUniqueEdge` owners the probe uses, so a caller
+ * cannot tell which layer refused.
+ */
+export type EdgeClaimOutcome =
+  | Readonly<{ status: "claimed" }>
+  | Readonly<{ status: "refused"; holderEdgeId: string }>;
+
+/** Parameters for the housekeeping purge of claims held by named edges. */
+export type PurgeEdgeClaimsParams = Readonly<{
+  graphId: string;
+  edgeIds: readonly string[];
+}>;
+
+/** One edge kind's declared cardinality, as the fence audit reads it. */
+export type EdgeCardinalityDeclaration = Readonly<{
+  edgeKind: string;
+  /** `many` declares nothing, so it is unrepresentable here. */
+  cardinality: Exclude<Cardinality, "many">;
+}>;
+
+/**
+ * What a constraint-fence audit asks the database about: the declarations the
+ * graph carries, one list per family.
+ *
+ * The declarations are passed rather than discovered because the backend holds
+ * no schema — and because the `uniqueConstraintNames` restriction is
+ * load-bearing rather than an optimization: the `uniques` relation also holds
+ * disjointness claims, whose `node_kind` is a pair label rather than a kind and
+ * for which no uniqueness axis can be computed. Those rows are covered by
+ * `disjointKindPairs`, from the nodes relation.
+ */
+export type ReadConstraintFenceViolationsParams = Readonly<{
+  graphId: string;
+  /** Every unique constraint name the graph declares, in any scope. */
+  uniqueConstraintNames: readonly string[];
+  /** Every declared `disjointWith` pair, each read as one intersection. */
+  disjointKindPairs: readonly (readonly [string, string])[];
+  /** Every edge kind declaring a cardinality other than `many`. */
+  edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+}>;
+
+/**
+ * One live `uniques` row that shares its `(constraint_name, key)` with at least
+ * one other live row — a candidate, not a verdict: two rows contend only when
+ * their `node_kind`s fold onto ONE claim axis, which the caller decides.
+ */
+export type ContendedUniqueRow = Readonly<{
+  nodeKind: string;
+  constraintName: string;
+  key: string;
+  concreteKind: string;
+  nodeId: string;
+}>;
+
+/**
+ * One live edge that shares its declared cardinality's population with at least
+ * one other live edge. The endpoints are returned whole so the caller can name
+ * the claim key through the one builder that renders it.
+ */
+export type ContendedEdgeRow = Readonly<{
+  edgeKind: string;
+  cardinality: Exclude<Cardinality, "many">;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
+/** One node id live under BOTH kinds of a declared disjoint pair. */
+export type DisjointOverlapRow = Readonly<{
+  kinds: readonly [string, string];
+  nodeId: string;
+}>;
+
+/** Everything one constraint-fence audit read, per family. */
+export type ConstraintFenceViolationRows = Readonly<{
+  contendedUniqueRows: readonly ContendedUniqueRow[];
+  contendedEdgeRows: readonly ContendedEdgeRow[];
+  disjointOverlaps: readonly DisjointOverlapRow[];
 }>;
 
 /**
@@ -3477,6 +3762,9 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
   clearValidTo: true,
   returning: true, // SQLite has supported RETURNING since 3.35.0
+  // The bundled schema ships both claim relations and the shared operation
+  // backend implements every claim member.
+  constraintClaims: true,
   maxBindParameters: SQLITE_MAX_BIND_PARAMETERS,
   // Generic SQLite builds do not guarantee ENABLE_MATH_FUNCTIONS. The local
   // better-sqlite3 factory overrides this flag for its bundled build contract.
@@ -3491,6 +3779,9 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
   clearValidTo: true,
   returning: true, // PostgreSQL has supported RETURNING since 8.2
+  // The bundled schema ships both claim relations and the shared operation
+  // backend implements every claim member.
+  constraintClaims: true,
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),
 });

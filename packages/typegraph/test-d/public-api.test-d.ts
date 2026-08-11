@@ -126,6 +126,12 @@ expectType<string>(legacySchema.tables.recordedNodes);
 expectType<string>(legacySchema.tables.recordedEdges);
 expectType<string>(legacySchema.tables.recordedClock);
 expectAssignable<ResolvedSqlTableNames>(legacySchema.tables);
+const customClaimTableNames = {
+  ...legacyTableNames,
+  edgeClaims: "app_edge_claims",
+} satisfies SqlTableNames;
+expectAssignable<SqlTableNames>(customClaimTableNames);
+expectType<string>(createSqlSchema(customClaimTableNames).tables.edgeClaims);
 const structurallyCompatibleSchema = {
   tables: legacySchema.tables,
   nodesTable: legacySchema.nodesTable,

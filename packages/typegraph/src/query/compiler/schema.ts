@@ -17,7 +17,7 @@ const SQL_SCHEMA_BRAND: unique symbol = typeGraphGlobalSymbol("sql-schema-v1");
  * Table names for TypeGraph SQL schema.
  *
  * Carries every customizable physical-table name the backend exposes,
- * including the secondary tables (`uniques`) that the query compiler
+ * including the secondary tables (`uniques`, `edgeClaims`) that the query compiler
  * itself doesn't reference but `materializeRemovals` and other
  * cleanup paths need to address by name. Backends without a
  * `uniques` table (custom embeddings-only stores) leave it as the
@@ -49,6 +49,8 @@ export type SqlTableNames = Readonly<{
   fulltext: string;
   /** Node uniques table name (default: "typegraph_node_uniques") */
   uniques: string;
+  /** Edge cardinality claim table name (default: "typegraph_edge_claims") */
+  edgeClaims?: string | undefined;
 }>;
 
 export type ResolvedSqlTableNames = Readonly<{
@@ -72,6 +74,8 @@ export type ResolvedSqlTableNames = Readonly<{
   fulltext: string;
   /** Node uniques table name */
   uniques: string;
+  /** Edge cardinality claim table name */
+  edgeClaims: string;
 }>;
 
 type SqlSchemaFields = Readonly<{
@@ -180,6 +184,7 @@ const DEFAULT_TABLE_NAMES: ResolvedSqlTableNames = {
   identitySeparation: "typegraph_identity_separation",
   fulltext: "typegraph_node_fulltext",
   uniques: "typegraph_node_uniques",
+  edgeClaims: "typegraph_edge_claims",
 };
 
 function resolveTableNames(
@@ -204,6 +209,7 @@ function resolveTableNames(
       names.identitySeparation ?? DEFAULT_TABLE_NAMES.identitySeparation,
     fulltext: names.fulltext ?? DEFAULT_TABLE_NAMES.fulltext,
     uniques: names.uniques ?? DEFAULT_TABLE_NAMES.uniques,
+    edgeClaims: names.edgeClaims ?? DEFAULT_TABLE_NAMES.edgeClaims,
   };
 }
 
@@ -317,6 +323,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.identitySeparation, "identitySeparation");
   validateTableName(tables.fulltext, "fulltext");
   validateTableName(tables.uniques, "uniques");
+  validateTableName(tables.edgeClaims, "edgeClaims");
 
   return freezeSqlSchema({
     tables: Object.freeze(tables),

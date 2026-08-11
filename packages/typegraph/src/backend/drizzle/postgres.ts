@@ -111,6 +111,8 @@ import {
   type ContributionRepairResult,
   type ContributionRepopulationStats,
   type CreateVectorIndexParams,
+  DATABASE_EXTENSION_NAMES,
+  type DatabaseExtensionName,
   type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
   type DeleteFulltextParams,
@@ -404,8 +406,41 @@ const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
   "identitySeparation",
 ]);
 
-const TRIGRAM_EXTENSION_DDL_LOCK_KEY = "typegraph:pg-trgm-ddl";
-const TRIGRAM_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
+/**
+ * THE one-shot retry every idempotent catalog write in this backend shares.
+ *
+ * PostgreSQL's IF NOT EXISTS check cannot see another session's uncommitted
+ * catalog row. The loser waits for the winner and is then handed the winner's
+ * conflict instead of a harmless notice; retrying after that wait observes the
+ * committed object. Which failures mean that is
+ * {@link isPostgresConcurrentDdlRaceError}'s single decision — anything else
+ * (and anything the retry cannot clear) stays loud.
+ *
+ * Takes a thunk rather than a statement because one caller — the extension
+ * install — runs its statement inside its own transaction, and the retry
+ * decision must be the same one whether the unit of work is one statement or a
+ * locked pair.
+ */
+async function withConcurrentCreateRetry<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!isPostgresConcurrentDdlRaceError(error)) throw error;
+    return await run();
+  }
+}
+
+/**
+ * The advisory-lock key an extension install serializes on.
+ *
+ * Per extension rather than one global key: the fence exists to stop two
+ * installers of the SAME catalog row from colliding, and a shared key would
+ * additionally queue `vector` behind `pg_trgm` at boot for no benefit. The
+ * names it interpolates are allowlisted before they reach here.
+ */
+function extensionDdlLockKey(extension: DatabaseExtensionName): string {
+  return `typegraph:extension-ddl:${extension}`;
+}
 
 type ExecutePostgresStatement = (statement: ExecutableSql) => Promise<void>;
 
@@ -708,6 +743,7 @@ export function createPostgresBackend(
     identitySeparation: getTableName(tables.identitySeparation),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
+    edgeClaims: getTableName(tables.edgeClaims),
   };
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
   // ANALYZE statements on every call. The recorded and identity relations
@@ -780,28 +816,72 @@ export function createPostgresBackend(
    * Runs one IDEMPOTENT DDL statement — `CREATE ... IF NOT EXISTS` or
    * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` — with the one-shot retry a
    * concurrent boot needs.
-   *
-   * PostgreSQL's IF NOT EXISTS check cannot see another session's uncommitted
-   * catalog row. The loser waits for the winner and is then handed the
-   * winner's conflict instead of a harmless notice; retrying after that wait
-   * observes the committed object. Which failures mean that is
-   * {@link isPostgresConcurrentDdlRaceError}'s single decision — anything else
-   * (and anything the retry cannot clear) stays loud.
    */
   async function executeConcurrentCreateDdl(ddl: string): Promise<void> {
     const statement = sql.raw(ddl);
-    try {
+    await withConcurrentCreateRetry(async () => {
       await db.execute(statement);
-    } catch (error) {
-      if (!isPostgresConcurrentDdlRaceError(error)) throw error;
-      await db.execute(statement);
-    }
+    });
   }
 
   async function ensureTableWithConcurrentCreateRetry(
     table: Parameters<typeof generatePgCreateTableSQL>[0],
   ): Promise<void> {
     await executeConcurrentCreateDdl(generatePgCreateTableSQL(table));
+  }
+
+  /**
+   * THE one place this backend installs a database extension, for every
+   * extension and every caller.
+   *
+   * An extension is database-global while the claims that reach it are not (an
+   * index-materialization claim is per index), so two callers wanting different
+   * objects still race on `pg_extension_name_index`. Two fences answer that,
+   * and both are here because they answer different halves of it:
+   *
+   *  - the advisory lock serializes same-key installers inside this process
+   *    group so the common case never raises at all (#475). It is keyed on the
+   *    extension so installing `vector` does not queue behind `pg_trgm`;
+   *  - {@link withConcurrentCreateRetry} clears the 23505 an installer that did
+   *    NOT take this lock can still hand us — a peer on an older version, whose
+   *    lock key differs, or a `capabilities.transactions: false` backend which
+   *    has no transaction to hang a `pg_advisory_xact_lock` on (#446).
+   *
+   * The lock runs in its own transaction on purpose: a 23505 poisons an
+   * enclosing transaction (the next statement fails `25P02`), so the retry is
+   * sound only when the failed unit of work is one this function owns
+   * end-to-end.
+   */
+  async function ensureDatabaseExtension(
+    name: DatabaseExtensionName,
+  ): Promise<void> {
+    // The name reaches DDL by interpolation, so the allowlist — not the
+    // caller's type — is what makes the identifier trustworthy at runtime.
+    const validated = DATABASE_EXTENSION_NAMES.find(
+      (candidate) => candidate === name,
+    );
+    if (validated === undefined) {
+      throw new ConfigurationError(
+        `Unsupported database extension "${name}".`,
+        { extension: name, supported: DATABASE_EXTENSION_NAMES },
+        {
+          suggestion: `Request one of: ${DATABASE_EXTENSION_NAMES.join(", ")}.`,
+        },
+      );
+    }
+    const ddl = `CREATE EXTENSION IF NOT EXISTS "${validated}";`;
+    if (!capabilities.transactions) {
+      await executeConcurrentCreateDdl(ddl);
+      return;
+    }
+    await withConcurrentCreateRetry(async () => {
+      await db.transaction(async (tx) => {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${extensionDdlLockKey(validated)}), 0)`,
+        );
+        await tx.execute(sql.raw(ddl));
+      });
+    });
   }
 
   async function ensureContributionMaterializationsTableImpl(): Promise<void> {
@@ -1200,6 +1280,8 @@ export function createPostgresBackend(
       await db.execute(sql.raw(ddl));
     },
 
+    ensureExtension: ensureDatabaseExtension,
+
     async ensureIndexMaterializationsTable(): Promise<void> {
       await ensureTableWithConcurrentCreateRetry(tables.indexMaterializations);
       // Deployments created before the build-claim columns existed get
@@ -1220,17 +1302,8 @@ export function createPostgresBackend(
       );
     },
 
-    async ensureTrigramExtension(): Promise<void> {
-      if (!capabilities.transactions) {
-        await executeConcurrentCreateDdl(TRIGRAM_EXTENSION_DDL);
-        return;
-      }
-      await db.transaction(async (tx) => {
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtext(${TRIGRAM_EXTENSION_DDL_LOCK_KEY}), 0)`,
-        );
-        await tx.execute(sql.raw(TRIGRAM_EXTENSION_DDL));
-      });
+    ensureTrigramExtension(): Promise<void> {
+      return ensureDatabaseExtension("pg_trgm");
     },
 
     async claimIndexMaterialization(

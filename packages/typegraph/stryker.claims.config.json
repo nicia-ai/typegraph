@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker/master/packages/core/schema/stryker-schema.json",
+  "packageManager": "pnpm",
+  "testRunner": "vitest",
+  "plugins": ["@stryker-mutator/vitest-runner"],
+  "mutate": [
+    "src/store/claims/**/*.ts",
+    "src/backend/drizzle/operations/edge-claims.ts",
+    "src/backend/drizzle/operations/constraint-fence-audit.ts"
+  ],
+  "ignorePatterns": ["dist", "node_modules"],
+  "reporters": ["html", "clear-text", "progress"],
+  "htmlReporter": {
+    "fileName": "reports/mutation-claims/index.html"
+  },
+  "thresholds": {
+    "high": 90,
+    "low": 80,
+    "break": 60
+  },
+  "timeoutMS": 60000,
+  "concurrency": 4,
+  "coverageAnalysis": "perTest",
+  "incremental": true,
+  "incrementalFile": ".stryker-cache/incremental-claims.json",
+  "vitest": {
+    "configFile": "vitest.claims.config.ts"
+  },
+  "dryRunTimeoutMinutes": 10
+}

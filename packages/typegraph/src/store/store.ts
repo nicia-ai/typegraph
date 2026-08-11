@@ -174,6 +174,11 @@ import {
   type GraphAlgorithms,
   type InternalGraphAlgorithms,
 } from "./algorithms";
+import { applyResolvedNodeClaims } from "./claims/resolved-node-claims";
+import {
+  type ConstraintFenceViolation,
+  verifyConstraintFences as verifyConstraintFencesImpl,
+} from "./claims/verify";
 import {
   createEdgeCollectionsProxy,
   createNodeCollectionsProxy,
@@ -318,10 +323,6 @@ import {
   type TransactionOutcome,
   type UnboundLiveStoreOptions,
 } from "./types";
-import {
-  applyResolvedNodeUniqueness,
-  createUniquenessContext,
-} from "./uniqueness";
 
 type StoreSchemaMetadata = Readonly<{
   schemaVersion: number | undefined;
@@ -636,6 +637,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     options?: ReembedVectorFieldOptions,
   ) => Promise<ReembedVectorFieldResult>;
   verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
+  verifyConstraintFences: () => Promise<readonly ConstraintFenceViolation[]>;
   repairContributions: () => Promise<ContributionRepairResult>;
   probeContributions: () => Promise<ContributionProbeResult>;
   rebuildContribution: (
@@ -1031,6 +1033,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             constraints: registration.unique ?? [],
           };
         });
+        // Which kinds a release is worth CLEARING for: the clear exists so the
+        // set's upserts can take keys the set is giving back, and only a
+        // uniqueness declaration produces a key another node could take.
         const constrainedKinds = new Set(
           Object.entries(this.#graph.nodes)
             .filter(
@@ -1050,10 +1055,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           upserts.every((upsert) => upsert.constraints.length === 0) &&
           releases.length === 0
         ) {
+          // Nothing is cleared, so nothing needs rebuilding, so the write set
+          // owes no set-wide preflight either. A kind with no uniqueness
+          // declaration may still owe DISJOINTNESS claims, and those are taken
+          // and released by the individual writes inside `apply()` exactly as
+          // they are outside a merge — this branch is what keeps that true.
           return apply();
         }
-        return applyResolvedNodeUniqueness(
-          createUniquenessContext(this.graphId, this.#registry, target),
+        // The per-graph write lock, before any claim or sidecar work: the
+        // rebuild below writes claim rows, and the lock is what the claim
+        // discipline requires ahead of them. It is reentrant and memoized per
+        // transaction, so a merge that already took it pays no round trip.
+        const lock = await lockRecordedGraphWrite(target, this.graphId);
+        return applyResolvedNodeClaims(
+          { graphId: this.graphId, registry: this.#registry, lock },
+          target,
           upserts,
           releases,
           apply,
@@ -4268,6 +4284,46 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         resolveGraphVectorSlots(this.#graph)
       : [];
     return verify(this.graphId, vectorSlots);
+  }
+
+  /**
+   * Read-only diagnostic: every claim axis this graph's data ALREADY contends
+   * for — a scoped unique key two live nodes hold, an id live under both kinds
+   * of a `disjointWith` pair, or a declared edge cardinality two live edges
+   * exceed.
+   *
+   * The claim relations refuse a second claimant from the first write after
+   * upgrade onward, but they repair nothing that predates them: a database that
+   * carried a violation keeps carrying it until a write touches that axis, and
+   * is then refused with the ordinary typed error naming the incumbent. This is
+   * how an operator sees that state before a user does.
+   *
+   * Reports; never repairs. Which of two live claimants keeps the axis is a
+   * data-loss decision that belongs to the operator.
+   *
+   * Declarations are resolved from the active persisted schema, not this
+   * Store's construction-time graph snapshot. A Store left stale by another
+   * instance's `evolve()` therefore audits the constraints that currently
+   * govern the database instead of returning a false clean report.
+   *
+   * @throws {ConfigurationError} `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` when the
+   *   backend cannot run the audit — an empty report from a backend that never
+   *   looked is indistinguishable from a clean database.
+   */
+  async verifyConstraintFences(): Promise<readonly ConstraintFenceViolation[]> {
+    const activeRow = await this.#baseBackend.getActiveSchema(this.graphId);
+    const graph =
+      activeRow === undefined ?
+        this.#graph
+      : this.#catchUpToStored(parseSerializedSchema(activeRow.schema_doc));
+    const registry =
+      graph === this.#graph ? this.#registry : buildKindRegistry(graph);
+    return verifyConstraintFencesImpl({
+      graph,
+      registry,
+      graphId: this.graphId,
+      backend: this.#baseBackend,
+    });
   }
 
   /**

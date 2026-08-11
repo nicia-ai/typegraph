@@ -480,7 +480,7 @@ export default [
   },
   {
     files: [
-      "src/store/operations/edge-operations.ts",
+      "src/store/operations/edge-batch-validation.ts",
       "src/store/operations/node-operations.ts",
       "src/store/recorded-capture.ts",
       "src/store/recorded-read-service.ts",

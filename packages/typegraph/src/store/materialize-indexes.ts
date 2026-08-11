@@ -125,11 +125,35 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+/**
+ * Installs `pg_trgm`, preferring the most capable seam the backend offers.
+ *
+ * All three branches make the SAME request and differ only in what happens to
+ * the loser of a concurrent install:
+ *
+ *  1. `ensureExtension` — the general seam: the backend owns the fence for
+ *     every extension the library installs;
+ *  2. `ensureTrigramExtension` — the `pg_trgm`-only spelling a 0.47 backend may
+ *     implement instead, consulted so such a backend keeps its fence;
+ *  3. bare `executeDdl` with this function's own one-shot retry, which is all
+ *     a backend offering neither can do.
+ *
+ * A backend with none of them keeps failing loudly on `requireDefined`.
+ */
 async function ensureTrigramExtension(backend: GraphBackend): Promise<void> {
+  if (backend.ensureExtension !== undefined) {
+    await backend.ensureExtension("pg_trgm");
+    return;
+  }
+  // Consulting the deprecated seam IS this branch's purpose: a backend written
+  // against 0.47 implements only this one, and skipping it would drop such a
+  // backend to the bare statement below and lose the fence it does have.
+  /* eslint-disable @typescript-eslint/no-deprecated */
   if (backend.ensureTrigramExtension !== undefined) {
     await backend.ensureTrigramExtension();
     return;
   }
+  /* eslint-enable @typescript-eslint/no-deprecated */
 
   const executeDdl = requireDefined(backend.executeDdl);
   try {
@@ -470,10 +494,17 @@ async function materializeRelationalIndex(
     run: async () => {
       if (declaration.method === "trigram") {
         // gin_trgm_ops lives in the pg_trgm extension (contrib — present
-        // on stock Postgres and the hosted variants). Extension installation
-        // is database-global, so the backend serializes it independently of
-        // this index-name claim. A permission failure surfaces as this
-        // index's `failed` entry.
+        // on stock Postgres and the hosted variants). Idempotent, and a
+        // permission failure surfaces as this index's `failed` entry.
+        //
+        // The install needs a fence this claim cannot give it: the extension
+        // is database-global while this claim is per-index, so two
+        // materializers building DIFFERENT trigram indexes both reach it and
+        // race on the catalog row — the loser's 23505 would be a spurious
+        // `failed` entry (#446). The backend seam owns that fence (#475); a
+        // backend offering neither seam keeps issuing it bare, so the index is
+        // still materialized, just with this function's own retry rather than
+        // the backend's serialization.
         await ensureTrigramExtension(backend);
       }
       await requireDefined(backend.executeDdl)(ddl);

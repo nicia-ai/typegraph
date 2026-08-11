@@ -63,6 +63,7 @@ export type PostgresTableNames = Readonly<{
   identityClosure: string;
   identitySeparation: string;
   uniques: string;
+  edgeClaims: string;
   schemaVersions: string;
   fulltext: string;
   indexMaterializations: string;
@@ -93,6 +94,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   identityClosure: "typegraph_identity_closure",
   identitySeparation: "typegraph_identity_separation",
   uniques: "typegraph_node_uniques",
+  edgeClaims: "typegraph_edge_claims",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
@@ -398,6 +400,29 @@ export function createPostgresTables(
     ],
   );
 
+  // The edge cardinality claim relation: one row per claim AXIS
+  // (`<cardinality>:<edgeKind>`) and endpoint KEY, naming the edge that holds
+  // it. Declared edge cardinality is a predicate over `(kind, from)` or
+  // `(kind, from, to)`, which the edges primary key `(graph_id, id)` cannot
+  // fence, so this relation's own primary key is what refuses a second
+  // concurrent claimant. A claim whose holder is no longer live (or, for
+  // `oneActive`, no longer active) is taken over in place, which is why the
+  // relation needs no release path — see `store/claims/edge-claims.ts`.
+  const edgeClaims = pgTable(
+    n.edgeClaims,
+    {
+      graphId: text("graph_id").notNull(),
+      axis: text("axis").notNull(),
+      key: text("key").notNull(),
+      edgeId: text("edge_id").notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.axis, t.key] }),
+      index(`${n.edgeClaims}_edge_idx`).on(t.graphId, t.edgeId),
+    ],
+  );
+
   const schemaVersions = pgTable(
     n.schemaVersions,
     {
@@ -593,6 +618,7 @@ export function createPostgresTables(
     identityClosure,
     identitySeparation,
     uniques,
+    edgeClaims,
     schemaVersions,
     indexMaterializations,
     contributionMaterializations,
@@ -618,6 +644,7 @@ export const {
   recordedEdges,
   recordedClock,
   uniques,
+  edgeClaims,
   schemaVersions,
   fulltext,
 } = tables;
