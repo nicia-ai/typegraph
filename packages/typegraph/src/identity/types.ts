@@ -192,6 +192,18 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
   }>;
 
 /**
+ * The assertion-only write surface of the TypeGraph Identity Profile.
+ *
+ * This deliberately excludes reads and retractions so constrained staging
+ * handles can accept incoming identity claims without exposing the broader
+ * operational identity surface.
+ */
+export type IdentityAssertionWriteFacade<G extends GraphDef> = Pick<
+  IdentityFacade<G>,
+  "assertSame" | "assertDifferent" | "bulkAssertSame" | "bulkAssertDifferent"
+>;
+
+/**
  * Per-transaction identity write counts carried by a transaction receipt.
  * `total` is the sum of the three preceding counters.
  */

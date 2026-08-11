@@ -23,7 +23,10 @@ import { z } from "zod";
 import type { TransactionBackend } from "../../src/backend/types";
 import { ingestionBranch } from "../../src/graph-merge";
 import { branch } from "../../src/graph-merge/branch";
-import { MergeConstraintConflictError } from "../../src/graph-merge/errors";
+import {
+  IdentityMergeConflictError,
+  MergeConstraintConflictError,
+} from "../../src/graph-merge/errors";
 import {
   applyMergePlan,
   planMergeIncremental,
@@ -129,6 +132,7 @@ const ingestionGraph = defineGraph({
     subClassOf(Practitioner, ClinicalEntity),
     disjointWith(Patient, AdministrativeRecord),
   ],
+  identity: { sameIdAcrossKinds: "ignore" },
 });
 
 const relaxedIngestionGraph = defineGraph({
@@ -143,6 +147,13 @@ const relaxedIngestionGraph = defineGraph({
   edges: ingestionGraph.edges,
   indexes: [patientMrnCandidates],
   ontology: ingestionGraph.ontology,
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+
+const identityDisabledGraph = defineGraph({
+  id: "constraint-aware-ingestion-without-identity",
+  nodes: { Patient: { type: Patient } },
+  edges: {},
 });
 
 type IngestionGraph = typeof ingestionGraph;
@@ -323,6 +334,10 @@ describe.each(backendMatrix())(
       cleanups = [];
       const base = await makeStore();
       await seedCanonical(base);
+      const canonical = requireDefined(
+        await base.nodes.Patient.getById(asNodeId("patient-canonical")),
+      );
+      const identityValidFrom = requireDefined(canonical.meta.validFrom);
       const incoming = await makeIngestion(base);
       const validFrom = "2025-01-01T00:00:00.000Z";
       const validTo = "2030-01-01T00:00:00.000Z";
@@ -338,6 +353,12 @@ describe.each(backendMatrix())(
             validFrom,
             validTo,
           },
+          {
+            kind: "Patient",
+            id: "patient-identity-imported",
+            properties: { name: "Ana Identity", mrn: "MRN-IDENTITY" },
+            validFrom: identityValidFrom,
+          },
         ],
         edges: [
           {
@@ -350,15 +371,30 @@ describe.each(backendMatrix())(
             validTo,
           },
         ],
+        identity: {
+          profile: "typegraph-identity-v1",
+          mode: "state",
+          assertions: [
+            {
+              id: "identity-imported",
+              relation: "same",
+              a: { kind: "Patient", id: "patient-canonical" },
+              b: { kind: "Patient", id: "patient-identity-imported" },
+              validFrom: identityValidFrom,
+            },
+          ],
+        },
       } satisfies GraphData;
 
       const result = await importGraph(incoming, document, {
         onConflict: "error",
       });
 
+      expect(result.errors).toEqual([]);
       expect(result.success).toBe(true);
-      expect(result.nodes.created).toBe(1);
+      expect(result.nodes.created).toBe(2);
       expect(result.edges.created).toBe(1);
+      expect(result.identity).toEqual({ created: 1, skipped: 0 });
       expect(
         await incoming.nodes.Patient.getById(asNodeId("patient-imported"), {
           temporalMode: "includeEnded",
@@ -443,6 +479,306 @@ describe.each(backendMatrix())(
           { id: "patient-alias" },
         ),
       ).rejects.toThrow(UniquenessError);
+    });
+
+    it("exposes identity writes without exposing identity reads", async () => {
+      cleanups = [];
+      const base = await makeStore();
+      const incoming = await makeIngestion(base);
+
+      expect("identity" in incoming).toBe(true);
+      expectTypeOf(incoming).toHaveProperty("identity");
+      expectTypeOf(incoming.identity).toHaveProperty("assertSame");
+      expectTypeOf(incoming.identity).toHaveProperty("assertDifferent");
+      expectTypeOf(incoming.identity).not.toHaveProperty("areSame");
+      expectTypeOf(incoming.identity).not.toHaveProperty("membersOf");
+      expectTypeOf(incoming.identity).not.toHaveProperty("retractAssertion");
+      expectTypeOf(incoming.identity).not.toHaveProperty(
+        "retractSameAssertion",
+      );
+      expectTypeOf(incoming.identity).not.toHaveProperty(
+        "retractDifferentAssertion",
+      );
+      expectTypeOf(incoming.identity).not.toHaveProperty(
+        "bulkRetractAssertions",
+      );
+      expect("areSame" in incoming.identity).toBe(false);
+      expect("membersOf" in incoming.identity).toBe(false);
+      expect("assertionsOf" in incoming.identity).toBe(false);
+      expect("retractAssertion" in incoming.identity).toBe(false);
+      expect("retractSameAssertion" in incoming.identity).toBe(false);
+      expect("retractDifferentAssertion" in incoming.identity).toBe(false);
+      expect("bulkRetractAssertions" in incoming.identity).toBe(false);
+    });
+
+    it("omits identity for identity-disabled graphs", async () => {
+      cleanups = [];
+      const [base] = await createStoreWithSchema(
+        identityDisabledGraph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      const incoming = unwrap(
+        await ingestionBranch(base, () => makeBackend(), { id: INCOMING }),
+      );
+
+      expectTypeOf(incoming).not.toHaveProperty("identity");
+      expect("identity" in incoming).toBe(false);
+    });
+
+    it("stages bulk same and different assertions through the narrow facade", async () => {
+      cleanups = [];
+      const forkPoint = await makeStore();
+      const targetClone = await cloneStore(
+        forkPoint,
+        asBranchId("bulk-identity-target"),
+      );
+      const incoming = await makeIngestion(forkPoint);
+      const created = await incoming.nodes.Patient.bulkCreate([
+        {
+          id: "same-left",
+          props: { name: "Same left", mrn: "MRN-SAME-LEFT" },
+        },
+        {
+          id: "same-right",
+          props: { name: "Same right", mrn: "MRN-SAME-RIGHT" },
+        },
+        {
+          id: "different-left",
+          props: { name: "Different left", mrn: "MRN-DIFFERENT-LEFT" },
+        },
+        {
+          id: "different-right",
+          props: { name: "Different right", mrn: "MRN-DIFFERENT-RIGHT" },
+        },
+      ]);
+      const sameLeft = requireDefined(created[0]);
+      const sameRight = requireDefined(created[1]);
+      const differentLeft = requireDefined(created[2]);
+      const differentRight = requireDefined(created[3]);
+      const sameResults = await incoming.identity.bulkAssertSame([
+        { a: sameLeft, b: sameRight },
+      ]);
+      const differentResults = await incoming.identity.bulkAssertDifferent([
+        { a: differentLeft, b: differentRight },
+      ]);
+
+      expect(sameResults.map((result) => result.action)).toEqual(["created"]);
+      expect(differentResults.map((result) => result.action)).toEqual([
+        "created",
+      ]);
+      const plan = unwrap(
+        await planMergeIncremental({
+          forkPoint,
+          target: targetClone.store,
+          branches: [incoming],
+          options: { onBasePropertyConflict: "flag" },
+        }),
+      );
+      unwrap(await applyMergePlan(targetClone.store, plan));
+
+      expect(
+        await targetClone.store.identity.areSame(sameLeft, sameRight),
+      ).toBe(true);
+      expect(
+        await targetClone.store.identity.areDifferent(
+          differentLeft,
+          differentRight,
+        ),
+      ).toBe(true);
+    });
+
+    it("preserves validity windows from single and bulk identity assertions", async () => {
+      cleanups = [];
+      const forkPoint = await makeStore();
+      const targetClone = await cloneStore(
+        forkPoint,
+        asBranchId("identity-validity-target"),
+      );
+      const incoming = await makeIngestion(forkPoint);
+      const created = await incoming.nodes.Patient.bulkCreate(
+        [
+          "single-same-left",
+          "single-same-right",
+          "single-different-left",
+          "single-different-right",
+          "bulk-same-left",
+          "bulk-same-right",
+          "bulk-different-left",
+          "bulk-different-right",
+        ].map((id) => ({
+          id,
+          props: { name: id, mrn: `MRN-${id}` },
+          validFrom: "2020-01-01T00:00:00.000Z",
+        })),
+      );
+      const singleSameLeft = requireDefined(created[0]);
+      const singleSameRight = requireDefined(created[1]);
+      const singleDifferentLeft = requireDefined(created[2]);
+      const singleDifferentRight = requireDefined(created[3]);
+      const bulkSameLeft = requireDefined(created[4]);
+      const bulkSameRight = requireDefined(created[5]);
+      const bulkDifferentLeft = requireDefined(created[6]);
+      const bulkDifferentRight = requireDefined(created[7]);
+      const singleSame = await incoming.identity.assertSame(
+        singleSameLeft,
+        singleSameRight,
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      );
+      const singleDifferent = await incoming.identity.assertDifferent(
+        singleDifferentLeft,
+        singleDifferentRight,
+        {
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: "2022-01-01T00:00:00.000Z",
+        },
+      );
+      const [bulkSame] = await incoming.identity.bulkAssertSame([
+        {
+          a: bulkSameLeft,
+          b: bulkSameRight,
+          validFrom: "2022-01-01T00:00:00.000Z",
+          validTo: "2023-01-01T00:00:00.000Z",
+        },
+      ]);
+      const [bulkDifferent] = await incoming.identity.bulkAssertDifferent([
+        {
+          a: bulkDifferentLeft,
+          b: bulkDifferentRight,
+          validFrom: "2023-01-01T00:00:00.000Z",
+          validTo: "2024-01-01T00:00:00.000Z",
+        },
+      ]);
+      const expectedAssertions = [
+        [singleSameLeft, singleSame.assertion, "2020-06-01T00:00:00.000Z"],
+        [
+          singleDifferentLeft,
+          singleDifferent.assertion,
+          "2021-06-01T00:00:00.000Z",
+        ],
+        [
+          bulkSameLeft,
+          requireDefined(bulkSame).assertion,
+          "2022-06-01T00:00:00.000Z",
+        ],
+        [
+          bulkDifferentLeft,
+          requireDefined(bulkDifferent).assertion,
+          "2023-06-01T00:00:00.000Z",
+        ],
+      ] as const;
+
+      expect(
+        expectedAssertions.map(([, assertion]) => ({
+          validFrom: assertion.validFrom,
+          validTo: assertion.validTo,
+        })),
+      ).toEqual([
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+        {
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: "2022-01-01T00:00:00.000Z",
+        },
+        {
+          validFrom: "2022-01-01T00:00:00.000Z",
+          validTo: "2023-01-01T00:00:00.000Z",
+        },
+        {
+          validFrom: "2023-01-01T00:00:00.000Z",
+          validTo: "2024-01-01T00:00:00.000Z",
+        },
+      ]);
+      const plan = unwrap(
+        await planMergeIncremental({
+          forkPoint,
+          target: targetClone.store,
+          branches: [incoming],
+          options: { onBasePropertyConflict: "flag" },
+        }),
+      );
+      unwrap(await applyMergePlan(targetClone.store, plan));
+
+      for (const [ref, assertion, asOf] of expectedAssertions) {
+        expect(
+          await targetClone.store.asOf(asOf).identity.assertionsOf(ref),
+        ).toEqual([assertion]);
+      }
+    });
+
+    it("stages and merges a duplicate unique alias asserted as the same identity", async () => {
+      cleanups = [];
+      const forkPoint = await makeStore();
+      await seedCanonical(forkPoint);
+      const canonical = requireDefined(
+        await forkPoint.nodes.Patient.getById(asNodeId("patient-canonical")),
+      );
+      const targetClone = await cloneStore(
+        forkPoint,
+        asBranchId("identity-same-target"),
+      );
+      const incoming = await makeIngestion(forkPoint);
+
+      const alias = await incoming.nodes.Patient.create(
+        { name: "Anna Rivera", mrn: "MRN-123" },
+        { id: "patient-alias" },
+      );
+      const assertion = await incoming.identity.assertSame(canonical, alias);
+
+      expect(assertion.action).toBe("created");
+      const plan = unwrap(
+        await planMergeIncremental({
+          forkPoint,
+          target: targetClone.store,
+          branches: [incoming],
+          options: incrementalOptions(),
+        }),
+      );
+      unwrap(await applyMergePlan(targetClone.store, plan));
+
+      expect(
+        (await targetClone.store.nodes.Patient.find()).map((node) => node.id),
+      ).toEqual(["patient-canonical"]);
+    });
+
+    it("stages a duplicate unique alias asserted as different and reports a merge conflict", async () => {
+      cleanups = [];
+      const forkPoint = await makeStore();
+      await seedCanonical(forkPoint);
+      const canonical = requireDefined(
+        await forkPoint.nodes.Patient.getById(asNodeId("patient-canonical")),
+      );
+      const targetClone = await cloneStore(
+        forkPoint,
+        asBranchId("identity-different-target"),
+      );
+      const incoming = await makeIngestion(forkPoint);
+
+      const alias = await incoming.nodes.Patient.create(
+        { name: "Anna Rivera", mrn: "MRN-123" },
+        { id: "patient-alias" },
+      );
+      const assertion = await incoming.identity.assertDifferent(
+        canonical,
+        alias,
+      );
+
+      expect(assertion.action).toBe("created");
+      const result = await planMergeIncremental({
+        forkPoint,
+        target: targetClone.store,
+        branches: [incoming],
+        options: incrementalOptions(),
+      });
+
+      expect(isErr(result)).toBe(true);
+      if (!isErr(result)) return;
+      expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
     });
 
     it("validates the resolved write set as a set so unique-key swaps succeed", async () => {

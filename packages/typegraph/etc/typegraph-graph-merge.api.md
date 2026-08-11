@@ -2000,6 +2000,9 @@ type IdentityAssertionResult<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
+export type IdentityAssertionWriteFacade<G extends GraphDef> = Pick<IdentityFacade<G>, "assertSame" | "assertDifferent" | "bulkAssertSame" | "bulkAssertDifferent">;
+
+// @public
 type IdentityChange = Readonly<{
     type: ChangeType;
     severity: ChangeSeverity;
@@ -2214,7 +2217,9 @@ export type IngestionBranch<G extends GraphDef> = IngestionImportTarget<G> & Rea
     nodes: IngestionNodeCollections<G>;
     edges: Store<G>["edges"];
     close: () => Promise<void>;
-}>;
+}> & ("identity" extends keyof Store<G> ? Readonly<{
+    identity: IdentityAssertionWriteFacade<G>;
+}> : Readonly<Record<never, never>>);
 
 // @public
 export function ingestionBranch<G extends GraphDef>(baseStore: GraphBranch<G>["store"], makeBackend: MakeBackend, options?: BranchOptions): Promise<Result<IngestionBranch<G>, BranchError>>;

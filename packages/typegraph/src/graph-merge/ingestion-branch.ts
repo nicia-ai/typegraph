@@ -13,7 +13,11 @@ import { branch } from "./branch";
 import { BranchError } from "./errors";
 import type { Result } from "./result";
 import { err, isErr, ok } from "./result";
-import type { GraphDef } from "./typegraph-internal";
+import type {
+  GraphDef,
+  IdentityAssertionWriteFacade,
+  IdentityFacade,
+} from "./typegraph-internal";
 import { storeBackend } from "./typegraph-internal";
 import type {
   BranchOptions,
@@ -25,6 +29,26 @@ import type { MakeBackend } from "./working-copy";
 import { cloneIngestionWorkingCopyStrategy } from "./working-copy";
 
 const PRIVATE_BRANCHES = new WeakMap<object, unknown>();
+
+/** Restricts a full identity facade to the assertions accepted during ingestion. */
+function createIngestionIdentityFacade<G extends GraphDef>(
+  identity: IdentityFacade<G>,
+): IdentityAssertionWriteFacade<G> {
+  return Object.freeze({
+    assertSame(a, b, window) {
+      return identity.assertSame(a, b, window);
+    },
+    assertDifferent(a, b, window) {
+      return identity.assertDifferent(a, b, window);
+    },
+    bulkAssertSame(pairs) {
+      return identity.bulkAssertSame(pairs);
+    },
+    bulkAssertDifferent(pairs) {
+      return identity.bulkAssertDifferent(pairs);
+    },
+  });
+}
 
 /**
  * Creates an isolated ingestion branch whose node uniqueness constraints are
@@ -56,11 +80,21 @@ export async function ingestionBranch<G extends GraphDef>(
     }
     const privateBranch = created.data;
     const { base, id, store } = privateBranch;
+    const identityAccess =
+      store.graph.identity === undefined ?
+        {}
+      : {
+          identity: createIngestionIdentityFacade(
+            (store as typeof store & Readonly<{ identity: IdentityFacade<G> }>)
+              .identity,
+          ),
+        };
     const handle = Object.freeze({
       id,
       base,
       nodes: store.nodes,
       edges: store.edges,
+      ...identityAccess,
       close: async (): Promise<void> => storeBackend(store).close(),
     }) as unknown as IngestionBranch<G>;
     PRIVATE_BRANCHES.set(handle, privateBranch);

@@ -837,6 +837,7 @@ schema validation, edge endpoint checks, disjointness, and edge cardinality
 still apply immediately.
 
 ```typescript
+import { asNodeId } from "@nicia-ai/typegraph";
 import {
   applyMergePlan,
   asBranchId,
@@ -857,6 +858,15 @@ const imported = await importGraph(incoming, providerDocument, {
   onUnknownProperty: "error",
 });
 if (!imported.success) throw new Error("Provider import was rejected");
+
+const alias = await incoming.nodes.Patient.getById(
+  asNodeId("incoming-patient"),
+);
+if (alias === undefined) throw new Error("Imported patient was not found");
+
+// `canonicalPatient` is an existing Patient read from the base before forking.
+// The repeated MRN and its identity evidence can be staged together.
+await incoming.identity.assertSame(canonicalPatient, alias);
 
 const plan = unwrap(
   await planMergeIncremental({
@@ -882,15 +892,29 @@ await incoming.close();
 Both `importGraph()` and `importGraphStream()` accept the returned handle, so an
 interchange document can be staged without a hand-written collection copy loop.
 Import remains the single owner of node-first ordering, validity windows, edge
-endpoint order and reference validation. The handle also exposes ingestion
-collections, but not the branch's underlying `Store`, so callers cannot bypass
-the deferred-constraint contract or run schema operations on the derived working
-copy. The original graph definition remains the merge contract:
+endpoint order and reference validation.
+
+On an identity-enabled graph, the handle also exposes an assertion-only
+`IdentityAssertionWriteFacade` as `identity`: `assertSame`, `assertDifferent`,
+`bulkAssertSame`, and `bulkAssertDifferent`. This lets a batch stage aliases
+that repeat unique keys and the explicit identity evidence needed to reconcile
+them before merge-time constraint validation. Assertion contradictions and
+invalid endpoints are still refused while staging; only node uniqueness is
+deferred.
+
+The returned handle exposes those ingestion collections and identity assertion
+writes, not the branch's underlying `Store`. Identity reads and retractions,
+schema operations, transactions, and runtime internals remain unavailable, so
+callers cannot bypass the deferred-constraint contract. As with `Store`, the
+`identity` property is absent at the type level when the graph does not enable
+Operational Identity.
+
+The original graph definition remains the merge contract:
 `applyMergePlan()` validates node uniqueness against the entire resolved write
-set in the target transaction. Valid key handoffs and
-swaps are accepted as one set. If reviewed resolution leaves two live owners of
-the same unique key, the merge returns `MergeConstraintConflictError` and
-commits no graph or provenance writes.
+set in the target transaction. Valid key handoffs and swaps are accepted as one
+set. If reviewed resolution leaves two live owners of the same unique key, the
+merge returns `MergeConstraintConflictError` and commits no graph or provenance
+writes.
 
 The derived schema is persisted on the working-copy backend, so the relaxed
 contract is auditable and an explicit reattachment with an equivalent graph

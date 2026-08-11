@@ -24,6 +24,10 @@ export {
   type TypeGraphErrorOptions,
 } from "../errors";
 export type { IdentityTransferAssertion } from "../identity/service";
+export type {
+  IdentityAssertionWriteFacade,
+  IdentityFacade,
+} from "../identity/types";
 export { exportGraph, exportGraphStream } from "../interchange/export";
 export { importGraph, importGraphStream } from "../interchange/import";
 export { computeTransitiveClosure, isReachable } from "../ontology/closures";
