@@ -156,8 +156,8 @@ import {
 import { edgeWritePlan } from "./write-plan";
 import {
   type EdgeInsertWork,
+  type EdgeWriteSession,
   unfencedTarget,
-  type WriteSession,
   type WriteTarget,
 } from "./write-session";
 
@@ -808,7 +808,7 @@ export function edgeUpsertDirtyCheck<G extends GraphDef>(
 async function performEdgeUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: UpsertUpdateEdgeInput,
-  session: WriteSession,
+  session: EdgeWriteSession,
   target: WriteTarget,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Edge> {
@@ -1017,7 +1017,7 @@ const EDGE_UPDATE_ATTEMPTS = 2;
 async function performEdgeUpdateConverging<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: UpsertUpdateEdgeInput,
-  session: WriteSession,
+  session: EdgeWriteSession,
   target: WriteTarget,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Edge> {

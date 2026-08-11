@@ -65,7 +65,11 @@ import {
   NODE_UPDATE_FENCE_APPLIERS,
   UnsupportedWriteFenceError,
 } from "../src/store/operations/write-fences";
-import { type WriteSession } from "../src/store/operations/write-session";
+import {
+  type EdgeWriteSession,
+  type NodeWriteSession,
+  type WriteSession,
+} from "../src/store/operations/write-session";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -391,7 +395,21 @@ describe("fence appliers", () => {
   });
 });
 
+function assertDisjointSessions(
+  nodeSession: NodeWriteSession,
+  edgeSession: EdgeWriteSession,
+): void {
+  // @ts-expect-error -- a node plan cannot reach an edge session method
+  void nodeSession.createEdge;
+  // @ts-expect-error -- an edge plan cannot reach a node session method
+  void edgeSession.createNode;
+}
+
 describe("a fenced session method cannot be called without its fence", () => {
+  it("keeps node and edge plan session surfaces disjoint", () => {
+    expect(assertDisjointSessions).toBeTypeOf("function");
+  });
+
   it("rejects an omitted fence record at compile time", () => {
     // I6(a): every key of a fence record is REQUIRED, so "I forgot to pass the
     // fence" is a type error rather than a silently unfenced write. This line

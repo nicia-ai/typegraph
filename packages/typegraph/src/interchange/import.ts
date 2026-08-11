@@ -106,7 +106,7 @@ import {
   type OverlaidSessionMint,
   runWritePlan,
 } from "../store/operations/write-executor";
-import { nodeWritePlan } from "../store/operations/write-plan";
+import { mixedWritePlan } from "../store/operations/write-plan";
 import {
   type EdgeInsertWork,
   type NodeInsertWork,
@@ -270,7 +270,7 @@ export async function withImportStreamLease<G extends GraphDef, T>(
 type ImportWriteFrame = Readonly<{
   session: WriteSession;
   target: WriteTarget;
-  overlaidSession: OverlaidSessionMint;
+  overlaidSession: OverlaidSessionMint<"mixed">;
 }>;
 
 async function importGraphData<G extends GraphDef>(
@@ -334,11 +334,9 @@ async function importGraphData<G extends GraphDef>(
       // "identity is configured" test, exactly as before the migration.
       identityLock: (target) => runtime.lockIdentityImportTarget(target),
     },
-    // An import writes node rows AND edge rows in one frame. The family is
-    // stated as `node` because that is the one whose row work obliges
-    // sidecars — an edge write obliges none — and because import declares no
-    // constraint probe, the only other thing a plan carries.
-    nodeWritePlan(undefined, "import"),
+    // An import writes node rows AND edge rows in one frame, so it declares the
+    // mixed family explicitly instead of receiving either narrower session.
+    mixedWritePlan(undefined, true),
     backend,
     async (session, target, overlaidSession) => {
       const frame: ImportWriteFrame = { session, target, overlaidSession };

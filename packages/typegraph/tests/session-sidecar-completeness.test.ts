@@ -372,7 +372,7 @@ type Case = Readonly<{
   plan: WritePlan;
 }>;
 
-const NODE_PLAN = nodeWritePlan(undefined, undefined);
+const NODE_PLAN = nodeWritePlan(undefined, false);
 const EDGE_PLAN = edgeWritePlan(undefined);
 
 /**
@@ -672,7 +672,10 @@ describe("write session sidecar completeness", () => {
         const { backend, counts, sequence } = withCallCounts(raw);
 
         await runWritePlan(writeContext(), testCase.plan, backend, (session) =>
-          rowWork(session),
+          // `CASES` is heterogeneous by plan family. `Object.entries` erases
+          // the correlation between each plan and its row-work session, while
+          // the exhaustive table above establishes that correlation per entry.
+          rowWork(session as WriteSession),
         );
 
         const missing = [testCase.row, ...testCase.sidecars].filter(

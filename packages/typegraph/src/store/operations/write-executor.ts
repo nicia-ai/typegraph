@@ -22,11 +22,12 @@ import {
 import { requireDefined } from "../../utils/presence";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type OperationHookContext } from "../types";
-import { type WritePlan } from "./write-plan";
+import { type RowWorkKind, type WritePlan } from "./write-plan";
 import {
   createWriteSession,
   type WriteSession,
   type WriteSessionContext,
+  type WriteSessionFor,
   type WriteTarget,
 } from "./write-session";
 import {
@@ -43,7 +44,7 @@ import {
  * through it) and HOW this caller acquires the identity lock.
  *
  * `identityLock` is absent when the graph has no identity configured — in
- * which case plan builders derive `identity: undefined`, so a declared
+ * which case plan builders derive `requiresIdentityLock: false`, so a declared
  * participation with no acquirer is a wiring bug. The executor asserts on it
  * rather than silently skipping the lock: no user-stated option can produce
  * that state, so it is an internal invariant, not a public refusal.
@@ -105,15 +106,15 @@ export type WritePlanOptions<T> = Omit<
  */
 type WriteTargetReadOverlay = Partial<WriteTarget>;
 
-export type OverlaidSessionMint = (
+export type OverlaidSessionMint<K extends RowWorkKind = RowWorkKind> = (
   reads: WriteTargetReadOverlay,
-) => WriteSession;
+) => WriteSessionFor<K>;
 
 /** Row work: the only place a plan-driven write may read or write rows. */
-export type WriteRowWork<T> = (
-  session: WriteSession,
+export type WriteRowWork<K extends RowWorkKind, T> = (
+  session: WriteSessionFor<K>,
   target: WriteTarget,
-  overlaidSession: OverlaidSessionMint,
+  overlaidSession: OverlaidSessionMint<K>,
 ) => Promise<T>;
 
 /**
@@ -125,16 +126,16 @@ export type WriteRowWork<T> = (
  * wraps the transaction, so the identity decision — and the moment in the
  * frame it is taken at — must not be written twice.
  */
-function planFrame<T>(
+function planFrame<K extends RowWorkKind, T>(
   ctx: WritePlanContext,
-  plan: WritePlan,
-  rowWork: WriteRowWork<T>,
+  plan: WritePlan<K>,
+  rowWork: WriteRowWork<K, T>,
 ) {
   return async (
     target: GraphBackend | TransactionBackend,
     lock: GraphWriteLock,
   ): Promise<T> => {
-    if (plan.identity !== undefined) {
+    if (plan.requiresIdentityLock) {
       const acquireIdentityLock = requireDefined(
         ctx.identityLock,
         "write plan declares identity participation with no acquirer",
@@ -149,13 +150,17 @@ function planFrame<T>(
     const mintSessionOver = (
       sessionTarget: GraphBackend | TransactionBackend,
     ): WriteSession => createWriteSession(ctx, sessionTarget, lock);
-    const mintOverlaidSession: OverlaidSessionMint = (reads) =>
-      mintSessionOver(deriveBackend(target, reads));
+    const mintOverlaidSession: OverlaidSessionMint<K> = (reads) =>
+      mintSessionOver(deriveBackend(target, reads)) as WriteSessionFor<K>;
     // The two handles are the SAME object: the session closes over the raw
     // target (its step modules probe optional members on it), while row work
     // sees it through the type-only `WriteTarget` projection. One value, two
     // static views.
-    return rowWork(mintSessionOver(target), target, mintOverlaidSession);
+    return rowWork(
+      mintSessionOver(target) as WriteSessionFor<K>,
+      target,
+      mintOverlaidSession,
+    );
   };
 }
 
@@ -165,19 +170,19 @@ function planFrame<T>(
  * `fencesConstraintProbe` is written LAST and from the plan alone, so no
  * caller-supplied residue can shadow it.
  */
-function planTransactionOptions<T>(
-  plan: WritePlan,
+function planTransactionOptions<K extends RowWorkKind, T>(
+  plan: WritePlan<K>,
   options: WritePlanOptions<T> | undefined,
 ): WriteTransactionOptions<T> {
   return { ...options, fencesConstraintProbe: plan.constraintProbe };
 }
 
 /** Runs one managed write under its plan. */
-export function runWritePlan<T>(
+export function runWritePlan<K extends RowWorkKind, T>(
   ctx: WritePlanContext,
-  plan: WritePlan,
+  plan: WritePlan<K>,
   backend: GraphBackend | TransactionBackend,
-  rowWork: WriteRowWork<T>,
+  rowWork: WriteRowWork<K, T>,
   options?: WritePlanOptions<T>,
 ): Promise<T> {
   return runInWriteTransaction(
@@ -193,12 +198,12 @@ export function runWritePlan<T>(
  * `runHookedWriteOperation` wraps the transaction today, so `onOperationEnd`
  * observes a durably committed result.
  */
-export function runHookedWritePlan<T>(
+export function runHookedWritePlan<K extends RowWorkKind, T>(
   ctx: HookedWritePlanContext,
   opContext: OperationHookContext,
-  plan: WritePlan,
+  plan: WritePlan<K>,
   backend: GraphBackend | TransactionBackend,
-  rowWork: WriteRowWork<T>,
+  rowWork: WriteRowWork<K, T>,
   options?: WritePlanOptions<T>,
 ): Promise<T> {
   return runHookedWriteOperation(

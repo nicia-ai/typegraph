@@ -6,7 +6,7 @@
  * ## What this deliberately does NOT re-export
  *
  * The write pipeline's step and sidecar modules — `node-write-pipeline.ts`,
- * `edge-write-pipeline.ts`, `insert-dispatch.ts`, `uniqueness.ts`,
+ * `edge-write-pipeline.ts`, `insert-dispatch.ts`, the claim modules,
  * `embedding-sync.ts`, `fulltext-sync.ts` — and `write-transaction.ts`'s
  * `runInWriteTransaction` / `runHookedWriteOperation`. A raw row primitive
  * reached through a convenient barrel is exactly the "a new write path forgot
@@ -54,6 +54,18 @@ export {
   nodeUpsertDirtyCheck,
 } from "./node-operations";
 export { runWritePlan } from "./write-executor";
-export { type WritePlan } from "./write-plan";
-export { type WriteSession } from "./write-session";
+export {
+  edgeWritePlan,
+  mixedWritePlan,
+  nodeBatchWritePlan,
+  nodeWritePlan,
+  type RowWorkKind,
+  type WritePlan,
+} from "./write-plan";
+export {
+  type EdgeWriteSession,
+  type NodeWriteSession,
+  type WriteSession,
+  type WriteSessionFor,
+} from "./write-session";
 export { lockSchemaVersionForStoreWrite } from "./write-transaction";

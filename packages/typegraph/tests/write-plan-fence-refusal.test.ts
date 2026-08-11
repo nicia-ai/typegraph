@@ -166,7 +166,7 @@ describe("a fence the row work's statement cannot carry", () => {
 
       const failure: unknown = await runWritePlan(
         writeContext(),
-        nodeWritePlan(undefined, undefined),
+        nodeWritePlan(undefined, false),
         backend,
         (session) =>
           session.reviseNodeSet(work, {
@@ -196,7 +196,7 @@ describe("a fence the row work's statement cannot carry", () => {
 
       const result = await runWritePlan(
         writeContext(),
-        nodeWritePlan(undefined, undefined),
+        nodeWritePlan(undefined, false),
         backend,
         (session) => session.reviseNodeSet(work, { validityLowerBound: {} }),
       );

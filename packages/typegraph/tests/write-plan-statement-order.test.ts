@@ -632,7 +632,7 @@ describe("the executor's own frame keeps that order", () => {
       },
       // A constrained plan with identity participation: the executor owns
       // BOTH decisions, so both are visible in one frame.
-      nodeWritePlan("nodeUniquenessScope", "fold"),
+      nodeWritePlan("nodeUniquenessScope", true),
       backend,
       (session) =>
         session.createNode({

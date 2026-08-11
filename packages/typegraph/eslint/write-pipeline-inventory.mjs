@@ -82,27 +82,68 @@ export const WRITE_PIPELINE_MESSAGE =
  * would close them, and its cost (a rule package plus type information on the
  * lint program) was weighed and rejected.
  */
-export const WRITE_PIPELINE_RESTRICTIONS = [
-  {
-    // 1. direct call: target.insertNode(params)
-    selector: `CallExpression > MemberExpression.callee[property.name=/^(${WRITE_MEMBER_NAMES.join("|")})$/]`,
-    message: WRITE_PIPELINE_MESSAGE,
-  },
-  {
-    // 2. hoist to local: const updateNodeSet = target.updateNodeSet;
-    //    (forced by TypeScript's narrowing of optional members)
-    selector: `VariableDeclarator > MemberExpression.init[property.name=/^(${WRITE_MEMBER_NAMES.join("|")})$/]`,
-    message: WRITE_PIPELINE_MESSAGE,
-  },
-  {
-    // 3. requireDefined wrap: requireDefined(backend.insertNodesBatch)(params)
-    selector: `CallExpression[callee.name="requireDefined"] > MemberExpression[property.name=/^(${WRITE_MEMBER_NAMES.join("|")})$/]`,
-    message: WRITE_PIPELINE_MESSAGE,
-  },
+export function writePipelineMemberRestrictions(memberNames) {
+  if (memberNames.length === 0) return [];
+  const memberPattern = memberNames.join("|");
+  return [
+    {
+      // 1. direct call: target.insertNode(params)
+      selector: `CallExpression > MemberExpression.callee[property.name=/^(${memberPattern})$/]`,
+      message: WRITE_PIPELINE_MESSAGE,
+    },
+    {
+      // 2. hoist to local: const updateNodeSet = target.updateNodeSet;
+      //    (forced by TypeScript's narrowing of optional members)
+      selector: `VariableDeclarator > MemberExpression.init[property.name=/^(${memberPattern})$/]`,
+      message: WRITE_PIPELINE_MESSAGE,
+    },
+    {
+      // 3. requireDefined wrap: requireDefined(backend.insertNodesBatch)(params)
+      selector: `CallExpression[callee.name="requireDefined"] > MemberExpression[property.name=/^(${memberPattern})$/]`,
+      message: WRITE_PIPELINE_MESSAGE,
+    },
+  ];
+}
+
+export const WRITE_PIPELINE_RESTRICTIONS =
+  writePipelineMemberRestrictions(WRITE_MEMBER_NAMES);
+
+export const WRITE_PIPELINE_INTERNAL_IMPORT_NAMES = [
+  "nodeInsertDispatch",
+  "edgeInsertDispatch",
+  "runInsertNoReturn",
+  "runInsertBatch",
+  "runInsertBatchReturning",
+  "applyNodeUpdate",
+  "applyNodeSoftDelete",
+  "applyNodeHardDelete",
+  "applyNodeResurrect",
+  "applyNodeSetUpdate",
+  "applyNodeInsertSyncFans",
+  "applyNodeInsertSyncFansBatch",
+  "applyEdgeUpdate",
+  "applyEdgeSoftDelete",
+  "applyEdgeHardDelete",
 ];
 
+export function writePipelineImportRestrictions(importNames) {
+  if (importNames.length === 0) return [];
+  return [
+    {
+      selector:
+        `ImportDeclaration[source.value=/\\/(?:insert-dispatch|node-write-pipeline|edge-write-pipeline)$/] ` +
+        `ImportSpecifier[imported.name=/^(${importNames.join("|")})$/]`,
+      message:
+        "Write step and insert-dispatch mutation helpers are private to the fused write session. Add a session method and call it through runWritePlan instead of importing a row-only primitive.",
+    },
+  ];
+}
+
+export const WRITE_PIPELINE_IMPORT_RESTRICTIONS =
+  writePipelineImportRestrictions(WRITE_PIPELINE_INTERNAL_IMPORT_NAMES);
+
 /**
- * @typedef {Readonly<{ path: string, reason: string, permanent: boolean }>} WritePipelineExemption
+ * @typedef {Readonly<{ path: string, reason: string, permanent: boolean, allowedMembers: readonly string[], allowedImports?: readonly string[] }>} WritePipelineExemption
  */
 
 /**
@@ -125,82 +166,176 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     reason:
       "The node step bodies themselves (updateNode, deleteNode, hardDeleteNode, and the delete-behavior edge cascade), reachable only through the session.",
     permanent: true,
+    allowedMembers: [
+      "updateNode",
+      "updateNodeSet",
+      "deleteNode",
+      "hardDeleteNode",
+      "deleteEdge",
+      "hardDeleteEdge",
+    ],
   },
   {
     path: "src/store/insert-dispatch.ts",
     reason:
       "Insert dispatch: the one module that knows which of the four insert shapes a backend supports. Called only by session methods.",
     permanent: true,
+    allowedMembers: [
+      "insertNode",
+      "insertNodeNoReturn",
+      "insertNodesBatch",
+      "insertNodesBatchReturning",
+      "insertEdge",
+      "insertEdgeNoReturn",
+      "insertEdgesBatch",
+      "insertEdgesBatchReturning",
+    ],
   },
   {
     path: "src/store/claims/node-claims.ts",
     reason:
       "The node claim sidecar (uniqueness and disjointness reservations in the uniques relation), called only by the write steps and the session methods that own the row each claim gates.",
     permanent: true,
+    allowedMembers: [
+      "insertUnique",
+      "insertUniqueBatch",
+      "deleteUnique",
+      "hardDeleteUniquesByNodeIds",
+    ],
   },
   {
     path: "src/store/claims/resolved-node-claims.ts",
     reason:
       "The resolved-write-set claim sidecar: the key-blind drop and rebuild a set update and a graph merge need, reached only from the step that owns their row write.",
     permanent: true,
+    allowedMembers: ["hardDeleteUniquesByNodeIds"],
   },
   {
     path: "src/store/claims/edge-claims.ts",
     reason:
       "The edge cardinality claim sidecar (the edge_claims relation), called only by the session's edge create methods and the edge write steps.",
     permanent: true,
+    allowedMembers: [
+      "claimEdgeCardinality",
+      "claimEdgeCardinalityBatch",
+      "purgeEdgeClaims",
+    ],
   },
   {
     path: "src/store/claims/backing.ts",
     reason:
       "claimSupport reads the claim members to NARROW them for the sidecars above; it issues no write itself, and the syntactic rule cannot tell a requireDefined presence read from a call.",
     permanent: true,
+    allowedMembers: [
+      "claimEdgeCardinality",
+      "claimEdgeCardinalityBatch",
+      "purgeEdgeClaims",
+      "hardDeleteUniquesByConcreteKind",
+    ],
   },
   {
     path: "src/store/embedding-sync.ts",
     reason: "The embedding sidecar, called only by the write steps.",
     permanent: true,
+    allowedMembers: [
+      "upsertEmbedding",
+      "upsertEmbeddingBatch",
+      "deleteEmbedding",
+      "deleteEmbeddingBatch",
+    ],
   },
   {
     path: "src/store/fulltext-sync.ts",
     reason: "The fulltext sidecar, called only by the write steps.",
     permanent: true,
+    allowedMembers: [
+      "upsertFulltext",
+      "upsertFulltextBatch",
+      "deleteFulltext",
+      "deleteFulltextBatch",
+    ],
   },
   {
     path: "src/store/recorded-capture.ts",
     reason:
       "The capture overlay IS a backend: it wraps every write member and sits BELOW the session, so it cannot route through one.",
     permanent: true,
+    allowedMembers: [
+      "insertNode",
+      "updateNode",
+      "updateNodeSet",
+      "deleteNode",
+      "hardDeleteNode",
+      "insertEdge",
+      "updateEdge",
+      "deleteEdge",
+      "deleteEdgesBatch",
+      "hardDeleteEdge",
+      "hardDeleteEdgesBatch",
+    ],
+    allowedImports: [
+      "nodeInsertDispatch",
+      "edgeInsertDispatch",
+      "runInsertNoReturn",
+      "runInsertBatch",
+      "runInsertBatchReturning",
+    ],
   },
   {
     path: "src/store/fulltext-rebuild.ts",
     reason:
       "Index maintenance that rebuilds the fulltext projection from committed rows. Not a graph write; no WritePlan applies.",
     permanent: true,
+    allowedMembers: [
+      "upsertFulltext",
+      "upsertFulltextBatch",
+      "deleteFulltext",
+      "deleteFulltextBatch",
+    ],
   },
   {
     path: "src/store/store.ts",
     reason:
       "reembedVectorField maintenance and the lifecycle clear() path — store lifecycle, not a managed graph write.",
     permanent: true,
+    allowedMembers: ["upsertEmbedding"],
   },
   {
     path: "src/graph-merge/provenance-store.ts",
     reason:
       "A pre-schema-commit marker write under its own LOCK TABLE fence, inside the schema-write transaction the Store cannot join.",
     permanent: true,
+    allowedMembers: ["insertNode"],
   },
   {
     path: "src/interchange/trusted-import.ts",
     reason:
       "backend.trustedImport is a backend-owned, all-or-nothing ingestion session that takes the managed-write fence itself and requires empty tables; it is documented to bypass the store write pipeline.",
     permanent: true,
+    allowedMembers: ["trustedImport"],
   },
   {
     path: "src/store/operations/edge-write-pipeline.ts",
     reason:
       "The edge step bodies themselves (updateEdge, deleteEdge, hardDeleteEdge), reachable only through the session.",
     permanent: true,
+    allowedMembers: ["updateEdge", "deleteEdge", "hardDeleteEdge"],
+  },
+  {
+    path: "src/store/operations/write-session.ts",
+    reason:
+      "The fused session is the sole ordinary owner of insert-dispatch and row-step mutation helpers.",
+    permanent: true,
+    allowedMembers: [],
+    allowedImports: WRITE_PIPELINE_INTERNAL_IMPORT_NAMES,
+  },
+  {
+    path: "src/provenance/index.ts",
+    reason:
+      "Provenance currency close and reopen are the documented read-compute-write prelude carve-outs.",
+    permanent: true,
+    allowedMembers: [],
+    allowedImports: ["applyNodeSoftDelete", "applyNodeResurrect"],
   },
 ];
 
@@ -250,8 +385,10 @@ export function profileCovers(filePath, profile) {
  * subset of `src/**` must respell its profile's whole restriction list. Doing
  * that by hand for four profiles × two halves is how a guardrail silently
  * disappears from a file. Here each profile states its list once, and the
- * exempt half is the same list MINUS the write-pipeline selectors — which is
- * the only difference an exemption is allowed to make.
+ * exempt files each receive their own block: the same profile restrictions,
+ * plus bans for every write member and private helper that file is NOT
+ * explicitly allowed to own. An exemption is therefore capability-scoped,
+ * not a blanket suspension of the pipeline guardrail.
  *
  * @param {Readonly<{
  *   profiles: readonly Readonly<{
@@ -265,9 +402,10 @@ export function profileCovers(filePath, profile) {
  */
 export function writePipelineBlocks({ profiles, exemptions }) {
   return profiles.flatMap((profile) => {
-    const exemptPaths = exemptions
-      .map((entry) => entry.path)
-      .filter((path) => profileCovers(path, profile));
+    const profileExemptions = exemptions.filter((entry) =>
+      profileCovers(entry.path, profile),
+    );
+    const exemptPaths = profileExemptions.map((entry) => entry.path);
     const ignores = [...(profile.ignores ?? [])];
     return [
       {
@@ -279,20 +417,32 @@ export function writePipelineBlocks({ profiles, exemptions }) {
             "error",
             ...profile.restrictions,
             ...WRITE_PIPELINE_RESTRICTIONS,
+            ...WRITE_PIPELINE_IMPORT_RESTRICTIONS,
           ],
         },
       },
-      ...(exemptPaths.length === 0 ?
+      ...(profileExemptions.length === 0 ?
         []
-      : [
-          {
-            name: `typegraph/write-pipeline/${profile.name}/exempt`,
-            files: exemptPaths,
+      : profileExemptions.map((entry) => {
+          const deniedMembers = WRITE_MEMBER_NAMES.filter(
+            (member) => !entry.allowedMembers.includes(member),
+          );
+          const deniedImports = WRITE_PIPELINE_INTERNAL_IMPORT_NAMES.filter(
+            (name) => !(entry.allowedImports ?? []).includes(name),
+          );
+          return {
+            name: `typegraph/write-pipeline/${profile.name}/exempt/${entry.path}`,
+            files: [entry.path],
             rules: {
-              "no-restricted-syntax": ["error", ...profile.restrictions],
+              "no-restricted-syntax": [
+                "error",
+                ...profile.restrictions,
+                ...writePipelineMemberRestrictions(deniedMembers),
+                ...writePipelineImportRestrictions(deniedImports),
+              ],
             },
-          },
-        ]),
+          };
+        })),
     ];
   });
 }

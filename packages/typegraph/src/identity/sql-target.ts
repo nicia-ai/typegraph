@@ -22,6 +22,8 @@ import { recordedBindParamBudget } from "../store/recorded-capture/relations";
 import { isSqliteStaleSnapshotError } from "../utils/sql-errors";
 
 /**
+ * @internal
+ *
  * What an identity statement runs against: reads, compiled execution, and the
  * optional raw-statement port {@link executeIdentityStatement} refuses without.
  *

@@ -275,7 +275,9 @@ describe("write-pipeline ratchet", () => {
 
   it("lists every violating file, and no file that does not violate", () => {
     const exempt = new Set(
-      WRITE_PIPELINE_EXEMPTIONS.map((entry) => entry.path),
+      WRITE_PIPELINE_EXEMPTIONS.filter(
+        (entry) => entry.allowedMembers.length > 0,
+      ).map((entry) => entry.path),
     );
     const unlisted = [...violatingFiles].filter((file) => !exempt.has(file));
     const stale = [...exempt].filter((file) => !violatingFiles.has(file));
@@ -294,10 +296,41 @@ describe("write-pipeline ratchet", () => {
     expect([...violatingFiles].toSorted()).toEqual([...exempt].toSorted());
   });
 
+  it("allows only the backend members each exempt file actually owns", () => {
+    const exemptionByPath = new Map(
+      WRITE_PIPELINE_EXEMPTIONS.map((entry) => [entry.path, entry]),
+    );
+    const unexpected = violations.filter(
+      (violation) =>
+        !exemptionByPath
+          .get(violation.file)
+          ?.allowedMembers.includes(violation.member),
+    );
+    expect(unexpected).toEqual([]);
+  });
+
+  it("does not retain member permissions an exempt file no longer uses", () => {
+    const actualMembersByPath = new Map<string, Set<string>>();
+    for (const violation of violations) {
+      const actual =
+        actualMembersByPath.get(violation.file) ?? new Set<string>();
+      actual.add(violation.member);
+      actualMembersByPath.set(violation.file, actual);
+    }
+    const stalePermissions = WRITE_PIPELINE_EXEMPTIONS.flatMap((entry) =>
+      entry.allowedMembers
+        .filter((member) => !actualMembersByPath.get(entry.path)?.has(member))
+        .map((member) => ({ file: entry.path, member })),
+    );
+    expect(stalePermissions).toEqual([]);
+  });
+
   it("requires a reason and an explicit permanence on every entry", () => {
     const malformed = WRITE_PIPELINE_EXEMPTIONS.filter(
       (entry) =>
-        entry.reason.trim().length < 20 || typeof entry.permanent !== "boolean",
+        entry.reason.trim().length < 20 ||
+        typeof entry.permanent !== "boolean" ||
+        !Array.isArray(entry.allowedMembers),
     );
     expect(malformed.map((entry) => entry.path)).toEqual([]);
   });
@@ -375,8 +408,14 @@ describe("write-pipeline lint blocks", () => {
       path: "src/store/claims/node-claims.ts",
       reason: "sidecar",
       permanent: true,
+      allowedMembers: ["insertUnique"],
     },
-    { path: "src/store/store.ts", reason: "lifecycle", permanent: true },
+    {
+      path: "src/store/store.ts",
+      reason: "lifecycle",
+      permanent: true,
+      allowedMembers: ["upsertEmbedding"],
+    },
   ] as const;
   const blocks = writePipelineBlocks({ profiles, exemptions });
 
@@ -398,15 +437,15 @@ describe("write-pipeline lint blocks", () => {
   });
 
   it("adds the ban to the in-scheme half and only to it", () => {
-    const inScheme = blocks.filter((block) => !block.name.endsWith("/exempt"));
-    const exempt = blocks.filter((block) => block.name.endsWith("/exempt"));
+    const inScheme = blocks.filter((block) => !block.name.includes("/exempt/"));
+    const exempt = blocks.filter((block) => block.name.includes("/exempt/"));
     expect(inScheme).toHaveLength(2);
     expect(exempt).toHaveLength(2);
     for (const block of inScheme) {
-      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 3);
+      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 3 + 1);
     }
     for (const block of exempt) {
-      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1);
+      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 3 + 1);
     }
   });
 
@@ -422,7 +461,7 @@ describe("write-pipeline lint blocks", () => {
           ),
       );
       expect(covering.map((block) => block.name)).toHaveLength(1);
-      expect(covering[0]?.name).toMatch(/\/exempt$/);
+      expect(covering[0]?.name).toContain("/exempt/");
     }
   });
 

@@ -317,6 +317,7 @@ const WRITE_PIPELINE_PROFILES = [
       "src/interchange/**/*.ts",
       "src/identity/**/*.ts",
       "src/graph-merge/**/*.ts",
+      "src/provenance/**/*.ts",
     ],
     ignores: ["src/identity/historical-sql.ts"],
     restrictions: [

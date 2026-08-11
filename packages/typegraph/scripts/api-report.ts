@@ -44,8 +44,8 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 333,
-    sha256: "e99623d10ef9335279e0c29d88c185af146424df430864e89dd8d25f8bf3b6a2",
+    count: 332,
+    sha256: "65462244035e510f4ec07ba24c4b668995746475c833a04326e9c62082cc17db",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
@@ -84,36 +84,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "0f36d8f84e9a9d75255b39940c5308ae4df2c3dbe1e0cb2683b00ee8cb974f73",
   },
   "./graph-merge": {
-    count: 597,
-    sha256: "acdfc9e70393b96b7d62b98bba3a3b200f41a7af0e6313e06d1a1b28467efe28",
+    count: 596,
+    sha256: "2602b7cf351ab5766587bd91bce19c4483867a0518167e9ede71a3da75b4b1f1",
   },
   "./indexes": {
     count: 43,
     sha256: "49144a0eeda76d83d8ebe63f533e25796e1b7d46fe521a4adc997fb58cb876bb",
   },
   "./interchange": {
-    count: 583,
-    sha256: "f3d6a5bb503271aa77e42401cb716e2c5dc65644f17935898c02cf9f5a088c13",
+    count: 582,
+    sha256: "f42fd1d4e224b58d76cef5d7a2eed2818f5cb2ad17062aeea729648996f4dea1",
   },
   "./postgres/pglite": {
-    count: 587,
-    sha256: "0165a9b6df097abe5c959d0ad2f78ab6144f867aaee70c0a5e2fd889a92a0e0f",
+    count: 586,
+    sha256: "ff22cb781357b0aaef076b8450d725a4a22f0a7bf91f3e6f3252310ab7137f7e",
   },
   "./profiler": {
-    count: 585,
-    sha256: "339c0320a9cc5f35682bf77a744c7ada4903a51c6b35372878116143742384aa",
+    count: 584,
+    sha256: "a8b757cd06c69a91dca4bc9001d793146d6d7265be8fc565bdc5597b35dec18d",
   },
   "./provenance": {
-    count: 591,
-    sha256: "e1500f540adc7dc8aad700c845d5dc03caa2fb61bb3f0e747757c1f42acc9532",
+    count: 590,
+    sha256: "d47c52bbc50d60dce2c29ca512839e740e516c5b7d711fcfb01205f3f107d015",
   },
   "./schema": {
     count: 222,
     sha256: "cd081c533e51a5f04d6ae51dc78d6c760b996081f753521f0b5babade8b8c77f",
   },
   "./sqlite/local": {
-    count: 587,
-    sha256: "0165a9b6df097abe5c959d0ad2f78ab6144f867aaee70c0a5e2fd889a92a0e0f",
+    count: 586,
+    sha256: "ff22cb781357b0aaef076b8450d725a4a22f0a7bf91f3e6f3252310ab7137f7e",
   },
 };
 

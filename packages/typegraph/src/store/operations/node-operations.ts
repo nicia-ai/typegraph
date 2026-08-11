@@ -152,14 +152,10 @@ import {
   runWritePlan,
 } from "./write-executor";
 import { type NodeUpdateFences } from "./write-fences";
-import {
-  type IdentityParticipation,
-  nodeBatchWritePlan,
-  nodeWritePlan,
-} from "./write-plan";
+import { nodeBatchWritePlan, nodeWritePlan } from "./write-plan";
 import {
   type NodeInsertWork,
-  type WriteSession,
+  type NodeWriteSession,
   type WriteTarget,
 } from "./write-session";
 
@@ -328,11 +324,10 @@ function nodeWritePlanContext<G extends GraphDef>(
  * identity — the one place the `if (identity !== undefined)` that used to be
  * re-spelled at every node write site now lives.
  */
-function nodeIdentityParticipation<G extends GraphDef>(
+function nodeRequiresIdentityLock<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  participation: IdentityParticipation,
-): IdentityParticipation | undefined {
-  return ctx.identity === undefined ? undefined : participation;
+): boolean {
+  return ctx.identity !== undefined;
 }
 
 function buildNodeCacheKey(graphId: string, kind: string, id: string): string {
@@ -984,7 +979,7 @@ export function nodeUpsertDirtyCheck<G extends GraphDef>(
 async function performNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
-  session: WriteSession,
+  session: NodeWriteSession,
   target: WriteTarget,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
@@ -1176,7 +1171,7 @@ const NODE_UPDATE_ATTEMPTS = 2;
 async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
-  session: WriteSession,
+  session: NodeWriteSession,
   target: WriteTarget,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
@@ -1432,7 +1427,7 @@ function isNodeUpdateNoRowError(
 
 async function resurrectPreparedNode<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  session: WriteSession,
+  session: NodeWriteSession,
   target: WriteTarget,
   prepared: NodeCreatePrepared,
 ): Promise<BackendNodeRow> {
@@ -1633,7 +1628,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     opContext,
     nodeWritePlan(
       nodeFencesConstraintProbe(ctx, kind, "create"),
-      nodeIdentityParticipation(ctx, "fold"),
+      nodeRequiresIdentityLock(ctx),
     ),
     backend,
     async (session, target) => {
@@ -1735,7 +1730,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     nodeWritePlanContext(ctx),
     nodeBatchWritePlan(
       nodeBatchConstraintProbes(ctx, inputs, "create"),
-      nodeIdentityParticipation(ctx, "fold"),
+      nodeRequiresIdentityLock(ctx),
     ),
     backend,
     async (session, target) => {
@@ -1792,7 +1787,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
     nodeWritePlanContext(ctx),
     nodeBatchWritePlan(
       nodeBatchConstraintProbes(ctx, inputs, "create"),
-      nodeIdentityParticipation(ctx, "fold"),
+      nodeRequiresIdentityLock(ctx),
     ),
     backend,
     async (session, target) => {
@@ -1871,8 +1866,8 @@ export async function executeNodeUpdate<G extends GraphDef>(
       // states a validity end: a live-row update cannot change a node's kind, so
       // nothing folds, but an end reads the identity assertions that touch it.
       options?.clearDeleted === true || input.validTo !== undefined ?
-        nodeIdentityParticipation(ctx, "fold")
-      : undefined,
+        nodeRequiresIdentityLock(ctx)
+      : false,
     ),
     backend,
     async (session, target) => {
@@ -2036,7 +2031,7 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
       // constraint makes it a constrained write like any other update.
       // Identity does not participate: a set update rewrites props, and no
       // patch can change a node's kind.
-      nodeWritePlan(nodeFencesConstraintProbe(ctx, kind, "update"), undefined),
+      nodeWritePlan(nodeFencesConstraintProbe(ctx, kind, "update"), false),
       backend,
       (session) =>
         session.reviseNodeSet(
@@ -2081,8 +2076,8 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
       // resurrecting upsert folds, and stating a validity end reads the
       // identity's other members, so both take the lock.
       options?.clearDeleted === true || input.validTo !== undefined ?
-        nodeIdentityParticipation(ctx, "fold")
-      : undefined,
+        nodeRequiresIdentityLock(ctx)
+      : false,
     ),
     backend,
     async (session, target) => {
@@ -2138,7 +2133,7 @@ export async function executeNodeDelete<G extends GraphDef>(
   return runHookedWritePlan(
     nodeWritePlanContext(ctx),
     opContext,
-    nodeWritePlan(undefined, nodeIdentityParticipation(ctx, "detach")),
+    nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
     backend,
     async (session, target) => {
       const identity = ctx.identity;
@@ -2182,7 +2177,7 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
 ): Promise<void> {
   await runWritePlan(
     nodeWritePlanContext(ctx),
-    nodeWritePlan(undefined, nodeIdentityParticipation(ctx, "detach")),
+    nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
     backend,
     async (session, target) => {
       const identity = ctx.identity;
@@ -2237,7 +2232,7 @@ export async function executeNodeHardDelete<G extends GraphDef>(
   return runHookedWritePlan(
     nodeWritePlanContext(ctx),
     opContext,
-    nodeWritePlan(undefined, nodeIdentityParticipation(ctx, "detach")),
+    nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
     backend,
     async (session, target) => {
       const identity = ctx.identity;

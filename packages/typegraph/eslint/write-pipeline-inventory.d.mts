@@ -12,6 +12,8 @@ export type WritePipelineExemption = Readonly<{
   path: string;
   reason: string;
   permanent: boolean;
+  allowedMembers: readonly string[];
+  allowedImports?: readonly string[];
 }>;
 
 export type WritePipelineRestriction = Readonly<{
@@ -38,7 +40,17 @@ export type WritePipelineBlock = Readonly<{
 export declare const WRITE_MEMBER_NAMES: readonly string[];
 export declare const WRITE_PIPELINE_MESSAGE: string;
 export declare const WRITE_PIPELINE_RESTRICTIONS: readonly WritePipelineRestriction[];
+export declare const WRITE_PIPELINE_INTERNAL_IMPORT_NAMES: readonly string[];
+export declare const WRITE_PIPELINE_IMPORT_RESTRICTIONS: readonly WritePipelineRestriction[];
 export declare const WRITE_PIPELINE_EXEMPTIONS: readonly WritePipelineExemption[];
+
+export declare function writePipelineMemberRestrictions(
+  memberNames: readonly string[],
+): readonly WritePipelineRestriction[];
+
+export declare function writePipelineImportRestrictions(
+  importNames: readonly string[],
+): readonly WritePipelineRestriction[];
 
 export declare function matchesFilePattern(
   filePath: string,

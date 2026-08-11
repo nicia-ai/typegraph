@@ -1,4 +1,13 @@
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import {
+  type BackendIdentity,
+  type GraphBackend,
+  type GraphEntityReadBackend,
+  type QueryExecutionBackend,
+  type RawQueryExecutionBackend,
+  type SchemaReadBackend,
+  type SqlCompilationBackend,
+  type TransactionBackend,
+} from "../backend/types";
 import {
   type AllNodeTypes,
   type EdgeKinds,
@@ -12,7 +21,6 @@ import {
   type NodeId,
   type NodeType,
 } from "../core/types";
-import { type IdentityTarget } from "../identity/sql-target";
 import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
@@ -231,13 +239,39 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
       done: boolean;
     }>
   >;
-  lockIdentityImportTarget: (target: IdentityTarget) => Promise<void>;
+  lockIdentityImportTarget: (
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
+  ) => Promise<void>;
   foldImportedIdentityNodes: (
-    target: IdentityTarget,
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
   importIdentityAssertionsAtTarget: (
-    target: IdentityTarget,
+    target: Readonly<
+      BackendIdentity &
+        GraphEntityReadBackend &
+        SchemaReadBackend &
+        QueryExecutionBackend &
+        SqlCompilationBackend &
+        RawQueryExecutionBackend &
+        Pick<GraphBackend, "executeStatement">
+    >,
     assertions: readonly Readonly<{
       id: string;
       relation: "same" | "different";

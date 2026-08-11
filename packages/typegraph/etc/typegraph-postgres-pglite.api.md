@@ -1956,9 +1956,6 @@ type IdentityTableNames = Readonly<{
 }>;
 
 // @public
-type IdentityTarget = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>;
-
-// @public
 type IdentityTraversalOption<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
     includeIdentityMembers?: boolean;
 }> : Readonly<{
@@ -4015,12 +4012,12 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         nextAfter?: string;
         done: boolean;
     }>>;
-    lockIdentityImportTarget: (target: IdentityTarget) => Promise<void>;
-    foldImportedIdentityNodes: (target: IdentityTarget, references: readonly Readonly<{
+    lockIdentityImportTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>) => Promise<void>;
+    foldImportedIdentityNodes: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, references: readonly Readonly<{
         kind: string;
         id: string;
     }>[]) => Promise<void>;
-    importIdentityAssertionsAtTarget: (target: IdentityTarget, assertions: readonly Readonly<{
+    importIdentityAssertionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{

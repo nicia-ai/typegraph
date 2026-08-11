@@ -21,35 +21,27 @@
 import { type ConstraintFenceReason } from "../constraints";
 
 /**
- * The row-work family, which DETERMINES the sidecar set a write owes. Not a
- * caller choice: a node write's sidecars are the node sidecars, whatever the
- * caller intended.
+ * The row-work family, which determines the session surface handed to row
+ * work. A node plan can call only node session methods, an edge plan only edge
+ * methods, and the deliberately mixed import plan can call both.
  *
- * `"identity"` names the third family for completeness of the taxonomy — an
- * identity assertion is neither a node nor an edge row and has no sidecars.
- * No builder produces it, because the two managed writes in that family
- * (`identity/service-facade.ts` and `store.rebuildIdentityClosure`) are
- * permanently allowlisted rather than migrated: they gain no session, no
- * fences and no sidecars from a plan.
+ * `"mixed"` is explicit rather than pretending a frame that writes both node
+ * and edge rows belongs to one family. Interchange import is its sole caller.
  */
-type RowWorkKind = "node" | "edge" | "identity";
+export type RowWorkKind = "node" | "edge" | "mixed";
 
 /**
- * Why identity participates in this write. The executor acquires the identity
- * lock from `ctx.identityLock` when this is set; the reason is recorded
- * because the fold / detach / assert legs differ in what they do AFTER the row
- * work, and a reader of the plan should not have to find that out from the row
- * work.
+ * Whether identity participates in this write. The executor owns only the lock
+ * requirement; fold, detach, and assertion behavior remains typed row work and
+ * is deliberately not encoded as inert plan data the executor would ignore.
  *
  * NOTE what this is not: a lock ORDER. There is no `LockPlan`. Positions 1, 2
  * and 5 are decided and acquired by `write-transaction.ts` and the capture
  * overlay, which own the state those locks guard; the plan re-spells none of
  * them.
  */
-export type IdentityParticipation = "fold" | "detach" | "assert" | "import";
-
-export type WritePlan = Readonly<{
-  entity: RowWorkKind;
+export type WritePlan<K extends RowWorkKind = RowWorkKind> = Readonly<{
+  entity: K;
   /**
    * The declared constraint that makes this a constrained write, or
    * `undefined`. Threaded verbatim into `runInWriteTransaction`'s existing
@@ -57,15 +49,15 @@ export type WritePlan = Readonly<{
    * now carried as data instead of spelled at the call.
    */
   constraintProbe: ConstraintFenceReason | undefined;
-  identity: IdentityParticipation | undefined;
+  requiresIdentityLock: boolean;
 }>;
 
 /** The plan for one node write. */
 export function nodeWritePlan(
   constraintProbe: ConstraintFenceReason | undefined,
-  identity: IdentityParticipation | undefined,
-): WritePlan {
-  return { entity: "node", constraintProbe, identity };
+  requiresIdentityLock: boolean,
+): WritePlan<"node"> {
+  return { entity: "node", constraintProbe, requiresIdentityLock };
 }
 
 /**
@@ -82,12 +74,12 @@ export function nodeWritePlan(
  */
 export function nodeBatchWritePlan(
   constraintProbes: readonly (ConstraintFenceReason | undefined)[],
-  identity: IdentityParticipation | undefined,
-): WritePlan {
+  requiresIdentityLock: boolean,
+): WritePlan<"node"> {
   return {
     entity: "node",
     constraintProbe: constraintProbes.find((probe) => probe !== undefined),
-    identity,
+    requiresIdentityLock,
   };
 }
 
@@ -98,6 +90,14 @@ export function nodeBatchWritePlan(
  */
 export function edgeWritePlan(
   constraintProbe: ConstraintFenceReason | undefined,
-): WritePlan {
-  return { entity: "edge", constraintProbe, identity: undefined };
+): WritePlan<"edge"> {
+  return { entity: "edge", constraintProbe, requiresIdentityLock: false };
+}
+
+/** A single frame that deliberately coordinates node and edge writes. */
+export function mixedWritePlan(
+  constraintProbe: ConstraintFenceReason | undefined,
+  requiresIdentityLock: boolean,
+): WritePlan<"mixed"> {
+  return { entity: "mixed", constraintProbe, requiresIdentityLock };
 }

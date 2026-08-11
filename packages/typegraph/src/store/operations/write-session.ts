@@ -51,6 +51,7 @@ import {
   type NodeRow,
   type QueryExecutionBackend,
   type RawQueryExecutionBackend,
+  type RawStatementExecutionBackend,
   type SchemaReadBackend,
   type SqlCompilationBackend,
   type TombstonedNodeRow,
@@ -136,6 +137,7 @@ export type WriteTarget = Readonly<
     QueryExecutionBackend &
     SqlCompilationBackend &
     RawQueryExecutionBackend &
+    RawStatementExecutionBackend &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<VectorOperationBackend, "vectorSearch"> &
     Pick<FulltextOperationBackend, "fulltextSearch">
@@ -272,7 +274,7 @@ function edgeBatchClaims(
   return work.flatMap((item) => (item.claim === undefined ? [] : [item.claim]));
 }
 
-export type WriteSession = Readonly<{
+export type NodeWriteSession = Readonly<{
   // ---- B0: delegates to node-write-pipeline.ts + insert-dispatch.ts
   createNode: (work: NodeInsertWork) => Promise<NodeRow>;
   createNodeNoReturn: (work: NodeInsertWork) => Promise<void>;
@@ -294,7 +296,9 @@ export type WriteSession = Readonly<{
     work: NodeSetUpdateWork,
     fences: NodeSetUpdateFences,
   ) => Promise<NodeSetUpdateResult>;
+}>;
 
+export type EdgeWriteSession = Readonly<{
   // ---- B2: delegates to edge-write-pipeline.ts + insert-dispatch.ts
   createEdge: (work: EdgeInsertWork) => Promise<EdgeRow>;
   createEdgeNoReturn: (work: EdgeInsertWork) => Promise<void>;
@@ -307,6 +311,13 @@ export type WriteSession = Readonly<{
   retireEdge: (work: EdgeDeleteWork) => Promise<void>;
   purgeEdge: (work: EdgeHardDeleteWork) => Promise<void>;
 }>;
+
+export type WriteSession = NodeWriteSession & EdgeWriteSession;
+
+export type WriteSessionFor<K extends "node" | "edge" | "mixed"> =
+  K extends "node" ? NodeWriteSession
+  : K extends "edge" ? EdgeWriteSession
+  : WriteSession;
 
 // No session method may collide with a banned backend member name: the lint
 // rule is syntactic and receiver-blind, so a collision would make the rule
