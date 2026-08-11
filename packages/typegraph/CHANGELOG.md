@@ -1,5 +1,19 @@
 # @nicia-ai/typegraph
 
+## 0.49.0
+
+### Minor Changes
+
+- [#488](https://github.com/nicia-ai/typegraph/pull/488) [`0db8f9c`](https://github.com/nicia-ai/typegraph/commit/0db8f9c68ae0a13c9363f393c889d56c48114f4c) Thanks [@pdlug](https://github.com/pdlug)! - Allow `importGraph` and `importGraphStream` to stage interchange data directly into an opaque ingestion branch while preserving its deferred-uniqueness boundary.
+
+- [#486](https://github.com/nicia-ai/typegraph/pull/486) [`b82d436`](https://github.com/nicia-ai/typegraph/commit/b82d436a5c151ee6fa230591861785f82aaee302) Thanks [@pdlug](https://github.com/pdlug)! - Let constraint-aware ingestion branches stage Operational Identity same and different assertions through a conditional assertion-only facade, so duplicate unique aliases and their identity evidence can reach merge planning together.
+
+### Patch Changes
+
+- [#485](https://github.com/nicia-ai/typegraph/pull/485) [`184fc96`](https://github.com/nicia-ai/typegraph/commit/184fc965e20973b6196fb1349e91e4139c3e6b27) Thanks [@pdlug](https://github.com/pdlug)! - Stop publishing a private workspace ESLint config in package metadata, preventing lockfile-refreshing pnpm installs from resolving an unpublished package.
+
+- [#489](https://github.com/nicia-ai/typegraph/pull/489) [`f4e31d9`](https://github.com/nicia-ai/typegraph/commit/f4e31d91d04faf93033b124bc351c39458ec16d3) Thanks [@pdlug](https://github.com/pdlug)! - Translate missing fulltext storage failures from Cloudflare Durable Objects SQLite into `ContributionUnavailableError` while preserving the underlying database error and transactional rollback.
+
 ## 0.48.0
 
 ### Minor Changes
