@@ -2838,6 +2838,9 @@ export type IdentityAssertionResult<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
+export type IdentityAssertionWriteFacade<G extends GraphDef> = Pick<IdentityFacade<G>, "assertSame" | "assertDifferent" | "bulkAssertSame" | "bulkAssertDifferent">;
+
+// @public
 export type IdentityChange = Readonly<{
     type: ChangeType;
     severity: ChangeSeverity;

@@ -851,10 +851,14 @@ const incoming = unwrap(
   }),
 );
 
-await incoming.nodes.Patient.create(
+const alias = await incoming.nodes.Patient.create(
   { name: "Ana Rivera", cohort: "C1", mrn: "MRN-123" },
   { id: "incoming-patient" },
 );
+
+// `canonicalPatient` is an existing Patient read from the base before forking.
+// The repeated MRN and its identity evidence can be staged together.
+await incoming.identity.assertSame(canonicalPatient, alias);
 
 const plan = unwrap(
   await planMergeIncremental({
@@ -877,14 +881,27 @@ const applied = unwrap(await applyMergePlan(base, plan));
 await incoming.close();
 ```
 
-The returned handle exposes ingestion collections, not the branch's underlying
-`Store`, so callers cannot bypass the deferred-constraint contract or run schema
-operations on the derived working copy. The original graph definition remains
-the merge contract: `applyMergePlan()` validates node uniqueness against the
-entire resolved write set in the target transaction. Valid key handoffs and
-swaps are accepted as one set. If reviewed resolution leaves two live owners of
-the same unique key, the merge returns `MergeConstraintConflictError` and
-commits no graph or provenance writes.
+On an identity-enabled graph, the handle also exposes an assertion-only
+`IdentityAssertionWriteFacade` as `identity`: `assertSame`, `assertDifferent`,
+`bulkAssertSame`, and `bulkAssertDifferent`. This lets a batch stage aliases
+that repeat unique keys and the explicit identity evidence needed to reconcile
+them before merge-time constraint validation. Assertion contradictions and
+invalid endpoints are still refused while staging; only node uniqueness is
+deferred.
+
+The returned handle exposes those ingestion collections and identity assertion
+writes, not the branch's underlying `Store`. Identity reads and retractions,
+schema operations, transactions, and runtime internals remain unavailable, so
+callers cannot bypass the deferred-constraint contract. As with `Store`, the
+`identity` property is absent at the type level when the graph does not enable
+Operational Identity.
+
+The original graph definition remains the merge contract:
+`applyMergePlan()` validates node uniqueness against the entire resolved write
+set in the target transaction. Valid key handoffs and swaps are accepted as one
+set. If reviewed resolution leaves two live owners of the same unique key, the
+merge returns `MergeConstraintConflictError` and commits no graph or provenance
+writes.
 
 The derived schema is persisted on the working-copy backend, so the relaxed
 contract is auditable and an explicit reattachment with an equivalent graph

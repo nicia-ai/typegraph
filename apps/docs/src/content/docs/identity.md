@@ -21,15 +21,22 @@ const graph = defineGraph({
 });
 ```
 
-The option is serialized with the schema. Enabled graph types expose
-`store.identity`, `tx.identity`, read-only `StoreView.identity`, and the
-identity traversal option. All three use the same conditional-**presence**
-encoding: on an identity-disabled graph type, `identity` does not exist on
-`Store`, `TransactionContext`, or the read-only views at all — reaching for it
-is a compile error, not a `never`-typed property. A runtime `ConfigurationError`
-with details code `IDENTITY_NOT_ENABLED` backs every one of those getters too,
-for the widened or `any`-typed handles TypeScript can't check (a JavaScript
-caller, or a store handle that lost its precise graph type).
+The option is serialized with the schema. Enabled graph types expose the full
+facade as `store.identity` and `tx.identity`, a read-only facade as
+`StoreView.identity`, and the identity traversal option. These surfaces use
+conditional **presence**: on an identity-disabled graph type, `identity` does
+not exist on `Store`, `TransactionContext`, or the read-only views at all —
+reaching for it is a compile error, not a `never`-typed property. A runtime
+`ConfigurationError` with details code `IDENTITY_NOT_ENABLED` backs those
+getters too, for widened or `any`-typed handles TypeScript can't check (a
+JavaScript caller, or a store handle that lost its precise graph type).
+
+Constraint-aware `IngestionBranch` handles follow the same conditional-presence
+contract, but expose only `assertSame`, `assertDifferent`, and their bulk forms.
+Reads and retractions stay unavailable so untrusted batches can stage identity
+evidence without gaining the full operational surface. See
+[Constraint-aware ingestion branches](/graph-merge/#constraint-aware-ingestion-branches)
+for the staging and merge workflow.
 
 At runtime, a disabled graph does no identity work: no identity locks, probes,
 closure computation, or identity SQL run. That guarantee is scoped to runtime

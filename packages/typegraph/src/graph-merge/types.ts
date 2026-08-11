@@ -17,6 +17,7 @@ import type {
   EdgeId,
   GetNodeType,
   GraphDef,
+  IdentityAssertionWriteFacade,
   JsonValue,
   Node,
   NodeId,
@@ -124,7 +125,10 @@ export type IngestionBranch<G extends GraphDef> = Readonly<{
   nodes: IngestionNodeCollections<G>;
   edges: Store<G>["edges"];
   close: () => Promise<void>;
-}>;
+}> &
+  ("identity" extends keyof Store<G> ?
+    Readonly<{ identity: IdentityAssertionWriteFacade<G> }>
+  : Readonly<Record<never, never>>);
 
 /** A normal branch or an opaque ingestion branch accepted by merge entrypoints. */
 export type MergeBranch<G extends GraphDef> =
