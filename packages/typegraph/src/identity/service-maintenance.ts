@@ -1,6 +1,10 @@
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
-import { ConfigurationError, IdentityContradictionError } from "../errors";
+import {
+  ConfigurationError,
+  IdentityContradictionError,
+  IdentityEndpointValidityError,
+} from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
@@ -766,6 +770,43 @@ async function readNodeDeletionInstant(
   return row === undefined ? undefined : (
       optionalIdentityTimestamp(row.deleted_at)
     );
+}
+
+/** Refuses a finite node window that would strand identity assertion history. */
+export async function requireNodeValidityEndCompatible(
+  ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
+  target: Backend,
+  ref: PlainNodeRef,
+  validTo: string,
+): Promise<void> {
+  const rows = await target.execute<RawIdentityAssertionRow>(
+    asCompiledRowsSql(sql`
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
+      FROM ${ctx.schema.identityAssertionsTable}
+      WHERE graph_id = ${ctx.graphId}
+        AND deleted_at IS NULL
+        AND (valid_to IS NULL OR valid_to > ${validTo})
+        AND (
+          (a_kind = ${ref.kind} AND a_id = ${ref.id})
+          OR (b_kind = ${ref.kind} AND b_id = ${ref.id})
+        )
+      ORDER BY id
+      LIMIT 1
+    `),
+  );
+  const row = rows.at(0);
+  if (row === undefined) return;
+  const assertion = normalizeIdentityAssertionRow(row);
+  throw new IdentityEndpointValidityError({
+    endpoint: ref,
+    assertionWindow: {
+      validFrom: assertion.valid_from,
+      ...(assertion.valid_to === undefined ?
+        {}
+      : { validTo: assertion.valid_to }),
+    },
+    endpointWindow: { validTo },
+  });
 }
 
 export async function detachIdentityForNode(

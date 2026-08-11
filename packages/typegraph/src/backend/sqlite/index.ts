@@ -32,6 +32,7 @@ export {
   type SqliteTransactionMode,
   tables,
 } from "../drizzle/sqlite";
+export type { SerializedResourceDeclaration } from "../transaction-resource";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
@@ -42,6 +43,7 @@ export type {
 // Schema: table definitions and factory options
 export {
   type CreateSqliteTablesOptions,
+  edgeClaims,
   edges,
   nodes,
   recordedClock,

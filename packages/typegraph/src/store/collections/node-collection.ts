@@ -40,7 +40,12 @@ import {
   type NodeGetOrCreateByConstraintResult,
   type QueryOptions,
   type UpdateNodeInput,
+  type ValidityEndMutation,
 } from "../types";
+import {
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+} from "../validity-end";
 import {
   findRepeatedUpsertIds,
   shouldCoalesceUpsert,
@@ -60,9 +65,9 @@ type OnImmutableLowerBound = "preserve" | "refuse";
 
 type NodeUpsertOptions = Readonly<{
   validFrom?: string;
-  validTo?: string;
   onImmutableLowerBound?: OnImmutableLowerBound;
-}>;
+}> &
+  ValidityEndMutation;
 
 /**
  * Narrows unparameterized Node to Node<N>.
@@ -138,9 +143,13 @@ function evaluateNodePredicate<N extends NodeType>(
  * Update input for the internal upsert path, which owns the WHOLE validity
  * window: a resurrecting upsert rewrites both endpoints, so it must be able to
  * carry `validFrom` as well as `validTo`. Dropping `validFrom` here would leave
- * the backend defaulting the lower bound to the resurrection instant while the
- * caller's (possibly already past) `validTo` stayed — an inverted window that
- * no read coordinate can observe.
+ * a stated lower bound unreachable by the only node write that stores one: a
+ * resurrection rewrites `valid_from` whether or not the caller named it, so the
+ * caller's bound would be replaced by the instant that write stamps rather than
+ * honored. It would no longer INVERT the window — a resurrection stating only a
+ * historical `validTo` stores no lower bound at all — which is why the sibling
+ * note on `UpsertUpdateEdgeInput` still reads in terms of inversion and this one
+ * does not: an edge resurrection RETAINS its stored bound.
  *
  * The public `update()` API cannot reach this member: its options type exposes
  * `validTo` only, and it builds its input through {@link buildUpdateInput}. Only
@@ -270,15 +279,17 @@ function buildUpdateInput(
   kind: string,
   id: string,
   props: Record<string, unknown>,
-  options?: Readonly<{ validTo?: string }>,
+  options?: ValidityEndMutation,
 ): UpdateNodeInput {
   const input: {
     kind: string;
     id: string;
     props: Partial<Record<string, unknown>>;
     validTo?: string;
+    clearValidTo?: true;
   } = { kind, id, props };
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
   return input as UpdateNodeInput;
 }
 
@@ -287,7 +298,12 @@ function buildUpsertUpdateInput(
   kind: string,
   id: string,
   props: Record<string, unknown>,
-  options?: NodeUpsertOptions,
+  options?: Readonly<{
+    validFrom?: string;
+    validTo?: string;
+    clearValidTo?: true;
+    onImmutableLowerBound?: OnImmutableLowerBound;
+  }>,
 ): UpsertUpdateNodeInput {
   const input: {
     kind: string;
@@ -295,10 +311,12 @@ function buildUpsertUpdateInput(
     props: Partial<Record<string, unknown>>;
     validFrom?: string;
     validTo?: string;
+    clearValidTo?: true;
     onImmutableLowerBound?: OnImmutableLowerBound;
   } = { kind, id, props };
   if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
   if (options?.onImmutableLowerBound !== undefined) {
     input.onImmutableLowerBound = options.onImmutableLowerBound;
   }
@@ -399,7 +417,7 @@ export function createNodeCollection<
     async update(
       id: NodeId<N>,
       props: Partial<z.input<N["schema"]>>,
-      options?: Readonly<{ validTo?: string }>,
+      options?: ValidityEndMutation,
     ): Promise<Node<N>> {
       const result = await executeNodeUpdate(
         buildUpdateInput(kind, id, props, options),
@@ -588,6 +606,14 @@ export function createNodeCollection<
       data: Record<string, unknown>,
       options?: NodeUpsertOptions,
     ): Promise<Node<N>> {
+      assertValidityEndMutation(options ?? {}, {
+        entityType: "node",
+        kind,
+        id,
+      });
+      if (options?.clearValidTo === true) {
+        assertClearValidToSupported(backend, "node");
+      }
       const existing = await backend.getNode(graphId, kind, id);
 
       // Coalesce a value-identical replay: skip the write entirely (no
@@ -702,10 +728,22 @@ export function createNodeCollection<
         props: z.input<N["schema"]>;
         validFrom?: string;
         validTo?: string;
+        clearValidTo?: true;
         onImmutableLowerBound?: OnImmutableLowerBound;
       }>[],
     ): Promise<Node<N>[]> {
       if (items.length === 0) return [];
+
+      for (const item of items) {
+        assertValidityEndMutation(item, {
+          entityType: "node",
+          kind,
+          id: item.id,
+        });
+        if (item.clearValidTo === true) {
+          assertClearValidToSupported(backend, "node");
+        }
+      }
 
       const upsertAll = async (
         target: GraphBackend | TransactionBackend,

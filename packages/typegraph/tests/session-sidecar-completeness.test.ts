@@ -12,7 +12,7 @@
  *
  * The sidecars a node write owes:
  *
- *  - uniqueness entries (`insertUnique*` / `deleteUnique`),
+ *  - CLAIMS in the `uniques` relation (`insertUnique*` / `deleteUnique`),
  *  - fulltext (`upsertFulltext*` / `deleteFulltext`),
  *  - embeddings (`upsertEmbedding*` / `deleteEmbedding`), and
  *  - for the delete legs, the DELETE-BEHAVIOR EDGE CASCADE
@@ -20,10 +20,14 @@
  *    that lives one module away from the others and is easy to forget exactly
  *    because of that.
  *
- * An EDGE write obliges none of them, and the seven edge rows say so with an
- * empty sidecar list. That empty list is a CLAIM, not an omission, so it is
- * asserted as one: a case that declares no sidecars must issue its row
- * statement and NOTHING else off the watched set.
+ * An edge write obliges no DERIVED data, but a CONSTRAINED edge kind owes a claim
+ * in the `edge_claims` relation, which is why the edge rows run against a
+ * `cardinality: "unique"` kind: an unconstrained kind would let every edge row
+ * pass with an empty sidecar list and the claim placements would be guarded by
+ * nothing. The rows that legitimately owe nothing say so with an empty list, and
+ * that empty list is a CLAIM, not an omission, so it is asserted as one: a case
+ * that declares no sidecars must issue its row statement and NOTHING else off
+ * the watched set.
  *
  * Observed as backend member CALLS through the same counting-wrapper idiom
  * `bulk-create-batching.test.ts` uses: what is under test is which statements
@@ -47,6 +51,10 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+} from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type GraphBackend,
@@ -61,6 +69,7 @@ import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledSelectSql } from "../src/query/sql-intent";
 import { buildKindRegistry } from "../src/registry";
+import { edgeCardinalityClaim } from "../src/store/claims/edge-claims";
 import {
   runWritePlan,
   type WritePlanContext,
@@ -88,6 +97,12 @@ const Document = defineNode("Doc", {
 });
 
 const links = defineEdge("links", { schema: z.object({}) });
+/**
+ * A CONSTRAINED edge kind, so the edge rows exercise the claim their cardinality
+ * owes. `unique` keys on the endpoint PAIR, which is what lets one batch create
+ * two claiming edges from the same source without contending with itself.
+ */
+const owns = defineEdge("owns", { schema: z.object({}) });
 
 const graph = defineGraph({
   id: GRAPH_ID,
@@ -104,7 +119,15 @@ const graph = defineGraph({
       ],
     },
   },
-  edges: { links: { type: links, from: [Document], to: [Document] } },
+  edges: {
+    links: { type: links, from: [Document], to: [Document] },
+    owns: {
+      type: owns,
+      from: [Document],
+      to: [Document],
+      cardinality: "unique",
+    },
+  },
 });
 
 const registry = buildKindRegistry(graph);
@@ -117,6 +140,10 @@ const WATCHED_MEMBERS = [
   "insertUniqueBatch",
   "deleteUnique",
   "hardDeleteUniquesByNodeIds",
+  "hardDeleteUniquesByConcreteKind",
+  "claimEdgeCardinality",
+  "claimEdgeCardinalityBatch",
+  "purgeEdgeClaims",
   "upsertFulltext",
   "upsertFulltextBatch",
   "deleteFulltext",
@@ -159,31 +186,39 @@ function emptyCounts(): CallCounts {
 function withCallCounts(backend: GraphBackend): Readonly<{
   backend: GraphBackend;
   counts: CallCounts;
+  /** Every watched call in the order it was issued — see `preRow` / `postRow`. */
+  sequence: WatchedMember[];
 }> {
   const counts = emptyCounts();
+  const sequence: WatchedMember[] = [];
 
   function wrapMethods<T extends GraphBackend | TransactionBackend>(
     target: T,
   ): T {
-    const wrapped = { ...target } as Record<string, unknown>;
+    const overlay: Record<string, unknown> = {};
     for (const member of WATCHED_MEMBERS) {
       const original = (target as Record<string, unknown>)[member];
       if (typeof original !== "function") continue;
-      wrapped[member] = (...args: unknown[]) => {
+      overlay[member] = (...args: unknown[]) => {
         counts[member] += 1;
+        sequence.push(member);
         return (original as (...a: unknown[]) => unknown).apply(target, args);
       };
     }
-    return wrapped as T;
+    // Derived, never spread: a fixture built by copying a backend is the #435
+    // defect written into the double the store under test then runs against.
+    // The cast states what a keyed loop cannot show the compiler — every overlay
+    // member IS the target's own function with a counter in front of it.
+    return deriveBackend(target, overlay as ExactBackendOverlay<T, Partial<T>>);
   }
 
   return {
-    backend: {
-      ...wrapMethods(backend),
+    backend: deriveBackend(wrapMethods(backend), {
       transaction: (fn, options) =>
         backend.transaction((target) => fn(wrapMethods(target)), options),
-    },
+    }),
     counts,
+    sequence,
   };
 }
 
@@ -209,6 +244,12 @@ function documentProps(id: string): Record<string, unknown> {
 function insertWork(id: string): NodeInsertWork {
   return {
     params: { graphId: GRAPH_ID, kind: "Doc", id, props: documentProps(id) },
+    claim: {
+      kind: "Doc",
+      id,
+      props: documentProps(id),
+      constraints: uniqueConstraints,
+    },
     sideEffects: {
       kind: "Doc",
       id,
@@ -219,16 +260,26 @@ function insertWork(id: string): NodeInsertWork {
   };
 }
 
-function edgeInsertWork(id: string, endpointId: string): EdgeInsertWork {
-  return {
+function edgeInsertWork(
+  id: string,
+  fromId: string,
+  toId: string,
+): EdgeInsertWork {
+  const params = {
     graphId: GRAPH_ID,
     id,
-    kind: "links",
+    kind: "owns",
     fromKind: "Doc",
-    fromId: endpointId,
+    fromId,
     toKind: "Doc",
-    toId: endpointId,
+    toId,
     props: {},
+  };
+  // Built exactly as the production paths build it — through the claim decider —
+  // so a change to what a `unique` kind claims moves this fixture too.
+  return {
+    params,
+    claim: requireDefined(edgeCardinalityClaim("unique", params)),
   };
 }
 
@@ -242,6 +293,14 @@ async function seed(
     kind: "Doc",
     id,
     props: documentProps(id),
+  });
+  // A second endpoint, so a batch case can create two `unique` edges from one
+  // source without the two contending for the same claim row.
+  await backend.insertNode({
+    graphId: GRAPH_ID,
+    kind: "Doc",
+    id: `${id}-b`,
+    props: documentProps(`${id}-b`),
   });
   await backend.insertEdge({
     graphId: GRAPH_ID,
@@ -287,6 +346,25 @@ type Case = Readonly<{
   /** The primary row statement, asserted so a no-op case cannot pass. */
   row: WatchedMember;
   /**
+   * Sidecars that must be issued BEFORE the row — the claim placements. A claim
+   * issued after the row it gates is not a fence, so its POSITION is as
+   * load-bearing as its presence, and presence alone is what `sidecars` checks.
+   */
+  preRow?: readonly WatchedMember[];
+  /**
+   * CLAIM writes that must follow the row: a claim whose own key is the fence
+   * may be issued after the row it fences, and those are the entries here.
+   */
+  postRowClaims?: readonly WatchedMember[];
+  /**
+   * SYNC FANS, which must follow the row AND every post-row claim: derived data
+   * with no claim to make, which must not be written for a row that never landed
+   * nor before the reservation the row depends on. The two fans are issued
+   * concurrently, so their order relative to EACH OTHER is deliberately not
+   * asserted — only their position relative to the row and the claims.
+   */
+  postRowFans?: readonly WatchedMember[];
+  /**
    * The plan this row work runs under. It selects no behavior here — neither
    * the constraint probe nor identity participation is under test — but a node
    * case running an edge plan (or the reverse) would misdescribe the write.
@@ -307,6 +385,13 @@ const CASES: Record<keyof WriteSession, Case> = {
       Promise.resolve((session) => session.createNode(insertWork("a"))),
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "insertNode",
+    // The fixture's constraint is `scope: "kind"`, whose own primary key IS the
+    // fence, so its claim keeps the POST-insert placement it ships with. The
+    // PRE-insert placement — a scope spanning kinds, where the claim is the only
+    // fence — is pinned in `write-plan-statement-order.test.ts`, against real
+    // SQL and a `kindWithSubClasses` scope.
+    postRowClaims: ["insertUnique"],
+    postRowFans: ["upsertFulltext", "upsertEmbedding"],
     plan: NODE_PLAN,
   },
   createNodeNoReturn: {
@@ -314,6 +399,8 @@ const CASES: Record<keyof WriteSession, Case> = {
       Promise.resolve((session) => session.createNodeNoReturn(insertWork("b"))),
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "insertNodeNoReturn",
+    postRowClaims: ["insertUnique"],
+    postRowFans: ["upsertFulltext", "upsertEmbedding"],
     plan: NODE_PLAN,
   },
   createNodes: {
@@ -327,6 +414,8 @@ const CASES: Record<keyof WriteSession, Case> = {
       "upsertEmbeddingBatch",
     ],
     row: "insertNodesBatchReturning",
+    postRowClaims: ["insertUniqueBatch"],
+    postRowFans: ["upsertFulltextBatch", "upsertEmbeddingBatch"],
     plan: NODE_PLAN,
   },
   createNodesNoReturn: {
@@ -340,6 +429,8 @@ const CASES: Record<keyof WriteSession, Case> = {
       "upsertEmbeddingBatch",
     ],
     row: "insertNodesBatch",
+    postRowClaims: ["insertUniqueBatch"],
+    postRowFans: ["upsertFulltextBatch", "upsertEmbeddingBatch"],
     plan: NODE_PLAN,
   },
   reviseNode: {
@@ -454,52 +545,61 @@ const CASES: Record<keyof WriteSession, Case> = {
       "upsertEmbeddingBatch",
     ],
     row: "updateNodeSet",
+    // The set update writes its row FIRST — the after-images its claims are
+    // computed from are not knowable before the statement runs — so every claim
+    // here is a post-row one, and the fans still follow them.
+    postRowClaims: ["hardDeleteUniquesByNodeIds", "insertUniqueBatch"],
+    postRowFans: ["upsertFulltextBatch", "upsertEmbeddingBatch"],
     plan: NODE_PLAN,
   },
   createEdge: {
     run: async (raw) => {
       await seed(raw, "l");
-      const work = edgeInsertWork("edge-new-l", "l");
+      const work = edgeInsertWork("edge-new-l", "l", "l-b");
       return (session) => session.createEdge(work);
     },
-    sidecars: [],
+    sidecars: ["claimEdgeCardinality"],
     row: "insertEdge",
+    preRow: ["claimEdgeCardinality"],
     plan: EDGE_PLAN,
   },
   createEdgeNoReturn: {
     run: async (raw) => {
       await seed(raw, "m");
-      const work = edgeInsertWork("edge-new-m", "m");
+      const work = edgeInsertWork("edge-new-m", "m", "m-b");
       return (session) => session.createEdgeNoReturn(work);
     },
-    sidecars: [],
+    sidecars: ["claimEdgeCardinality"],
     row: "insertEdgeNoReturn",
+    preRow: ["claimEdgeCardinality"],
     plan: EDGE_PLAN,
   },
   createEdges: {
     run: async (raw) => {
       await seed(raw, "n");
       const work = [
-        edgeInsertWork("edge-new-n1", "n"),
-        edgeInsertWork("edge-new-n2", "n"),
+        edgeInsertWork("edge-new-n1", "n", "n"),
+        edgeInsertWork("edge-new-n2", "n", "n-b"),
       ];
       return (session) => session.createEdges(work);
     },
-    sidecars: [],
+    sidecars: ["claimEdgeCardinalityBatch"],
     row: "insertEdgesBatchReturning",
+    preRow: ["claimEdgeCardinalityBatch"],
     plan: EDGE_PLAN,
   },
   createEdgesNoReturn: {
     run: async (raw) => {
       await seed(raw, "o");
       const work = [
-        edgeInsertWork("edge-new-o1", "o"),
-        edgeInsertWork("edge-new-o2", "o"),
+        edgeInsertWork("edge-new-o1", "o", "o"),
+        edgeInsertWork("edge-new-o2", "o", "o-b"),
       ];
       return (session) => session.createEdgesNoReturn(work);
     },
-    sidecars: [],
+    sidecars: ["claimEdgeCardinalityBatch"],
     row: "insertEdgesBatch",
+    preRow: ["claimEdgeCardinalityBatch"],
     plan: EDGE_PLAN,
   },
   reviseEdge: {
@@ -509,6 +609,9 @@ const CASES: Record<keyof WriteSession, Case> = {
       return (session) =>
         session.reviseEdge(work, {
           validityLowerBound: {},
+          // An in-place props update re-admits the row to no counted population,
+          // so it reads no stored end and asserts none.
+          validityUpperBound: {},
           // The kind the seeded row carries: an edge update always asserts the
           // identity it resolved the row under, and the applier carries it
           // into the statement's own `WHERE`.
@@ -532,11 +635,26 @@ const CASES: Record<keyof WriteSession, Case> = {
   purgeEdge: {
     run: async (raw) => {
       await seed(raw, "r");
-      const work = { id: "edge-r", kind: "links" };
+      // A CONSTRAINED kind, so the claim release is a statement this case can
+      // observe: an unconstrained kind holds no claim and pays nothing for one.
+      const work = await (async () => {
+        await raw.insertEdge({
+          graphId: GRAPH_ID,
+          kind: "owns",
+          id: "edge-owns-r",
+          fromKind: "Doc",
+          fromId: "r",
+          toKind: "Doc",
+          toId: "r-b",
+          props: {},
+        });
+        return { id: "edge-owns-r", kind: "owns", holdsCardinalityClaim: true };
+      })();
       return (session) => session.purgeEdge(work);
     },
-    sidecars: [],
+    sidecars: ["purgeEdgeClaims"],
     row: "hardDeleteEdge",
+    postRowClaims: ["purgeEdgeClaims"],
     plan: EDGE_PLAN,
   },
 };
@@ -551,7 +669,7 @@ describe("write session sidecar completeness", () => {
         // create their tables.
         await createStoreWithSchema(graph, raw);
         const rowWork = await testCase.run(raw);
-        const { backend, counts } = withCallCounts(raw);
+        const { backend, counts, sequence } = withCallCounts(raw);
 
         await runWritePlan(writeContext(), testCase.plan, backend, (session) =>
           rowWork(session),
@@ -574,6 +692,27 @@ describe("write session sidecar completeness", () => {
             )
           : [];
         expect(undeclared).toEqual([]);
+
+        // …and each declared sidecar sits on the side of the row its PLACEMENT
+        // says it does. A claim issued after the row it gates is not a fence,
+        // and derived data written before the row can describe a row that never
+        // landed, so position is a separate assertion from presence.
+        const rowAt = sequence.indexOf(testCase.row);
+        const postRowClaims = testCase.postRowClaims ?? [];
+        const postRowFans = testCase.postRowFans ?? [];
+        const at = (member: WatchedMember): number => sequence.indexOf(member);
+        const misplaced = [
+          ...(testCase.preRow ?? []).filter((member) => at(member) > rowAt),
+          ...[...postRowClaims, ...postRowFans].filter(
+            (member) => at(member) < rowAt,
+          ),
+          // A fan before any claim the same write owes would be derived data
+          // written against a reservation nobody had taken yet.
+          ...postRowFans.filter((fan) =>
+            postRowClaims.some((claim) => at(fan) < at(claim)),
+          ),
+        ];
+        expect(misplaced).toEqual([]);
       } finally {
         await raw.close();
       }

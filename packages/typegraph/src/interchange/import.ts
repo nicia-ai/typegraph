@@ -54,6 +54,7 @@ import {
 } from "../backend/transaction-resource";
 import {
   type GraphBackend,
+  type InsertEdgeParams,
   isLiveNodeRow,
   type LiveNodeRow,
   rowPropsToObject,
@@ -65,13 +66,16 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import {
+  type Cardinality,
   type EdgeRegistration,
   type NodeRegistration,
   type UniqueConstraint,
 } from "../core/types";
 import {
+  CardinalityError,
   ConfigurationError,
   DatabaseOperationError,
+  DisjointError,
   IdentityContradictionError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   INVERTED_VALIDITY_WINDOW_CODE,
@@ -85,6 +89,14 @@ import {
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
 import { type KindRegistry } from "../registry/kind-registry";
+import { edgeCardinalityClaim } from "../store/claims/edge-claims";
+import { checkUniquenessConstraints } from "../store/claims/node-claims";
+import {
+  checkCardinalityConstraint,
+  checkDisjointnessConstraint,
+  graphOwesClaims,
+} from "../store/constraints";
+import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
 import {
   createNodeBatchValidationSeams,
   type NodeCreateDraft,
@@ -101,9 +113,9 @@ import {
   type WriteSession,
   type WriteTarget,
 } from "../store/operations/write-session";
+import { constraintFenceRefusal } from "../store/operations/write-transaction";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
-import { checkUniquenessConstraints } from "../store/uniqueness";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
@@ -112,6 +124,10 @@ import {
 } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { encodeTupleKey } from "../utils/tuple-key";
+import {
+  type IngestionImportTarget,
+  resolveIngestionImportTarget,
+} from "./ingestion-import-target";
 import { exportStreamBackend } from "./stream-source";
 import {
   type GraphData,
@@ -134,8 +150,12 @@ import {
 // Import Function
 // ============================================================
 
+/** A normal Store or an opaque ingestion branch that interchange may stage. */
+export type ImportTarget<G extends GraphDef> =
+  Store<G> | IngestionImportTarget<G>;
+
 /**
- * Import graph data into a store.
+ * Import graph data into a store or opaque ingestion branch.
  *
  * Nodes are imported first to satisfy edge reference validation.
  * The import runs within a transaction for atomicity when supported.
@@ -148,7 +168,18 @@ import {
  * connection is therefore refused on the first chunk instead of nesting a write
  * transaction inside the export's open snapshot.
  *
- * @param store - The graph store to import into
+ * Also refused, with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, when the backend
+ * reports `transactions: false` AND the graph owes a claim that must be written
+ * before the row it gates — any unique constraint of any scope, any node kind
+ * with a `disjointWith` partner, or any edge kind whose cardinality is not
+ * `many`. An import writes those reservations like every other writer and takes
+ * no per-graph lock, so without a transaction a failure between a reservation
+ * and its row would leave a key blocked with no repair path. The verdict is per
+ * GRAPH rather than per payload, and it is reached before the first row: a
+ * streamed import cannot commit part of itself and only then discover it could
+ * not be fenced.
+ *
+ * @param target - The graph store or ingestion branch to import into
  * @param data - Graph data in interchange format
  * @param options - Import configuration
  * @returns Import statistics and any errors
@@ -164,10 +195,11 @@ import {
  * ```
  */
 export async function importGraph<G extends GraphDef>(
-  store: Store<G>,
+  target: ImportTarget<G>,
   data: GraphData,
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
+  const store = resolveIngestionImportTarget<G>(target);
   // Parse ONCE at the public boundary: schema defaults (batchSize, ...)
   // only exist after parsing, and every internal stage reads them
   // directly.
@@ -260,6 +292,22 @@ async function importGraphData<G extends GraphDef>(
   const backend = storeBackend(store);
   const runtime = storeRuntime(store);
   const registry = store.registry;
+
+  // Fenced or refused, before any write. An import writes claim rows like every
+  // other writer, but it takes no per-graph lock and it is not covered by
+  // `runInWriteTransaction`'s refusal, because it declares no
+  // `fencesConstraintProbe` (that option also decides the lock, and a per-graph
+  // mutex held for a whole bulk load is a different decision — see
+  // `graphOwesClaims`). So it asks the same question directly. The subject is
+  // the graph rather than the payload deliberately: `importGraphStream` imports
+  // per chunk and cannot see the whole payload, and refusing on chunk k with
+  // k-1 chunks committed is a worse answer than refusing up front.
+  const owedClaimReason = graphOwesClaims(graph, registry);
+  const claimRefusal =
+    owedClaimReason === undefined ? undefined : (
+      constraintFenceRefusal({ graphId }, backend, owedClaimReason)
+    );
+  if (claimRefusal !== undefined) throw claimRefusal;
 
   // Build lookup maps for schema validation
   const nodeSchemas = buildNodeSchemaMap(graph);
@@ -394,10 +442,11 @@ async function importGraphData<G extends GraphDef>(
  * `backend/transaction-resource.ts`.
  */
 export async function importGraphStream<G extends GraphDef>(
-  store: Store<G>,
+  target: ImportTarget<G>,
   chunks: AsyncIterable<GraphInterchangeChunk>,
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
+  const store = resolveIngestionImportTarget<G>(target);
   const options = ImportOptionsSchema.parse(rawOptions);
   const sourceBackend = exportStreamBackend(chunks);
   const targetBackend = storeBackend(store);
@@ -1364,17 +1413,28 @@ async function processNodeSlice(
       continue;
     }
 
-    const uniquenessResult = await catchUniquenessError(() =>
-      checkUniquenessConstraints(
+    // Both declared node constraints are probed here, per row, against the
+    // pending-aware overlay — so an in-slice pair (a `Person` and a `Company`
+    // sharing an id, two rows apart) is seen through `pendingNodes` and refuses
+    // the SECOND row while the first commits. The claim behind these probes is
+    // the fence for a concurrent violation, and that one aborts the import;
+    // this is the half that must not.
+    const constraintResult = await catchDeclaredConstraintRefusal(async () => {
+      await checkUniquenessConstraints(
         { graphId, registry, backend: validationBackend },
         node.kind,
         node.id,
         props,
         uniqueConstraints,
-      ),
-    );
-    if (!uniquenessResult.ok) {
-      record(node, { status: "error", error: uniquenessResult.error });
+      );
+      await checkDisjointnessConstraint(
+        { graphId, registry, backend: validationBackend },
+        node.kind,
+        node.id,
+      );
+    });
+    if (!constraintResult.ok) {
+      record(node, { status: "error", error: constraintResult.error });
       continue;
     }
 
@@ -1383,10 +1443,14 @@ async function processNodeSlice(
     accepted.push(candidate);
   }
 
-  // Flush the accepted creates as ONE fused unit: the multi-row insert and
-  // then the batched side effects (uniqueness entries, fulltext, embeddings),
-  // which is the order this path already used — the session simply makes the
-  // pair unbreakable. The NO-RETURN batch shape, because import discards the
+  // Flush the accepted creates as ONE fused unit: the claim groups at their
+  // declared placements, the multi-row insert, then the batched sync fans
+  // (fulltext, embeddings). The session simply makes the group unbreakable. The
+  // pre-insert claims are what make an import fenced at all — this writer takes
+  // no per-graph lock, so a claim whose axis spans kinds is the only thing that
+  // can refuse a peer, and it has to be issued BEFORE the rows it gates or a
+  // refused batch would leave the violating rows behind for a caller that
+  // recovers per row. The NO-RETURN batch shape, because import discards the
   // rows and the returning shape would emit a different statement.
   if (accepted.length > 0) {
     await frame.session.createNodesNoReturn(
@@ -1430,13 +1494,13 @@ function buildImportInsertParams(
 }
 
 /**
- * The fused create unit for one imported node: the row params and the derived
- * data that row obliges, built together.
+ * The fused create unit for one imported node: the row params, the claims the
+ * row owes, and the derived data it obliges, built together.
  *
- * ONE owner for both halves, shared by the batched slice and the per-row
- * fallback. Before the migration each path spelled its own insert params and
- * its own side-effect record, which is the shape in which the two drift — and
- * the shape in which a path forgets the second half entirely.
+ * ONE owner for all three, shared by the batched slice and the per-row fallback.
+ * Before the migration each path spelled its own insert params, its own claim
+ * seam call and its own side-effect record, which is the shape in which they
+ * drift — and the shape in which a path forgets one of them entirely.
  */
 function importNodeInsertWork(
   graphId: string,
@@ -1446,6 +1510,12 @@ function importNodeInsertWork(
 ): NodeInsertWork {
   return {
     params: buildImportInsertParams(graphId, node, props),
+    claim: {
+      kind: node.kind,
+      id: node.id,
+      props,
+      constraints: registration.unique ?? [],
+    },
     sideEffects: {
       kind: node.kind,
       id: node.id,
@@ -1472,25 +1542,36 @@ type ProcessResult =
 /**
  * What a guard hands back when its refusal is a PER-ROW fact: either the value
  * the guard produced, or the message recorded against that row while the import
- * keeps going. Shared by the uniqueness guard and the window guard so the two
- * per-row recoveries have one shape.
+ * keeps going. Shared by the declared-constraint guard and the window guard so
+ * the two per-row recoveries have one shape.
  */
 type PerRowGuardResult<T> =
   Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: string }>;
 
 /**
- * Runs `fn` and reports a `UniquenessError` as a per-row result instead of
- * letting it abort the whole import — the same recovery both the node
- * uniqueness pre-check and the update path need. Any other error still
+ * Runs `fn` and reports a DECLARED-CONSTRAINT refusal as a per-row result
+ * instead of letting it abort the whole import. Any other error still
  * propagates.
+ *
+ * The subject is the family of refusals a declared constraint produces —
+ * uniqueness, disjointness and edge cardinality — rather than one class of it.
+ * A guard named for a single class is an invitation to forget the next family
+ * that arrives, which is exactly how the disjointness gap this closes came
+ * about: import gained a claim that could refuse a disjoint row and no per-row
+ * recovery that recognized the refusal, so a violation would have aborted the
+ * whole batch where the contract promises a refused ROW.
  */
-async function catchUniquenessError<T>(
+async function catchDeclaredConstraintRefusal<T>(
   fn: () => Promise<T>,
 ): Promise<PerRowGuardResult<T>> {
   try {
     return { ok: true, value: await fn() };
   } catch (error) {
-    if (error instanceof UniquenessError) {
+    if (
+      error instanceof UniquenessError ||
+      error instanceof DisjointError ||
+      error instanceof CardinalityError
+    ) {
       return { ok: false, error: error.message };
     }
     throw error;
@@ -1549,7 +1630,14 @@ async function updateImportedNode(
   }>,
 ): Promise<string | undefined> {
   try {
-    const result = await catchUniquenessError(() =>
+    // The widened guard wraps a WRITE here, not a probe, so what it recovers
+    // from is worth stating: `reviseNode` raises neither a `DisjointError` nor a
+    // `CardinalityError` — an in-place update cannot change a node's kind, so it
+    // re-derives no disjointness verdict, and it writes no edges — and the update
+    // path's claim set carries uniqueness entries only. Widening the guard
+    // therefore changes nothing here today; it is listed because a changed
+    // contract re-audits its consumers.
+    const result = await catchDeclaredConstraintRefusal(() =>
       // The fence is an ARGUMENT the method requires, not a spread the call
       // site may forget: the guard's verdict travels to the statement that
       // honors it, and an empty fence (`{}`) is the stated decision to assert
@@ -1734,6 +1822,10 @@ async function updateImportedEdge(
       },
       {
         validityLowerBound: windowFence,
+        // Import re-admits no row to a counted population — it never resurrects
+        // and never clears an end — so it reads no stored `valid_to` and asserts
+        // none. `{}` is the stated decision, not an omission.
+        validityUpperBound: {},
         edgeIdentity: {
           kind: edge.kind,
           fromKind: edge.from.kind,
@@ -1837,8 +1929,11 @@ function validateValidityWindow(
     validateOptionalCanonicalIsoDate(entity.validTo, "validTo");
     // On an INSERT only a stated pair is judged — a lone historical validTo
     // means "born already ended", exactly as it does on `create` (see
-    // assertWritableValidityWindow). `null` is a confirmed open-left window and
-    // is not a lower bound at all.
+    // assertWritableValidityWindow) — and that is the WHOLE rule, not a partial
+    // one: the insert path this feeds stamps NO lower bound for such a row
+    // (`resolveStampedValidityLowerBound`), so a document accepted here cannot
+    // become a row readable at no coordinate. `null` is a confirmed open-left
+    // window and is not a lower bound at all.
     assertOrderedValidityWindow(
       `${entity.kind} "${entity.id}"`,
       entity.validFrom ?? undefined,
@@ -1985,21 +2080,28 @@ async function processNode(
     }
   }
 
-  // Create new node. Pre-check uniqueness (as the collection create does) so a
-  // conflict is a per-row error rather than an orphaned node row, then create
-  // through the session, which applies the integrity side effects a raw
-  // insert would bypass.
-  const uniquenessResult = await catchUniquenessError(() =>
-    checkUniquenessConstraints(
+  // Create new node. Pre-check both declared node constraints (as the
+  // collection create does) so a conflict is a per-row error rather than an
+  // orphaned node row, then create through the session, which applies the claims
+  // and the sync fans a raw insert would bypass. No pending state is needed
+  // here: this path writes each row as it goes, so the next row's probe reads
+  // the previous one from the same transaction.
+  const constraintResult = await catchDeclaredConstraintRefusal(async () => {
+    await checkUniquenessConstraints(
       { graphId, registry, backend: frame.target },
       node.kind,
       node.id,
       propsResult.data,
       uniqueConstraints,
-    ),
-  );
-  if (!uniquenessResult.ok) {
-    return { status: "error", error: uniquenessResult.error };
+    );
+    await checkDisjointnessConstraint(
+      { graphId, registry, backend: frame.target },
+      node.kind,
+      node.id,
+    );
+  });
+  if (!constraintResult.ok) {
+    return { status: "error", error: constraintResult.error };
   }
 
   // The RETURNING single-insert shape, whose row this path discards, because
@@ -2083,6 +2185,32 @@ type EdgeImportCandidate = Readonly<{
 }>;
 
 /**
+ * THE insert params one accepted edge candidate carries, built once and read by
+ * three consumers: the in-slice cardinality registration, the claim, and the
+ * flush. The candidate loop needs them before the flush does — that is what
+ * lets an in-slice collision refuse the ROW — so they cannot be materialized
+ * only at the flush the way the pre-fence path did.
+ */
+function edgeInsertParamsOf(
+  graphId: string,
+  candidate: EdgeImportCandidate,
+): InsertEdgeParams {
+  const { edge, props } = candidate;
+  return {
+    graphId,
+    id: edge.id,
+    kind: edge.kind,
+    fromKind: edge.from.kind,
+    fromId: edge.from.id,
+    toKind: edge.to.kind,
+    toId: edge.to.id,
+    props,
+    ...(edge.validFrom !== undefined && { validFrom: edge.validFrom }),
+    ...(edge.validTo !== undefined && { validTo: edge.validTo }),
+  };
+}
+
+/**
  * Processes one batchSize slice of edges with batched round trips: one
  * `getNodes` per endpoint kind for reference liveness, one `getEdges` for
  * existence, and one multi-row insert for the accepted creates. Per-row
@@ -2104,6 +2232,17 @@ async function processEdgeSlice(
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
   };
+
+  // The store's own in-batch cardinality accounting, constructed once per
+  // slice against the REAL backend — the same wrapper `prepareEdgeBatchCreates`
+  // uses, not a second implementation. Per slice rather than per import is
+  // correct because each slice flushes its accepted inserts before the next one
+  // runs, so slice k+1's probe reads slice k's rows from the backend; the
+  // pending state only has to cover rows decided but not yet written.
+  const {
+    backend: cardinalityValidationBackend,
+    registerPendingEdgeForCardinality,
+  } = createEdgeBatchValidationBackend(frame.target);
 
   // Pass 1 (synchronous): kind, endpoint-kind, endpoint-assignability,
   // property, and validity validation, plus in-slice duplicate deferral.
@@ -2303,16 +2442,52 @@ async function processEdgeSlice(
       continue;
     }
 
+    // The cardinality probe, per row and against the pending-aware overlay, so
+    // two `cardinality: "one"` edges from one source IN ONE SLICE refuse the
+    // second row instead of both passing and colliding at the batch claim —
+    // which runs once for the whole slice, outside every per-row recovery.
+    const insertParams = edgeInsertParamsOf(graphId, candidate);
+    const cardinality =
+      edgeSchemas.get(edge.kind)?.registration.cardinality ?? "many";
+    const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
+      checkCardinalityConstraint(
+        { graphId, registry, backend: cardinalityValidationBackend },
+        edge.kind,
+        cardinality,
+        edge.from.kind,
+        edge.from.id,
+        edge.to.kind,
+        edge.to.id,
+        edge.validTo,
+      ),
+    );
+    if (!cardinalityResult.ok) {
+      record(edge, { status: "error", error: cardinalityResult.error });
+      continue;
+    }
+    registerPendingEdgeForCardinality(insertParams, cardinality);
+
     accepted.push(candidate);
   }
 
   if (accepted.length > 0) {
     // The NO-RETURN batch shape. `insert-dispatch.ts` — reached through the
     // session — owns "does this backend have the batch member, and what does it
-    // fall back to", which is the predicate this leg used to spell for itself.
+    // fall back to", which is the predicate this leg used to spell for itself,
+    // and the session issues ONE sorted claim for the slice before any row is
+    // written. This import takes no per-graph lock, so the claim is the ONLY
+    // thing that can refuse a concurrent writer of the same axis; a refusal
+    // there aborts the import, which is the honest outcome when the graph
+    // changed under a bulk load and is why the per-row probe above exists for
+    // everything that is not concurrent.
     await frame.session.createEdgesNoReturn(
-      accepted.map(({ edge, props }) =>
-        buildImportEdgeInsertParams(graphId, edge, props),
+      accepted.map((candidate) =>
+        importEdgeInsertWork(
+          graphId,
+          candidate,
+          edgeSchemas.get(candidate.edge.kind)?.registration.cardinality ??
+            "many",
+        ),
       ),
     );
     for (const candidate of accepted) {
@@ -2480,40 +2655,59 @@ async function processEdge(
     }
   }
 
-  // Create new edge, through the RETURNING single-insert shape this leg
-  // emitted before the migration; the row it returns is discarded.
+  // Create new edge. Probe first (for the error text), then create through the
+  // session, which claims before it writes — the same order the collection
+  // create uses. No pending state is needed: this path writes each edge as it
+  // goes, so the next row's `countEdgesFrom` reads the previous one from the
+  // same transaction.
+  const cardinality = schemaEntry.registration.cardinality ?? "many";
+  const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
+    checkCardinalityConstraint(
+      { graphId, registry, backend: frame.target },
+      edge.kind,
+      cardinality,
+      edge.from.kind,
+      edge.from.id,
+      edge.to.kind,
+      edge.to.id,
+      edge.validTo,
+    ),
+  );
+  if (!cardinalityResult.ok) {
+    return { status: "error", error: cardinalityResult.error };
+  }
+
   await frame.session.createEdge(
-    buildImportEdgeInsertParams(graphId, edge, propsResult.data),
+    importEdgeInsertWork(
+      graphId,
+      { edge, props: propsResult.data },
+      cardinality,
+    ),
   );
 
   return { status: "created" };
 }
 
 /**
- * The insert params for one imported edge.
+ * The insert unit for one imported edge: the row params and the cardinality
+ * claim the row owes.
  *
- * ONE owner, shared by the batched slice and the per-row fallback, for the
- * same reason {@link importNodeInsertWork} is one: two spellings of the same
- * row are two spellings that can drift. There is no side-effect half here
- * because an edge write obliges no derived data.
+ * ONE owner, shared by the batched slice and the per-row fallback, for the same
+ * reason {@link importNodeInsertWork} is one: two spellings of the same row are
+ * two spellings that can drift. The claim is built here and ISSUED by the
+ * session, which is the only handle in this module that reaches a write member.
  */
-function buildImportEdgeInsertParams(
+function importEdgeInsertWork(
   graphId: string,
-  edge: InterchangeEdge,
-  props: Record<string, unknown>,
+  candidate: Readonly<{
+    edge: InterchangeEdge;
+    props: Record<string, unknown>;
+  }>,
+  cardinality: Cardinality,
 ): EdgeInsertWork {
-  return {
-    graphId,
-    id: edge.id,
-    kind: edge.kind,
-    fromKind: edge.from.kind,
-    fromId: edge.from.id,
-    toKind: edge.to.kind,
-    toId: edge.to.id,
-    props,
-    ...(edge.validFrom !== undefined && { validFrom: edge.validFrom }),
-    ...(edge.validTo !== undefined && { validTo: edge.validTo }),
-  };
+  const params = edgeInsertParamsOf(graphId, candidate);
+  const claim = edgeCardinalityClaim(cardinality, params);
+  return { params, ...(claim === undefined ? {} : { claim }) };
 }
 
 // ============================================================

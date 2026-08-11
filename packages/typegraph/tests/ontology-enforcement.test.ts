@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   createQueryBuilder,
   defineEdge,
   defineGraph,
@@ -21,7 +22,11 @@ import {
   inverseOf,
   subClassOf,
 } from "../src";
-import { ConfigurationError, RestrictedDeleteError } from "../src/errors";
+import {
+  ConfigurationError,
+  DisjointError,
+  RestrictedDeleteError,
+} from "../src/errors";
 import { buildKindRegistry } from "../src/registry/builders";
 import { deserializeSchema, serializeSchema } from "../src/schema";
 import { createStore, createStoreWithSchema } from "../src/store/store";
@@ -177,6 +182,99 @@ describe("Disjointness Enforcement", () => {
       { id: "entity-1" },
     );
     expect(animal.id).toBe("entity-1");
+
+    await backend.close();
+  });
+
+  // Regression coverage for a resurrect that enters through the UPDATE
+  // seam (`upsertById` / `bulkUpsertById`) rather than through `.create()` on
+  // a tombstoned id. `.create()`'s resurrect leg was already fenced
+  // (`finishNodeCreatePreparation` probes disjointness before it); the
+  // update-seam resurrect leg (`performNodeUpdate` -> `applyNodeUpdate` with
+  // `clearDeleted: true`) skipped both the probe AND the claim entirely, so a
+  // single sequential caller — no concurrency involved — could resurrect a
+  // node under an id a disjoint partner already held live.
+  it("blocks resurrecting a node via upsertById into a disjoint namesake's id", async () => {
+    const graph = defineGraph({
+      id: "disjoint_test_4",
+      nodes: {
+        Person: { type: Person },
+        Animal: { type: Animal },
+      },
+      edges: {},
+      ontology: [disjointWith(Person, Animal)],
+    });
+
+    const backend = createTestBackend();
+    const store = createStore(graph, backend);
+
+    // Create then soft-delete a Person, then let an Animal take the id live.
+    await store.nodes.Person.create(
+      { name: "John", email: "john@example.com" },
+      { id: "entity-1" },
+    );
+    await store.nodes.Person.delete(asNodeId<typeof Person>("entity-1"));
+    await store.nodes.Animal.create({ species: "Dog" }, { id: "entity-1" });
+
+    // Resurrecting the Person through upsertById must be refused: it would
+    // leave "entity-1" live under both disjoint kinds.
+    await expect(
+      store.nodes.Person.upsertById(asNodeId<typeof Person>("entity-1"), {
+        name: "Jane",
+        email: "jane@example.com",
+      }),
+    ).rejects.toThrow(DisjointError);
+
+    // The Person stays tombstoned (the refusal left no live resurrect behind)
+    // and the Animal is untouched and still the sole live holder of the id.
+    expect(
+      await store.nodes.Person.getById(asNodeId<typeof Person>("entity-1")),
+    ).toBeUndefined();
+    const animal = await store.nodes.Animal.getById(
+      asNodeId<typeof Animal>("entity-1"),
+    );
+    expect(animal?.species).toBe("Dog");
+
+    await backend.close();
+  });
+
+  it("blocks resurrecting a node via bulkUpsertById into a disjoint namesake's id", async () => {
+    const graph = defineGraph({
+      id: "disjoint_test_5",
+      nodes: {
+        Person: { type: Person },
+        Animal: { type: Animal },
+      },
+      edges: {},
+      ontology: [disjointWith(Person, Animal)],
+    });
+
+    const backend = createTestBackend();
+    const store = createStore(graph, backend);
+
+    await store.nodes.Person.create(
+      { name: "John", email: "john@example.com" },
+      { id: "entity-1" },
+    );
+    await store.nodes.Person.delete(asNodeId<typeof Person>("entity-1"));
+    await store.nodes.Animal.create({ species: "Dog" }, { id: "entity-1" });
+
+    await expect(
+      store.nodes.Person.bulkUpsertById([
+        {
+          id: asNodeId<typeof Person>("entity-1"),
+          props: { name: "Jane", email: "jane@example.com" },
+        },
+      ]),
+    ).rejects.toThrow(DisjointError);
+
+    expect(
+      await store.nodes.Person.getById(asNodeId<typeof Person>("entity-1")),
+    ).toBeUndefined();
+    const animal = await store.nodes.Animal.getById(
+      asNodeId<typeof Animal>("entity-1"),
+    );
+    expect(animal?.species).toBe("Dog");
 
     await backend.close();
   });

@@ -26,7 +26,9 @@
  */
 import {
   assertsStoredLowerBound,
+  assertsStoredUpperBound,
   type ValidityLowerBoundFence,
+  type ValidityUpperBoundFence,
 } from "../../utils/date";
 import { type EdgeIdentityExpectation } from "./edge-identity";
 
@@ -46,6 +48,7 @@ export type WriteFenceKind = "nodeUpdate" | "nodeSetUpdate" | "edgeUpdate";
  */
 export interface WriteParamsDraft {
   expectedValidFrom?: string | null;
+  expectedValidTo?: string | null;
   kind?: string;
   fromKind?: string;
   fromId?: string;
@@ -84,9 +87,31 @@ export type NodeSetUpdateFences = Readonly<{
 /** The fences an edge UPDATE can carry. */
 export type EdgeUpdateFences = Readonly<{
   validityLowerBound: ValidityLowerBoundFence;
+  /**
+   * The window END the verdict read. Non-empty only for a reopen that re-admits
+   * the row to a counted population it was excluded from — the `oneActive`
+   * case — because that verdict is the one that consumed the stored `valid_to`.
+   */
+  validityUpperBound: ValidityUpperBoundFence;
   /** The identity components the caller asserted; each optional INSIDE. */
   edgeIdentity: EdgeIdentityExpectation;
 }>;
+
+/**
+ * Whether an edge update asserts ANY window state — the single owner of the
+ * question the unmatched-update diagnosis asks.
+ *
+ * The diagnosis has to know whether "no row matched" could have been the window
+ * predicates rather than the identity ones, and it must reach that answer from
+ * the same two predicates the appliers consult. Re-deriving it from the emitted
+ * params (which the diagnosis never sees) is how the copies drift.
+ */
+export function assertsStoredWindowState(fences: EdgeUpdateFences): boolean {
+  return (
+    assertsStoredLowerBound(fences.validityLowerBound) ||
+    assertsStoredUpperBound(fences.validityUpperBound)
+  );
+}
 
 /**
  * A fence the row work's statement has no field to carry.
@@ -168,8 +193,21 @@ function applyEdgeIdentity(
   if (fence.toId !== undefined) draft.toId = fence.toId;
 }
 
+/**
+ * Carries the window END the verdict READ, on the same terms as its
+ * lower-bound counterpart: present only when the verdict consulted it.
+ */
+function applyValidityUpperBound(
+  fence: ValidityUpperBoundFence,
+  draft: WriteParamsDraft,
+): void {
+  if (!assertsStoredUpperBound(fence)) return;
+  draft.expectedValidTo = fence.expectedValidTo;
+}
+
 export const EDGE_UPDATE_FENCE_APPLIERS = {
   validityLowerBound: applyValidityLowerBound,
+  validityUpperBound: applyValidityUpperBound,
   edgeIdentity: applyEdgeIdentity,
 } as const satisfies FenceApplierMap<EdgeUpdateFences>;
 

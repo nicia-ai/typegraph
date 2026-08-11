@@ -14,6 +14,10 @@ import {
   type EdgeId,
   type NodeId,
 } from "../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { ValidationError } from "../src/errors";
@@ -172,8 +176,9 @@ describe("Node Collections (SQLite)", () => {
     });
 
     it("falls back to individual getNode when backend lacks getNodes", async () => {
-      const { getNodes: _getNodes, ...rest } = backend;
-      const backendWithoutBatch = rest as GraphBackend;
+      const backendWithoutBatch: GraphBackend = projectBackendWithout(backend, [
+        "getNodes",
+      ]);
       const localStore = createStore(testGraph, backendWithoutBatch);
 
       const alice = await localStore.nodes.Person.create(
@@ -407,8 +412,7 @@ describe("Node Collections (SQLite)", () => {
     it("does not open an empty top-level transaction for absent non-history deletes", async () => {
       const baseBackend = backend;
       let transactionCount = 0;
-      const observedBackend: GraphBackend = {
-        ...baseBackend,
+      const observedBackend: GraphBackend = deriveBackend(baseBackend, {
         async transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: Parameters<GraphBackend["transaction"]>[1],
@@ -416,7 +420,7 @@ describe("Node Collections (SQLite)", () => {
           transactionCount++;
           return baseBackend.transaction(fn, options);
         },
-      };
+      });
       const observedStore = createStore(testGraph, observedBackend);
       const missingId = "missing-person" as NodeId<typeof Person>;
 
@@ -458,8 +462,7 @@ describe("Node Collections (SQLite)", () => {
       // Reads may run through backend.execute (Drizzle path) or the cached
       // template's executeRaw fast path; count both so "ran on the tx backend"
       // holds regardless of which path a where-filtered find() takes.
-      const observedBackend: GraphBackend = {
-        ...baseBackend,
+      const observedBackend: GraphBackend = deriveBackend(baseBackend, {
         async execute<T>(
           query: Parameters<GraphBackend["execute"]>[0],
         ): Promise<readonly T[]> {
@@ -475,23 +478,31 @@ describe("Node Collections (SQLite)", () => {
           options?: Parameters<GraphBackend["transaction"]>[1],
         ): Promise<T> {
           return baseBackend.transaction(async (txBackend) => {
-            const observedTxBackend: TransactionBackend = {
-              ...txBackend,
-              async execute<T>(
-                query: Parameters<GraphBackend["execute"]>[0],
-              ): Promise<readonly T[]> {
-                txExecuteCount++;
-                return txBackend.execute<T>(query);
+            const observedTxBackend: TransactionBackend = deriveBackend(
+              txBackend,
+              {
+                async execute<T>(
+                  query: Parameters<GraphBackend["execute"]>[0],
+                ): Promise<readonly T[]> {
+                  txExecuteCount++;
+                  return txBackend.execute<T>(query);
+                },
+                async executeRaw<T>(
+                  sqlText: string,
+                  params: readonly unknown[],
+                ) {
+                  txExecuteCount++;
+                  return requireDefined(txBackend.executeRaw)<T>(
+                    sqlText,
+                    params,
+                  );
+                },
               },
-              async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
-                txExecuteCount++;
-                return requireDefined(txBackend.executeRaw)<T>(sqlText, params);
-              },
-            };
+            );
             return fn(observedTxBackend);
           }, options);
         },
-      };
+      });
 
       const observedStore = createStore(testGraph, observedBackend);
 
@@ -624,8 +635,9 @@ describe("Edge Collections (SQLite)", () => {
     });
 
     it("falls back to individual getEdge when backend lacks getEdges", async () => {
-      const { getEdges: _getEdges, ...rest } = backend;
-      const backendWithoutBatch = rest as GraphBackend;
+      const backendWithoutBatch: GraphBackend = projectBackendWithout(backend, [
+        "getEdges",
+      ]);
       const localStore = createStore(testGraph, backendWithoutBatch);
 
       const alice = await localStore.nodes.Person.create({ name: "Alice" });
@@ -950,26 +962,33 @@ describe("Bulk Operations (SQLite)", () => {
       expect(resurrected.meta.deletedAt).toBeUndefined();
     });
 
-    it("refuses a lone past validTo on a resurrecting upsert", async () => {
-      // A resurrection resets the lower bound to the write instant when no
-      // validFrom accompanies it, so a lone historical validTo would be born
-      // INVERTED — permanently invisible at every coordinate. The effective
-      // window is validated instead of silently persisting the corruption.
+    it("stores no lower bound for a lone past validTo on a resurrecting upsert", async () => {
+      // A resurrection RESETS the window, so with no `validFrom` accompanying a
+      // historical `validTo` there is no bound to invert against: the write
+      // stamps none, and the row means "ended at T, start unknown" — the same
+      // stored shape a create reaches for the same stated window.
+      //
+      // This case used to REFUSE, on the reasoning that the reset bound was the
+      // write instant. The write no longer chooses an instant that would leave
+      // the row readable at no coordinate, so there is nothing left to refuse.
       const person = await store.nodes.Person.createFromRecord(
         { name: "Windowed" },
         { id: "person-window" },
       );
       await store.nodes.Person.delete(person.id);
 
-      await expect(
-        store.nodes.Person.upsertByIdFromRecord(
-          "person-window",
-          { name: "Windowed Reborn" },
-          { validTo: "2021-01-01T00:00:00.000Z" },
-        ),
-      ).rejects.toThrow(ValidationError);
+      const reborn = await store.nodes.Person.upsertByIdFromRecord(
+        "person-window",
+        { name: "Windowed Reborn" },
+        { validTo: "2021-01-01T00:00:00.000Z" },
+      );
+      expect(reborn.meta.validFrom).toBeUndefined();
+      expect(reborn.meta.validTo).toBe("2021-01-01T00:00:00.000Z");
 
-      // The full historical window is the sanctioned form.
+      // Naming the full historical window still stores it verbatim. Tombstoned
+      // again first: the accepted upsert above left the row LIVE, and a live
+      // row's lower bound is history — only a resurrection writes one.
+      await store.nodes.Person.delete(person.id);
       const resurrected = await store.nodes.Person.upsertByIdFromRecord(
         "person-window",
         { name: "Windowed Reborn" },
@@ -979,6 +998,7 @@ describe("Bulk Operations (SQLite)", () => {
         },
       );
       expect(resurrected.id).toBe("person-window");
+      expect(resurrected.meta.validFrom).toBe("2020-01-01T00:00:00.000Z");
     });
 
     it("rejects invalid data at runtime via Zod validation", async () => {
@@ -1053,8 +1073,7 @@ describe("Bulk Operations (SQLite)", () => {
         }
       }
 
-      const backendWithCounters: GraphBackend = {
-        ...baseBackend,
+      const backendWithCounters: GraphBackend = deriveBackend(baseBackend, {
         async insertNodeNoReturn(params) {
           nodeNoReturnCalls += 1;
           await insertNodeNoReturnWithFallback(baseBackend, params);
@@ -1079,7 +1098,7 @@ describe("Bulk Operations (SQLite)", () => {
             return fn(wrappedTx);
           }, options);
         },
-      };
+      });
 
       const localStore = createStore(testGraph, backendWithCounters);
       await localStore.nodes.Person.bulkInsert([
@@ -1250,8 +1269,7 @@ describe("Bulk Operations (SQLite)", () => {
         }
       }
 
-      const backendWithCounters: GraphBackend = {
-        ...baseBackend,
+      const backendWithCounters: GraphBackend = deriveBackend(baseBackend, {
         async insertEdgeNoReturn(params) {
           edgeNoReturnCalls += 1;
           await insertEdgeNoReturnWithFallback(baseBackend, params);
@@ -1276,7 +1294,7 @@ describe("Bulk Operations (SQLite)", () => {
             return fn(wrappedTx);
           }, options);
         },
-      };
+      });
 
       const localStore = createStore(testGraph, backendWithCounters);
       const alice = await localStore.nodes.Person.create({ name: "Alice" });
@@ -1320,8 +1338,7 @@ describe("Bulk Operations (SQLite)", () => {
       let getNodeCalls = 0;
       let getNodesCalls = 0;
 
-      const backendWithNodeCounter: GraphBackend = {
-        ...baseBackend,
+      const backendWithNodeCounter: GraphBackend = deriveBackend(baseBackend, {
         async getNode(graphId, kind, id) {
           getNodeCalls += 1;
           return baseBackend.getNode(graphId, kind, id);
@@ -1350,7 +1367,7 @@ describe("Bulk Operations (SQLite)", () => {
             return fn(wrappedTx);
           }, options);
         },
-      };
+      });
 
       const localStore = createStore(testGraph, backendWithNodeCounter);
       const alice = await localStore.nodes.Person.create({ name: "Alice" });

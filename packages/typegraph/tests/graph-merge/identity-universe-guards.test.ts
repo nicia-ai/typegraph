@@ -910,11 +910,11 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     },
   );
 
-  it("allows deleting an identity bridge and asserting its ends different", async () => {
-    // Deleting the bridge ends both touching assertions and SPLITS the class
-    // {a, bridge, b}. Modeling the post-deletion class by filtering the old
-    // member list would leave [a, b] pre-linked and falsely reject the
-    // different(a, b) the branch legally asserted after the deletion.
+  it("refuses backdating a post-deletion relation before the target split", async () => {
+    // The branch's different(a,b) begins when its bridge was deleted, but the
+    // target retains that bridge and its same-class truth until merge time.
+    // Applying the branch timestamp verbatim would create contradictory target
+    // history; silently rebasing it would violate the accepted window.
     const [forkPoint] = await createStoreWithSchema(
       anchoredIgnoreGraph,
       await makeBackend(),
@@ -948,17 +948,46 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
       branches: [splitBranch],
       options: { branchOrder: [BRANCH_A] },
     });
-    if (isErr(result)) throw result.error;
+    expect(isErr(result)).toBe(true);
+    if (isOk(result)) throw new Error("Expected temporal identity conflict");
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    expect(await target.nodes.Anchor.getById("bridge" as never)).toBeDefined();
+  });
+
+  it("retracts identity before ending an assertion endpoint", async () => {
+    const forkPoint = await anchoredForkPoint();
+    const assertion = await forkPoint.identity.assertSame(
+      { kind: "Anchor", id: "a" },
+      { kind: "Anchor", id: "b" },
+    );
+    const endBranch = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await endBranch.store.identity.retractAssertion(assertion.assertion.id);
+    await endBranch.store.nodes.Anchor.update(
+      "a" as never,
+      {},
+      { validTo: "2100-01-01T00:00:00.000Z" },
+    );
+
+    const result = await merge(forkPoint, [endBranch], {
+      branchOrder: [BRANCH_A],
+    });
     expect(isOk(result)).toBe(true);
+    if (isErr(result)) throw result.error;
+    expect(result.data.merged.identity).toEqual({
+      asserted: 0,
+      retracted: 1,
+    });
     expect(
-      await target.nodes.Anchor.getById("bridge" as never),
-    ).toBeUndefined();
+      (await forkPoint.nodes.Anchor.getById("a" as never))?.meta.validTo,
+    ).toBe("2100-01-01T00:00:00.000Z");
     expect(
-      await target.identity.areDifferent(
+      await forkPoint.identity.areSame(
         { kind: "Anchor", id: "a" },
         { kind: "Anchor", id: "b" },
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it.each([
@@ -1751,9 +1780,18 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
         id: asBranchId("target-clone"),
       }),
     ).store;
+    const assertionValidFrom = ["a", "b"].map(async (id) =>
+      requireDefined(
+        requireDefined(await forkPoint.nodes.Anchor.getById(id as never)).meta
+          .validFrom,
+      ),
+    );
+    const sharedValidFrom = (await Promise.all(assertionValidFrom))
+      .toSorted()
+      .at(-1);
     const targetImport = await importGraph(
       target,
-      assertionDocument("shared-x2", "a", "b"),
+      assertionDocument("shared-x2", "a", "b", requireDefined(sharedValidFrom)),
       { onConflict: "skip" },
     );
     expect(targetImport.success).toBe(true);
@@ -1762,7 +1800,7 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     );
     const branchImport = await importGraph(
       countBranch.store,
-      assertionDocument("shared-x2", "a", "b"),
+      assertionDocument("shared-x2", "a", "b", requireDefined(sharedValidFrom)),
       { onConflict: "skip" },
     );
     expect(branchImport.success).toBe(true);
@@ -1850,14 +1888,33 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
     const branchB = unwrap(
       await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
     );
+    const endpointValidFrom = requireDefined(
+      (
+        await Promise.all(
+          ["a", "b"].map(async (id) =>
+            requireDefined(
+              requireDefined(await forkPoint.nodes.Anchor.getById(id as never))
+                .meta.validFrom,
+            ),
+          ),
+        )
+      )
+        .toSorted()
+        .at(-1),
+    );
     const first = await importGraph(
       branchA.store,
-      assertionDocument("dup-id", "a", "b"),
+      assertionDocument("dup-id", "a", "b", endpointValidFrom),
       { onConflict: "skip" },
     );
     const second = await importGraph(
       branchB.store,
-      assertionDocument("dup-id", "a", "b", "2024-02-01T00:00:00.000Z"),
+      assertionDocument(
+        "dup-id",
+        "a",
+        "b",
+        new Date(Date.parse(endpointValidFrom) + 1).toISOString(),
+      ),
       { onConflict: "skip" },
     );
     expect(first.success).toBe(true);

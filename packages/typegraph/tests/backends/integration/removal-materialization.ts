@@ -8,7 +8,7 @@ import {
   defineGraphExtension,
   defineNode,
 } from "../../../src";
-import { createBackendOverlay } from "../../../src/backend/types";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { computeSchemaHash, serializeSchema } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
@@ -54,7 +54,7 @@ export function registerRemovalMaterializationIntegrationTests(
         readdBeforePendingRowsReturn: boolean;
         liveGraph?: GraphDef;
       } = { readdBeforePendingRowsReturn: false };
-      const backend = createBackendOverlay(baseBackend, {
+      const backend = deriveBackend(baseBackend, {
         async getPendingKindRemovals(graphId) {
           const pending = await getPendingKindRemovals(graphId);
           if (raceState.readdBeforePendingRowsReturn) {

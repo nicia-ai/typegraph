@@ -1,11 +1,11 @@
 import { type GraphDef } from "../core/define-graph";
 import {
   ConfigurationError,
+  IdentityValidityWindowError,
   NodeNotFoundError,
   ValidationError,
 } from "../errors";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
-import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import {
   requireLiveEndpoints,
@@ -13,10 +13,12 @@ import {
 } from "./service-components";
 import {
   partitionRetractedEndpoints,
-  retractByIds,
+  retractPlannedAssertions,
   runIdentityMutation,
 } from "./service-facade";
 import {
+  assertionForExactWindow,
+  createIdentityWindowValidator,
   currentAssertionForPair,
   insertAssertion,
   insertAssertionRows,
@@ -24,6 +26,7 @@ import {
   mergeCurrentClasses,
   replaceAffectedClosure,
   replaceSeparationForReferences,
+  requireEndpointsCoverIdentityWindow,
   validateCurrentRelation,
 } from "./service-mutation";
 import type { Backend } from "./service-read";
@@ -35,6 +38,10 @@ import {
 } from "./service-types";
 import { type PlainNodeRef } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
+import {
+  type ResolvedIdentityValidityWindow,
+  resolveIdentityValidityWindow,
+} from "./validity-window";
 
 /**
  * What importing a ledger of assertions reads off the service context: the
@@ -76,7 +83,11 @@ function validateTransferShape(
   ctx: IdentityAssertionImportContext,
   assertion: IdentityTransferAssertion,
   mode: "state" | "archival",
-): readonly [PlainNodeRef, PlainNodeRef] {
+  operationInstant: string,
+): Readonly<{
+  endpoints: readonly [PlainNodeRef, PlainNodeRef];
+  window: ResolvedIdentityValidityWindow;
+}> {
   if (
     !ctx.registry.nodeKinds.has(assertion.a.kind) ||
     !ctx.registry.nodeKinds.has(assertion.b.kind)
@@ -124,41 +135,38 @@ function validateTransferShape(
       },
     );
   }
-  const now = nowIso();
-  // An open row is asserted as current-truth "now"; a future validFrom would
-  // insert a row the closure filter (valid_from <= now) excludes yet
-  // currentAssertionForPair (valid_to IS NULL only) treats as current — two
-  // conflicting definitions of "current". That split does not depend on the
-  // import mode: an archival open row is just as unended as a state one.
-  if (
-    assertion.validTo === undefined &&
-    compareCodePoints(assertion.validFrom, now) > 0
-  ) {
-    throw transferShapeError(
-      assertion,
-      "Identity import cannot contain future-dated open assertions.",
+  let window: ResolvedIdentityValidityWindow;
+  try {
+    window = resolveIdentityValidityWindow(
       {
-        message: `Assertion ${assertion.id} validFrom is in the future`,
-        code: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
+        validFrom: assertion.validFrom,
+        ...(assertion.validTo === undefined ?
+          {}
+        : { validTo: assertion.validTo }),
       },
+      operationInstant,
     );
-  }
-  // Reject a NEGATIVE window (validTo strictly before validFrom). A zero-width
-  // window (validTo === validFrom) is intentionally allowed: it is what a
-  // same-instant retraction legitimately produces (nowIso is millisecond
-  // precision) and what the clock-skew clamp in retractById emits, so rejecting
-  // it here would break archival round-tripping of the store's own output.
-  if (
-    assertion.validTo !== undefined &&
-    compareCodePoints(assertion.validTo, assertion.validFrom) < 0
-  ) {
+  } catch (error) {
+    if (!(error instanceof IdentityValidityWindowError)) throw error;
+    const issue =
+      error.details.reason === "future-valid-from" ?
+        {
+          code: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
+          message: `Assertion ${assertion.id} validFrom is in the future`,
+        }
+      : error.details.reason === "future-valid-to" ?
+        {
+          code: "IDENTITY_IMPORT_FUTURE_VALID_TO",
+          message: `Assertion ${assertion.id} validTo is in the future`,
+        }
+      : {
+          code: "IDENTITY_IMPORT_INVALID_WINDOW",
+          message: `Assertion ${assertion.id} validTo must not precede validFrom`,
+        };
     throw transferShapeError(
       assertion,
-      "Identity assertion validity window is empty.",
-      {
-        message: `Assertion ${assertion.id} validTo must not precede validFrom`,
-        code: "IDENTITY_IMPORT_INVALID_WINDOW",
-      },
+      "Identity import contains an unsupported validity window.",
+      issue,
     );
   }
   // A cascade cause is only meaningful on an ENDED row, and only ever names
@@ -191,29 +199,7 @@ function validateTransferShape(
       );
     }
   }
-  // An ended row takes the raw-INSERT branch of the importer, which skips
-  // endpoint-liveness validation, contradiction validation and closure
-  // maintenance because a row that ended in the past cannot be part of any
-  // current identity class. A validTo in the future breaks that premise: the
-  // snapshot filter (valid_from <= now AND (valid_to IS NULL OR valid_to > now))
-  // reports the row as CURRENT while no closure row backs it, wedging the store
-  // — membersOf disagrees with the ledger, validateIdentity() reports a
-  // permanent contradiction, and no retraction API can end the row because they
-  // all match on valid_to IS NULL.
-  if (
-    assertion.validTo !== undefined &&
-    compareCodePoints(assertion.validTo, now) > 0
-  ) {
-    throw transferShapeError(
-      assertion,
-      "Identity import cannot contain assertions that end in the future.",
-      {
-        message: `Assertion ${assertion.id} validTo is in the future`,
-        code: "IDENTITY_IMPORT_FUTURE_VALID_TO",
-      },
-    );
-  }
-  return normalized;
+  return { endpoints: normalized, window };
 }
 
 /**
@@ -264,16 +250,18 @@ export async function importIdentityAssertionsIntoTarget(
   target: Backend,
   assertions: readonly IdentityTransferAssertion[],
   mode: "state" | "archival",
+  ignoredAssertionIds: ReadonlySet<string> = new Set(),
 ): Promise<IdentityImportSummary> {
   let created = 0;
   let skipped = 0;
   await withRecordedIdentityMutationTarget(target, async (rawTarget, touch) => {
+    const operationInstant = nowIso();
     // Pre-pass: validate every shape in input order and normalize endpoints,
     // then batch the two reads the loop would otherwise issue per item — the
     // existing-row-by-id lookup and the current-endpoint liveness check.
     const normalized = assertions.map((assertion) => ({
       assertion,
-      endpoints: validateTransferShape(ctx, assertion, mode),
+      ...validateTransferShape(ctx, assertion, mode, operationInstant),
     }));
     const existingById = await loadAssertionsByIds(
       rawTarget,
@@ -336,8 +324,18 @@ export async function importIdentityAssertionsIntoTarget(
     } catch (error) {
       attributeMissingEndpoint(error, true);
     }
+    const windowValidator = await createIdentityWindowValidator(
+      ctx,
+      rawTarget,
+      normalized.map(({ endpoints, window }) => ({
+        references: endpoints,
+        window,
+      })),
+      operationInstant,
+      ignoredAssertionIds,
+    );
 
-    for (const { assertion, endpoints } of normalized) {
+    for (const { assertion, endpoints, window } of normalized) {
       const [a, b] = endpoints;
       try {
         const sameId = existingById.get(assertion.id);
@@ -366,77 +364,107 @@ export async function importIdentityAssertionsIntoTarget(
           );
         }
 
-        if (assertion.validTo !== undefined) {
-          const timestamp = assertion.validFrom;
-          const row: IdentityAssertionStorageRow = {
-            graph_id: ctx.graphId,
-            id: assertion.id,
-            rel: assertion.relation,
-            a_kind: a.kind,
-            a_id: a.id,
-            b_kind: b.kind,
-            b_id: b.id,
-            valid_from: assertion.validFrom,
-            valid_to: assertion.validTo,
-            created_at: timestamp,
-            updated_at: assertion.validTo,
-            deleted_at: undefined,
-            ended_by_kind: assertion.endedBy?.kind,
-            ended_by_id: assertion.endedBy?.id,
-          };
-          await insertAssertionRows(rawTarget, ctx.schema, [row]);
-          touch(ctx.graphId, row.id, row);
-          existingById.set(row.id, row);
-          created += 1;
-          continue;
-        }
-
-        const existing = await currentAssertionForPair(
+        const exactWindow = await assertionForExactWindow(
           rawTarget,
           ctx.schema,
           ctx.graphId,
           assertion.relation,
           a,
           b,
+          window,
         );
-        if (existing !== undefined) {
+        if (exactWindow !== undefined) {
           skipped += 1;
           continue;
         }
-        await validateCurrentRelation(
-          ctx,
-          rawTarget,
-          assertion.relation,
-          "import",
-          a,
-          b,
-        );
-        const inserted = await insertAssertion(
-          rawTarget,
-          ctx.schema,
-          ctx.graphId,
-          assertion.relation,
-          a,
-          b,
-          nowIso(),
-          touch,
-          { id: assertion.id, validFrom: assertion.validFrom },
-        );
-        existingById.set(inserted.id, inserted);
-        created += 1;
-        // Repair the closure incrementally, exactly as single assertPair does, so
-        // a later validation in this same batch (e.g. a following different(a,b))
-        // sees the merge instead of validating against a stale materialized class.
-        if (assertion.relation === "same") {
-          await mergeCurrentClasses(rawTarget, ctx.schema, ctx.graphId, a, b);
-        } else {
-          await replaceSeparationForReferences(
+        if (window.effective === "current") {
+          const current = await currentAssertionForPair(
             rawTarget,
             ctx.schema,
             ctx.graphId,
-            [a, b],
+            assertion.relation,
+            a,
+            b,
           );
+          if (current !== undefined) {
+            skipped += 1;
+            continue;
+          }
+          await requireEndpointsCoverIdentityWindow(
+            rawTarget,
+            ctx.graphId,
+            [a, b],
+            window,
+          );
+          windowValidator.validate(assertion.relation, "import", a, b, window);
+          // The temporal check owns historical correctness. The current check
+          // also exercises the materialized separation backstop/readiness guard
+          // before this row changes current derived state.
+          await validateCurrentRelation(
+            ctx,
+            rawTarget,
+            assertion.relation,
+            "import",
+            a,
+            b,
+          );
+          const inserted = await insertAssertion(
+            rawTarget,
+            ctx.schema,
+            ctx.graphId,
+            assertion.relation,
+            a,
+            b,
+            operationInstant,
+            touch,
+            { id: assertion.id, validFrom: window.validFrom },
+          );
+          existingById.set(inserted.id, inserted);
+          windowValidator.record(inserted);
+          created += 1;
+          if (assertion.relation === "same") {
+            await mergeCurrentClasses(rawTarget, ctx.schema, ctx.graphId, a, b);
+          } else {
+            await replaceSeparationForReferences(
+              rawTarget,
+              ctx.schema,
+              ctx.graphId,
+              [a, b],
+            );
+          }
+          continue;
         }
+
+        await requireEndpointsCoverIdentityWindow(
+          rawTarget,
+          ctx.graphId,
+          [a, b],
+          window,
+        );
+        windowValidator.validate(assertion.relation, "import", a, b, window);
+
+        const timestamp = window.validFrom;
+        const row: IdentityAssertionStorageRow = {
+          graph_id: ctx.graphId,
+          id: assertion.id,
+          rel: assertion.relation,
+          a_kind: a.kind,
+          a_id: a.id,
+          b_kind: b.kind,
+          b_id: b.id,
+          valid_from: window.validFrom,
+          valid_to: window.validTo,
+          created_at: timestamp,
+          updated_at: window.validTo ?? window.validFrom,
+          deleted_at: undefined,
+          ended_by_kind: assertion.endedBy?.kind,
+          ended_by_id: assertion.endedBy?.id,
+        };
+        await insertAssertionRows(rawTarget, ctx.schema, [row]);
+        touch(ctx.graphId, row.id, row);
+        existingById.set(row.id, row);
+        windowValidator.record(row);
+        created += 1;
       } catch (error) {
         rethrowTaggedWithAssertion(error, assertion.id, { created, skipped });
       }
@@ -447,14 +475,19 @@ export async function importIdentityAssertionsIntoTarget(
 
 export async function applyIdentityChangesForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
-  retractionIds: readonly string[],
+  retractions: readonly IdentityTransferAssertion[],
   assertions: readonly IdentityTransferAssertion[],
 ): Promise<Readonly<{ created: number; retracted: number }>> {
-  if (retractionIds.length === 0 && assertions.length === 0) {
+  if (retractions.length === 0 && assertions.length === 0) {
     return { created: 0, retracted: 0 };
   }
   return runIdentityMutation(ctx, async (target, touch, markWritten) => {
-    const retracted = await retractByIds(ctx, target, retractionIds, touch);
+    const retracted = await retractPlannedAssertions(
+      ctx,
+      target,
+      retractions,
+      touch,
+    );
     const { closureReferences, separationReferences } =
       partitionRetractedEndpoints(retracted);
     // Repair the closure from the retractions BEFORE importing: a batch that
@@ -480,7 +513,8 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
       ctx,
       target,
       assertions,
-      "state",
+      "archival",
+      new Set(retracted.map((assertion) => assertion.id)),
     );
     // The import records capture touches through its OWN recorded binding, so
     // the mutation's wrapped touch never fires for created rows — an

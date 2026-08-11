@@ -27,6 +27,7 @@ import { z } from "zod";
 
 import { blockNodes } from "../../src/graph-merge/blocking";
 import { generateCandidates } from "../../src/graph-merge/candidate-gen";
+import { entityRef } from "../../src/graph-merge/evidence";
 import {
   compareMergeKeys,
   idOf,
@@ -98,6 +99,23 @@ const MRN_CONSTRAINT: readonly UniqueIntrospection[] = [
  */
 function edgeKeys(edges: readonly CandidateEdge[]): string[] {
   return edges.map((edge) => `${idOf(edge.a)}|${idOf(edge.b)}`);
+}
+
+function makeForcedEdge(
+  a: ReturnType<typeof mergeKey>,
+  b: ReturnType<typeof mergeKey>,
+): CandidateEdge {
+  return {
+    a,
+    b,
+    score: FORCED_MATCH_SCORE,
+    evidence: {
+      a: entityRef(a),
+      b: entityRef(b),
+      sources: [{ kind: "unique", sourceId: "unique", constraintName: "test" }],
+      decision: "definitional",
+    },
+  };
 }
 
 describe("candidate sources + scoring stage (step 0)", () => {
@@ -187,6 +205,16 @@ describe("candidate sources + scoring stage (step 0)", () => {
       `${expected[0]}|${expected[1]}`,
     ]);
     expect(produced.forcedEdges[0]?.score).toBe(FORCED_MATCH_SCORE);
+    expect(produced.forcedEdges[0]?.evidence).toMatchObject({
+      decision: "definitional",
+      sources: [
+        {
+          kind: "unique",
+          sourceId: "unique",
+          constraintName: "mrn_unique",
+        },
+      ],
+    });
     expect(produced.pairs).toEqual([]);
     expect(produced.baseMembers).toEqual([]);
   });
@@ -204,11 +232,10 @@ describe("candidate sources + scoring stage (step 0)", () => {
     const xKey = mergeKeyOf(x);
     const yKey = mergeKeyOf(y);
     const forced: readonly CandidateEdge[] = [
-      {
-        a: compareMergeKeys(xKey, yKey) <= 0 ? xKey : yKey,
-        b: compareMergeKeys(xKey, yKey) <= 0 ? yKey : xKey,
-        score: FORCED_MATCH_SCORE,
-      },
+      makeForcedEdge(
+        compareMergeKeys(xKey, yKey) <= 0 ? xKey : yKey,
+        compareMergeKeys(xKey, yKey) <= 0 ? yKey : xKey,
+      ),
     ];
 
     const scored = scoreCandidates(
@@ -249,11 +276,7 @@ describe("candidate sources + scoring stage (step 0)", () => {
     const pairs = pairsFromBlocks(blocks);
     expect(pairs).toHaveLength(1);
     const forced: readonly CandidateEdge[] = [
-      {
-        a: requireDefined(pairs[0]).a,
-        b: requireDefined(pairs[0]).b,
-        score: FORCED_MATCH_SCORE,
-      },
+      makeForcedEdge(requireDefined(pairs[0]).a, requireDefined(pairs[0]).b),
     ];
 
     const scored = scoreCandidates(
@@ -269,6 +292,66 @@ describe("candidate sources + scoring stage (step 0)", () => {
     // Exactly ONE edge — the forced one — not a forced AND a separate fuzzy edge.
     expect(scored.data.edges).toHaveLength(1);
     expect(scored.data.edges[0]?.score).toBe(FORCED_MATCH_SCORE);
+  });
+
+  it("preserves every proposing source after endpoint dedup", async () => {
+    const { create, ctx } = await makeFixture();
+    const left = await create({
+      name: "Anna Rivera",
+      birthDate: "1974-03-09",
+      mrn: "MRN-1",
+    });
+    const right = await create({
+      name: "Ana Rivera",
+      birthDate: "1974-03-09",
+      mrn: "MRN-1",
+    });
+    const constraints: readonly UniqueIntrospection[] = [
+      ...MRN_CONSTRAINT,
+      {
+        name: "name_unique",
+        fields: ["birthDate"],
+        scope: "kind",
+        collation: "binary",
+      },
+    ];
+    const blocks = blockNodes([left, right], blockByBirthDate, constraints);
+    const scored = scoreCandidates(
+      {
+        pairs: pairsFromBlocks(blocks),
+        forcedEdges: forcedEdgesFromBlocks(blocks),
+      },
+      blockByBirthDate,
+      ctx,
+      "error",
+    );
+    expect(isOk(scored)).toBe(true);
+    if (!isOk(scored)) return;
+    expect(scored.data.edges).toHaveLength(1);
+    const evidence = scored.data.edges[0]?.evidence;
+    expect(evidence).toEqual({
+      a: entityRef(requireDefined(scored.data.edges[0]).a),
+      b: entityRef(requireDefined(scored.data.edges[0]).b),
+      sources: [
+        { kind: "block", sourceId: "exactKey" },
+        {
+          kind: "unique",
+          sourceId: "unique",
+          constraintName: "mrn_unique",
+        },
+        {
+          kind: "unique",
+          sourceId: "unique",
+          constraintName: "name_unique",
+        },
+      ],
+      decision: "definitional",
+    });
+    const serialized = JSON.stringify(evidence);
+    expect(serialized).not.toContain("Anna Rivera");
+    expect(serialized).not.toContain("Ana Rivera");
+    expect(serialized).not.toContain("MRN-1");
+    expect(serialized).not.toContain("1974-03-09");
   });
 
   it("never merges two textless fuzzy pairs, even at threshold 0 (#8)", async () => {
@@ -288,6 +371,9 @@ describe("candidate sources + scoring stage (step 0)", () => {
     const blocks = blockNodes([alice, bob], textlessAtZero);
     const pairs = pairsFromBlocks(blocks);
     expect(pairs).toHaveLength(1); // both unblocked → compared all-vs-all
+    expect(pairs[0]?.sources).toEqual([
+      { kind: "keyless", sourceId: "keyless" },
+    ]);
 
     const scored = scoreCandidates(
       { pairs, forcedEdges: [] },
@@ -379,6 +465,11 @@ describe("ontologyRetypeEdges (cross-kind ontology retype source)", () => {
       new Set(["Doctor", "SpecialistDoctor"]),
     );
     expect(edge.score).toBe(FORCED_MATCH_SCORE);
+    expect(edge.evidence).toMatchObject({
+      decision: "definitional",
+      sources: [{ kind: "retype", sourceId: "retype" }],
+    });
+    expect(edge.evidence).not.toHaveProperty("score");
   });
 
   it("partitions a mixed bucket: an unrelated kind at the id does NOT suppress the valid retype pair", () => {

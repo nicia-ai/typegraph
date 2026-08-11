@@ -24,8 +24,8 @@
  * backend, and its files legitimately call these members), so the module is
  * data, not a call site.
  *
- * The existing facet types are not a substitute. They cover 87 of the 105
- * members and they deliberately overlap (`compileSql` is in both
+ * The existing facet types are not a substitute. They cover a strict subset of
+ * the members and they deliberately overlap (`compileSql` is in both
  * `RawQueryExecutionBackend` and `SqlCompilationBackend`): a facet is a
  * capability PROJECTION, this is a PARTITION. Different jobs, different
  * module.
@@ -77,6 +77,11 @@ const READ_MEMBERS = [
   "getPendingKindRemovals",
   "probeContributions",
   "verifyContributions",
+  // The constraint-fence AUDIT read. `verifyConstraintFences()` reports
+  // contended claim axes without touching them, so it is a probe like
+  // `checkUnique` — and for the same reason it must NOT be a write member: the
+  // audit runs from `store.ts`, outside any write frame.
+  "readConstraintFenceViolations",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 /**
@@ -106,15 +111,27 @@ export const ENTITY_WRITE_MEMBERS = [
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 /**
- * Derived-data writes a graph-entity write obliges: uniqueness reservations,
+ * Derived-data writes a graph-entity write obliges: CLAIM reservations,
  * embeddings, fulltext. These are the sidecars the fused session methods apply
  * — never something a write path may issue on its own.
+ *
+ * The claim relations are here, not in a class of their own, because a claim IS
+ * derived data a row write obliges: the row and the claim rows that fence it are
+ * written as one unit, at placements the claim entry decides, and a path that
+ * issued one without the other is precisely the defect the seam closes. Both
+ * relations are covered — the `uniques` relation (node uniqueness and
+ * `disjointWith` claims) and the `edge_claims` relation (edge cardinality) — so
+ * neither family can be written from outside a step or sidecar module.
  */
 export const SIDECAR_WRITE_MEMBERS = [
   "insertUnique",
   "insertUniqueBatch",
   "deleteUnique",
   "hardDeleteUniquesByNodeIds",
+  "hardDeleteUniquesByConcreteKind",
+  "claimEdgeCardinality",
+  "claimEdgeCardinalityBatch",
+  "purgeEdgeClaims",
   "upsertEmbedding",
   "upsertEmbeddingBatch",
   "deleteEmbedding",
@@ -163,9 +180,18 @@ const SCHEMA_MEMBERS = [
   "schemaWriteTransaction",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
-/** Table/index provisioning and DDL — the backend-setup carve-out. */
+/**
+ * Table/index provisioning and DDL — the backend-setup carve-out.
+ *
+ * `ensureExtension` (and its deprecated `ensureTrigramExtension` alias) install
+ * a database-global extension under a per-extension advisory lock. That is DDL
+ * provisioning, not a graph write: it precedes every index build, takes its own
+ * fence, and no `WritePlan` applies to it.
+ */
 const PROVISIONING_MEMBERS = [
   "bootstrapTables",
+  "ensureExtension",
+  "ensureTrigramExtension",
   "ensureFulltextTable",
   "ensureIdentityTables",
   "ensureIndexMaterializationsTable",

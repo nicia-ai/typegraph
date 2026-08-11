@@ -10,7 +10,9 @@ export {
   type CreateEdgeInput,
   type CreateNodeInput,
   type DynamicEdgeCollection,
+  type DynamicNode,
   type DynamicNodeCollection,
+  type DynamicNodeReference,
   type Edge,
   type EdgeBatchReads,
   type EdgeCollection,
@@ -98,6 +100,8 @@ export type {
 export { defineSubgraphProject } from "./subgraph";
 
 // Store
+export type { ClaimOwner, ClaimTarget } from "./claims/axis";
+export type { ConstraintFenceViolation } from "./claims/verify";
 export type { HistoryStoreBackend } from "./history-store-backend";
 export type {
   MaterializeIndexesEntry,

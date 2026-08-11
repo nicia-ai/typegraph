@@ -119,6 +119,7 @@ const BRANCH_ORDER = [BRANCH_A, BRANCH_B];
 const EARLY = "2100-01-01T00:00:00.000Z";
 const LATE = "2100-06-01T00:00:00.000Z";
 const LATEST = "2100-09-01T00:00:00.000Z";
+const MOVED_FROM = "2099-01-01T00:00:00.000Z";
 
 describe.each(backendMatrix())(
   "merging valid-time windows [$name]",
@@ -539,6 +540,81 @@ describe.each(backendMatrix())(
       ).toBe(beforeFrom);
     });
 
+    it("does not apply the open-window artifact of delete and resurrect", async () => {
+      const forkPoint = await seededForkPoint();
+      await forkPoint.nodes.Patient.update(LONE_PATIENT, {}, { validTo: LATE });
+      await forkPoint.edges.hadEncounter.update(EDGE_1, {}, { validTo: LATE });
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+
+      await branchA.store.nodes.Patient.delete(LONE_PATIENT);
+      await branchA.store.nodes.Patient.upsertById(
+        LONE_PATIENT,
+        { name: "Ben Okafor" },
+        { validFrom: MOVED_FROM },
+      );
+      await branchA.store.edges.hadEncounter.delete(EDGE_1);
+      await branchA.store.edges.hadEncounter.bulkUpsertById([
+        {
+          id: EDGE_1,
+          from: { kind: "Patient", id: "pat-1" },
+          to: { kind: "Encounter", id: "enc-1" },
+          props: { on: "2026-01-05" },
+          validFrom: MOVED_FROM,
+        },
+      ]);
+
+      const report = unwrap(
+        await merge(forkPoint, [branchA], { branchOrder: BRANCH_ORDER }),
+      );
+
+      expect(await nodeEnd(forkPoint, "Patient", "pat-2")).toBe(LATE);
+      expect(await edgeEnd(forkPoint, "edge-1")).toBe(LATE);
+      expect(report.validityEnds).toEqual([]);
+      expect(unapplicableIds(report)).toEqual(
+        expect.arrayContaining(["pat-2", "edge-1"]),
+      );
+    });
+
+    it("does not let a target resurrection artifact outrank a branch end", async () => {
+      const forkPoint = await seededForkPoint();
+      await forkPoint.nodes.Patient.update(LONE_PATIENT, {}, { validTo: LATE });
+      const target = (await forkOf(forkPoint, asBranchId("window-target")))
+        .store;
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+
+      await target.nodes.Patient.delete(LONE_PATIENT);
+      await target.nodes.Patient.upsertById(
+        LONE_PATIENT,
+        { name: "Ben Okafor" },
+        { validFrom: MOVED_FROM },
+      );
+      await branchA.store.nodes.Patient.update(
+        LONE_PATIENT,
+        {},
+        { validTo: EARLY },
+      );
+
+      const report = unwrap(
+        await mergeIncremental<CareGraph>({
+          forkPoint,
+          target,
+          branches: [branchA],
+          options: { branchOrder: BRANCH_ORDER },
+        }),
+      );
+
+      expect(await nodeEnd(target, "Patient", "pat-2")).toBe(EARLY);
+      expect(report.validityEnds).toEqual([
+        {
+          entity: "node",
+          kind: "Patient",
+          id: "pat-2",
+          validTo: EARLY,
+          claimedBy: [BRANCH_A],
+        },
+      ]);
+    });
+
     it("gives PARALLEL edges of one kind their own ends", async () => {
       const forkPoint = await seededForkPoint();
       // A SECOND inherited edge with identical endpoints and props. The store is a
@@ -623,6 +699,80 @@ describe.each(backendMatrix())(
       // The single-changer rule, not a blind `min` against base — otherwise no
       // branch could ever extend a window.
       expect(await nodeEnd(forkPoint, "Patient", "pat-1")).toBe(LATEST);
+    });
+
+    it("reopens inherited node and edge windows from a branch", async () => {
+      const forkPoint = await seededForkPoint();
+      await forkPoint.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
+      await forkPoint.edges.hadEncounter.update(EDGE_1, {}, { validTo: LATE });
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      await branchA.store.nodes.Patient.update(
+        PATIENT,
+        {},
+        { clearValidTo: true },
+      );
+      await branchA.store.edges.hadEncounter.update(
+        EDGE_1,
+        {},
+        { clearValidTo: true },
+      );
+
+      const report = unwrap(
+        await merge(forkPoint, [branchA], { branchOrder: BRANCH_ORDER }),
+      );
+
+      expect(await nodeEnd(forkPoint, "Patient", "pat-1")).toBeUndefined();
+      expect(await edgeEnd(forkPoint, "edge-1")).toBeUndefined();
+      expect(report.validityEnds).toEqual([
+        {
+          entity: "node",
+          kind: "Patient",
+          id: "pat-1",
+          clearValidTo: true,
+          claimedBy: [BRANCH_A],
+        },
+        {
+          entity: "edge",
+          kind: "hadEncounter",
+          id: "edge-1",
+          clearValidTo: true,
+          claimedBy: [BRANCH_A],
+        },
+      ]);
+      expect(unapplicableIds(report)).not.toContain("pat-1");
+      expect(unapplicableIds(report)).not.toContain("edge-1");
+    });
+
+    it("keeps an ending over a concurrent reopening", async () => {
+      const forkPoint = await seededForkPoint();
+      await forkPoint.nodes.Patient.update(PATIENT, {}, { validTo: LATE });
+      const branchA = await forkOf(forkPoint, BRANCH_A);
+      const branchB = await forkOf(forkPoint, BRANCH_B);
+      await branchA.store.nodes.Patient.update(
+        PATIENT,
+        {},
+        { clearValidTo: true },
+      );
+      await branchB.store.nodes.Patient.update(PATIENT, {}, { validTo: EARLY });
+
+      const report = unwrap(
+        await merge(forkPoint, [branchA, branchB], {
+          branchOrder: BRANCH_ORDER,
+        }),
+      );
+
+      // An ending is the stronger monotone claim when sibling branches disagree
+      // about reopening the same row.
+      expect(await nodeEnd(forkPoint, "Patient", "pat-1")).toBe(EARLY);
+      expect(report.validityEnds).toEqual([
+        {
+          entity: "node",
+          kind: "Patient",
+          id: "pat-1",
+          validTo: EARLY,
+          claimedBy: [BRANCH_A, BRANCH_B],
+        },
+      ]);
     });
 
     it("leaves the target's window alone for a props-only modification", async () => {

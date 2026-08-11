@@ -80,6 +80,57 @@ import { createAdapterTestSuite } from "./adapter-test-suite";
 createAdapterTestSuite("SQLite", () => createTestBackend());
 ```
 
+### Oracle suites
+
+Some semantics have more than one implementation inside the library — the same
+question answered by the SQL compiler, by a collection predicate, and by an
+in-memory row filter. Checking those against each other proves nothing: any
+three of them agreeing is the failure mode, not the evidence. An **oracle
+suite** answers the question a fourth time, independently, and checks every path
+against that.
+
+Two exist today, both registered in the shared cross-backend suite so they run
+on every backend in the matrix:
+
+| Model | Suite | Question it re-derives |
+| --- | --- | --- |
+| `tests/backends/integration/identity-traversal-model.ts` | `identity-current-traversal.ts`, `identity-historical-traversal.ts` | Which rows an identity-expanded hop must return at an instant. |
+| `tests/backends/integration/temporal-oracle-model.ts` | `temporal-oracle.ts` | Which rows a bitemporal coordinate must return, and which validity windows a write may store. |
+
+A model earns the name by three properties, and all three are load-bearing:
+
+1. **It is a second implementation, not a restatement.** The temporal model
+   formulates visibility as interval membership over epoch milliseconds; the
+   library formulates it as a column predicate over `TEXT` or `timestamptz`.
+2. **It derives its expectations from the rows that were actually persisted**,
+   never from the write calls, so a write whose stored shape differs from the
+   requested one is checked against what it stored rather than flaking.
+3. **It passes unchanged on `main`.** A model that only passes after the fix it
+   accompanies is a restatement of the fix. Where the tree is knowingly wrong,
+   the model declares the cell in a gap table, withholds the op shape that
+   reaches it from the generator, and carries a still-reproduces test — and each
+   entry is deleted by the diff that measurably closes it, never later, with its
+   reproduction turned around into a gap-CLOSED test running the same script.
+   The temporal model carried three such entries and now carries none; its
+   `closed contract gaps` block is what that discipline leaves behind.
+
+`tests/temporal-oracle-imports.test.ts` ratchets the temporal model's
+independence: exact set equality over its import specifiers, a named-import
+check on `src/utils/date` so the window guards stay out, and an assertion that
+the barrel import is `import type`, so it cannot carry a value however the
+barrel grows. It also ratchets the op vocabulary by **sampling the history
+generator's own arbitrary**: a shape the script claims to cover is only covered
+if the generator can draw it, and comparing one spelling of the declared list
+against another cannot show that.
+
+The oracle properties run at a smoke-gate iteration count by default and take a
+run-count knob for deep runs:
+
+```bash
+# Deep run of the temporal oracle on every backend in the default lane
+TYPEGRAPH_ORACLE_RUNS=100 pnpm test
+```
+
 ## Running Tests
 
 ```bash
@@ -240,10 +291,20 @@ A surviving mutant indicates a gap in test coverage - code that can change witho
 # Full run (slow - 6000+ mutants)
 pnpm test:mutation
 
-# Targeted run (recommended)
+# Scoped runs (recommended) — one config per high-risk subsystem
+pnpm test:mutation:critical   # write pipeline, import, provenance, history
+pnpm test:mutation:claims     # constraint claim axes, specs and statements
+
+# Ad-hoc targeted run
 npx stryker run --mutate "src/utils/*.ts"
 npx stryker run --mutate "src/query/builder/*.ts"
 ```
+
+`test:mutation:claims` covers `src/store/claims/**` plus the claim-statement and
+fence-audit builders under `src/backend/drizzle/operations`. Run it without
+`POSTGRES_URL`: the two-connection concurrency suite is timing-bound and skips
+itself there, while the cross-backend integration suite — which is what kills
+most of these mutants — runs either way.
 
 ### Interpreting Results
 
@@ -390,20 +451,23 @@ it("closure is transitive", () => {
 
 ## CI Integration
 
-Every pull request to `main` must pass the full gate defined in
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). It is much broader
-than the local `pnpm test` default (which runs only SQLite unit/property
-tests). The jobs are:
+Every code-changing pull request to `main` must pass the full gate defined in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Release changes that
+only update changesets, changelogs, and the package version skip the heavy jobs;
+the parsed package manifest must otherwise be identical.
+The full gate is much broader than the local `pnpm test` default (which runs
+only SQLite unit/property tests). The jobs are:
 
 | Job | What it runs |
 |-----|--------------|
 | **Lint & Type Check** | `typecheck`, `lint` (ESLint), `prettier`, `test:docs` (markdownlint), `test:unused` (knip) |
-| **Test (SQLite)** | `test:unit` + `test:property` on Node 22 and 24, plus a SQLite perf sanity check and an example smoke test |
-| **Test (Coverage)** | `test:coverage` — enforces the coverage thresholds |
-| **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.2 |
+| **Test (SQLite)** | Two `test:unit` shards on Node 22, `test:property` on Node 24, plus a SQLite perf sanity check and example smoke tests |
+| **Test (Coverage)** | Four V8 coverage shards on Node 24; a merge job combines their blob reports and enforces the coverage thresholds |
+| **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.3 |
 | **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |
 | **Test (Durable Objects SQLite)** | `test:do` — the workerd / Cloudflare Durable Objects SQLite lane |
-| **Build** | `turbo run build` — gated on every job above |
+| **Build artifacts** | `turbo run build` in parallel with the test jobs |
+| **Build** | Final required gate that succeeds only after the build and every test job above pass |
 
 A separate [release workflow](../.github/workflows/release.yml) packs the npm
 tarball after CI passes and smoke-imports every public subpath (ESM + CJS)

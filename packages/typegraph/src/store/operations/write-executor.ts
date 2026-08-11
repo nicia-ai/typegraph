@@ -14,8 +14,8 @@
  * takes positions 1-2, this takes position 3, and `rowWork` is called after
  * both.
  */
+import { deriveBackend } from "../../backend/derive-backend";
 import {
-  createBackendOverlay,
   type GraphBackend,
   type TransactionBackend,
 } from "../../backend/types";
@@ -150,7 +150,7 @@ function planFrame<T>(
       sessionTarget: GraphBackend | TransactionBackend,
     ): WriteSession => createWriteSession(ctx, sessionTarget, lock);
     const mintOverlaidSession: OverlaidSessionMint = (reads) =>
-      mintSessionOver(createBackendOverlay(target, reads));
+      mintSessionOver(deriveBackend(target, reads));
     // The two handles are the SAME object: the session closes over the raw
     // target (its step modules probe optional members on it), while row work
     // sees it through the type-only `WriteTarget` projection. One value, two

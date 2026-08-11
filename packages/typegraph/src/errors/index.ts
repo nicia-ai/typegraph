@@ -556,6 +556,20 @@ export type UniquenessErrorDetails = Readonly<{
   existingId: string;
   newId: string;
   fields: readonly string[];
+  /**
+   * The claim row's `node_kind` — the axis this violation was found at.
+   * Optional so a third-party backend implementing the documented "throws
+   * `UniquenessError`" contract keeps working unchanged; when a throw site
+   * omits it, a caller loses only the disambiguation this field exists for,
+   * never correctness of the refusal itself.
+   *
+   * `constraintName` alone cannot tell two disjoint pairs apart — every
+   * `disjointWith` pair shares the single reserved `DISJOINT_CONSTRAINT_NAME`
+   * — so `mapClaimRefusal` (`store/claims/node-claims.ts`) matches on this
+   * field together with `constraintName` and the key, which is exactly the
+   * claim row's primary key and therefore unambiguous.
+   */
+  axis?: string;
 }>;
 
 /**
@@ -684,6 +698,74 @@ export class IdentityContradictionError extends TypeGraphError {
       },
     );
     this.name = "IdentityContradictionError";
+  }
+}
+
+export type IdentityValidityWindowErrorDetails = Readonly<{
+  reason:
+    | "future-valid-from"
+    | "future-valid-to"
+    | "inverted"
+    | "overlapping-open-window";
+  validFrom: string;
+  validTo?: string;
+  operationInstant: string;
+}>;
+
+/** Thrown when an identity assertion validity window cannot be applied. */
+export class IdentityValidityWindowError extends TypeGraphError {
+  declare readonly details: IdentityValidityWindowErrorDetails;
+
+  constructor(details: IdentityValidityWindowErrorDetails) {
+    const code =
+      details.reason === "future-valid-from" ? "IDENTITY_VALIDITY_FUTURE_START"
+      : details.reason === "future-valid-to" ? "IDENTITY_VALIDITY_FUTURE_END"
+      : details.reason === "inverted" ? "IDENTITY_VALIDITY_INVERTED"
+      : "IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT";
+    super(
+      `Identity assertion validity window cannot be applied: ${details.reason}.`,
+      code,
+      {
+        details,
+        category:
+          details.reason === "overlapping-open-window" ? "constraint" : "user",
+        suggestion:
+          details.reason === "inverted" ? "Pass validFrom at or before validTo."
+          : details.reason === "overlapping-open-window" ?
+            "Retract the existing open assertion before creating a different open validity window for the same relation and pair."
+          : "Use a boundary at or before the current operation clock; future-scheduled identity transitions are not supported.",
+      },
+    );
+    this.name = "IdentityValidityWindowError";
+  }
+}
+
+export type IdentityEndpointValidityErrorDetails = Readonly<{
+  endpoint: Readonly<{ kind: string; id: string }>;
+  assertionWindow: Readonly<{ validFrom: string; validTo?: string }>;
+  endpointWindow: Readonly<{
+    validFrom?: string;
+    validTo?: string;
+    deletedAt?: string;
+  }>;
+}>;
+
+/** Thrown when an identity endpoint does not exist throughout the assertion window. */
+export class IdentityEndpointValidityError extends TypeGraphError {
+  declare readonly details: IdentityEndpointValidityErrorDetails;
+
+  constructor(details: IdentityEndpointValidityErrorDetails) {
+    super(
+      `Identity endpoint ${details.endpoint.kind}/${details.endpoint.id} does not exist throughout the requested assertion validity window.`,
+      "IDENTITY_ENDPOINT_VALIDITY",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Choose an assertion window contained by both endpoint validity windows.",
+      },
+    );
+    this.name = "IdentityEndpointValidityError";
   }
 }
 
@@ -1448,6 +1530,36 @@ export class ExportStreamCancelledError extends TypeGraphError {
 }
 
 /**
+ * Thrown when an export stream's consumer leaves a delivered chunk
+ * unacknowledged for longer than its configured idle timeout.
+ *
+ * The timeout measures consumer idleness only: it starts when a chunk is
+ * yielded and stops when the consumer asks for the next one. Receiving this
+ * error means the timed-out export has settled its snapshot transaction and
+ * released any serialized connection lease it held. `details.idleTimeoutMs`
+ * carries the configured bound.
+ */
+export class ExportStreamIdleTimeoutError extends TypeGraphError {
+  constructor(graphId: string, idleTimeoutMs: number, transactional: boolean) {
+    super(
+      transactional ?
+        `The graph export stream consumer did not request its next chunk within ${idleTimeoutMs}ms: its repeatable-read snapshot has been rolled back and the connection it held released.`
+      : `The graph export stream consumer did not request its next chunk within ${idleTimeoutMs}ms: its remaining reads were abandoned. This backend does not support transactions, so the export held no snapshot and no connection.`,
+      "INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT",
+      {
+        details: { graphId, idleTimeoutMs },
+        category: "user",
+        suggestion:
+          transactional ?
+            "Start a new export and consume each chunk within the configured idle timeout, increase idleTimeoutMs, or cancel explicitly with an AbortSignal."
+          : "Start a new export and consume each chunk within the configured idle timeout, increase idleTimeoutMs, or cancel explicitly with an AbortSignal; discard the partial export unless mutually-inconsistent chunks are acceptable.",
+      },
+    );
+    this.name = "ExportStreamIdleTimeoutError";
+  }
+}
+
+/**
  * The stable `details.code` values raised by the recorded-capture guards on a
  * history- or revision-tracked store. These are the sanctioned branch points
  * for a portable caller that must pick a transaction strategy without
@@ -1664,6 +1776,49 @@ function storeNotInitializedAction(
     `Run createStoreWithSchema(graph, backend) during application boot, ` +
     `outside request handlers and adopted transactions, before using createStore().`
   );
+}
+
+/** Details for a runtime contribution whose durable marker outlived storage. */
+export type ContributionUnavailableErrorDetails = Readonly<{
+  graphId: string;
+  logicalName: "fulltext";
+  physicalName: string;
+  state: "physical-storage-missing";
+}>;
+
+/**
+ * Thrown when a gated fulltext operation discovers that materialized storage
+ * disappeared after its durable marker recorded successful initialization.
+ */
+export class ContributionUnavailableError extends TypeGraphError {
+  declare readonly details: ContributionUnavailableErrorDetails;
+
+  constructor(
+    graphId: string,
+    physicalName: string,
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    const suggestion =
+      'Run store.rebuildContribution("fulltext") to recreate the lost ' +
+      "storage and repopulate it from the graph's nodes.";
+    super(
+      `Fulltext storage "${physicalName}" for graph "${graphId}" ` +
+        `disappeared after initialization. ${suggestion}`,
+      "CONTRIBUTION_UNAVAILABLE",
+      {
+        details: {
+          graphId,
+          logicalName: "fulltext",
+          physicalName,
+          state: "physical-storage-missing",
+        },
+        category: "user",
+        suggestion,
+        cause: options?.cause,
+      },
+    );
+    this.name = "ContributionUnavailableError";
+  }
 }
 
 /**

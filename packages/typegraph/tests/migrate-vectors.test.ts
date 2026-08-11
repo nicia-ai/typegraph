@@ -12,6 +12,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { migrateLegacyEmbeddings } from "../src/backend/migrate-vectors";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
@@ -305,10 +309,9 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
   });
 
   it("throws when the backend has no vectorStrategy", async () => {
-    const strategyless: GraphBackend = {
-      ...backend,
-      vectorStrategy: undefined,
-    };
+    const strategyless: GraphBackend = projectBackendWithout(backend, [
+      "vectorStrategy",
+    ]);
     await expect(
       migrateLegacyEmbeddings({ backend: strategyless }),
     ).rejects.toThrow(/requires a backend wired with a vectorStrategy/u);
@@ -371,13 +374,12 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
       },
     ];
     let reads = 0;
-    const wrapped: GraphBackend = {
-      ...backend,
+    const wrapped: GraphBackend = deriveBackend(backend, {
       execute: (() => {
         reads += 1;
         return Promise.resolve(reads === 1 ? malformedBatch : []);
       }) as GraphBackend["execute"],
-    };
+    });
 
     const result = await migrateLegacyEmbeddings({ backend: wrapped });
 

@@ -163,6 +163,7 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     identityClosure: `${prefix}_identity_closure`,
     identitySeparation: `${prefix}_identity_separation`,
     uniques: `${prefix}_uniques`,
+    edgeClaims: `${prefix}_edge_claims`,
     schemaVersions: `${prefix}_schema_versions`,
     fulltext: `${prefix}_fulltext`,
     indexMaterializations: `${prefix}_index_materializations`,
@@ -320,7 +321,7 @@ export function identityAssertionDocument(
   id: string,
   a: string,
   b: string,
-  validFrom = "2024-01-01T00:00:00.000Z",
+  validFrom = new Date().toISOString(),
 ): Parameters<typeof importGraph>[1] {
   const refA = { kind, id: a };
   const refB = { kind, id: b };

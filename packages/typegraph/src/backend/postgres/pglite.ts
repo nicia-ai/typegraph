@@ -41,6 +41,7 @@ import { type Extension, PGlite } from "@electric-sql/pglite";
 import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 
 import { ConfigurationError } from "../../errors";
+import { wrapWithManagedClose } from "../derive-backend";
 export type { GraphIdentityConfig } from "../../core/define-graph";
 import {
   generatePostgresDDL,
@@ -53,11 +54,7 @@ import {
   type PostgresTables,
   tables as defaultTables,
 } from "../drizzle/postgres";
-import {
-  type AdapterBackend,
-  closeAfterFailure,
-  wrapWithManagedClose,
-} from "../types";
+import { type AdapterBackend, closeAfterFailure } from "../types";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,

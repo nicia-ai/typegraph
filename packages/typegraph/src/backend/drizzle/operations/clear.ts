@@ -14,7 +14,7 @@ export type ClearGraphStatement = Readonly<{
  * Builds DELETE FROM statements for all per-graph base tables filtered by
  * graph_id. Delete order respects implicit FK-like dependencies:
  * fulltext → recorded identity/edges/nodes → identity closure/assertions →
- * recorded_clock → uniques → edges → nodes → schema_versions.
+ * recorded_clock → uniques → edge_claims → edges → nodes → schema_versions.
  *
  * Embeddings are NOT cleared here: they live in per-`(nodeKind, fieldPath)`
  * strategy-owned tables that this graph-agnostic builder cannot enumerate.
@@ -74,6 +74,17 @@ export function buildClearGraph(
     },
     {
       query: sql`DELETE FROM ${tables.uniques} WHERE ${tables.uniques.graphId} = ${graphId}`,
+    },
+    // Edge claims name the edges they are held by, so they are cleared
+    // BEFORE the edges — the same ordering `uniques` gets against `nodes`.
+    // Tolerates absence for the reason the recorded relations do: bootstrap DDL
+    // runs only on first boot, so a database initialized before this relation
+    // existed has no such table, and clearing a graph must not become the
+    // operation that fails on it.
+    {
+      query: sql`DELETE FROM ${tables.edgeClaims} WHERE ${tables.edgeClaims.graphId} = ${graphId}`,
+      ignoreMissingTable: true,
+      requiredTableName: getTableName(tables.edgeClaims),
     },
     {
       query: sql`DELETE FROM ${tables.edges} WHERE ${tables.edges.graphId} = ${graphId}`,

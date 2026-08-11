@@ -413,7 +413,7 @@ export type SerializedClosures = Readonly<{
   broaderClosure: Record<string, readonly string[]>;
   narrowerClosure: Record<string, readonly string[]>;
   equivalenceSets: Record<string, readonly string[]>;
-  disjointPairs: readonly string[]; // ["Organization|Person", ...]
+  disjointPairs: readonly string[]; // Injectively encoded unordered pairs
   partOfClosure: Record<string, readonly string[]>;
   hasPartClosure: Record<string, readonly string[]>;
   iriToKind: Record<string, string>;

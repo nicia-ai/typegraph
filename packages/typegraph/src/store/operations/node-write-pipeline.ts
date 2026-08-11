@@ -26,11 +26,6 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import {
-  checkWherePredicate,
-  computeUniqueKey,
-  getKindsForUniquenessCheck,
-} from "../../constraints";
-import {
   type DeleteBehavior,
   type JsonValue,
   type UniqueConstraint,
@@ -38,7 +33,6 @@ import {
 import {
   ConfigurationError,
   RestrictedDeleteError,
-  UniquenessError,
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
@@ -46,7 +40,20 @@ import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { assertsStoredLowerBound } from "../../utils/date";
-import { requireDefined } from "../../utils/presence";
+import { purgeEdgeClaims } from "../claims/edge-claims";
+import {
+  alreadyAppliedRowWrite,
+  createUniquenessContext,
+  deleteUniquenessEntries,
+  hardDeleteClaimsByNodeIds,
+  type NodeClaimContext,
+  planNodeClaimReinsert,
+  planNodeClaimUpdate,
+  type UniquenessUpdatePlan,
+  withNodeClaimTransition,
+  withNodeCreateClaimsBatch,
+} from "../claims/node-claims";
+import { validateResolvedNodeClaims } from "../claims/resolved-node-claims";
 import {
   deleteNodeEmbeddings,
   getEmbeddingFields,
@@ -60,17 +67,6 @@ import {
   syncFulltextBatchForKind,
 } from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import {
-  createUniquenessContext,
-  deleteUniquenessEntries,
-  hardDeleteUniquenessEntriesByNodeIds,
-  insertUniquenessEntries,
-  insertUniquenessEntriesBatch,
-  planUniquenessReinsert,
-  planUniquenessUpdate,
-  type UniquenessUpdatePlan,
-  withUniquenessTransition,
-} from "../uniqueness";
 
 type Backend = GraphBackend | TransactionBackend;
 
@@ -80,12 +76,13 @@ type Backend = GraphBackend | TransactionBackend;
  * row work (see {@link GraphWriteLock}): the pipeline performs no locking of
  * its own, so requiring the token here makes "sidecar write before lock" a
  * type error at the call site instead of a lock-order inversion in review.
+ *
+ * It is the claim seam's context by definition rather than by coincidence: a
+ * write path hands the same value to {@link withNodeCreateClaims} and to the
+ * sync fans, so the two halves of one insert cannot be given different graphs,
+ * registries, or lock evidence.
  */
-export type NodeWriteContext = Readonly<{
-  graphId: string;
-  registry: KindRegistry;
-  lock: GraphWriteLock;
-}>;
+export type NodeWriteContext = NodeClaimContext;
 
 /** Builds a {@link NodeWriteContext} — the one constructor every call site shares. */
 export function createNodeWriteContext(
@@ -176,50 +173,59 @@ async function enforceNodeDeleteBehavior(
       // without both endpoints. One batched statement per bind-budget
       // chunk instead of one statement per edge; the per-edge loop remains
       // for backends without the batch members.
+      const connectedEdgeIds = connectedEdges.map((edge) => edge.id);
       const batchDelete =
         args.mode === "hard" ?
           backend.hardDeleteEdgesBatch
         : backend.deleteEdgesBatch;
-      if (batchDelete !== undefined) {
+      if (batchDelete === undefined) {
+        for (const edge of connectedEdges) {
+          await (args.mode === "hard" ?
+            backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })
+          : backend.deleteEdge({ graphId: ctx.graphId, id: edge.id }));
+        }
+      } else {
         await batchDelete({
           graphId: ctx.graphId,
-          ids: connectedEdges.map((edge) => edge.id),
+          ids: connectedEdgeIds,
         });
-        break;
       }
-      for (const edge of connectedEdges) {
-        await (args.mode === "hard" ?
-          backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })
-        : backend.deleteEdge({ graphId: ctx.graphId, id: edge.id }));
+      // Hard-deleted holders are already takeable through the liveness probe;
+      // this is housekeeping so node cascades do not grow edgeClaims forever.
+      // Soft-deleted edges retain their rows for resurrection and are not
+      // reaped here.
+      if (args.mode === "hard") {
+        await purgeEdgeClaims(backend, ctx.graphId, connectedEdgeIds);
       }
       break;
     }
   }
 }
 
+/** One inserted row, as the post-insert sync fans read it. */
+export type NodeInsertSyncItem = Readonly<{
+  kind: string;
+  id: string;
+  schema: z.ZodType;
+  props: Record<string, unknown>;
+  uniqueConstraints: readonly UniqueConstraint[];
+}>;
+
 /**
- * Applies the side effects that follow a node insert: uniqueness entries, then
- * embedding and fulltext sync. Uniqueness has already been *checked* during
- * create preparation; this writes the entries.
+ * The sync fans that follow a node insert: embedding and fulltext.
+ *
+ * The claims this row owes are NOT here. They are issued by
+ * {@link withNodeCreateClaims}, on the two sides of the insert their placement
+ * names — a claim that is the only fence for its axis has to precede the row it
+ * gates, and a function that runs entirely after the insert cannot issue one.
+ * The fans have no such constraint: they are derived data, they fence nothing,
+ * and they stay where they have always been.
  */
-export async function applyNodeInsertSideEffects(
+export async function applyNodeInsertSyncFans(
   ctx: NodeWriteContext,
-  args: Readonly<{
-    kind: string;
-    id: string;
-    schema: z.ZodType;
-    props: Record<string, unknown>;
-    uniqueConstraints: readonly UniqueConstraint[];
-  }>,
+  args: NodeInsertSyncItem,
   backend: Backend,
 ): Promise<void> {
-  await insertUniquenessEntries(
-    uniquenessContext(ctx, backend),
-    args.kind,
-    args.id,
-    args.props,
-    args.uniqueConstraints,
-  );
   await Promise.all([
     syncEmbeddings(
       nodeSyncContext(ctx, args.kind, args.id, backend),
@@ -235,34 +241,16 @@ export async function applyNodeInsertSideEffects(
 }
 
 /**
- * Batched {@link applyNodeInsertSideEffects}: one uniqueness batch across
- * every item, then one embedding batch per (kind, field) and one fulltext
- * batch per kind — instead of the per-row statement fan the single-op path
- * issues. Ordering matches the single-op path (uniqueness first, then the
- * sync fans).
+ * Batched {@link applyNodeInsertSyncFans}: one embedding batch per (kind,
+ * field) and one fulltext batch per kind, instead of the per-row statement fan
+ * the single-op path issues.
  */
-export async function applyNodeInsertSideEffectsBatch(
+export async function applyNodeInsertSyncFansBatch(
   ctx: NodeWriteContext,
-  items: readonly Readonly<{
-    kind: string;
-    id: string;
-    schema: z.ZodType;
-    props: Record<string, unknown>;
-    uniqueConstraints: readonly UniqueConstraint[];
-  }>[],
+  items: readonly NodeInsertSyncItem[],
   backend: Backend,
 ): Promise<void> {
   if (items.length === 0) return;
-
-  await insertUniquenessEntriesBatch(
-    uniquenessContext(ctx, backend),
-    items.map((item) => ({
-      kind: item.kind,
-      id: item.id,
-      props: item.props,
-      constraints: item.uniqueConstraints,
-    })),
-  );
 
   interface KindGroup {
     schema: z.ZodType;
@@ -310,7 +298,7 @@ export type NodeUpdateTarget =
  * key and leave the resurrected node holding NO reservation, so a later create
  * could silently duplicate the value. It re-reserves every applying key
  * instead. Both refuse a conflict before returning, and both hand the caller a
- * plan that only {@link withUniquenessTransition} may carry out.
+ * plan that only {@link withNodeClaimTransition} may carry out.
  */
 async function planNodeUpdateUniqueness(
   ctx: NodeWriteContext,
@@ -324,7 +312,7 @@ async function planNodeUpdateUniqueness(
   const { kind, id } = args.existing;
 
   if (args.existing.deleted_at !== undefined) {
-    return planUniquenessReinsert(
+    return planNodeClaimReinsert(
       uniquenessContext(ctx, backend),
       kind,
       id,
@@ -333,7 +321,7 @@ async function planNodeUpdateUniqueness(
     );
   }
 
-  return planUniquenessUpdate(
+  return planNodeClaimUpdate(
     uniquenessContext(ctx, backend),
     kind,
     id,
@@ -355,7 +343,7 @@ async function planNodeUpdateUniqueness(
  * `deleted_at` fence stopped holding, the uniqueness claim loses a race for a
  * key — and a caller that catches either PER ROW and commits the rest of the
  * transaction (interchange import) must never be left with half of the pair
- * applied. {@link withUniquenessTransition} owns that sequencing and documents
+ * applied. {@link withNodeClaimTransition} owns that sequencing and documents
  * why claim/gate/release is the only order that works; this function just hands
  * it the plan and the write.
  *
@@ -371,6 +359,7 @@ export async function applyNodeUpdate(
     uniqueConstraints: readonly UniqueConstraint[];
     validFrom?: string | null;
     validTo?: string;
+    clearValidTo?: true;
     /** See {@link UpdateNodeParams.expectedValidFrom}. */
     expectedValidFrom?: string | null;
   }> &
@@ -397,7 +386,6 @@ export async function applyNodeUpdate(
     id: string;
     props: Record<string, unknown>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
@@ -409,7 +397,6 @@ export async function applyNodeUpdate(
     incrementVersion: true,
   };
   if (args.validFrom !== undefined) updateParams.validFrom = args.validFrom;
-  if (args.validTo !== undefined) updateParams.validTo = args.validTo;
   // `assertsStoredLowerBound` owns "does this fence state anything?" — the same
   // predicate the fence appliers consult, so the step that CARRIES the fence
   // and the seam that VALIDATES it cannot disagree about what an empty fence is.
@@ -418,12 +405,18 @@ export async function applyNodeUpdate(
   }
   if (args.clearDeleted) updateParams.clearDeleted = true;
 
-  const row = await withUniquenessTransition(
+  const row = await withNodeClaimTransition(
     uniquenessContext(ctx, backend),
     kind,
     id,
     plan,
-    () => backend.updateNode(updateParams),
+    () =>
+      backend.updateNode({
+        ...updateParams,
+        ...(args.clearValidTo === true ? { clearValidTo: true as const }
+        : args.validTo === undefined ? {}
+        : { validTo: args.validTo }),
+      }),
   );
 
   await Promise.all([
@@ -474,6 +467,7 @@ export async function applyNodeSoftDelete(
   await deleteUniquenessEntries(
     uniquenessContext(ctx, backend),
     kind,
+    id,
     parseRowProps(args.existing),
     args.uniqueConstraints,
   );
@@ -545,15 +539,15 @@ export async function applyNodeResurrect(
   // resurrecting UPDATE carries `deleted_at IS NOT NULL`, so a peer that revived
   // this tombstone first makes it match zero rows — and the reservations that
   // revival is entitled to are the peer's, not this caller's.
-  // `withUniquenessTransition` gives them back when the gate refuses.
-  const plan = await planUniquenessReinsert(
+  // `withNodeClaimTransition` gives them back when the gate refuses.
+  const plan = await planNodeClaimReinsert(
     uniquenessContext(ctx, backend),
     kind,
     id,
     props,
     args.uniqueConstraints,
   );
-  const row = await withUniquenessTransition(
+  const row = await withNodeClaimTransition(
     uniquenessContext(ctx, backend),
     kind,
     id,
@@ -610,7 +604,7 @@ export type NodeSetUpdateResult = Readonly<{ affectedCount: number }>;
  * refuses before the transaction and one that refuses inside it report the
  * same class.
  *
- * ## Why the order is row -> probe -> drop -> reinsert
+ * ## Why the order is row -> probe -> drop -> re-claim
  *
  * Unlike every other node write, the uniqueness claim happens AFTER the row
  * write: the statement rewrites whole rows without reading their before-images,
@@ -712,65 +706,43 @@ export async function applyNodeSetUpdate(
     };
   });
 
+  const claimItems = sidecarItems.map((item) => ({
+    kind: item.kind,
+    id: item.id,
+    props: item.props,
+    constraints: item.uniqueConstraints,
+  }));
   if (uniqueConstraints.length > 0) {
-    const affectedIds = new Set(result.rows.map((row) => row.id));
-    for (const constraint of uniqueConstraints) {
-      const keyToId = new Map<string, string>();
-      for (const item of sidecarItems) {
-        if (!checkWherePredicate(constraint, item.props)) continue;
-        const key = computeUniqueKey(
-          item.props,
-          constraint.fields,
-          constraint.collation,
-        );
-        const priorId = keyToId.get(key);
-        if (priorId !== undefined && priorId !== item.id) {
-          throw new UniquenessError({
-            constraintName: constraint.name,
-            kind,
-            existingId: priorId,
-            newId: item.id,
-            fields: constraint.fields,
-          });
-        }
-        keyToId.set(key, item.id);
-      }
-      const keys = [...keyToId.keys()];
-      if (keys.length === 0) continue;
-      for (const kindToCheck of getKindsForUniquenessCheck(
-        kind,
-        constraint.scope,
-        ctx.registry,
-      )) {
-        const existingRows = await requireDefined(backend.checkUniqueBatch)({
-          graphId: ctx.graphId,
-          nodeKind: kindToCheck,
-          constraintName: constraint.name,
-          keys,
-        });
-        for (const existing of existingRows) {
-          if (
-            existing.concrete_kind === kind &&
-            affectedIds.has(existing.node_id)
-          ) {
-            continue;
-          }
-          throw new UniquenessError({
-            constraintName: constraint.name,
-            kind: kindToCheck,
-            existingId: existing.node_id,
-            newId: requireDefined(keyToId.get(existing.key)),
-            fields: constraint.fields,
-          });
-        }
-      }
-    }
-    await hardDeleteUniquenessEntriesByNodeIds(
+    // The RESOLVED-SET verdict, not a row-at-a-time one: the statement rewrote
+    // every candidate at once, so a swap or a handoff of one key between two
+    // rows it touched is legal in the final state and refused by every
+    // intermediate one. One owner of that verdict, shared with the graph merge.
+    await validateResolvedNodeClaims(
+      createUniquenessContext(ctx.graphId, ctx.registry, backend),
+      claimItems,
+      [],
+    );
+    await hardDeleteClaimsByNodeIds(
       uniquenessContext(ctx, backend),
       kind,
       result.rows.map((row) => row.id),
     );
   }
-  await applyNodeInsertSideEffectsBatch(ctx, sidecarItems, backend);
+  // The same claim seam every create-shaped writer uses, with an ALREADY-APPLIED
+  // row write as its gate: the rows landed above and the old claims were
+  // hard-deleted, so what is left is a re-claim and there is no row write left
+  // for a claim to precede. Inverting it would mean reserving keys the update has
+  // not written. What covers this site on a backend that cannot fence is stated
+  // per kind shape: a kind whose scope spans siblings declares
+  // `fencesConstraintProbe` at the entry point and is refused before this body
+  // runs; a kind-scoped one is not refused, before or after — its
+  // delete-then-rebuild window is unchanged in shape and extent here.
+  await withNodeCreateClaimsBatch(
+    ctx,
+    claimItems,
+    backend,
+    alreadyAppliedRowWrite,
+  );
+  await applyNodeInsertSyncFansBatch(ctx, sidecarItems, backend);
   return { affectedCount: result.affectedCount };
 }

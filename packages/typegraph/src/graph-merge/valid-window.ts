@@ -9,19 +9,18 @@
  * WHAT IS RECONCILED, AND WHY ONLY THAT
  *
  * On a row that is live in both the base and the fork, `validTo` is the only
- * window delta a branch can author AND the commit can apply:
+ * window field a branch can author AND the commit can apply:
  *
  * | observed delta            | reachable how                     | applicable? |
  * | ------------------------- | --------------------------------- | ----------- |
  * | `validTo` set / moved     | `update(id, {}, { validTo })`     | yes         |
+ * | `validTo` cleared to none | `update(id, {}, { clearValidTo: true })` | yes |
  * | `validFrom` changed       | soft-delete + resurrect in a fork | no          |
- * | `validTo` cleared to none | soft-delete + resurrect in a fork | no          |
  *
  * The update SQL writes `valid_from` only under `clearDeleted` (the
- * resurrection path) and can only SET `valid_to`, never clear it — see
- * `buildUpdateNode` in `backend/drizzle/operations/nodes.ts`. Reconciling a
- * value the commit then drops would make the merge report a change that did not
- * happen, so the two unapplicable deltas are REPORTED
+ * resurrection path), so a changed lower bound still cannot be applied to a
+ * live inherited row. Reconciling a value the commit then drops would make the
+ * merge report a change that did not happen, so that delta is REPORTED
  * ({@link WINDOW_NOT_APPLICABLE_DROP_REASON}) rather than staged.
  *
  * THE RESOLUTION RULE
@@ -33,13 +32,16 @@
  *   1. no branch changed it        → keep base, write nothing;
  *   2. exactly one branch changed  → that value, INCLUDING an extension to a
  *                                    later instant (a blind `min` against base
- *                                    would make extension impossible);
+ *                                    would make extension impossible), or clear;
  *   3. several branches changed    → the preferred (incremental target) branch's
  *                                    value if it is one of them, else the
- *                                    EARLIEST end.
+ *                                    EARLIEST end; an end beats a concurrent
+ *                                    clear as the stronger monotone claim, and
+ *                                    unanimous clears reopen the row.
  *
- * `min` over a set is commutative and associative, so determinism holds without
- * consulting `branchRank` at all, and rule 3's preference is the same
+ * `min` over the set claims plus the all-clear check is commutative and
+ * associative, so determinism holds without consulting `branchRank` at all, and
+ * rule 3's preference is the same
  * committed-target precedence `canonicalizeCluster` applies to identity
  * survivors: a user branch never re-windows a row the target itself windowed.
  * Nothing here can raise a new conflict, so no previously-succeeding merge
@@ -120,10 +122,10 @@ export const WINDOW_NOT_APPLICABLE_DROP_REASON =
  * inherited identity must be written with, plus both report channels.
  */
 export type ValidWindowResolution = Readonly<{
-  /** `(kind, id) -> validTo` for every inherited NODE the commit must end. */
-  nodeEnds: ReadonlyMap<MergeKey, string>;
-  /** `(kind, id) -> validTo` for every inherited EDGE the commit must end. */
-  edgeEnds: ReadonlyMap<MergeKey, string>;
+  /** `(kind, id) -> validTo change` for every inherited NODE to re-window. */
+  nodeEnds: ReadonlyMap<MergeKey, ValidToChange>;
+  /** `(kind, id) -> validTo change` for every inherited EDGE to re-window. */
+  edgeEnds: ReadonlyMap<MergeKey, ValidToChange>;
   /**
    * `(kind, id) -> the branches that AUTHORED the resolved node end`: the
    * claimants whose claim equals {@link ValidWindowResolution.nodeEnds}, sorted
@@ -135,8 +137,8 @@ export type ValidWindowResolution = Readonly<{
   /** The edge half of {@link ValidWindowResolution.nodeCredits}. */
   edgeCredits: ReadonlyMap<MergeKey, readonly BranchId[]>;
   /**
-   * Every row whose end this phase RESOLVED, nodes then edges — a superset of the
-   * ends above: a row target precedence decided appears here (marked
+   * Every row whose upper-bound change this phase RESOLVED, nodes then edges — a
+   * superset of the changes above: a row target precedence decided appears here (marked
    * {@link VALIDITY_END_TARGET_PRECEDENCE}) with no entry in `nodeEnds`/`edgeEnds`
    * and none in the credits.
    */
@@ -144,8 +146,15 @@ export type ValidWindowResolution = Readonly<{
   dropped: readonly DroppedItem[];
 }>;
 
-/** One branch's claim that a row stopped being valid at an instant. */
-export type EndClaim = Readonly<{ branchId: BranchId; validTo: string }>;
+/** An explicit upper-bound change; absence from a plan means preserve. */
+export type ValidToChange =
+  Readonly<{ kind: "set"; validTo: string }> | Readonly<{ kind: "clear" }>;
+
+/** One branch's claim about a row's upper validity bound. */
+export type EndClaim = Readonly<{
+  branchId: BranchId;
+  change: ValidToChange;
+}>;
 
 /**
  * The least claim in a set: the earliest instant any branch claimed, or
@@ -159,8 +168,12 @@ export type EndClaim = Readonly<{ branchId: BranchId; validTo: string }>;
 function earliestEnd(claims: readonly EndClaim[]): string | undefined {
   let earliest: string | undefined;
   for (const claim of claims) {
-    if (earliest === undefined || compareStrings(claim.validTo, earliest) < 0) {
-      earliest = claim.validTo;
+    if (claim.change.kind !== "set") continue;
+    if (
+      earliest === undefined ||
+      compareStrings(claim.change.validTo, earliest) < 0
+    ) {
+      earliest = claim.change.validTo;
     }
   }
   return earliest;
@@ -181,11 +194,19 @@ function earliestEnd(claims: readonly EndClaim[]): string | undefined {
 export function resolveEndClaims(
   claims: readonly EndClaim[],
   preferredBranchId: BranchId | undefined,
-): string | undefined {
+): ValidToChange | undefined {
   const preferred = claims.filter(
     (claim) => claim.branchId === preferredBranchId,
   );
-  return earliestEnd(preferred.length > 0 ? preferred : claims);
+  const candidates = preferred.length > 0 ? preferred : claims;
+  const earliest = earliestEnd(candidates);
+  return (
+    earliest === undefined ?
+      candidates.some((claim) => claim.change.kind === "clear") ?
+        { kind: "clear" }
+      : undefined
+    : { kind: "set", validTo: earliest }
+  );
 }
 
 /** The claiming branches of a resolved end, deduped and sorted. */
@@ -195,23 +216,37 @@ function claimingBranches(claims: readonly EndClaim[]): readonly BranchId[] {
   );
 }
 
+/** Whether two explicit upper-bound changes request the same stored state. */
+function sameValidToChange(left: ValidToChange, right: ValidToChange): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "clear") return true;
+  return right.kind === "set" && left.validTo === right.validTo;
+}
+
 /**
  * Splits ONE branch's observed window delta into the part the commit can apply
- * (a set or moved `validTo`) and the parts it cannot. A single delta can be
- * both: a fork that soft-deleted and resurrected a row moved `validFrom`
- * (unapplicable) and may have set a new end (applicable) in the same act.
+ * (a set, move, or authored clear of `validTo`) and the part it cannot. A moved
+ * lower bound proves delete+resurrect occurred. Its implicit ended-to-open
+ * transition is part of that indivisible resurrection artifact, not an authored
+ * clear, so it stays entirely in `window-not-applicable`; an explicit new end
+ * remains independently applicable.
  */
 function classifyDelta(
   base: ValidWindow,
   fork: ValidWindow,
-): Readonly<{ applicableEnd: string | undefined; unapplicable: boolean }> {
+): Readonly<{
+  applicableEnd: ValidToChange | undefined;
+  unapplicable: boolean;
+}> {
+  const lowerBoundMoved = fork.validFrom !== base.validFrom;
   const endCleared = fork.validTo === undefined && base.validTo !== undefined;
   return {
     applicableEnd:
       fork.validTo !== undefined && fork.validTo !== base.validTo ?
-        fork.validTo
+        { kind: "set", validTo: fork.validTo }
+      : endCleared && !lowerBoundMoved ? { kind: "clear" }
       : undefined,
-    unapplicable: endCleared || fork.validFrom !== base.validFrom,
+    unapplicable: lowerBoundMoved,
   };
 }
 
@@ -239,7 +274,7 @@ function resolvePopulation(
   preferredBranchId: BranchId | undefined,
   dropItem: (id: string) => DroppedItem,
 ): Readonly<{
-  ends: ReadonlyMap<MergeKey, string>;
+  ends: ReadonlyMap<MergeKey, ValidToChange>;
   credits: ReadonlyMap<MergeKey, readonly BranchId[]>;
   resolutions: readonly ValidityEndResolution[];
   dropped: readonly DroppedItem[];
@@ -258,7 +293,7 @@ function resolvePopulation(
     }
   }
 
-  const ends = new Map<MergeKey, string>();
+  const ends = new Map<MergeKey, ValidToChange>();
   const credits = new Map<MergeKey, readonly BranchId[]>();
   const resolutions: ValidityEndResolution[] = [];
   const dropped: DroppedItem[] = [];
@@ -266,7 +301,7 @@ function resolvePopulation(
   for (const [identity, group] of byIdentity) {
     const claims: EndClaim[] = [];
     let reportedUnapplicable = false;
-    let targetEnd: string | undefined;
+    let targetEnd: ValidToChange | undefined;
     for (const delta of group) {
       const { applicableEnd, unapplicable } = classifyDelta(
         delta.base,
@@ -286,7 +321,7 @@ function resolvePopulation(
         continue;
       }
       if (applicableEnd !== undefined) {
-        claims.push({ branchId: delta.branchId, validTo: applicableEnd });
+        claims.push({ branchId: delta.branchId, change: applicableEnd });
       }
       // One entry per ROW, not per contributing branch: the report names what
       // the merge could not apply to that row, and a second branch diverging the
@@ -311,14 +346,16 @@ function resolvePopulation(
           entity,
           kind: first.kind,
           id: first.id,
-          validTo: targetEnd,
+          ...(targetEnd.kind === "set" ?
+            { validTo: targetEnd.validTo }
+          : { clearValidTo: true as const }),
           claimedBy: claimingBranches(claims),
           precedence: VALIDITY_END_TARGET_PRECEDENCE,
         });
       }
       continue;
     }
-    const resolved = earliestEnd(claims);
+    const resolved = resolveEndClaims(claims, undefined);
     if (resolved === undefined) {
       continue;
     }
@@ -329,13 +366,17 @@ function resolvePopulation(
     // credit — it stays visible as a claimant in the resolution below.
     credits.set(
       identity,
-      claimingBranches(claims.filter((claim) => claim.validTo === resolved)),
+      claimingBranches(
+        claims.filter((claim) => sameValidToChange(claim.change, resolved)),
+      ),
     );
     resolutions.push({
       entity,
       kind: first.kind,
       id: first.id,
-      validTo: resolved,
+      ...(resolved.kind === "set" ?
+        { validTo: resolved.validTo }
+      : { clearValidTo: true as const }),
       claimedBy: claimingBranches(claims),
     });
   }

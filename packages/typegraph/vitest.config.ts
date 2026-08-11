@@ -15,7 +15,22 @@ const GRAPH_MERGE_GLOBS = [
   ...(UNIT_SCOPE ? [] : ["tests/property/graph-merge/**/*.test.ts"]),
 ];
 
-const PGLITE_GLOBS = ["tests/backends/postgres/pglite-*.test.ts"];
+/**
+ * Every suite that boots an in-process PGlite, by whichever route it reaches
+ * one: the backend suite that names it, and the statement-recorder suites,
+ * which create one PGlite per case. Membership is the fact that decides the
+ * budget, not the directory — these recorder files sat in the default project
+ * on a five-second budget, where a slow WASM Postgres boot under file-parallel
+ * load reported as a failed assertion about statements that were in fact
+ * issued.
+ */
+const PGLITE_GLOBS = [
+  "tests/backends/postgres/pglite-*.test.ts",
+  "tests/constraint-claim-inventory.test.ts",
+  "tests/constraint-write-fence.test.ts",
+  "tests/contribution-rebuild-lock.test.ts",
+  "tests/materialize-trigram-extension.test.ts",
+];
 
 const SHARED_EXCLUDE = [
   ...configDefaults.exclude,

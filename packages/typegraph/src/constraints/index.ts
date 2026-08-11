@@ -357,6 +357,31 @@ export function getKindsForUniquenessCheck(
 }
 
 /**
+ * THE definition of "which kinds a `kindWithSubClasses` scope covers": the
+ * registry's precomputed connected component of the UNDIRECTED `subClassOf`
+ * graph containing `kind`, in code-point order.
+ *
+ * Kind-independent by construction — every member of a component computes the
+ * same set — which is what makes a claim axis folded from it deterministic: two
+ * writers of two different kinds in one hierarchy reserve the SAME row, so the
+ * uniques primary key fences them against each other.
+ *
+ * {@link getKindsForUniquenessCheck} is deliberately NOT folded into this: it
+ * walks one root's descendants, so on a multi-root hierarchy (`Employee`
+ * subclassing both `Alpha` and `Zeta`) it answers differently depending on which
+ * member asks, and a fold of a kind-dependent set cannot be a canonical axis.
+ * This is the documented intent of that function, so the component is a superset
+ * of the set it walks: the fence is never weaker than the probe, and is stronger
+ * in exactly the multi-root case where the probe is inconsistent.
+ */
+export function subClassComponent(
+  kind: string,
+  registry: KindRegistry,
+): readonly string[] {
+  return registry.getSubClassComponent(kind);
+}
+
+/**
  * Finds the topmost ancestor of a kind, or the kind itself if it has no ancestors.
  */
 function findRootAncestor(kind: string, registry: KindRegistry): string {

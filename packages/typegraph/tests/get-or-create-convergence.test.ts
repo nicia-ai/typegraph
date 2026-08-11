@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, UniquenessError } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type FindEdgesByKindParams,
@@ -99,8 +100,7 @@ function racingBackend(
 ): GraphBackend {
   let calls = 0;
   let raced = false;
-  return {
-    ...base,
+  return deriveBackend(base, {
     findEdgesByKind: async (params: FindEdgesByKindParams) => {
       const rows = await base.findEdgesByKind(params);
       calls += 1;
@@ -110,7 +110,7 @@ function racingBackend(
       }
       return rows;
     },
-  };
+  });
 }
 
 describe("getOrCreateByEndpoints convergence", () => {
@@ -208,22 +208,24 @@ describe("getOrCreateByEndpoints convergence", () => {
     const bob = await setup.nodes.Person.create({ name: "Bob" });
 
     let reported = false;
-    const store = createStore(cardinalGraph, {
-      ...raw,
-      transaction: (fn, options) =>
-        raw.transaction(
-          (target) =>
-            fn({
-              ...target,
-              countEdgesFrom: async (params) => {
-                if (reported) return target.countEdgesFrom(params);
-                reported = true;
-                return 1;
-              },
-            }),
-          options,
-        ),
-    } satisfies GraphBackend);
+    const store = createStore(
+      cardinalGraph,
+      deriveBackend(raw, {
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn({
+                ...target,
+                countEdgesFrom: async (params) => {
+                  if (reported) return target.countEdgesFrom(params);
+                  reported = true;
+                  return 1;
+                },
+              }),
+            options,
+          ),
+      }),
+    );
 
     const results = await store.edges.reportsTo.bulkGetOrCreateByEndpoints([
       { from: alice, to: bob, props: {} },
@@ -242,28 +244,30 @@ describe("getOrCreateByEndpoints convergence", () => {
     // batch. The uniques reservation is where that loss surfaces, so that is
     // where the conflict is injected.
     let reported = false;
-    const store = createStore(uniqueGraph, {
-      ...raw,
-      transaction: (fn, options) =>
-        raw.transaction(
-          (target) =>
-            fn({
-              ...target,
-              insertUniqueBatch: async (entries) => {
-                if (reported) return target.insertUniqueBatch?.(entries);
-                reported = true;
-                throw new UniquenessError({
-                  constraintName: "email",
-                  kind: "Account",
-                  existingId: "winner",
-                  newId: "loser",
-                  fields: ["email"],
-                });
-              },
-            }),
-          options,
-        ),
-    } satisfies GraphBackend);
+    const store = createStore(
+      uniqueGraph,
+      deriveBackend(raw, {
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn({
+                ...target,
+                insertUniqueBatch: async (entries) => {
+                  if (reported) return target.insertUniqueBatch?.(entries);
+                  reported = true;
+                  throw new UniquenessError({
+                    constraintName: "email",
+                    kind: "Account",
+                    existingId: "winner",
+                    newId: "loser",
+                    fields: ["email"],
+                  });
+                },
+              }),
+            options,
+          ),
+      }),
+    );
 
     const results = await store.nodes.Account.bulkGetOrCreateByConstraint(
       "email",
@@ -377,26 +381,28 @@ describe("getOrCreateByEndpoints convergence", () => {
     );
 
     let attempts = 0;
-    const store = createStore(graph, {
-      ...raw,
-      // The dispatcher reads through the top level and must see NOTHING, so it
-      // keeps electing to create.
-      findEdgesByKind: () => Promise.resolve([]),
-      transaction: (fn, options) =>
-        raw.transaction(
-          (target) =>
-            fn({
-              ...target,
-              // The guard reads through the transaction and always sees a
-              // competitor, so every attempt aborts.
-              findEdgesByKind: () => {
-                attempts += 1;
-                return Promise.resolve([phantom]);
-              },
-            }),
-          options,
-        ),
-    } satisfies GraphBackend);
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        // The dispatcher reads through the top level and must see NOTHING, so it
+        // keeps electing to create.
+        findEdgesByKind: () => Promise.resolve([]),
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn({
+                ...target,
+                // The guard reads through the transaction and always sees a
+                // competitor, so every attempt aborts.
+                findEdgesByKind: () => {
+                  attempts += 1;
+                  return Promise.resolve([phantom]);
+                },
+              }),
+            options,
+          ),
+      }),
+    );
 
     await expect(
       store.edges.knows.getOrCreateByEndpoints(alice, bob, { since: "x" }),

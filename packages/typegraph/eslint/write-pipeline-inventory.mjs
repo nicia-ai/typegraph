@@ -13,9 +13,9 @@
  */
 
 /**
- * The 30 backend members no module outside the seam may call: the three WRITE
+ * The 34 backend members no module outside the seam may call: the three WRITE
  * classes of `src/backend/member-classes.ts` — graph-entity writes, their
- * sidecars, and backend-owned bulk ingestion.
+ * sidecars (both claim relations included), and backend-owned bulk ingestion.
  */
 export const WRITE_MEMBER_NAMES = [
   // ENTITY_WRITE_MEMBERS
@@ -41,6 +41,10 @@ export const WRITE_MEMBER_NAMES = [
   "insertUniqueBatch",
   "deleteUnique",
   "hardDeleteUniquesByNodeIds",
+  "hardDeleteUniquesByConcreteKind",
+  "claimEdgeCardinality",
+  "claimEdgeCardinalityBatch",
+  "purgeEdgeClaims",
   "upsertEmbedding",
   "upsertEmbeddingBatch",
   "deleteEmbedding",
@@ -129,9 +133,27 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     permanent: true,
   },
   {
-    path: "src/store/uniqueness.ts",
+    path: "src/store/claims/node-claims.ts",
     reason:
-      "The uniqueness sidecar, called only by the write steps that own the row it reserves for.",
+      "The node claim sidecar (uniqueness and disjointness reservations in the uniques relation), called only by the write steps and the session methods that own the row each claim gates.",
+    permanent: true,
+  },
+  {
+    path: "src/store/claims/resolved-node-claims.ts",
+    reason:
+      "The resolved-write-set claim sidecar: the key-blind drop and rebuild a set update and a graph merge need, reached only from the step that owns their row write.",
+    permanent: true,
+  },
+  {
+    path: "src/store/claims/edge-claims.ts",
+    reason:
+      "The edge cardinality claim sidecar (the edge_claims relation), called only by the session's edge create methods and the edge write steps.",
+    permanent: true,
+  },
+  {
+    path: "src/store/claims/backing.ts",
+    reason:
+      "claimSupport reads the claim members to NARROW them for the sidecars above; it issues no write itself, and the syntactic rule cannot tell a requireDefined presence read from a call.",
     permanent: true,
   },
   {

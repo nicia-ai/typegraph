@@ -44,8 +44,8 @@
  *    resurrect" — both the single and bulk paths read that from the node row
  *    they are about to write, because one decision with two owners drifts.
  */
+import { deriveBackend } from "../../backend/derive-backend";
 import {
-  createBackendOverlay,
   type GraphBackend,
   type InsertNodeParams,
   isLiveNodeRow,
@@ -54,11 +54,7 @@ import {
   type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
-import {
-  checkWherePredicate,
-  computeUniqueKey,
-  getKindsForUniquenessCheck,
-} from "../../constraints";
+import { checkWherePredicate, computeUniqueKey } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
 import { assertJsonValue } from "../../core/json-value";
 import {
@@ -105,12 +101,20 @@ import {
   assertWritableValidityWindow,
   nowIso,
   preservesImmutableLowerBound,
+  resolveStampedValidityLowerBound,
   validateOptionalCanonicalIsoDate,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import { createDataKeyedBag, hasOwnKey } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
+import {
+  checkUniquenessConstraints,
+  createUniquenessContext,
+  nodeClaimEntries,
+  type NodeClaimItem,
+} from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateNodeInput } from "../collections/node-collection";
 import {
@@ -134,13 +138,14 @@ import {
   type UpdateNodeInput,
 } from "../types";
 import {
-  checkUniquenessConstraints,
-  createUniquenessContext,
-} from "../uniqueness";
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+} from "../validity-end";
 import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
 } from "./already-exists";
+import { type NodeInsertSyncItem } from "./node-write-pipeline";
 import {
   type HookedWritePlanContext,
   runHookedWritePlan,
@@ -168,6 +173,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
+  coalesceUnchangedUpsertsEnabled: boolean;
   revisionSchema: SqlSchema;
   registry: KindRegistry;
   createOperationContext: (
@@ -205,6 +211,11 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
       target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
       mode: "soft" | "hard",
+    ) => Promise<void>;
+    requireValidityEndCompatible: (
+      target: IdentityTarget,
+      ref: Readonly<{ kind: string; id: string }>,
+      validTo: string,
     ) => Promise<void>;
   }>;
 }>;
@@ -363,20 +374,32 @@ function buildInsertNodeParams(
   return insertParams;
 }
 
+/**
+ * Materializes the claim row a not-yet-flushed batch member holds, so a later
+ * member's probe reads the same shape it would read from the database.
+ *
+ * It invents no kind: the owner pair comes from the pending registration. The
+ * predecessor wrote `concrete_kind: nodeKind` — the axis the probe QUERIED,
+ * which the pending writer never supplied — so `Employee "X"` followed by
+ * `Contractor "X"` on one shared-scope key read back as the same owner, the
+ * in-batch refusal was suppressed, and the real one arrived at the flush as a
+ * whole-batch abort. This is the third renderer of claim ownership; it must
+ * agree with the TypeScript predicate and the SQL arms.
+ */
 function createPendingUniqueRow(
   graphId: string,
   nodeKind: string,
   constraintName: string,
   key: string,
-  nodeId: string,
+  owner: ClaimOwner,
 ): UniqueRow {
   return {
     graph_id: graphId,
     node_kind: nodeKind,
     constraint_name: constraintName,
     key,
-    node_id: nodeId,
-    concrete_kind: nodeKind,
+    node_id: owner.nodeId,
+    concrete_kind: owner.concreteKind,
     deleted_at: undefined,
   };
 }
@@ -454,7 +477,10 @@ export function createNodeBatchValidationSeams(
   const nodeCache = new Map<string, CachedNodeRow>();
   const pendingNodes = new Map<string, NonNullable<CachedNodeRow>>();
   const uniqueCache = new Map<string, CachedUniqueRow>();
-  const pendingUniqueOwners = new Map<string, string>();
+  // The pending OWNER PAIR, never the bare id: two batch members sharing an id
+  // under different kinds are two claimants, and an id-keyed cache reads them
+  // as one.
+  const pendingUniqueOwners = new Map<string, ClaimOwner>();
 
   async function getNodeCached(
     lookupGraphId: string,
@@ -515,44 +541,35 @@ export function createNodeBatchValidationSeams(
     });
   }
 
+  // Records the claims a not-yet-flushed create will write, at the AXIS it will
+  // write them: one entry per claim, not one per kind in scope. The fan-out
+  // this replaces existed because the claim used to be written under the
+  // node's own kind while the probe read every kind in scope; now both sides
+  // name the axis, so a second entry would be a second spelling of the same
+  // reservation.
   function registerPendingUniqueEntries(
     kind: string,
     id: string,
     props: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ): void {
-    for (const constraint of constraints) {
-      if (!checkWherePredicate(constraint, props)) continue;
-
-      const key = computeUniqueKey(
-        props,
-        constraint.fields,
-        constraint.collation,
+    for (const entry of nodeClaimEntries(
+      registry,
+      kind,
+      id,
+      props,
+      constraints,
+      "create",
+    )) {
+      pendingUniqueOwners.set(
+        buildUniqueCacheKey(
+          graphId,
+          entry.axis,
+          entry.constraintName,
+          entry.key,
+        ),
+        { concreteKind: kind, nodeId: id },
       );
-      const concreteEntryKey = buildUniqueCacheKey(
-        graphId,
-        kind,
-        constraint.name,
-        key,
-      );
-      pendingUniqueOwners.set(concreteEntryKey, id);
-
-      if (constraint.scope !== "kind") {
-        const kindsToCheck = getKindsForUniquenessCheck(
-          kind,
-          constraint.scope,
-          registry,
-        );
-        for (const kindToCheck of kindsToCheck) {
-          const inheritedEntryKey = buildUniqueCacheKey(
-            graphId,
-            kindToCheck,
-            constraint.name,
-            key,
-          );
-          pendingUniqueOwners.set(inheritedEntryKey, id);
-        }
-      }
     }
   }
 
@@ -564,10 +581,12 @@ export function createNodeBatchValidationSeams(
   // create either (a) claims a value this update just freed yet gets rejected
   // against the stale reservation, or (b) passes the stale "free" cache for a
   // value this update just took and then violates the real constraint at
-  // flush, aborting the whole import. Mirrors updateUniquenessEntries' key
-  // diff: for each constraint whose key changed, the released old key becomes
-  // free and the reserved new key becomes owned by this node, across every
-  // kind the constraint's scope checks.
+  // flush, aborting the whole import. Mirrors the claim transition's key diff:
+  // for each constraint whose key changed, the released old key becomes free
+  // and the reserved new key becomes owned by this node AT ITS AXIS — the one
+  // row the transition actually wrote — while the remaining kinds the probe
+  // reads are recorded as vacant, which they are: the probe that let this
+  // update through visited every one of them.
   function registerAppliedNodeUpdate(
     kind: string,
     id: string,
@@ -575,32 +594,36 @@ export function createNodeBatchValidationSeams(
     newProps: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ): void {
-    for (const constraint of constraints) {
-      const oldApplies = checkWherePredicate(constraint, oldProps);
-      const newApplies = checkWherePredicate(constraint, newProps);
-      const oldKey =
-        oldApplies ?
-          computeUniqueKey(oldProps, constraint.fields, constraint.collation)
-        : undefined;
-      const newKey =
-        newApplies ?
-          computeUniqueKey(newProps, constraint.fields, constraint.collation)
-        : undefined;
-      if (oldKey === newKey) continue;
+    const owner: ClaimOwner = { concreteKind: kind, nodeId: id };
+    const oldEntries = new Map(
+      nodeClaimEntries(registry, kind, id, oldProps, constraints, "update").map(
+        (entry) => [entry.constraintName, entry],
+      ),
+    );
+    const newEntries = new Map(
+      nodeClaimEntries(registry, kind, id, newProps, constraints, "update").map(
+        (entry) => [entry.constraintName, entry],
+      ),
+    );
 
-      const kindsToCheck = getKindsForUniquenessCheck(
+    for (const constraint of constraints) {
+      const oldEntry = oldEntries.get(constraint.name);
+      const newEntry = newEntries.get(constraint.name);
+      if (oldEntry?.key === newEntry?.key) continue;
+
+      const kindsToCheck = uniquenessProbeKinds(
         kind,
         constraint.scope,
         registry,
       );
 
-      if (oldKey !== undefined) {
+      if (oldEntry !== undefined) {
         for (const kindToCheck of kindsToCheck) {
           const cacheKey = buildUniqueCacheKey(
             graphId,
             kindToCheck,
             constraint.name,
-            oldKey,
+            oldEntry.key,
           );
           // This node released the key on the real backend, so it is now
           // free. Clear any pending reservation and record the known-free
@@ -610,18 +633,23 @@ export function createNodeBatchValidationSeams(
           uniqueCache.set(cacheKey, undefined);
         }
       }
-      if (newKey !== undefined) {
+      if (newEntry !== undefined) {
         for (const kindToCheck of kindsToCheck) {
           const cacheKey = buildUniqueCacheKey(
             graphId,
             kindToCheck,
             constraint.name,
-            newKey,
+            newEntry.key,
           );
-          // This node now holds the key on the real backend. A pending owner
-          // shadows the seeded uniqueCache entry (checkUniqueCached consults
-          // it first), matching registerPendingUniqueEntries' reservation.
-          pendingUniqueOwners.set(cacheKey, id);
+          if (kindToCheck === newEntry.axis) {
+            // This node now holds the key on the real backend. A pending owner
+            // shadows the seeded uniqueCache entry (checkUniqueCached consults
+            // it first), matching registerPendingUniqueEntries' reservation.
+            pendingUniqueOwners.set(cacheKey, owner);
+            continue;
+          }
+          pendingUniqueOwners.delete(cacheKey);
+          uniqueCache.set(cacheKey, undefined);
         }
       }
     }
@@ -657,7 +685,7 @@ export function createNodeBatchValidationSeams(
 
   return {
     reads,
-    reader: createBackendOverlay(backend, reads),
+    reader: deriveBackend(backend, reads),
     registerPendingNode,
     registerPendingUniqueEntries,
     registerAppliedNodeUpdate,
@@ -726,10 +754,12 @@ function draftNodeCreate<G extends GraphDef>(
     "validFrom",
   );
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  // A stated pair must be ordered. A lone historical validTo is NOT an error on
-  // an insert — it means "born already ended" (see
-  // assertWritableValidityWindow). Both create paths (single and batch) draft
-  // through here, so this is the only insert-side check needed.
+  // A stated pair must be ordered, and on an insert that is the COMPLETE rule.
+  // A lone historical validTo is NOT an error — it means "born already ended"
+  // (see assertWritableValidityWindow), and the insert stores no lower bound for
+  // it rather than one past the stated end, so there is no effective bound left
+  // for this layer to judge. Both create paths (single and batch) draft through
+  // here, so this is the only insert-side check needed.
   assertOrderedValidityWindow(`${kind} "${id}"`, validFrom, validTo);
 
   return {
@@ -814,25 +844,43 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
   );
 }
 
+/** What a prepared create hands the claim seam and the sync fans. */
+function nodeCreateSideEffectItem(
+  prepared: NodeCreatePrepared,
+): NodeInsertSyncItem {
+  return {
+    kind: prepared.kind,
+    id: prepared.id,
+    schema: prepared.nodeKind.schema,
+    props: prepared.validatedProps,
+    uniqueConstraints: prepared.uniqueConstraints,
+  };
+}
+
+function nodeCreateClaimItem(prepared: NodeCreatePrepared): NodeClaimItem {
+  return {
+    kind: prepared.kind,
+    id: prepared.id,
+    props: prepared.validatedProps,
+    constraints: prepared.uniqueConstraints,
+  };
+}
+
 /**
- * One prepared create as the session's insert unit: the row params and the
- * sidecar inputs, as ONE value.
+ * One prepared create as the session's insert unit: the row params, the claims
+ * the row owes, and the sidecar inputs, as ONE value.
  *
- * This replaces the `finalizeNodeCreate` / `finalizeNodeCreateBatch` pair. They
- * were the sidecar HALF of a create, callable — and forgettable — on their own;
- * the session takes the whole unit and applies both, in the order the create
- * paths already used (row first, sidecars second).
+ * This replaces the `finalizeNodeCreate` / `finalizeNodeCreateBatch` pair and
+ * the claim seam the create paths used to open around their own insert. Each was
+ * a HALF of a create, callable — and forgettable — on its own; the session takes
+ * the whole unit and applies all three in the pinned order (pre-insert claims,
+ * row, post-insert claims, sync fans).
  */
 function nodeInsertWork(prepared: NodeCreatePrepared): NodeInsertWork {
   return {
     params: prepared.insertParams,
-    sideEffects: {
-      kind: prepared.kind,
-      id: prepared.id,
-      schema: prepared.nodeKind.schema,
-      props: prepared.validatedProps,
-      uniqueConstraints: prepared.uniqueConstraints,
-    },
+    claim: nodeCreateClaimItem(prepared),
+    sideEffects: nodeCreateSideEffectItem(prepared),
   };
 }
 
@@ -942,6 +990,8 @@ async function performNodeUpdate<G extends GraphDef>(
 ): Promise<Node> {
   const { kind, id } = input;
 
+  assertValidityEndMutation(input, { entityType: "node", kind, id });
+
   const existing = await target.getNode(ctx.graphId, kind, id);
   if (!existing) throw new NodeNotFoundError(kind, id);
 
@@ -953,15 +1003,16 @@ async function performNodeUpdate<G extends GraphDef>(
   const nodeKind = registration.type;
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-  // A node resurrection RESETS `valid_from` (see `buildUpdateNode`), so the
-  // effective lower bound is the write instant rather than the row's stored
-  // one. That instant is sampled HERE and then travels to the backend as an
-  // explicit `validFrom`, because the guard has to measure the bound the write
-  // will actually store: left to default, `resolveValidFrom` would stamp the
-  // backend's own, strictly later, sample, and a `validTo` at this instant
-  // would pass the guard as zero-width and land as negative width a
-  // millisecond later (issue #413). An in-place update keeps the row's stored
-  // bound, which no write rewrites and so needs no prediction.
+  // A node resurrection RESETS `valid_from` (see `buildUpdateNode`), so its
+  // effective lower bound is one this write stamps rather than the row's stored
+  // one. The instant is sampled HERE and the bound resolved from it travels to
+  // the backend as an explicit `validFrom`, because the guard has to measure
+  // the bound the write will actually store: left to default, the builder's own
+  // `resolveStampedValidityLowerBound` call would judge the backend's strictly
+  // later sample, and a `validTo` at this instant would pass the guard as
+  // zero-width and land as a different shape a millisecond later (issue #413).
+  // An in-place update keeps the row's stored bound, which no write rewrites and
+  // so needs no prediction.
   const resurrectionInstant =
     options?.clearDeleted === true && existing.deleted_at !== undefined ?
       nowIso()
@@ -979,6 +1030,18 @@ async function performNodeUpdate<G extends GraphDef>(
     "validFrom",
   );
   const validFrom = preservesLiveLowerBound ? undefined : statedValidFrom;
+  // The bound this resurrection will STORE, decided by the same owner every
+  // insert builder decides through, against the instant sampled above. Asking
+  // the owner rather than assuming `resurrectionInstant` is what makes a
+  // resurrection carrying only a historical `validTo` reach the shape a create
+  // reaches — no lower bound, "ended at T, start unknown" — instead of being
+  // refused for inverting against an instant the write would never have stored
+  // (I12). `undefined` here means "no bound", which is nothing to invert
+  // against, so the verdict below judges exactly what lands.
+  const resurrectionBound =
+    resurrectionInstant === undefined ? undefined : (
+      resolveStampedValidityLowerBound(validFrom, validTo, resurrectionInstant)
+    );
   // A resurrection STORES a stated `validFrom` (it rewrites the whole window);
   // an in-place update never does, so one that differs from the row's stored
   // bound is refused rather than accepted and dropped.
@@ -992,23 +1055,20 @@ async function performNodeUpdate<G extends GraphDef>(
         effectiveBoundIsStored: true,
       }
     : {
-        effectiveValidFrom: resurrectionInstant,
+        effectiveValidFrom: resurrectionBound,
         appliesStatedValidFrom: true,
-        // The instant this write is about to stamp, not a bound the row holds.
+        // The bound this write is about to stamp, not one the row holds.
         effectiveBoundIsStored: false,
       },
     validTo,
   );
 
-  // `validFrom` reaches the backend only through a resurrecting write (see
-  // UpdateNodeParams): a live row's lower bound is history and stays put.
-  const effectiveValidFrom = validFrom ?? resurrectionInstant;
   const shared = {
     schema: nodeKind.schema,
     validatedProps,
     uniqueConstraints: registration.unique ?? [],
-    ...(effectiveValidFrom !== undefined && { validFrom: effectiveValidFrom }),
     ...(validTo !== undefined && { validTo }),
+    ...(input.clearValidTo === true && { clearValidTo: true as const }),
   };
   // The bound the verdict above READ, carried into the UPDATE's own `WHERE` so
   // the row this writes is the row that was judged. The verdict hands over the
@@ -1029,15 +1089,44 @@ async function performNodeUpdate<G extends GraphDef>(
   // A resurrecting upsert (clearDeleted) may target a tombstoned row; a plain
   // update must prove the row live — see NodeUpdateTarget.
   if (options?.clearDeleted) {
+    // Keyed on the SAME condition the verdict was, because only that condition
+    // produces a verdict to state. With `resurrectionInstant` defined this is
+    // the DECISION, never an absence: omitting the key would let
+    // `buildUpdateNode` re-derive the bound against the backend's own, strictly
+    // later `timestamp`, so the two layers would agree only while the two clocks
+    // do — the #413 hazard, one layer out. `null` is how `UpdateNodeParams`
+    // spells "store no lower bound", which is what this decision resolves to for
+    // a resurrection that ends at or before the instant it judged.
+    //
+    // With it UNDEFINED this read found the row live — a peer resurrected it
+    // between the collection's probe and here — so the verdict judged the row's
+    // stored bound and stamped nothing. There is no decision to state, and
+    // stating one anyway would write away a `validFrom` the guard just ACCEPTED
+    // as equal to that stored bound. The statement usually matches no row
+    // (`deleted_at IS NOT NULL`) and the recovery below re-reads, but a peer that
+    // re-tombstones before the UPDATE makes it match, so this leg carries the
+    // stated bound exactly as the in-place leg does.
+    const resurrectionLowerBound =
+      resurrectionInstant === undefined ?
+        validFrom !== undefined && { validFrom }
+        // eslint-disable-next-line unicorn/no-null -- `validFrom: null` means "store NULL"; omitting the key means "decide for me", and this path has already decided. See UpdateNodeParams.validFrom.
+      : { validFrom: resurrectionBound ?? null };
     const row = await session.reviseNode(
-      { ...shared, existing, clearDeleted: true },
+      { ...shared, existing, clearDeleted: true, ...resurrectionLowerBound },
       fences,
     );
     return rowToNode(row);
   }
 
   if (!isLiveNodeRow(existing)) throw new NodeNotFoundError(kind, id);
-  const row = await session.reviseNode({ ...shared, existing }, fences);
+  const row = await session.reviseNode(
+    // An in-place update must not rewrite the stored bound, so it keeps the
+    // conditional spread: `buildUpdateNode` ignores `validFrom` off the
+    // resurrection leg, and stating one here would claim a rewrite that no
+    // statement performs.
+    { ...shared, existing, ...(validFrom !== undefined && { validFrom }) },
+    fences,
+  );
   return rowToNode(row);
 }
 
@@ -1196,14 +1285,25 @@ export async function primeBatchValidationCaches(
     }
     const groups = new Map<string, ProbeGroup>();
     for (const draft of drafts) {
-      for (const constraint of draft.uniqueConstraints) {
-        if (!checkWherePredicate(constraint, draft.validatedProps)) continue;
-        const key = computeUniqueKey(
-          draft.validatedProps,
-          constraint.fields,
-          constraint.collation,
-        );
-        const kindsToCheck = getKindsForUniquenessCheck(
+      for (const entry of nodeClaimEntries(
+        ctx.registry,
+        draft.kind,
+        draft.id,
+        draft.validatedProps,
+        draft.uniqueConstraints,
+        "create",
+      )) {
+        // Uniqueness entries only: this primes the reads the UNIQUENESS probe
+        // makes. A disjointness entry's verdict comes from the disjoint
+        // partner's node row, which no `checkUnique` read would supply.
+        if (entry.refusal.kind !== "uniqueness") continue;
+        const constraint = entry.refusal.constraint;
+        const key = entry.key;
+        // Seeded over exactly the kinds the per-row probe reads — the axis and
+        // the legacy kinds — so priming stays a batched substitute for those
+        // reads rather than a narrower set that sends them back to the
+        // database one row at a time.
+        const kindsToCheck = uniquenessProbeKinds(
           draft.kind,
           constraint.scope,
           ctx.registry,
@@ -1346,6 +1446,20 @@ async function resurrectPreparedNode<G extends GraphDef>(
   if (current.deleted_at === undefined) {
     throw createAlreadyExistsError("node", prepared.kind, prepared.id);
   }
+  // A create landing on a tombstone RESETS the window, so this leg stamps a
+  // bound whenever the caller stated none — and it decides which one through
+  // the same owner `performNodeUpdate`'s resurrection leg and every insert
+  // builder use, against an instant sampled HERE. Two consequences. The stored
+  // bound is the one this layer judged rather than the backend's strictly later
+  // sample, so one write has one instant (issue #413). And a create carrying
+  // only a historical `validTo` reaches the same stored shape on a tombstoned
+  // id as on a fresh one — no lower bound (I12).
+  const resurrectionInstant = nowIso();
+  const resurrectionBound = resolveStampedValidityLowerBound(
+    prepared.insertParams.validFrom,
+    prepared.insertParams.validTo,
+    resurrectionInstant,
+  );
   try {
     return await session.reviseNode(
       {
@@ -1354,9 +1468,10 @@ async function resurrectPreparedNode<G extends GraphDef>(
         schema: prepared.nodeKind.schema,
         validatedProps: prepared.validatedProps,
         uniqueConstraints: prepared.uniqueConstraints,
-        ...(prepared.insertParams.validFrom === undefined ?
-          {}
-        : { validFrom: prepared.insertParams.validFrom }),
+        // The decision itself, never an absence — see the same spelling on
+        // `performNodeUpdate`'s resurrection leg.
+        // eslint-disable-next-line unicorn/no-null -- `validFrom: null` means "store NULL"; omitting the key means "decide for me", and this path has already decided. See UpdateNodeParams.validFrom.
+        validFrom: resurrectionBound ?? null,
         ...(prepared.insertParams.validTo === undefined ?
           {}
         : { validTo: prepared.insertParams.validTo }),
@@ -1391,6 +1506,33 @@ async function resurrectPreparedNode<G extends GraphDef>(
 // unique constraint entries across all applicable kinds.
 // ============================================================
 
+/**
+ * THE preference rule when a key has claim rows at more than one kind — which a
+ * database carrying pre-axis rows legitimately can, at the axis AND at a
+ * concrete kind, with different owners:
+ *
+ * 1. Visit the AXIS first, then the remaining kinds in scope in code-point
+ *    order — the order {@link uniquenessProbeKinds} defines, so this reads what
+ *    the write path claims before it reads what an older version claimed.
+ * 2. Prefer a LIVE row over a tombstoned one, wherever each was found: a
+ *    tombstone is a released reservation, and reviving it while a live holder
+ *    exists would hand the caller the wrong node.
+ * 3. Among rows of the same liveness prefer the axis row, which rule 1 already
+ *    delivers.
+ *
+ * Stated rather than left to iteration order because `getOrCreateByConstraint`
+ * decides which node to revive from it.
+ */
+function prefersClaimRow(
+  incumbent: UniqueMatchRow | undefined,
+  candidate: UniqueMatchRow,
+): boolean {
+  if (incumbent === undefined) return true;
+  return (
+    incumbent.deleted_at !== undefined && candidate.deleted_at === undefined
+  );
+}
+
 async function findUniqueRowAcrossKinds(
   backend: WriteTarget,
   graphId: string,
@@ -1398,10 +1540,10 @@ async function findUniqueRowAcrossKinds(
   key: string,
   kindsToCheck: readonly string[],
   includeDeleted: boolean,
-): Promise<
-  | { node_id: string; concrete_kind: string; deleted_at: string | undefined }
-  | undefined
-> {
+): Promise<UniqueMatchRow | undefined> {
+  // `let` earns its place: a tombstoned hit does not end the search, because a
+  // live row later in the order outranks it (rule 2).
+  let preferred: UniqueMatchRow | undefined;
   for (const kindToCheck of kindsToCheck) {
     const row = await backend.checkUnique({
       graphId,
@@ -1410,9 +1552,12 @@ async function findUniqueRowAcrossKinds(
       key,
       includeDeleted,
     });
-    if (row !== undefined) return row;
+    if (row === undefined) continue;
+    if (!prefersClaimRow(preferred, row)) continue;
+    preferred = row;
+    if (row.deleted_at === undefined) return row;
   }
-  return undefined;
+  return preferred;
 }
 
 interface UniqueMatchRow {
@@ -1434,7 +1579,10 @@ async function batchCheckUniqueAcrossKinds(
   for (const kindToCheck of kindsToCheck) {
     if (backend.checkUniqueBatch === undefined) {
       for (const key of uniqueKeys) {
-        if (existingByKey.has(key)) continue;
+        const incumbent = existingByKey.get(key);
+        if (incumbent !== undefined && incumbent.deleted_at === undefined) {
+          continue;
+        }
         const row = await backend.checkUnique({
           graphId,
           nodeKind: kindToCheck,
@@ -1442,7 +1590,7 @@ async function batchCheckUniqueAcrossKinds(
           key,
           includeDeleted,
         });
-        if (row !== undefined) {
+        if (row !== undefined && prefersClaimRow(incumbent, row)) {
           existingByKey.set(row.key, row);
         }
       }
@@ -1455,7 +1603,7 @@ async function batchCheckUniqueAcrossKinds(
         includeDeleted,
       });
       for (const row of rows) {
-        if (!existingByKey.has(row.key)) {
+        if (prefersClaimRow(existingByKey.get(row.key), row)) {
           existingByKey.set(row.key, row);
         }
       }
@@ -1517,12 +1665,15 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       // can commit between the probe and this INSERT, and only the engine's
       // refusal reports it. Both routes to that conclusion raise the same error.
       //
-      // The translation now spans the fused unit — row AND sidecars — because
-      // the session applies them together. That widening is inert:
-      // `isDuplicateKeyInsertError` fires only on a classified node-INSERT
-      // duplicate, which no uniqueness / fulltext / embedding sidecar raises.
-      // The alternative — the session owning the translation — would change
-      // import's create-leg error type on a lost race, which it must not.
+      // The claims are the session's, at their declared placements: the
+      // pre-insert group gates the row and is compensated away if it does not
+      // land, the post-insert group follows it. The translation spans the fused
+      // unit — claims, row AND sidecars — because the session applies them
+      // together. That widening is inert: `isDuplicateKeyInsertError` fires only
+      // on a classified node-INSERT duplicate, which no claim, fulltext or
+      // embedding write raises. The alternative — the session owning the
+      // translation — would change import's create-leg error type on a lost
+      // race, which it must not.
       const row = await withAlreadyExistsTranslation("node", async () => {
         const work = nodeInsertWork(prepared);
         if (shouldReturnRow) return session.createNode(work);
@@ -1594,16 +1745,16 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       const partition = partitionCreates(preparedCreates);
       // ## Resurrections follow the whole insert unit
       //
-      // The batch INSERT and its sidecar batch are ONE session call, so the
-      // resurrection updates that used to run BETWEEN them now run after both.
-      // That is the one statement-order difference this migration makes, and
-      // it is safe because the two groups touch disjoint rows: a prepared
-      // create is either an insert or a resurrection, never both, and the
-      // embedding/fulltext rows are node-id-keyed. Their only shared resource
-      // is the uniques index — and two batch members claiming one key are
-      // already refused during preparation, which registers each row's pending
-      // unique entries so a later row sees an earlier one
-      // ({@link prepareBatchCreates}). So no error this batch can raise
+      // The batch INSERT, its claim groups and its sidecar batch are ONE session
+      // call, so the resurrection updates that used to run BETWEEN the insert and
+      // the fans now run after all of them. That is the one statement-order
+      // difference this migration makes, and it is safe because the two groups
+      // touch disjoint rows: a prepared create is either an insert or a
+      // resurrection, never both, and the embedding/fulltext rows are
+      // node-id-keyed. Their only shared resource is the claim relation — and two
+      // batch members claiming one key are already refused during preparation,
+      // which registers each row's pending claims so a later row sees an earlier
+      // one ({@link prepareBatchCreates}). So no error this batch can raise
       // depends on which of the two groups writes first.
       await withAlreadyExistsTranslation("node", () =>
         session.createNodesNoReturn(
@@ -1654,8 +1805,8 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       );
 
       const partition = partitionCreates(preparedCreates);
-      // One call for row + sidecars, so the resurrections follow the whole
-      // unit — same reasoning as {@link executeNodeCreateNoReturnBatch}.
+      // One call for claims + row + sidecars, so the resurrections follow the
+      // whole unit — same reasoning as {@link executeNodeCreateNoReturnBatch}.
       const inserted = await withAlreadyExistsTranslation("node", () =>
         session.createNodes(
           partition.inserts.map((prepared) => nodeInsertWork(prepared)),
@@ -1698,6 +1849,13 @@ export async function executeNodeUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
+  // The capability refusal is taken on the backend the CALLER handed in, before
+  // the frame opens: a stated `clearValidTo` a backend does not promise to apply
+  // must be refused, never accepted and dropped, and no transaction is needed to
+  // read a capability. Same placement as `executeNodeUpsertUpdate`'s.
+  if (input.clearValidTo === true) {
+    assertClearValidToSupported(backend, "node");
+  }
   const opContext = ctx.createOperationContext(
     "update",
     "node",
@@ -1709,14 +1867,27 @@ export async function executeNodeUpdate<G extends GraphDef>(
     opContext,
     nodeWritePlan(
       nodeFencesConstraintProbe(ctx, input.kind, "update"),
-      // Identity participates in an update only when it RESURRECTS: a live-row
-      // update cannot change a node's kind, so nothing folds.
-      options?.clearDeleted === true ?
+      // Identity participates in an update when it RESURRECTS, and when it
+      // states a validity end: a live-row update cannot change a node's kind, so
+      // nothing folds, but an end reads the identity assertions that touch it.
+      options?.clearDeleted === true || input.validTo !== undefined ?
         nodeIdentityParticipation(ctx, "fold")
       : undefined,
     ),
     backend,
     async (session, target) => {
+      const validTo = validateOptionalCanonicalIsoDate(
+        input.validTo,
+        "validTo",
+      );
+      const identity = ctx.identity;
+      if (identity !== undefined && validTo !== undefined) {
+        await identity.requireValidityEndCompatible(
+          target,
+          { kind: input.kind, id: input.id },
+          validTo,
+        );
+      }
       const node = await performNodeUpdateWithResurrectionRecovery(
         ctx,
         input,
@@ -1724,7 +1895,6 @@ export async function executeNodeUpdate<G extends GraphDef>(
         target,
         options,
       );
-      const identity = ctx.identity;
       if (options?.clearDeleted && identity !== undefined) {
         await identity.foldCreated(target, [
           { kind: input.kind, id: input.id },
@@ -1900,18 +2070,34 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
+  if (input.clearValidTo === true) {
+    assertClearValidToSupported(backend, "node");
+  }
   return runWritePlan(
     nodeWritePlanContext(ctx),
     nodeWritePlan(
       nodeFencesConstraintProbe(ctx, input.kind, "update"),
-      // Conditional for the same reason as {@link executeNodeUpdate}: only a
-      // resurrecting upsert folds.
-      options?.clearDeleted === true ?
+      // Conditional for the same reason as {@link executeNodeUpdate}: a
+      // resurrecting upsert folds, and stating a validity end reads the
+      // identity's other members, so both take the lock.
+      options?.clearDeleted === true || input.validTo !== undefined ?
         nodeIdentityParticipation(ctx, "fold")
       : undefined,
     ),
     backend,
     async (session, target) => {
+      const validTo = validateOptionalCanonicalIsoDate(
+        input.validTo,
+        "validTo",
+      );
+      const identity = ctx.identity;
+      if (identity !== undefined && validTo !== undefined) {
+        await identity.requireValidityEndCompatible(
+          target,
+          { kind: input.kind, id: input.id },
+          validTo,
+        );
+      }
       const node = await performNodeUpdateWithResurrectionRecovery(
         ctx,
         input,
@@ -1919,7 +2105,6 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
         target,
         options,
       );
-      const identity = ctx.identity;
       if (options?.clearDeleted && identity !== undefined) {
         await identity.foldCreated(target, [
           { kind: input.kind, id: input.id },
@@ -2121,7 +2306,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     constraint.collation,
   );
 
-  const kindsToCheck = getKindsForUniquenessCheck(
+  const kindsToCheck = uniquenessProbeKinds(
     kind,
     constraint.scope,
     ctx.registry,
@@ -2227,7 +2412,7 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
     constraint.collation,
   );
 
-  const kindsToCheck = getKindsForUniquenessCheck(
+  const kindsToCheck = uniquenessProbeKinds(
     kind,
     constraint.scope,
     ctx.registry,
@@ -2323,7 +2508,7 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
   const validated = validateAndComputeKeys(nodeKind, kind, constraint, items);
   const uniqueKeys = collectUniqueKeys(validated);
 
-  const kindsToCheck = getKindsForUniquenessCheck(
+  const kindsToCheck = uniquenessProbeKinds(
     kind,
     constraint.scope,
     ctx.registry,
@@ -2792,7 +2977,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
   const validated = validateAndComputeKeys(nodeKind, kind, constraint, items);
   const uniqueKeys = collectUniqueKeys(validated);
 
-  const kindsToCheck = getKindsForUniquenessCheck(
+  const kindsToCheck = uniquenessProbeKinds(
     kind,
     constraint.scope,
     ctx.registry,

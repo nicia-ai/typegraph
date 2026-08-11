@@ -14,6 +14,7 @@ import {
   defineNode,
   type Store,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { type GraphBackend } from "../src/backend/types";
 import { type QueryBuilderState } from "../src/query/builder/types";
 import {
@@ -21,6 +22,7 @@ import {
   createTrackingContext,
   FieldAccessTracker,
 } from "../src/query/execution/field-tracker";
+import { mapSelectiveResults } from "../src/query/execution/selective-result-mapper";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";
 import { type SqlFragment } from "../src/query/sql-fragment";
 import { type CompiledRowsSql } from "../src/query/sql-intent";
@@ -121,8 +123,7 @@ function createRecordingBackend(): Readonly<{
   const backend = createTestBackend();
   let lastQuery: SqlFragment | string | undefined;
 
-  const recordingBackend: GraphBackend = {
-    ...backend,
+  const recordingBackend: GraphBackend = deriveBackend(backend, {
     execute: async <T>(query: CompiledRowsSql) => {
       lastQuery = query;
       return backend.execute<T>(query);
@@ -134,7 +135,7 @@ function createRecordingBackend(): Readonly<{
       lastQuery = sqlText;
       return requireDefined(backend.executeRaw)<T>(sqlText, params);
     },
-  };
+  });
 
   return {
     backend: recordingBackend,
@@ -269,6 +270,54 @@ describe("createTrackingContext", () => {
     expect(context.p).toBeDefined();
     expect(context.c).toBeUndefined();
     expect(context.e).toBeUndefined();
+  });
+
+  it("canonicalizes selectively projected metadata timestamps", () => {
+    const timestampFields = [
+      "validFrom",
+      "validTo",
+      "createdAt",
+      "updatedAt",
+      "deletedAt",
+    ] as const;
+    const selectiveFields = buildSelectiveFields(
+      timestampFields.map((field) => ({
+        alias: "p",
+        field: `meta.${field}`,
+        isSystemField: true,
+      })),
+    );
+    const postgresJsTimestamp = "2026-08-09 11:52:09.617+00";
+    const row = Object.fromEntries(
+      selectiveFields.map((field) => [field.outputName, postgresJsTimestamp]),
+    );
+
+    const results = mapSelectiveResults(
+      [row],
+      mockState,
+      selectiveFields,
+      schemaIntrospector,
+      (context) => {
+        const node = requireDefined(context["p"]);
+        return {
+          validFrom: node.meta.validFrom,
+          validTo: node.meta.validTo,
+          createdAt: node.meta.createdAt,
+          updatedAt: node.meta.updatedAt,
+          deletedAt: node.meta.deletedAt,
+        };
+      },
+    );
+
+    expect(results).toEqual([
+      {
+        validFrom: "2026-08-09T11:52:09.617Z",
+        validTo: "2026-08-09T11:52:09.617Z",
+        createdAt: "2026-08-09T11:52:09.617Z",
+        updatedAt: "2026-08-09T11:52:09.617Z",
+        deletedAt: "2026-08-09T11:52:09.617Z",
+      },
+    ]);
   });
 });
 

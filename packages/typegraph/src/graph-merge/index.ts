@@ -10,21 +10,85 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../backend/types";
+export type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
+export type { MergeConstraintConflictErrorDetails } from "./errors";
 export {
   BaseVersionMismatchError,
   BranchError,
+  CandidateSourceError,
   IdentityMergeConflictError,
   InvalidMergeOptionsError,
+  InvalidMergePlanError,
+  MatchEvidenceError,
   MERGE_ERROR_CODES,
   MergeConflictError,
+  MergeConstraintConflictError,
   MergeError,
+  MergePlanCapabilityError,
+  MergePlanDigestMismatchError,
+  MergePlanningStaleError,
+  MergePlanOriginMismatchError,
+  MergePlanSchemaMismatchError,
+  MergePlanTargetMismatchError,
   SimilarityUnavailableError,
+  StaleMergePlanError,
+  UnsupportedMergePlanVersionError,
 } from "./errors";
-export { merge, mergeIncremental } from "./merge";
+export type {
+  CandidateDiagnostic,
+  CandidateDiagnostics,
+  EntityRef,
+  MatchEvidence,
+  MatchSource,
+  MatchStrategy,
+} from "./evidence";
+export { ingestionBranch } from "./ingestion-branch";
+export {
+  applyMergePlan,
+  merge,
+  mergeIncremental,
+  planMerge,
+  planMergeIncremental,
+} from "./merge";
 export type { NormalizedMergeOptions } from "./options";
 export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
+export type {
+  MergePlanAnchors,
+  MergePlanArtifact,
+  MergePlanArtifactV1,
+  MergePlanArtifactV1Input,
+  MergePlanBranchAnchor,
+  MergePlanCandidateDiagnostic,
+  MergePlanCanonicalMapping,
+  MergePlanDiagnostics,
+  MergePlanDigest,
+  MergePlanEdgeDelete,
+  MergePlanEdgeUpsert,
+  MergePlanEntityRef,
+  MergePlanEntityResolution,
+  MergePlanGuards,
+  MergePlanIdentityAssertion,
+  MergePlanMatchEvidence,
+  MergePlanMatchSource,
+  MergePlanNodeDelete,
+  MergePlanNodeUpsert,
+  MergePlanProposedSummary,
+  MergePlanProvenanceOptions,
+  MergePlanRetype,
+  MergePlanReview,
+  MergePlanRevisionFence,
+  MergePlanSchemaFence,
+  MergePlanSimilarityStrategy,
+  MergePlanTargetFence,
+  MergePlanTypeReconciliation,
+  MergePlanWrites,
+} from "./plan-schema";
+export {
+  MERGE_PLAN_DIGEST_ALGORITHM,
+  MERGE_PLAN_FORMAT_VERSION,
+} from "./plan-schema";
 export type {
   ProvenanceGraph,
   ProvenanceNode,
@@ -44,12 +108,14 @@ export type {
   KeylessConfig,
   SourceScope,
 } from "./sources";
+export type { IdentityAssertionWriteFacade } from "./typegraph-internal";
 export type {
   BaseAmbiguity,
   BaseVersion,
   BranchId,
   BranchOptions,
   BranchProvenance,
+  CandidateDiagnosticsOptions,
   ComparisonCeilingPolicy,
   ConflictingValue,
   DeleteModifyConflict,
@@ -58,6 +124,9 @@ export type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IngestionBranch,
+  IngestionNodeCollections,
+  MergeBranch,
   MergedCounts,
   MergeIncrementalArgs,
   MergeOptions,

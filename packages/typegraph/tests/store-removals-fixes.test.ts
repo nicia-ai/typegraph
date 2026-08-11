@@ -14,13 +14,19 @@
  *  4. `materializeRemovals` cleans up the customized `uniques`
  *     table — not the canonical default — when the backend is
  *     configured with a non-default name.
+ *  5. Removing a node kind reaps claims held by its connected edges before
+ *     those edge rows disappear.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { createSqliteTables } from "../src/backend/sqlite";
 import { type GraphBackend } from "../src/backend/types";
-import { defineGraph, defineNode } from "../src/core";
+import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { RECORDED_MAX_REVISION } from "../src/core/temporal";
 import {
   defineGraphExtension,
@@ -45,15 +51,14 @@ function withOneShotTransactionFailure(
   base: GraphBackend,
   shouldFailNow: () => boolean,
 ): GraphBackend {
-  return {
-    ...base,
+  return deriveBackend(base, {
     async schemaWriteTransaction(graphId, fn) {
       if (shouldFailNow()) {
         throw new Error("injected recorded-close failure");
       }
       return requireDefined(base.schemaWriteTransaction)(graphId, fn);
     },
-  };
+  });
 }
 
 const Person = defineNode("Person", {
@@ -81,19 +86,17 @@ const tagExtension = defineGraphExtension({
 describe("evolve against a DB missing typegraph_kind_removals", () => {
   it("falls back to full bootstrap for custom backends", async () => {
     const baseBackend = createTestBackend();
-    const {
-      ensureKindRemovalsTable: focusedEnsure,
-      ...backendWithoutFocusedEnsure
-    } = baseBackend;
-    expect(focusedEnsure).toBeDefined();
+    expect(baseBackend.ensureKindRemovalsTable).toBeDefined();
+    const backendWithoutFocusedEnsure = projectBackendWithout(baseBackend, [
+      "ensureKindRemovalsTable",
+    ]);
     let bootstrapCalls = 0;
-    const backend: GraphBackend = {
-      ...backendWithoutFocusedEnsure,
+    const backend: GraphBackend = deriveBackend(backendWithoutFocusedEnsure, {
       async bootstrapTables() {
         bootstrapCalls += 1;
         await requireDefined(baseBackend.bootstrapTables)();
       },
-    };
+    });
     const [store] = await createStoreWithSchema(baseGraph, backend);
     bootstrapCalls = 0;
     await requireDefined(backend.executeDdl)(
@@ -125,13 +128,12 @@ describe("evolve against a DB missing typegraph_kind_removals", () => {
   it("does not bootstrap the queue for a no-op evolve", async () => {
     const baseBackend = createTestBackend();
     let ensureCalls = 0;
-    const backend: GraphBackend = {
-      ...baseBackend,
+    const backend: GraphBackend = deriveBackend(baseBackend, {
       async ensureKindRemovalsTable() {
         ensureCalls += 1;
         await requireDefined(baseBackend.ensureKindRemovalsTable)();
       },
-    };
+    });
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(tagExtension);
     ensureCalls = 0;
@@ -471,6 +473,117 @@ describe("materializeRemovals against a backend with a custom `uniques` table", 
       ),
     );
     expect(requireDefined(afterRows[0]).count).toBe(0);
+  });
+});
+
+// ============================================================
+// 5. Node-kind removal reaps connected edge claims
+// ============================================================
+
+describe("materializeRemovals edge-claim housekeeping", () => {
+  it("reaps claims for edges hard-deleted by a node cascade", async () => {
+    const CascadePerson = defineNode("CascadePerson", {
+      schema: z.object({ name: z.string() }),
+    });
+    const cascadeLink = defineEdge("cascadeLink", { schema: z.object({}) });
+    const cascadeGraph = defineGraph({
+      id: "node_cascade_edge_claim_cleanup",
+      nodes: {
+        CascadePerson: { type: CascadePerson, onDelete: "cascade" },
+      },
+      edges: {
+        cascadeLink: {
+          type: cascadeLink,
+          from: [CascadePerson],
+          to: [CascadePerson],
+          cardinality: "one",
+        },
+      },
+    });
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(cascadeGraph, backend);
+    const source = await store.nodes.CascadePerson.create({ name: "Source" });
+    const target = await store.nodes.CascadePerson.create({ name: "Target" });
+    const edge = await store.edges.cascadeLink.create(source, target, {});
+    const claimCount = async (): Promise<number> => {
+      const rows = await backend.execute<{ count: number }>(
+        asCompiledRowsSql(
+          sql`SELECT COUNT(*) AS count FROM ${sql.identifier("typegraph_edge_claims")} WHERE edge_id = ${edge.id}`,
+        ),
+      );
+      return requireDefined(rows[0]).count;
+    };
+    expect(await claimCount()).toBe(1);
+
+    await store.nodes.CascadePerson.hardDelete(source.id);
+
+    expect(await claimCount()).toBe(0);
+  });
+
+  it("reaps claims held by edges connected to a removed node kind", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+        edges: {
+          taggedPerson: {
+            from: ["Tag"],
+            to: ["Person"],
+            properties: {},
+          },
+        },
+      }),
+    );
+    const dynamicNodes = evolved.nodes as unknown as {
+      Tag: { create: (props: { label: string }) => Promise<{ id: string }> };
+    };
+    const dynamicEdges = evolved.edges as unknown as {
+      taggedPerson: {
+        create: (
+          from: Readonly<{ kind: "Tag"; id: string }>,
+          to: Readonly<{ kind: "Person"; id: string }>,
+          props: Record<string, never>,
+        ) => Promise<{ id: string }>;
+      };
+    };
+    const tag = await dynamicNodes.Tag.create({ label: "important" });
+    const person = await evolved.nodes.Person.create({ name: "Ada" });
+    const edge = await dynamicEdges.taggedPerson.create(
+      { kind: "Tag", id: tag.id },
+      person,
+      {},
+    );
+    await requireDefined(backend.claimEdgeCardinality)({
+      graphId: baseGraph.id,
+      cardinality: "one",
+      edgeKind: "taggedPerson",
+      edgeId: edge.id,
+      fromKind: "Tag",
+      fromId: tag.id,
+      toKind: "Person",
+      toId: person.id,
+    });
+    const claimCount = async (): Promise<number> => {
+      const rows = await backend.execute<{ count: number }>(
+        asCompiledRowsSql(
+          sql`SELECT COUNT(*) AS count FROM ${sql.identifier("typegraph_edge_claims")} WHERE edge_id = ${edge.id}`,
+        ),
+      );
+      return requireDefined(rows[0]).count;
+    };
+    expect(await claimCount()).toBe(1);
+
+    const removed = await evolved.removeKinds(["Tag", "taggedPerson"]);
+    // Run only the node-kind row. The edge-kind cleanup remains pending, so it
+    // cannot hide a missing connected-edge reap in this path.
+    const result = await removed.materializeRemovals({ kinds: ["Tag"] });
+    expect(result.results).toContainEqual({
+      entity: "node",
+      kind: "Tag",
+      status: "removed",
+    });
+    expect(await claimCount()).toBe(0);
   });
 });
 

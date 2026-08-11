@@ -70,6 +70,7 @@ export type {
   IntentSql,
   SqlIntent,
 } from "../query/sql-intent";
+export { resolveStampedValidityLowerBound } from "../utils/date";
 export {
   deleteLegacyRecordedAnchorMap,
   type DeleteLegacyRecordedAnchorMapOptions,
@@ -79,6 +80,13 @@ export {
   migrateRecordedAnchor,
   type MigrateRecordedAnchorOptions,
 } from "./migrate-recorded-time";
+export {
+  repairInvertedValidityWindows,
+  type RepairInvertedWindowsOptions,
+  type RepairInvertedWindowsReport,
+  type RepairRelation,
+  type RepairRelationScope,
+} from "./repair-validity-windows";
 export type {
   StrategyTableContribution,
   TableContribution,
@@ -97,10 +105,14 @@ export type {
   BackendTransactions,
   CheckUniqueBatchParams,
   CheckUniqueParams,
+  ClaimEdgeCardinalityParams,
   ClaimIndexMaterializationParams,
   CommitSchemaVersionExpected,
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
+  ConstraintFenceViolationRows,
+  ContendedEdgeRow,
+  ContendedUniqueRow,
   ContributionCapabilities,
   ContributionDiagnostic,
   ContributionDiagnosticState,
@@ -120,6 +132,7 @@ export type {
   CountEdgesFromParams,
   CountNodesByKindParams,
   CreateVectorIndexParams,
+  DatabaseExtensionName,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
   DeleteEmbeddingParams,
@@ -127,7 +140,10 @@ export type {
   DeleteFulltextParams,
   DeleteNodeParams,
   DeleteUniqueParams,
+  DisjointOverlapRow,
   DropVectorIndexParams,
+  EdgeCardinalityDeclaration,
+  EdgeClaimOutcome,
   EdgeEntityReadBackend,
   EdgeEntityWriteBackend,
   EdgeExistsBetweenParams,
@@ -153,6 +169,7 @@ export type {
   GraphReadBackend,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   HybridSearchParams,
   HybridSearchRow,
@@ -170,9 +187,11 @@ export type {
   NodeEntityWriteBackend,
   NodeRow,
   PopulatedSchemaKind,
+  PurgeEdgeClaimsParams,
   QueryExecutionBackend,
   RawQueryExecutionBackend,
   RawStatementExecutionBackend,
+  ReadConstraintFenceViolationsParams,
   RecordContributionMaterializationParams,
   RecordIndexMaterializationParams,
   RecordKindRemovalParams,
@@ -214,6 +233,7 @@ export type {
 } from "./types";
 export {
   D1_MAX_BIND_PARAMETERS,
+  DATABASE_EXTENSION_NAMES,
   DURABLE_OBJECT_MAX_BIND_PARAMETERS,
   isLiveNodeRow,
   isTombstonedNodeRow,

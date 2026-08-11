@@ -22,6 +22,7 @@ import { canonicalizeDatabaseTimestamp } from "../utils/date";
 import { postgresContributions, sqliteContributions } from "./drizzle/ddl";
 import { createPostgresTables } from "./drizzle/schema/postgres";
 import { createSqliteTables } from "./drizzle/schema/sqlite";
+import { resolvedTableNames } from "./table-names";
 import { type GraphBackend, type TransactionBackend } from "./types";
 
 const LEGACY_RECORDED_MAX = "9999-12-31T23:59:59.999Z";
@@ -89,7 +90,7 @@ type ColumnRow = Readonly<{ name: unknown }>;
 
 export type MigrateLegacyRecordedTimeOptions = Readonly<{
   backend: GraphBackend;
-  /** Override the backend's recorded table names. */
+  /** Patch selected backend table names; unstated names remain configured. */
   tableNames?: Partial<SqlTableNames> | undefined;
   /** Override the durable legacy-anchor mapping table name. */
   mappingTableName?: string | undefined;
@@ -110,6 +111,7 @@ export type MigrateRecordedAnchorOptions = Readonly<{
   backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames">;
   graphId: string;
   anchor: string;
+  /** Patch selected backend table names; unstated names remain configured. */
   tableNames?: Partial<SqlTableNames> | undefined;
   mappingTableName?: string | undefined;
 }>;
@@ -120,18 +122,12 @@ export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
     "dialect" | "execute" | "executeStatement" | "tableNames" | "transaction"
   >;
   graphId: string;
+  /** Patch selected backend table names; unstated names remain configured. */
   tableNames?: Partial<SqlTableNames> | undefined;
   mappingTableName?: string | undefined;
   /** Drop the mapping table when this deletion leaves it empty. */
   dropWhenEmpty?: boolean | undefined;
 }>;
-
-function resolvedTableNames(
-  backend: Pick<GraphBackend, "tableNames">,
-  override: Partial<SqlTableNames> | undefined,
-): ResolvedSqlTableNames {
-  return createSqlSchema(override ?? backend.tableNames ?? {}).tables;
-}
 
 function shortenedIdentifier(value: string): string {
   if (value.length <= 63) return value;

@@ -131,6 +131,18 @@ const graph = defineGraph({
 
 const statements: LoggedStatement[] = [];
 
+/**
+ * The relation names the claim-placement matchers below look for, read from the
+ * same schema builder the store uses rather than spelled as literals: a
+ * configured table prefix would silently make a substring matcher match nothing,
+ * and a matcher that matches nothing passes every "before" comparison it is not
+ * guarded against.
+ */
+const SCHEMA_TABLES = {
+  nodes: "typegraph_nodes",
+  nodeUniques: "typegraph_node_uniques",
+} as const;
+
 let store: Store<typeof graph>;
 let backend: GraphBackend;
 let closeClient: () => Promise<void>;
@@ -537,6 +549,69 @@ describe("every managed write locks before it writes", () => {
   }
 });
 
+/**
+ * The first statement that writes the CLAIM relation a node's declared
+ * constraints reserve in. Both claim families live in `uniques`, so one matcher
+ * covers uniqueness and disjointness alike.
+ */
+function indexOfClaimStatement(): number {
+  return statements.findIndex(
+    (statement) =>
+      /^\s*insert/i.test(statement.query) &&
+      statement.query.includes(SCHEMA_TABLES.nodeUniques),
+  );
+}
+
+/** The first statement that writes the node row itself. */
+function indexOfNodeRowStatement(): number {
+  return statements.findIndex(
+    (statement) =>
+      /^\s*insert/i.test(statement.query) &&
+      statement.query.includes(SCHEMA_TABLES.nodes),
+  );
+}
+
+/**
+ * THE PINNED COORDINATION ORDER where the write pipeline meets the claim
+ * architecture: pre-insert claims, the row, post-insert claims, the sync fans.
+ *
+ * The lock table above cannot see this — it stops at "the first row statement" —
+ * and neither design's own suites pin it either, because each was written
+ * against a tree where the other half did not exist: the claim suites drive the
+ * public API and assert OUTCOMES (who owns the axis, what error a loser gets),
+ * and the pipeline suites assert which MEMBERS a fused unit reaches. The
+ * placement is the one property that is neither, and it is the property the two
+ * designs had to agree on: a claim issued after the row it fences is not a
+ * fence, and a sync fan issued before the row can write derived data for a row
+ * that never landed.
+ *
+ * Named mutation, verified to bite: invert the placement partition in
+ * `withNodeCreateClaimsIssuedBy` (`claims/node-claims.ts`) so the post-insert
+ * group is issued first → this case fails, because the claim then follows the
+ * row it is supposed to gate.
+ *
+ * The other half of the pinned order — the sync fans FOLLOW the row — is pinned
+ * in `session-sidecar-completeness.test.ts`, whose fixture actually declares a
+ * searchable and an embedded field; this fixture's kinds declare neither, so a
+ * case here would assert against a statement that is never emitted.
+ */
+describe("claims and row work keep their pinned order", () => {
+  it("issues a pre-insert claim BEFORE the row it gates", async () => {
+    // A `kindWithSubClasses` scope: the axis spans sibling kinds no single
+    // primary key backs, which is exactly the claim that must precede its row.
+    await store.nodes.Employee.create({
+      email: "placement@example.com",
+      name: "Placement",
+    });
+
+    const claim = indexOfClaimStatement();
+    const row = indexOfNodeRowStatement();
+    expect(claim).toBeGreaterThanOrEqual(0);
+    expect(row).toBeGreaterThanOrEqual(0);
+    expect(claim).toBeLessThan(row);
+  });
+});
+
 describe("the executor's own frame keeps that order", () => {
   it("threads the plan's constraint probe and takes identity at position three", async () => {
     const identityLocks: number[] = [];
@@ -566,6 +641,12 @@ describe("the executor's own frame keeps that order", () => {
             kind: "Plain",
             id: "executor-node",
             props: { name: "executor" },
+          },
+          claim: {
+            kind: "Plain",
+            id: "executor-node",
+            props: { name: "executor" },
+            constraints: [],
           },
           sideEffects: {
             kind: "Plain",

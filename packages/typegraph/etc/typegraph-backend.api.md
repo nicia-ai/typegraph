@@ -32,8 +32,10 @@ export function assertVectorSearchLimit(limit: number): void;
 export type BackendCapabilities = Readonly<{
     transactions: boolean;
     windowFunctions: boolean;
+    clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
+    readonly constraintClaims?: boolean;
     vector?: VectorCapabilities | undefined;
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
@@ -51,6 +53,15 @@ export type BackendMaintenance = Pick<GraphBackend, "refreshStatistics">;
 
 // @public (undocumented)
 export type BackendTransactions = Pick<GraphBackend, "transaction">;
+
+// @public
+type BackendValidityEndMutation = Readonly<{
+    validTo?: string;
+    clearValidTo?: never;
+}> | Readonly<{
+    validTo?: never;
+    clearValidTo: true;
+}>;
 
 // @public
 export const BASE_CONTRIBUTION_OWNER = "base";
@@ -80,6 +91,18 @@ export type CheckUniqueParams = Readonly<{
     constraintName: string;
     key: string;
     includeDeleted?: boolean;
+}>;
+
+// @public
+export type ClaimEdgeCardinalityParams = Readonly<{
+    graphId: string;
+    cardinality: Exclude<Cardinality, "many">;
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
 }>;
 
 // @public
@@ -134,6 +157,33 @@ export type CompiledStatementSql = IntentSql<"statement">;
 
 // @public (undocumented)
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
+
+// @public
+export type ConstraintFenceViolationRows = Readonly<{
+    contendedUniqueRows: readonly ContendedUniqueRow[];
+    contendedEdgeRows: readonly ContendedEdgeRow[];
+    disjointOverlaps: readonly DisjointOverlapRow[];
+}>;
+
+// @public
+export type ContendedEdgeRow = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
+export type ContendedUniqueRow = Readonly<{
+    nodeKind: string;
+    constraintName: string;
+    key: string;
+    concreteKind: string;
+    nodeId: string;
+}>;
 
 // @public
 export type ContributionCapabilities = Readonly<{
@@ -286,6 +336,12 @@ export type CreateVectorIndexParams = Readonly<{
 export const D1_MAX_BIND_PARAMETERS = 100;
 
 // @public
+export const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
+
+// @public
+export type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
+// @public
 export type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 
 // @public
@@ -348,9 +404,11 @@ export type DeleteNodeParams = Readonly<{
 // @public
 export type DeleteUniqueParams = Readonly<{
     graphId: string;
-    nodeKind: string;
+    nodeKind?: string;
     constraintName: string;
     key: string;
+    concreteKind: string;
+    nodeId: string;
 }>;
 
 // @public
@@ -415,6 +473,12 @@ export type DialectStandardQueryStrategy = "cte_project";
 export type DialectVectorPredicateStrategy = "native" | "unsupported";
 
 // @public
+export type DisjointOverlapRow = Readonly<{
+    kinds: readonly [string, string];
+    nodeId: string;
+}>;
+
+// @public
 export type DropVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -423,6 +487,20 @@ export type DropVectorIndexParams = Readonly<{
 
 // @public
 export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
+
+// @public
+export type EdgeCardinalityDeclaration = Readonly<{
+    edgeKind: string;
+    cardinality: Exclude<Cardinality, "many">;
+}>;
+
+// @public
+export type EdgeClaimOutcome = Readonly<{
+    status: "claimed";
+}> | Readonly<{
+    status: "refused";
+    holderEdgeId: string;
+}>;
 
 // @public
 type EdgeEndpointSide = "from" | "to";
@@ -802,8 +880,13 @@ export type GraphBackend = Readonly<{
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
     deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
     hardDeleteUniquesByNodeIds?: (this: void, params: HardDeleteUniquesByNodeIdsParams) => Promise<void>;
+    hardDeleteUniquesByConcreteKind?: (this: void, params: HardDeleteUniquesByConcreteKindParams) => Promise<void>;
     checkUnique: (this: void, params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
     checkUniqueBatch?: (this: void, params: CheckUniqueBatchParams) => Promise<readonly UniqueRow[]>;
+    claimEdgeCardinality?: (this: void, params: ClaimEdgeCardinalityParams) => Promise<EdgeClaimOutcome>;
+    claimEdgeCardinalityBatch?: (this: void, entries: readonly ClaimEdgeCardinalityParams[]) => Promise<readonly EdgeClaimOutcome[]>;
+    purgeEdgeClaims?: (this: void, params: PurgeEdgeClaimsParams) => Promise<void>;
+    readConstraintFenceViolations?: (this: void, params: ReadConstraintFenceViolationsParams) => Promise<ConstraintFenceViolationRows>;
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
@@ -849,6 +932,7 @@ export type GraphBackend = Readonly<{
     deleteFulltextBatch?: (this: void, params: DeleteFulltextBatchParams) => Promise<void>;
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
+    ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
@@ -905,6 +989,7 @@ export type GraphBackend = Readonly<{
         params: readonly unknown[];
     }>;
     executeDdl?: (this: void, ddl: string) => Promise<void>;
+    ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
     transaction: <T>(this: void, fn: (tx: TransactionBackend) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     close: (this: void) => Promise<void>;
 }>;
@@ -950,6 +1035,12 @@ export type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+}>;
+
+// @public
+export type HardDeleteUniquesByConcreteKindParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
 }>;
 
 // @public
@@ -1330,6 +1421,12 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities;
 // @public
 export const POSTGRES_MAX_BIND_PARAMETERS = 65533;
 
+// @public
+export type PurgeEdgeClaimsParams = Readonly<{
+    graphId: string;
+    edgeIds: readonly string[];
+}>;
+
 // @public (undocumented)
 export type QueryExecutionBackend = Pick<GraphBackend, "execute">;
 
@@ -1341,6 +1438,14 @@ export type RawQueryExecutionBackend = Pick<GraphBackend, "executeRaw" | "compil
 
 // @public (undocumented)
 export type RawStatementExecutionBackend = Pick<GraphBackend, "executeStatement" | "executeTemporaryStatement" | "executeDdl">;
+
+// @public
+export type ReadConstraintFenceViolationsParams = Readonly<{
+    graphId: string;
+    uniqueConstraintNames: readonly string[];
+    disjointKindPairs: readonly (readonly [string, string])[];
+    edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+}>;
 
 // @public
 export type RecordContributionMaterializationParams = Readonly<{
@@ -1419,6 +1524,32 @@ export function renderSqlInline(fragment: SqlFragment, dialect: SqlDialect): str
 // @public
 export function renderSqlite(fragment: SqlFragment, bindings?: Readonly<Record<string, unknown>>): RenderedSql;
 
+// @public
+export function repairInvertedValidityWindows(options: RepairInvertedWindowsOptions): Promise<RepairInvertedWindowsReport>;
+
+// @public
+export type RepairInvertedWindowsOptions = Readonly<{
+    backend: GraphBackend;
+    graphId?: string | undefined;
+    relations: RepairRelationScope;
+    mode: "report" | "apply";
+    tableNames?: Partial<SqlTableNames> | undefined;
+}>;
+
+// @public
+export type RepairInvertedWindowsReport = Readonly<{
+    relations: RepairRelationScope;
+    counts: Readonly<Record<RepairRelation, number | undefined>>;
+    nonCanonical: Readonly<Record<RepairRelation, number | undefined>>;
+    atomic: boolean;
+}>;
+
+// @public
+export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdges";
+
+// @public
+export type RepairRelationScope = "live" | "live-and-recorded";
+
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
     nodes: string;
@@ -1433,7 +1564,11 @@ export type ResolvedSqlTableNames = Readonly<{
     identitySeparation: string;
     fulltext: string;
     uniques: string;
+    edgeClaims: string;
 }>;
+
+// @public
+export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
 
 // @public
 export type RowProps = string | Readonly<Record<string, unknown>>;
@@ -1645,6 +1780,7 @@ export type SqlTableNames = Readonly<{
     identitySeparation?: string | undefined;
     fulltext: string;
     uniques: string;
+    edgeClaims?: string | undefined;
 }>;
 
 // @public
@@ -1687,7 +1823,7 @@ export type TombstonedNodeRow = NodeRow & Readonly<{
 }>;
 
 // @public
-export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & SchemaReadBackend & Pick<GraphBackend, "lockSchemaVersionForWrite"> & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & Pick<GraphBackend, "lockSchemaVersionForWrite"> & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 export type TransactionOptions = Readonly<{
@@ -1716,7 +1852,7 @@ export type TrustedImportSession = Readonly<{
 export const tsvectorStrategy: FulltextStrategy;
 
 // @public (undocumented)
-export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "checkUnique" | "checkUniqueBatch">;
+export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
 
 // @public
 export type UniquenessScope = "kind" | "kindWithSubClasses";
@@ -1743,10 +1879,10 @@ export type UpdateEdgeParams = Readonly<{
     toId?: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
+    expectedValidTo?: string | null;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 export type UpdateNodeParams = Readonly<{
@@ -1755,11 +1891,10 @@ export type UpdateNodeParams = Readonly<{
     id: string;
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
-    validTo?: string;
     expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 export type UpdateNodeSetParams = Readonly<{

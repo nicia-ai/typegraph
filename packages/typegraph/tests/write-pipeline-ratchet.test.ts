@@ -97,7 +97,7 @@ const RATCHET = {
  * visible. Adding a member moves this number and forces the new member into a
  * class — which is the point: whoever adds it decides whether it is a write.
  */
-const MEMBER_COUNT = 105;
+const MEMBER_COUNT = 112;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 
@@ -371,7 +371,11 @@ describe("write-pipeline lint blocks", () => {
     },
   ] as const;
   const exemptions = [
-    { path: "src/store/uniqueness.ts", reason: "sidecar", permanent: true },
+    {
+      path: "src/store/claims/node-claims.ts",
+      reason: "sidecar",
+      permanent: true,
+    },
     { path: "src/store/store.ts", reason: "lifecycle", permanent: true },
   ] as const;
   const blocks = writePipelineBlocks({ profiles, exemptions });

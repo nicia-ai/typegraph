@@ -22,6 +22,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode, type GraphBackend } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { type CompiledRowsSql } from "../../../src/query/sql-intent";
 import { createStoreWithSchema } from "../../../src/store";
@@ -159,8 +160,7 @@ describe("Operational Identity derived-relation upgrade on Postgres", () => {
       // BEFORE the DDL, which is what this observes.
       const fence = requireDefined(backend.schemaWriteTransaction);
       const statements: string[] = [];
-      const observed: GraphBackend = {
-        ...backend,
+      const observed: GraphBackend = deriveBackend(backend, {
         schemaWriteTransaction: <T>(
           graphId: string,
           fn: (tx: Parameters<Parameters<typeof fence>[1]>[0]) => Promise<T>,
@@ -180,7 +180,7 @@ describe("Operational Identity derived-relation upgrade on Postgres", () => {
               },
             });
           }),
-      };
+      });
 
       await createStoreWithSchema(graph, observed);
 

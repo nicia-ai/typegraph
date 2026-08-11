@@ -24,6 +24,10 @@ export {
   type TypeGraphErrorOptions,
 } from "../errors";
 export type { IdentityTransferAssertion } from "../identity/service";
+export type {
+  IdentityAssertionWriteFacade,
+  IdentityFacade,
+} from "../identity/types";
 export { exportGraph, exportGraphStream } from "../interchange/export";
 export { importGraph, importGraphStream } from "../interchange/import";
 export { computeTransitiveClosure, isReachable } from "../ontology/closures";
@@ -42,19 +46,23 @@ export {
   type OntologyIntrospection,
   type UniqueIntrospection,
 } from "../store/introspect";
+export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
+  advanceRevisionClock,
+  forceRecordedGraphRevision,
   lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
 } from "../store/recorded-capture";
 export {
   storeBackend,
+  storeQueryBackend,
   storeRuntime,
   transactionBackend,
 } from "../store/runtime-port";
 export type { Store } from "../store/store";
 export { createStoreWithSchema } from "../store/store";
-export { type Edge, type Node } from "../store/types";
+export { type Edge, type Node, type ValidityEndMutation } from "../store/types";
 export { compareCodePoints } from "../utils/compare";
 export { canonicalizeDatabaseTimestamp } from "../utils/date";
 export { sha256Hex } from "../utils/hash";

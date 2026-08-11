@@ -6,6 +6,10 @@
  * missing fields and unsupported "return whole node/edge" selections.
  */
 
+import {
+  normalizeRequiredRowTimestamp,
+  normalizeRowTimestamp,
+} from "../../backend/row-mappers";
 import type { KindEntity } from "../../core/types";
 import { compareStrings, hasOwnKey, normalizePath } from "../../utils";
 import { createDataKeyedBag, isInteropProbeKey } from "../../utils/object";
@@ -71,6 +75,19 @@ type AliasPlan = Readonly<{
   propsOutputNames: ReadonlySet<string>;
   systemOutputNames: ReadonlySet<string>;
 }>;
+
+function normalizeMetaValue(
+  value: unknown,
+  metaKey: string,
+  alias: string,
+): unknown {
+  if (metaKey === "version") return nullToUndefined(value);
+  const field = `${alias}_${metaKey}`;
+  if (metaKey === "createdAt" || metaKey === "updatedAt") {
+    return normalizeRequiredRowTimestamp(value, field);
+  }
+  return normalizeRowTimestamp(value, field);
+}
 
 // ============================================================
 // Marker for "whole alias object" detection
@@ -352,7 +369,11 @@ function buildRequiredAliasValue(
   if (plan.metaFields.length > 0) {
     const meta = createDataKeyedBag<unknown>();
     for (const field of plan.metaFields) {
-      meta[field.metaKey] = nullToUndefined(row[field.outputName]);
+      meta[field.metaKey] = normalizeMetaValue(
+        row[field.outputName],
+        field.metaKey,
+        plan.alias,
+      );
     }
     base["meta"] = createGuardedProxy(meta, `${plan.alias}.meta`);
   }

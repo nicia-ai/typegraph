@@ -63,6 +63,7 @@ import { serializeIndexDeclaration } from "../schema/serializer";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import { requireDefined } from "../utils/presence";
+import { isPostgresConcurrentDdlRaceError } from "../utils/sql-errors";
 import {
   ensureFocusedStatusTable,
   runBucketedMaterialization,
@@ -82,6 +83,7 @@ import {
 const CLAIM_LEASE_MS = 15 * 60_000;
 const CLAIM_RETRY_DELAY_MS = 200;
 const CLAIM_WAIT_TIMEOUT_MS = CLAIM_LEASE_MS + 60_000;
+const TRIGRAM_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
 
 const INDEX_DIALECT_BEHAVIOR = {
   postgres: {
@@ -121,6 +123,45 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/**
+ * Installs `pg_trgm`, preferring the most capable seam the backend offers.
+ *
+ * All three branches make the SAME request and differ only in what happens to
+ * the loser of a concurrent install:
+ *
+ *  1. `ensureExtension` — the general seam: the backend owns the fence for
+ *     every extension the library installs;
+ *  2. `ensureTrigramExtension` — the `pg_trgm`-only spelling a 0.47 backend may
+ *     implement instead, consulted so such a backend keeps its fence;
+ *  3. bare `executeDdl` with this function's own one-shot retry, which is all
+ *     a backend offering neither can do.
+ *
+ * A backend with none of them keeps failing loudly on `requireDefined`.
+ */
+async function ensureTrigramExtension(backend: GraphBackend): Promise<void> {
+  if (backend.ensureExtension !== undefined) {
+    await backend.ensureExtension("pg_trgm");
+    return;
+  }
+  // Consulting the deprecated seam IS this branch's purpose: a backend written
+  // against 0.47 implements only this one, and skipping it would drop such a
+  // backend to the bare statement below and lose the fence it does have.
+  /* eslint-disable @typescript-eslint/no-deprecated */
+  if (backend.ensureTrigramExtension !== undefined) {
+    await backend.ensureTrigramExtension();
+    return;
+  }
+  /* eslint-enable @typescript-eslint/no-deprecated */
+
+  const executeDdl = requireDefined(backend.executeDdl);
+  try {
+    await executeDdl(TRIGRAM_EXTENSION_DDL);
+  } catch (error) {
+    if (!isPostgresConcurrentDdlRaceError(error)) throw error;
+    await executeDdl(TRIGRAM_EXTENSION_DDL);
+  }
 }
 
 export type MaterializeIndexesOptions = Readonly<{
@@ -455,9 +496,16 @@ async function materializeRelationalIndex(
         // gin_trgm_ops lives in the pg_trgm extension (contrib — present
         // on stock Postgres and the hosted variants). Idempotent, and a
         // permission failure surfaces as this index's `failed` entry.
-        await requireDefined(backend.executeDdl)(
-          "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
-        );
+        //
+        // The install needs a fence this claim cannot give it: the extension
+        // is database-global while this claim is per-index, so two
+        // materializers building DIFFERENT trigram indexes both reach it and
+        // race on the catalog row — the loser's 23505 would be a spurious
+        // `failed` entry (#446). The backend seam owns that fence (#475); a
+        // backend offering neither seam keeps issuing it bare, so the index is
+        // still materialized, just with this function's own retry rather than
+        // the backend's serialization.
+        await ensureTrigramExtension(backend);
       }
       await requireDefined(backend.executeDdl)(ddl);
     },

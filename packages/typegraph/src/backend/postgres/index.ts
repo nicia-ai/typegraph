@@ -62,6 +62,7 @@ export {
   type PostgresTables,
   tables,
 } from "../drizzle/postgres";
+export type { SerializedResourceDeclaration } from "../transaction-resource";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
@@ -72,6 +73,7 @@ export type {
 // Schema: table definitions and factory options
 export {
   type CreatePostgresTablesOptions,
+  edgeClaims,
   edges,
   fulltext,
   nodes,

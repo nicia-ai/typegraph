@@ -8,6 +8,8 @@ import {
   defineGraphExtension,
   defineNode,
   type GraphBackend,
+  IdentityContradictionError,
+  IdentityEndpointValidityError,
   rebuildIdentityClosure,
 } from "../../../src";
 import { exportGraph } from "../../../src/interchange";
@@ -209,6 +211,319 @@ export function registerIdentityIntegrationTests(
 
       await store.identity.retractAssertion(assertion.assertion.id);
       expect(await store.identity.areSame(person, product)).toBe(false);
+    });
+
+    it("applies bounded and open identity assertion validity windows", async () => {
+      const store = context.getStore();
+      const endpointStart = "2019-01-01T00:00:00.000Z";
+      const validFrom = "2020-01-01T00:00:00.000Z";
+      const inside = "2021-01-01T00:00:00.000Z";
+      const validTo = "2022-01-01T00:00:00.000Z";
+      const person = await store.nodes.Person.create(
+        { name: "Windowed person" },
+        { id: "windowed-person", validFrom: endpointStart },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Windowed company" },
+        { id: "windowed-company", validFrom: endpointStart },
+      );
+
+      const historical = await store.identity.assertSame(person, company, {
+        validFrom,
+        validTo,
+      });
+      expect(historical.assertion).toMatchObject({ validFrom, validTo });
+      expect(await store.identity.areSame(person, company)).toBe(false);
+      expect(await store.asOf(inside).identity.areSame(person, company)).toBe(
+        true,
+      );
+      expect(await store.asOf(validTo).identity.areSame(person, company)).toBe(
+        false,
+      );
+      await storeRuntime(store).validateIdentity();
+      await rebuildIdentityClosure(store);
+      expect(await store.identity.areSame(person, company)).toBe(false);
+      expect(await store.asOf(inside).identity.areSame(person, company)).toBe(
+        true,
+      );
+
+      const repeated = await store.identity.assertSame(person, company, {
+        validFrom,
+        validTo,
+      });
+      expect(repeated).toMatchObject({
+        action: "existing",
+        assertion: { id: historical.assertion.id },
+      });
+
+      const current = await store.identity.assertSame(person, company, {
+        validFrom: validTo,
+      });
+      expect(current.action).toBe("created");
+      expect(await store.identity.areSame(person, company)).toBe(true);
+    });
+
+    it("checks temporal identity contradictions over every overlapping segment", async () => {
+      const store = context.getStore();
+      const endpointStart = "2019-01-01T00:00:00.000Z";
+      const first = await store.nodes.Person.create(
+        { name: "Temporal first" },
+        { id: "temporal-first", validFrom: endpointStart },
+      );
+      const bridge = await store.nodes.Person.create(
+        { name: "Temporal bridge" },
+        { id: "temporal-bridge", validFrom: endpointStart },
+      );
+      const last = await store.nodes.Person.create(
+        { name: "Temporal last" },
+        { id: "temporal-last", validFrom: endpointStart },
+      );
+
+      await store.identity.assertDifferent(first, last, {
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2022-01-01T00:00:00.000Z",
+      });
+      await store.identity.assertSame(first, bridge, {
+        validFrom: "2020-06-01T00:00:00.000Z",
+        validTo: "2023-01-01T00:00:00.000Z",
+      });
+      await expect(
+        store.identity.assertSame(bridge, last, {
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: "2024-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toBeInstanceOf(IdentityContradictionError);
+
+      await expect(
+        store.identity.assertSame(bridge, last, {
+          validFrom: "2022-01-01T00:00:00.000Z",
+          validTo: "2024-01-01T00:00:00.000Z",
+        }),
+      ).resolves.toMatchObject({ action: "created" });
+    });
+
+    it("refuses unsupported identity windows and endpoints outside the interval", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Validity person" },
+        { id: "validity-person", validFrom: "2021-01-01T00:00:00.000Z" },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Validity company" },
+        { id: "validity-company", validFrom: "2019-01-01T00:00:00.000Z" },
+      );
+
+      await expect(
+        store.identity.assertSame(person, company, {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2022-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+      await expect(
+        store.identity.assertSame(person, company, {
+          validFrom: "2099-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toMatchObject({
+        code: "IDENTITY_VALIDITY_FUTURE_START",
+        category: "user",
+        details: { reason: "future-valid-from" },
+      });
+      await expect(
+        store.identity.assertSame(person, company, {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2099-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toMatchObject({
+        code: "IDENTITY_VALIDITY_FUTURE_END",
+        category: "user",
+        details: { reason: "future-valid-to" },
+      });
+      await expect(
+        store.identity.assertSame(person, company, {
+          validFrom: "2024-01-01T00:00:00.000Z",
+          validTo: "2023-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toMatchObject({
+        code: "IDENTITY_VALIDITY_INVERTED",
+        category: "user",
+        details: { reason: "inverted" },
+      });
+    });
+
+    it("refuses a second non-identical open window in scalar and bulk writes", async () => {
+      const store = context.getStore();
+      const nodes = await store.nodes.Person.bulkCreate(
+        ["scalar-a", "scalar-b", "bulk-a", "bulk-b"].map((id) => ({
+          id: `open-window-${id}`,
+          props: { name: `Open window ${id}` },
+          validFrom: "2019-01-01T00:00:00.000Z",
+        })),
+      );
+      const scalarA = requireDefined(nodes[0]);
+      const scalarB = requireDefined(nodes[1]);
+      const bulkA = requireDefined(nodes[2]);
+      const bulkB = requireDefined(nodes[3]);
+      await store.identity.assertSame(scalarA, scalarB, {
+        validFrom: "2021-01-01T00:00:00.000Z",
+      });
+      await store.identity.assertSame(bulkA, bulkB, {
+        validFrom: "2021-01-01T00:00:00.000Z",
+      });
+      const expectedError = {
+        code: "IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT",
+        category: "constraint",
+        details: { reason: "overlapping-open-window" },
+      } as const;
+
+      await expect(
+        store.identity.assertSame(scalarA, scalarB, {
+          validFrom: "2020-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toMatchObject(expectedError);
+      await expect(
+        store.identity.bulkAssertSame([
+          {
+            a: bulkA,
+            b: bulkB,
+            validFrom: "2020-01-01T00:00:00.000Z",
+          },
+        ]),
+      ).rejects.toMatchObject(expectedError);
+    });
+
+    it("applies one validity window per bulk identity pair", async () => {
+      const store = context.getStore();
+      const endpointStart = "2019-01-01T00:00:00.000Z";
+      const nodes = await store.nodes.Person.bulkCreate(
+        ["a", "b", "c", "d"].map((id) => ({
+          id: `bulk-window-${id}`,
+          props: { name: `Bulk ${id}` },
+          validFrom: endpointStart,
+        })),
+      );
+      const first = requireDefined(nodes[0]);
+      const second = requireDefined(nodes[1]);
+      const third = requireDefined(nodes[2]);
+      const fourth = requireDefined(nodes[3]);
+      const results = await store.identity.bulkAssertSame([
+        {
+          a: first,
+          b: second,
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+        {
+          a: third,
+          b: fourth,
+          validFrom: "2022-01-01T00:00:00.000Z",
+        },
+      ]);
+
+      expect(results.map((result) => result.assertion.validTo)).toEqual([
+        "2021-01-01T00:00:00.000Z",
+        undefined,
+      ]);
+      expect(await store.identity.areSame(first, second)).toBe(false);
+      expect(await store.identity.areSame(third, fourth)).toBe(true);
+    });
+
+    it("preserves unwindowed semantics in mixed bulk calls and empty windows", async () => {
+      const store = context.getStore();
+      const endpointStart = "2019-01-01T00:00:00.000Z";
+      const nodes = await store.nodes.Person.bulkCreate(
+        ["a", "b", "c", "d"].map((id) => ({
+          id: `mixed-window-${id}`,
+          props: { name: `Mixed ${id}` },
+          validFrom: endpointStart,
+        })),
+      );
+      const first = requireDefined(nodes[0]);
+      const second = requireDefined(nodes[1]);
+      const third = requireDefined(nodes[2]);
+      const fourth = requireDefined(nodes[3]);
+      const existing = await store.identity.assertSame(first, second);
+
+      await expect(
+        store.identity.assertSame(first, second, {}),
+      ).resolves.toMatchObject({
+        action: "existing",
+        assertion: { id: existing.assertion.id },
+      });
+      await expect(
+        store.identity.bulkAssertSame([
+          { a: first, b: second },
+          {
+            a: third,
+            b: fourth,
+            validFrom: "2020-01-01T00:00:00.000Z",
+            validTo: "2021-01-01T00:00:00.000Z",
+          },
+        ]),
+      ).resolves.toMatchObject([
+        { action: "existing", assertion: { id: existing.assertion.id } },
+        { action: "created" },
+      ]);
+    });
+
+    it("requires endpoints to cover the full assertion upper bound", async () => {
+      const store = context.getStore();
+      const validFrom = "2020-01-01T00:00:00.000Z";
+      const endpointEnd = "2022-01-01T00:00:00.000Z";
+      const first = await store.nodes.Person.create(
+        { name: "Upper first" },
+        {
+          id: "upper-first",
+          validFrom: "2019-01-01T00:00:00.000Z",
+          validTo: endpointEnd,
+        },
+      );
+      const second = await store.nodes.Company.create(
+        { name: "Upper second" },
+        { id: "upper-second", validFrom: "2019-01-01T00:00:00.000Z" },
+      );
+
+      await expect(
+        store.identity.assertSame(first, second, {
+          validFrom,
+          validTo: endpointEnd,
+        }),
+      ).resolves.toMatchObject({ action: "created" });
+      await expect(
+        store.identity.assertSame(first, second, {
+          validFrom,
+          validTo: "2023-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+      await expect(
+        store.identity.assertDifferent(first, second, { validFrom }),
+      ).rejects.toBeInstanceOf(IdentityEndpointValidityError);
+    });
+
+    it("keeps retrospective assertions behind their recorded-time commit", async () => {
+      const store = await provisionIdentityTraversalStore(context, true);
+      const endpointStart = "2019-01-01T00:00:00.000Z";
+      const person = await store.nodes.Person.create(
+        { name: "Recorded person" },
+        { id: "recorded-window-person", validFrom: endpointStart },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Recorded company" },
+        { id: "recorded-window-company", validFrom: endpointStart },
+      );
+      const beforeAssertion = requireDefined(await store.recordedNow());
+
+      await store.identity.assertSame(person, company, {
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2022-01-01T00:00:00.000Z",
+      });
+
+      const validView = store.asOf("2021-01-01T00:00:00.000Z");
+      expect(await validView.identity.areSame(person, company)).toBe(true);
+      expect(
+        await validView
+          .asOfRecorded(beforeAssertion)
+          .identity.areSame(person, company),
+      ).toBe(false);
     });
 
     it("grows a materialized folded class without closure conflicts", async () => {
@@ -783,7 +1098,11 @@ export function registerIdentityIntegrationTests(
       const tag = await evolved.getNodeCollectionOrThrow("Tag").create({
         label: "author",
       });
-      await evolved.identity.assertSame(person, tag as never);
+      await evolved.identity.assertSame(person, tag);
+      expect(await evolved.identity.membersOf(person)).toEqual([
+        { kind: "Person", id: person.id },
+        { kind: "Tag", id: tag.id },
+      ]);
       const beforeRemoval = await evolved.recordedNow();
       expect(beforeRemoval).toBeDefined();
 

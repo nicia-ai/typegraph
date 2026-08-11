@@ -40,6 +40,7 @@ import { type z } from "zod";
 
 import {
   type BackendIdentity,
+  type ClaimEdgeCardinalityParams,
   type EdgeRow,
   type FulltextOperationBackend,
   type GraphBackend,
@@ -61,6 +62,15 @@ import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { type Assert, type Equal } from "../../utils/type-assert";
 import {
+  claimEdgeCardinality,
+  claimEdgeCardinalityBatch,
+} from "../claims/edge-claims";
+import {
+  type NodeClaimItem,
+  withNodeCreateClaims,
+  withNodeCreateClaimsBatch,
+} from "../claims/node-claims";
+import {
   edgeInsertDispatch,
   nodeInsertDispatch,
   runInsertBatch,
@@ -74,12 +84,13 @@ import {
   applyEdgeUpdate,
   createEdgeWriteContext,
   type EdgeDeleteWork,
+  type EdgeHardDeleteWork,
   type EdgeUpdateWork,
 } from "./edge-write-pipeline";
 import {
   applyNodeHardDelete,
-  applyNodeInsertSideEffects,
-  applyNodeInsertSideEffectsBatch,
+  applyNodeInsertSyncFans,
+  applyNodeInsertSyncFansBatch,
   applyNodeResurrect,
   applyNodeSetUpdate,
   applyNodeSoftDelete,
@@ -174,12 +185,18 @@ type NodeInsertSideEffects = Readonly<{
 }>;
 
 /**
- * One node insert: the row params and the sidecar inputs, as ONE value. They
- * travel together because they are applied together; a caller cannot hand over
- * the row and keep the sidecars to itself.
+ * One node insert: the row params, the claims the row owes, and the sidecar
+ * inputs, as ONE value. They travel together because they are applied together;
+ * a caller cannot hand over the row and keep either half to itself.
+ *
+ * The claim item is the DECLARATION the claim seam reads its entries from — not
+ * the entries themselves — because the seam owns both "what claims does this row
+ * owe" and "when is each due", and a caller that could hand over a prepared
+ * entry list could hand over a shorter one.
  */
 export type NodeInsertWork = Readonly<{
   params: InsertNodeParams;
+  claim: NodeClaimItem;
   sideEffects: NodeInsertSideEffects;
 }>;
 
@@ -193,7 +210,15 @@ type NodeUpdateWork = Readonly<{
   validatedProps: Record<string, unknown>;
   uniqueConstraints: readonly UniqueConstraint[];
   validFrom?: string | null;
+  /**
+   * The window end this update states, and the flag that clears one. Declared as
+   * two independent optionals rather than as `BackendValidityEndMutation`'s
+   * discriminated pair, because `applyNodeUpdate` — not this record — is what
+   * resolves them into the mutually exclusive params, and the store's callers
+   * build them with conditional spreads a union cannot narrow.
+   */
   validTo?: string;
+  clearValidTo?: true;
 }> &
   NodeUpdateTarget;
 
@@ -221,21 +246,31 @@ type NodeResurrectWork = Readonly<{
 }>;
 
 /**
- * One edge insert.
+ * One edge insert: the row params and the cardinality claim the row owes.
  *
- * An edge write obliges NO derived data — no uniqueness entries, no fulltext,
- * no embeddings — so, unlike {@link NodeInsertWork}, there is nothing that has
- * to travel alongside the row params: the work IS the params. The alias exists
- * so the session's edge methods read like its node methods, and so that the day
- * an edge grows a sidecar there is one type to widen and every caller is
- * already routed through it.
+ * An edge write obliges no DERIVED data — no uniqueness entries, no fulltext, no
+ * embeddings — but a constrained kind owes a claim, and the claim is what fences
+ * the axis its declaration spans. It is absent for an unconstrained kind and for
+ * a born-ended row whose cardinality does not count it, which is what
+ * `edgeCardinalityClaim` decides; the caller states the decision and this
+ * surface applies it at its PRE-INSERT placement.
  *
  * The update and delete work records live in `edge-write-pipeline.ts` instead,
  * beside the steps that consume them; these four methods have no step module of
  * their own (they delegate to `insert-dispatch.ts`), so their work record lives
  * here with them.
  */
-export type EdgeInsertWork = InsertEdgeParams;
+export type EdgeInsertWork = Readonly<{
+  params: InsertEdgeParams;
+  claim?: ClaimEdgeCardinalityParams;
+}>;
+
+/** The claims a batch of edge inserts owes, in the order the batch writer sorts. */
+function edgeBatchClaims(
+  work: readonly EdgeInsertWork[],
+): readonly ClaimEdgeCardinalityParams[] {
+  return work.flatMap((item) => (item.claim === undefined ? [] : [item.claim]));
+}
 
 export type WriteSession = Readonly<{
   // ---- B0: delegates to node-write-pipeline.ts + insert-dispatch.ts
@@ -270,7 +305,7 @@ export type WriteSession = Readonly<{
     fences: EdgeUpdateFences,
   ) => Promise<EdgeRow>;
   retireEdge: (work: EdgeDeleteWork) => Promise<void>;
-  purgeEdge: (work: EdgeDeleteWork) => Promise<void>;
+  purgeEdge: (work: EdgeHardDeleteWork) => Promise<void>;
 }>;
 
 // No session method may collide with a banned backend member name: the lint
@@ -301,23 +336,40 @@ export function createWriteSession(
   const edgeDispatch = edgeInsertDispatch(target);
 
   return {
+    // The pinned coordination order, spelled once per insert shape:
+    // pre-insert claims, the row, post-insert claims, the sync fans. The claim
+    // seam owns the two groups and the compensation between them; this surface
+    // owns only "the row write it gates is THIS one".
     createNode: async (work) => {
-      const row = await dispatch.one(work.params);
-      await applyNodeInsertSideEffects(writeContext, work.sideEffects, target);
+      const row = await withNodeCreateClaims(
+        writeContext,
+        work.claim,
+        target,
+        () => dispatch.one(work.params),
+      );
+      await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
       return row;
     },
 
     createNodeNoReturn: async (work) => {
-      await runInsertNoReturn(dispatch, work.params);
-      await applyNodeInsertSideEffects(writeContext, work.sideEffects, target);
+      await withNodeCreateClaims(writeContext, work.claim, target, () =>
+        runInsertNoReturn(dispatch, work.params),
+      );
+      await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
     },
 
     createNodes: async (work) => {
-      const rows = await runInsertBatchReturning(
-        dispatch,
-        work.map((item) => item.params),
+      const rows = await withNodeCreateClaimsBatch(
+        writeContext,
+        work.map((item) => item.claim),
+        target,
+        () =>
+          runInsertBatchReturning(
+            dispatch,
+            work.map((item) => item.params),
+          ),
       );
-      await applyNodeInsertSideEffectsBatch(
+      await applyNodeInsertSyncFansBatch(
         writeContext,
         work.map((item) => item.sideEffects),
         target,
@@ -326,11 +378,17 @@ export function createWriteSession(
     },
 
     createNodesNoReturn: async (work) => {
-      await runInsertBatch(
-        dispatch,
-        work.map((item) => item.params),
+      await withNodeCreateClaimsBatch(
+        writeContext,
+        work.map((item) => item.claim),
+        target,
+        () =>
+          runInsertBatch(
+            dispatch,
+            work.map((item) => item.params),
+          ),
       );
-      await applyNodeInsertSideEffectsBatch(
+      await applyNodeInsertSyncFansBatch(
         writeContext,
         work.map((item) => item.sideEffects),
         target,
@@ -364,16 +422,42 @@ export function createWriteSession(
       return applyNodeSetUpdate(writeContext, work, target);
     },
 
-    // The edge methods apply no sidecars because an edge write obliges none —
-    // stated here rather than implied by their absence, and pinned by the
-    // completeness matrix, which is exhaustive over this type.
-    createEdge: (work) => edgeDispatch.one(work),
+    // An edge write obliges no DERIVED data, so these apply no sync fans — but a
+    // constrained kind owes its cardinality claim, at the same PRE-INSERT
+    // placement a node's scope-spanning claim takes and for the same reason: the
+    // probe that authorised the insert read a population no key fences. The
+    // batch issues ONE sorted statement (`claimEdgeCardinalityBatch` orders by
+    // `compareClaimTargets`), so a batch and a peer batch take their row locks
+    // in the same order.
+    createEdge: async (work) => {
+      if (work.claim !== undefined) {
+        await claimEdgeCardinality(target, work.claim);
+      }
+      return edgeDispatch.one(work.params);
+    },
 
-    createEdgeNoReturn: (work) => runInsertNoReturn(edgeDispatch, work),
+    createEdgeNoReturn: async (work) => {
+      if (work.claim !== undefined) {
+        await claimEdgeCardinality(target, work.claim);
+      }
+      await runInsertNoReturn(edgeDispatch, work.params);
+    },
 
-    createEdges: (work) => runInsertBatchReturning(edgeDispatch, work),
+    createEdges: async (work) => {
+      await claimEdgeCardinalityBatch(target, edgeBatchClaims(work));
+      return runInsertBatchReturning(
+        edgeDispatch,
+        work.map((item) => item.params),
+      );
+    },
 
-    createEdgesNoReturn: (work) => runInsertBatch(edgeDispatch, work),
+    createEdgesNoReturn: async (work) => {
+      await claimEdgeCardinalityBatch(target, edgeBatchClaims(work));
+      await runInsertBatch(
+        edgeDispatch,
+        work.map((item) => item.params),
+      );
+    },
 
     reviseEdge: (work, fences) => {
       const draft = createWriteParamsDraft();

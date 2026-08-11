@@ -13,6 +13,7 @@
  */
 import { afterAll, beforeAll, beforeEach } from "vitest";
 
+import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createIntegrationTestSuite } from "../integration-test-suite";
@@ -56,4 +57,23 @@ beforeEach(async () => {
 
 // No `cleanup` is returned: closing per test would dispose nothing useful (the
 // backend close is a no-op) and the engine must survive for the next test.
-createIntegrationTestSuite("PGlite", () => ({ backend: engine.makeBackend() }));
+createIntegrationTestSuite(
+  "PGlite",
+  () => ({
+    backend: engine.makeBackend(),
+    // PGlite is one in-process instance, so a backend over the lane's own
+    // engine is already the serialized fixture. Closing stays a no-op because
+    // the engine outlives each test.
+    createSerializedBackend: () =>
+      Promise.resolve({
+        backend: engine.makeBackend(),
+        close: () => Promise.resolve(),
+      }),
+  }),
+  {
+    createIsolatedBackend: async () => {
+      const { backend } = await createLocalPgliteBackend();
+      return { backend, cleanup: () => backend.close() };
+    },
+  },
+);

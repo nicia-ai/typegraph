@@ -364,7 +364,7 @@ describe("identity ledger cascade while identity is disabled", () => {
     const tag = await evolved
       .getNodeCollectionOrThrow("Tag")
       .create({ label: "author" });
-    const asserted = await evolved.identity.assertSame(person, tag as never);
+    const asserted = await evolved.identity.assertSame(person, tag);
 
     await migrateSchema(
       backend,

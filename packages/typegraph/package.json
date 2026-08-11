@@ -1,6 +1,6 @@
 {
   "name": "@nicia-ai/typegraph",
-  "version": "0.46.1",
+  "version": "0.49.0",
   "description": "TypeScript-first embedded knowledge graph library with ontological reasoning",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -134,7 +134,8 @@
     "test:coverage": "vitest run --coverage",
     "test:coverage:merge": "vitest run --merge-reports=.vitest-reports --coverage",
     "test:mutation": "stryker run",
-    "test:mutation:critical": "stryker run stryker.critical.config.json"
+    "test:mutation:critical": "stryker run stryker.critical.config.json",
+    "test:mutation:claims": "stryker run stryker.claims.config.json"
   },
   "keywords": [
     "graph",
@@ -209,7 +210,6 @@
     "@neondatabase/serverless": "^1.1.0",
     "@stryker-mutator/core": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",
-    "@typegraph/eslint-config": "workspace:*",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.13.2",
     "@types/pg": "^8.20.0",

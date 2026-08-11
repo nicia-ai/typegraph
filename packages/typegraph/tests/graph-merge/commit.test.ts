@@ -135,6 +135,7 @@ describe.each(backendMatrix())(
           memberIds: [nodeId("base-1"), nodeId("new-2")],
           kind: "Patient",
           branchOrigins: [],
+          decisiveEdges: [],
         },
         conflicts: [],
       };
@@ -205,6 +206,7 @@ describe.each(backendMatrix())(
           memberIds: [nodeId("base-1")],
           kind: "Patient",
           branchOrigins: [],
+          decisiveEdges: [],
         },
         conflicts: [],
       };

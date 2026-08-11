@@ -27,13 +27,18 @@ const GLOBAL_SYMBOL_MESSAGE =
   "Register TypeGraph process-wide symbols through typeGraphGlobalSymbol so " +
   "the closed symbol inventory and ESM/CJS identity contract stay audited.";
 
-const GLOBAL_SYMBOL_RESTRICTION = {
+/**
+ * Exported, like every other column of the block table below, so the exemption
+ * ratchet resolves THIS restriction out of the real config rather than
+ * re-spelling it.
+ */
+export const GLOBAL_SYMBOL_RESTRICTION = {
   selector:
     'CallExpression[callee.object.name="Symbol"][callee.property.name="for"]',
   message: GLOBAL_SYMBOL_MESSAGE,
 };
 
-const RUNTIME_PORT_RESTRICTIONS = [
+export const RUNTIME_PORT_RESTRICTIONS = [
   {
     selector:
       "ImportSpecifier[imported.name=/^(STORE_RUNTIME|StoreRuntime|TRANSACTION_RUNTIME|TransactionRuntime)$/]",
@@ -48,17 +53,158 @@ const RUNTIME_PORT_RESTRICTIONS = [
   },
 ];
 
-const BACKEND_OVERLAY_RESTRICTIONS = [
+export const BACKEND_SEAM_IMPORT_RESTRICTIONS = [
   {
-    selector: 'ImportSpecifier[imported.name="createBackendOverlay"]',
+    selector: 'ImportSpecifier[imported.name="deriveBackend"]',
     message:
-      "createBackendOverlay is decoration-only and restricted to audited modules; use an allowlist projection to narrow capabilities.",
+      "deriveBackend is decoration-only and restricted to audited modules; use an allowlist projection to narrow capabilities.",
   },
   {
-    selector: 'ExportSpecifier[local.name="createBackendOverlay"]',
+    selector: 'ExportSpecifier[local.name="deriveBackend"]',
     message:
-      "createBackendOverlay must not be re-exported from a new surface; capability narrowing uses allowlist projections.",
+      "deriveBackend must not be re-exported from a new surface; capability narrowing uses allowlist projections.",
   },
+];
+
+const CARRY_MESSAGE =
+  "carryBackendResourceAudit is the construction seam's private carry. Only " +
+  "src/backend/derive-backend.ts may import it: a second importer is a second " +
+  "place that decides when a derived backend inherits its base's " +
+  "serialized-resource verdict, and the two WILL drift. Derive through the " +
+  "seam instead — the carry runs there.";
+
+const AUDIT_MESSAGE =
+  "auditBackendResource records a backend's serialized-resource verdict, and " +
+  "it is written ONCE by the factory that built the backend, before the " +
+  "object escapes. Only the two drizzle factories may import it; anything " +
+  "else either derives through src/backend/derive-backend.ts (which carries " +
+  "the verdict) or reads it through resolveBackendAudit.";
+
+/**
+ * The I1 import ban. Exported so the exemption ratchet resolves THESE selectors
+ * out of the real config instead of re-spelling them — a per-file block that
+ * forgets to spread this list is invisible to a test that carries its own copy.
+ */
+export const BACKEND_CARRY_RESTRICTIONS = [
+  {
+    selector: 'ImportSpecifier[imported.name="carryBackendResourceAudit"]',
+    message: CARRY_MESSAGE,
+  },
+  {
+    selector: 'ExportSpecifier[local.name="carryBackendResourceAudit"]',
+    message: CARRY_MESSAGE,
+  },
+];
+
+/** The I2 import ban, exported for the same reason as its carry counterpart. */
+export const BACKEND_AUDIT_RESTRICTIONS = [
+  {
+    selector: 'ImportSpecifier[imported.name="auditBackendResource"]',
+    message: AUDIT_MESSAGE,
+  },
+  {
+    selector: 'ExportSpecifier[local.name="auditBackendResource"]',
+    message: AUDIT_MESSAGE,
+  },
+];
+
+/**
+ * Why a copied backend is a defect (#435), stated where the copy is written.
+ * Exported so the ratchet tests consume THESE selectors rather than a second
+ * emulation of them.
+ */
+export const BACKEND_SEAM_MESSAGE =
+  "Derive a backend through src/backend/derive-backend.ts (deriveBackend / " +
+  "projectBackend / projectBackendWithout / projectGraphBackend). A spread, " +
+  "Object.assign copy or rest-omission builds a NEW object that the " +
+  "serialized-resource audit does not follow — the #435 defect. An identifier " +
+  "ending in `Backend` denotes a whole backend object; name a members " +
+  "fragment `*Members`.";
+
+/** The mutating half of the same class: Object.assign's FIRST argument. */
+export const BACKEND_MUTATION_MESSAGE =
+  "Object.assign(<backend>, …) MUTATES a backend other wrappers already hold, " +
+  "including frozen store projections (store.ts, createStore's backend " +
+  "projection). Derive instead.";
+
+/**
+ * The construction ratchet: every spelling that builds a new backend object
+ * from an existing one without going through the seam.
+ *
+ * Name-based by construction — the same heuristic class as the dialect-literal
+ * ban — so it is a cheap first net for the dominant spelling, not the argument
+ * that the seam holds. The type-aware population is measured by the scanner in
+ * tests/backend-derivation-scan.ts.
+ */
+export const BACKEND_CONSTRUCTION_RESTRICTIONS = [
+  // Copies: identifier, `.backend` member, and factory-call spellings.
+  {
+    selector: "ObjectExpression > SpreadElement[argument.name=/[Bb]ackend$/]",
+    message: BACKEND_SEAM_MESSAGE,
+  },
+  {
+    selector:
+      'ObjectExpression > SpreadElement[argument.property.name="backend"]',
+    message: BACKEND_SEAM_MESSAGE,
+  },
+  {
+    selector:
+      "ObjectExpression > SpreadElement[argument.callee.name=/[Bb]ackend$/]",
+    message: BACKEND_SEAM_MESSAGE,
+  },
+  // Rest-omission: the same three spellings of the initializer.
+  {
+    selector:
+      "VariableDeclarator[init.name=/[Bb]ackend$/] > ObjectPattern > RestElement",
+    message: BACKEND_SEAM_MESSAGE,
+  },
+  {
+    selector:
+      "VariableDeclarator[init.callee.name=/[Bb]ackend$/] > ObjectPattern > RestElement",
+    message: BACKEND_SEAM_MESSAGE,
+  },
+  {
+    selector:
+      'VariableDeclarator[init.property.name="backend"] > ObjectPattern > RestElement',
+    message: BACKEND_SEAM_MESSAGE,
+  },
+  // Object.assign, split so a mutation and a copy do not share one message.
+  {
+    selector:
+      'CallExpression[callee.object.name="Object"][callee.property.name="assign"] > :first-child[name=/[Bb]ackend$/]',
+    message: BACKEND_MUTATION_MESSAGE,
+  },
+  {
+    selector:
+      'CallExpression[callee.object.name="Object"][callee.property.name="assign"] > :not(:first-child)[name=/[Bb]ackend$/]',
+    message: BACKEND_SEAM_MESSAGE,
+  },
+];
+
+/**
+ * The backend-derivation guardrails a file keeps even when it is one of the
+ * audited decorators: the two import bans that name a single owner
+ * (`carryBackendResourceAudit`, `auditBackendResource`) and the construction
+ * ratchet. An audited overlay module is allowed to DECORATE; it is not allowed
+ * to own the audit carry or to build a backend by copying one.
+ *
+ * Named once because flat-config rule entries REPLACE rather than merge, so
+ * every block that respells a profile's list has to spread the same group — and
+ * the write-pipeline profile generator respells four of them.
+ */
+const BACKEND_AUDIT_TRAIL_RESTRICTIONS = [
+  ...BACKEND_CARRY_RESTRICTIONS,
+  ...BACKEND_AUDIT_RESTRICTIONS,
+  ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+];
+
+/**
+ * The full derivation ban for a file that is NOT an audited decorator: the
+ * audit-trail group plus the `deriveBackend` import ban.
+ */
+const BACKEND_DERIVATION_RESTRICTIONS = [
+  ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
+  ...BACKEND_AUDIT_TRAIL_RESTRICTIONS,
 ];
 
 const INTEROP_PROBE_MESSAGE =
@@ -104,7 +250,7 @@ const DETERMINISM_RESTRICTIONS = [
 // Every no-restricted-syntax block below starts from this list: both guardrails
 // apply to the whole library source, and a block that set only one of them
 // would silently switch the other off for its files.
-const SOURCE_WIDE_RESTRICTIONS = [
+export const SOURCE_WIDE_RESTRICTIONS = [
   ...DETERMINISM_RESTRICTIONS,
   ...INTEROP_PROBE_RESTRICTIONS,
 ];
@@ -138,7 +284,7 @@ const DIALECT_SEAM_RESTRICTIONS = [
  * a writable backend of its own.
  */
 const AUDITED_OVERLAY_FILES = [
-  "src/store/operations/edge-operations.ts",
+  "src/store/operations/edge-batch-validation.ts",
   "src/store/operations/node-operations.ts",
   "src/store/operations/write-executor.ts",
   "src/store/recorded-capture.ts",
@@ -162,7 +308,7 @@ const WRITE_PIPELINE_PROFILES = [
     restrictions: [
       ...SOURCE_WIDE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
-      ...BACKEND_OVERLAY_RESTRICTIONS,
+      ...BACKEND_DERIVATION_RESTRICTIONS,
     ],
   },
   {
@@ -177,13 +323,17 @@ const WRITE_PIPELINE_PROFILES = [
       ...SOURCE_WIDE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
       ...RUNTIME_PORT_RESTRICTIONS,
-      ...BACKEND_OVERLAY_RESTRICTIONS,
+      ...BACKEND_DERIVATION_RESTRICTIONS,
     ],
   },
   {
     name: "audited-overlay",
     files: AUDITED_OVERLAY_FILES,
-    restrictions: [...SOURCE_WIDE_RESTRICTIONS, GLOBAL_SYMBOL_RESTRICTION],
+    restrictions: [
+      ...SOURCE_WIDE_RESTRICTIONS,
+      GLOBAL_SYMBOL_RESTRICTION,
+      ...BACKEND_AUDIT_TRAIL_RESTRICTIONS,
+    ],
   },
   {
     name: "dialect-seam",
@@ -192,7 +342,7 @@ const WRITE_PIPELINE_PROFILES = [
       ...SOURCE_WIDE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
       ...RUNTIME_PORT_RESTRICTIONS,
-      ...BACKEND_OVERLAY_RESTRICTIONS,
+      ...BACKEND_DERIVATION_RESTRICTIONS,
       ...DIALECT_SEAM_RESTRICTIONS,
     ],
   },
@@ -284,7 +434,10 @@ export default [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
-        ...BACKEND_OVERLAY_RESTRICTIONS,
+        ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
+        ...BACKEND_CARRY_RESTRICTIONS,
+        ...BACKEND_AUDIT_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
       ],
     },
   },
@@ -301,7 +454,10 @@ export default [
         ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
-        ...BACKEND_OVERLAY_RESTRICTIONS,
+        ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
+        ...BACKEND_CARRY_RESTRICTIONS,
+        ...BACKEND_AUDIT_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
       ],
     },
   },
@@ -343,7 +499,7 @@ export default [
         ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
-        ...BACKEND_OVERLAY_RESTRICTIONS,
+        ...BACKEND_DERIVATION_RESTRICTIONS,
         ...DIALECT_SEAM_RESTRICTIONS,
       ],
     },
@@ -358,24 +514,84 @@ export default [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
         ...RUNTIME_PORT_RESTRICTIONS,
-        ...BACKEND_OVERLAY_RESTRICTIONS,
+        ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
+        ...BACKEND_CARRY_RESTRICTIONS,
+        ...BACKEND_AUDIT_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
       ],
     },
   },
 
-  // Audited same-surface decorators. These retain the global source and
-  // runtime-port restrictions while omitting only the overlay import ban.
+  // The construction seam itself: it DEFINES deriveBackend and is the ONE
+  // module allowed to import the carry, so those two bans cannot apply here.
+  // Every other guardrail is spread back in — a flat-config entry REPLACES, so
+  // omitting one would switch it off for the one module that owns the carry.
+  // It needs no construction exemption: deriveBackend is a Proxy, projectBackend
+  // builds through Object.fromEntries, and the overlay's descriptor spread is
+  // not a `*Backend` name.
   {
-    files: [
-      "src/backend/drizzle/contribution-materializations.ts",
-      "src/backend/drizzle/postgres.ts",
-    ],
+    files: ["src/backend/derive-backend.ts"],
     rules: {
       "no-restricted-syntax": [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
+        ...BACKEND_AUDIT_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+      ],
+    },
+  },
+
+  // Audited same-surface decorator over transaction-scoped backends. Retains
+  // every guardrail except the seam import ban, which it needs because it
+  // decorates through deriveBackend. It gets no audit exemption: only the two
+  // drizzle factories write a verdict.
+  {
+    files: ["src/backend/drizzle/contribution-materializations.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...SOURCE_WIDE_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...RUNTIME_PORT_RESTRICTIONS,
+        ...BACKEND_CARRY_RESTRICTIONS,
+        ...BACKEND_AUDIT_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+      ],
+    },
+  },
+
+  // The two backend factories are the only modules that WRITE a verdict, so
+  // each is exempted from the audit import ban and from nothing else. They are
+  // separate blocks — one shared block would hand the audit setter to
+  // contribution-materializations.ts for free. The PostgreSQL factory also
+  // decorates trusted transactions through the seam, so it drops the seam
+  // import ban; the SQLite factory imports no seam and keeps it.
+  {
+    files: ["src/backend/drizzle/postgres.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...SOURCE_WIDE_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...RUNTIME_PORT_RESTRICTIONS,
+        ...BACKEND_CARRY_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+      ],
+    },
+  },
+  {
+    files: ["src/backend/drizzle/sqlite.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...SOURCE_WIDE_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...RUNTIME_PORT_RESTRICTIONS,
+        ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
+        ...BACKEND_CARRY_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
       ],
     },
   },
@@ -388,4 +604,21 @@ export default [
     profiles: WRITE_PIPELINE_PROFILES,
     exemptions: WRITE_PIPELINE_EXEMPTIONS,
   }),
+
+  // The construction ratchet applies to the test tree too: a double built by
+  // spreading a backend is the #435 defect written in a fixture, and the
+  // fixture is what the store under test then runs against. Only the
+  // construction group is installed — SOURCE_WIDE_RESTRICTIONS and the import
+  // bans are source-only by design, and the runtime-port ban would forbid the
+  // accessors the suite legitimately reaches for.
+  //
+  // The two sites this cannot reach are suppressed inline, each with its
+  // reason, and both are enumerated by the exemption ratchet in
+  // `tests/backend-derivation-population.test.ts`.
+  {
+    files: ["tests/**/*.ts"],
+    rules: {
+      "no-restricted-syntax": ["error", ...BACKEND_CONSTRUCTION_RESTRICTIONS],
+    },
+  },
 ];

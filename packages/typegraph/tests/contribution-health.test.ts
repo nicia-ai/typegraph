@@ -26,6 +26,7 @@ import {
   fts5Strategy,
   searchable,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
   type ContributionMaterializerDeps,
   contributionRebuildSupported,
@@ -38,7 +39,6 @@ import type {
   RecordContributionMaterializationParams,
   SchemaWriteTransactionBackend,
 } from "../src/backend/types";
-import { createBackendOverlay } from "../src/backend/types";
 import { type FulltextStrategy } from "../src/query/dialect/fulltext-strategy";
 import { createTestBackend } from "./test-utils";
 
@@ -295,7 +295,7 @@ describe("probeContributions on a backend that cannot probe", () => {
   it("reports no entries when the backend has no contribution machinery", async () => {
     const base = createTestBackend();
     const backend = withoutPorts(
-      createBackendOverlay(base, {
+      deriveBackend(base, {
         capabilities: { ...base.capabilities, contributions: undefined },
       }),
       "probeContributions",
@@ -312,7 +312,7 @@ describe("probeContributions on a backend that cannot probe", () => {
   it("refuses when contributions are supported but unprobeable", async () => {
     const base = createTestBackend();
     const backend = withoutPorts(
-      createBackendOverlay(base, {
+      deriveBackend(base, {
         capabilities: {
           ...base.capabilities,
           contributions: { supported: true, probe: false, rebuild: false },
@@ -354,7 +354,7 @@ describe("probeContributions on a backend that cannot probe", () => {
     // the store restates the invariant instead of trusting it.
     const base = createTestBackend();
     const dropped: string[] = [];
-    const backend = createBackendOverlay(base, {
+    const backend = deriveBackend(base, {
       rebuildContribution: async (_graphId, scope, refill) => {
         dropped.push(scope);
         // The refill target is never read: the store's guard throws first.
@@ -381,7 +381,7 @@ describe("probeContributions on a backend that cannot probe", () => {
         Promise.resolve([{ contribution: "fulltext", state: "ready" }]),
     );
     const base = createTestBackend();
-    const backend = createBackendOverlay(base, { probeContributions });
+    const backend = deriveBackend(base, { probeContributions });
     const [store] = await createStoreWithSchema(graph, backend);
 
     await expect(store.probeContributions()).resolves.toEqual({

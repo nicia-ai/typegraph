@@ -253,8 +253,8 @@ describe("buildSelectableNode", () => {
     p_version: 1,
     p_valid_from: null,
     p_valid_to: null,
-    p_created_at: "2024-01-01T00:00:00Z",
-    p_updated_at: "2024-01-02T00:00:00Z",
+    p_created_at: "2024-01-01T00:00:00.000Z",
+    p_updated_at: "2024-01-02T00:00:00.000Z",
     p_deleted_at: null,
   };
 
@@ -280,8 +280,8 @@ describe("buildSelectableNode", () => {
         version: 1,
         validFrom: undefined,
         validTo: undefined,
-        createdAt: "2024-01-01T00:00:00Z",
-        updatedAt: "2024-01-02T00:00:00Z",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-02T00:00:00.000Z",
         deletedAt: undefined,
       });
     });
@@ -303,14 +303,37 @@ describe("buildSelectableNode", () => {
     it("preserves non-null temporal values", () => {
       const row = {
         ...baseRow,
-        p_valid_from: "2024-01-01T00:00:00Z",
-        p_deleted_at: "2024-06-01T00:00:00Z",
+        p_valid_from: "2024-01-01T00:00:00.000Z",
+        p_deleted_at: "2024-06-01T00:00:00.000Z",
       };
 
       const node = buildSelectableNode(row, "p");
 
-      expect(node.meta.validFrom).toBe("2024-01-01T00:00:00Z");
-      expect(node.meta.deletedAt).toBe("2024-06-01T00:00:00Z");
+      expect(node.meta.validFrom).toBe("2024-01-01T00:00:00.000Z");
+      expect(node.meta.deletedAt).toBe("2024-06-01T00:00:00.000Z");
+    });
+
+    it("canonicalizes postgres.js timestamp text for every metadata field", () => {
+      const postgresJsTimestamp = "2026-08-09 11:52:09.617+00";
+      const row = {
+        ...baseRow,
+        p_valid_from: postgresJsTimestamp,
+        p_valid_to: postgresJsTimestamp,
+        p_created_at: postgresJsTimestamp,
+        p_updated_at: postgresJsTimestamp,
+        p_deleted_at: postgresJsTimestamp,
+      };
+
+      const node = buildSelectableNode(row, "p");
+
+      expect(node.meta).toEqual({
+        version: 1,
+        validFrom: "2026-08-09T11:52:09.617Z",
+        validTo: "2026-08-09T11:52:09.617Z",
+        createdAt: "2026-08-09T11:52:09.617Z",
+        updatedAt: "2026-08-09T11:52:09.617Z",
+        deletedAt: "2026-08-09T11:52:09.617Z",
+      });
     });
   });
 
@@ -397,8 +420,8 @@ describe("buildSelectContext", () => {
     p_version: 1,
     p_valid_from: null,
     p_valid_to: null,
-    p_created_at: "2024-01-01T00:00:00Z",
-    p_updated_at: "2024-01-01T00:00:00Z",
+    p_created_at: "2024-01-01T00:00:00.000Z",
+    p_updated_at: "2024-01-01T00:00:00.000Z",
     p_deleted_at: null,
   };
 
@@ -422,8 +445,8 @@ describe("buildSelectContext", () => {
       friend_version: 1,
       friend_valid_from: null,
       friend_valid_to: null,
-      friend_created_at: "2024-01-01T00:00:00Z",
-      friend_updated_at: "2024-01-01T00:00:00Z",
+      friend_created_at: "2024-01-01T00:00:00.000Z",
+      friend_updated_at: "2024-01-01T00:00:00.000Z",
       friend_deleted_at: null,
       // Edge
       e_id: "edge-1",
@@ -433,8 +456,8 @@ describe("buildSelectContext", () => {
       e_props: JSON.stringify({ since: 2020 }),
       e_valid_from: null,
       e_valid_to: null,
-      e_created_at: "2024-01-01T00:00:00Z",
-      e_updated_at: "2024-01-01T00:00:00Z",
+      e_created_at: "2024-01-01T00:00:00.000Z",
+      e_updated_at: "2024-01-01T00:00:00.000Z",
       e_deleted_at: null,
     };
 
@@ -467,6 +490,28 @@ describe("buildSelectContext", () => {
       expect(requireDefined(context["e"]).fromId).toBe("person-1");
       expect(requireDefined(context["e"]).toId).toBe("person-2");
       expect(requireDefined(context["e"])["since"]).toBe(2020);
+    });
+
+    it("canonicalizes postgres.js timestamp text for edge metadata", () => {
+      const postgresJsTimestamp = "2026-08-09 11:52:09.617+00";
+      const row = {
+        ...traversalRow,
+        e_valid_from: postgresJsTimestamp,
+        e_valid_to: postgresJsTimestamp,
+        e_created_at: postgresJsTimestamp,
+        e_updated_at: postgresJsTimestamp,
+        e_deleted_at: postgresJsTimestamp,
+      };
+
+      const context = buildSelectContext(row, "p", traversals);
+
+      expect(requireDefined(context["e"]).meta).toEqual({
+        validFrom: "2026-08-09T11:52:09.617Z",
+        validTo: "2026-08-09T11:52:09.617Z",
+        createdAt: "2026-08-09T11:52:09.617Z",
+        updatedAt: "2026-08-09T11:52:09.617Z",
+        deletedAt: "2026-08-09T11:52:09.617Z",
+      });
     });
   });
 

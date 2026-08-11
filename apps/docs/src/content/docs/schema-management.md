@@ -508,6 +508,102 @@ been translated. `dropWhenEmpty: true` atomically drops the mapping table when
 the deleted graph was the final one. Without that option, the empty table is
 retained intentionally and can be dropped by your normal migration tooling.
 
+## Repairing Inverted Validity Windows
+
+Older library versions could store a row whose validity window runs backwards
+(`valid_from > valid_to`). Such a row is readable at **no** coordinate at all:
+`asOf(t)` needs `valid_from <= t < valid_to`, and backwards bounds admit no `t`.
+The write paths no longer produce one — a write that stamps a lower bound the
+caller did not state now stores no bound rather than an inverting one, see
+[Open-left rows](/queries/temporal#open-left-rows-validfrom-is-undefined) — but
+**upgrading rewrites nothing**. Rows already stored that way keep their window
+and stay invisible until an operator repairs them, which is deliberate: an
+upgrade that silently made previously-invisible rows appear in historical
+queries would be the worse surprise.
+
+`repairInvertedValidityWindows` is that explicit action. It has two modes:
+`report` counts and writes nothing, `apply` normalizes the rows it counted to
+`valid_from = NULL` ("ended at T, start unknown").
+
+```typescript
+import { repairInvertedValidityWindows } from "@nicia-ai/typegraph";
+
+// Diagnose. `report` reads through `execute`, a required backend member, so it
+// runs against ANY backend — including a history-capturing one and one with no
+// statement-execution support.
+const report = await repairInvertedValidityWindows({
+  backend: anyBackend,
+  relations: "live-and-recorded",
+  mode: "report",
+});
+// report.counts.recordedNodes === undefined means NOT SCANNED, never "clean".
+// report.atomic === false means the counts came from per-relation snapshots.
+
+// Repair, with writers stopped. On a history-enabled store pass the RAW backend
+// you constructed it from: the repair mints no revision by design, and the
+// capture wrapper refuses raw statements.
+await repairInvertedValidityWindows({
+  backend: rawBackend,
+  relations: "live-and-recorded",
+  mode: "apply",
+});
+```
+
+If `tableNames` is supplied, it patches `backend.tableNames`; unstated relation
+names keep the backend's configured values. A partial override never sends the
+other relations back to TypeGraph's built-in defaults.
+
+`relations` is **required**, and `"live-and-recorded"` is the recommended scope.
+Repairing only the live axis leaves the recorded twin carrying the inverted
+window, which re-materializes the invisible row at any `asOfRecorded`
+coordinate — the same defect one axis over. `"live"` is right in exactly two
+cases: the store captures no history and the `recorded_*` tables do not exist
+(scanning them is then an error, not a no-op), or you are deliberately keeping
+the recorded axis as an audit record of the pre-repair state and accept that
+historical `asOfRecorded` reads keep returning the invisible shape.
+
+What an operator must know before running it:
+
+1. **Run `apply` with writers stopped**, the same guidance
+   `migrateLegacyRecordedTime()` carries. A concurrent window-bearing update
+   may fence its write on the validity lower bound it read, so a repair landing
+   in between can make the peer's first `UPDATE` match no row. Store node and
+   edge updates re-read and re-judge against the repaired bound; interchange
+   records a per-row target-changed error instead of claiming the row was
+   written. `report` needs no quiescing: it scans in a read-only transaction
+   (`BEGIN` rather than SQLite's writer-reserving `BEGIN IMMEDIATE`, and
+   `BEGIN … READ ONLY` on PostgreSQL), so it cannot write itself.
+2. **Repaired rows become visible** at `asOf` coordinates before their end. That
+   is the point, and it is a read-visibility change to historical queries.
+3. **Outstanding `base@V` merge tokens are invalidated** for repaired rows —
+   `valid_from` is part of the base content fingerprint, so a merge whose base
+   token predates the repair fails its precondition afterwards. Quiesce merges,
+   repair, then re-baseline branches.
+4. **The repair mints no revision and bumps no `version`**, and does not move
+   `updated_at`. It normalizes a storage convention for rows that were never
+   observable at any coordinate; it is not a logical write. That is why `apply`
+   is run against the raw backend, and why bypassing recorded-time capture here
+   is intended rather than a workaround.
+5. **`apply` refuses when a scanned relation stores non-canonical bounds**
+   (SQLite only — PostgreSQL stores `timestamptz`, so a scanned relation always
+   reports `nonCanonical: 0`). SQLite compares the bounds as text, so a
+   non-canonical value cannot be classified without a timestamp semantics this
+   repair does not own. The refusal is total: the whole call is rejected before
+   any row is updated, so `apply` never repairs the rows it understood and skips
+   the rest. `report` still counts them, in `nonCanonical` — normalize those
+   bounds, or narrow the call with `graphId`, and re-run.
+6. **On a backend without transactions the call still runs**, per relation, and
+   says so with `report.atomic === false`: the counts may span snapshots, and a
+   crash mid-`apply` can leave the live axis repaired and the recorded axis not.
+   Re-run — each statement is idempotent and convergent, and a later `report`
+   proves it converged.
+7. **Repair before exporting a legacy graph.** An exported inverted row is
+   refused per row on re-import, so an unrepaired graph does not round-trip.
+
+The statement touches only rows the library mis-stored, so it is empty on a
+healthy graph and needs no batching. If a report returns a count large enough to
+worry about, narrow the call with `graphId` and run it per graph.
+
 ## Schema Serialization
 
 Schemas are stored as JSON documents with computed hashes for fast comparison:

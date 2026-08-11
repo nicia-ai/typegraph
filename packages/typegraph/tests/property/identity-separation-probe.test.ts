@@ -23,6 +23,7 @@ import {
   defineNode,
   type GraphBackend,
 } from "../../src";
+import { deriveBackend } from "../../src/backend/derive-backend";
 import { IdentityContradictionError } from "../../src/errors";
 import {
   loadCurrentStructuralClasses,
@@ -445,13 +446,12 @@ function probeFailingBackend(error: Error): Readonly<{
       (chunk) => chunk.kind === "identifier" && chunk.value === table,
     );
   return {
-    backend: {
-      ...base,
+    backend: deriveBackend(base, {
       execute: async <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
         if (armed && namesSeparation(query)) throw error;
         return base.execute<T>(query);
       },
-    },
+    }),
     arm: () => {
       armed = true;
     },

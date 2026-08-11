@@ -26,6 +26,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { asEdgeId, defineEdge, defineGraph, defineNode } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type GraphBackend,
@@ -80,8 +81,7 @@ function substitutingBackend(
     fromId: endpoints.fromId,
     toId: endpoints.toId,
   };
-  return {
-    ...base,
+  return deriveBackend(base, {
     transaction: (fn, options) =>
       base.transaction(async (transactionTarget) => {
         let substituted = false;
@@ -115,7 +115,7 @@ function substitutingBackend(
         }) as TransactionBackend;
         return fn(proxied);
       }, options),
-  };
+  });
 }
 
 describe("kind-scoped edge writes carry their own identity predicate", () => {

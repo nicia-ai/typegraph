@@ -307,6 +307,7 @@ describe("fence appliers", () => {
       EDGE_UPDATE_FENCE_APPLIERS,
       {
         validityLowerBound: {},
+        validityUpperBound: {},
         edgeIdentity: { kind: "knows", fromKind: "Person", fromId: NODE_ID },
       },
       draft,
@@ -316,6 +317,54 @@ describe("fence appliers", () => {
       fromKind: "Person",
       fromId: NODE_ID,
     });
+  });
+
+  it("carries the window END a reopen's verdict read, and only then", () => {
+    // The claim architecture's `oneActive` reopen judges the row's stored
+    // `valid_to` and re-admits the row to the counted active population, so its
+    // UPDATE must assert that end. Every other edge update read no end and
+    // asserts none — the same "only what the verdict read" rule the lower bound
+    // follows, with the same failure mode if it is over-applied: a props-only
+    // update predicated on `valid_to` refuses legitimate writes.
+    const stated = createWriteParamsDraft();
+    applyWriteFences(
+      EDGE_UPDATE_FENCE_APPLIERS,
+      {
+        validityLowerBound: {},
+        validityUpperBound: { expectedValidTo: LATE_BOUND },
+        edgeIdentity: { kind: "knows" },
+      },
+      stated,
+    );
+    expect(stated).toEqual({ kind: "knows", expectedValidTo: LATE_BOUND });
+
+    const empty = createWriteParamsDraft();
+    applyWriteFences(
+      EDGE_UPDATE_FENCE_APPLIERS,
+      {
+        validityLowerBound: {},
+        validityUpperBound: {},
+        edgeIdentity: { kind: "knows" },
+      },
+      empty,
+    );
+    expect(empty).toEqual({ kind: "knows" });
+  });
+
+  it("distinguishes an explicit `still open-ended` claim from none", () => {
+    const draft = createWriteParamsDraft();
+    applyWriteFences(
+      EDGE_UPDATE_FENCE_APPLIERS,
+      {
+        validityLowerBound: {},
+        // eslint-disable-next-line unicorn/no-null -- `null` asserts `valid_to IS NULL`; an absent key asserts nothing.
+        validityUpperBound: { expectedValidTo: null },
+        edgeIdentity: { kind: "knows" },
+      },
+      draft,
+    );
+    // eslint-disable-next-line unicorn/no-null -- see above
+    expect(draft).toEqual({ kind: "knows", expectedValidTo: null });
   });
 
   it("refuses a lower-bound fence the set UPDATE has no field to carry", () => {
@@ -373,7 +422,11 @@ describe("a fenced session method cannot be called without its fence", () => {
     // @ts-expect-error -- `edgeIdentity` is required and is not stated here
     const fences: Parameters<WriteSession["reviseEdge"]>[1] = {
       validityLowerBound: {},
+      validityUpperBound: {},
     };
-    expect(fences).toEqual({ validityLowerBound: {} });
+    expect(fences).toEqual({
+      validityLowerBound: {},
+      validityUpperBound: {},
+    });
   });
 });

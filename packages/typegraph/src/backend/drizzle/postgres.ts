@@ -79,6 +79,7 @@ import {
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
+import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
@@ -90,7 +91,11 @@ import {
   nowIso,
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
-import { markSerializedTransactionResource } from "../transaction-resource";
+import {
+  auditBackendResource,
+  resolveDeclaredBackendResource,
+  type SerializedResourceDeclaration,
+} from "../transaction-resource";
 import {
   type AdapterBackend,
   type BackendCapabilities,
@@ -105,8 +110,9 @@ import {
   type ContributionRebuildScope,
   type ContributionRepairResult,
   type ContributionRepopulationStats,
-  createBackendOverlay,
   type CreateVectorIndexParams,
+  DATABASE_EXTENSION_NAMES,
+  type DatabaseExtensionName,
   type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
   type DeleteFulltextParams,
@@ -296,6 +302,19 @@ export type PostgresBackendOptions = Readonly<{
    * `prepareStatements` is `false`.
    */
   preparedStatementCacheMax?: number;
+  /**
+   * Declare the connection this backend serializes every statement onto, when
+   * TypeGraph's driver predicates cannot see it (Bun `SQL` at `{ max: 1 }`,
+   * `pg-proxy`, a postgres-js client capped through a non-numeric string the
+   * driver does not coerce) — or declare that it serializes on nothing, when
+   * detection is wrong for your topology.
+   *
+   * Defaults to `{ mode: "detect" }`. See
+   * {@link SerializedResourceDeclaration} for what each mode means and for the
+   * one refusal it cannot lift (`same-sqlite-backend`, which is SQLite-only and
+   * therefore never reached from here).
+   */
+  serializedResource?: SerializedResourceDeclaration;
 }>;
 
 const NODE_INSERT_PARAM_COUNT = 9;
@@ -387,6 +406,202 @@ const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
   "identitySeparation",
 ]);
 
+/**
+ * THE one-shot retry every idempotent catalog write in this backend shares.
+ *
+ * PostgreSQL's IF NOT EXISTS check cannot see another session's uncommitted
+ * catalog row. The loser waits for the winner and is then handed the winner's
+ * conflict instead of a harmless notice; retrying after that wait observes the
+ * committed object. Which failures mean that is
+ * {@link isPostgresConcurrentDdlRaceError}'s single decision — anything else
+ * (and anything the retry cannot clear) stays loud.
+ *
+ * Takes a thunk rather than a statement because one caller — the extension
+ * install — runs its statement inside its own transaction, and the retry
+ * decision must be the same one whether the unit of work is one statement or a
+ * locked pair.
+ */
+async function withConcurrentCreateRetry<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!isPostgresConcurrentDdlRaceError(error)) throw error;
+    return await run();
+  }
+}
+
+/**
+ * The advisory-lock key an extension install serializes on.
+ *
+ * Per extension rather than one global key: the fence exists to stop two
+ * installers of the SAME catalog row from colliding, and a shared key would
+ * additionally queue `vector` behind `pg_trgm` at boot for no benefit. The
+ * names it interpolates are allowlisted before they reach here.
+ */
+function extensionDdlLockKey(extension: DatabaseExtensionName): string {
+  return `typegraph:extension-ddl:${extension}`;
+}
+
+type ExecutePostgresStatement = (statement: ExecutableSql) => Promise<void>;
+
+function parallelWorkerResetSql(tableName: string): string {
+  return `ALTER TABLE "${tableName.replaceAll('"', '""')}" RESET (parallel_workers);`;
+}
+
+function parallelWorkerResetError(
+  tableName: string,
+  resetError: unknown,
+): Error {
+  return new Error(
+    `PostgreSQL did not restore the durable parallel_workers setting on vector table ${JSON.stringify(tableName)}. Run ${parallelWorkerResetSql(tableName)} before retrying index materialization.`,
+    { cause: resetError },
+  );
+}
+
+function vectorSerialFallbackPreparationError(
+  step: "drop-index" | "disable-parallel-workers",
+  parallelBuildError: unknown,
+  preparationError: unknown,
+): AggregateError {
+  const action =
+    step === "drop-index" ?
+      "drop the partial vector index"
+    : "disable parallel workers for the serial retry";
+  return new AggregateError(
+    [preparationError],
+    `PostgreSQL could not ${action} after the parallel vector index build exhausted resources.`,
+    { cause: parallelBuildError },
+  );
+}
+
+function reportParallelWorkerResetFailure(
+  tableName: string,
+  resetError: unknown,
+): void {
+  try {
+    if (typeof console === "undefined" || typeof console.error !== "function") {
+      return;
+    }
+    const reported = (console.error as (...data: readonly unknown[]) => unknown)(
+      `[typegraph] The serial vector index rebuild failed and cleanup also failed. ${parallelWorkerResetError(tableName, resetError).message}`,
+      resetError,
+    );
+    void Promise.resolve(reported).catch(() => {
+      // Reporting must not displace the index-build failure.
+    });
+  } catch {
+    // A hostile or replaced logger cannot displace the index-build failure.
+  }
+}
+
+async function resetVectorParallelWorkers(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+): Promise<void> {
+  try {
+    await execute(
+      portableSql`ALTER TABLE ${portableSql.identifier(tableName)} RESET (parallel_workers)`,
+    );
+  } catch (resetError) {
+    throw parallelWorkerResetError(tableName, resetError);
+  }
+}
+
+/** @internal */
+export async function runVectorIndexBuildWithSerialFallback(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  dropStatement?: ExecutableSql,
+): Promise<void> {
+  // The strategy table is TypeGraph-owned, and parallel_workers is only set
+  // temporarily by the fallback below. Reset it before every materialization
+  // attempt so cleanup survives backend and process recreation. Keep this
+  // outside the resource-failure catch: a cleanup error must never be
+  // mistaken for a failed parallel build whose valid index should be dropped.
+  await resetVectorParallelWorkers(execute, tableName);
+  try {
+    await execute(indexStatement);
+  } catch (error) {
+    if (!isInsufficientResourcesError(error)) throw error;
+    if (dropStatement !== undefined) {
+      try {
+        await execute(dropStatement);
+      } catch (dropError) {
+        throw vectorSerialFallbackPreparationError(
+          "drop-index",
+          error,
+          dropError,
+        );
+      }
+    }
+    await runSerialVectorIndexBuild(
+      execute,
+      tableName,
+      indexStatement,
+      error,
+    );
+  }
+}
+
+/** @internal */
+export async function runPostgresVectorIndexBuild(
+  vectorStrategy: VectorStrategy,
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  dropStatement?: ExecutableSql,
+): Promise<void> {
+  if (vectorStrategy !== pgvectorStrategy) {
+    await execute(indexStatement);
+    return;
+  }
+  await runVectorIndexBuildWithSerialFallback(
+    execute,
+    tableName,
+    indexStatement,
+    dropStatement,
+  );
+}
+
+/** @internal */
+export async function runSerialVectorIndexBuild(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  parallelBuildError?: unknown,
+): Promise<void> {
+  const table = portableSql.identifier(tableName);
+  try {
+    await execute(portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`);
+  } catch (setError) {
+    if (parallelBuildError === undefined) throw setError;
+    throw vectorSerialFallbackPreparationError(
+      "disable-parallel-workers",
+      parallelBuildError,
+      setError,
+    );
+  }
+
+  let buildFailure: Readonly<{ error: unknown }> | undefined;
+  try {
+    await execute(indexStatement);
+  } catch (error) {
+    buildFailure = { error };
+  }
+
+  try {
+    await execute(portableSql`ALTER TABLE ${table} RESET (parallel_workers)`);
+  } catch (resetError) {
+    if (buildFailure === undefined) {
+      throw parallelWorkerResetError(tableName, resetError);
+    }
+    reportParallelWorkerResetFailure(tableName, resetError);
+  }
+
+  if (buildFailure !== undefined) throw buildFailure.error;
+}
+
 // ============================================================
 // Utilities
 // ============================================================
@@ -430,7 +645,12 @@ export function createPostgresBackend(
 ): AdapterBackend<AnyPgTransaction> {
   // Resolved before the backend exists so marking it below is a lookup, never
   // work that could fail after a wrapper already observed an unmarked backend.
-  const serializedClient = getSerializedPostgresClient(db);
+  // A `serializedResource` declaration that contradicts detection is refused
+  // here too, before any object a caller could hold has been built.
+  const resourceAudit = resolveDeclaredBackendResource(
+    getSerializedPostgresClient(db),
+    options.serializedResource,
+  );
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
   // pgvector is compiled into a standalone Postgres server, so it is wired
@@ -523,6 +743,7 @@ export function createPostgresBackend(
     identitySeparation: getTableName(tables.identitySeparation),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
+    edgeClaims: getTableName(tables.edgeClaims),
   };
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
   // ANALYZE statements on every call. The recorded and identity relations
@@ -595,28 +816,72 @@ export function createPostgresBackend(
    * Runs one IDEMPOTENT DDL statement — `CREATE ... IF NOT EXISTS` or
    * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` — with the one-shot retry a
    * concurrent boot needs.
-   *
-   * PostgreSQL's IF NOT EXISTS check cannot see another session's uncommitted
-   * catalog row. The loser waits for the winner and is then handed the
-   * winner's conflict instead of a harmless notice; retrying after that wait
-   * observes the committed object. Which failures mean that is
-   * {@link isPostgresConcurrentDdlRaceError}'s single decision — anything else
-   * (and anything the retry cannot clear) stays loud.
    */
   async function executeConcurrentCreateDdl(ddl: string): Promise<void> {
     const statement = sql.raw(ddl);
-    try {
+    await withConcurrentCreateRetry(async () => {
       await db.execute(statement);
-    } catch (error) {
-      if (!isPostgresConcurrentDdlRaceError(error)) throw error;
-      await db.execute(statement);
-    }
+    });
   }
 
   async function ensureTableWithConcurrentCreateRetry(
     table: Parameters<typeof generatePgCreateTableSQL>[0],
   ): Promise<void> {
     await executeConcurrentCreateDdl(generatePgCreateTableSQL(table));
+  }
+
+  /**
+   * THE one place this backend installs a database extension, for every
+   * extension and every caller.
+   *
+   * An extension is database-global while the claims that reach it are not (an
+   * index-materialization claim is per index), so two callers wanting different
+   * objects still race on `pg_extension_name_index`. Two fences answer that,
+   * and both are here because they answer different halves of it:
+   *
+   *  - the advisory lock serializes same-key installers inside this process
+   *    group so the common case never raises at all (#475). It is keyed on the
+   *    extension so installing `vector` does not queue behind `pg_trgm`;
+   *  - {@link withConcurrentCreateRetry} clears the 23505 an installer that did
+   *    NOT take this lock can still hand us — a peer on an older version, whose
+   *    lock key differs, or a `capabilities.transactions: false` backend which
+   *    has no transaction to hang a `pg_advisory_xact_lock` on (#446).
+   *
+   * The lock runs in its own transaction on purpose: a 23505 poisons an
+   * enclosing transaction (the next statement fails `25P02`), so the retry is
+   * sound only when the failed unit of work is one this function owns
+   * end-to-end.
+   */
+  async function ensureDatabaseExtension(
+    name: DatabaseExtensionName,
+  ): Promise<void> {
+    // The name reaches DDL by interpolation, so the allowlist — not the
+    // caller's type — is what makes the identifier trustworthy at runtime.
+    const validated = DATABASE_EXTENSION_NAMES.find(
+      (candidate) => candidate === name,
+    );
+    if (validated === undefined) {
+      throw new ConfigurationError(
+        `Unsupported database extension "${name}".`,
+        { extension: name, supported: DATABASE_EXTENSION_NAMES },
+        {
+          suggestion: `Request one of: ${DATABASE_EXTENSION_NAMES.join(", ")}.`,
+        },
+      );
+    }
+    const ddl = `CREATE EXTENSION IF NOT EXISTS "${validated}";`;
+    if (!capabilities.transactions) {
+      await executeConcurrentCreateDdl(ddl);
+      return;
+    }
+    await withConcurrentCreateRetry(async () => {
+      await db.transaction(async (tx) => {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${extensionDdlLockKey(validated)}), 0)`,
+        );
+        await tx.execute(sql.raw(ddl));
+      });
+    });
   }
 
   async function ensureContributionMaterializationsTableImpl(): Promise<void> {
@@ -883,6 +1148,7 @@ export function createPostgresBackend(
       backend: gateFulltext(
         backend,
         contributionMaterializer.assertInitialized,
+        contributionMaterializer.refuseUnavailableFulltext,
       ),
       drainAndClose,
     };
@@ -917,7 +1183,7 @@ export function createPostgresBackend(
                 { capability: "trustedImport", dialect: "postgres" },
               );
             }
-            const trustedTx = createBackendOverlay(tx, {
+            const trustedTx = deriveBackend(tx, {
               executeRaw<T>(
                 sqlText: string,
                 params: readonly unknown[],
@@ -1007,11 +1273,14 @@ export function createPostgresBackend(
     ...gateFulltextMethods(
       operations,
       contributionMaterializer.assertInitialized,
+      contributionMaterializer.refuseUnavailableFulltext,
     ),
 
     async executeDdl(ddl: string): Promise<void> {
       await db.execute(sql.raw(ddl));
     },
+
+    ensureExtension: ensureDatabaseExtension,
 
     async ensureIndexMaterializationsTable(): Promise<void> {
       await ensureTableWithConcurrentCreateRetry(tables.indexMaterializations);
@@ -1031,6 +1300,10 @@ export function createPostgresBackend(
       await executeConcurrentCreateDdl(
         `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
       );
+    },
+
+    ensureTrigramExtension(): Promise<void> {
+      return ensureDatabaseExtension("pg_trgm");
     },
 
     async claimIndexMaterialization(
@@ -1491,11 +1764,11 @@ export function createPostgresBackend(
     },
   };
 
-  // INVARIANT: mark before any wrapper can observe this backend — see
-  // transaction-resource.ts.
-  if (serializedClient !== undefined) {
-    markSerializedTransactionResource(backend, serializedClient);
-  }
+  // INVARIANT: audit before any wrapper can observe this backend — see
+  // transaction-resource.ts. Unconditional: an abstention recorded as
+  // "independent" is a verdict the guards can tell apart from a backend nobody
+  // looked at.
+  auditBackendResource(backend, resourceAudit);
   return backend;
 }
 
@@ -1512,23 +1785,26 @@ export function createPostgresBackend(
  *   An export's `BEGIN ... READ ONLY` stays open across the whole stream, so a
  *   concurrent import's INSERT lands inside it ("cannot execute INSERT in a
  *   read-only transaction").
- * - **A `Pool` explicitly configured with `max: 1`** — the export checks out the
+ * - **A `Pool` whose resolved cap is one connection** — the export checks out the
  *   pool's only connection for the duration, so a concurrent import waits for a
- *   connection that is never released.
- * - **A postgres-js client built with `{ max: 1 }`** — the same cap on a
- *   CALLABLE client. postgres-js's `begin` reserves a connection from its own
- *   pool for the transaction, so with a pool of one an export snapshot holds the
- *   only connection every other wrapper's statement needs.
+ *   connection that is never released. Every spelling pg-pool resolves into that
+ *   cap counts; {@link isSingleConnectionPgPoolCap} owns which ones those are.
+ * - **A postgres-js client whose resolved cap is one connection** — the same cap
+ *   on a CALLABLE client. postgres-js's `begin` reserves a connection from its
+ *   own pool for the transaction, so with a pool of one an export snapshot holds
+ *   the only connection every other wrapper's statement needs.
+ *   {@link isSingleConnectionPostgresJsCap} owns that driver's reading of a cap,
+ *   which is NOT the same decision as pg-pool's.
  *
  * Deliberately NOT marked: a default pool (independent connection per
  * checkout), a postgres-js client at default size (`max` defaults to 10), a
  * neon-http tagged template (session-less HTTP), and anything unrecognized. A
  * false positive refuses legitimate concurrent work, so the predicate requires
  * positive evidence and abstains otherwise. A pool capped at one connection by
- * means other than an explicit `max` option (a global `pg.defaults.max`, a
- * driver-specific connection string) is therefore not detected, and a
- * serialized-connection import there still fails the way it did before this
- * guard existed.
+ * means other than the cap pg-pool resolves (a global `pg.defaults.max`, a
+ * `pg` connection string's `?max=1` — neither of which pg honors, so neither
+ * caps anything) is therefore not detected, and a serialized-connection import
+ * there still fails the way it did before this guard existed.
  */
 function getSerializedPostgresClient(db: AnyPgDatabase): object | undefined {
   const pgliteClient = getPgliteClient(db);
@@ -1552,11 +1828,33 @@ function isSingleConnectionPgPool(
   candidate: Readonly<Record<string, unknown>>,
 ): boolean {
   // `options` is a pg.Pool member (pg.Client has none), and holds the resolved
-  // pool configuration. Only an explicit `max: 1` is treated as serialized: the
-  // default is 10, so an absent/other `max` says nothing.
+  // pool configuration. The default is 10, so an absent/other `max` says
+  // nothing; what a cap of one looks like is the cap predicate's decision.
   const options: unknown = candidate["options"];
   if (typeof options !== "object" || options === null) return false;
-  return (options as Readonly<Record<string, unknown>>)["max"] === 1;
+  return isSingleConnectionPgPoolCap(
+    (options as Readonly<Record<string, unknown>>)["max"],
+  );
+}
+
+/**
+ * Whether a pg-pool `options.max` means ONE connection.
+ *
+ * Numeric 1 is the obvious form. A STRING `"1"` is not a typo: pg-pool's
+ * `options.max = options.max || options.poolSize || 10` (pg-pool 3.x
+ * `index.js:89`) never coerces, so `new Pool({ max: process.env.PG_MAX })` —
+ * and the legacy `new Pool({ poolSize: "1" })`, which lands in the same
+ * `options.max` — keeps a string that its own `this._clients.length >=
+ * this.options.max` comparison (`index.js:120`) then coerces. The pool really
+ * is capped at one.
+ *
+ * `"5"` is NOT evidence: `1 >= "5"` is false, so that pool genuinely opens five
+ * connections. This is the whole reason the decision is per driver — postgres-js
+ * reads the identical value differently, and
+ * {@link isSingleConnectionPostgresJsCap} owns that reading.
+ */
+function isSingleConnectionPgPoolCap(value: unknown): boolean {
+  return value === 1 || (typeof value === "string" && Number(value) === 1);
 }
 
 /**
@@ -1569,11 +1867,11 @@ function isSingleConnectionPgPool(
  *   adapter that already discriminates postgres-js from the other callable
  *   client (neon-http). Without it, `options.max` on an unknown callable means
  *   nothing we can act on.
- * - `options.max === 1` — postgres-js exposes its RESOLVED options on the
- *   callable, and its `max` defaults to 10, so only an explicit cap of one says
- *   "every statement lands on the same connection". An absent or larger `max`
- *   abstains: postgres-js at default size hands each `begin` its own connection
- *   and marking it would refuse concurrent work that succeeds.
+ * - {@link isSingleConnectionPostgresJsCap} — postgres-js exposes its RESOLVED
+ *   options on the callable, and its `max` defaults to 10, so only a cap of one
+ *   says "every statement lands on the same connection". An absent or larger
+ *   `max` abstains: postgres-js at default size hands each `begin` its own
+ *   connection and marking it would refuse concurrent work that succeeds.
  *
  * NOT covered: Bun's `SQL`. Nothing in this package positively identifies that
  * driver (the SQLite side recognizes `BunSQLiteSession`; there is no Postgres
@@ -1590,7 +1888,32 @@ function isSingleConnectionCallablePgClient(client: unknown): boolean {
   ];
   if (!isPostgresJsClient(client)) return false;
   if (typeof options !== "object" || options === null) return false;
-  return (options as Readonly<Record<string, unknown>>)["max"] === 1;
+  return isSingleConnectionPostgresJsCap(
+    (options as Readonly<Record<string, unknown>>)["max"],
+  );
+}
+
+/**
+ * Whether a postgres-js `options.max` means ONE connection.
+ *
+ * postgres-js resolves `max` from the options object, the URL query string and
+ * the `PGMAX` environment variable, and does not coerce it (`max` is absent from
+ * its `ints` list, postgres@3.4.9 `src/index.js:447`). So `postgres(url +
+ * "?max=1")` and `PGMAX=1` both yield the STRING `"1"`, which is one connection
+ * and is marked, exactly as the numeric `postgres(url, { max: 1 })` is.
+ *
+ * KNOWN, DELIBERATE GAP: `[...Array(options.max)]` (`src/index.js:65`) yields
+ * length 1 for ANY non-numeric string, so `postgres(url + "?max=5")` also opens
+ * exactly one connection today and can genuinely wedge a stream pair. It is NOT
+ * marked, because marking on it means marking on an upstream bug: the moment
+ * postgres-js coerces `max`, that configuration becomes a five-connection pool
+ * and the mark would refuse legitimate concurrent work. This is why the decision
+ * is separate from {@link isSingleConnectionPgPoolCap} — the two predicates read
+ * the same value with two justifications, and it is those justifications, not
+ * the bodies, that will diverge as either driver changes.
+ */
+function isSingleConnectionPostgresJsCap(value: unknown): boolean {
+  return value === 1 || (typeof value === "string" && Number(value) === 1);
 }
 
 /** Whether a `pg`-shaped client owns exactly one connection (Client, not Pool). */
@@ -1764,7 +2087,6 @@ function createPostgresOperationBackend(
     schemaVersionsTable,
     transactionScoped,
   } = options;
-
   // Route through the execution adapter so driver-specific result shapes
   // (`{rows}` for node-postgres / neon-serverless; bare array for
   // postgres-js) are normalized in one place.
@@ -1955,7 +2277,7 @@ function createPostgresOperationBackend(
     capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
   );
 
-  const commonBackend = createCommonOperationBackend({
+  const commonOperationMembers = createCommonOperationBackend({
     batchConfig,
     execution: {
       execAll,
@@ -2240,7 +2562,7 @@ function createPostgresOperationBackend(
   }
 
   const operationBackend: InternalOperationBackend = {
-    ...commonBackend,
+    ...commonOperationMembers,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
     /**
@@ -2330,7 +2652,9 @@ function createPostgresOperationBackend(
       // that genuinely has no active version. A rollback landing back on
       // `expectedVersion` reports `expected === actual`; the rejection stands,
       // because nothing is holding the fence.
-      const settled = await commonBackend.getActiveSchema(params.graphId);
+      const settled = await commonOperationMembers.getActiveSchema(
+        params.graphId,
+      );
       throw new StaleVersionError({
         graphId: params.graphId,
         expected: params.expectedVersion,
@@ -2356,42 +2680,28 @@ function createPostgresOperationBackend(
         concurrent: params.concurrent === true,
       });
       if (indexStatement !== undefined) {
-        try {
-          await execRun(indexStatement);
-        } catch (error) {
-          if (!isInsufficientResourcesError(error)) throw error;
-          // Parallel HNSW/IVFFlat builds stage the build graph in dynamic
-          // shared memory, and resource-constrained hosts reject the
-          // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
-          // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
-          // from dsm_impl_posix). Retry serially: drop the INVALID
-          // leftover the failed CONCURRENTLY build leaves behind (its
-          // IF NOT EXISTS would otherwise mask the retry), pin the
-          // strategy table to parallel_workers = 0 (maintenance builds
-          // take min(storage parameter, max_parallel_maintenance_workers)),
-          // rebuild in local memory, and restore the setting.
-          const dropStatement = vectorStrategy.buildDropIndex?.(slot);
-          if (dropStatement !== undefined) {
-            await execRun(dropStatement);
-          }
-          const table = portableSql.identifier(
-            vectorStrategy.tableName(
-              slot.graphId,
-              slot.nodeKind,
-              slot.fieldPath,
-            ),
-          );
-          await execRun(
-            portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`,
-          );
-          try {
-            await execRun(indexStatement);
-          } finally {
-            await execRun(
-              portableSql`ALTER TABLE ${table} RESET (parallel_workers)`,
-            );
-          }
-        }
+        const strategyTableName = vectorStrategy.tableName(
+          slot.graphId,
+          slot.nodeKind,
+          slot.fieldPath,
+        );
+        // Built-in pgvector HNSW/IVFFlat builds stage the build graph in dynamic
+        // shared memory, and resource-constrained hosts reject the
+        // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
+        // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
+        // from dsm_impl_posix). Retry serially: drop the INVALID
+        // leftover the failed CONCURRENTLY build leaves behind (its
+        // IF NOT EXISTS would otherwise mask the retry), pin the
+        // strategy table to parallel_workers = 0 (maintenance builds
+        // take min(storage parameter, max_parallel_maintenance_workers)),
+        // rebuild in local memory, and restore the setting.
+        await runPostgresVectorIndexBuild(
+          vectorStrategy,
+          execRun,
+          strategyTableName,
+          indexStatement,
+          vectorStrategy.buildDropIndex?.(slot),
+        );
       }
     },
 

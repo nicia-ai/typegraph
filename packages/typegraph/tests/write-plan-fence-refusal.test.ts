@@ -24,6 +24,10 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStoreWithSchema, defineGraph, defineNode } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+} from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type GraphBackend,
@@ -89,21 +93,23 @@ function withSetUpdateCount(backend: GraphBackend): Readonly<{
     // Called unbound: the drizzle backends build their members as closures
     // over the factory's state, so none of them reads `this`.
     const original = requireDefined(target.updateNodeSet);
-    return {
-      ...target,
+    // Derived, never spread: a fixture built by copying a backend is the #435
+    // defect written into the double the store under test then runs against, and
+    // the derivation seam is what carries the source's serialized-resource
+    // verdict onto the wrapper.
+    return deriveBackend(target, {
       updateNodeSet: (params) => {
         counts.updateNodeSet += 1;
         return original(params);
       },
-    };
+    } as ExactBackendOverlay<T, Partial<T>>);
   }
 
   return {
-    backend: {
-      ...wrap(backend),
+    backend: deriveBackend(wrap(backend), {
       transaction: (fn, options) =>
         backend.transaction((target) => fn(wrap(target)), options),
-    },
+    }),
     counts,
   };
 }

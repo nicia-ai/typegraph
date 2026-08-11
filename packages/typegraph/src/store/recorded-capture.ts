@@ -1,6 +1,5 @@
-import { createGraphBackendProjection } from "../backend/graph-backend-projection";
+import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
-  createBackendOverlay,
   type DeleteEdgesBatchParams,
   type EdgeRow,
   type GraphBackend,
@@ -99,6 +98,7 @@ type RecordedCaptureSession = Readonly<{
     id: string,
     afterImage?: IdentityAssertionStorageRow,
   ) => void;
+  forceGraphRevision: (graphId: string) => void;
   flush: (
     target: TransactionBackend,
     schema: SqlSchema,
@@ -207,6 +207,7 @@ function recordedCaptureSealedError(
 
 function createRecordedCaptureSession(): RecordedCaptureSession {
   const touched = new Map<string, TouchedEntity>();
+  const forcedGraphRevisions = new Set<string>();
   // Sealed by flush(): a scope flushes exactly once, at its terminal point, so
   // any touch afterward means a graph write happened after capture lost its
   // flush window (e.g. a caller reused the withRecordedTransaction context after
@@ -251,6 +252,11 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       touch({ entity: "identity", graphId, id, afterImage });
     },
 
+    forceGraphRevision(graphId: string): void {
+      if (sealed) throw recordedCaptureSealedError({ graphId });
+      forcedGraphRevisions.add(graphId);
+    },
+
     async flush(
       target: TransactionBackend,
       schema: SqlSchema,
@@ -271,9 +277,13 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       // flush() writes recorded rows directly (never via touch), so sealing here
       // does not block its own work.
       sealed = true;
-      if (touched.size === 0) return new Map();
+      if (touched.size === 0 && forcedGraphRevisions.size === 0)
+        return new Map();
       const recordedByGraph = new Map<string, string>();
       const byGraph = groupBy(touched.values(), (entity) => entity.graphId);
+      for (const graphId of forcedGraphRevisions) {
+        if (!byGraph.has(graphId)) byGraph.set(graphId, []);
+      }
       for (const [graphId, entities] of byGraph) {
         const recordedCommit = await allocateRecordedCommit(
           target,
@@ -315,6 +325,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
         );
       }
       touched.clear();
+      forcedGraphRevisions.clear();
       return recordedByGraph;
     },
   };
@@ -326,6 +337,19 @@ type RecordedIdentityBinding = Readonly<{
 }>;
 
 const recordedIdentityBindings = new WeakMap<object, RecordedIdentityBinding>();
+
+const recordedRevisionBindings = new WeakMap<object, RecordedCaptureSession>();
+
+/** Forces one revision allocation when this capture transaction flushes. */
+export function forceRecordedGraphRevision(
+  backend: TransactionBackend,
+  graphId: string,
+): boolean {
+  const session = recordedRevisionBindings.get(backend);
+  if (session === undefined) return false;
+  session.forceGraphRevision(graphId);
+  return true;
+}
 
 function ignoreIdentityTouch(): void {
   return;
@@ -393,7 +417,7 @@ function createRecordedTransactionBackend(
     }
   }
 
-  const overlay = createBackendOverlay(target, {
+  const overlay = deriveBackend(target, {
     ...rawWriteGuards(target, "tx.backend"),
 
     async insertNode(params) {
@@ -613,6 +637,7 @@ function createRecordedTransactionBackend(
   // silently drop every touch, losing the merge-created assertions from history.
   recordedIdentityBindings.set(overlay, { target, session });
   recordedIdentityBindings.set(target, { target, session });
+  recordedRevisionBindings.set(overlay, session);
   return overlay;
 }
 
@@ -675,8 +700,8 @@ export function createRecordedBackend(
     fn: (target: TransactionBackend) => Promise<T>,
   ): Promise<T> => runCapturedAutocommit(backend, schema, fn);
 
-  const projectedBackend = createGraphBackendProjection(backend);
-  return createBackendOverlay(projectedBackend, {
+  const projectedBackend = projectGraphBackend(backend);
+  return deriveBackend(projectedBackend, {
     ...rawWriteGuards(backend, "backend"),
 
     async insertNode(params) {

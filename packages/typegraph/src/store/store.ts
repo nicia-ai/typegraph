@@ -16,7 +16,7 @@ import {
   type GraphWriteBackend,
   type RawBackend,
 } from "../backend/branded";
-import { createGraphBackendProjection } from "../backend/graph-backend-projection";
+import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
   createEdgeRowMapper,
   createNodeRowMapper,
@@ -31,7 +31,6 @@ import {
   type ContributionRebuildResult,
   type ContributionRebuildScope,
   type ContributionRepairResult,
-  createBackendOverlay,
   createTransactionReadBackend,
   type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
@@ -109,6 +108,7 @@ import {
   rebuildIdentityClosureForContext,
   refKey,
   removeIdentityKindsForContext,
+  requireNodeValidityEndCompatible,
   toTransferAssertion,
   validateIdentityForContext,
 } from "../identity/service";
@@ -166,7 +166,7 @@ import {
 import { type SchemaDiff } from "../schema/migration";
 import { serializeSchema } from "../schema/serializer";
 import { type SerializedSchema } from "../schema/types";
-import { nowIso } from "../utils/date";
+import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
@@ -175,6 +175,11 @@ import {
   type GraphAlgorithms,
   type InternalGraphAlgorithms,
 } from "./algorithms";
+import { applyResolvedNodeClaims } from "./claims/resolved-node-claims";
+import {
+  type ConstraintFenceViolation,
+  verifyConstraintFences as verifyConstraintFencesImpl,
+} from "./claims/verify";
 import {
   createEdgeCollectionsProxy,
   createNodeCollectionsProxy,
@@ -575,8 +580,12 @@ type StoreCore<G extends GraphDef> = Readonly<{
   edges: GraphEdgeCollections<G>;
   algorithms: GraphAlgorithms<G>;
   search: StoreSearch<G>;
-  getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
-  getNodeCollectionOrThrow: (kind: string) => DynamicNodeCollection;
+  getNodeCollection: <const K extends string>(
+    kind: K,
+  ) => DynamicNodeCollection<K> | undefined;
+  getNodeCollectionOrThrow: <const K extends string>(
+    kind: K,
+  ) => DynamicNodeCollection<K>;
   getEdgeCollection: (kind: string) => DynamicEdgeCollection | undefined;
   getEdgeCollectionOrThrow: (kind: string) => DynamicEdgeCollection;
   getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
@@ -629,6 +638,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     options?: ReembedVectorFieldOptions,
   ) => Promise<ReembedVectorFieldResult>;
   verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
+  verifyConstraintFences: () => Promise<readonly ConstraintFenceViolation[]>;
   repairContributions: () => Promise<ContributionRepairResult>;
   probeContributions: () => Promise<ContributionProbeResult>;
   rebuildContribution: (
@@ -980,6 +990,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
       backend: this.#backend,
+      // The query path's own construction, not a second spelling of it: a
+      // caller that could only rebuild this object could not observe the one
+      // the queries actually run on.
+      queryBackend: (target) =>
+        this.#createHookedQueryBackend(target ?? this[STORE_RUNTIME].backend),
       sealedQuery: (coordinate) => this.sealedQuery(coordinate),
       recordedNodeGetById: (kind, id, coordinate) =>
         this.recordedNodeGetById(kind, id, coordinate),
@@ -1001,6 +1016,66 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.identityAtCoordinate(coordinate),
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
+      applyResolvedNodeUniqueness: async (target, writes, apply) => {
+        const upserts = writes.upserts.map((upsert) => {
+          if (!hasOwnKey(this.#graph.nodes, upsert.kind)) {
+            throw new KindNotFoundError(upsert.kind, "node", {
+              graphId: this.graphId,
+            });
+          }
+          const registration = this.#graph.nodes[upsert.kind];
+          if (registration === undefined) {
+            throw new KindNotFoundError(upsert.kind, "node", {
+              graphId: this.graphId,
+            });
+          }
+          return {
+            ...upsert,
+            constraints: registration.unique ?? [],
+          };
+        });
+        // Which kinds a release is worth CLEARING for: the clear exists so the
+        // set's upserts can take keys the set is giving back, and only a
+        // uniqueness declaration produces a key another node could take.
+        const constrainedKinds = new Set(
+          Object.entries(this.#graph.nodes)
+            .filter(
+              ([, registration]) => (registration.unique ?? []).length > 0,
+            )
+            .map(([kind]) => kind),
+        );
+        const releases = writes.releases.filter((release) => {
+          if (!Object.hasOwn(this.#graph.nodes, release.kind)) {
+            throw new KindNotFoundError(release.kind, "node", {
+              graphId: this.graphId,
+            });
+          }
+          return constrainedKinds.has(release.kind);
+        });
+        if (
+          upserts.every((upsert) => upsert.constraints.length === 0) &&
+          releases.length === 0
+        ) {
+          // Nothing is cleared, so nothing needs rebuilding, so the write set
+          // owes no set-wide preflight either. A kind with no uniqueness
+          // declaration may still owe DISJOINTNESS claims, and those are taken
+          // and released by the individual writes inside `apply()` exactly as
+          // they are outside a merge — this branch is what keeps that true.
+          return apply();
+        }
+        // The per-graph write lock, before any claim or sidecar work: the
+        // rebuild below writes claim rows, and the lock is what the claim
+        // discipline requires ahead of them. It is reentrant and memoized per
+        // transaction, so a merge that already took it pays no round trip.
+        const lock = await lockRecordedGraphWrite(target, this.graphId);
+        return applyResolvedNodeClaims(
+          { graphId: this.graphId, registry: this.#registry, lock },
+          target,
+          upserts,
+          releases,
+          apply,
+        );
+      },
       liveNodesSharingIds: async (ids, target) => {
         const backend = target ?? this.#baseBackend;
         const liveKindsById = await liveNodeKindsSharingIds(
@@ -1053,8 +1128,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.foldImportedIdentityNodes(target, references),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
-      applyIdentityMergeAtTarget: (target, retractionIds, assertions) =>
-        this.applyIdentityMergeAtTarget(target, retractionIds, assertions),
+      applyIdentityMergeAtTarget: (target, retractions, assertions) =>
+        this.applyIdentityMergeAtTarget(target, retractions, assertions),
       assertIdentityClassesConsistentAtTarget: (target, seeds) =>
         this.assertIdentityClassesConsistentAtTarget(target, seeds),
     };
@@ -1351,10 +1426,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** @internal Mechanical graph-merge apply through the mutation coordinator. */
   applyIdentityMergeAtTarget(
     target: GraphBackend | TransactionBackend,
-    retractionIds: readonly string[],
+    retractions: readonly IdentityTransferAssertion[],
     assertions: readonly IdentityTransferAssertion[],
   ): Promise<Readonly<{ created: number; retracted: number }>> {
-    if (retractionIds.length === 0 && assertions.length === 0) {
+    if (retractions.length === 0 && assertions.length === 0) {
       return Promise.resolve({ created: 0, retracted: 0 });
     }
     if (this.#graph.identity === undefined) {
@@ -1365,7 +1440,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
     return applyIdentityChangesForContext(
       this.#identityContext(target),
-      retractionIds,
+      retractions,
       assertions,
     );
   }
@@ -1554,14 +1629,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * lookup exactly like `this.#graph.nodes` membership is checked everywhere
    * else.
    */
-  #resolveDynamicNodeCollection(
+  #resolveDynamicNodeCollection<const K extends string>(
     collections: GraphNodeCollections<G>,
-    kind: string,
-  ): DynamicNodeCollection | undefined {
+    kind: K,
+  ): DynamicNodeCollection<K> | undefined {
     if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
     return collections[
       kind as keyof G["nodes"] & string
-    ] as unknown as DynamicNodeCollection;
+    ] as unknown as DynamicNodeCollection<K>;
   }
 
   /**
@@ -1574,7 +1649,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * me the collection" pattern, prefer `getNodeCollectionOrThrow` — it
    * throws `KindNotFoundError` instead of forcing a null-check.
    */
-  getNodeCollection(kind: string): DynamicNodeCollection | undefined {
+  getNodeCollection<const K extends string>(
+    kind: K,
+  ): DynamicNodeCollection<K> | undefined {
     return this.#resolveDynamicNodeCollection(this.nodes, kind);
   }
 
@@ -1587,7 +1664,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * operates on the new kind, and the null-check the optional variant requires
    * is busywork.
    */
-  getNodeCollectionOrThrow(kind: string): DynamicNodeCollection {
+  getNodeCollectionOrThrow<const K extends string>(
+    kind: K,
+  ): DynamicNodeCollection<K> {
     const collection = this.getNodeCollection(kind);
     if (collection === undefined) {
       throw new KindNotFoundError(kind, "node", {
@@ -1791,7 +1870,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           options,
         ),
       // Present only when opted in; its absence is the coalesce off switch.
-      ...(this.#options?.coalesceUnchangedUpserts === true && {
+      ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           nodeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
@@ -1877,7 +1956,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       executeUpsertUpdate: (input, backend, options) =>
         executeEdgeUpsertUpdate(ctx, input, backend, options),
       // Present only when opted in; its absence is the coalesce off switch.
-      ...(this.#options?.coalesceUnchangedUpserts === true && {
+      ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           edgeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
@@ -2840,7 +2919,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 hookedFunction,
               ),
           },
-          getNodeCollection: (kind: string) =>
+          getNodeCollection: <const K extends string>(kind: K) =>
             this.#resolveDynamicNodeCollection(nodes, kind),
         };
       Object.defineProperty(fallbackContext, TRANSACTION_RUNTIME, {
@@ -3238,7 +3317,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           nodes,
           edges,
           ...(identity === undefined ? {} : { identity }),
-          getNodeCollection: (kind: string) =>
+          getNodeCollection: <const K extends string>(kind: K) =>
             this.#resolveDynamicNodeCollection(nodes, kind),
         }),
       );
@@ -3322,9 +3401,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         identity
       : wrapTransactionIdentity(identity, receiptRecorder);
 
-    const getNodeCollection = (
-      kind: string,
-    ): DynamicNodeCollection | undefined =>
+    const getNodeCollection = <const K extends string>(
+      kind: K,
+    ): DynamicNodeCollection<K> | undefined =>
       this.#resolveDynamicNodeCollection(nodes, kind);
 
     // Honest capability discriminant for `tx.sql`. Capture/revision tracking
@@ -4159,8 +4238,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * path. The cost is that a database whose contribution tables were dropped
    * out of band (a partial restore, a hand-run `DROP`, a schema-scoped
    * restore that missed them) opens completely clean and then fails at the
-   * first read of the affected slot. This is the explicit, operator-invoked
-   * check for that state; it is not, and should not become, a boot step.
+   * first read or write that depends on the affected slot. This is the
+   * explicit, operator-invoked check for that state; it is not, and should not
+   * become, a boot step.
    *
    * Purely read-only: one existence query per distinct contribution table
    * plus one marker read per graph, no DDL and no writes, so it is safe to
@@ -4210,6 +4290,46 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * Read-only diagnostic: every claim axis this graph's data ALREADY contends
+   * for — a scoped unique key two live nodes hold, an id live under both kinds
+   * of a `disjointWith` pair, or a declared edge cardinality two live edges
+   * exceed.
+   *
+   * The claim relations refuse a second claimant from the first write after
+   * upgrade onward, but they repair nothing that predates them: a database that
+   * carried a violation keeps carrying it until a write touches that axis, and
+   * is then refused with the ordinary typed error naming the incumbent. This is
+   * how an operator sees that state before a user does.
+   *
+   * Reports; never repairs. Which of two live claimants keeps the axis is a
+   * data-loss decision that belongs to the operator.
+   *
+   * Declarations are resolved from the active persisted schema, not this
+   * Store's construction-time graph snapshot. A Store left stale by another
+   * instance's `evolve()` therefore audits the constraints that currently
+   * govern the database instead of returning a false clean report.
+   *
+   * @throws {ConfigurationError} `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` when the
+   *   backend cannot run the audit — an empty report from a backend that never
+   *   looked is indistinguishable from a clean database.
+   */
+  async verifyConstraintFences(): Promise<readonly ConstraintFenceViolation[]> {
+    const activeRow = await this.#baseBackend.getActiveSchema(this.graphId);
+    const graph =
+      activeRow === undefined ?
+        this.#graph
+      : this.#catchUpToStored(parseSerializedSchema(activeRow.schema_doc));
+    const registry =
+      graph === this.#graph ? this.#registry : buildKindRegistry(graph);
+    return verifyConstraintFencesImpl({
+      graph,
+      registry,
+      graphId: this.graphId,
+      backend: this.#baseBackend,
+    });
+  }
+
+  /**
    * Non-destructively repairs contribution states whose physical storage can
    * be preserved: `missing-marker` and `failed-materialization`.
    * `orphaned-marker` and `stale` findings are returned as
@@ -4249,8 +4369,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Read-only readiness check for the search projections: is search
-   * coherent with the graph right now, or is a query about to hit a
+   * Read-only readiness check for the search projections: are dependent reads
+   * and writes coherent with the graph right now, or are they about to hit a
    * degraded index?
    *
    * The read-only half of {@link Store.repairContributions}, and the
@@ -4865,6 +4985,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
       ...(identityConfig === undefined ?
@@ -4902,6 +5023,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 ref,
                 mode,
               ),
+            requireValidityEndCompatible: (
+              target: IdentityTarget,
+              ref: Readonly<{ kind: string; id: string }>,
+              validTo: string,
+            ) =>
+              requireNodeValidityEndCompatible(
+                {
+                  graphId: this.graphId,
+                  schema: this.#sqlSchema(),
+                },
+                target,
+                ref,
+                validTo,
+              ),
           },
         }),
       createOperationContext: (operation, entity, kind, id) =>
@@ -4926,12 +5061,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
       withOperationHooks: runHooks,
     };
+  }
+
+  /** The single owner of the store-wide unchanged-upsert enablement decision. */
+  #coalescesUnchangedUpserts(): boolean {
+    return this.#options?.coalesceUnchangedUpserts === true;
   }
 
   // === Internal: Hook Helpers ===
@@ -4941,7 +5082,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * query builder submits to the backend. A selective-projection retry
    * therefore emits two independent start/end pairs with their actual SQL.
    *
-   * Decoration goes through {@link createBackendOverlay}, which carries the
+   * Decoration goes through {@link deriveBackend}, which carries the
    * projection's serialized-resource ownership: the hooked backend still
    * executes on the source's connection, so it must answer the same "shares one
    * serialized connection" question as its source.
@@ -4961,9 +5102,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const compileSql = backend.compileSql;
     // Store backends may be frozen. Decorate an allowlist projection so
     // execute/executeRaw can be replaced without mutating the source.
-    const projected = createGraphBackendProjection(backend as GraphBackend);
+    const projected = projectGraphBackend(backend as GraphBackend);
 
-    return createBackendOverlay(projected, {
+    return deriveBackend(projected, {
       execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
         const compiled =
           compileSql === undefined ?
@@ -5156,12 +5297,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         case "current":
         case "asOf": {
           // resolveTemporalReadParams always resolves an instant for these modes.
-          if (row.deleted_at) return false;
-          if (asOf !== undefined && row.valid_from && asOf < row.valid_from)
-            return false;
-          if (asOf !== undefined && row.valid_to && asOf >= row.valid_to)
-            return false;
-          return true;
+          if (row.deleted_at || asOf === undefined) return false;
+          return validityWindowContainsInstant(
+            row.valid_from,
+            row.valid_to,
+            asOf,
+          );
         }
         case "includeEnded": {
           return !row.deleted_at;
@@ -5216,9 +5357,7 @@ class AdapterStoreImplementation<
     this.backend =
       options?.history === true ?
         createHistoryStoreBackendProjection(this[STORE_RUNTIME].backend)
-      : Object.freeze(
-          createGraphBackendProjection(this[STORE_RUNTIME].backend),
-        );
+      : Object.freeze(projectGraphBackend(this[STORE_RUNTIME].backend));
   }
 
   /**

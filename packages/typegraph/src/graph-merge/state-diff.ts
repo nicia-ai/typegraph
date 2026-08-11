@@ -30,7 +30,7 @@ import {
   edgeStateSignature,
   parseRowProps,
 } from "./canonical-props";
-import { assertionTruthKey } from "./merge-identity";
+import { assertionIdentityKey, assertionTruthKey } from "./merge-identity";
 import { compareStrings, type MergeKey, mergeKey } from "./node-key";
 import type {
   EdgeId,
@@ -628,38 +628,37 @@ function classifyRetraction(
 /**
  * Classifies every retraction in one fork.
  *
- * The fork's own rows for the retracted ids are read only when a cascade is
- * possible at all — a fork that deleted no node, or retracted nothing, cannot
- * have produced one.
+ * The fork's archival row owns the authored retraction boundary. Preserve that
+ * complete ended truth in the plan whenever the row still identifies the base
+ * assertion; a hard delete can remove the row entirely, in which case the node
+ * deletion itself owns the commit-time cascade.
  */
-async function classifyRetractions<G extends GraphDef>(
-  forkStore: Store<G>,
+function classifyRetractions(
   retracted: readonly IdentityTransferAssertion[],
   deletedNodes: readonly DeletedNode[],
-): Promise<readonly RetractedAssertion[]> {
-  if (retracted.length === 0 || deletedNodes.length === 0) {
-    return retracted.map((assertion) => ({
-      assertion,
-      cause: EXPLICIT_RETRACTION,
-    }));
-  }
+  forkRowsById: ReadonlyMap<string, IdentityTransferAssertion>,
+): readonly RetractedAssertion[] {
+  if (retracted.length === 0) return [];
   const deletedByKey = new Map<MergeKey, DeletedNode>(
     deletedNodes.map((deletion) => [
       mergeKey(deletion.kind, deletion.id),
       deletion,
     ]),
   );
-  const forkRowsById = await storeRuntime(forkStore).identityAssertionRowsByIds(
-    retracted.map((assertion) => assertion.id),
-  );
-  return retracted.map((assertion) => ({
-    assertion,
-    cause: classifyRetraction(
-      assertion,
-      deletedByKey,
-      forkRowsById.get(assertion.id),
-    ),
-  }));
+  return retracted.map((assertion) => {
+    const forkAssertion = forkRowsById.get(assertion.id);
+    const endedAssertion =
+      (
+        forkAssertion?.validTo !== undefined &&
+        assertionIdentityKey(forkAssertion) === assertionIdentityKey(assertion)
+      ) ?
+        forkAssertion
+      : assertion;
+    return {
+      assertion: endedAssertion,
+      cause: classifyRetraction(assertion, deletedByKey, forkAssertion),
+    };
+  });
 }
 
 /** Stable id-ascending comparator over any `{ id: string }`. */
@@ -692,8 +691,8 @@ export async function diffAgainstBase<G extends GraphDef>(
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
   const [baseIdentity, forkIdentity] = await Promise.all([
-    storeRuntime(baseStore).readCurrentIdentityAssertions("state"),
-    storeRuntime(forkStore).readCurrentIdentityAssertions("state"),
+    storeRuntime(baseStore).readCurrentIdentityAssertions("archival"),
+    storeRuntime(forkStore).readCurrentIdentityAssertions("archival"),
   ]);
   const baseIdentityById = new Map(
     baseIdentity.map((assertion) => [assertion.id, assertion]),
@@ -807,10 +806,10 @@ export async function diffAgainstBase<G extends GraphDef>(
       );
     })
     .toSorted((left, right) => compareStrings(left.id, right.id));
-  const classifiedRetractions = await classifyRetractions(
-    forkStore,
+  const classifiedRetractions = classifyRetractions(
     retractedAssertions,
     deletedNodes,
+    forkIdentityById,
   );
 
   return {
@@ -840,7 +839,8 @@ export async function diffAgainstBase<G extends GraphDef>(
           const base = baseIdentityById.get(assertion.id);
           return (
             base === undefined ||
-            assertionTruthKey(base) !== assertionTruthKey(assertion)
+            (assertionIdentityKey(base) !== assertionIdentityKey(assertion) &&
+              assertionTruthKey(base) !== assertionTruthKey(assertion))
           );
         })
         .toSorted((left, right) => compareStrings(left.id, right.id)),

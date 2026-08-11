@@ -5,26 +5,42 @@ import {
 } from "../core/define-graph";
 import { ValidationError } from "../errors";
 import {
+  type DynamicNode,
+  type DynamicNodeReference,
   type GraphNodeReference,
   type Node,
   type NodeRef,
 } from "../store/types";
 
 /**
- * The loose *input* form every identity facade method accepts: a whole node, a
- * bare id, or a `{ kind, id }` pair, for any node kind in the graph. Its kind
- * and id are independent, so a caller can pass what it already has without
- * re-correlating them.
+ * The accepted *input* form for every identity facade method: a whole node or
+ * a `{ kind, id }` pair for any compile-time graph kind, plus a proof-bearing
+ * node or reference produced through the runtime collection lane. Runtime
+ * values stay nominal so accepting them does not make an arbitrary
+ * `{ kind: string, id: string }` object type-safe.
  *
- * Identity *results* use the strict {@link GraphNodeReference} instead, whose
- * `kind` and branded `id` stay correlated.
+ * Identity results use {@link IdentityNodeReference}, which honestly includes
+ * runtime kinds because an evolved kind can belong to a class reached from a
+ * compile-time node.
  */
-export type IdentityNodeRefInput<G extends GraphDef> = NodeRef<AllNodeTypes<G>>;
+export type IdentityNodeRefInput<G extends GraphDef> =
+  NodeRef<AllNodeTypes<G>> | DynamicNode | DynamicNodeReference;
 
-/** A hydrated identity member, discriminated by its registered node kind. */
-export type IdentityNode<G extends GraphDef> = {
-  [K in NodeKinds<G>]: Node<G["nodes"][K]["type"]>;
-}[NodeKinds<G>];
+/**
+ * A node reference returned by Operational Identity.
+ *
+ * Identity classes can contain runtime-evolved kinds even when a read starts
+ * from a compile-time node, so results honestly include both lanes.
+ */
+export type IdentityNodeReference<G extends GraphDef> =
+  GraphNodeReference<G> | DynamicNodeReference;
+
+/** A hydrated compile-time or runtime identity member. */
+export type IdentityNode<G extends GraphDef> =
+  | {
+      [K in NodeKinds<G>]: Node<G["nodes"][K]["type"]>;
+    }[NodeKinds<G>]
+  | DynamicNode;
 
 declare const __identityAssertionId: unique symbol;
 
@@ -76,8 +92,8 @@ export type IdentityRelation = "same" | "different";
 export type IdentityAssertion<G extends GraphDef> = Readonly<{
   id: IdentityAssertionId;
   relation: IdentityRelation;
-  a: GraphNodeReference<G>;
-  b: GraphNodeReference<G>;
+  a: IdentityNodeReference<G>;
+  b: IdentityNodeReference<G>;
   validFrom: string;
   validTo?: string;
 }>;
@@ -88,11 +104,18 @@ export type IdentityAssertionResult<G extends GraphDef> = Readonly<{
   action: "created" | "existing";
 }>;
 
+/** The half-open effective-time window of an identity assertion. */
+export type IdentityValidityWindow = Readonly<{
+  validFrom?: string;
+  validTo?: string;
+}>;
+
 /** One ordered node pair handed to `bulkAssertSame` / `bulkAssertDifferent`. */
 export type IdentityPair<G extends GraphDef> = Readonly<{
   a: IdentityNodeRefInput<G>;
   b: IdentityNodeRefInput<G>;
-}>;
+}> &
+  IdentityValidityWindow;
 
 /**
  * The read half of the identity surface: equivalence-set membership,
@@ -105,10 +128,10 @@ export type IdentityPair<G extends GraphDef> = Readonly<{
 export type IdentityReadFacade<G extends GraphDef> = Readonly<{
   representativeOf: (
     ref: IdentityNodeRefInput<G>,
-  ) => Promise<GraphNodeReference<G> | undefined>;
+  ) => Promise<IdentityNodeReference<G> | undefined>;
   membersOf: (
     ref: IdentityNodeRefInput<G>,
-  ) => Promise<readonly GraphNodeReference<G>[]>;
+  ) => Promise<readonly IdentityNodeReference<G>[]>;
   nodesOf: (
     ref: IdentityNodeRefInput<G>,
   ) => Promise<readonly IdentityNode<G>[]>;
@@ -139,10 +162,12 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
     assertSame: (
       a: IdentityNodeRefInput<G>,
       b: IdentityNodeRefInput<G>,
+      window?: IdentityValidityWindow,
     ) => Promise<IdentityAssertionResult<G>>;
     assertDifferent: (
       a: IdentityNodeRefInput<G>,
       b: IdentityNodeRefInput<G>,
+      window?: IdentityValidityWindow,
     ) => Promise<IdentityAssertionResult<G>>;
     bulkAssertSame: (
       pairs: readonly IdentityPair<G>[],
@@ -165,6 +190,18 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
       ids: readonly IdentityAssertionId[],
     ) => Promise<readonly IdentityAssertion<G>[]>;
   }>;
+
+/**
+ * The assertion-only write surface of the TypeGraph Identity Profile.
+ *
+ * This deliberately excludes reads and retractions so constrained staging
+ * handles can accept incoming identity claims without exposing the broader
+ * operational identity surface.
+ */
+export type IdentityAssertionWriteFacade<G extends GraphDef> = Pick<
+  IdentityFacade<G>,
+  "assertSame" | "assertDifferent" | "bulkAssertSame" | "bulkAssertDifferent"
+>;
 
 /**
  * Per-transaction identity write counts carried by a transaction receipt.

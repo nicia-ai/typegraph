@@ -10,10 +10,11 @@ import {
   importGraph,
   importGraphStream,
 } from "../../../src/interchange";
-import { storeRuntime } from "../../../src/store/runtime-port";
+import { storeBackend, storeRuntime } from "../../../src/store/runtime-port";
 import { type Store } from "../../../src/store/store";
 import {
   createTestBackend,
+  expectAuditedBackend,
   matchingArray,
   matchingObject,
 } from "../../test-utils";
@@ -107,6 +108,13 @@ function transfer(
 
 async function seedSource(context: IntegrationTestContext) {
   const store = await context.createStore(identityInterchangeSourceGraph);
+  // `createStreamingImportTarget` below picks this suite's import target by
+  // asking `snapshotExportContention`, which answers `undefined` both for a
+  // genuinely independent backend and for one nobody audited — the same answer
+  // for opposite situations. So the fixture states which one it is in: an
+  // unaudited fixture would silently route every lane down the independent
+  // branch and the suite would still be green.
+  expectAuditedBackend(storeBackend(store));
   const alice = await store.nodes.Person.create(
     { name: "Alice" },
     { id: "alice" },

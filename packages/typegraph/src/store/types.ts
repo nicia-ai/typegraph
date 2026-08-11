@@ -4,6 +4,7 @@
 import { type z } from "zod";
 
 import {
+  type BackendValidityEndMutation,
   type EdgeRow,
   type NodeRow,
   type TransactionBackend,
@@ -29,9 +30,18 @@ import {
 } from "../core/types";
 import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
+
+/**
+ * An explicit validity-end mutation. Omission preserves the stored end,
+ * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
+ * two write actions mutually exclusive without exposing public `null`.
+ */
+export type ValidityEndMutation = BackendValidityEndMutation;
 import type {
   DynamicEdgeAccessor,
   DynamicNodeAccessor,
+  DynamicNodeKind,
+  DynamicNodeType,
 } from "../query/builder";
 import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
 import {
@@ -132,8 +142,8 @@ export type UpdateNodeInput<N extends NodeType = NodeType> = Readonly<{
   kind: N["kind"];
   id: NodeId<N>;
   props: Partial<z.infer<N["schema"]>>;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 // ============================================================
 // Edge Instance Types
@@ -188,8 +198,8 @@ export type CreateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
 export type UpdateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
   id: EdgeId<E>;
   props: Partial<z.infer<E["schema"]>>;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 // ============================================================
 // Query Options
@@ -391,9 +401,9 @@ export type BaseStoreOptions = Readonly<{
    */
   autoRefreshStatistics?: false | number;
   /**
-   * Skip the write for an `upsertById` (or `bulkUpsertById` item) whose
-   * validated props are value-identical to the existing live row. Default
-   * off.
+   * Skip the write for an `upsertById`, `bulkUpsertById` item, or endpoint
+   * get-or-create update whose validated props are value-identical to the
+   * existing live row. Default off.
    *
    * Enable this for at-least-once / replay materializers. An event log that
    * re-delivers a byte-identical change would otherwise rewrite the row anyway:
@@ -414,7 +424,12 @@ export type BaseStoreOptions = Readonly<{
    * **no write at all**: no `updateNode`, no recorded-time capture, no history
    * row, no revision-anchor advance, and no `update` operation hooks (nothing
    * happened, so nothing is reported). It resolves with the **existing** node,
-   * preserving its original `validFrom` / `updatedAt` / `version`.
+   * preserving its original `validFrom` / `updatedAt` / `version`. An endpoint
+   * get-or-create reports action `"found"` when its requested update is
+   * coalesced; `"updated"` always means an UPDATE actually ran.
+   * Node `getOrCreateByConstraint` updates are outside this option's scope and
+   * still write on every `ifExists: "update"` match; replay projectors that
+   * need coalescing should use `upsertById` for nodes.
    *
    * Receipt shape is unchanged and needs no new signal: a coalesced upsert
    * still counts as one write intent (`writes.total` includes it), but
@@ -430,9 +445,8 @@ export type BaseStoreOptions = Readonly<{
    *      batch already queued (a create or an update).
    *   2. That row is not soft-deleted (a deleted row resurrects — a real
    *      change — and is never coalesced).
-   *   3. The caller passed no explicit `validFrom` / `validTo` (an explicit
-   *      temporal override is a deliberate request and is never coalesced;
-   *      applied per item in the bulk path).
+   *   3. Any requested `validFrom` / `validTo` names the window already stored;
+   *      a changed or inapplicable temporal request reaches the write path.
    *   4. The new props, merged over the stored props and run through the
    *      kind's Zod schema (defaults applied, values normalized), are deeply
    *      value-identical to the stored props (key order aside).
@@ -759,12 +773,15 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
      */
     onImmutableLowerBound?: "preserve" | "refuse";
     /**
-     * Valid-time end for a created, updated, or resurrected edge. Ignored when
-     * the operation returns an existing edge without writing. May not precede
-     * the row's effective start; see `INVERTED_VALIDITY_WINDOW_CODE`.
+     * Valid-time end for a created, updated, or resurrected edge. `validTo` is
+     * ignored when the operation returns an existing edge without writing;
+     * `clearValidTo` instead requires `ifExists: "update"` on a live match and
+     * is refused with `CLEAR_VALID_TO_REQUIRES_UPDATE` under return mode. May
+     * not precede the row's effective start; see
+     * `INVERTED_VALIDITY_WINDOW_CODE`.
      */
-    validTo?: string;
-  }>;
+  }> &
+    ValidityEndMutation;
 
 // ============================================================
 // Collection Interfaces
@@ -782,7 +799,11 @@ export type NodeCollection<
   /**
    * Create a new node.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   create: (
     props: z.input<N["schema"]>,
@@ -801,11 +822,14 @@ export type NodeCollection<
     options?: QueryOptions,
   ) => Promise<readonly (Node<N> | undefined)[]>;
 
-  /** Update a node */
+  /**
+   * Update a node's properties and optionally set or clear its validity end.
+   * Omitting both end options preserves the stored window.
+   */
   update: (
     id: NodeId<N>,
     props: Partial<z.input<N["schema"]>>,
-    options?: Readonly<{ validTo?: string }>,
+    options?: ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -872,7 +896,11 @@ export type NodeCollection<
    * the data shape is determined at runtime, not compile time.
    * The return type is fully typed — only the input gate is relaxed.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   createFromRecord: (
     data: Record<string, unknown>,
@@ -887,9 +915,15 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. An update to a LIVE row stores no lower
-   * bound, because that row's is already history, so one naming a different
-   * instant is REFUSED (`ValidationError` carrying
+   * operation's timestamp when omitted. That default is dropped when a stated
+   * `validTo` at or before the write instant would leave the row readable at no
+   * coordinate: NO lower bound is stored ("ended at T, start unknown") and
+   * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
+   * exception, decided against the instant it samples, so one stated window
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An
+   * update to a LIVE row stores no lower bound, because that row's is already
+   * history, so one naming a different instant is REFUSED (`ValidationError`
+   * carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
    * bound the row already holds is accepted and changes nothing. Set
    * `onImmutableLowerBound: "preserve"` for event materializers whose
@@ -901,9 +935,9 @@ export type NodeCollection<
     props: z.input<N["schema"]>,
     options?: Readonly<{
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>,
+    }> &
+      ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -915,9 +949,15 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. An update to a LIVE row stores no lower
-   * bound, because that row's is already history, so one naming a different
-   * instant is REFUSED (`ValidationError` carrying
+   * operation's timestamp when omitted. That default is dropped when a stated
+   * `validTo` at or before the write instant would leave the row readable at no
+   * coordinate: NO lower bound is stored ("ended at T, start unknown") and
+   * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
+   * exception, decided against the instant it samples, so one stated window
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An
+   * update to a LIVE row stores no lower bound, because that row's is already
+   * history, so one naming a different instant is REFUSED (`ValidationError`
+   * carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
    * bound the row already holds is accepted and changes nothing. Set
    * `onImmutableLowerBound: "preserve"` for create/resurrection-only input.
@@ -927,9 +967,9 @@ export type NodeCollection<
     data: Record<string, unknown>,
     options?: Readonly<{
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>,
+    }> &
+      ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -938,7 +978,11 @@ export type NodeCollection<
    * More efficient than calling create() multiple times.
    * Use `bulkInsert` for the dedicated fast path that skips returning results.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkCreate: (
     items: readonly Readonly<{
@@ -963,7 +1007,12 @@ export type NodeCollection<
    *
    * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
    * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. An update to a LIVE row stores no lower
+   * operation's timestamp when omitted. That default is dropped when a stated
+   * `validTo` at or before the write instant would leave the row readable at no
+   * coordinate: NO lower bound is stored ("ended at T, start unknown") and
+   * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
+   * exception, decided against the instant it samples, so one stated window
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An update to a LIVE row stores no lower
    * bound, because that row's is already history, so one naming a different
    * instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
@@ -985,13 +1034,13 @@ export type NodeCollection<
    * claim) or to apply those items as sequential `upsertById` calls.
    */
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: string;
       props: z.input<N["schema"]>;
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>[],
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<Node<N>[]>;
 
   /**
@@ -1001,7 +1050,11 @@ export type NodeCollection<
    * with `returnResults: false`, the intent is unambiguous: no results
    * are returned and the operation is wrapped in a transaction.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkInsert: (
     items: readonly Readonly<{
@@ -1170,7 +1223,11 @@ export type EdgeCollection<
   /**
    * Create a new edge.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    *
    * @param from - Source node (must be one of the allowed 'from' types)
    * @param to - Target node (must be one of the allowed 'to' types)
@@ -1194,11 +1251,14 @@ export type EdgeCollection<
     options?: QueryOptions,
   ) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
 
-  /** Update an edge's properties */
+  /**
+   * Update an edge's properties and optionally set or clear its validity end.
+   * Reopening a `oneActive` edge rechecks cardinality before the write.
+   */
   update: (
     id: EdgeId<E>,
     props: Partial<z.input<E["schema"]>>,
-    options?: Readonly<{ validTo?: string }>,
+    options?: ValidityEndMutation,
   ) => Promise<Edge<E, From, To>>;
 
   /**
@@ -1349,7 +1409,11 @@ export type EdgeCollection<
    * More efficient than calling create() multiple times.
    * Use `bulkInsert` for the dedicated fast path that skips returning results.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkCreate: (
     items: readonly Readonly<{
@@ -1377,11 +1441,16 @@ export type EdgeCollection<
    * is refused with `ValidationError` carrying
    * `EDGE_IDENTITY_MISMATCH_CODE`; it is never silently ignored.
    *
-   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
-   * a tombstoned one — both write a fresh validity window — defaulting to the
-   * operation's timestamp when omitted. An update to a LIVE row stores no lower
-   * bound, because that row's is already history, so one naming a different
-   * instant is REFUSED (`ValidationError` carrying
+   * `validFrom` applies when the upsert CREATES the edge and when it RESURRECTS
+   * a tombstoned one. A create writes a fresh validity window, defaulting to the
+   * operation's timestamp when omitted — unless a stated `validTo` at or before
+   * that instant would leave the row readable at no coordinate, in which case NO
+   * lower bound is stored ("ended at T, start unknown") and `meta.validFrom`
+   * reads back as `undefined`. A resurrection stamps nothing: an edge RETAINS
+   * its stored lower bound unless the item names a new one, so a `validTo`
+   * before the retained bound is REFUSED rather than stamped over. An update to
+   * a LIVE row stores no lower bound, because that row's is already history, so
+   * one naming a different instant is REFUSED (`ValidationError` carrying
    * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
    * bound the row already holds is accepted and changes nothing.
    *
@@ -1398,14 +1467,14 @@ export type EdgeCollection<
    * (free the slot, then claim it) or to apply those items individually.
    */
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: EdgeId<E>;
       from: NodeRef<From>;
       to: NodeRef<To>;
       props?: z.input<E["schema"]>;
       validFrom?: string;
-      validTo?: string;
-    }>[],
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<Edge<E, From, To>[]>;
 
   /**
@@ -1415,7 +1484,11 @@ export type EdgeCollection<
    * with `returnResults: false`, the intent is unambiguous: no results
    * are returned and the operation is wrapped in a transaction.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkInsert: (
     items: readonly Readonly<{
@@ -1472,8 +1545,13 @@ export type EdgeCollection<
    * property fields, only edges whose properties match on those fields are considered.
    * Soft-deleted matches are resurrected when cardinality allows.
    *
-   * `validFrom` applies on the create and RESURRECT branches, defaulting to the
-   * operation's creation timestamp when omitted. On the `ifExists: "update"`
+   * `validFrom` applies on the create and RESURRECT branches. A create defaults
+   * it to the operation's creation timestamp when omitted — unless a stated
+   * `validTo` at or before that instant would leave the row readable at no
+   * coordinate, in which case no lower bound is stored ("ended at T, start
+   * unknown"). A resurrection stamps nothing: an edge RETAINS its stored lower
+   * bound unless the call names a new one, so a `validTo` before the retained
+   * bound is REFUSED rather than stamped over. On the `ifExists: "update"`
    * branch a live edge's lower bound is history and cannot be stored, so a
    * `validFrom` naming a different instant is REFUSED (`ValidationError`
    * carrying `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`); restating the bound the
@@ -1501,14 +1579,14 @@ export type EdgeCollection<
    * Atomic when the backend supports transactions.
    */
   bulkGetOrCreateByEndpoints: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       from: NodeRef<From>;
       to: NodeRef<To>;
       props: z.input<E["schema"]>;
       validFrom?: string;
-      validTo?: string;
       onImmutableLowerBound?: "preserve" | "refuse";
-    }>[],
+    }> &
+      ValidityEndMutation)[],
     options?: Pick<
       EdgeGetOrCreateByEndpointsOptions<E>,
       "matchOn" | "ifExists"
@@ -1888,7 +1966,9 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
    * `Store.getNodeCollection`. Returns `undefined` when `kind` is not
    * registered in this graph.
    */
-  getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
+  getNodeCollection: <const K extends string>(
+    kind: K,
+  ) => DynamicNodeCollection<K> | undefined;
 }> &
   (G["identity"] extends GraphIdentityConfig ?
     Readonly<{ identity: IdentityFacade<G> }>
@@ -1969,6 +2049,23 @@ export type MeasurableAdapterTransactionContext<
 // ============================================================
 
 /**
+ * A node returned by a runtime string-keyed collection.
+ *
+ * Its nominal node-type brand proves the value passed through the dynamic
+ * collection API while its properties remain runtime-schema-shaped.
+ */
+export type DynamicNode<K extends string = string> = Node<DynamicNodeType<K>>;
+
+declare const DYNAMIC_NODE_REFERENCE_BRAND: unique symbol;
+
+/** A nominal lightweight reference returned by runtime-aware identity reads. */
+export type DynamicNodeReference<K extends string = string> = Readonly<{
+  kind: DynamicNodeKind<K>;
+  id: NodeId<DynamicNodeType<K>>;
+  [DYNAMIC_NODE_REFERENCE_BRAND]: true;
+}>;
+
+/**
  * Replace branded `NodeId` / `EdgeId` with plain `string` in each
  * method's parameter list. Return types are preserved unchanged.
  *
@@ -2004,16 +2101,16 @@ type UnbrandRecord<T extends Record<string, unknown>> = {
  * A node collection with widened generics for runtime string-keyed access.
  *
  * This is the return type of `store.getNodeCollection(kind)`. It exposes
- * the full `NodeCollection` API but with `NodeType` and `string` constraint
- * names instead of the specific generic parameters, since the concrete type
- * is not known at compile time.
+ * the full `NodeCollection` API but with a nominal `DynamicNodeType` and
+ * `string` constraint names instead of the specific generic parameters, since
+ * the concrete type is not known at compile time.
  *
  * ID parameters accept plain `string` instead of branded `NodeId<N>`, since
  * the dynamic path typically receives IDs from edge metadata, snapshots,
  * or external input where the brand is not available.
  */
-export type DynamicNodeCollection = WidenBrandedIds<
-  NodeCollection<NodeType, string>
+export type DynamicNodeCollection<K extends string = string> = WidenBrandedIds<
+  NodeCollection<DynamicNodeType<K>, string>
 >;
 
 /**
