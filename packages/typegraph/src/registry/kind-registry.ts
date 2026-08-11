@@ -31,21 +31,23 @@ const ENCODED_DISJOINT_PAIR_PREFIX = "\u001Epair\u001E";
  * Encodes one string with its UTF-16 length, so adjacent values retain their
  * boundary even when either value contains punctuation used by older labels.
  */
-function lengthPrefix(value: string): string {
+function encodeLengthPrefixed(value: string): string {
   return `${value.length}:${value}`;
 }
 
 /**
  * Builds the canonical label of an unordered pair of kinds: the two names in
- * code-point order, length-prefixed and concatenated.
+ * code-point order. Existing unambiguous pairs retain their historical
+ * separator-joined form; pairs containing that separator use length prefixes.
  *
  * Order-independence is the whole point — `A⊥B` and `B⊥A` are one fact, so
  * they must be one string. {@link KindRegistry.disjointPairLabel} exposes it,
  * {@link computeDisjointPairs} writes the set with it, and the disjointness
  * claim axis folds it.
  */
-function disjointPairLabel(a: string, b: string): string {
-  const [first, second] = a < b ? [a, b] : [b, a];
+function disjointPairLabel(leftKind: string, rightKind: string): string {
+  const [first, second] =
+    leftKind < rightKind ? [leftKind, rightKind] : [rightKind, leftKind];
   if (
     !first.includes(DISJOINT_PAIR_SEPARATOR) &&
     !second.includes(DISJOINT_PAIR_SEPARATOR)
@@ -54,20 +56,20 @@ function disjointPairLabel(a: string, b: string): string {
     // closure documents and schema hashes — wherever it is already injective.
     return `${first}${DISJOINT_PAIR_SEPARATOR}${second}`;
   }
-  return `${ENCODED_DISJOINT_PAIR_PREFIX}${lengthPrefix(first)}${lengthPrefix(second)}`;
+  return `${ENCODED_DISJOINT_PAIR_PREFIX}${encodeLengthPrefixed(first)}${encodeLengthPrefixed(second)}`;
 }
 
-/** Reads one value produced by {@link lengthPrefix}. */
+/** Reads one value produced by {@link encodeLengthPrefixed}. */
 function readLengthPrefixed(
   label: string,
   offset: number,
 ): Readonly<{ value: string; nextOffset: number }> {
-  const separator = label.indexOf(":", offset);
-  const lengthText = label.slice(offset, separator);
-  if (separator === -1 || !/^\d+$/u.test(lengthText)) {
+  const lengthSeparator = label.indexOf(":", offset);
+  const lengthText = label.slice(offset, lengthSeparator);
+  if (lengthSeparator === -1 || !/^\d+$/u.test(lengthText)) {
     throw new Error(`Invalid disjoint-pair label ${JSON.stringify(label)}.`);
   }
-  const start = separator + 1;
+  const start = lengthSeparator + 1;
   const end = start + Number(lengthText);
   if (end > label.length) {
     throw new Error(`Invalid disjoint-pair label ${JSON.stringify(label)}.`);
@@ -78,8 +80,8 @@ function readLengthPrefixed(
 /** The inverse of {@link disjointPairLabel}, so only one place knows the form. */
 function disjointPairMembers(label: string): readonly [string, string] {
   if (!label.startsWith(ENCODED_DISJOINT_PAIR_PREFIX)) {
-    const parts = label.split(DISJOINT_PAIR_SEPARATOR);
-    return [requireDefined(parts[0]), requireDefined(parts[1])];
+    const [first, second] = label.split(DISJOINT_PAIR_SEPARATOR);
+    return [requireDefined(first), requireDefined(second)];
   }
   const first = readLengthPrefixed(label, ENCODED_DISJOINT_PAIR_PREFIX.length);
   const second = readLengthPrefixed(label, first.nextOffset);

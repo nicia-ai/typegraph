@@ -114,13 +114,22 @@ export type UniquenessClaimTarget = Readonly<{
   crossKind: boolean;
 }>;
 
+/** The kinds one uniqueness claim axis spans, in canonical order. */
+function uniquenessClaimKinds(
+  kind: string,
+  scope: UniquenessScope,
+  registry: KindRegistry,
+): readonly string[] {
+  return scope === "kind" ? [kind] : subClassComponent(kind, registry);
+}
+
 /** THE decision above — the one owner of both readings. */
 export function uniquenessClaimTarget(
   kind: string,
   scope: UniquenessScope,
   registry: KindRegistry,
 ): UniquenessClaimTarget {
-  const kinds = scope === "kind" ? [kind] : subClassComponent(kind, registry);
+  const kinds = uniquenessClaimKinds(kind, scope, registry);
   return { axis: kinds[0] ?? kind, crossKind: kinds.length > 1 };
 }
 
@@ -164,8 +173,7 @@ export function uniquenessProbeKinds(
   registry: KindRegistry,
 ): readonly string[] {
   const axis = uniquenessClaimAxis(kind, scope, registry);
-  const coveredKinds =
-    scope === "kind" ? [kind] : subClassComponent(kind, registry);
+  const coveredKinds = uniquenessClaimKinds(kind, scope, registry);
   const rest = coveredKinds
     .filter((candidate) => candidate !== axis)
     .toSorted((left, right) => compareStrings(left, right));
