@@ -15,6 +15,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 const WORKFLOW_PATH = fileURLToPath(
   new URL("../../../.github/workflows/ci.yml", import.meta.url),
 );
+const RELEASE_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../.github/workflows/release.yml", import.meta.url),
+);
 const METADATA_PREDICATE_PATH = fileURLToPath(
   new URL(
     "../../../.github/scripts/is-release-metadata-only.sh",
@@ -98,6 +101,14 @@ describe("CI workflow contract", () => {
     expect(workflow).toMatch(
       /test-coverage:[\s\S]*?timeout-minutes: 30[\s\S]*?strategy:/,
     );
+  });
+
+  it("gives CI and release declaration builds enough worker heap", () => {
+    for (const workflowPath of [WORKFLOW_PATH, RELEASE_WORKFLOW_PATH]) {
+      expect(readFileSync(workflowPath, "utf8")).toContain(
+        "NODE_OPTIONS: --max-old-space-size=6144",
+      );
+    }
   });
 
   it("detects metadata-only changes on pushes and pull requests", () => {
