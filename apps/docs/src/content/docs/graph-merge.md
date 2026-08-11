@@ -837,6 +837,7 @@ schema validation, edge endpoint checks, disjointness, and edge cardinality
 still apply immediately.
 
 ```typescript
+import { asNodeId } from "@nicia-ai/typegraph";
 import {
   applyMergePlan,
   asBranchId,
@@ -844,6 +845,7 @@ import {
   planMergeIncremental,
   unwrap,
 } from "@nicia-ai/typegraph/graph-merge";
+import { importGraph } from "@nicia-ai/typegraph/interchange";
 
 const incoming = unwrap(
   await ingestionBranch(base, makeBackend, {
@@ -851,10 +853,16 @@ const incoming = unwrap(
   }),
 );
 
-const alias = await incoming.nodes.Patient.create(
-  { name: "Ana Rivera", cohort: "C1", mrn: "MRN-123" },
-  { id: "incoming-patient" },
+const imported = await importGraph(incoming, providerDocument, {
+  onConflict: "error",
+  onUnknownProperty: "error",
+});
+if (!imported.success) throw new Error("Provider import was rejected");
+
+const alias = await incoming.nodes.Patient.getById(
+  asNodeId("incoming-patient"),
 );
+if (alias === undefined) throw new Error("Imported patient was not found");
 
 // `canonicalPatient` is an existing Patient read from the base before forking.
 // The repeated MRN and its identity evidence can be staged together.
@@ -880,6 +888,11 @@ const plan = unwrap(
 const applied = unwrap(await applyMergePlan(base, plan));
 await incoming.close();
 ```
+
+Both `importGraph()` and `importGraphStream()` accept the returned handle, so an
+interchange document can be staged without a hand-written collection copy loop.
+Import remains the single owner of node-first ordering, validity windows, edge
+endpoint order and reference validation.
 
 On an identity-enabled graph, the handle also exposes an assertion-only
 `IdentityAssertionWriteFacade` as `identity`: `assertSame`, `assertDifferent`,

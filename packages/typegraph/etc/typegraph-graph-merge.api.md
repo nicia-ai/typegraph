@@ -2207,7 +2207,10 @@ type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint"
 const INGESTION_BRANCH_BRAND: unique symbol;
 
 // @public
-export type IngestionBranch<G extends GraphDef> = Readonly<{
+const INGESTION_IMPORT_TARGET_BRAND: unique symbol;
+
+// @public
+export type IngestionBranch<G extends GraphDef> = IngestionImportTarget<G> & Readonly<{
     [INGESTION_BRANCH_BRAND]: true;
     id: BranchId;
     base: BaseVersion;
@@ -2220,6 +2223,11 @@ export type IngestionBranch<G extends GraphDef> = Readonly<{
 
 // @public
 export function ingestionBranch<G extends GraphDef>(baseStore: GraphBranch<G>["store"], makeBackend: MakeBackend, options?: BranchOptions): Promise<Result<IngestionBranch<G>, BranchError>>;
+
+// @public
+export type IngestionImportTarget<G extends GraphDef> = Readonly<{
+    [INGESTION_IMPORT_TARGET_BRAND]: G;
+}>;
 
 // @public
 export type IngestionNodeCollections<G extends GraphDef> = Readonly<{

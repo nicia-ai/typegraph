@@ -8,6 +8,7 @@
  * active during staging.
  */
 
+import { registerIngestionImportTarget } from "../interchange/ingestion-import-target";
 import { branch } from "./branch";
 import { BranchError } from "./errors";
 import type { Result } from "./result";
@@ -97,6 +98,7 @@ export async function ingestionBranch<G extends GraphDef>(
       close: async (): Promise<void> => storeBackend(store).close(),
     }) as unknown as IngestionBranch<G>;
     PRIVATE_BRANCHES.set(handle, privateBranch);
+    registerIngestionImportTarget(handle, store);
     return ok(handle);
   } catch (error) {
     return err(

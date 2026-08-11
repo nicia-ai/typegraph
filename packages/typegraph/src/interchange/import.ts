@@ -109,6 +109,10 @@ import {
 } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { encodeTupleKey } from "../utils/tuple-key";
+import {
+  type IngestionImportTarget,
+  resolveIngestionImportTarget,
+} from "./ingestion-import-target";
 import { exportStreamBackend } from "./stream-source";
 import {
   type GraphData,
@@ -131,8 +135,12 @@ import {
 // Import Function
 // ============================================================
 
+/** A normal Store or an opaque ingestion branch that interchange may stage. */
+export type ImportTarget<G extends GraphDef> =
+  Store<G> | IngestionImportTarget<G>;
+
 /**
- * Import graph data into a store.
+ * Import graph data into a store or opaque ingestion branch.
  *
  * Nodes are imported first to satisfy edge reference validation.
  * The import runs within a transaction for atomicity when supported.
@@ -145,7 +153,7 @@ import {
  * connection is therefore refused on the first chunk instead of nesting a write
  * transaction inside the export's open snapshot.
  *
- * @param store - The graph store to import into
+ * @param target - The graph store or ingestion branch to import into
  * @param data - Graph data in interchange format
  * @param options - Import configuration
  * @returns Import statistics and any errors
@@ -161,10 +169,11 @@ import {
  * ```
  */
 export async function importGraph<G extends GraphDef>(
-  store: Store<G>,
+  target: ImportTarget<G>,
   data: GraphData,
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
+  const store = resolveIngestionImportTarget<G>(target);
   // Parse ONCE at the public boundary: schema defaults (batchSize, ...)
   // only exist after parsing, and every internal stage reads them
   // directly.
@@ -357,10 +366,11 @@ async function importGraphData<G extends GraphDef>(
  * `backend/transaction-resource.ts`.
  */
 export async function importGraphStream<G extends GraphDef>(
-  store: Store<G>,
+  target: ImportTarget<G>,
   chunks: AsyncIterable<GraphInterchangeChunk>,
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
+  const store = resolveIngestionImportTarget<G>(target);
   const options = ImportOptionsSchema.parse(rawOptions);
   const sourceBackend = exportStreamBackend(chunks);
   const targetBackend = storeBackend(store);
