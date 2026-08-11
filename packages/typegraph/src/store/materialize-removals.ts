@@ -9,7 +9,10 @@
  * deferrable. Candidates run sequentially because they share one graph lock.
  */
 import { type RawBackend } from "../backend/branded";
-import { buildHardDeleteEdgeClaimsByEdgeKind } from "../backend/drizzle/operations/edge-claims";
+import {
+  buildHardDeleteEdgeClaimsByEdgeKind,
+  buildHardDeleteEdgeClaimsByNodeKind,
+} from "../backend/drizzle/operations/edge-claims";
 import { buildHardDeleteUniquesByConcreteKind } from "../backend/drizzle/operations/uniques";
 import {
   type GraphBackend,
@@ -557,8 +560,7 @@ async function closeRecordedAndDeleteLiveRows(
   // Same tolerance `clearGraph` gives the relation: a database bootstrapped
   // before edge claims existed has no such table, and reaping a removed kind's
   // housekeeping rows must not be the operation that fails on it.
-  const reapsEdgeClaims =
-    row.entity === "edge" && (await target.tableExists(ctx.edgeClaimsTable));
+  const reapsEdgeClaims = await target.tableExists(ctx.edgeClaimsTable);
   const deleteStatements = buildRemovedKindLiveDeleteStatements(
     ctx,
     row,
@@ -596,8 +598,9 @@ async function closeRecordedAndDeleteLiveRows(
 /**
  * The live rows a removed kind leaves behind, as statements.
  *
- * Neither claim family is spelled here — the edge claims come from
- * `buildHardDeleteEdgeClaimsByEdgeKind` for the same reason as the node ones.
+ * Neither claim family is spelled here — edge claims come from the two
+ * ownership builders in `operations/edge-claims`, one for edges of a removed
+ * edge kind and one for edges connected to a removed node kind.
  * The uniqueness claims are NOT spelled here: which claims a kind owns is one
  * predicate with one owner, `buildHardDeleteUniquesByConcreteKind`, and this is
  * its second consumer. Filtering on `node_kind` — the claim AXIS — instead would
@@ -614,6 +617,17 @@ function buildRemovedKindLiveDeleteStatements(
   const kindLit = literal(row.kindName);
   if (row.entity === "node") {
     return [
+      // Must precede the edge delete: ownership is discovered by selecting the
+      // connected edge ids, which no longer exist afterward.
+      ...(reapsEdgeClaims ?
+        [
+          buildHardDeleteEdgeClaimsByNodeKind(
+            ctx.edgeClaimsTable,
+            ctx.edgesTable,
+            { graphId: ctx.graphId, nodeKind: row.kindName },
+          ),
+        ]
+      : []),
       sql.raw(
         `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
       ),

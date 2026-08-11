@@ -220,9 +220,17 @@ describe("Postgres concurrent CREATE DDL", () => {
   // `pg_extension_name_index` — but the resource is database-global while the
   // index-materialization claim protecting it is per-index, so two
   // materializers building DIFFERENT trigram indexes both reach it.
+  //
+  // These cases run on a `transactions: false` backend, which is the shape that
+  // has no transaction to hang the advisory-lock fence on and therefore relies
+  // on the retry alone. The locked shape is
+  // `tests/postgres-trigram-extension-lock.test.ts`.
   it("installs an extension when a concurrent installer wins the catalog race", async () => {
     const { db, attempts } = stubPostgresDatabase({ failFirstAttempt: true });
-    const backend = createPostgresBackend(db, { vector: false });
+    const backend = createPostgresBackend(db, {
+      capabilities: { transactions: false },
+      vector: false,
+    });
 
     await expect(
       requireDefined(backend.ensureExtension)("pg_trgm"),
@@ -236,7 +244,10 @@ describe("Postgres concurrent CREATE DDL", () => {
 
   it("issues the extension statement once when nothing is racing it", async () => {
     const { db, attempts } = stubPostgresDatabase({ failFirstAttempt: false });
-    const backend = createPostgresBackend(db, { vector: false });
+    const backend = createPostgresBackend(db, {
+      capabilities: { transactions: false },
+      vector: false,
+    });
 
     await requireDefined(backend.ensureExtension)("vector");
 
@@ -272,7 +283,10 @@ describe("Postgres concurrent CREATE DDL", () => {
         );
       },
     } as unknown as AnyPgDatabase;
-    const backend = createPostgresBackend(db, { vector: false });
+    const backend = createPostgresBackend(db, {
+      capabilities: { transactions: false },
+      vector: false,
+    });
 
     await expect(
       requireDefined(backend.ensureExtension)("pg_trgm"),

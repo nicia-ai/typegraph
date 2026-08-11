@@ -23,6 +23,7 @@ import {
   type SerializedSchema,
   serializeSchema,
 } from "../src/schema";
+import { disjointnessClaimAxis } from "../src/store/claims/axis";
 import { matchingArray, matchingObject } from "./test-utils";
 
 const emptySchema = z.object({});
@@ -273,6 +274,34 @@ describe("ontology truth and hardening", () => {
     const closures = computeClosuresFromNamedOntology(ontology);
     expect([...closures.disjointPairs]).toEqual(["Alpha|Beta"]);
     expect(closures.equivalenceSets.get("Alpha")?.has("Gamma")).toBe(false);
+  });
+
+  it("keeps disjoint pairs injective when kind names contain pipes", () => {
+    const A = defineNode("A", { schema: emptySchema });
+    const BPipeC = defineNode("B|C", { schema: emptySchema });
+    const APipeB = defineNode("A|B", { schema: emptySchema });
+    const C = defineNode("C", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "injective-disjoint-pairs",
+      nodes: {
+        A: { type: A },
+        "B|C": { type: BPipeC },
+        "A|B": { type: APipeB },
+        C: { type: C },
+      },
+      edges: {},
+      ontology: [disjointWith(A, BPipeC), disjointWith(APipeB, C)],
+    });
+    const registry = buildKindRegistry(graph);
+
+    expect(registry.disjointKindPairs()).toEqual([
+      ["A", "B|C"],
+      ["A|B", "C"],
+    ]);
+    expect(disjointnessClaimAxis("A", "B|C", registry)).not.toBe(
+      disjointnessClaimAxis("A|B", "C", registry),
+    );
+    expect(registry.areDisjoint("A", "C")).toBe(false);
   });
 
   it("serializes lazy equivalence-set views as complete member lists", () => {

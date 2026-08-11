@@ -29,6 +29,10 @@ import {
   subClassOf,
   UniquenessError,
 } from "../../../src";
+import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../../../src/backend/derive-backend";
 import { type GraphBackend } from "../../../src/backend/types";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -70,21 +74,24 @@ const healthGraph = defineGraph({
 
 /** The same backend with the uniqueness PROBE blinded, so the claim refuses. */
 function backendWithoutUniquenessProbe(backend: GraphBackend): GraphBackend {
-  return {
-    ...backend,
+  // Over a PROJECTION, not over the store's own backend object: that one is
+  // frozen, and a decoration Proxy cannot shadow a non-configurable member.
+  // `projectGraphBackend` is the audited way to get an unfrozen copy.
+  return deriveBackend(projectGraphBackend(backend), {
     checkUnique: () => Promise.resolve(undefined),
     checkUniqueBatch: () => Promise.resolve([]),
     transaction: (run, options) =>
       backend.transaction(
         (target) =>
-          run({
-            ...target,
-            checkUnique: () => Promise.resolve(undefined),
-            checkUniqueBatch: () => Promise.resolve([]),
-          }),
+          run(
+            deriveBackend(target, {
+              checkUnique: () => Promise.resolve(undefined),
+              checkUniqueBatch: () => Promise.resolve([]),
+            }),
+          ),
         options,
       ),
-  };
+  });
 }
 
 export function registerConstraintFenceTransactionHealthTests(

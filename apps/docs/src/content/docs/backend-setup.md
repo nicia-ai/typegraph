@@ -984,9 +984,11 @@ relation** whose primary key admits one live claimant per axis: `uniques` (for
 uniqueness scopes and `disjointWith` pairs) and `typegraph_edge_claims` (for
 `cardinality: "one" | "unique" | "oneActive"`). Both bundled backends carry them
 and report `capabilities.constraintClaims: true`. The claim is what makes those
-constraints hold for writers that hold no lock at all — `importGraph` is the one
-in the box — and what makes an out-of-band writer using raw SQL against the same
-tables collide rather than corrupt.
+constraints hold for TypeGraph writers that hold no per-graph lock at all —
+`importGraph` is the one in the box. The protocol is application-maintained:
+raw SQL that writes only `nodes` or `edges` bypasses the corresponding claim
+write and can violate the declaration. An out-of-band writer is fenced only if
+it participates in the same claim protocol in the same transaction.
 
 Three properties of that mechanism are worth knowing before you rely on it:
 

@@ -123,10 +123,10 @@ const INVENTORY: readonly InventoryEntry[] = [
       "A history store exposes a deliberately narrower port than a live one; the allowlist is what makes the narrowing a decision rather than an omission.",
   },
   {
-    file: "store/operations/edge-operations.ts",
+    file: "store/operations/edge-batch-validation.ts",
     line: "const validationBackend = deriveBackend(backend, {",
     reason:
-      "Edge endpoint validation reads through the caller's write target, so the reads it issues must see that target's uncommitted rows.",
+      "In-batch cardinality accounting reads through the caller's write target, so the reads it issues must see that target's uncommitted rows.",
   },
   {
     file: "store/operations/node-operations.ts",

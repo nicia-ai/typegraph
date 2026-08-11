@@ -17,11 +17,11 @@
  *
  * It is a read overlay only. The CLAIM is issued against the real backend, once
  * per batch, by the caller — a claim against this wrapper would still reach the
- * real target (`createBackendOverlay` forwards every non-overlaid member) but
+ * real target (`deriveBackend` forwards every non-overlaid member) but
  * would be a second, unsorted, per-row claim in addition to the batch's.
  */
+import { deriveBackend } from "../../backend/derive-backend";
 import {
-  createBackendOverlay,
   type GraphBackend,
   type InsertEdgeParams,
   type TransactionBackend,
@@ -208,7 +208,7 @@ export function createEdgeBatchValidationBackend(
     }
   }
 
-  const validationBackend = createBackendOverlay(backend, {
+  const validationBackend = deriveBackend(backend, {
     getNode: getNodeCached,
     countEdgesFrom: countEdgesFromCached,
     edgeExistsBetween: edgeExistsBetweenCached,

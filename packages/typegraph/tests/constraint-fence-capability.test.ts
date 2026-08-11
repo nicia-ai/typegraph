@@ -40,6 +40,10 @@ import {
   type GraphBackend,
   subClassOf,
 } from "../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import {
@@ -618,16 +622,21 @@ type ClaimMembers = Readonly<{
   hardDeleteUniquesByConcreteKind?: unknown;
 }>;
 
-/** Removes the claim members from one object, leaving everything else alone. */
+/**
+ * Removes the claim members from one object, leaving everything else alone.
+ *
+ * Through `projectBackendWithout` rather than a rest destructure: the omission
+ * seam carries the source's serialized-resource verdict onto the narrowed
+ * object, and it retains prototype and non-enumerable members a destructure
+ * would silently drop (#435). A member the source does not carry stays absent.
+ */
 function stripClaimMembers<T extends object>(target: T): T {
-  const {
-    claimEdgeCardinality: _claim,
-    claimEdgeCardinalityBatch: _claimBatch,
-    purgeEdgeClaims: _purge,
-    hardDeleteUniquesByConcreteKind: _reap,
-    ...rest
-  } = target as T & ClaimMembers;
-  return rest as T;
+  return projectBackendWithout(target as T & ClaimMembers, [
+    "claimEdgeCardinality",
+    "claimEdgeCardinalityBatch",
+    "purgeEdgeClaims",
+    "hardDeleteUniquesByConcreteKind",
+  ]) as T;
 }
 
 /**
@@ -637,22 +646,22 @@ function stripClaimMembers<T extends object>(target: T): T {
  * transaction backend, not the outer one.
  */
 function withoutClaimSupport(backend: GraphBackend): GraphBackend {
-  return {
-    ...stripClaimMembers(backend),
+  return deriveBackend(stripClaimMembers(backend), {
     capabilities: { ...backend.capabilities, constraintClaims: false },
     transaction: (run, options) =>
       backend.transaction(
         (target) =>
-          run({
-            ...stripClaimMembers(target),
-            capabilities: {
-              ...target.capabilities,
-              constraintClaims: false,
-            },
-          }),
+          run(
+            deriveBackend(stripClaimMembers(target), {
+              capabilities: {
+                ...target.capabilities,
+                constraintClaims: false,
+              },
+            }),
+          ),
         options,
       ),
-  };
+  });
 }
 
 describe("a backend that declares no claim support", () => {
@@ -696,22 +705,22 @@ describe("a backend that declares no claim support", () => {
       const db = drizzle(sqlite);
       for (const statement of generateSqliteDDL()) sqlite.exec(statement);
       const real = createSqliteBackend(db);
-      const undeclared: GraphBackend = {
-        ...real,
+      const undeclared: GraphBackend = deriveBackend(real, {
         capabilities: { ...real.capabilities, constraintClaims: false },
         transaction: (run, options) =>
           real.transaction(
             (target) =>
-              run({
-                ...target,
-                capabilities: {
-                  ...target.capabilities,
-                  constraintClaims: false,
-                },
-              }),
+              run(
+                deriveBackend(target, {
+                  capabilities: {
+                    ...target.capabilities,
+                    constraintClaims: false,
+                  },
+                }),
+              ),
             options,
           ),
-      };
+      });
       const store = createStore(graph, undeclared);
 
       const alice = await store.nodes.Person.create({ name: "Alice" });
@@ -741,14 +750,14 @@ describe("a backend that declares no claim support", () => {
       // Declares support, ships without one member: a projection that dropped
       // an allowlist entry looks exactly like this, and reading only the
       // capability would report a fence this object cannot hold.
-      const mismatched: GraphBackend = {
-        ...real,
+      const mismatched: GraphBackend = deriveBackend(real, {
         transaction: (run, options) =>
-          real.transaction((target) => {
-            const { claimEdgeCardinality: _dropped, ...rest } = target;
-            return run(rest);
-          }, options),
-      };
+          real.transaction(
+            (target) =>
+              run(projectBackendWithout(target, ["claimEdgeCardinality"])),
+            options,
+          ),
+      });
       const store = createStore(graph, mismatched);
 
       const alice = await store.nodes.Person.create({ name: "Alice" });

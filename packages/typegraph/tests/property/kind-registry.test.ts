@@ -707,4 +707,28 @@ describe("computeClosuresFromOntology Properties", () => {
       true,
     );
   });
+
+  it("precomputes one subclass component shared by every member", () => {
+    const relations = [
+      createRelation("Employee", META_EDGE_SUB_CLASS_OF, "Alpha"),
+      createRelation("Employee", META_EDGE_SUB_CLASS_OF, "Zeta"),
+      createRelation("Contractor", META_EDGE_SUB_CLASS_OF, "Zeta"),
+    ];
+    const nodeKinds = new Map(
+      ["Alpha", "Contractor", "Employee", "Zeta"].map((kind) => [
+        kind,
+        getNodeType(kind),
+      ]),
+    );
+    const registry = new KindRegistry(
+      nodeKinds,
+      new Map(),
+      computeClosuresFromOntology(relations),
+    );
+
+    const component = registry.getSubClassComponent("Employee");
+    expect(component).toEqual(["Alpha", "Contractor", "Employee", "Zeta"]);
+    expect(registry.getSubClassComponent("Alpha")).toBe(component);
+    expect(registry.getSubClassComponent("Zeta")).toBe(component);
+  });
 });

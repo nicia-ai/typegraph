@@ -16,14 +16,12 @@
  */
 import { type Column, type SQL, sql } from "drizzle-orm";
 
-import {
-  getKindsForUniquenessCheck,
-  subClassComponent,
-} from "../../constraints";
+import { subClassComponent } from "../../constraints";
 import { type UniquenessScope } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStrings } from "../../utils/compare";
+import { encodeTupleKey } from "../../utils/tuple-key";
 
 /**
  * The one code point an axis component may not contain, written as an escape
@@ -151,12 +149,11 @@ export function uniquenessClaimAxis(
  * Two things make this list wider than the axis alone and narrower than
  * arbitrary:
  *
- * - The axis is where this version writes, so it is read first; it is included
- *   even when it is not a member of {@link getKindsForUniquenessCheck}'s set,
- *   which happens on a multi-root hierarchy where that set walks one root.
+ * - The axis is where this version writes, so it is read first.
  * - Rows written before the axis move sit under their own concrete kind, so the
- *   probe keeps visiting every kind in scope. That is what makes the axis move
- *   need no data migration.
+ *   probe visits the full undirected component, including every root of a
+ *   multi-root hierarchy. That is what makes the axis move need no data
+ *   migration.
  *
  * The remainder is sorted rather than left in registry-iteration order so two
  * processes reading the same scope read it in the same order.
@@ -167,7 +164,9 @@ export function uniquenessProbeKinds(
   registry: KindRegistry,
 ): readonly string[] {
   const axis = uniquenessClaimAxis(kind, scope, registry);
-  const rest = getKindsForUniquenessCheck(kind, scope, registry)
+  const coveredKinds =
+    scope === "kind" ? [kind] : subClassComponent(kind, registry);
+  const rest = coveredKinds
     .filter((candidate) => candidate !== axis)
     .toSorted((left, right) => compareStrings(left, right));
   return [axis, ...rest];
@@ -256,6 +255,21 @@ export function isSameClaimOwner(left: ClaimOwner, right: ClaimOwner): boolean {
   return (
     left.nodeId === right.nodeId && left.concreteKind === right.concreteKind
   );
+}
+
+/**
+ * THE Set/Map key rendering of {@link isSameClaimOwner}, for a path that decides
+ * ownership against MANY owners at once rather than pairwise.
+ *
+ * `encodeTupleKey`, not a delimiter join: kind names are constrained but node
+ * ids are arbitrary caller data, and a delimiter a value may contain would make
+ * two different owners collapse onto one key — which, where this is used, would
+ * silently whitelist a foreign owner. Third rendering of one predicate, in the
+ * module that owns it and beside {@link claimOwnerMatchesSql}: keys are equal
+ * exactly when `isSameClaimOwner` holds and exactly when the SQL matches.
+ */
+export function claimOwnerKey(owner: ClaimOwner): string {
+  return encodeTupleKey([owner.concreteKind, owner.nodeId]);
 }
 
 /** The owner columns of the uniques relation, as the SQL renderer needs them. */

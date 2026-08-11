@@ -26,6 +26,7 @@ import {
   subClassOf,
   UniquenessError,
 } from "../../../src";
+import { projectGraphBackend } from "../../../src/backend/derive-backend";
 import { type GraphBackend } from "../../../src/backend/types";
 import { computeUniqueKey } from "../../../src/constraints";
 import { buildKindRegistry } from "../../../src/registry";
@@ -262,9 +263,12 @@ export function registerClaimOwnerIdentityIntegrationTests(
         const seams = createNodeBatchValidationBackend(
           ownerGraph.id,
           registry,
-          // A spread copy: the store's own backend object is frozen, and the
-          // wrapper's overlay Proxy cannot shadow a non-configurable member.
-          { ...backend },
+          // A fresh projection, not the store's own backend object: that one is
+          // frozen, and an overlay Proxy cannot shadow a non-configurable
+          // member. `projectGraphBackend` is the audited way to get an unfrozen
+          // copy — a spread would build a backend the serialized-resource audit
+          // does not follow (#435).
+          projectGraphBackend(backend),
         );
         seams.registerPendingUniqueEntries(
           cell.incumbent.concreteKind,

@@ -33,7 +33,6 @@ import {
   UniquenessError,
 } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
-import { compareStrings } from "../utils/compare";
 import { hasOwnKey, readOwnProperty } from "../utils/object";
 import { isPresent } from "../utils/presence";
 
@@ -359,8 +358,8 @@ export function getKindsForUniquenessCheck(
 
 /**
  * THE definition of "which kinds a `kindWithSubClasses` scope covers": the
- * connected component of the UNDIRECTED `subClassOf` graph containing `kind`,
- * in code-point order.
+ * registry's precomputed connected component of the UNDIRECTED `subClassOf`
+ * graph containing `kind`, in code-point order.
  *
  * Kind-independent by construction — every member of a component computes the
  * same set — which is what makes a claim axis folded from it deterministic: two
@@ -379,25 +378,7 @@ export function subClassComponent(
   kind: string,
   registry: KindRegistry,
 ): readonly string[] {
-  // The transitive closures are a sound adjacency for connectivity: a direct
-  // `subClassOf` edge is always present in them, and every closure edge joins
-  // kinds that a chain of direct edges already joins.
-  const members = new Set<string>([kind]);
-  const pending: string[] = [kind];
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (current === undefined) break;
-    const neighbors = [
-      ...registry.getAncestors(current),
-      ...registry.getDescendants(current),
-    ];
-    for (const neighbor of neighbors) {
-      if (members.has(neighbor)) continue;
-      members.add(neighbor);
-      pending.push(neighbor);
-    }
-  }
-  return [...members].toSorted((left, right) => compareStrings(left, right));
+  return registry.getSubClassComponent(kind);
 }
 
 /**

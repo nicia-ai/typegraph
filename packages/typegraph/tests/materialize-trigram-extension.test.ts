@@ -25,10 +25,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode } from "../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import {
-  createBackendOverlay,
   type DatabaseExtensionName,
   type GraphBackend,
 } from "../src/backend/types";
@@ -80,7 +83,7 @@ async function createRecordedMaterializer(
   const ddl: string[] = [];
   const extensions: DatabaseExtensionName[] = [];
   const base = createPostgresBackend(drizzle(client), { vector: false });
-  const recorded = createBackendOverlay<GraphBackend>(base, {
+  const recorded = deriveBackend<GraphBackend>(base, {
     executeDdl: (statement: string) => {
       ddl.push(statement);
       return Promise.resolve();
@@ -92,10 +95,18 @@ async function createRecordedMaterializer(
   });
   if (carriesSeam) return { backend: recorded, ddl, extensions };
 
-  // A backend written before the seam has the member ABSENT, not
+  // A backend written before the seams has the members ABSENT, not
   // undefined-valued — the only shape a third-party port can actually take.
-  const { ensureExtension: omittedSeam, ...withoutSeam } = recorded;
-  expect(omittedSeam).toBeDefined();
+  // BOTH extension members go: `ensureTrigramExtension` is the 0.47 spelling
+  // the call site consults next, so omitting only the general one would pin
+  // the wrong branch.
+  expect(recorded.ensureExtension).toBeDefined();
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- naming the deprecated seam is the point: it must be gone too.
+  expect(recorded.ensureTrigramExtension).toBeDefined();
+  const withoutSeam = projectBackendWithout(recorded, [
+    "ensureExtension",
+    "ensureTrigramExtension",
+  ]);
   return { backend: withoutSeam, ddl, extensions };
 }
 

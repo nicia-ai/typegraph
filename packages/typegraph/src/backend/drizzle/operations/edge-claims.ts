@@ -176,3 +176,19 @@ export function buildHardDeleteEdgeClaimsByEdgeKind(
   );
   return fragmentSql`DELETE FROM ${fragmentSql.identifier(edgeClaimsTableName)} WHERE ${fragmentSql.identifier("graph_id")} = ${params.graphId} AND ${fragmentSql.identifier("axis")} IN (${fragmentSql.join(axes, fragmentSql`, `)})`;
 }
+
+/**
+ * Housekeeping for node-kind removal: deletes every claim held by an edge whose
+ * source or target has the removed kind.
+ *
+ * The holder ids are selected before those edges are deleted. Filtering claim
+ * axes cannot express this ownership: an edge kind may connect several node
+ * kinds, while its claim axis names only its cardinality and edge kind.
+ */
+export function buildHardDeleteEdgeClaimsByNodeKind(
+  edgeClaimsTableName: string,
+  edgesTableName: string,
+  params: Readonly<{ graphId: string; nodeKind: string }>,
+): SqlFragment {
+  return fragmentSql`DELETE FROM ${fragmentSql.identifier(edgeClaimsTableName)} WHERE ${fragmentSql.identifier("graph_id")} = ${params.graphId} AND ${fragmentSql.identifier("edge_id")} IN (SELECT ${fragmentSql.identifier("id")} FROM ${fragmentSql.identifier(edgesTableName)} WHERE ${fragmentSql.identifier("graph_id")} = ${params.graphId} AND (${fragmentSql.identifier("from_kind")} = ${params.nodeKind} OR ${fragmentSql.identifier("to_kind")} = ${params.nodeKind}))`;
+}

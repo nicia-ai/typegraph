@@ -28,6 +28,7 @@ import {
 import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
 import { RestrictedDeleteError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
   createUniquenessContext,
   deleteUniquenessEntries,
@@ -154,21 +155,29 @@ async function enforceNodeDeleteBehavior(
       // without both endpoints. One batched statement per bind-budget
       // chunk instead of one statement per edge; the per-edge loop remains
       // for backends without the batch members.
+      const connectedEdgeIds = connectedEdges.map((edge) => edge.id);
       const batchDelete =
         args.mode === "hard" ?
           backend.hardDeleteEdgesBatch
         : backend.deleteEdgesBatch;
-      if (batchDelete !== undefined) {
+      if (batchDelete === undefined) {
+        for (const edge of connectedEdges) {
+          await (args.mode === "hard" ?
+            backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })
+          : backend.deleteEdge({ graphId: ctx.graphId, id: edge.id }));
+        }
+      } else {
         await batchDelete({
           graphId: ctx.graphId,
-          ids: connectedEdges.map((edge) => edge.id),
+          ids: connectedEdgeIds,
         });
-        break;
       }
-      for (const edge of connectedEdges) {
-        await (args.mode === "hard" ?
-          backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })
-        : backend.deleteEdge({ graphId: ctx.graphId, id: edge.id }));
+      // Hard-deleted holders are already takeable through the liveness probe;
+      // this is housekeeping so node cascades do not grow edgeClaims forever.
+      // Soft-deleted edges retain their rows for resurrection and are not
+      // reaped here.
+      if (args.mode === "hard") {
+        await purgeEdgeClaims(backend, ctx.graphId, connectedEdgeIds);
       }
       break;
     }

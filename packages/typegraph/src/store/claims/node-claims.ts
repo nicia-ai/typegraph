@@ -270,19 +270,25 @@ function claimFenceRefusal(
   return constraintFenceRefusal(ctx, backend, gating.refusalReason);
 }
 
-/** An entry whose family is uniqueness — the only family this probe reads. */
-type UniquenessClaimEntry = NodeClaimEntry &
+/** An entry whose family is uniqueness — the only family a claim probe reads. */
+export type UniquenessClaimEntry = NodeClaimEntry &
   Readonly<{ refusal: Extract<ClaimRefusal, { kind: "uniqueness" }> }>;
 
 /**
- * Narrows an entry to the uniqueness family.
+ * THE narrowing to the uniqueness family, for every path that probes claim rows.
  *
  * Disjointness entries have their own probe (`checkDisjointnessConstraint`,
  * which reads the NODE rows the constraint is declared over) and deliberately
  * do not get a second one here: a claim-row read would be a second spelling of
  * that verdict, and the two would drift.
+ *
+ * Exported because it is also what "an ingestion branch defers node UNIQUENESS
+ * and nothing else" means, operationally: the clone's registrations produce
+ * claim entries and this predicate is false for every one of them, while the
+ * disjointness entries the same list carries are unaffected (see
+ * {@link file://../../graph-merge/working-copy.ts graphWithoutNodeUniqueness}).
  */
-function isUniquenessClaimEntry(
+export function isUniquenessClaimEntry(
   entry: NodeClaimEntry,
 ): entry is UniquenessClaimEntry {
   return entry.refusal.kind === "uniqueness";

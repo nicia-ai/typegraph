@@ -20,6 +20,10 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineGraph, defineNode, subClassOf } from "../../../src";
+import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../../../src/backend/derive-backend";
 import { type GraphBackend } from "../../../src/backend/types";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -75,21 +79,24 @@ function failingInsertNode(
 }
 
 function backendFailingOneInsert(backend: GraphBackend): GraphBackend {
-  return {
-    ...backend,
+  // Over a PROJECTION, not over the store's own backend object: that one is
+  // frozen, and a decoration Proxy cannot shadow a non-configurable member.
+  // `projectGraphBackend` is the audited way to get an unfrozen copy.
+  return deriveBackend(projectGraphBackend(backend), {
     insertNode: failingInsertNode((params) => backend.insertNode(params)),
     transaction: (run, options) =>
       backend.transaction(
         (target) =>
-          run({
-            ...target,
-            insertNode: failingInsertNode((params) =>
-              target.insertNode(params),
-            ),
-          }),
+          run(
+            deriveBackend(target, {
+              insertNode: failingInsertNode((params) =>
+                target.insertNode(params),
+              ),
+            }),
+          ),
         options,
       ),
-  };
+  });
 }
 
 export function registerClaimCompensationIntegrationTests(

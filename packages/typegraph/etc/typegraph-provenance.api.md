@@ -2283,6 +2283,7 @@ class KindRegistry {
     getNodeType(name: string): NodeType | undefined;
     getParts(whole: string): readonly string[];
     getRelatedKinds(kind: string): readonly string[];
+    getSubClassComponent(kind: string): readonly string[];
     getWholes(part: string): readonly string[];
     hasEdgeType(name: string): boolean;
     hasNodeType(name: string): boolean;

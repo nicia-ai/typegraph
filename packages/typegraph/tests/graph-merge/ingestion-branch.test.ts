@@ -21,6 +21,7 @@ import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import type { TransactionBackend } from "../../src/backend/types";
+import type { UniqueConstraint } from "../../src/core/types";
 import { ingestionBranch } from "../../src/graph-merge";
 import { branch } from "../../src/graph-merge/branch";
 import {
@@ -44,7 +45,14 @@ import {
   importGraph,
   importGraphStream,
 } from "../../src/interchange";
+import { buildKindRegistry } from "../../src/registry";
+import type { KindRegistry } from "../../src/registry/kind-registry";
 import { parseSerializedSchema } from "../../src/schema";
+import {
+  DISJOINT_CONSTRAINT_NAME,
+  disjointnessClaimAxis,
+} from "../../src/store/claims/axis";
+import { nodeClaimEntries } from "../../src/store/claims/node-claims";
 import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, createSqliteMergeBackend } from "./test-utils";
 
@@ -942,6 +950,56 @@ describe.each(backendMatrix())(
       ).rejects.toThrow(UniquenessError);
     });
 
+    it("rebuilds the disjointness claims its preparation cleared", async () => {
+      // The set preflight clears claims by OWNER, and a node's owned claims are
+      // both families — so a rebuild that restored only uniqueness would leave
+      // every merged node permanently unfenced against a disjoint namesake. The
+      // coalesced upsert is the shape that makes it visible: the row write is
+      // elided, so the final rebuild is the ONLY thing that can put the row back.
+      cleanups = [];
+      const backend = await makeBackend();
+      const [base] = await createStoreWithSchema(ingestionGraph, backend, {
+        revisionTracking: true,
+        coalesceUnchangedUpserts: true,
+      });
+      await seedCanonical(base);
+      const disjointnessClaim = {
+        graphId: base.graphId,
+        nodeKind: disjointnessClaimAxis(
+          "Patient",
+          "AdministrativeRecord",
+          buildKindRegistry(ingestionGraph),
+        ),
+        constraintName: DISJOINT_CONSTRAINT_NAME,
+        key: "patient-canonical",
+      };
+      expect(await backend.checkUnique(disjointnessClaim)).toMatchObject({
+        concrete_kind: "Patient",
+        node_id: "patient-canonical",
+      });
+
+      const incoming = await makeIngestion(base);
+      await incoming.nodes.Patient.create(
+        { name: "Ana Rivera", mrn: "MRN-123" },
+        { id: "patient-alias" },
+      );
+      const plan = unwrap(
+        await planMergeIncremental({
+          forkPoint: base,
+          target: base,
+          branches: [incoming],
+          options: incrementalOptions(),
+        }),
+      );
+
+      unwrap(await applyMergePlan(base, plan));
+
+      expect(await backend.checkUnique(disjointnessClaim)).toMatchObject({
+        concrete_kind: "Patient",
+        node_id: "patient-canonical",
+      });
+    });
+
     it("produces the same canonical result for either alias ingestion order", async () => {
       cleanups = [];
 
@@ -1160,6 +1218,50 @@ describe.each(backendMatrix())(
     });
   },
 );
+
+// What "an ingestion branch defers node uniqueness" means where the store
+// actually enforces it. A row's reservations are `nodeClaimEntries`, and the
+// derivation removes `unique` — the only input to that list's uniqueness family.
+// Asserting it through the list rather than through the declarations is what
+// keeps "and nothing else" true: a derivation reaching one field too far would
+// drop the disjointness entry here, and a claim family added later shows up in
+// this comparison instead of silently surviving onto the clone.
+describe("the ingestion derivation drops exactly the uniqueness claim family", () => {
+  const canonicalRegistry = buildKindRegistry(ingestionGraph);
+  const derivedRegistry = buildKindRegistry(relaxedIngestionGraph);
+
+  function claimedFamilies(
+    registry: KindRegistry,
+    unique: readonly UniqueConstraint[],
+  ): readonly string[] {
+    return nodeClaimEntries(
+      registry,
+      "Patient",
+      "patient-1",
+      { name: "Ana Rivera", mrn: "MRN-123" },
+      unique,
+      "create",
+    ).map((entry) => entry.refusal.kind);
+  }
+
+  it("owes both families on the canonical graph", () => {
+    expect(
+      claimedFamilies(
+        canonicalRegistry,
+        requireDefined(ingestionGraph.nodes.Patient.unique),
+      ),
+    ).toEqual(["disjointness", "uniqueness"]);
+  });
+
+  // The empty list is what the derivation leaves behind — "persists the derived
+  // schema" above asserts the persisted registration's `uniqueConstraints` is
+  // `[]`. This is the other half: given that, the row's claim entries lose the
+  // uniqueness family and keep the disjointness one, which comes from the
+  // registry the derivation does not touch.
+  it("owes only the disjointness family on the derived graph", () => {
+    expect(claimedFamilies(derivedRegistry, [])).toEqual(["disjointness"]);
+  });
+});
 
 it("refuses an unregistered ingestion import capability at the boundary", async () => {
   const forgedTarget = {} as unknown as IngestionBranch<IngestionGraph>;

@@ -29,7 +29,12 @@ import {
   defineGraph,
   defineGraphExtension,
   defineNode,
+  subClassOf,
 } from "../../../src";
+import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../../../src/backend/derive-backend";
 import { computeUniqueKey } from "../../../src/constraints";
 import {
   FORMAT_VERSION,
@@ -86,6 +91,35 @@ const namesakeGraph = defineGraph({
     Contractor: { type: Contractor, unique: [NAMESAKE_EMAIL_UNIQUE] },
   },
   edges: {},
+});
+
+const MultiRootAlpha = defineNode("MultiRootAlpha", {
+  schema: z.object({ email: z.string() }),
+});
+const MultiRootZeta = defineNode("MultiRootZeta", {
+  schema: z.object({ email: z.string() }),
+});
+const MultiRootEmployee = defineNode("MultiRootEmployee", {
+  schema: z.object({ email: z.string() }),
+});
+const MULTI_ROOT_UNIQUE = {
+  name: "multi_root_email",
+  fields: ["email"],
+  scope: "kindWithSubClasses",
+  collation: "binary",
+} as const;
+const multiRootGraph = defineGraph({
+  id: "legacy_claim_axis_multi_root",
+  nodes: {
+    MultiRootAlpha: { type: MultiRootAlpha, unique: [MULTI_ROOT_UNIQUE] },
+    MultiRootZeta: { type: MultiRootZeta, unique: [MULTI_ROOT_UNIQUE] },
+    MultiRootEmployee: { type: MultiRootEmployee, unique: [MULTI_ROOT_UNIQUE] },
+  },
+  edges: {},
+  ontology: [
+    subClassOf(MultiRootEmployee, MultiRootAlpha),
+    subClassOf(MultiRootEmployee, MultiRootZeta),
+  ],
 });
 
 function emailKey(email: string): string {
@@ -148,27 +182,30 @@ function backendRefusingGatedRowWrite(
   nodeId: string,
 ): GraphBackend {
   const runTransaction = backend.transaction;
-  return {
-    ...backend,
+  // Over a PROJECTION, not over the store's own backend object: that one is
+  // frozen, and a decoration Proxy cannot shadow a non-configurable member.
+  // `projectGraphBackend` is the audited way to get an unfrozen copy.
+  return deriveBackend(projectGraphBackend(backend), {
     transaction: (run, options) =>
       runTransaction(async (target) => {
         const updateNode = target.updateNode;
         let armed = true;
-        return run({
-          ...target,
-          updateNode: async (params) => {
-            if (armed && params.id === nodeId) {
-              armed = false;
-              return updateNode({
-                ...params,
-                expectedValidFrom: VANISHED_LOWER_BOUND,
-              });
-            }
-            return updateNode(params);
-          },
-        });
+        return run(
+          deriveBackend(target, {
+            updateNode: async (params) => {
+              if (armed && params.id === nodeId) {
+                armed = false;
+                return updateNode({
+                  ...params,
+                  expectedValidFrom: VANISHED_LOWER_BOUND,
+                });
+              }
+              return updateNode(params);
+            },
+          }),
+        );
       }, options),
-  };
+  });
 }
 
 /** Owner-scoped claim release and kind reaping, on every backend. */
@@ -176,6 +213,35 @@ export function registerLegacyClaimAxisIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("owner-scoped claim release", () => {
+    it("probes legacy claims at every root of a multi-root component", async () => {
+      const store = await context.createStore(multiRootGraph);
+      const key = emailKey("shared@example.com");
+      await store.backend.insertNode({
+        graphId: multiRootGraph.id,
+        kind: "MultiRootZeta",
+        id: "legacy-zeta",
+        props: { email: "shared@example.com" },
+      });
+      // Pre-axis data: the claim sits at the concrete kind. The old one-root
+      // walk from MultiRootAlpha never visited MultiRootZeta, even though both
+      // belong to the component the new canonical axis spans.
+      await store.backend.insertUnique({
+        graphId: multiRootGraph.id,
+        nodeKind: "MultiRootZeta",
+        constraintName: MULTI_ROOT_UNIQUE.name,
+        key,
+        nodeId: "legacy-zeta",
+        concreteKind: "MultiRootZeta",
+      });
+
+      await expect(
+        store.nodes.MultiRootAlpha.create({ email: "shared@example.com" }),
+      ).rejects.toMatchObject({
+        name: "UniquenessError",
+        details: { existingId: "legacy-zeta" },
+      });
+    });
+
     it("releases a claim of this node whose axis is not this node's kind", async () => {
       const store = await context.createStore(employeeGraph);
       const backend = store.backend;

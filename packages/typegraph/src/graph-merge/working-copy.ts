@@ -227,6 +227,16 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
  * is removed. Extension documents are rewritten too: they are the durable
  * source used to reconstruct extension kinds on reload, so leaving their
  * declarations intact would silently restore uniqueness after a restart.
+ *
+ * What "node uniqueness is deferred" means at the level the store enforces it:
+ * a row's reservations are whatever
+ * {@link file://../store/claims/node-claims.ts nodeClaimEntries} says its kind
+ * owes, and `unique` is the ONLY input to that list's uniqueness family. So
+ * removing it removes exactly the uniqueness claim entries and nothing else —
+ * the disjointness entries the same list carries come from the registry's
+ * declared pairs, which this derivation does not touch, and they stay enforced
+ * on the clone during staging. `tests/graph-merge/ingestion-branch.test.ts`
+ * asserts that split through `nodeClaimEntries` itself rather than restating it.
  */
 function graphWithoutNodeUniqueness<G extends GraphDef>(graph: G): G {
   const nodes = Object.fromEntries(

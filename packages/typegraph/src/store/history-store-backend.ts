@@ -47,9 +47,11 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "dropVectorIndex",
   "edgeExistsBetween",
   "ensureContributionMaterializationsTable",
-  // Installs a database-global extension. Like the `ensure*Table` members it
-  // sits beside, it creates storage-level scaffolding and writes no graph row,
-  // so it cannot bypass a capture flush.
+  // Installs a database-global extension — and `ensureTrigramExtension` is the
+  // same operation under its deprecated `pg_trgm`-only name, so the two are
+  // classified together or not at all. Like the `ensure*Table` members they sit
+  // beside, they create storage-level scaffolding and write no graph row, so
+  // neither can bypass a capture flush.
   "ensureExtension",
   "ensureFulltextTable",
   "ensureIndexMaterializationsTable",
@@ -57,6 +59,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "ensureReconciliationMarkersTable",
   "ensureRevisionOriginsTable",
   "ensureRuntimeContributions",
+  "ensureTrigramExtension",
   "ensureVectorSlotContribution",
   "ensureVectorSlotContributions",
   "execute",
@@ -136,7 +139,6 @@ type UnsafeHistoryStoreBackendMember =
   | "executeRaw"
   | "executeStatement"
   | "ensureIdentityTables"
-  | "ensureTrigramExtension"
   | "identityTableDdl"
   | "rebuildContribution"
   | "repairContributions"

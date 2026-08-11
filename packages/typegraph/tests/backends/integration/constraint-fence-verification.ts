@@ -20,6 +20,7 @@ import { z } from "zod";
 import {
   defineEdge,
   defineGraph,
+  defineGraphExtension,
   defineNode,
   disjointWith,
   subClassOf,
@@ -302,6 +303,58 @@ export function registerConstraintFenceVerificationIntegrationTests(
       // liveness predicate would take its axis. The report reads the same
       // population, so it must not name it either.
       expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("audits declarations added after this Store became stale", async () => {
+      const staleStore = await context.createStore(verifyGraph);
+      const evolved = await staleStore.evolve(
+        defineGraphExtension({
+          nodes: {
+            AuditLeft: { properties: {} },
+            AuditRight: { properties: {} },
+          },
+          ontology: [
+            {
+              metaEdge: "disjointWith",
+              from: "AuditLeft",
+              to: "AuditRight",
+            },
+          ],
+        }),
+      );
+      await staleStore.backend.insertNode({
+        graphId: verifyGraph.id,
+        kind: "AuditLeft",
+        id: "stale-audit-overlap",
+        props: {},
+      });
+      await staleStore.backend.insertNode({
+        graphId: verifyGraph.id,
+        kind: "AuditRight",
+        id: "stale-audit-overlap",
+        props: {},
+      });
+
+      expect(await staleStore.verifyConstraintFences()).toEqual([
+        {
+          family: "nodeDisjointness",
+          target: {
+            relation: "uniques",
+            graphId: verifyGraph.id,
+            axis: disjointnessClaimAxis(
+              "AuditLeft",
+              "AuditRight",
+              evolved.registry,
+            ),
+            constraintName: DISJOINT_CONSTRAINT_NAME,
+            key: "stale-audit-overlap",
+          },
+          owners: [
+            { concreteKind: "AuditLeft", nodeId: "stale-audit-overlap" },
+            { concreteKind: "AuditRight", nodeId: "stale-audit-overlap" },
+          ],
+        },
+      ]);
     });
   });
 }

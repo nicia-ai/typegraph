@@ -29,6 +29,10 @@ import {
   type NodeId,
   subClassOf,
 } from "../../../src";
+import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../../../src/backend/derive-backend";
 import { type GraphBackend } from "../../../src/backend/types";
 import {
   FORMAT_VERSION,
@@ -180,22 +184,25 @@ function backendWithHiddenKind(
     kind === hiddenKind ?
       Promise.resolve(undefined)
     : backend.getNode(graphId, kind, id);
-  return {
-    ...backend,
+  // Over a PROJECTION, not over the store's own backend object: that one is
+  // frozen, and a decoration Proxy cannot shadow a non-configurable member.
+  // `projectGraphBackend` is the audited way to get an unfrozen copy.
+  return deriveBackend(projectGraphBackend(backend), {
     getNode,
     transaction: (run, options) =>
       backend.transaction(
         (target) =>
-          run({
-            ...target,
-            getNode: (graphId, kind, id) =>
-              kind === hiddenKind ?
-                Promise.resolve(undefined)
-              : target.getNode(graphId, kind, id),
-          }),
+          run(
+            deriveBackend(target, {
+              getNode: (graphId, kind, id) =>
+                kind === hiddenKind ?
+                  Promise.resolve(undefined)
+                : target.getNode(graphId, kind, id),
+            }),
+          ),
         options,
       ),
-  };
+  });
 }
 
 const ImportNode = defineNode("ImportNode", {

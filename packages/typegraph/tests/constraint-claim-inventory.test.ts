@@ -21,7 +21,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
-import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
+import { projectGraphBackend } from "../src/backend/derive-backend";
 import { type GraphBackend } from "../src/backend/types";
 import {
   FORMAT_VERSION,
@@ -47,6 +47,10 @@ const inventoryReportsTo = defineEdge("inventoryReportsTo", {
 });
 /** Unconstrained: declares nothing, so it must claim nothing. */
 const inventoryKnows = defineEdge("inventoryKnows", { schema: z.object({}) });
+/** Constrained on the ACTIVE population, which a reopened window re-enters. */
+const inventoryActiveShift = defineEdge("inventoryActiveShift", {
+  schema: z.object({}),
+});
 
 const inventoryGraph = defineGraph({
   id: "constraint_claim_inventory",
@@ -63,8 +67,17 @@ const inventoryGraph = defineGraph({
       from: [InventoryPerson],
       to: [InventoryPerson],
     },
+    inventoryActiveShift: {
+      type: inventoryActiveShift,
+      from: [InventoryPerson],
+      to: [InventoryPerson],
+      cardinality: "oneActive",
+    },
   },
 });
+
+/** A bound already in the past, so an edge stated with it is born ended. */
+const ENDED = "2020-01-01T00:00:00.000Z";
 
 function edgeClaimStatements(
   statements: readonly LoggedStatement[],
@@ -83,6 +96,12 @@ function edgeInsertIndex(statements: readonly LoggedStatement[]): number {
 function edgeClaimIndex(statements: readonly LoggedStatement[]): number {
   return statements.findIndex((statement) =>
     /insert into "typegraph_edge_claims"/iu.test(statement.query),
+  );
+}
+
+function edgeUpdateIndex(statements: readonly LoggedStatement[]): number {
+  return statements.findIndex((statement) =>
+    /update "typegraph_edges"/iu.test(statement.query),
   );
 }
 
@@ -211,6 +230,39 @@ describe("every constrained edge write claims its axis", () => {
     expect(edgeClaimStatements(statements)).toHaveLength(1);
   });
 
+  it("claims when a reopened window re-enters the active population", async () => {
+    // The other leg of the same site. #469 let an update clear an edge's upper
+    // bound, which puts a row that was outside the `oneActive` population back
+    // inside it — the identical "re-admitted after a probe no key backs" event a
+    // resurrect is, reached through a different caller. A claim on the resurrect
+    // leg alone would leave this one unfenced.
+    const { store, statements, reset } =
+      await createRecordedPostgresStore(inventoryGraph);
+    const alice = await store.nodes.InventoryPerson.create({ name: "Alice" });
+    const bob = await store.nodes.InventoryPerson.create({ name: "Bob" });
+    const ended = await store.edges.inventoryActiveShift.create(
+      alice,
+      bob,
+      {},
+      { validTo: ENDED },
+    );
+    // Born ended, so it joined no active population and claimed nothing.
+    expect(edgeClaimStatements(statements)).toHaveLength(0);
+
+    reset();
+    const reopened = await store.edges.inventoryActiveShift.update(
+      ended.id,
+      {},
+      { clearValidTo: true },
+    );
+
+    expect(reopened.meta.validTo).toBeUndefined();
+    expect(edgeClaimStatements(statements)).toHaveLength(1);
+    expect(edgeClaimIndex(statements)).toBeLessThan(
+      edgeUpdateIndex(statements),
+    );
+  });
+
   it("purges a hard-deleted constrained edge's claim, and only a constrained one's", async () => {
     // Housekeeping, not a fence: the claim is already takeable once the row
     // is gone. What must not happen is the relation growing by one row per
@@ -305,7 +357,7 @@ describe("every projection of a claim-capable backend stays claim-capable", () =
   it("answers supported on the store projection and on the history projection", async () => {
     const { backend } = await createRecordedPostgresStore(inventoryGraph);
 
-    expect(claimSupport(createGraphBackendProjection(backend))).toMatchObject({
+    expect(claimSupport(projectGraphBackend(backend))).toMatchObject({
       supported: true,
     });
     expect(

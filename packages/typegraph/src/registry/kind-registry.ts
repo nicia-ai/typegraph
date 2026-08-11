@@ -21,17 +21,23 @@ import {
 import { isExternalIri } from "../ontology/external-iri";
 import { type OntologyRelation } from "../ontology/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
+import { compareStrings } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
 
-/**
- * The character joining the two kinds of a stored disjoint-pair label. Named
- * once so the label's two directions — build and parse — cannot disagree.
- */
 const DISJOINT_PAIR_SEPARATOR = "|";
+const ENCODED_DISJOINT_PAIR_PREFIX = "\u001Epair\u001E";
+
+/**
+ * Encodes one string with its UTF-16 length, so adjacent values retain their
+ * boundary even when either value contains punctuation used by older labels.
+ */
+function lengthPrefix(value: string): string {
+  return `${value.length}:${value}`;
+}
 
 /**
  * Builds the canonical label of an unordered pair of kinds: the two names in
- * code-point order, separator-joined.
+ * code-point order, length-prefixed and concatenated.
  *
  * Order-independence is the whole point — `A⊥B` and `B⊥A` are one fact, so
  * they must be one string. {@link KindRegistry.disjointPairLabel} exposes it,
@@ -39,15 +45,91 @@ const DISJOINT_PAIR_SEPARATOR = "|";
  * claim axis folds it.
  */
 function disjointPairLabel(a: string, b: string): string {
-  return a < b ?
-      `${a}${DISJOINT_PAIR_SEPARATOR}${b}`
-    : `${b}${DISJOINT_PAIR_SEPARATOR}${a}`;
+  const [first, second] = a < b ? [a, b] : [b, a];
+  if (
+    !first.includes(DISJOINT_PAIR_SEPARATOR) &&
+    !second.includes(DISJOINT_PAIR_SEPARATOR)
+  ) {
+    // Preserve the historical form — and therefore existing serialized
+    // closure documents and schema hashes — wherever it is already injective.
+    return `${first}${DISJOINT_PAIR_SEPARATOR}${second}`;
+  }
+  return `${ENCODED_DISJOINT_PAIR_PREFIX}${lengthPrefix(first)}${lengthPrefix(second)}`;
+}
+
+/** Reads one value produced by {@link lengthPrefix}. */
+function readLengthPrefixed(
+  label: string,
+  offset: number,
+): Readonly<{ value: string; nextOffset: number }> {
+  const separator = label.indexOf(":", offset);
+  const lengthText = label.slice(offset, separator);
+  if (separator === -1 || !/^\d+$/u.test(lengthText)) {
+    throw new Error(`Invalid disjoint-pair label ${JSON.stringify(label)}.`);
+  }
+  const start = separator + 1;
+  const end = start + Number(lengthText);
+  if (end > label.length) {
+    throw new Error(`Invalid disjoint-pair label ${JSON.stringify(label)}.`);
+  }
+  return { value: label.slice(start, end), nextOffset: end };
 }
 
 /** The inverse of {@link disjointPairLabel}, so only one place knows the form. */
 function disjointPairMembers(label: string): readonly [string, string] {
-  const parts = label.split(DISJOINT_PAIR_SEPARATOR);
-  return [requireDefined(parts[0]), requireDefined(parts[1])];
+  if (!label.startsWith(ENCODED_DISJOINT_PAIR_PREFIX)) {
+    const parts = label.split(DISJOINT_PAIR_SEPARATOR);
+    return [requireDefined(parts[0]), requireDefined(parts[1])];
+  }
+  const first = readLengthPrefixed(label, ENCODED_DISJOINT_PAIR_PREFIX.length);
+  const second = readLengthPrefixed(label, first.nextOffset);
+  if (second.nextOffset !== label.length) {
+    throw new Error(`Invalid disjoint-pair label ${JSON.stringify(label)}.`);
+  }
+  return [first.value, second.value];
+}
+
+/**
+ * Precomputes each undirected `subClassOf` component once per registry.
+ *
+ * The transitive closures are a sound adjacency: every direct edge is present,
+ * and every closure edge joins members of the same component. Assigning the
+ * same frozen array to every member makes later axis/probe resolution O(1) and
+ * guarantees every member observes byte-identical ordering.
+ */
+function computeSubClassComponents(
+  nodeKinds: ReadonlyMap<string, NodeType>,
+  ancestors: ReadonlyMap<string, ReadonlySet<string>>,
+  descendants: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlyMap<string, readonly string[]> {
+  const components = new Map<string, readonly string[]>();
+  const knownKinds = new Set([
+    ...nodeKinds.keys(),
+    ...ancestors.keys(),
+    ...descendants.keys(),
+  ]);
+  for (const kind of knownKinds) {
+    if (components.has(kind)) continue;
+    const members = new Set<string>([kind]);
+    const pending = [kind];
+    while (pending.length > 0) {
+      const current = requireDefined(pending.pop());
+      const neighbors = [
+        ...(ancestors.get(current) ?? []),
+        ...(descendants.get(current) ?? []),
+      ];
+      for (const neighbor of neighbors) {
+        if (members.has(neighbor)) continue;
+        members.add(neighbor);
+        pending.push(neighbor);
+      }
+    }
+    const component = Object.freeze(
+      [...members].toSorted((left, right) => compareStrings(left, right)),
+    );
+    for (const member of members) components.set(member, component);
+  }
+  return components;
 }
 
 /**
@@ -70,6 +152,7 @@ export class KindRegistry {
   // Transitive closure for inheritance
   readonly subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
   readonly subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
+  readonly #subClassComponents: ReadonlyMap<string, readonly string[]>;
 
   // === Hierarchy (broader/narrower) ===
   // Transitive closure for concept hierarchy (separate from subClassOf!)
@@ -82,7 +165,7 @@ export class KindRegistry {
   readonly relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
 
   // === Constraints ===
-  readonly disjointPairs: ReadonlySet<string>; // Normalized pairs: "Organization|Person"
+  readonly disjointPairs: ReadonlySet<string>; // Injectively encoded unordered pairs
 
   // === Composition ===
   readonly partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
@@ -118,6 +201,11 @@ export class KindRegistry {
     this.identity = identity;
     this.subClassAncestors = closures.subClassAncestors;
     this.subClassDescendants = closures.subClassDescendants;
+    this.#subClassComponents = computeSubClassComponents(
+      nodeKinds,
+      closures.subClassAncestors,
+      closures.subClassDescendants,
+    );
     this.broaderClosure = closures.broaderClosure;
     this.narrowerClosure = closures.narrowerClosure;
     this.equivalenceSets = closures.equivalenceSets;
@@ -161,6 +249,14 @@ export class KindRegistry {
    */
   getDescendants(kind: string): ReadonlySet<string> {
     return this.subClassDescendants.get(kind) ?? new Set();
+  }
+
+  /**
+   * Returns the precomputed undirected `subClassOf` component containing kind,
+   * in code-point order. Every member of one component returns the same array.
+   */
+  getSubClassComponent(kind: string): readonly string[] {
+    return this.#subClassComponents.get(kind) ?? [kind];
   }
 
   // === Hierarchy Methods ===

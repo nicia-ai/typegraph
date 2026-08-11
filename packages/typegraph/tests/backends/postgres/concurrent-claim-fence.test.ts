@@ -54,6 +54,10 @@ import {
   type Store,
   subClassOf,
 } from "../../../src";
+import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { type GraphBackend } from "../../../src/backend/types";
@@ -465,25 +469,28 @@ function backendPausingAfterFirstClaim(
   backend: GraphBackend,
   gate: ClaimGate,
 ): GraphBackend {
-  return {
-    ...backend,
+  // Over a PROJECTION, not over the store's own backend object: that one is
+  // frozen, and a decoration Proxy cannot shadow a non-configurable member.
+  // `projectGraphBackend` is the audited way to get an unfrozen copy.
+  return deriveBackend(projectGraphBackend(backend), {
     transaction: (run, options) =>
       backend.transaction(async (target) => {
         // `let` earns its place: "have I already paused?" is per-transaction
         // state the wrapper has nowhere else to keep.
         let claimsIssued = 0;
-        return run({
-          ...target,
-          insertUnique: async (params) => {
-            await target.insertUnique(params);
-            claimsIssued += 1;
-            if (claimsIssued === 1) {
-              await gate.arrive();
-            }
-          },
-        });
+        return run(
+          deriveBackend(target, {
+            insertUnique: async (params) => {
+              await target.insertUnique(params);
+              claimsIssued += 1;
+              if (claimsIssued === 1) {
+                await gate.arrive();
+              }
+            },
+          }),
+        );
       }, options),
-  };
+  });
 }
 
 /**
@@ -499,28 +506,31 @@ function backendPausingBeforeClaim(
   const pause = async (): Promise<void> => {
     await gate.arrive();
   };
-  return {
-    ...backend,
+  // Over a PROJECTION, not over the store's own backend object: that one is
+  // frozen, and a decoration Proxy cannot shadow a non-configurable member.
+  // `projectGraphBackend` is the audited way to get an unfrozen copy.
+  return deriveBackend(projectGraphBackend(backend), {
     transaction: (run, options) =>
       backend.transaction(async (target) => {
         const insertUniqueBatch = target.insertUniqueBatch;
-        return run({
-          ...target,
-          insertUnique: async (params) => {
-            await pause();
-            return target.insertUnique(params);
-          },
-          ...(insertUniqueBatch === undefined ?
-            {}
-          : {
-              insertUniqueBatch: async (entries) => {
-                await pause();
-                return insertUniqueBatch(entries);
-              },
-            }),
-        });
+        return run(
+          deriveBackend(target, {
+            insertUnique: async (params) => {
+              await pause();
+              return target.insertUnique(params);
+            },
+            ...(insertUniqueBatch === undefined ?
+              {}
+            : {
+                insertUniqueBatch: async (entries) => {
+                  await pause();
+                  return insertUniqueBatch(entries);
+                },
+              }),
+          }),
+        );
       }, options),
-  };
+  });
 }
 
 /**
@@ -536,8 +546,10 @@ function backendPausingBeforeEdgeClaim(
   const pause = async (): Promise<void> => {
     await gate.arrive();
   };
-  return {
-    ...backend,
+  // Over a PROJECTION, not over the store's own backend object: that one is
+  // frozen, and a decoration Proxy cannot shadow a non-configurable member.
+  // `projectGraphBackend` is the audited way to get an unfrozen copy.
+  return deriveBackend(projectGraphBackend(backend), {
     transaction: (run, options) =>
       backend.transaction(async (target) => {
         const claimOne = requireDefined(
@@ -548,19 +560,20 @@ function backendPausingBeforeEdgeClaim(
           target.claimEdgeCardinalityBatch,
           "claimEdgeCardinalityBatch",
         );
-        return run({
-          ...target,
-          claimEdgeCardinality: async (params) => {
-            await pause();
-            return claimOne(params);
-          },
-          claimEdgeCardinalityBatch: async (entries) => {
-            await pause();
-            return claimBatch(entries);
-          },
-        });
+        return run(
+          deriveBackend(target, {
+            claimEdgeCardinality: async (params) => {
+              await pause();
+              return claimOne(params);
+            },
+            claimEdgeCardinalityBatch: async (entries) => {
+              await pause();
+              return claimBatch(entries);
+            },
+          }),
+        );
       }, options),
-  };
+  });
 }
 
 /**

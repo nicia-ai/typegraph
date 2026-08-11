@@ -2191,6 +2191,12 @@ export type GraphBackend = Readonly<{
    * Install the PostgreSQL `pg_trgm` extension under a database-global
    * concurrency fence. Relational trigram index materialization calls this
    * before emitting its index DDL; non-PostgreSQL backends omit it.
+   *
+   * @deprecated The `pg_trgm`-only spelling of {@link GraphBackend.ensureExtension},
+   *   which says the same thing for every extension the library installs. It is
+   *   retained — and still consulted, after `ensureExtension` — so a backend
+   *   written against 0.47 keeps its fence; the bundled PostgreSQL backend
+   *   implements it by delegating. Implement `ensureExtension` in new backends.
    */
   ensureTrigramExtension?: (this: void) => Promise<void>;
 
@@ -2770,9 +2776,14 @@ export type GraphBackend = Readonly<{
    * PostgreSQL: the existence check cannot see another session's uncommitted
    * `pg_extension` row, so the loser of a race waits for the winner and is
    * then handed SQLSTATE 23505 instead of the harmless "already exists"
-   * notice (#446). A backend implementing this member owns that retry; a
-   * caller that only has {@link GraphBackend.executeDdl} keeps issuing the
-   * statement bare and keeps surfacing the loser's failure.
+   * notice (#446). A backend implementing this member owns that retry, and
+   * may additionally serialize same-extension installers behind a fence of its
+   * own (the bundled PostgreSQL backend takes a transaction advisory lock
+   * keyed on the extension, #475).
+   *
+   * This is the one member the library asks for an extension install; it
+   * supersedes {@link GraphBackend.ensureTrigramExtension}, which said the same
+   * thing for one extension.
    *
    * Like `executeDdl`, implementations MUST run the statement at the
    * top-level backend, never inside `transaction(...)`: the 23505 aborts the

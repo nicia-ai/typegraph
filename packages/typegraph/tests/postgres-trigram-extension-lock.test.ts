@@ -90,12 +90,62 @@ describe("Postgres pg_trgm extension prerequisite", () => {
     const { db, statements } = stubTransactionalDatabase();
     const backend = createPostgresBackend(db, { vector: false });
 
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- this suite covers the deprecated 0.47 seam, which must keep its fence.
     await requireDefined(backend.ensureTrigramExtension)();
 
     expect(statements).toHaveLength(2);
     expect(statements[0]).toContain("pg_advisory_xact_lock");
-    expect(statements[0]).toContain("typegraph:pg-trgm-ddl");
-    expect(statements[1]).toContain("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+    expect(statements[0]).toContain("typegraph:extension-ddl:pg_trgm");
+    expect(statements[1]).toContain('CREATE EXTENSION IF NOT EXISTS "pg_trgm"');
+  });
+
+  // The fence generalized with the seam it lives on: one install path for every
+  // allowlisted extension, keyed per extension so `vector` does not queue
+  // behind `pg_trgm` at boot. `ensureTrigramExtension` is the deprecated
+  // `pg_trgm` spelling and delegates here, which is why the case above and this
+  // one observe the same two statements.
+  it("keys the lock on the extension being installed", async () => {
+    const { db, statements } = stubTransactionalDatabase();
+    const backend = createPostgresBackend(db, { vector: false });
+
+    await requireDefined(backend.ensureExtension)("vector");
+
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toContain("typegraph:extension-ddl:vector");
+    expect(statements[1]).toContain('CREATE EXTENSION IF NOT EXISTS "vector"');
+  });
+
+  // A peer running an older version takes a different advisory-lock key, so the
+  // lock cannot be the only fence: the 23505 it hands the loser is cleared by
+  // the same retry the non-transactional path relies on.
+  it("retries a concurrent extension catalog race the lock did not prevent", async () => {
+    const statements: string[] = [];
+    const transaction = {
+      execute(
+        statement: unknown,
+      ): Promise<Readonly<{ rows: readonly unknown[] }>> {
+        const text = statementText(statement);
+        statements.push(text);
+        if (text.includes("CREATE EXTENSION") && statements.length === 2) {
+          return Promise.reject(duplicateKeyError());
+        }
+        return Promise.resolve({ rows: [] });
+      },
+    };
+    const db = {
+      $client: { query: () => Promise.resolve({ rows: [] }) },
+      transaction<T>(fn: (tx: typeof transaction) => Promise<T>): Promise<T> {
+        return fn(transaction);
+      },
+    } as unknown as AnyPgDatabase;
+    const backend = createPostgresBackend(db, { vector: false });
+
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- this suite covers the deprecated 0.47 seam, which must keep its fence.
+    await requireDefined(backend.ensureTrigramExtension)();
+
+    expect(statements).toHaveLength(4);
+    expect(statements[2]).toContain("pg_advisory_xact_lock");
+    expect(statements[3]).toContain('CREATE EXTENSION IF NOT EXISTS "pg_trgm"');
   });
 
   it("retries a concurrent extension catalog race without transaction support", async () => {
@@ -115,11 +165,12 @@ describe("Postgres pg_trgm extension prerequisite", () => {
       vector: false,
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- this suite covers the deprecated 0.47 seam, which must keep its fence.
     await requireDefined(backend.ensureTrigramExtension)();
 
     expect(statements).toHaveLength(2);
     expect(new Set(statements)).toEqual(
-      new Set(["CREATE EXTENSION IF NOT EXISTS pg_trgm;"]),
+      new Set(['CREATE EXTENSION IF NOT EXISTS "pg_trgm";']),
     );
   });
 
