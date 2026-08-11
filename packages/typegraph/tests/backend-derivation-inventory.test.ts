@@ -136,7 +136,7 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "store/operations/write-executor.ts",
-    line: "mintSessionOver(deriveBackend(target, reads));",
+    line: "mintSessionOver(deriveBackend(target, reads)) as WriteSessionFor<K>;",
     reason:
       "The write frame owns the ONE decoration row work may ask for: a second session over a read overlay of THIS frame's target, so a fused step's uniqueness pre-check sees the pending state its own slice created while the write still lands on the real backend.",
   },
