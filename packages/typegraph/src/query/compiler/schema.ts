@@ -50,7 +50,7 @@ export type SqlTableNames = Readonly<{
   /** Node uniques table name (default: "typegraph_node_uniques") */
   uniques: string;
   /** Edge cardinality claim table name (default: "typegraph_edge_claims") */
-  edgeClaims: string;
+  edgeClaims?: string | undefined;
 }>;
 
 export type ResolvedSqlTableNames = Readonly<{

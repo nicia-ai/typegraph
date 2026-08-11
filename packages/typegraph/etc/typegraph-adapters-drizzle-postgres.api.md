@@ -5850,7 +5850,7 @@ type SqlTableNames = Readonly<{
     identitySeparation?: string | undefined;
     fulltext: string;
     uniques: string;
-    edgeClaims: string;
+    edgeClaims?: string | undefined;
 }>;
 
 // @public (undocumented)
