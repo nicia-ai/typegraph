@@ -191,7 +191,7 @@ describe("refuseUnavailableFulltext", () => {
     const { materializer, spies } = createMockMaterializer(markers);
     await materializer.ensureRuntimeContributions(GRAPH_ID);
     spies.tableExists.mockClear();
-    const cause = new Error(`no such table: ${FULLTEXT_TABLE}`);
+    const cause = new Error(`no such table: ${FULLTEXT_TABLE}: SQLITE_ERROR`);
 
     const error = await captureRejection(
       materializer.refuseUnavailableFulltext(GRAPH_ID, cause),

@@ -403,7 +403,10 @@ function missingTableErrorNames(error: unknown, tableName: string): boolean {
     const message = errorMessage(link);
     if (typeof message !== "string") continue;
 
-    const sqliteMatch = /\bno such table:\s*([^\s;]+)/i.exec(message);
+    // workerd appends `: SQLITE_ERROR` to SQLite's missing-table message.
+    // Keep that diagnostic delimiter out of the physical identifier so the
+    // exact-name check below sees the declared table, not `<table>:`.
+    const sqliteMatch = /\bno such table:\s*([^\s;:]+)/i.exec(message);
     const sqliteName = unquoteSqliteIdentifier(sqliteMatch?.[1]);
     if (sqliteName === tableName) return true;
 

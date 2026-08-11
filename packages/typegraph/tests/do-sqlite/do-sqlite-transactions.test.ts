@@ -21,10 +21,10 @@
  * data-only; administrative removal cleanup may execute transactional DDL.
  *
  * Each `it` runs in its OWN Durable Object instance (unique
- * `idFromName`) so storage is isolated. The graph node has no
- * `searchable` field, so a create is a pure INSERT and the fulltext
- * gate is never reached. Store reads return the flattened node shape
- * (`node.title`, `node.meta`) — there is no `node.props`.
+ * `idFromName`) so storage is isolated. `Doc` has no `searchable` field,
+ * so its creates remain pure INSERTs; `SearchableDoc` exists only for the
+ * workerd fulltext-gate regressions. Store reads return the flattened node
+ * shape (`node.title`, `node.meta`) — there is no `node.props`.
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { sql } from "drizzle-orm";
@@ -40,18 +40,23 @@ import { z } from "zod";
 
 import {
   asEdgeId,
+  ContributionUnavailableError,
   createAdapterStoreWithSchema,
   createStore,
   defineEdge,
   defineGraph,
   defineGraphExtension,
   defineNode,
+  searchable,
 } from "../../src";
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../../src/backend/sqlite";
 import { DURABLE_OBJECT_MAX_BIND_PARAMETERS } from "../../src/backend/types";
 import { RECORDED_EDGE_COLUMNS } from "../../src/store/recorded-capture";
-import { isSqliteNotAuthorizedError } from "../../src/utils/sql-errors";
+import {
+  errorChain,
+  isSqliteNotAuthorizedError,
+} from "../../src/utils/sql-errors";
 
 import { SpikeDO } from "./worker";
 
@@ -69,13 +74,17 @@ const docVersions = sqliteTable(
 );
 
 const Doc = defineNode("Doc", { schema: z.object({ title: z.string() }) });
+const SearchableDoc = defineNode("SearchableDoc", {
+  schema: z.object({ title: searchable({ language: "english" }) }),
+});
+const FULLTEXT_TABLE = defaultTables.fulltextTableName;
 const linksTo = defineEdge("links_to", {
   schema: z.object({ cost: z.number() }),
 });
 
 const DocGraph = defineGraph({
   id: "do-sqlite",
-  nodes: { Doc: { type: Doc } },
+  nodes: { Doc: { type: Doc }, SearchableDoc: { type: SearchableDoc } },
   edges: { links_to: { type: linksTo, from: [Doc], to: [Doc] } },
 });
 
@@ -160,7 +169,95 @@ function inObject<T>(
   );
 }
 
+async function captureRejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
+
+function errorChainMessages(error: unknown): readonly string[] {
+  return [...errorChain(error)].flatMap((link) => {
+    if (typeof link === "string") return [link];
+    if (typeof link !== "object" || link === null || !("message" in link)) {
+      return [];
+    }
+    return typeof link.message === "string" ? [link.message] : [];
+  });
+}
+
+function expectMissingFulltextError(error: unknown): void {
+  expect(error).toBeInstanceOf(ContributionUnavailableError);
+  if (!(error instanceof ContributionUnavailableError)) {
+    throw new Error("Expected ContributionUnavailableError");
+  }
+  expect(error).toMatchObject({
+    code: "CONTRIBUTION_UNAVAILABLE",
+    details: {
+      graphId: DocGraph.id,
+      logicalName: "fulltext",
+      physicalName: FULLTEXT_TABLE,
+      state: "physical-storage-missing",
+    },
+  });
+  expect(error.cause).toBeDefined();
+  expect(errorChainMessages(error.cause)).toEqual(
+    expect.arrayContaining([
+      expect.stringContaining(`no such table: ${FULLTEXT_TABLE}: SQLITE_ERROR`),
+    ]),
+  );
+}
+
 describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
+  it("types a missing fulltext table on searchable writes and rolls back the node", async () => {
+    await inObject("missing-fulltext-write", async ({ db, store }) => {
+      await db.run(sql.raw(`DROP TABLE ${FULLTEXT_TABLE}`));
+
+      const error = await captureRejection(
+        store.nodes.SearchableDoc.create(
+          { title: "This relational insert must roll back" },
+          { id: "orphaned-fulltext-write" },
+        ),
+      );
+
+      expectMissingFulltextError(error);
+      expect(await store.nodes.SearchableDoc.count()).toBe(0);
+    });
+  });
+
+  it("types a missing fulltext table on reads", async () => {
+    await inObject("missing-fulltext-read", async ({ db, store }) => {
+      await db.run(sql.raw(`DROP TABLE ${FULLTEXT_TABLE}`));
+
+      const error = await captureRejection(
+        store.search.fulltext("SearchableDoc", {
+          query: "missing",
+          limit: 10,
+        }),
+      );
+
+      expectMissingFulltextError(error);
+    });
+  });
+
+  it("rethrows unrelated fulltext SQLite failures without translation", async () => {
+    await inObject("unrelated-fulltext-error", async ({ db, store }) => {
+      await db.run(sql.raw(`DROP TABLE ${FULLTEXT_TABLE}`));
+      await db.run(sql.raw(`CREATE TABLE ${FULLTEXT_TABLE} (unrelated TEXT)`));
+
+      const error = await captureRejection(
+        store.nodes.SearchableDoc.create({ title: "malformed storage" }),
+      );
+
+      expect(error).not.toBeInstanceOf(ContributionUnavailableError);
+      const messages = errorChainMessages(error).join("\n");
+      expect(messages).not.toContain("no such table");
+      expect(messages).toContain("SQLITE_ERROR");
+    });
+  });
+
   it("continues with ANALYZE when workerd forbids analysis_limit", async () => {
     await inObject(
       "statistics-authorization",
