@@ -106,6 +106,9 @@ pnpm build
 
    Run `pnpm test:postgres` for backend, Store, or collection changes. Run the
    example and documentation release checks when their surfaces change.
+   - Run `pnpm test:size` for changes that add imports between subsystems or
+     add a published entrypoint; re-seed with `pnpm size-budget:update` and
+     explain the movement in the PR body.
 4. **Commit:** We use [Changesets](https://github.com/changesets/changesets) for versioning.
    - If your change affects the published package, run `pnpm changeset` and follow the prompts
      to add a changeset file describing your modification.

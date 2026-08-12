@@ -433,6 +433,28 @@ jobs:
       - name: Run Durable Objects SQLite tests (workerd)
         run: pnpm --filter @nicia-ai/typegraph test:do
 
+  size-budget:
+    name: Size budget
+    runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run size budget check
+        run: pnpm test:size
+
   build-artifacts:
     name: Build artifacts
     runs-on: ubuntu-24.04
@@ -478,6 +500,7 @@ jobs:
       - test-typescript-compat
       - test-postgres
       - test-durable-objects
+      - size-budget
     if: >-
       ${{
         !cancelled() &&
