@@ -131,6 +131,48 @@ run-count knob for deep runs:
 TYPEGRAPH_ORACLE_RUNS=100 pnpm test
 ```
 
+### Performance fixtures
+
+Location: `packages/typegraph/tests/perf/`
+
+A registered manifest (`tests/perf/inventory.ts`'s `PERF_FIXTURES`) rather than
+a bag of scripts: every file in the directory is checked, by
+`perf-fixture-inventory.test.ts`, against a live scan of the directory itself
+and against the mode/gating it claims. Each entry names the regression it
+guards and the mutation shown red-then-restored to prove it can fail.
+
+Two modes:
+
+- **`report`** — prints timings, asserts nothing, and is gated on
+  `TYPEGRAPH_PERF=1` via `describe.runIf` so it costs a normal `pnpm test` run
+  nothing. `identity-current-traversal-scaling.test.ts` and
+  `identity-historical-traversal-scaling.test.ts` are this mode; they were the
+  measurement protocol validated during the 0.46.0 identity-traversal
+  hardening (typegraph#270, typegraph#310, typegraph#391, typegraph#396) and
+  are kept green here.
+- **`assert`** — a normal, ungated test that runs in every default `pnpm test`
+  invocation. `write-pipeline-statement-budget.test.ts` pins the exact,
+  enumerated statement multiset a managed write issues, on both PostgreSQL
+  (PGlite) and SQLite (`better-sqlite3`, wrapped by
+  `tests/statement-recorder.ts`'s `createRecordedSqliteStore`), and asserts a
+  batch's statement count does not grow with row count.
+  `claim-fence-overhead.test.ts` asserts an unconstrained write pays no
+  per-graph lock and writes no claim, and that a declared constraint's
+  per-claim cost is a constant, isolated by differencing rather than by a
+  raw total (so it holds independent of the base statement cost or the lock
+  count).
+
+```bash
+# Assert-mode fixtures run in every default invocation
+pnpm test
+
+# Report-mode fixtures, SQLite only
+TYPEGRAPH_PERF=1 pnpm vitest run tests/perf/identity-current-traversal-scaling.test.ts
+
+# Report-mode fixtures, with a PostgreSQL leg too
+POSTGRES_URL=... TYPEGRAPH_PERF=1 pnpm vitest run tests/perf/identity-historical-traversal-scaling.test.ts
+```
+
 ## Running Tests
 
 ```bash

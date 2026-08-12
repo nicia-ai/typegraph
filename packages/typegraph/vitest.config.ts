@@ -8,7 +8,7 @@ import { configDefaults, defineConfig } from "vitest/config";
  * project with file serialization + generous timeouts. The rest of the package
  * keeps default parallelism and fast-fail timeouts.
  */
-const UNIT_SCOPE = process.env.TYPEGRAPH_TEST_SCOPE === "unit";
+const UNIT_SCOPE = process.env["TYPEGRAPH_TEST_SCOPE"] === "unit";
 
 const GRAPH_MERGE_GLOBS = [
   "tests/graph-merge/**/*.test.ts",
@@ -24,7 +24,7 @@ const GRAPH_MERGE_GLOBS = [
  * load reported as a failed assertion about statements that were in fact
  * issued.
  */
-const PGLITE_GLOBS = [
+export const PGLITE_GLOBS = [
   "tests/backends/postgres/pglite-*.test.ts",
   "tests/constraint-claim-inventory.test.ts",
   "tests/constraint-write-fence.test.ts",
@@ -36,6 +36,13 @@ const PGLITE_GLOBS = [
   // recorder suites do, not on the default five-second budget.
   "tests/lock-fence-plan.test.ts",
   "tests/lock-fence-refusal.test.ts",
+  // Perf fixtures that boot a PGlite instance per case to capture statement
+  // counts (`tests/statement-recorder.ts`). Registered here — rather than
+  // left in the default project's 5s budget — for the same reason as the
+  // recorder suites above: `tests/perf/perf-fixture-inventory.test.ts`
+  // checks this list against `PERF_FIXTURES`' own `pglite`-engine entries.
+  "tests/perf/write-pipeline-statement-budget.test.ts",
+  "tests/perf/claim-fence-overhead.test.ts",
 ];
 
 const SHARED_EXCLUDE = [
@@ -153,7 +160,8 @@ export default defineConfig({
           // it provisions an explicit server connection budget for parallel
           // files (scripts/test-postgres.sh), and the 60s budgets below
           // already absorb concurrent PGlite startup latency.
-          fileParallelism: process.env.TYPEGRAPH_HEAVY_FILE_PARALLELISM === "1",
+          fileParallelism:
+            process.env["TYPEGRAPH_HEAVY_FILE_PARALLELISM"] === "1",
           testTimeout: 60_000,
           hookTimeout: 60_000,
         },
@@ -169,7 +177,8 @@ export default defineConfig({
           // not masquerade as a correctness failure. Scoped to this project so
           // the rest of the package keeps default parallelism + fast timeouts.
           // The PostgreSQL lane opts back in (see the pglite project note).
-          fileParallelism: process.env.TYPEGRAPH_HEAVY_FILE_PARALLELISM === "1",
+          fileParallelism:
+            process.env["TYPEGRAPH_HEAVY_FILE_PARALLELISM"] === "1",
           testTimeout: 60_000,
           hookTimeout: 60_000,
         },
