@@ -34,6 +34,8 @@ export type LoggedStatement = Readonly<{
 export type RecordedPostgresStore<TGraph extends GraphDef> = Readonly<{
   store: Store<TGraph>;
   backend: GraphBackend;
+  /** The underlying PGlite client — for `EXPLAIN`, which needs it directly. */
+  client: PGlite;
   /** Every statement recorded since the last `reset()`, in issue order. */
   statements: readonly LoggedStatement[];
   /** Drops the recording so the next assertion sees one write's statements. */
@@ -47,13 +49,28 @@ afterEach(async () => {
   for (const client of pending.toReversed()) await client.close();
 });
 
+/** A fresh PGlite client with TypeGraph's schema, and a backend over it — no store. */
+export type RecordedPglite = Readonly<{
+  client: PGlite;
+  backend: GraphBackend;
+  /** Every statement recorded since the last `reset()`, in issue order. */
+  statements: readonly LoggedStatement[];
+  /** Drops the recording so the next assertion sees one write's statements. */
+  reset: () => void;
+}>;
+
 /**
- * Creates a fresh PGlite database with TypeGraph's schema, a Postgres backend
- * over it, and a live store for `graph` — recording every statement issued.
+ * Creates a fresh PGlite database with TypeGraph's schema and a Postgres
+ * backend over it, recording every statement issued through drizzle's
+ * `logger`. One owner of PGlite creation, DDL application, logger wiring and
+ * client cleanup: {@link createRecordedPostgresStore} delegates to this
+ * rather than repeating the setup with a store bolted on.
+ *
+ * Exposes the raw `client` because `EXPLAIN` needs to run directly against
+ * it — a store's backend has no `EXPLAIN` surface, and a captured statement's
+ * SQL text is exactly what `client.query("EXPLAIN ... " + sql, params)` wants.
  */
-export async function createRecordedPostgresStore<TGraph extends GraphDef>(
-  graph: TGraph,
-): Promise<RecordedPostgresStore<TGraph>> {
+export async function createRecordedPglite(): Promise<RecordedPglite> {
   const client = await PGlite.create();
   clients.push(client);
   await client.exec(generatePostgresDDL().join("\n\n"));
@@ -71,11 +88,29 @@ export async function createRecordedPostgresStore<TGraph extends GraphDef>(
   );
 
   return {
-    store: createStore(graph, backend),
+    client,
     backend,
     statements,
     reset: () => {
       statements.splice(0);
     },
+  };
+}
+
+/**
+ * Creates a fresh PGlite database with TypeGraph's schema, a Postgres backend
+ * over it, and a live store for `graph` — recording every statement issued.
+ */
+export async function createRecordedPostgresStore<TGraph extends GraphDef>(
+  graph: TGraph,
+): Promise<RecordedPostgresStore<TGraph>> {
+  const { client, backend, statements, reset } = await createRecordedPglite();
+
+  return {
+    store: createStore(graph, backend),
+    backend,
+    client,
+    statements,
+    reset,
   };
 }
