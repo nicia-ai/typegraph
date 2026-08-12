@@ -21,6 +21,7 @@
     "bench": "turbo run bench",
     "bench:maintenance": "pnpm --filter @nicia-ai/typegraph-benchmarks bench:maintenance",
     "bench:maintenance:postgres": "pnpm --filter @nicia-ai/typegraph-benchmarks bench:maintenance:postgres",
+    "bench:regression": "pnpm --filter @nicia-ai/typegraph-benchmarks bench:regression",
     "fix": "run-s fix:*",
     "fix:prettier": "prettier --write .",
     "fix:lint": "turbo run lint -- --fix",
