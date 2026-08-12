@@ -466,6 +466,7 @@ only SQLite unit/property tests). The jobs are:
 | **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.3 |
 | **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |
 | **Test (Durable Objects SQLite)** | `test:do` — the workerd / Cloudflare Durable Objects SQLite lane |
+| **Size budget** | `test:size` — per-entrypoint bundle budgets, single-symbol tree-shakeability probes, dist artifact totals |
 | **Build artifacts** | `turbo run build` in parallel with the test jobs |
 | **Build** | Final required gate that succeeds only after the build and every test job above pass |
 
@@ -477,3 +478,19 @@ To reproduce the core gate locally before pushing, run `pnpm fix && pnpm
 typecheck && pnpm test`, then `pnpm test:postgres` (Docker-backed) for any
 change touching backend, store, or collection code. Coverage thresholds are
 enforced by `pnpm test:coverage`.
+
+### Size budget window
+
+`pnpm test:size` (from the repo root or `packages/typegraph`) bundles every
+published entrypoint and a set of single-symbol probes with esbuild, and
+compares the result against the recorded actuals in
+`packages/typegraph/etc/size-budget.json`. A measurement passes when it falls
+at or below `recorded × 1.05` — the ceiling is anchored to the byte count
+recorded the last time someone ran `pnpm size-budget:update`, not to the
+previous PR's measurement, so small increments cannot ratchet the budget
+upward over time.
+
+To re-seed after an intentional size change, run `pnpm size-budget:update`
+(from the repo root or `packages/typegraph`) and commit the resulting diff to
+`etc/size-budget.json`. Every re-seed diff must be justified in the PR body —
+explain which entrypoints moved, by how much, and why.
