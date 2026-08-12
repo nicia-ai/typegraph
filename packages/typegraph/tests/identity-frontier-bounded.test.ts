@@ -42,6 +42,13 @@ import { generatePostgresMigrationSQL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { IDENTITY_CLASS_CTE_ALIAS } from "../src/query/compiler/identity-traversal";
+import {
+  assertPlanShape,
+  assertRowCeiling,
+  type PostgresPlanRoot,
+  renderPostgresPlan,
+  totalActualRows,
+} from "./perf/explain/explain-harness";
 import { provisionPostgresTestDatabase } from "./postgres-test-database";
 
 /**
@@ -225,21 +232,31 @@ describe("current identity expansion is frontier-bounded", () => {
           .join("\n");
 
         // The frontier row's class, then that class's members: both index
-        // seeks, each keyed by the step before it.
-        expect(plan).toContain(
-          "SEARCH identity_seed_class USING INDEX sqlite_autoindex_typegraph_identity_closure_1",
-        );
-        expect(plan).toContain(
-          "SEARCH identity_peer USING INDEX typegraph_identity_closure_class_idx",
-        );
-        // The regression's signature: the closure read whole, or folded into a
-        // relation the frontier cannot narrow. Both spellings are pinned — the
-        // hoisted relation shows up as its own `MATERIALIZE` step, while an
-        // unkeyed join shows up as a scan of the closure under whatever alias it
-        // is given.
-        expect(plan).not.toContain(`MATERIALIZE ${IDENTITY_CLASS_CTE_ALIAS}`);
-        expect(plan).not.toContain("SCAN typegraph_identity_closure");
-        expect(plan).not.toMatch(/SCAN identity_/);
+        // seeks, each keyed by the step before it. The regression's signature:
+        // the closure read whole, or folded into a relation the frontier
+        // cannot narrow. Both spellings are pinned — the hoisted relation
+        // shows up as its own `MATERIALIZE` step, while an unkeyed join shows
+        // up as a scan of the closure under whatever alias it is given.
+        // assertPlanShape is the sole owner of this required/forbidden-term
+        // comparison (see explain-harness.ts); identity-frontier-expansion.test.ts
+        // pins the identical set on a separate fixture.
+        assertPlanShape({
+          plan: {
+            engine: "sqlite",
+            label: "current frontier hop",
+            text: plan,
+            visitedRows: undefined,
+          },
+          required: [
+            "SEARCH identity_seed_class USING INDEX sqlite_autoindex_typegraph_identity_closure_1",
+            "SEARCH identity_peer USING INDEX typegraph_identity_closure_class_idx",
+          ],
+          forbidden: [
+            `MATERIALIZE ${IDENTITY_CLASS_CTE_ALIAS}`,
+            "SCAN typegraph_identity_closure",
+            /SCAN identity_/,
+          ],
+        });
       } finally {
         await backend.close();
       }
@@ -300,20 +317,31 @@ describe("current identity expansion is frontier-bounded", () => {
         // Actual rows rather than estimates: PostgreSQL reports no plan-level
         // "materialized" marker to assert on, but a relation built over the whole
         // closure has to emit its rows, and they are counted here.
-        const explained = await activePool.query<{ "QUERY PLAN": PlanRoot[] }>(
+        const explained = await activePool.query<{
+          "QUERY PLAN": PostgresPlanRoot[];
+        }>(
           `EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) ${statement.sql}`,
           [...statement.params],
         );
         const root = explained.rows[0]?.["QUERY PLAN"][0]?.Plan;
-        const visited =
-          root === undefined ? Number.POSITIVE_INFINITY : totalActualRows(root);
 
         // The fixture holds 4504 nodes in 10 identity classes; the removed shape
         // emitted 2,250,000 pairs from them. A frontier-bounded hop touches the
         // start row, its two peers and one edge — tens of rows, whatever the
         // planner picks. The ceiling is loose enough to survive a plan change and
-        // four orders of magnitude below the regression.
-        expect(visited).toBeLessThan(500);
+        // four orders of magnitude below the regression. assertRowCeiling is the
+        // sole owner of this comparison (see explain-harness.ts);
+        // identity-frontier-expansion.test.ts pins the identical 500-row ceiling
+        // on a separate fixture.
+        assertRowCeiling({
+          plan: {
+            engine: "postgres",
+            label: "current frontier hop",
+            text: root === undefined ? "" : renderPostgresPlan(root),
+            visitedRows: root === undefined ? undefined : totalActualRows(root),
+          },
+          ceiling: 500,
+        });
         await truncate(activePool);
       },
       300_000,
@@ -340,25 +368,3 @@ describe("current identity expansion is frontier-bounded", () => {
     );
   });
 });
-
-/** Shape of the `EXPLAIN (FORMAT JSON)` documents this file reads. */
-type PlanRoot = Readonly<{ Plan: PlanNode }>;
-
-type PlanNode = Readonly<{
-  "Actual Loops"?: number;
-  "Actual Rows"?: number;
-  Plans?: readonly PlanNode[];
-}>;
-
-/**
- * Rows every node of the plan actually emitted, loops included — PostgreSQL
- * reports per-loop averages, so a nested loop's inner side has to be multiplied
- * back out to count the work it did.
- */
-function totalActualRows(node: PlanNode): number {
-  const own = (node["Actual Rows"] ?? 0) * (node["Actual Loops"] ?? 1);
-  return (node.Plans ?? []).reduce(
-    (sum, child) => sum + totalActualRows(child),
-    own,
-  );
-}

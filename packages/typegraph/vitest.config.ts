@@ -36,6 +36,11 @@ const PGLITE_GLOBS = [
   // recorder suites do, not on the default five-second budget.
   "tests/lock-fence-plan.test.ts",
   "tests/lock-fence-refusal.test.ts",
+  // A directory glob, not a file-by-file ratchet: every suite under here
+  // reaches PGlite through `createRecordedPglite` (see
+  // `tests/perf/explain/explain-engines.ts`), so a future explain suite
+  // inherits the budget structurally instead of needing its own entry.
+  "tests/perf/explain/**/*.test.ts",
 ];
 
 const SHARED_EXCLUDE = [
