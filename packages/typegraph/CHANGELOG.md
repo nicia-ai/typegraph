@@ -1,5 +1,180 @@
 # @nicia-ai/typegraph
 
+## 0.50.0
+
+### Minor Changes
+
+- [#490](https://github.com/nicia-ai/typegraph/pull/490) [`02c0370`](https://github.com/nicia-ai/typegraph/commit/02c03708dc9ebe81cb3f2aa4ec3b91d6352106a7) Thanks [@pdlug](https://github.com/pdlug)! - Issue a node's claims on the side of the row write their placement names, and refuse the writes a backend with no transactions cannot undo.
+
+  A uniqueness claim whose axis spans kinds beyond the writer's own is the **only** fence for that axis — the nodes primary key is `(graph_id, kind, id)`, so an `Employee`'s insert does not collide with a `Contractor`'s — and a fence issued after the write it fences is not a fence. Those claims now precede the row insert they gate, with the reservations given back if that insert does not land, so a refusal leaves zero net effect. On the import path this is what turns a violation into a refusal instead of a committed row: `importGraph` recovers per row and takes no per-graph lock, so a claim written after the row it was supposed to refuse let the row commit.
+
+  A claim whose axis **is** the writer's own kind keeps the position it has today, after the row: the uniques primary key at that axis is already the complete fence for it, moving it would buy nothing, and it would cost a refusal on backends with no transactions. Placement is decided once, per claim, from the one fact both readings turn on — does this claim's axis span kinds beyond the writer's own? — and carried as data through the entry, the claim seam, the refusal and the lock projection. Which writes take the per-graph advisory lock, and the reason each reports, are unchanged.
+
+  Two new refusals follow, both on `transactions: false` backends (Cloudflare D1, `drizzle-orm/neon-http`, `transactionMode: "none"` SQLite), and both `ConfigurationError` / `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`:
+
+  - **`importGraph` / `importGraphStream` into a graph any of whose node kinds declares a unique constraint of any scope, or any of whose edge kinds is non-`many`.** Import writes claim rows like every other writer but is not covered by the write-transaction refusal, so it would have written reservations with nothing to roll them back. The refusal is computed up front, before the first chunk, so a streamed import cannot commit _k-1_ chunks and then fail. Disjointness owes no claim yet — that fence lands in a later batch — so a disjoint-only graph is not refused here.
+  - **A node UPDATE or RESURRECT whose kind declares only `scope: "kind"` unique constraints**, reason `nodeUniquenessClaim`. This closes an existing hole rather than paying for a new one: the transition seam already claims before its gated row write for every scope, so that path already wrote a reservation with nothing to undo it. The matching **create** is not refused — its claim stays after the row — which is the pair that makes the rule legible: same kind, same constraint, opposite verdicts, decided only by placement.
+
+  `ConstraintFenceReason` gains `nodeUniquenessClaim` for that refusal. It is never returned by the lock projection, so it cannot widen the set of writes that take the per-graph lock.
+
+  Claim statements within each placement group are issued in one canonical order — code-point on `(relation, graph, axis, constraint, key)` — and the pre-insert group is always issued first, so two writers touching the same claim rows for one row acquire them in the same order instead of deadlocking. For a node create this is observable as statement order: a kind owing only own-axis claims emits exactly what it emits today, a kind owing a cross-kind claim emits it ahead of the row insert, and a kind owing both emits two claim statements, one on each side.
+
+- [#490](https://github.com/nicia-ai/typegraph/pull/490) [`02c0370`](https://github.com/nicia-ai/typegraph/commit/02c03708dc9ebe81cb3f2aa4ec3b91d6352106a7) Thanks [@pdlug](https://github.com/pdlug)! - Tolerate the concurrent `CREATE EXTENSION` race when materializing trigram indexes, and give every extension install one owner.
+
+  `method: "trigram"` needs `pg_trgm`, the extension is database-global, and the claim that serializes an index build is keyed per index — so two materializers building different trigram indexes both reach `CREATE EXTENSION IF NOT EXISTS pg_trgm`. That statement is not a concurrency primitive on PostgreSQL: its existence check cannot see another session's uncommitted `pg_extension` row, so the loser waited for the winner and was handed SQLSTATE 23505 instead of a notice, reporting `failed` for an extension the winner had already installed.
+
+  `GraphBackend` gains an optional `ensureExtension(name)` member — the single owner of "install a database-global extension idempotently" — which the bundled PostgreSQL backend implements with both fences: a transaction advisory lock keyed on the extension, so same-key installers never raise at all, and the concurrent-DDL retry its table and column creates already use, which clears the 23505 an installer that did NOT take that lock can still hand it (a peer on an older version, or a `capabilities.transactions: false` backend with no transaction to hang the lock on). The name is validated against the exported `DATABASE_EXTENSION_NAMES` allowlist rather than interpolated freely.
+
+  `GraphBackend.ensureTrigramExtension`, the `pg_trgm`-only member added in 0.47, is deprecated in favour of `ensureExtension` and now says exactly the same thing: the bundled PostgreSQL backend implements it by delegating, and index materialization consults it only after `ensureExtension`, so a backend written against 0.47 keeps its fence unchanged. A backend implementing neither keeps issuing the bare statement with materialization's own one-shot retry, so a third-party trigram index is still materialized. The advisory-lock key changed from `typegraph:pg-trgm-ddl` to `typegraph:extension-ddl:<extension>` when the fence generalized to any allowlisted extension — a 0.47 peer therefore takes a different key, which is exactly why the retry is retained on the locked path too.
+
+  Closes [#446](https://github.com/nicia-ai/typegraph/issues/446).
+
+- [#490](https://github.com/nicia-ai/typegraph/pull/490) [`02c0370`](https://github.com/nicia-ai/typegraph/commit/02c03708dc9ebe81cb3f2aa4ec3b91d6352106a7) Thanks [@pdlug](https://github.com/pdlug)! - Fence `disjointWith` with a claim on the declared pair, and enforce it under `importGraph`.
+
+  Disjointness was probed and never fenced. The nodes primary key is `(graph_id, kind, id)`, so `Person "X"` and `Company "X"` are two different rows by construction — the exact collision the axiom forbids is the one the database cannot refuse — and the probe was only as good as the serialization around it. `importGraph` takes no per-graph lock and, until now, ran no disjointness probe at all: an import could commit both halves of a violating pair.
+
+  A create of a kind with a `disjointWith` partner now reserves one claim row per partner, in the same relation uniqueness claims use, at the pair's own axis with the node's id as the key. Both kinds of a pair fold to one axis through the registry's own canonical pair label, so their claims contend for one row and its primary key refuses the second writer. The claim precedes the row it gates and is given back if that row does not land, so a refusal leaves zero net effect. Because the two families arrive through one list of claim sites, every path that already maintained uniqueness reservations — create, batch create, delete, import — maintains disjointness reservations too. A **resurrect** — a soft-deleted node revived by `.create()` on its tombstoned id, `upsertById`, `upsertByIdFromRecord`, `bulkUpsertById`, or `getOrCreateByConstraint` — reserves the same claim, since reviving a tombstone re-introduces a live id under a kind exactly as a create does; the resurrect leg no longer has a window where it could revive a node under an id a disjoint partner already holds live.
+
+  `importGraph` gains the per-row disjointness probe both node paths were missing, and the per-row recovery it sits in is widened from `UniquenessError` to every declared-constraint refusal. Behavior deltas:
+
+  - **Import now enforces disjointness.** A payload containing a `Person` and a `Company` with the same id, in one batch or in sequence, refuses the second **row** and reports it in `errors` while the import continues — the accepted rows commit. Previously both committed silently. A _concurrent_ violation, taken by another writer between this row's probe and the batch's claim, still surfaces from the claim and aborts the import; that asymmetry is what import already does for uniqueness.
+  - **`importGraph` / `importGraphStream` is refused on a `transactions: false` backend when any node kind has a disjoint partner**, joining the unique-constraint and non-`many`-cardinality cases (`ConfigurationError` / `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`). A disjoint create's claim precedes its row, and without a transaction a failure between the two would leave a reservation with no repair path.
+  - **A kind or unique constraint name containing `U+001E` is refused at `defineNode` / `defineGraph`.** That code point builds the axes that are not kinds, so a name carrying it could spell the reserved disjointness axis. New refusal on an input no real schema carries.
+
+  The refusal a caller sees is the family's own `DisjointError`, with the same payload whichever layer produced it: the probe reads the partner's node row, the claim reads its reservation's owner, and both name the holder's concrete kind.
+
+- [#490](https://github.com/nicia-ai/typegraph/pull/490) [`02c0370`](https://github.com/nicia-ai/typegraph/commit/02c03708dc9ebe81cb3f2aa4ec3b91d6352106a7) Thanks [@pdlug](https://github.com/pdlug)! - Fence edge cardinality with a claim relation, and enforce it under `importGraph`.
+
+  Declared edge cardinality was probed and never fenced. `one` and `oneActive` are predicates over `(kind, from)` and `unique` is one over `(kind, from, to)`, while the edges relation's only uniqueness is its `(graph_id, id)` primary key — so two writers could both count zero sibling edges and both commit, and nothing in the schema re-decided at write time. `importGraph` made it worse by running no cardinality probe at all: a payload could commit any number of edges a `cardinality: "one"` declaration forbids.
+
+  A new relation, `typegraph_edge_claims`, keyed `(graph_id, axis, key)`, is the fence. Each constrained edge write reserves the axis its declaration spans (`<cardinality>:<edgeKind>`) against the endpoint identity the declaration covers, in two statements: a decision-free create-or-lock that reports the committed holder, then — only when the holder is a different edge — a conditional takeover that succeeds exactly when that holder is no longer an edge the axis and key describe. Deciding inside one upsert would read the pre-lock snapshot of the edges relation under READ COMMITTED and accept both writers; the split is what makes the second one lose.
+
+  The claim needs no release path. A holder that is soft-deleted, hard-deleted, or (for `oneActive`) ended fails the takeover's liveness predicate and is replaced in place, so no delete, end, cascade or kind-removal path participates in the fence. The holder is identified by its kind and source endpoints as well as its id, because edge ids are caller-suppliable: a reused id would otherwise read as a live holder and block its axis forever. `EDGE_CARDINALITY_SPECS` is the one table both the TypeScript probe and the takeover's SQL read for which endpoints an axis covers, whether an edge born already ended claims at all, and what a holder must still be — so the probe and the fence cannot drift apart.
+
+  Behavior deltas:
+
+  - **Import now enforces edge cardinality** (`one` / `unique` / `oneActive`). Two edges from one source in one payload refuse the second **row** and report it in `errors` while the import continues; the accepted rows commit. Import's edge slice reuses the store's own in-batch cardinality accounting to make that per-row rather than a whole-slice abort. A _concurrent_ violation, taken by another writer between a row's probe and the slice's claim, still surfaces from the claim and aborts the import — the same asymmetry import already has for uniqueness.
+  - **`PostgresTableNames` / `SqliteTableNames` / `SqlTableNames` gain `edgeClaims`**, and `BackendCapabilities` gains an **optional** `constraintClaims`. Absent means `false`: a backend that predates the claim relations keeps every fence it has today and is never refused for the absence. Both bundled dialects declare `true` and implement every claim member. A backend whose declaration and surface disagree in either direction is refused with `ConfigurationError` / `CONSTRAINT_CLAIM_SURFACE_MISMATCH` rather than silently unfenced.
+  - **`GraphBackend` gains optional `claimEdgeCardinality`, `claimEdgeCardinalityBatch` and `purgeEdgeClaims`.** Additive; a custom backend that omits them declares `constraintClaims: false` and keeps working.
+  - **A database bootstrapped before this release needs the new table.** It is emitted by the existing idempotent boot path and by `generatePostgresMigrationSQL` / `generateSqliteMigrationSQL`. A store reaching a missing relation on its first constrained edge write is refused with a typed `ConfigurationError` (`EDGE_CLAIM_RELATION_MISSING`) naming the relation and the migration to run, instead of an opaque driver failure.
+
+  The refusal a caller sees is the family's own `CardinalityError`, built by the same functions the probe calls, so it is indistinguishable from the serial refusal it replaces.
+
+- [#490](https://github.com/nicia-ai/typegraph/pull/490) [`02c0370`](https://github.com/nicia-ai/typegraph/commit/02c03708dc9ebe81cb3f2aa4ec3b91d6352106a7) Thanks [@pdlug](https://github.com/pdlug)! - Scope uniqueness-claim releases to the node that owns the claim.
+
+  A `typegraph_node_uniques` row records both the axis it fences on (`node_kind`) and the node that owns it (`concrete_kind`, `node_id`). Releases keyed on the axis alone could not tell those apart: a soft delete gave up whatever row sat at the node's own kind, and a kind removal deleted every claim whose _axis_ was the removed kind. Both readings are wrong the moment an axis and a concrete kind differ — they leak a claim that blocks its key forever, and they delete a surviving sibling's claim.
+
+  Release now has three explicitly different shapes, each with one owner: a **lifecycle** release gives up every claim the node holds for a constraint and key at whatever axis it sits on (soft delete, an update's key-change release, the resurrect diff); a **compensating** release undoes exactly the row a failed write claimed, at the axis it claimed on; and **kind reaping** removes every claim the removed kind's nodes own, through the new `buildHardDeleteUniquesByConcreteKind` builder that `materializeRemovals` and the new optional `hardDeleteUniquesByConcreteKind` backend member both compile.
+
+  `DeleteUniqueParams` gains the owner pair `concreteKind` / `nodeId`, and its `nodeKind` becomes optional — present selects the compensating shape, absent the lifecycle one. A third-party `GraphBackend` that implements `deleteUnique` must make BOTH changes: add `concrete_kind` and `node_id` to its predicate, and make the `node_kind` term _conditional_ on `params.nodeKind` being present. Doing neither does not leave the old behavior in place: the lifecycle release now passes no `nodeKind`, so a predicate that still spells `node_kind = :nodeKind` unconditionally compares against NULL, matches zero rows, and releases nothing — every soft delete and every key-change release leaks its claim, and the key stays blocked forever. TypeScript cannot catch it either, since an `undefined` bound into a SQL template is accepted silently.
+
+- [#490](https://github.com/nicia-ai/typegraph/pull/490) [`02c0370`](https://github.com/nicia-ai/typegraph/commit/02c03708dc9ebe81cb3f2aa4ec3b91d6352106a7) Thanks [@pdlug](https://github.com/pdlug)! - Fence `scope: "kindWithSubClasses"` uniqueness on a shared claim axis, and decide claim ownership by `(concrete_kind, node_id)`.
+
+  A shared-scope unique constraint used to reserve its key under the writer's OWN kind, while the probe walked the whole hierarchy. Sibling kinds therefore reserved rows that could never collide — the `typegraph_node_uniques` primary key was structurally incapable of refusing the second writer, and only the per-graph lock stood between two concurrent creates and a duplicate ([#436](https://github.com/nicia-ai/typegraph/issues/436)). The claim is now written at the scope's **axis**: the code-point minimum of the connected `subClassOf` component, which every kind in that component computes identically, so two writers of two kinds contend for one row and the primary key is the fence. Under multiple inheritance or multiple roots this is stricter than before — the component is what the old "walk one root's descendants" reading was documented to mean — and the probe still visits every kind in scope, so rows written before the upgrade are still read and no data migration is required.
+
+  Ownership of a claim is the pair `(concrete_kind, node_id)`, not the id alone. Ids are unique only per kind, so `Employee "X"` and `Contractor "X"` are two different nodes; comparing ids let the second one match the "this row is already mine" arm of the upsert, rewrite the incumbent's `concrete_kind`, and read its own id back as proof it had won. Both upsert builders now compare the pair and return it, the accept/refuse test compares the pair, and the batch-validation cache remembers the pair — so a live claim held by a namesake under another kind is a refusal where it was previously a silent takeover. In one import batch, that refusal is now reported per row (with the earlier rows committed) instead of aborting the whole batch at the flush.
+
+  Two payload/behavior corrections come with it. `UniquenessError.kind` now names the **holder's own kind** rather than the `node_kind` the row was found under, which is the same value on a single-kind scope and the meaningful one on a shared scope. And the cross-kind lookups behind `findByConstraint` and `getOrCreateByConstraint` state their preference explicitly — axis first, then the remaining kinds in code-point order, live rows preferred over tombstoned ones — so a database carrying both a pre-upgrade and a post-upgrade row for one key resolves deterministically instead of by iteration order.
+
+  The per-graph write lock is unchanged: which writes take it, and the reason each one reports, are byte-identical, now derived from the same claim-site classification the claim itself is written from.
+
+- [#490](https://github.com/nicia-ai/typegraph/pull/490) [`02c0370`](https://github.com/nicia-ai/typegraph/commit/02c03708dc9ebe81cb3f2aa4ec3b91d6352106a7) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.verifyConstraintFences()`, the read-only audit of constraint violations that predate the fence.
+
+  The claim relations refuse the second live claimant of an axis from the first write after upgrade onward, but they repair nothing that is already there. A database that carried two live siblings sharing a `scope: "kindWithSubClasses"` key, an id live under both kinds of a `disjointWith` pair, or two live `cardinality: "one"` edges from one source keeps carrying them: the next write that touches such an axis is refused with the ordinary typed error naming the incumbent, and until then nothing says so. This is the diagnostic that says so.
+
+  It reads the relation each constraint is **declared over**, never a claim relation's primary key. A claim key admits one row per axis by construction, and a database written before the claim tables existed holds no edge claims at all, so a claim scan would report zero violations on precisely the data the audit exists to find. Uniqueness is read from the live `uniques` rows and folded onto the axis each row's `node_kind` belongs to — which is how a pre-upgrade duplicate sitting at two different `node_kind`s is found at all — restricted to constraint names the graph declares, so disjointness claims (whose `node_kind` is a pair label, not a kind) are audited from the nodes relation instead. Contention is counted in distinct **owner pairs** (`concrete_kind`, `node_id`), not rows, so one node legitimately holding its key at a legacy axis and at the current one is not reported.
+
+  Each entry names the claim row two claimants contend for — built by the same functions the fence writes with — plus the conflicting `owners` (uniqueness, disjointness) or `edgeIds` (cardinality). It writes nothing and repairs nothing: choosing which claimant keeps an axis is a data-loss decision that belongs to the operator.
+
+  - **`GraphBackend` gains an optional `readConstraintFenceViolations`.** Additive; both bundled dialects implement it through one shared statement per family. `store.verifyConstraintFences()` refuses with `ConfigurationError` / `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` on a backend without it, rather than returning an empty report a caller would read as "clean".
+  - **`KindRegistry` gains `disjointKindPairs()`**, the declared pairs as kind pairs — the inverse of the internal pair label, so an enumerating caller never spells the label's form itself.
+
+  The parity matrix in `backend-setup.md` gains the three rows this mechanism owes a reader: the `constraintClaims` capability, PostgreSQL's `40001` in place of the typed error above READ COMMITTED, and the claim row's lock being held to end-of-transaction on both dialects — refusal included, so a caller that catches a constraint error and continues blocks other writers of that axis for the rest of its transaction.
+
+### Patch Changes
+
+- [#490](https://github.com/nicia-ai/typegraph/pull/490) [`02c0370`](https://github.com/nicia-ai/typegraph/commit/02c03708dc9ebe81cb3f2aa4ec3b91d6352106a7) Thanks [@pdlug](https://github.com/pdlug)! - Restore a merged node's `disjointWith` reservations after a resolved merge write set commits.
+
+  A resolved node write set (the graph-merge apply path, and the set update it shares its preflight with) validates the whole after-image, then clears the affected nodes' sidecar rows so its upserts can take the approved keys in any order, then rebuilds them once at the end — the rebuild is what keeps a coalesced, otherwise side-effect-free upsert from leaving its key unreserved.
+
+  The clear is keyed on the claim's OWNER, so it takes every reservation the affected nodes hold, and since 0.48 that includes their `disjointWith` claims as well as their uniqueness claims. The rebuild now goes through the same claim writer an ordinary create uses, which restores whatever the row's kind owes rather than the uniqueness slice alone; previously a merged node came out of every merge with its disjointness axis unreserved, leaving it unfenced against a disjoint namesake for the rest of the graph's life.
+
+- [#491](https://github.com/nicia-ai/typegraph/pull/491) [`2009e6c`](https://github.com/nicia-ai/typegraph/commit/2009e6cb39bd5bc306a34acc61a81e2619e007bc) Thanks [@pdlug](https://github.com/pdlug)! - Close the write-pipeline seam: the row-work read projection is now the type
+  every write path actually uses. The preparation helpers, constraint and
+  uniqueness probes, batch validation caches and identity hooks the migrated
+  modules reach are re-typed off `GraphBackend | TransactionBackend` onto the
+  narrow handle a write frame hands out, so the counted `unfencedTarget` widening
+  falls from seventeen call sites to one. That one is structural rather than
+  migration debt — the bulk `getOrCreateByEndpoints` legs re-enter the executor
+  against their enclosing frame's target, and re-entry mints a session — and the
+  ratchet now records it as a reasoned floor with a second escape failing the
+  build.
+
+  Three seams are stated instead of implied along the way. `IdentityTarget` is an
+  explicit facet composition of what an identity statement needs (reads plus the
+  optional raw-statement port) rather than the whole backend union, with the
+  service context's `backend` named for what it is: the handle the service opens
+  its own write frames on. `ConstraintContext` and the uniqueness probe carry
+  read facets, which states in the type that no check in either module writes.
+  The executor's overlaid-session mint takes the READS to answer rather than a
+  backend to write through, so row work can no longer hand the session an
+  arbitrary backend. `src/store/operations/index.ts` publishes the seam
+  (`runWritePlan`, `WritePlan`, `WriteSession`) and still re-exports no step or
+  sidecar module, and the write-pipeline files come off knip's ignore list. No
+  public API, behavior, error type, statement or lock scope changes.
+
+- [#491](https://github.com/nicia-ai/typegraph/pull/491) [`2009e6c`](https://github.com/nicia-ai/typegraph/commit/2009e6cb39bd5bc306a34acc61a81e2619e007bc) Thanks [@pdlug](https://github.com/pdlug)! - Route every edge write through the write pipeline: the raw `insertEdge` /
+  `updateEdge` / `deleteEdge` / `hardDeleteEdge` calls move into a new
+  `edge-write-pipeline.ts` step module and the insert dispatch, reached through
+  the session's seven edge methods under an edge write plan. All nine edge entry
+  points — including the bulk `getOrCreateByEndpoints` batch — now declare their
+  constraint probe as plan data instead of spelling it at the transaction call,
+  and an edge update states its asserted identity and validity bound as a fence
+  record whose keys are required, so a partially stated fence is a type error
+  rather than a silently unfenced write. The zero-row diagnosis
+  (`withUnmatchedEdgeUpdateRefusal`) moves to `edge-write-fences.ts` and stays
+  caller-applied, because the store's converge-or-refuse reading and interchange
+  import's report-and-continue reading are genuinely different recovery policies.
+  No public API, behavior, error type, statement, or lock scope changes.
+
+- [#491](https://github.com/nicia-ai/typegraph/pull/491) [`2009e6c`](https://github.com/nicia-ai/typegraph/commit/2009e6cb39bd5bc306a34acc61a81e2619e007bc) Thanks [@pdlug](https://github.com/pdlug)! - Route interchange import through the write pipeline: its hand-built write
+  context and its own `runInWriteTransaction` call are gone, and all six write
+  legs — the batched and per-row node creates, the node update, the batched and
+  per-row edge creates, and the edge update — now run as session calls under one
+  write plan whose identity participation the executor acquires. Import's
+  hand-rolled `insertNodesBatch === undefined` / `insertEdgesBatch === undefined`
+  probes converge on the insert dispatch that already owns that decision, and its
+  edge update states the five immutable identity components and the window
+  guard's stored lower bound as a fence record with required keys instead of a
+  spread convention. The write-pipeline exemption list has no migration debt left:
+  every remaining entry is a step, sidecar or reasoned carve-out. No public API,
+  behavior, error type, statement or lock scope changes.
+
+- [#491](https://github.com/nicia-ai/typegraph/pull/491) [`2009e6c`](https://github.com/nicia-ai/typegraph/commit/2009e6cb39bd5bc306a34acc61a81e2619e007bc) Thanks [@pdlug](https://github.com/pdlug)! - Route every node write except the set update through the write pipeline: the
+  eight managed entry points in `node-operations.ts` now compose a write plan and
+  run through the executor, and their row and sidecar writes are the session's
+  fused units rather than hand-paired calls. The identity-participation decision
+  moves from eight inline conditions to one declaration per plan, and the update
+  path's validity lower-bound fence becomes a required argument instead of a
+  spread convention. No public API, behavior, error type, or lock scope changes.
+
+- [#491](https://github.com/nicia-ai/typegraph/pull/491) [`2009e6c`](https://github.com/nicia-ai/typegraph/commit/2009e6cb39bd5bc306a34acc61a81e2619e007bc) Thanks [@pdlug](https://github.com/pdlug)! - Add the internal write-pipeline seam: a total, disjoint classification of every
+  `GraphBackend` member, a typed write plan, per-kind write fences with total
+  applier maps, the fused write session, and the executor that is the single
+  sanctioned caller of the write transaction. An ESLint rule now bans direct
+  backend mutation calls outside the step and sidecar modules that own them, with
+  a declared exemption list a ratchet holds equal to the tree. No public API,
+  behavior, statement order, or lock scope changes.
+
+- [#491](https://github.com/nicia-ai/typegraph/pull/491) [`2009e6c`](https://github.com/nicia-ai/typegraph/commit/2009e6cb39bd5bc306a34acc61a81e2619e007bc) Thanks [@pdlug](https://github.com/pdlug)! - Route the set-based node update through the write pipeline: `updateWhere`'s
+  transaction body is now `applyNodeSetUpdate`, a node write step, reached through
+  `session.reviseNodeSet` under a write plan. The uniqueness drop it performs
+  moves to the uniqueness sidecar module, and the fence the set UPDATE has no
+  field to carry is now refused by name instead of being absent from the call.
+  With this, no module outside the declared step and sidecar modules calls a
+  backend mutation member for a node write. No public API, behavior, error type,
+  or lock scope changes.
+
 ## 0.49.0
 
 ### Minor Changes
