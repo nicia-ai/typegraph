@@ -18,6 +18,11 @@ Two benchmark programs live in this package:
 The full program design lives in `docs/design/benchmark-program-plan.md`
 (gitignored, local to the repo checkout that approved it).
 
+Regression mode (`pnpm bench:regression`) compares a candidate against the
+last published tag, the PR base, and an optional feature baseline, and
+flags/fails on a median regression above a configured threshold — see
+[`docs/regression-mode.md`](docs/regression-mode.md).
+
 ## Real-workload benchmarks (`src/real/`)
 
 ### Lane 1 — LDBC SNB Interactive short reads (IS1-IS7)

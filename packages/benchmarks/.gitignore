@@ -1,3 +1,7 @@
 # Dated real-workload benchmark run bundles (docs/design/benchmark-program-plan.md).
 # The one-line-per-run reports/history.jsonl append log stays in git.
 bench-results/
+
+# Per-run regression-mode output (markdown + JSON report, worktree logs).
+# Curated proof reports are committed at reports/regression-*.md instead.
+reports/regression/
