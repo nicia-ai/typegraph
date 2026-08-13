@@ -61,15 +61,26 @@
  * (fail-eligible) if the chain of members/parameters leading to it is itself
  * mandatory: every field/parameter along the way is required (`Partial<>` /
  * `Required<>` forced-optionality is honored the same way it is for member
- * optionality), AND — for a chain rooted at a top-level function
- * declaration — that function itself already existed at the base ref. A
- * brand-new type reached only through an optional field (e.g.
- * `capabilities.recursiveTraversal?: RecursiveTraversalCapability`) or only
+ * optionality), AND — for a chain rooted at a callable declaration (a
+ * top-level function, an interface method, a class method, or a class
+ * constructor) — that *specific callable* already existed at the base ref.
+ * A brand-new type reached only through an optional field (e.g.
+ * `capabilities.recursiveTraversal?: RecursiveTraversalCapability`), only
  * through a brand-new exported function's parameter (e.g. a new
- * `assertFooSupported(verdict: FooVerdict)`) is therefore reported, not
- * failed: no existing external caller is forced to construct it, because
- * they can omit the optional field or simply never call the new function.
- * A declaration reached through an *existing* (present-at-base) mandatory
+ * `assertFooSupported(verdict: FooVerdict)`), or only through a brand-new
+ * method or constructor on a new-or-existing interface/class (e.g.
+ * `NewQueryBuilder.from`,
+ * or `ExistingBuilder.newMethod`) is therefore reported, not failed: no
+ * existing external caller is forced to construct it, because they can omit
+ * the optional field or simply never call the new function/method. This is
+ * the SAME gating predicate `collectInlineLiteralEntries` applies to inline
+ * parameter object literals — the two paths share the callable-newness set
+ * (`collectExistingCallableKeys`) and the per-parameter mandatory test
+ * (owning callable existed at base AND the parameter itself carries no `?`)
+ * rather than each re-deriving it, so they cannot drift the way an inline
+ * literal's parameter and a named type's parameter once did (the inline
+ * path used to hard-fail unconditionally, gating on neither axis). A
+ * declaration reached through an *existing* (present-at-base) mandatory
  * chain remains hard-contravariant even when its own referenced type is
  * brand new — swapping an existing required field's value type for a new,
  * differently-shaped type is exactly the kind of change this check exists
@@ -420,18 +431,19 @@ function flip(polarity: Polarity): Polarity {
  * `-` by at least one MANDATORY path: every field/parameter on that path is
  * required (honoring `Partial<>`/`Required<>` forced optionality the same
  * way member-optionality resolution does), and, where the path is rooted at
- * a top-level function declaration, that function itself is present in
- * `existingFunctionNames` (omit the argument, e.g. when walking the base
- * snapshot itself, to treat every top-level function as pre-existing — there
- * is no "before" to gate against). A declaration reached only through an
- * optional field or only through a brand-new function's parameter is walked
+ * a top-level function declaration, an interface/class method, or a class
+ * constructor, that callable itself is present in `existingCallableKeys`
+ * (omit the argument, e.g. when walking the base snapshot itself, to treat
+ * every callable as pre-existing — there is no "before" to gate against). A
+ * declaration reached only through an optional field or only through a
+ * brand-new function/method/constructor's parameter is walked
  * (so it can still surface further nested contravariant reachability) but
  * never added to the hard set, matching §module doc's gating note.
  */
 function computeContravariantNames(
   namedDeclarations: ReadonlyMap<string, NamedDeclarationEntry>,
   functionDeclarations: readonly ts.FunctionDeclaration[],
-  existingFunctionNames?: ReadonlySet<string>,
+  existingCallableKeys?: ReadonlySet<string>,
 ): ReadonlySet<string> {
   const contravariant = new Set<string>();
   const visited = new Set<string>();
@@ -450,8 +462,8 @@ function computeContravariantNames(
     if (entry.kind === "type")
       walkTypeNode(entry.typeNode, polarity, mandatory);
     else if (entry.kind === "interface")
-      walkTypeElements(entry.members, polarity, mandatory, undefined);
-    else walkClassMembers(entry.members, polarity, mandatory);
+      walkTypeElements(entry.members, polarity, mandatory, undefined, name);
+    else walkClassMembers(entry.members, polarity, mandatory, name);
   }
 
   function walkTypeNode(
@@ -524,11 +536,32 @@ function computeContravariantNames(
     return mandatory && !optional;
   }
 
+  /**
+   * A method/constructor parameter chain is only mandatory if the owning
+   * callable (`ownerName.memberName`) already existed at the base ref —
+   * `ownerName` is `undefined` for anonymous type literals (no callable to
+   * gate on, so nothing is gated) and `existingCallableKeys` is `undefined`
+   * when there is no "before" to gate against (building the base snapshot's
+   * own inventory), matching the top-level-function gate below.
+   */
+  function calleeExisted(
+    ownerName: string | undefined,
+    memberName: string | undefined,
+  ): boolean {
+    return (
+      existingCallableKeys === undefined ||
+      ownerName === undefined ||
+      memberName === undefined ||
+      existingCallableKeys.has(`${ownerName}.${memberName}`)
+    );
+  }
+
   function walkTypeElements(
     elements: readonly ts.TypeElement[],
     polarity: Polarity,
     mandatory: boolean,
     forcedMode: ForcedOptionalityMode | undefined,
+    ownerName?: string,
   ): void {
     for (const element of elements) {
       if (ts.isIndexSignatureDeclaration(element)) {
@@ -550,10 +583,16 @@ function computeContravariantNames(
           forcedMode,
           element.questionToken,
         );
+        const methodExisted = calleeExisted(
+          ownerName,
+          getMemberName(element.name),
+        );
         for (const parameter of element.parameters) {
           if (parameter.type !== undefined) {
             const parameterMandatory =
-              childMandatory && parameter.questionToken === undefined;
+              childMandatory &&
+              methodExisted &&
+              parameter.questionToken === undefined;
             walkTypeNode(parameter.type, flip(polarity), parameterMandatory);
           }
         }
@@ -567,9 +606,9 @@ function computeContravariantNames(
     members: readonly ts.ClassElement[],
     polarity: Polarity,
     mandatory: boolean,
+    ownerName?: string,
   ): void {
     for (const member of members) {
-      if (ts.isConstructorDeclaration(member)) continue;
       if (member.name !== undefined && ts.isPrivateIdentifier(member.name))
         continue;
       if (hasPrivateModifier(member)) continue;
@@ -585,12 +624,31 @@ function computeContravariantNames(
         walkTypeNode(member.type, polarity, mandatory && !memberOptional);
         continue;
       }
-      if (ts.isMethodDeclaration(member)) {
-        const childMandatory = mandatory && member.questionToken === undefined;
+      if (ts.isConstructorDeclaration(member)) {
+        const constructorExisted = calleeExisted(ownerName, "constructor");
         for (const parameter of member.parameters) {
           if (parameter.type !== undefined) {
             const parameterMandatory =
-              childMandatory && parameter.questionToken === undefined;
+              mandatory &&
+              constructorExisted &&
+              parameter.questionToken === undefined;
+            walkTypeNode(parameter.type, flip(polarity), parameterMandatory);
+          }
+        }
+        continue;
+      }
+      if (ts.isMethodDeclaration(member)) {
+        const childMandatory = mandatory && member.questionToken === undefined;
+        const methodExisted = calleeExisted(
+          ownerName,
+          getMemberName(member.name),
+        );
+        for (const parameter of member.parameters) {
+          if (parameter.type !== undefined) {
+            const parameterMandatory =
+              childMandatory &&
+              methodExisted &&
+              parameter.questionToken === undefined;
             walkTypeNode(parameter.type, flip(polarity), parameterMandatory);
           }
         }
@@ -603,9 +661,9 @@ function computeContravariantNames(
   for (const name of namedDeclarations.keys()) markReachable(name, 1, true);
   for (const functionDeclaration of functionDeclarations) {
     const functionExisted =
-      existingFunctionNames === undefined ||
+      existingCallableKeys === undefined ||
       (functionDeclaration.name !== undefined &&
-        existingFunctionNames.has(functionDeclaration.name.text));
+        existingCallableKeys.has(functionDeclaration.name.text));
     for (const parameter of functionDeclaration.parameters) {
       if (parameter.type !== undefined) {
         const parameterMandatory =
@@ -646,14 +704,37 @@ type CallableSignature = Readonly<{
  * (`funcName`), interface/class methods (`Owner.methodName`), and
  * constructors (`Owner.constructor`) uniformly — a required member added to
  * any of their inline parameter literals is inventoried the same way.
+ *
+ * A parameter-position entry is HARD contravariant under the same predicate
+ * `computeContravariantNames` applies to named types (§module doc's gating
+ * note): the owning callable must already exist in `existingCallableKeys`
+ * (its key — a bare function name, or `Owner.method` / `Owner.constructor` —
+ * present at the base ref), AND at least one overload carries the parameter
+ * without a `?`. A brand-new function/method (its key entirely absent from
+ * `existingCallableKeys`) or a brand-new optional parameter on an existing
+ * one is therefore reported, not failed: no existing external caller can be
+ * forced to construct a literal they were never required to pass in the
+ * first place. `existingCallableKeys` is `undefined` when there is no
+ * "before" to gate against (building the base snapshot's own inventory),
+ * matching every other call site of this gate.
  */
 function collectInlineLiteralEntries(
   callableGroups: ReadonlyMap<string, readonly CallableSignature[]>,
+  existingCallableKeys?: ReadonlySet<string>,
 ): Map<string, DeclarationRecord> {
   const entries = new Map<string, DeclarationRecord>();
 
   for (const [callableName, overloads] of callableGroups) {
-    const parameterMaps = new Map<string, ReadonlyMap<string, boolean>[]>();
+    const callableExisted =
+      existingCallableKeys === undefined ||
+      existingCallableKeys.has(callableName);
+    const parameterMaps = new Map<
+      string,
+      {
+        readonly members: ReadonlyMap<string, boolean>;
+        readonly mandatory: boolean;
+      }[]
+    >();
     const returnMaps: ReadonlyMap<string, boolean>[] = [];
 
     for (const overload of overloads) {
@@ -663,7 +744,10 @@ function collectInlineLiteralEntries(
         if (localMembers.size === 0) return;
         const key = parameterKey(parameter, index);
         const existing = parameterMaps.get(key) ?? [];
-        existing.push(localMembers);
+        existing.push({
+          members: localMembers,
+          mandatory: callableExisted && parameter.questionToken === undefined,
+        });
         parameterMaps.set(key, existing);
       });
       if (overload.returnType !== undefined) {
@@ -672,14 +756,15 @@ function collectInlineLiteralEntries(
       }
     }
 
-    for (const [parameterName, maps] of parameterMaps) {
+    for (const [parameterName, occurrences] of parameterMaps) {
+      const maps = occurrences.map((occurrence) => occurrence.members);
       const merged = mergeOverloadAggregate(maps);
       if (merged.size === 0) continue;
       const key = `${callableName}(${parameterName})`;
       entries.set(key, {
         name: key,
         kind: "inline-literal",
-        contravariant: true,
+        contravariant: occurrences.some((occurrence) => occurrence.mandatory),
         members: toOptionalityMap(merged),
       });
     }
@@ -767,60 +852,22 @@ function collectClassMethodCallables(
   return groups;
 }
 
-/**
- * Parses a report body far enough to list its top-level (non-method)
- * `FunctionDeclaration` names. Used to resolve `existingFunctionNames`
- * (the base snapshot's own function names) before building the head
- * inventory, so a brand-new function's parameters never contribute HARD
- * contravariant reachability (§module doc's gating note).
- */
-export function collectTopLevelFunctionNames(
-  body: string,
-  entrypoint: string,
-): ReadonlySet<string> {
-  const sourceFile = ts.createSourceFile(
-    `${entrypoint}.ts`,
-    body,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const names = new Set<string>();
-  for (const statement of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
-      names.add(statement.name.text);
-    }
-  }
-  return names;
-}
+type ParsedDeclarations = Readonly<{
+  namedDeclarations: ReadonlyMap<string, NamedDeclarationEntry>;
+  functionDeclarations: readonly ts.FunctionDeclaration[];
+}>;
 
 /**
- * Builds the canonical `(declaration → member path → optional?)` inventory
- * for one report body. Walks `TypeAliasDeclaration`, `InterfaceDeclaration`,
- * and `ClassDeclaration` statements — INCLUDING unexported ones, since
- * api-extractor renders forgotten exports without `export` when a published
- * type references them. Refuses if the body yields zero declarations, which
- * is the fence-format-change tripwire. `existingFunctionNames`, when given,
- * gates HARD contravariant reachability rooted at a top-level function to
- * only those functions present in it (§module doc); omit it when there is no
- * "before" to gate against (e.g. building the base snapshot's own inventory).
+ * The one place a report body's statements are sorted into named
+ * declarations (type/interface/class) versus top-level function
+ * declarations. Both `buildSurfaceInventory` and
+ * `collectExistingCallableKeys` consume this single parse rather than each
+ * re-walking `sourceFile.statements`, so the two can never disagree about
+ * what counts as a declaration.
  */
-export function buildSurfaceInventory(
-  body: string,
-  entrypoint: string,
-  existingFunctionNames?: ReadonlySet<string>,
-): SurfaceInventory {
-  const sourceFile = ts.createSourceFile(
-    `${entrypoint}.ts`,
-    body,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-
+function parseDeclarations(sourceFile: ts.SourceFile): ParsedDeclarations {
   const namedDeclarations = new Map<string, NamedDeclarationEntry>();
   const functionDeclarations: ts.FunctionDeclaration[] = [];
-  const functionCallables = new Map<string, CallableSignature[]>();
 
   for (const statement of sourceFile.statements) {
     if (ts.isTypeAliasDeclaration(statement)) {
@@ -846,17 +893,91 @@ export function buildSurfaceInventory(
       statement.name !== undefined
     ) {
       functionDeclarations.push(statement);
-      pushCallableSignature(functionCallables, statement.name.text, {
-        parameters: statement.parameters,
-        returnType: statement.type,
-      });
     }
+  }
+
+  return { namedDeclarations, functionDeclarations };
+}
+
+function parseReportSource(body: string, entrypoint: string): ts.SourceFile {
+  return ts.createSourceFile(
+    `${entrypoint}.ts`,
+    body,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+}
+
+/**
+ * Resolves every callable KEY that already exists in a report body — a bare
+ * function name for a top-level function, `Owner.method` for an interface or
+ * class method, `Owner.constructor` for a class constructor — the exact key
+ * space `collectInterfaceMethodCallables`/`collectClassMethodCallables`/the
+ * top-level `functionCallables` map use. Used to resolve, from the BASE
+ * snapshot, which callables already existed BEFORE building the head
+ * inventory, so a brand-new function/method's mandatory parameter never
+ * contributes HARD contravariant reachability whether that parameter is a
+ * named type or an inline object literal (§module doc's gating note; this is
+ * the one predicate both `computeContravariantNames` and
+ * `collectInlineLiteralEntries` consume, rather than each re-deriving its own
+ * notion of "callable existed at base"). Supersedes the narrower
+ * function-name-only `collectTopLevelFunctionNames`.
+ */
+export function collectExistingCallableKeys(
+  body: string,
+  entrypoint: string,
+): ReadonlySet<string> {
+  const { namedDeclarations, functionDeclarations } = parseDeclarations(
+    parseReportSource(body, entrypoint),
+  );
+  const keys = new Set<string>();
+  for (const functionDeclaration of functionDeclarations) {
+    if (functionDeclaration.name !== undefined) {
+      keys.add(functionDeclaration.name.text);
+    }
+  }
+  for (const key of collectInterfaceMethodCallables(namedDeclarations).keys())
+    keys.add(key);
+  for (const key of collectClassMethodCallables(namedDeclarations).keys())
+    keys.add(key);
+  return keys;
+}
+
+/**
+ * Builds the canonical `(declaration → member path → optional?)` inventory
+ * for one report body. Walks `TypeAliasDeclaration`, `InterfaceDeclaration`,
+ * and `ClassDeclaration` statements — INCLUDING unexported ones, since
+ * api-extractor renders forgotten exports without `export` when a published
+ * type references them. Refuses if the body yields zero declarations, which
+ * is the fence-format-change tripwire. `existingCallableKeys`, when given,
+ * gates HARD contravariant reachability — for both named-type parameters
+ * (`computeContravariantNames`) and inline-literal parameters
+ * (`collectInlineLiteralEntries`) — to only those callables present in it
+ * (§module doc); omit it when there is no "before" to gate against (e.g.
+ * building the base snapshot's own inventory).
+ */
+export function buildSurfaceInventory(
+  body: string,
+  entrypoint: string,
+  existingCallableKeys?: ReadonlySet<string>,
+): SurfaceInventory {
+  const sourceFile = parseReportSource(body, entrypoint);
+  const { namedDeclarations, functionDeclarations } =
+    parseDeclarations(sourceFile);
+  const functionCallables = new Map<string, CallableSignature[]>();
+  for (const functionDeclaration of functionDeclarations) {
+    if (functionDeclaration.name === undefined) continue;
+    pushCallableSignature(functionCallables, functionDeclaration.name.text, {
+      parameters: functionDeclaration.parameters,
+      returnType: functionDeclaration.type,
+    });
   }
 
   const contravariantNames = computeContravariantNames(
     namedDeclarations,
     functionDeclarations,
-    existingFunctionNames,
+    existingCallableKeys,
   );
 
   const inventory = new Map<string, DeclarationRecord>();
@@ -879,7 +1000,10 @@ export function buildSurfaceInventory(
     ...collectInterfaceMethodCallables(namedDeclarations),
     ...collectClassMethodCallables(namedDeclarations),
   ]);
-  for (const [key, record] of collectInlineLiteralEntries(callableGroups)) {
+  for (const [key, record] of collectInlineLiteralEntries(
+    callableGroups,
+    existingCallableKeys,
+  )) {
     inventory.set(key, record);
   }
 
@@ -1389,22 +1513,23 @@ export function runApiSurfaceCompat(
       `${relativeEtcDir}/${reportFile}`,
     );
 
-    // Resolve which top-level functions already existed at the base ref
-    // BEFORE building the head inventory, so a brand-new function's
-    // mandatory parameter never contributes HARD contravariant
-    // reachability (§module doc's gating note) — a new entrypoint has no
-    // base snapshot at all, so every head function is new by definition.
-    const existingFunctionNames =
+    // Resolve which callables (top-level functions, interface/class methods,
+    // constructors) already existed at the base ref BEFORE building the head
+    // inventory, so a brand-new callable's mandatory parameter never
+    // contributes HARD contravariant reachability (§module doc's gating
+    // note) — a new entrypoint has no base snapshot at all, so every head
+    // callable is new by definition.
+    const existingCallableKeys =
       baseSource === undefined ?
         new Set<string>()
-      : collectTopLevelFunctionNames(
+      : collectExistingCallableKeys(
           extractApiReportBody(baseSource),
           reportFile,
         );
     const headInventory = buildSurfaceInventory(
       extractApiReportBody(headSource),
       reportFile,
-      existingFunctionNames,
+      existingCallableKeys,
     );
     headInventories.set(reportFile, headInventory);
 
