@@ -250,6 +250,7 @@ describe("CI workflow contract", () => {
       "test-typescript-compat",
       "test-postgres",
       "test-durable-objects",
+      "size-budget",
     ]) {
       expect(workflow).toMatch(
         new RegExp(String.raw`\n {6}- ${requiredJob}(?:\n|$)`),
