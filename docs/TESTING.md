@@ -160,7 +160,12 @@ Two modes:
   per-graph lock and writes no claim, and that a declared constraint's
   per-claim cost is a constant, isolated by differencing rather than by a
   raw total (so it holds independent of the base statement cost or the lock
-  count).
+  count). The four `explain/` suites
+  (`identity-frontier-expansion.test.ts`, `variable-length-traversal.test.ts`,
+  `coalesce-probe.test.ts`, `claim-upsert.test.ts`) are also `assert` mode:
+  each asserts an `EXPLAIN` plan's shape (row-count ceiling, join kind) on
+  both PostgreSQL and SQLite via `forEachExplainEngine`, so a regression that
+  reintroduces a correlated scan fails deterministically without timing.
 
 ```bash
 # Assert-mode fixtures run in every default invocation

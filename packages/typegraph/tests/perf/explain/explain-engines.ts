@@ -52,9 +52,9 @@ import {
   totalActualRows,
 } from "./explain-harness";
 
-export type ExplainEngine = "sqlite" | "postgres";
+type ExplainEngine = "sqlite" | "postgres";
 
-export type ExplainSubject<TGraph extends GraphDef> = Readonly<{
+type ExplainSubject<TGraph extends GraphDef> = Readonly<{
   engine: ExplainEngine;
   store: Store<TGraph>;
   captured: readonly CapturedStatement[];
