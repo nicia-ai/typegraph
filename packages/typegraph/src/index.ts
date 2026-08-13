@@ -131,6 +131,7 @@ export {
 // Backend Types
 // ============================================================
 
+export type { RecursiveTraversalVerdict } from "./backend/capabilities/recursive-traversal";
 export type {
   StrategyTableContribution,
   TableContribution,
@@ -186,6 +187,7 @@ export type {
   QueryExecutionBackend,
   RawQueryExecutionBackend,
   RawStatementExecutionBackend,
+  RecursiveTraversalCapability,
   RemovalMaterializationBackend,
   SchemaCommitBackend,
   SchemaKindEmptinessProbe,

@@ -48,6 +48,10 @@ import { type ReadInstantMode, withPinnedReadInstant } from "./temporal";
 export { getDialect } from "../dialect";
 export { type DialectAdapter, type SqlDialect } from "../dialect/types";
 
+import {
+  assumeRecursiveTraversalSupported,
+  type RecursiveTraversalVerdict,
+} from "../../backend/capabilities/recursive-traversal";
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import {
   type AggregateExpr,
@@ -193,7 +197,41 @@ export type CompileQueryOptions = Readonly<{
   readInstant?: ReadInstantMode | undefined;
   /** Equal-id behavior for historical identity traversal reconstruction. */
   identitySameIdAcrossKinds?: "fold" | "ignore" | undefined;
+  /**
+   * Whether the active backend can compute a bounded transitive closure in
+   * one round trip. Defaults to {@link COMPILER_DEFAULT_RECURSIVE_TRAVERSAL}
+   * for direct compiler callers, mirroring `windowFunctions`.
+   */
+  recursiveTraversal?: RecursiveTraversalVerdict | undefined;
 }>;
+
+/**
+ * Every key {@link CompileQueryOptions} declares, kept in sync with the type
+ * by {@link Assert}<{@link Equal}> in `tests/compile-query-option-coverage.test.ts`
+ * so a new option cannot be added to one without the other noticing.
+ */
+export const COMPILE_QUERY_OPTION_KEYS = [
+  "dialect",
+  "schema",
+  "fulltextStrategy",
+  "vectorStrategy",
+  "windowFunctions",
+  "vectorSlots",
+  "fulltextLanguages",
+  "recordedReadBinding",
+  "readInstant",
+  "identitySameIdAcrossKinds",
+  "recursiveTraversal",
+] as const;
+
+/**
+ * The single sanctioned way to obtain a {@link RecursiveTraversalVerdict}
+ * without a backend: `compileQuery`'s public entry point takes no backend at
+ * all, so it has no capabilities to resolve a verdict from. This is the one
+ * `assumeRecursiveTraversalSupported` call site in `src/**`.
+ */
+export const COMPILER_DEFAULT_RECURSIVE_TRAVERSAL =
+  assumeRecursiveTraversalSupported("compileQuery called without a backend");
 
 /**
  * Compiles a query AST to SQL.
@@ -266,6 +304,8 @@ export function compileQuery(
       {}
     : { vectorStrategy: options_.vectorStrategy }),
     windowFunctions: options_.windowFunctions ?? true,
+    recursiveTraversal:
+      options_.recursiveTraversal ?? COMPILER_DEFAULT_RECURSIVE_TRAVERSAL,
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
@@ -444,7 +484,17 @@ function recordedSubqueryCoordinateMismatch(
 }
 
 /** Forwards compile options into recursive sub-compile calls. */
-function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
+/**
+ * Forwards compile options into recursive sub-compile calls. Module-private
+ * in every barrel — exported only so the T6 coverage test
+ * (`tests/compile-query-option-coverage.test.ts`) can exercise it directly
+ * against the same `CompileQueryOptions` keys the type declares.
+ *
+ * @internal
+ */
+export function propagateOptions(
+  options_: CompileQueryOptions,
+): CompileQueryOptions {
   return {
     dialect: options_.dialect ?? "sqlite",
     ...(options_.schema === undefined ? {} : { schema: options_.schema }),
@@ -455,6 +505,8 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
       {}
     : { vectorStrategy: options_.vectorStrategy }),
     windowFunctions: options_.windowFunctions ?? true,
+    recursiveTraversal:
+      options_.recursiveTraversal ?? COMPILER_DEFAULT_RECURSIVE_TRAVERSAL,
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
